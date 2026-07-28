@@ -1,0 +1,7 @@
+// pr-hero — a multi-agent PR-review engine (hunters → dedupe → refuter → tier).
+// Public API surface; the deep-review lab consumes exactly these exports.
+
+export const ENGINE_NAME = "pr-hero";
+export const ENGINE_VERSION = "0.1.0";
+
+export * from "./findings";
