@@ -390,6 +390,23 @@ describe("hunter fan-out", () => {
     expect(result.skillOutput.findings[0]?.hunter).toBe("reliability");
   });
 
+  test("parse accepts a draft whose hunter field is not even a valid enum value", async () => {
+    // Regression from the first live fixture run: hunters self-reported their
+    // agent name ("fixture-reliability-hunter"), which failed validation on a
+    // field the driver overwrites anyway. Stamping now happens before
+    // validation, so delivery must survive any hunter-field garbage.
+    const rogue = {
+      findings: [{ ...draft(), hunter: "fixture-reliability-hunter" }],
+    };
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, spec.parse(JSON.stringify(rogue))),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    expect(result.skillOutput.findings[0]?.hunter).toBe("reliability");
+  });
+
   test("one failed hunter keeps the other's survivors, run partial", async () => {
     const runner = new FakeStepRunner({
       "hunter-reliability": (spec) => ok(spec, { findings: [draft()] }),

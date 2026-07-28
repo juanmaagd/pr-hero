@@ -332,6 +332,18 @@ async function execute(
         if (extracted === undefined) {
           throw new Error(`${name} final message has no JSON object`);
         }
+        // Stamp `hunter` BEFORE validation: the driver owns this field and
+        // overwrites it unconditionally below, so a hunter self-reporting its
+        // agent name (fixture eval, first live run) must not fail delivery on
+        // a value the pipeline was about to discard anyway.
+        const candidate = extracted as { findings?: unknown };
+        if (Array.isArray(candidate.findings)) {
+          for (const f of candidate.findings) {
+            if (typeof f === "object" && f !== null) {
+              (f as Record<string, unknown>).hunter = hunter.key;
+            }
+          }
+        }
         return validateHunterDraft(extracted);
       },
     };
