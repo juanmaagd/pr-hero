@@ -7,5 +7,7 @@ export const ENGINE_VERSION = "0.1.0";
 export * from "./dedupe";
 export * from "./drafts";
 export * from "./findings";
+export * from "./pipeline";
+export * from "./prompt-set";
 export * from "./step-runner";
 export * from "./usage";
