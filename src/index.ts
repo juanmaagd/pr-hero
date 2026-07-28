@@ -4,4 +4,6 @@
 export const ENGINE_NAME = "pr-hero";
 export const ENGINE_VERSION = "0.1.0";
 
+export * from "./dedupe";
+export * from "./drafts";
 export * from "./findings";
