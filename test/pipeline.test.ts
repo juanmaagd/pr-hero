@@ -660,6 +660,45 @@ describe("assembly", () => {
     }
   });
 
+  test("no spec: step names and per_agent keys are byte-identical to the pre-spec wiring", async () => {
+    // Pipeline-as-data behavior-preservation proof: runPipeline WITHOUT a
+    // spec must produce exactly the step names and per_agent keys the
+    // hard-coded wiring produced — parity conditional on
+    // input.parityTriggerPaths, refuter fed by the inferential-blocker batch.
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "inferential" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      "hunter-parity": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
+    });
+    const input = await makeInput({ parityTriggerPaths: ["**/app.ts"] });
+    expect(input.spec).toBeUndefined();
+    const result = await runPipeline(input, { runner });
+    expect(runner.specs.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+      "hunter-parity",
+      "refuter",
+    ]);
+    expect(Object.keys(result.perAgent).sort()).toEqual([
+      "parity",
+      "refuter",
+      "reliability",
+      "resilience",
+    ]);
+    expect(result.skillOutput.parity_hunter_fired).toBe(true);
+  });
+
   test("perAgent carries per-step usage and totals sum over steps", async () => {
     const runner = new FakeStepRunner({
       "hunter-reliability": (spec) =>

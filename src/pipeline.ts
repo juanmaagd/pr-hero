@@ -33,6 +33,12 @@ import {
   type SuspicionPrior,
 } from "./prompt-set";
 import {
+  type AgentSpec,
+  defaultReviewSpec,
+  type ReviewSpec,
+  validateReviewSpec,
+} from "./spec";
+import {
   DEFAULT_STEP_MAX_ATTEMPTS,
   DEFAULT_STEP_TIMEOUT_MS,
   type StepResult,
@@ -58,9 +64,9 @@ export interface PipelineInput {
   outPath: string;
   mcpConfigPath: string;
   hopBudget: number;
-  // Override wins over agent-frontmatter model for EVERY step (JD decision:
-  // v1's replay `--model` note generalized); with no override, frontmatter
-  // wins.
+  // Override wins for EVERY step (JD decision: v1's replay `--model` note
+  // generalized). Full precedence: input.model > AgentSpec.model > agent
+  // frontmatter model.
   model?: string;
   parityTriggerPaths: string[];
   suspicionPriors: SuspicionPrior[];
@@ -68,6 +74,11 @@ export interface PipelineInput {
   stepTimeoutMs?: number;
   // Whole-pipeline ceiling; defaults to DEFAULT_PIPELINE_TIMEOUT_MS.
   pipelineTimeoutMs?: number;
+  // Pipeline-as-data: which agents run and how they're wired. Defaults to
+  // defaultReviewSpec() — EXACTLY the wiring that used to be hard-coded here,
+  // so callers that pass nothing see byte-identical step names, per_agent
+  // keys, and parity semantics.
+  spec?: ReviewSpec;
 }
 
 export interface PipelineDeps {
@@ -86,7 +97,8 @@ export interface PerAgentUsage {
 
 export interface PipelineResult {
   skillOutput: SkillOutput;
-  // Keyed reliability | resilience | parity | refuter.
+  // Keyed by AgentSpec.key — with the default spec that is exactly
+  // reliability | resilience | parity | refuter.
   perAgent: Record<string, PerAgentUsage>;
   usage: SessionUsage;
   // True only when ALL hunter steps failed — nothing was hunted. A single
@@ -193,17 +205,14 @@ function refuterPrompt(batchJson: string): string {
   ].join("\n");
 }
 
-// Always reliability + resilience (prose Step 4: "regardless of diff
-// content"); parity joins only when Step 3 fired.
-const FIXED_HUNTERS: Array<{ key: Hunter; agent: string }> = [
-  { key: "reliability", agent: "deep-review-reliability" },
-  { key: "resilience", agent: "deep-review-resilience" },
-];
-const PARITY_HUNTER: { key: Hunter; agent: string } = {
-  key: "parity",
-  agent: "deep-review-parity",
-};
-const REFUTER_AGENT = "review-refuter";
+// A conditional hunter's trigger, resolved against the ReviewSpec: the
+// "input" sentinel reads PipelineInput.parityTriggerPaths (the trigger PATHS
+// stay lab config; the spec only wires "this hunter is conditional").
+function triggerPatterns(agent: AgentSpec, input: PipelineInput): string[] {
+  return agent.trigger === "input"
+    ? input.parityTriggerPaths
+    : (agent.trigger ?? []);
+}
 
 // pipeline.json row: the resolved plan sans prompts (frozen-plan provenance —
 // which steps ran, with which model and tool surface, writing where).
@@ -289,25 +298,34 @@ async function execute(
     };
   }
 
-  // Step 3 — deterministic parity trigger. This decision is the driver's
-  // alone; the parity hunter never self-triggers.
+  // The DAG wiring is data (see spec.ts). The default spec is re-validated
+  // too — it is cheap and keeps a drifted default failing loudly.
+  const reviewSpec = validateReviewSpec(input.spec ?? defaultReviewSpec());
+
+  // Step 3 — deterministic trigger evaluation. This decision is the driver's
+  // alone; a conditional hunter never self-triggers. An unconditional hunter
+  // (no trigger) always runs; a conditional one runs only when a changed path
+  // matches its patterns. `parityFired` keeps its lab-facing meaning: true
+  // when ANY conditional hunter actually ran — with the default spec that is
+  // exactly the old "parity hunter fired" semantics.
   const patch = await Bun.file(input.diffPath).text();
-  state.parityFired = parityTriggered(
-    changedPathsFromDiff(patch),
-    input.parityTriggerPaths,
+  const changedPaths = changedPathsFromDiff(patch);
+  const hunters = reviewSpec.agents.filter(
+    (a) =>
+      a.role === "hunter" &&
+      (a.trigger === undefined ||
+        parityTriggered(changedPaths, triggerPatterns(a, input))),
   );
+  state.parityFired = hunters.some((a) => a.trigger !== undefined);
 
   // Step 4 — hunter fan-out.
   const stepsDir = path.join(input.runDir, "steps");
   const stepTimeoutMs = input.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
-  const hunters = state.parityFired
-    ? [...FIXED_HUNTERS, PARITY_HUNTER]
-    : FIXED_HUNTERS;
+  // validateReviewSpec pins hunter keys inside the findings-schema Hunter
+  // enum (v1.0.0 constraint), so the cast below is checked, not assumed.
   const hunterSpecs: Array<{ key: Hunter; spec: StepSpec }> = [];
   for (const hunter of hunters) {
-    const agent = await parseAgentFile(
-      path.join(input.agentsDir, `${hunter.agent}.md`),
-    );
+    const agent = await parseAgentFile(path.join(input.agentsDir, hunter.file));
     const name = `hunter-${hunter.key}`;
     const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
     // The rendered body is written run-dir-side as an audit artifact: the
@@ -322,7 +340,7 @@ async function execute(
       prompt: hunterPrompt(patch, input.hopBudget),
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
-      model: resolveModel(input, agent.model, hunter.agent),
+      model: resolveModel(input, hunter.model, agent.model, hunter.file),
       cwd: input.worktree,
       outPath: path.join(stepsDir, `${name}.draft.json`),
       timeoutMs: stepTimeoutMs,
@@ -347,7 +365,7 @@ async function execute(
         return validateHunterDraft(extracted);
       },
     };
-    hunterSpecs.push({ key: hunter.key, spec });
+    hunterSpecs.push({ key: hunter.key as Hunter, spec });
     state.steps.push(stepMeta(spec));
   }
   state.hunterCount = hunterSpecs.length;
@@ -391,8 +409,17 @@ async function execute(
       s.evidence_class === "inferential" &&
       (s.severity === "BLOCKER" || s.severity === "CRITICAL"),
   );
-  if (batch.length > 0) {
-    await runRefuter(input, deps, state, batch, { stepsDir, stepTimeoutMs });
+  // A spec with no refuter (allowed: "at most one") skips the leg entirely —
+  // configured absence, not failure: every finding stays not_submitted (so
+  // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
+  // the run stays complete.
+  const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
+  if (batch.length > 0 && refuterAgent) {
+    await runRefuter(input, deps, state, batch, {
+      stepsDir,
+      stepTimeoutMs,
+      agent: refuterAgent,
+    });
   }
 
   // Steps 7 + 8 live in finish(), shared with the ceiling path.
@@ -404,7 +431,7 @@ async function runRefuter(
   deps: PipelineDeps,
   state: RunState,
   batch: DedupedSurvivor[],
-  options: { stepsDir: string; stepTimeoutMs: number },
+  options: { stepsDir: string; stepTimeoutMs: number; agent: AgentSpec },
 ): Promise<void> {
   const submittedIds = batch.map((s) => s.id);
   const batchJson = JSON.stringify(
@@ -423,7 +450,7 @@ async function runRefuter(
     `${batchJson}\n`,
   );
   const agent = await parseAgentFile(
-    path.join(input.agentsDir, `${REFUTER_AGENT}.md`),
+    path.join(input.agentsDir, options.agent.file),
   );
   const systemPromptPath = path.join(options.stepsDir, "refuter.system.md");
   // The refuter body carries no {{PRIORS}}/{{GOTCHAS}} anchors — written
@@ -437,7 +464,12 @@ async function runRefuter(
     prompt: refuterPrompt(batchJson),
     tools: agent.tools,
     mcpConfigPath: input.mcpConfigPath,
-    model: resolveModel(input, agent.model, REFUTER_AGENT),
+    model: resolveModel(
+      input,
+      options.agent.model,
+      agent.model,
+      options.agent.file,
+    ),
     cwd: input.worktree,
     outPath: path.join(options.stepsDir, "refuter.result.json"),
     timeoutMs: options.stepTimeoutMs,
@@ -457,11 +489,12 @@ async function runRefuter(
   } catch {
     result = undefined;
   }
+  // per_agent key comes from the spec ("refuter" with the default spec).
   if (result) {
-    state.perAgent.refuter = perAgentEntry(result);
+    state.perAgent[options.agent.key] = perAgentEntry(result);
     state.usageTotal = sumUsage(state.usageTotal, result.usage);
   } else {
-    state.perAgent.refuter = failedAgentEntry();
+    state.perAgent[options.agent.key] = failedAgentEntry();
   }
   if (result?.status === "ok") {
     for (const entry of (result.output as RefuterResult).results) {
@@ -556,11 +589,13 @@ async function writePipelinePlan(
 
 function resolveModel(
   input: PipelineInput,
+  specModel: string | undefined,
   frontmatterModel: string | undefined,
   agentName: string,
 ): string {
-  // Override wins over frontmatter (JD decision) — see PipelineInput.model.
-  const model = input.model ?? frontmatterModel;
+  // Precedence: input.model (CLI --model, the JD decision generalized) >
+  // AgentSpec.model (per-agent config) > agent frontmatter model.
+  const model = input.model ?? specModel ?? frontmatterModel;
   if (!model) {
     throw new Error(`agent ${agentName} has no model and no override given`);
   }

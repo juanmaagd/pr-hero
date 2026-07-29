@@ -9,5 +9,6 @@ export * from "./drafts";
 export * from "./findings";
 export * from "./pipeline";
 export * from "./prompt-set";
+export * from "./spec";
 export * from "./step-runner";
 export * from "./usage";
