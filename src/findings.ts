@@ -23,7 +23,7 @@ export type RefuterVerdict =
   | "inconclusive"
   | "not_submitted";
 export type Tier = "blocking" | "advisory";
-export type Hunter = "reliability" | "resilience" | "parity";
+export type Hunter = "reliability" | "resilience" | "parity" | "lifecycle";
 export type RunStatus = "complete" | "partial";
 export type IndexMode = "fresh" | "sync";
 
@@ -142,7 +142,7 @@ const CAUSAL_DISPOSITIONS: CausalDisposition[] = [
   "unknown",
 ];
 const TIERS: Tier[] = ["blocking", "advisory"];
-const HUNTERS: Hunter[] = ["reliability", "resilience", "parity"];
+const HUNTERS: Hunter[] = ["reliability", "resilience", "parity", "lifecycle"];
 
 export class FindingsValidationError extends Error {}
 

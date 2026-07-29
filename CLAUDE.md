@@ -55,7 +55,7 @@ bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
    `--setting-sources ""`, no Write/Task/Bash for agents, driver owns all file writes. Tests assert them;
    weakening one requires explicit justification.
 5. **Schema compatibility with the lab is sacred** until a coordinated v1.1 bump (tracked in ROADMAP C2).
-   Hunter spec keys are limited to the schema's `reliability|resilience|parity` enum until then.
+   Hunter spec keys are limited to the schema's `reliability|resilience|parity|lifecycle` enum until then.
 6. **Every live run costs money → it lands in a ledger** (lab runs in `bench/`; local evals in the
    commit/PR description).
 7. **One variable per experiment**; replicates + N-of-M semantics; attribute misses (hunter/merge/

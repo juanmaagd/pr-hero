@@ -35,11 +35,16 @@ export interface ReviewSpec {
 }
 
 // Findings schema v1.0.0 stamps `hunter` with the producing step's key, and
-// its Hunter enum is closed ("reliability" | "resilience" | "parity") — the
-// SCHEMA is the constraint here, not the engine. Until schema v1.1 lifts the
-// enum, hunter keys must stay inside it so tonight's artifacts keep
-// validating; the spec layer is otherwise already key-agnostic.
-const SCHEMA_HUNTER_KEYS: Hunter[] = ["reliability", "resilience", "parity"];
+// its Hunter enum is closed ("reliability" | "resilience" | "parity" |
+// "lifecycle") — the SCHEMA is the constraint here, not the engine. Until
+// schema v1.1 lifts the enum, hunter keys must stay inside it so tonight's
+// artifacts keep validating; the spec layer is otherwise already key-agnostic.
+const SCHEMA_HUNTER_KEYS: Hunter[] = [
+  "reliability",
+  "resilience",
+  "parity",
+  "lifecycle",
+];
 
 export class ReviewSpecValidationError extends Error {}
 
@@ -88,8 +93,8 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
       must(
         SCHEMA_HUNTER_KEYS.includes(a.key as Hunter),
         `agents[${i}].key "${a.key}" is not a findings-schema v1.0.0 Hunter ` +
-          "enum value (reliability|resilience|parity); schema v1.1 will " +
-          "lift this",
+          "enum value (reliability|resilience|parity|lifecycle); schema " +
+          "v1.1 will lift this",
       );
       must(
         a.trigger === undefined ||

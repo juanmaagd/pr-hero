@@ -81,7 +81,7 @@ const CAUSAL_DISPOSITIONS: CausalDisposition[] = [
   "base-only",
   "unknown",
 ];
-const HUNTERS: Hunter[] = ["reliability", "resilience", "parity"];
+const HUNTERS: Hunter[] = ["reliability", "resilience", "parity", "lifecycle"];
 const REFUTER_OUTCOMES: RefuterOutcome[] = [
   "corroborated",
   "refuted",
