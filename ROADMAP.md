@@ -48,9 +48,25 @@ The two known capability gaps, in attack order:
   collinear in the live data and no number of musive replicates can separate them. The probe falsified the
   "deferential refuter" reading (3/3 correct refutations of a planted false claim, $0.58) but only for an
   adjacent, obvious contradiction.
-- **A3. Dataset decisions (Juanma)** — G6 ground truth (denominator 6 vs 7), confirm/overturn the 10
-  triage verdicts, graduation semantics under known-high variance (proposal: ≥6/7 on 2-of-2 replicate
-  passes, or mean over 3).
+- **A3. Dataset decisions (Juanma)** — G6 ground truth (denominator 6 vs 7) and confirm/overturn the 10
+  triage verdicts remain OPEN.
+
+  **Graduation semantics — DECIDED 2026-08-01 (Juanma): a golden's score is the MEAN over its replicates,
+  not a threshold.** A golden caught 2 of 3 times contributes 0.67, never 1.0. The reason is production:
+  the engine runs **once per PR**, so the mean is literally the expected catch rate a real PR experiences,
+  and a threshold answers a continuous reality with a binary. The prior unratified "≥2 of 3" rule had
+  already broken on its own terms — G5 on the same tree scored 2/3 under A1 and 1/3 under A2, flipping
+  from "caught" to "missed" on noise alone, while 3/3 and 2/3 counted identically.
+
+  Two consequences, both accepted deliberately:
+  1. **The bar gets harder.** ≥80% catch now means near-deterministic catching, not "caught at least
+     sometimes". A bar that flatters the engine cannot decide whether to cancel Greptile.
+  2. **Most historical scores become UNKNOWN rather than known.** They were single runs, and a single run
+     has no mean. Converting them requires replicates. Recording them as unknown is more truthful than
+     promoting one sample to a verdict.
+
+  Measured under this rule so far (lifecycle class, its own trees): **G5 0.50** (3 of 6), **G4 0.00**
+  (0 of 3), **G2 0.00** (0 of 4).
 - **A4. Held-out benchmark** — only after the smoke-level bar is met: full run over the lab's
   `dataset/test.jsonl` (first and only read), measure against the bar, F2/SNR reported alongside. This is
   one of the few places a full smoke-scale run is mandatory.
