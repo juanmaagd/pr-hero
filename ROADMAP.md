@@ -48,8 +48,27 @@ The two known capability gaps, in attack order:
   collinear in the live data and no number of musive replicates can separate them. The probe falsified the
   "deferential refuter" reading (3/3 correct refutations of a planted false claim, $0.58) but only for an
   adjacent, obvious contradiction.
-- **A3. Dataset decisions (Juanma)** — G6 ground truth (denominator 6 vs 7) and confirm/overturn the 10
-  triage verdicts remain OPEN.
+- **A3. Dataset decisions (Juanma)** — confirm/overturn the 10 triage verdicts remains OPEN.
+
+  **G6 ground truth — DECIDED 2026-08-01 (Juanma): G6 stays, denominator 7, and its correct verdict is
+  `downgraded-latent`, not `blocking`.** The dispute was framed as real-vs-not-real and that was the wrong
+  question. Verified in the code at `f961e23a`: `SongComments` renders from a single slot with **no `key`**
+  and no per-song conditional, so switching songs is a same-type same-position reconciliation — React
+  updates props and `AudioTrimmer` **stays mounted**, while only `<audio key={reproductionUrl}>` remounts.
+  `reset()`, the only writer that arms `isWaveformLoading`, sits in a `useEffect` with `[]`. The mechanism
+  is therefore real and unguarded. What could NOT be established is a live trigger: every traced path
+  closes-then-reopens behind a full-viewport click-eating overlay.
+
+  Real defect, unreachable today — which is the definition A2 wrote for `downgraded-latent`. G6 is the
+  lesson it was named after: the old refuter had only two doors, delete or block, and chose delete. The
+  engine's correct behaviour on G6 is to find it and demote it to advisory, which the v2 refuter was
+  measured doing 3 of 3 (`refuter-probe`, `latent-claim` arm).
+
+  Product follow-up surfaced by the same investigation, independent of the benchmark:
+  `useTriggerCardSliders.tsx:32-52` opens the comments slider from an effect with **no `sliderBoxContent`
+  guard**, while its three sibling effects all have one (`views/Project/index.tsx:229,:290`,
+  `views/PublicProject/index.tsx:233`). That missing guard is the only thing keeping G6 latent rather than
+  live.
 
   **Graduation semantics — DECIDED 2026-08-01 (Juanma): a golden's score is the MEAN over its replicates,
   not a threshold.** A golden caught 2 of 3 times contributes 0.67, never 1.0. The reason is production:
