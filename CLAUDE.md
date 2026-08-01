@@ -40,12 +40,19 @@ been burned by a manual match that inflated a score by 50%.
 ## Commands
 
 ```bash
-bun test               # 111 tests, all offline (fake spawn/runner)
-bun run typecheck      # tsc --noEmit, strict
-bun run check          # biome
+bun test               # 113 tests, all offline (fake spawn/runner)
+bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
+bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
+bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
 bun run fixture-eval   # LIVE: full pipeline vs a planted bug in a disposable repo (~$0.08, ~1 min)
 bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
 ```
+
+`refuter-probe` is the FIRST gate for any refuter prompt change (ROADMAP A2): it plants claims whose
+correct verdict is known and asserts all four outcomes — `corroborated`, `refuted` (adjacent and 3-hop),
+and `downgraded-latent`. A prompt edit that cannot pass it does not deserve a $10 replay. Note the
+coverage gap above: `scripts/` and `fixtures/` are checked by neither command, so verify new probe files
+with an explicit `bunx tsc` / `bunx biome check` over them.
 
 ## Architecture (one line per module)
 
