@@ -19,7 +19,15 @@ export interface HunterDraft {
   findings: DraftFinding[];
 }
 
-export type RefuterOutcome = "corroborated" | "refuted" | "inconclusive";
+// `downgraded-latent` (ROADMAP A2): the claim holds as a real defect, but
+// nothing can execute it at this commit. Distinct from `refuted`, which
+// deletes the finding — the G6 lesson is that a latent defect must stay
+// visible. Maps to the same-named RefuterVerdict and lands advisory.
+export type RefuterOutcome =
+  | "corroborated"
+  | "refuted"
+  | "inconclusive"
+  | "downgraded-latent";
 
 export interface RefuterResult {
   results: Array<{
@@ -86,6 +94,7 @@ const REFUTER_OUTCOMES: RefuterOutcome[] = [
   "corroborated",
   "refuted",
   "inconclusive",
+  "downgraded-latent",
 ];
 
 export function validateDraftFinding(

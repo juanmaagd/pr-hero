@@ -17,10 +17,19 @@ export type CausalDisposition =
   | "unknown";
 export type Severity = "BLOCKER" | "CRITICAL" | "WARNING" | "SUGGESTION";
 // Canonical "not sent to refuter" value per reconciliation R1 (spec's `n/a` maps to this).
+// `downgraded-latent` (ROADMAP A2) is the "real, but unreachable today"
+// verdict: the claim survives scrutiny as a genuine defect, yet nothing can
+// execute it at this commit — a bug in newly-added code no caller wires up
+// yet. It is deliberately NOT `refuted`, because refuting deletes the finding
+// from findings[] and the G6 lesson was that a real defect must never be
+// deleted for being latent. It lands advisory instead: recorded, visible, and
+// unable to block a merge. Additive widening; validators only reject
+// out-of-set values, so historical artifacts keep validating.
 export type RefuterVerdict =
   | "corroborated"
   | "refuted"
   | "inconclusive"
+  | "downgraded-latent"
   | "not_submitted";
 export type Tier = "blocking" | "advisory";
 export type Hunter = "reliability" | "resilience" | "parity" | "lifecycle";
@@ -131,6 +140,7 @@ const REFUTER_VERDICTS: RefuterVerdict[] = [
   "corroborated",
   "refuted",
   "inconclusive",
+  "downgraded-latent",
   "not_submitted",
 ];
 const CAUSAL_DISPOSITIONS: CausalDisposition[] = [
@@ -267,6 +277,13 @@ export function deriveTier(
     finding.severity === "BLOCKER" || finding.severity === "CRITICAL";
   if (!isBlockerClass) return "advisory";
   if (finding.evidence_class === "insufficient") return "advisory";
+  // Ordered BEFORE the deterministic short-circuit on purpose. A verdict that
+  // could not outrank `deterministic` would be inert exactly where it is
+  // needed: the 2026-07-29 AudioTrimmer runs put 26 of 26 blocking findings in
+  // that class, so the gate had nothing to act on. Only a POSITIVE downgrade
+  // gets this power — `inconclusive` still blocks, mirroring the rule that
+  // `refuted` requires positive disproof. Silence is not a demotion.
+  if (finding.refuter_verdict === "downgraded-latent") return "advisory";
   if (finding.evidence_class === "deterministic") return "blocking";
   return finding.refuter_verdict === "corroborated" ? "blocking" : "advisory";
 }

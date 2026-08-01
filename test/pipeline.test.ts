@@ -31,7 +31,13 @@ class FakeStepRunner implements StepRunner {
   constructor(private readonly script: StepScript) {}
   async run(spec: StepSpec): Promise<StepResult> {
     this.specs.push(spec);
-    const handler = this.script[spec.name];
+    // The refuter fans out to one step per finding (ROADMAP A2), so its step
+    // names carry the finding id: `refuter-F001`. A script keyed plainly on
+    // "refuter" answers all of them, which keeps these tests about pipeline
+    // behavior rather than about id bookkeeping.
+    const handler =
+      this.script[spec.name] ??
+      (spec.name.startsWith("refuter-") ? this.script.refuter : undefined);
     if (!handler) throw new Error(`unscripted step ${spec.name}`);
     return handler(spec);
   }
@@ -473,17 +479,18 @@ describe("refuter", () => {
       dedupe_key: `src/app.ts:sym${line}:1`,
     });
 
-  test("skips entirely when no inferential BLOCKER/CRITICAL survives", async () => {
-    // deterministic BLOCKER + inferential WARNING: neither qualifies.
+  test("skips entirely when nothing reaches BLOCKER/CRITICAL", async () => {
+    // WARNING + SUGGESTION: neither can block a merge, so neither needs the
+    // gate. Severity is now the whole eligibility test (ROADMAP A2).
     const runner = new FakeStepRunner({
       "hunter-reliability": (spec) =>
         ok(spec, {
           findings: [
-            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+            draft({ severity: "WARNING", evidence_class: "deterministic" }),
             draft({
               id: "REL-2",
               symbol: "other",
-              severity: "WARNING",
+              severity: "SUGGESTION",
               evidence_class: "inferential",
               dedupe_key: "src/app.ts:other:1",
             }),
@@ -498,6 +505,73 @@ describe("refuter", () => {
     }
     expect(result.perAgent.refuter).toBeUndefined();
     expect(result.skillOutput.run_status).toBe("complete");
+  });
+
+  // ROADMAP A2, and the reason the whole item was re-scoped. Under the old
+  // `inferential`-only filter this finding sailed into blocking tier with zero
+  // adversarial scrutiny — and on the 2026-07-29 AudioTrimmer runs that was
+  // not an edge case but the entire population: 26 of 26 blocking findings
+  // were deterministic, so the refuter never ran once across six reviews.
+  test("submits a deterministic BLOCKER — the gate sees everything that can block", async () => {
+    let submitted: Array<Record<string, unknown>> = [];
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
+    });
+    const input = await makeInput();
+    const result = await runPipeline(input, { runner });
+    expect(runner.specs.map((s) => s.name)).toContain("refuter-F001");
+    submitted = (await Bun.file(
+      path.join(input.runDir, "steps", "refuter-batch.json"),
+    ).json()) as Array<Record<string, unknown>>;
+    expect(submitted.length).toBe(1);
+    expect(result.skillOutput.findings[0]?.refuter_verdict).toBe(
+      "corroborated",
+    );
+    expect(result.skillOutput.findings[0]?.tier).toBe("blocking");
+  });
+
+  // The unwired-code answer: a real defect nothing can execute yet is neither
+  // deleted (that was the G6 mistake) nor merge-blocking. It lands advisory,
+  // and it survives in findings[] where a human can still read it.
+  test("downgraded-latent keeps a deterministic BLOCKER but demotes it to advisory", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: "F001",
+              outcome: "downgraded-latent",
+              proof_refs: ["src/app.ts:1 no caller wires this module yet"],
+            },
+          ],
+        } satisfies RefuterResult),
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    expect(result.skillOutput.debug.refuted).toHaveLength(0);
+    expect(result.skillOutput.findings).toHaveLength(1);
+    expect(result.skillOutput.findings[0]?.refuter_verdict).toBe(
+      "downgraded-latent",
+    );
+    expect(result.skillOutput.findings[0]?.tier).toBe("advisory");
   });
 
   test("writes the batch file and inlines it in the prompt", async () => {
@@ -602,6 +676,15 @@ describe("assembly", () => {
           ],
         }),
       "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      // A deterministic BLOCKER now reaches the refuter (ROADMAP A2), so the
+      // envelope round-trip needs the leg stubbed or it exercises the
+      // refuter-failure path and the run degrades to partial.
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
     });
     const result = await runPipeline(await makeInput(), { runner });
     const telemetry: Telemetry = {
@@ -684,11 +767,18 @@ describe("assembly", () => {
     const input = await makeInput({ parityTriggerPaths: ["**/app.ts"] });
     expect(input.spec).toBeUndefined();
     const result = await runPipeline(input, { runner });
+    // Hunter step names and ALL per_agent keys stay byte-identical to the
+    // pre-spec wiring — that is what this pin protects, and A2 does not touch
+    // it. The refuter STEP name now carries the finding id because the leg
+    // fans out one step per finding; its per_agent row is still the single
+    // "refuter" key, summed across those steps. Nothing downstream reads step
+    // names (checked: the lab's runner parses prompt_set and findings, never
+    // step names), so this rename is confined to pipeline.json provenance.
     expect(runner.specs.map((s) => s.name)).toEqual([
       "hunter-reliability",
       "hunter-resilience",
       "hunter-parity",
-      "refuter",
+      "refuter-F001",
     ]);
     expect(Object.keys(result.perAgent).sort()).toEqual([
       "parity",

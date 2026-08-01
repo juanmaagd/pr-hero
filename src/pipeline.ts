@@ -173,8 +173,9 @@ const HUNTER_OUTPUT_CONTRACT = [
 const REFUTER_OUTPUT_CONTRACT = [
   "Your final message must be exactly one JSON object — no prose, no code",
   'fences — of the shape {"results":[{"finding_id":"...","outcome":',
-  '"corroborated|refuted|inconclusive","proof_refs":["..."]}]} with exactly',
-  "one verdict per submitted finding id — never implied, never extra.",
+  '"corroborated|refuted|downgraded-latent|inconclusive","proof_refs":',
+  '["..."]}]} with exactly one verdict per submitted finding id — never',
+  "implied, never extra.",
 ].join("\n");
 
 function hunterPrompt(patch: string, hopBudget: number): string {
@@ -194,12 +195,25 @@ function hunterPrompt(patch: string, hopBudget: number): string {
 
 function refuterPrompt(batchJson: string): string {
   return [
-    "Refute or corroborate each finding in this batch:",
+    "Refute or corroborate this finding:",
     "",
     batchJson,
     "",
-    "For every finding decide `corroborated`, `refuted`, or `inconclusive`",
-    "against the code in this worktree.",
+    "Decide one of `corroborated`, `refuted`, `downgraded-latent`, or",
+    "`inconclusive` against the code in this worktree.",
+    "",
+    // The engine states the semantics because the tier consequences are the
+    // engine's, not the prompt set's: `refuted` DELETES the finding, so it
+    // demands positive disproof; `downgraded-latent` keeps it and demotes it
+    // to advisory. Without this line a reviewer facing a real defect in
+    // unreachable code has only the two wrong doors — delete it, or block a
+    // merge on it.
+    "`refuted` means the code positively contradicts the claim — cite the",
+    "contradicting lines. `downgraded-latent` means the claim is a REAL defect",
+    "that nothing can execute at this commit (no caller wires it up yet, the",
+    "branch is unreachable by construction): it is kept and recorded, never",
+    "deleted, but it will not block a merge. `inconclusive` means you could",
+    "not tell — it is not a polite `refuted`.",
     "",
     REFUTER_OUTPUT_CONTRACT,
   ].join("\n");
@@ -402,12 +416,20 @@ async function execute(
   state.survivors = survivors;
   state.deduped = deduped;
 
-  // Step 6 — one refuter batch: inferential BLOCKER/CRITICAL survivors only.
-  // Empty batch → no step runs, every finding stays not_submitted.
+  // Step 6 — one refuter batch: every BLOCKER/CRITICAL survivor, whatever its
+  // evidence_class. Severity alone is the test, because severity alone decides
+  // whether a finding can block a merge, and the refuter is the gate that
+  // protects merges.
+  //
+  // This used to also require `evidence_class === "inferential"`, on the theory
+  // that a code-provable claim needs no adversary. The 2026-07-29 AudioTrimmer
+  // runs killed that theory with data: 26 of 26 blocking findings across six
+  // reviews were `deterministic`, so the batch was empty every single time and
+  // the refuter never ran — blocking tier, the one tier that stops a merge,
+  // had no adversarial check at all. The label was not wrong (those defects
+  // really were locally provable); the filter was.
   const batch = survivors.filter(
-    (s) =>
-      s.evidence_class === "inferential" &&
-      (s.severity === "BLOCKER" || s.severity === "CRITICAL"),
+    (s) => s.severity === "BLOCKER" || s.severity === "CRITICAL",
   );
   // A spec with no refuter (allowed: "at most one") skips the leg entirely —
   // configured absence, not failure: every finding stays not_submitted (so
@@ -426,6 +448,18 @@ async function execute(
   return finish(input, state);
 }
 
+// ONE STEP PER FINDING, not one batch (ROADMAP A2). The batch shape had a
+// failure mode that cost a real smoke tree: `validateRefuterResult` demands the
+// returned id set match the submitted set EXACTLY, and on iteration 910's
+// `27e85937` the model returned a mismatched set over a 4-finding batch, so the
+// whole step was rejected, retried, and finally degraded the run to partial —
+// every verdict lost, including the ones it got right. A step that carries a
+// single finding cannot return a mismatched id set: the invariant becomes
+// unbreakable by construction rather than enforced after the fact.
+//
+// It also stops one hard finding from poisoning the verdicts of easy ones, and
+// it makes the per-finding own-expansion the prompt asks for actually
+// affordable — a single claim gets a whole context window instead of a share.
 async function runRefuter(
   input: PipelineInput,
   deps: PipelineDeps,
@@ -433,7 +467,9 @@ async function runRefuter(
   batch: DedupedSurvivor[],
   options: { stepsDir: string; stepTimeoutMs: number; agent: AgentSpec },
 ): Promise<void> {
-  const submittedIds = batch.map((s) => s.id);
+  // Kept as the audit manifest of everything submitted this run, even though
+  // no single step consumes it: it is how a reader reconstructs what the gate
+  // was asked to judge.
   const batchJson = JSON.stringify(
     batch.map((s) => ({
       id: s.id,
@@ -452,63 +488,103 @@ async function runRefuter(
   const agent = await parseAgentFile(
     path.join(input.agentsDir, options.agent.file),
   );
+  // One shared body, written once: every step is the same agent asked about a
+  // different finding.
   const systemPromptPath = path.join(options.stepsDir, "refuter.system.md");
   // The refuter body carries no {{PRIORS}}/{{GOTCHAS}} anchors — written
   // as-is, same audit-artifact role as the hunter system prompts.
   await Bun.write(systemPromptPath, agent.body);
-  const spec: StepSpec = {
-    name: "refuter",
-    systemPromptPath,
-    // Batch CONTENT inline, not a path: the refuter's tool surface is
-    // read-only over the worktree; its work order must arrive in the prompt.
-    prompt: refuterPrompt(batchJson),
-    tools: agent.tools,
-    mcpConfigPath: input.mcpConfigPath,
-    model: resolveModel(
-      input,
-      options.agent.model,
-      agent.model,
-      options.agent.file,
-    ),
-    cwd: input.worktree,
-    outPath: path.join(options.stepsDir, "refuter.result.json"),
-    timeoutMs: options.stepTimeoutMs,
-    maxAttempts: DEFAULT_STEP_MAX_ATTEMPTS,
-    parse: (finalText) => {
-      const extracted = extractJsonObject(finalText);
-      if (extracted === undefined) {
-        throw new Error("refuter final message has no JSON object");
-      }
-      return validateRefuterResult(extracted, submittedIds);
-    },
-  };
-  state.steps.push(stepMeta(spec));
-  let result: StepResult | undefined;
-  try {
-    result = await deps.runner.run(spec);
-  } catch {
-    result = undefined;
-  }
-  // per_agent key comes from the spec ("refuter" with the default spec).
-  if (result) {
-    state.perAgent[options.agent.key] = perAgentEntry(result);
-    state.usageTotal = sumUsage(state.usageTotal, result.usage);
-  } else {
-    state.perAgent[options.agent.key] = failedAgentEntry();
-  }
-  if (result?.status === "ok") {
-    for (const entry of (result.output as RefuterResult).results) {
-      state.verdicts.set(entry.finding_id, entry.outcome);
+  const model = resolveModel(
+    input,
+    options.agent.model,
+    agent.model,
+    options.agent.file,
+  );
+  const specs = batch.map((survivor) => {
+    const oneJson = JSON.stringify(
+      [
+        {
+          id: survivor.id,
+          location: `${survivor.path}:${survivor.line}`,
+          severity: survivor.severity,
+          claim: survivor.claim,
+          proof_refs: survivor.proof_refs,
+        },
+      ],
+      null,
+      2,
+    );
+    const spec: StepSpec = {
+      name: `refuter-${survivor.id}`,
+      systemPromptPath,
+      // Finding CONTENT inline, not a path: the refuter's tool surface is
+      // read-only over the worktree; its work order must arrive in the prompt.
+      prompt: refuterPrompt(oneJson),
+      tools: agent.tools,
+      mcpConfigPath: input.mcpConfigPath,
+      model,
+      cwd: input.worktree,
+      outPath: path.join(
+        options.stepsDir,
+        `refuter-${survivor.id}.result.json`,
+      ),
+      timeoutMs: options.stepTimeoutMs,
+      maxAttempts: DEFAULT_STEP_MAX_ATTEMPTS,
+      parse: (finalText) => {
+        const extracted = extractJsonObject(finalText);
+        if (extracted === undefined) {
+          throw new Error("refuter final message has no JSON object");
+        }
+        return validateRefuterResult(extracted, [survivor.id]);
+      },
+    };
+    return { id: survivor.id, spec };
+  });
+  for (const { spec } of specs) state.steps.push(stepMeta(spec));
+  // Parallel, matching the hunter fan-out: the steps are independent by
+  // construction and one slow claim must not gate the rest.
+  const settled = await Promise.allSettled(
+    specs.map(({ spec }) => deps.runner.run(spec)),
+  );
+  let usage: SessionUsage | undefined;
+  let attempts = 0;
+  let anyFailed = false;
+  for (const [i, entry] of specs.entries()) {
+    const outcome = settled[i];
+    const result = outcome?.status === "fulfilled" ? outcome.value : undefined;
+    if (result) {
+      usage = usage ? sumUsage(usage, result.usage) : result.usage;
+      attempts += result.attempts;
+      state.usageTotal = sumUsage(state.usageTotal, result.usage);
     }
-    return;
+    if (result?.status === "ok") {
+      for (const r of (result.output as RefuterResult).results) {
+        state.verdicts.set(r.finding_id, r.outcome);
+      }
+      continue;
+    }
+    // Conservative default, now scoped to the one finding whose gate died: a
+    // dead step must not delete a finding (it was never refuted) nor grant
+    // blocking tier (it was never corroborated). Under the batch shape this
+    // fallback swallowed every verdict in the run; now it costs exactly one.
+    anyFailed = true;
+    state.verdicts.set(entry.id, "inconclusive");
   }
-  // Conservative default: a dead refuter must not delete findings (they were
-  // never refuted) nor grant blocking tier (they were never corroborated) —
-  // every submitted finding becomes "inconclusive", and the run is partial.
-  for (const id of submittedIds) {
-    state.verdicts.set(id, "inconclusive");
-  }
-  state.partial = true;
+  // The spec carries ONE refuter agent, so its telemetry stays one row —
+  // summed across the steps it fanned into, which keeps `per_agent` totals
+  // reconcilable against the run total.
+  state.perAgent[options.agent.key] = usage
+    ? {
+        tokens_total: usage.tokens_total,
+        duration_ms: usage.wall_ms,
+        tokens_in: usage.tokens_in,
+        tokens_out: usage.tokens_out,
+        cost_usd_est: usage.cost_usd_est,
+        attempts,
+        status: anyFailed ? "failed" : "ok",
+      }
+    : failedAgentEntry();
+  if (anyFailed) state.partial = true;
 }
 
 // Steps 7 + 8: map verdicts, assign tiers, assemble the SkillOutput draft and

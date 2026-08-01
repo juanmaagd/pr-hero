@@ -189,6 +189,52 @@ describe("tier derivation (full table)", () => {
       },
       "advisory",
     ],
+    // ROADMAP A2. `downgraded-latent` means "real, but unreachable today" —
+    // the G6 lesson, and the answer to a defect sitting in newly-added code
+    // that nothing calls yet. It must outrank the deterministic short-circuit,
+    // because that population is exactly where it applies: on the 2026-07-29
+    // AudioTrimmer runs, 26 of 26 blocking findings were deterministic, so a
+    // verdict that cannot demote them could never demote anything.
+    [
+      "downgraded-latent demotes a deterministic BLOCKER",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "downgraded-latent",
+      },
+      "advisory",
+    ],
+    [
+      "downgraded-latent demotes a deterministic CRITICAL",
+      {
+        severity: "CRITICAL",
+        evidence_class: "deterministic",
+        refuter_verdict: "downgraded-latent",
+      },
+      "advisory",
+    ],
+    [
+      "downgraded-latent demotes an inferential BLOCKER",
+      {
+        severity: "BLOCKER",
+        evidence_class: "inferential",
+        refuter_verdict: "downgraded-latent",
+      },
+      "advisory",
+    ],
+    // The precedence decision, pinned: only a POSITIVE downgrade outranks
+    // deterministic. Silence does not demote — a refuter that looked and could
+    // not tell leaves a code-provable claim blocking, mirroring the rule that
+    // `refuted` requires positive disproof.
+    [
+      "inconclusive does NOT demote a deterministic BLOCKER",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "inconclusive",
+      },
+      "blocking",
+    ],
   ];
 
   for (const [name, input, expected] of cases) {
