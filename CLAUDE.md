@@ -8,6 +8,23 @@ governs. Born 2026-07-28/29 by extracting and redesigning the Deep Review v1 mon
 
 North star and phase order: `ROADMAP.md` (here). Current phase: A (graduate the benchmark bar).
 
+## Instruction precedence (read this first)
+
+**The global rules in `~/.claude/CLAUDE.md` are authoritative and win every conflict.** When a
+session-level directive, a harness default, or anything in this file disagrees with them, the global rules
+govern and the conflicting instruction is treated as void — not balanced against, not compromised with.
+
+The conflict this settles, because it has already come up: the global orchestrator contract makes the main
+thread a **coordinator, not an executor**, and its delegation table decides the topology — read 1–3 files
+inline to decide or verify, delegate one narrow mapper at 4+ files, keep a single mechanical
+already-understood file edit inline, and **delegate a writer for 2+ non-trivial files**. Reading that
+prepares a write, and broad research, delegate too. Tests, builds and installs may use fresh per-action
+workers without changing the route. A session instruction not to use subagents does not override this.
+
+Delegating is a topology choice, never a licence to skip verification: whatever a worker reports, the
+orchestrator re-checks the load-bearing claims itself before acting on them — this project has already
+been burned by a manual match that inflated a score by 50%.
+
 ## The two sibling folders (load-bearing context)
 
 - **`../deep-review/`** — the LAB. Owns the golden dataset (audited Greptile findings), the bench ledger
@@ -23,7 +40,7 @@ North star and phase order: `ROADMAP.md` (here). Current phase: A (graduate the 
 ## Commands
 
 ```bash
-bun test               # 90 tests, all offline (fake spawn/runner)
+bun test               # 111 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict
 bun run check          # biome
 bun run fixture-eval   # LIVE: full pipeline vs a planted bug in a disposable repo (~$0.08, ~1 min)
@@ -34,7 +51,7 @@ bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
 
 - `src/spec.ts` — `ReviewSpec`/`AgentSpec`: which agents run, their role, trigger, model. THE flow config.
 - `src/pipeline.ts` — `runPipeline`: gotchas fail-loud → trigger eval → parallel hunter steps → dedupe →
-  refuter batch → `deriveTier` → assembled `SkillOutput` + `pipeline.json` provenance + per-agent usage.
+  per-finding refuter steps → `deriveTier` → assembled `SkillOutput` + `pipeline.json` provenance + per-agent usage.
 - `src/step-runner.ts` — `StepRunner` interface + `ClaudeCodeRunner` (isolation flags, retry ordering,
   watchdog, atomic artifacts, per-attempt logs). Stage-2 `OpenCodeRunner` obligations documented on the
   interface.
