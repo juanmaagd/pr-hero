@@ -19,12 +19,35 @@ The two known capability gaps, in attack order:
   Targets the stable misses G2/G4/G5 (0-for-history — any repeated catch is pure signal). New prompt set
   (scored sets are immutable); surgical replays of the G2/G4/G5 trees with replicates + N-of-M reading;
   watch advisory volume and blocking precision for regressions.
-- **A2. Refuter v2** — precision + completeness guard. Per-finding refuter steps via the declarative spec
-  (kills the 27e85937 large-batch failure by construction); verdict vocabulary gains `downgraded-latent`
-  ("real but unreachable today" → advisory, never deleted — the G6 lesson); mandatory own-expansion per
-  finding (visit proof_refs AND hunt the counterexample; external measurement: −88.6% FP for −3.1%
-  recall); refuted requires positive disproof with cited code. Calibration: G6 → downgraded-latent,
-  27e85937 batch completes, blocking-tier precision stays 100%.
+- **A2. Refuter v2** — precision + completeness guard. **Built and measured 2026-08-01** (iterations
+  541–543, `bench/METRICS.md`). Per-finding refuter steps via the declarative spec (kills the 27e85937
+  large-batch failure by construction); eligibility is severity alone, because the triage found the gate
+  was not weak but *structurally bypassed* — 26 of 26 blocking findings were `deterministic` and the batch
+  filter admitted only `inferential`, so blocking tier had zero adversarial checking; verdict vocabulary
+  gains `downgraded-latent` ("real but unreachable today" → advisory, never deleted — the G6 lesson);
+  mandatory own-expansion per finding (visit proof_refs AND hunt the counterexample; external measurement:
+  −88.6% FP for −3.1% recall); refuted requires positive disproof with cited code.
+
+  **Calibration, restated — the original gate was the wrong instrument.** It read "G5 still reaches
+  blocking tier, ≥2 of 3", which conflates refuter behaviour with hunter run-to-run variance and therefore
+  cannot answer what A2 asks. G5 came back 1/3 (A1 was 2/3; pooled, the lifecycle hunter catches G5 in
+  3 of 6 runs on that tree — squarely inside this benchmark's documented variance), while the refuter
+  returned `corroborated` on all 15 findings it judged: it removed and downgraded nothing, so the misses
+  are provably upstream of the gate. **A refuter gate must assert what the refuter DID to a finding
+  (removed / downgraded / preserved), never an end-to-end catch rate.** Standing calibration for any
+  refuter change, in this order:
+  1. `bun run refuter-probe` — the verdict-vocabulary matrix on planted claims, cents per run. A prompt
+     edit that cannot pass this does not reach a paid replay.
+  2. On a golden tree: no finding the refuter judged may be removed or downgraded without a cited
+     contradiction, and 27e85937's batch must complete.
+  3. Blocking-tier precision reported only once the novel findings are triaged — never inferred from
+     volume.
+
+  **What remains unproven**: the −88.6% FP figure. A2 judged 15/15 `deterministic` findings where every
+  pre-A2 verdict was on an `inferential` one, so prompt effect and population shift are perfectly
+  collinear in the live data and no number of musive replicates can separate them. The probe falsified the
+  "deferential refuter" reading (3/3 correct refutations of a planted false claim, $0.58) but only for an
+  adjacent, obvious contradiction.
 - **A3. Dataset decisions (Juanma)** — G6 ground truth (denominator 6 vs 7), confirm/overturn the 10
   triage verdicts, graduation semantics under known-high variance (proposal: ≥6/7 on 2-of-2 replicate
   passes, or mean over 3).
@@ -89,6 +112,11 @@ Timing: only after Phase B proves the engine in anger on our own repo.
 - Prompt sets immutable once scored; new behavior = new set, fingerprinted.
 - One variable per experiment; replicates + N-of-M; misses attributed (hunter/merge/refuter) before
   choosing a lever.
+- A gate asserts the mechanism it tests, never a downstream proxy. If a component's pass condition can be
+  moved by something the component does not control, the gate measures that other thing — A2's original
+  "G5 reaches blocking tier ≥2 of 3" tested the refuter through the hunter's variance and answered a
+  question nobody asked. Where the mechanism can be planted and observed for cents, the cheap harness is
+  the gate and the paid replay is confirmation, not discovery.
 - The lab's `dataset/test.jsonl` stays sealed until A4.
 - Cost is a first-class metric; every live run lands in the ledger with its engine identity.
 - Convoy clone at `~/Desktop/convoy` + study notes at `../deep-review/intel/convoy.md` are the reference
