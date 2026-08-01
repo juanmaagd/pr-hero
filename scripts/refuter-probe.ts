@@ -1,11 +1,14 @@
 // Refuter-discrimination probe (ROADMAP A2 diagnostic — NOT a benchmark arm).
 //
 // Feeds the REAL A2 refuter one finding per run, on the REAL model, and
-// asserts the verdict. Two arms over the same fixture repo:
-//   - `true-claim`  (control) — an accurate claim  → expect `corroborated`
-//   - `false-claim` (the test) — a contradicted one → expect `refuted`
+// asserts the verdict. A calibration matrix over the verdict vocabulary A2
+// introduced — four arms over the same fixture repo:
+//   - `true-claim`       (control)  — accurate claim          → `corroborated`
+//   - `false-claim`      (easy)     — contradicted nearby     → `refuted`
+//   - `hard-false-claim` (depth)    — contradicted 3 files up → `refuted`
+//   - `latent-claim`     (G6)       — real, unreachable code  → `downgraded-latent`
 // See fixtures/refuter-probe.ts for why a fixture can answer this and a replay
-// cannot.
+// cannot, and for how each arm is planted.
 //
 // WHAT A RESULT MEANS
 //   false-claim `refuted`         → the gate DISCRIMINATES. A2's 15/15
@@ -25,13 +28,51 @@
 //                                   separately because the fix differs.
 //   false-claim `downgraded-late` → the fixture's live caller wiring broke;
 //                                   treat the run as void, not as a result.
-//   true-claim not `corroborated` → the PROBE is suspect. The test arm means
+//   true-claim not `corroborated` → the PROBE is suspect. Every test arm means
 //                                   nothing until the control passes.
 //
+//   hard-false `refuted`          → the gate does not just spot adjacent
+//                                   contradictions, it WALKS the call chain:
+//                                   three hops and three files out, and it
+//                                   still found the clamp. This is the result
+//                                   that would let A2's precision claim
+//                                   generalise past toy distance.
+//   hard-false `corroborated`     → the gate only catches OBVIOUS
+//                                   contradictions. Whatever the easy arm
+//                                   scored, refutation is a local text check,
+//                                   not verification — so on real PRs, where
+//                                   the disproof is never two lines away, it
+//                                   should be expected to rubber-stamp.
+//   hard-false `inconclusive`     → same practical consequence (nothing is
+//                                   deleted), different fix: the gate knows it
+//                                   did not verify. A depth/hop budget or an
+//                                   explicit "follow the value" mandate is the
+//                                   lever, not a stronger scepticism prompt.
+//
+//   latent `downgraded-latent`    → the G6 lesson HOLDS. A real defect nothing
+//                                   can execute is kept, recorded, and left
+//                                   advisory — the verdict A2 added the
+//                                   vocabulary for, tested for the first time.
+//   latent `refuted`              → the engine would DELETE a real defect.
+//                                   This is exactly the G6 failure A2 exists
+//                                   to prevent, and it is the most expensive
+//                                   outcome on the whole matrix: refuted
+//                                   findings leave findings[] entirely.
+//   latent `corroborated`         → the engine would BLOCK a merge on code
+//                                   nothing can run. Not a deletion, so far
+//                                   cheaper than the above, but it is the
+//                                   false-positive tax the latent verdict was
+//                                   introduced to remove.
+//   latent `inconclusive`         → the reachability question was never
+//                                   answered. Advisory either way, but it says
+//                                   the gate does not look for callers at all.
+//
 // LIVE: spends real money (charter rule 6 — the result lands in a ledger). One
-// sonnet refuter step per attempt over a four-file repo, so cents each; the
-// hunter leg is faked and free. The default 3 replicates x 2 arms stays far
-// below the ~$10 replay that cannot answer this question at all.
+// sonnet refuter step per attempt over a nine-file repo, so cents each; the
+// hunter leg is faked and free. The first two arms measured ~$0.10 per step
+// (3 replicates x 2 arms = $0.5776); the new arms traverse more files, so a
+// default 3 x 4 run should land near $1.5 — still far below the ~$10 replay
+// that cannot answer this question at all.
 //
 // Run: bun run scripts/refuter-probe.ts [replicates]
 import path from "node:path";
@@ -40,6 +81,7 @@ import {
   EXPECTED_VERDICT,
   HUNTER_AGENT_FILE,
   HUNTER_KEY,
+  PROBE_ARMS,
   type ProbeArm,
   REFUTER_AGENT_FILE,
 } from "../fixtures/refuter-probe";
@@ -181,9 +223,11 @@ async function runOnce(arm: ProbeArm, replicate: number): Promise<Attempt> {
   );
 
   // `refuted` findings LEAVE findings[] for debug.refuted; every other verdict
-  // stays in findings[] carrying refuter_verdict. Both places are read, and the
-  // id is taken from the row rather than assumed — mergeAndDedupe renumbers to
-  // F001 before the refuter runs, so the hunter's own id is already gone.
+  // stays in findings[] carrying refuter_verdict — `downgraded-latent` included
+  // (pipeline.ts finish(): only `refuted` is diverted, the rest are tiered, and
+  // deriveTier() lands `downgraded-latent` on advisory). Both places are read,
+  // and the id is taken from the row rather than assumed — mergeAndDedupe
+  // renumbers to F001 before the refuter runs, so the hunter's id is gone.
   const { skillOutput } = result;
   const rows = [...skillOutput.findings, ...skillOutput.debug.refuted];
   const row = rows[0];
@@ -213,9 +257,10 @@ async function runOnce(arm: ProbeArm, replicate: number): Promise<Attempt> {
 
 const attempts: Attempt[] = [];
 // Interleaved rather than grouped, so any drift in service behaviour over the
-// probe's wall-clock hits both arms evenly instead of loading one of them.
+// probe's wall-clock hits every arm evenly instead of loading one of them. The
+// arm list comes from the fixture: the matrix is declared once.
 for (let r = 1; r <= REPLICATES; r++) {
-  for (const arm of ["true-claim", "false-claim"] as const) {
+  for (const arm of PROBE_ARMS) {
     const attempt = await runOnce(arm, r);
     attempts.push(attempt);
     console.error(
@@ -257,6 +302,8 @@ console.log(
       refuter_model: REFUTER_MODEL,
       "true-claim": summarise("true-claim"),
       "false-claim": summarise("false-claim"),
+      "hard-false-claim": summarise("hard-false-claim"),
+      "latent-claim": summarise("latent-claim"),
       total_refuter_cost_usd: Number(
         attempts.reduce((s, a) => s + a.refuter_cost_usd, 0).toFixed(4),
       ),
