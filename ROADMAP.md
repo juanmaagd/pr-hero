@@ -127,6 +127,31 @@ The two known capability gaps, in attack order:
   `dataset/test.jsonl` (first and only read), measure against the bar, F2/SNR reported alongside. This is
   one of the few places a full smoke-scale run is mandatory.
 
+- **A6. Make the stall row writable** — the next recall lever, diagnosed 2026-08-01 for $0 from artifacts
+  already on disk, and the same failure shape A5 just fixed.
+
+  The lifecycle prompt names the mode explicitly (line 55: *"**Stall** — the op neither succeeds nor
+  errors (an event never fires, the network hangs, media never reaches...)"*), so this is a compliance gap,
+  not a design gap. Yet G4 — whose golden is exactly a missing stall backstop — scored **0 of 3**, and the
+  hunter's own drafts from iterations 531–533 show what it produced instead: switch-mode findings, three
+  runs running. The hunter works. The stall row is never generated.
+
+  **Why, precisely.** Condition (c) demands *"no disarm or re-arm actually FIRES in this mode … Prove it by
+  having read the whole owner plus every cleanup reachable via `codegraph_explore` — **not merely by not
+  having found one yet**."* Switch, error and early-return are events that exist in the code: there is a
+  line to cite. A stall is the absence of every event — there is nothing to point at, and (c) explicitly
+  rejects "I did not find one" as proof. **Stall is the one mode whose burden of proof is unsatisfiable by
+  construction**, so the row never gets written.
+
+  How stark the miss is: at G4's tree (`27e85937`) the file contains **zero `setTimeout` occurrences** — the
+  absence is total, not subtle. (Its sibling commit `f961e23a` has 3; the two are divergent, not
+  parent/child.)
+
+  Fix, following A5's template: turn *"I searched X, Y and Z and no disarm fires on a stall"* from an unmet
+  burden into a **reportable statement**, exactly as A5 did for reachability. New prompt set; target G4 @
+  `27e85937` (~$7/run, 3 replicates ≈ $21); report the mean. Watch blocking volume — every latch has a
+  stall column, so this is the lever most likely to produce a firehose, and that is the regression signal.
+
 Gate to Phase B: bar met on the held-out set.
 
 ## Phase B — Production wiring (cancels Greptile)
