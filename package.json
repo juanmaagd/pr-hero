@@ -11,6 +11,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "fixture-eval": "bun run scripts/fixture-eval.ts",
+    "refuter-probe": "bun run scripts/refuter-probe.ts",
     "check": "biome check src test"
   },
   "devDependencies": {
