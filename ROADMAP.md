@@ -48,7 +48,44 @@ The two known capability gaps, in attack order:
   collinear in the live data and no number of musive replicates can separate them. The probe falsified the
   "deferential refuter" reading (3/3 correct refutations of a planted false claim, $0.58) but only for an
   adjacent, obvious contradiction.
-- **A3. Dataset decisions (Juanma)** — confirm/overturn the 10 triage verdicts remains OPEN.
+- **A3. Dataset decisions (Juanma) — CLOSED 2026-08-01.** All three decisions made; see below and the
+  graduation/G6 entries that follow.
+
+  **The 10 triage verdicts: ratified, with one overturned on new evidence.** The row
+  *"trim range not reset on song switch"* — the only medium-confidence verdict — was marked FALSE
+  POSITIVE on the same "the component remounts on song switch" defence that the G6 investigation
+  disproved. Verified directly: `firstTrimValue`/`secondTrimValue` are component state
+  (`AudioTrimmer/index.tsx:64-65`) cleared in exactly two places, the add-comment success path (`:483`)
+  and the cancel button (`:553`); **no effect keyed on `song.song.id` resets them**. Since the component
+  survives a song switch, song A's trim range persists into song B. The claim is mechanically correct —
+  **latent, not false**. The other nine stand (five true positives, three of which the team independently
+  fixed later; the rest high-confidence and none resting on the disproved defence).
+
+  **Revised precision: false positives 2/15 (13%)**, down from 3/15 (20%). The ≤20% half of the bar is
+  met with margin.
+
+  **Process fix, learned the hard way**: that triage recorded verdicts WITHOUT their reasoning, so the
+  disputed row could not be re-examined when new evidence arrived — the verification had to be redone from
+  scratch. Record the reasoning with the verdict, always.
+
+- **A5. Lift the lifecycle pass's reachability suppression** — the recall lever, and the one grounded in a
+  provable inconsistency rather than a guess. `agents/slice3b-lifecycle-v2/deep-review-lifecycle.md`
+  contradicts itself: line 74 says *"Not reportable: a mode that is unreachable by construction"*, while
+  line 125 says *"You do not filter — a downstream refuter owns precision, and a finding you suppress is
+  simply lost."* That suppression is **why G2 scores 0 of 4** — G2 lives in a component with zero live
+  callers at its commit, so conditions (b) reachable-with-cited-path and (d) user-visible-consequence can
+  never be satisfied. (The value-contract pass has no reachability criteria at all, which is exactly why
+  G3 lands 4/4 in that same unwired file.)
+
+  The suppression was correct prudence when the refuter had only two doors, delete or block: emitting an
+  unreachable defect meant either a false positive or a blocked merge. **A2 built the third door**, and
+  `downgraded-latent` was measured working 3 of 3 (`refuter-probe`, `latent-claim` arm). The hunter is now
+  suppressing precisely the class the gate knows how to handle correctly.
+
+  Experiment (one variable, new prompt set since scored sets are immutable): drop the reachability
+  suppression, let the hunter emit unreachable-but-real defects at CRITICAL, and let the refuter demote
+  them. Target G2 @ `4609456d` — a cheap tree (~$3/run, so 3 replicates ≈ $10). Report the mean per the
+  graduation rule. Watch blocking volume and the `downgraded-latent` rate as the regression signals.
 
   **G6 ground truth — DECIDED 2026-08-01 (Juanma): G6 stays, denominator 7, and its correct verdict is
   `downgraded-latent`, not `blocking`.** The dispute was framed as real-vs-not-real and that was the wrong
