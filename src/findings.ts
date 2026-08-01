@@ -269,7 +269,9 @@ export function validateFindingsDocument(candidate: unknown): FindingsDocument {
 }
 
 // Full tier-assignment rule (spec BR "Full Tier-Assignment Rule"): only
-// corroborated-or-deterministic BLOCKER/CRITICAL findings may block.
+// corroborated-or-deterministic BLOCKER/CRITICAL findings may block, and even
+// a deterministic one is demoted to advisory when the refuter returns the
+// positive `downgraded-latent` verdict.
 export function deriveTier(
   finding: Pick<Finding, "severity" | "evidence_class" | "refuter_verdict">,
 ): Tier {

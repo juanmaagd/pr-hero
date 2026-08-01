@@ -543,9 +543,18 @@ async function runRefuter(
   for (const { spec } of specs) state.steps.push(stepMeta(spec));
   // Parallel, matching the hunter fan-out: the steps are independent by
   // construction and one slow claim must not gate the rest.
+  //
+  // Measured around the fan-out because summed `wall_ms` is NOT elapsed time
+  // once the steps overlap: N concurrent steps of 60s each sum to N*60s while
+  // the leg really took ~60s. Every hunter row reports one step's real
+  // `wall_ms` (see `perAgentEntry`), so a summed refuter row would be both
+  // inflated and incomparable with its siblings — and this engine exists to be
+  // compared on time and cost against a paid competitor.
+  const legStartedAt = Date.now();
   const settled = await Promise.allSettled(
     specs.map(({ spec }) => deps.runner.run(spec)),
   );
+  const legElapsedMs = Date.now() - legStartedAt;
   let usage: SessionUsage | undefined;
   let attempts = 0;
   let anyFailed = false;
@@ -571,12 +580,16 @@ async function runRefuter(
     state.verdicts.set(entry.id, "inconclusive");
   }
   // The spec carries ONE refuter agent, so its telemetry stays one row —
-  // summed across the steps it fanned into, which keeps `per_agent` totals
-  // reconcilable against the run total.
+  // token and cost fields summed across the steps it fanned into, which keeps
+  // `per_agent` totals reconcilable against the run total. `duration_ms` is the
+  // one field that cannot be summed: it reports the leg's measured elapsed
+  // time. `attempts` IS a sum on purpose — N steps have no single attempt
+  // count, so the total is the meaningful number; do not read it as "retries of
+  // one step".
   state.perAgent[options.agent.key] = usage
     ? {
         tokens_total: usage.tokens_total,
-        duration_ms: usage.wall_ms,
+        duration_ms: legElapsedMs,
         tokens_in: usage.tokens_in,
         tokens_out: usage.tokens_out,
         cost_usd_est: usage.cost_usd_est,

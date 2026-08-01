@@ -1,10 +1,10 @@
 # pr-hero
 
 A multi-agent PR-review engine: specialty hunter agents fan out in parallel over a repo checkout + diff,
-a mechanical dedupe merges their drafts, an adversarial refuter challenges the severe inferential
-findings, and deterministic code assigns blocking/advisory tiers. Convoy-inspired architecture: the flow
-is data (`ReviewSpec`), agents are prompt files, orchestration is testable TypeScript — LLMs judge, code
-governs. Born 2026-07-28/29 by extracting and redesigning the Deep Review v1 monolith.
+a mechanical dedupe merges their drafts, an adversarial refuter challenges every severe finding (one
+step per finding), and deterministic code assigns blocking/advisory tiers. Convoy-inspired architecture:
+the flow is data (`ReviewSpec`), agents are prompt files, orchestration is testable TypeScript — LLMs
+judge, code governs. Born 2026-07-28/29 by extracting and redesigning the Deep Review v1 monolith.
 
 North star and phase order: `ROADMAP.md` (here). Current phase: A (graduate the benchmark bar).
 

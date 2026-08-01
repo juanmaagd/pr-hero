@@ -660,6 +660,89 @@ describe("refuter", () => {
     }
     expect(result.perAgent.refuter?.status).toBe("failed");
   });
+
+  // The fan-out's central claim (ROADMAP A2): a dead step now costs exactly one
+  // finding instead of the whole batch. The failure test above kills every step
+  // through a single handler, so only a MIXED outcome can prove the blast
+  // radius actually shrank. Handlers are keyed on the exact step names, which
+  // the fake resolves ahead of its `refuter-` prefix fallback.
+  test("one dead refuter step costs only its own finding", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            inferentialBlocker("REL-1", 10),
+            inferentialBlocker("REL-2", 20),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      "refuter-F001": (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
+      "refuter-F002": (spec) => failed(spec),
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    const byId = new Map(
+      result.skillOutput.findings.map((f) => [f.id, f] as const),
+    );
+    // The surviving step's finding keeps the verdict IT returned, and the tier
+    // that follows from it — untouched by its neighbour's death.
+    expect(byId.get("F001")?.refuter_verdict).toBe("corroborated");
+    expect(byId.get("F001")?.tier).toBe("blocking");
+    // The dead step's finding is degraded, never deleted: never refuted (it was
+    // not disproved), never blocking (it was not corroborated).
+    expect(byId.get("F002")?.refuter_verdict).toBe("inconclusive");
+    expect(byId.get("F002")?.tier).toBe("advisory");
+    expect(result.skillOutput.findings.length).toBe(2);
+    expect(result.skillOutput.debug.refuted.length).toBe(0);
+    expect(result.skillOutput.run_status).toBe("partial");
+    // One dead step fails the single agent row, but its usage still carries the
+    // successful step's spend: 110 tokens from the ok step + 6 from the failed
+    // one, because a failed attempt costs real money too.
+    expect(result.perAgent.refuter?.status).toBe("failed");
+    expect(result.perAgent.refuter?.tokens_total).toBe(116);
+  });
+
+  test("refuter duration_ms is the leg's elapsed time, not summed step wall_ms", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            inferentialBlocker("REL-1", 10),
+            inferentialBlocker("REL-2", 20),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: spec.name.replace("refuter-", ""),
+              outcome: "corroborated",
+              proof_refs: [],
+            },
+          ],
+        } satisfies RefuterResult),
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    const refuterSteps = runner.specs.filter((s) =>
+      s.name.startsWith("refuter-"),
+    );
+    expect(refuterSteps.length).toBe(2);
+    // Each fake step REPORTS wall_ms 1_000 while resolving instantly, so a
+    // summing implementation would claim 2_000ms for a leg that took ~0ms. The
+    // row must carry measured elapsed time across the concurrent fan-out, which
+    // is necessarily below the sum whenever the steps overlap.
+    const summedStepWallMs = refuterSteps.length * 1_000;
+    const duration = result.perAgent.refuter?.duration_ms ?? -1;
+    expect(duration).toBeGreaterThanOrEqual(0);
+    expect(duration).toBeLessThan(summedStepWallMs);
+    // `attempts` stays a SUM across the fanned-out steps, unlike duration.
+    expect(result.perAgent.refuter?.attempts).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
