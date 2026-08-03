@@ -122,13 +122,16 @@ The two known capability gaps, in attack order:
      promoting one sample to a verdict.
 
   Measured under this rule so far (lifecycle class, its own trees): **G5 0.50** (3 of 6), **G4 0.00**
-  (0 of 3), **G2 0.00** (0 of 4).
+  (0 of 6, after A6 added three more), **G2** — 0 of 4 before A5, 1 of 3 under A5; pool it only when the arms
+  are stated, as G5's 3-of-6 is.
 - **A4. Held-out benchmark** — only after the smoke-level bar is met: full run over the lab's
   `dataset/test.jsonl` (first and only read), measure against the bar, F2/SNR reported alongside. This is
   one of the few places a full smoke-scale run is mandatory.
 
-- **A6. Make the stall row writable** — the next recall lever, diagnosed 2026-08-01 for $0 from artifacts
-  already on disk, and the same failure shape A5 just fixed.
+- **A6. Make the stall row writable — BUILT, MEASURED, AND FALSIFIED 2026-08-02.** Diagnosed 2026-08-01 for
+  $0 from artifacts on disk; the diagnosis was wrong, and the measurement that proved it is below. The reasoning
+  is kept in full because it is the record of what was believed, why it was plausible, and exactly which claim
+  the experiment killed.
 
   The lifecycle prompt names the mode explicitly (line 55: *"**Stall** — the op neither succeeds nor
   errors (an event never fires, the network hangs, media never reaches...)"*), so this is a compliance gap,
@@ -148,9 +151,44 @@ The two known capability gaps, in attack order:
   parent/child.)
 
   Fix, following A5's template: turn *"I searched X, Y and Z and no disarm fires on a stall"* from an unmet
-  burden into a **reportable statement**, exactly as A5 did for reachability. New prompt set; target G4 @
-  `27e85937` (~$7/run, 3 replicates ≈ $21); report the mean. Watch blocking volume — every latch has a
-  stall column, so this is the lever most likely to produce a firehose, and that is the regression signal.
+  burden into a **reportable statement**, exactly as A5 did for reachability. Built as
+  `slice3b-lifecycle-v4-refuter` (`e5d9d0a10f3edbfe`): a **completed enumerated sweep** counts as positive proof
+  (owner read in full with cited bounds → every ledger-named cleanup hop → backstop primitives searched by name
+  with counts reported including zeros → the awaited operation followed into whatever performs it), plus a fourth
+  absence-anchor form, both confined to mode 4.
+
+  **Result — iterations 561–563, $33.65, G4 0.00 (0 of 3).** Not a single stall row was written. A grep over
+  `claim` and `proof_refs` of every finding from every hunter in all three runs for
+  `stall|backstop|timeout|never fires|swept|sweep|setTimeout` returns **zero hits**; the lifecycle hunter
+  produced switch-mode findings again, the same shape as iterations 531–533. The prompt was clean before it ran
+  — two rounds of blind dual review, five defects confirmed by both judges and corrected, plus one fix-caused
+  defect caught in round two — so this is a falsified hypothesis, not a defective arm.
+
+  **What it kills.** The diagnosis above says the stall column is empty *because* condition (c) demanded proof of
+  a non-event and so could not be satisfied. A6 removed that impossibility and the row was still never written.
+  **The proof standard was not the binding constraint.** A gate can be unsatisfiable and still not be the reason
+  a thing does not happen — the hunter was never reaching the gate.
+
+  **Cost lesson, recorded because it was a real error:** the ~$21 estimate was carried from this document
+  without checking the tree. G4's tree is 45 files / +2775 −1237, so it bills ~$11/run, not ~$7. Estimate from
+  the diff, never from a sibling golden.
+
+- **A7. Force the cell to be generated** — the lever A6's failure points at, and the first one grounded in a
+  negative result rather than a reading of the prompt.
+
+  Step 2 tells the hunter to cross every ledger row against all five modes and says *"the unit of judgement is
+  the **cell**, not the row"*. Three runs of evidence say it does not do that: it builds the ledger, finds a
+  defect in an early mode (switch, every time), and reports that instead of completing the cross-product. The
+  stall cell is never generated, so no proof standard — satisfiable or not — is ever reached. That also explains
+  why A6's carefully-widened burden changed nothing.
+
+  Experiment (one variable): make the cross-product an **output obligation**, not an internal instruction —
+  require the mode table itself in the response, every row × every mode, each cell carrying one of
+  `defect | clean (cited) | incoherent (why)`, emitted *before* any finding. A cell the hunter must fill is a
+  cell it cannot skip. Target G4 @ `27e85937` again, since its golden is the one a completed table must surface,
+  and it is now the only tree where a null result is informative. Budget ~$11/run × 3 ≈ **$34** — verify against
+  the diff before committing to the number. Watch total findings and blocking volume: forcing a table is the
+  lever most likely to produce a firehose, and that is the regression signal.
 
 Gate to Phase B: bar met on the held-out set.
 
