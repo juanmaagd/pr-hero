@@ -173,8 +173,23 @@ The two known capability gaps, in attack order:
   without checking the tree. G4's tree is 45 files / +2775 −1237, so it bills ~$11/run, not ~$7. Estimate from
   the diff, never from a sibling golden.
 
-- **A7. Force the cell to be generated** — the lever A6's failure points at, and the first one grounded in a
-  negative result rather than a reading of the prompt.
+- **A7. Force the cell to be generated — BUILT, MEASURED, AND IT WORKS. 2026-08-03.** Iterations 571–573,
+  $48.30, set `slice3b-lifecycle-v5-refuter` (`fda1b839b067cb9d`). **G4 0.33 (1 of 3) — the first catch of G4 in
+  the campaign's history**, against 0 of 6 before it. The lever A6's failure pointed at, and the first one
+  grounded in a negative result rather than a reading of the prompt.
+
+  **The mechanism is the result, and it is unambiguous.** All three runs emitted the `cells` array — 15, 20 and
+  25 entries, i.e. 3, 4 and 5 resources × exactly five modes, so the completeness rule held — including **3, 4
+  and 5 stall cells**, with verdicts spanning the whole vocabulary (`defect`, `clean`, `incoherent`,
+  `unresolved`). A6 on this same tree produced zero stall anything. **Cell generation was the binding
+  constraint.** A6 made the stall row permissible; A7 made it generated; they are complementary, which is why v5
+  builds on v4 and the chain is measured at each step. The catch (iteration 572, F012, CRITICAL/blocking): the
+  `<audio preload="metadata">` element has no timeout or deadline, and only `onLoadedMetadata`/`onError` can end
+  `isWaveformLoading`.
+
+  Cost lesson, again: $48.30 against a ~$34 estimate. The table costs output tokens and the estimate was taken
+  from A6's per-run cost without adding them. **Two arms, two overruns, one root — estimating from the previous
+  arm instead of from what the change does.**
 
   Step 2 tells the hunter to cross every ledger row against all five modes and says *"the unit of judgement is
   the **cell**, not the row"*. Three runs of evidence say it does not do that: it builds the ledger, finds a
@@ -203,9 +218,23 @@ until the bar holds in production; then cancel Greptile ($912–1,632/yr).
 
 Convoy-inspired ops the engine still lacks, in value order:
 
-- **C1. Fingerprint seeds** — hunters emit `specialty|path|symbol|root-cause` (convoy's dedup primitive);
-  sharpens mechanical dedupe (the same-symbol over-merge case) and makes cross-run overlap measurable
-  (the variance analysis pain).
+- **C1. Fingerprint seeds — PROMOTE. A7's measurement turned this from a nice-to-have into a bar-blocker.**
+  Hunters emit `specialty|path|symbol|root-cause` (convoy's dedup primitive); sharpens mechanical dedupe (the
+  same-symbol over-merge case) and makes cross-run overlap measurable (the variance analysis pain).
+
+  **Why it moved.** A7's blocking volume doubled (13/11/9 against A6's 4/4/9), which reads as a precision
+  collapse. It is not one. **23 of those 33 blocking findings are a single root cause reported at ten different
+  call sites** — 10 of 13, 7 of 11, 6 of 9. Strip the cluster and non-cluster blocking is 3/4/3, alongside A6's.
+  The cluster is a **true positive**, verified end-to-end in the target repo at `27e85937`:
+  `ProjectSongDuration.fromSeconds()` stores `Math.round(seconds * 1000)` and `ProjectSong.toDto()` emits that
+  raw `.value`, while `Waveform/WaveformWithTime.tsx:13-14` documents `durationSec` as **SECONDS** and
+  `computeProgress` divides bare. A milliseconds producer feeding a documented seconds consumer, across every
+  host that renders a wave.
+
+  It fans out because `dedupe_key` is `<path>:<symbol>:<category>` and each host has a different path. So the
+  engine found a systemic defect and correctly named every site, and the benchmark counts that as ten precision
+  failures. Until C1 lands, **report blocking volume as distinct root causes, never as a raw count** — and never
+  infer precision from volume, which is the only reason this was caught at all.
 - **C2. Schema v1.1** — lift the closed `Hunter` enum (unblocks arbitrary spec keys), make `engine` a
   first-class field; lab migration + validator both sides.
 - **C3. Resume + run metadata** — convoy-style debounced tmp+rename metadata, resumable interrupted
