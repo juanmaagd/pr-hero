@@ -32,6 +32,7 @@ import {
   renderAgentBody,
   type SuspicionPrior,
 } from "./prompt-set";
+import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
 import {
   type AgentSpec,
   defaultReviewSpec,
@@ -639,11 +640,25 @@ async function finish(
     ...loser,
     refuter_verdict: "not_submitted" as const,
   }));
+  // Derived root causes (ROADMAP C1). The engine counts distinct root causes
+  // itself so blocking volume is never read as a raw finding count: ONE
+  // systemic defect reported at N call sites is one true positive fanned out,
+  // and reading it as N precision failures is exactly how a correct review
+  // ends up scored as a precision collapse. Purely additive — the findings
+  // above keep their ids, order, tiers and verdicts; only `root_cause_id` is
+  // stamped on, and only when the clusterer actually placed the finding.
+  const rootCauses = clusterByRootCause(findings);
+  const rootCauseId = rootCauseIdByFinding(rootCauses);
+  const clustered = findings.map((finding) => {
+    const id = rootCauseId.get(finding.id);
+    return id === undefined ? finding : { ...finding, root_cause_id: id };
+  });
   const skillOutput: SkillOutput = {
-    findings,
+    findings: clustered,
     debug: {
       refuted,
       ...(deduped.length > 0 ? { deduped } : {}),
+      root_causes: rootCauses,
     },
     parity_hunter_fired: state.parityFired,
     run_status: state.partial ? "partial" : "complete",

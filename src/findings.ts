@@ -5,6 +5,8 @@
 // validates the assembled output and merges in the driver-owned run envelope
 // (schema_version, telemetry) before anything is written to a run dir.
 
+import type { RootCauseSummary } from "./root-cause";
+
 export const SCHEMA_VERSION = "1.0.0";
 
 export type EvidenceClass = "deterministic" | "inferential" | "insufficient";
@@ -60,6 +62,12 @@ export interface Finding {
   hops_used: number;
   hop_trail: HopTrailStep[];
   dedupe_key: string;
+  // Which derived root-cause cluster this finding belongs to (RC001, …).
+  // ADDITIVE and OPTIONAL: both validators are pure allowlists that reject
+  // only bad values of known keys, never unknown keys, so a document carrying
+  // this field still validates against the unchanged 1.0.0 schema on the lab
+  // side and a document without it still validates here. No version bump.
+  root_cause_id?: string;
 }
 
 // Refuted findings are excluded from `findings[]` (scorer contract unchanged)
@@ -119,13 +127,23 @@ export interface FindingsDocument {
   run_status: RunStatus;
   telemetry: Telemetry;
   findings: Finding[];
-  debug: { refuted: DebugRefutedFinding[]; deduped?: DebugDedupedFinding[] };
+  debug: {
+    refuted: DebugRefutedFinding[];
+    deduped?: DebugDedupedFinding[];
+    // The whole derived partition, kept next to the findings it describes.
+    // Also additive/optional: a run that never computed it validates the same.
+    root_causes?: RootCauseSummary;
+  };
 }
 
 // Draft the engine assembles before the driver merges in the run envelope.
 export interface SkillOutput {
   findings: Finding[];
-  debug: { refuted: DebugRefutedFinding[]; deduped?: DebugDedupedFinding[] };
+  debug: {
+    refuted: DebugRefutedFinding[];
+    deduped?: DebugDedupedFinding[];
+    root_causes?: RootCauseSummary;
+  };
   parity_hunter_fired: boolean;
   run_status: RunStatus;
 }

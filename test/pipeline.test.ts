@@ -746,6 +746,73 @@ describe("refuter", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Derived root-cause clustering (ROADMAP C1) — measurement, never mutation
+// ---------------------------------------------------------------------------
+
+describe("root-cause clustering", () => {
+  test("a fan-out shares one root_cause_id and leaves findings untouched", async () => {
+    // Three call sites of ONE systemic defect: distinct dedupe keys (so
+    // nothing collapses in Step 5) all citing the same producer location
+    // first, with different prose after the location token. Plus an unrelated
+    // fourth finding to prove the partition is not "everything is one".
+    const producer = "src/duration.ts:19-20";
+    const site = (id: string, symbol: string, prose: string) =>
+      draft({
+        id,
+        symbol,
+        path: "src/app.ts",
+        dedupe_key: `src/app.ts:${symbol}:1`,
+        proof_refs: [`${producer} (${prose})`, `src/app.ts:1 (${symbol})`],
+      });
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            site("REL-1", "playHead", "stores raw seconds"),
+            site("REL-2", "seekBar", "never divides by 1000"),
+            site("REL-3", "exporter", "unit contract broken at the source"),
+            draft({
+              id: "REL-4",
+              symbol: "unrelated",
+              dedupe_key: "src/app.ts:unrelated:1",
+              proof_refs: ["src/other.ts:7 (independent defect)"],
+            }),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    const findings = result.skillOutput.findings;
+
+    // The findings array is otherwise UNCHANGED: same count, same canonical
+    // ids in the same order, same tiers. Clustering never merges or reorders.
+    expect(findings).toHaveLength(4);
+    expect(findings.map((f) => f.id)).toEqual(["F001", "F002", "F003", "F004"]);
+    expect(findings.map((f) => f.tier)).toEqual([
+      "advisory",
+      "advisory",
+      "advisory",
+      "advisory",
+    ]);
+
+    const clusterIds = findings.map((f) => f.root_cause_id);
+    expect(clusterIds.slice(0, 3)).toEqual(["RC001", "RC001", "RC001"]);
+    expect(clusterIds[3]).toBe("RC002");
+
+    const rootCauses = result.skillOutput.debug.root_causes;
+    expect(rootCauses?.distinct_root_causes).toBe(2);
+    expect(rootCauses?.clusters).toEqual([
+      { id: "RC001", anchor: producer, finding_ids: ["F001", "F002", "F003"] },
+      {
+        id: "RC002",
+        anchor: "src/other.ts:7",
+        finding_ids: ["F004"],
+      },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Step 8 — output validity, provenance, telemetry
 // ---------------------------------------------------------------------------
 

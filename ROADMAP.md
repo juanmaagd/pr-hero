@@ -247,6 +247,50 @@ Convoy-inspired ops the engine still lacks, in value order:
   engine found a systemic defect and correctly named every site, and the benchmark counts that as ten precision
   failures. Until C1 lands, **report blocking volume as distinct root causes, never as a raw count** — and never
   infer precision from volume, which is the only reason this was caught at all.
+
+  **C1 split in two on 2026-08-04, and the free half LANDED.** The entry above assumes the seed must be emitted
+  by the hunter, which means a new prompt file → a new immutable set → a new paid arm. A7 proved output
+  obligations move hunter behaviour hard, so that version perturbs the just-measured clean baseline in order to
+  fix a problem that is purely one of MEASUREMENT. It did not need to.
+
+  - **C1a — derived clustering. DONE, $0, no prompt change, no recall risk.** The signal already exists in
+    current artifacts: findings in a fan-out all cite the same root-cause location as their FIRST proof_ref,
+    because the hunter output contract already orders them `["producer path:line", "consumer path:line"]`.
+    `src/root-cause.ts` partitions findings on that anchor, `pipeline.ts` stamps `root_cause_id` and puts the
+    summary on `debug.root_causes`, and `scripts/cluster-report.ts` replays it over artifacts already on disk.
+    Purely additive: both validators are allowlists, so no schema bump and C1 never depended on C2.
+    **Non-destructive by construction** — the lab's scorer reads `findings[]` and ignores `debug.deduped[]`,
+    so a collapse here would surface as a recall regression on a run whose recall did not change.
+
+    Validated for $0 against A7's hand triage (the gate the standing rules ask for — plant it, observe it
+    cheap, never discover on a paid run):
+
+    | iter | blocking | root causes by hand | by the engine |
+    |---|---|---|---|
+    | 571 | 13 | 4 | 6 |
+    | 572 | 11 | 5 | 7 |
+    | 573 | 9 | 4 | **4** |
+
+    Raw count 33 → hand 13 → engine 17: **80% of the distance from the dishonest number to the correct one**,
+    mechanically. **Over-clustering: zero** (verified by hand — all 8 members of 571's cluster are the same
+    ms/seconds defect at different hosts). The residual is real and it is the whole argument for C1b: one root
+    cause has several citable sites (`ProjectSongDuration.ts:19-20` stores the ms, `ProjectSong.ts:454` emits
+    the raw `.value`, `WaveformWithTime.tsx` is the shared consumer), and findings split by which one they
+    cited first. No cheap normalization fixes that — they are different files.
+
+    **Direction-of-error rule, now load-bearing:** the clusterer must err toward UNDER-clustering.
+    Over-clustering deflates the apparent FP count, which is the direction that flatters the engine.
+    Concretely paid for during review: a ref written `path.tsx: 12-14 (prose)` — a space after the colon —
+    degenerates to a bare `path.tsx:` once the prose is cut, i.e. a FILE-level anchor, and in run 571 that was
+    already welding F013 (blocking, a fetch-once lifecycle bug) to F014 (advisory, a memo bug) as one root
+    cause. An anchor with no location component now yields no anchor at all. This is the SAME lesson
+    `dedupe.ts:66-69` already carries from judgment day — pass 2 refuses to collapse symbol-less findings
+    because keying on path alone over-merges distinct defects file-wide. New code did not inherit it; tests
+    pin it now.
+
+  - **C1b — hunter-emitted seed. DEFERRED, and now decided on evidence rather than faith.** What it buys is
+    exactly the residual C1a leaves: 4 root causes across three runs. That is the number to weigh against a new
+    prompt set, a new arm, and the risk of perturbing recall — not a guess.
 - **C2. Schema v1.1** — lift the closed `Hunter` enum (unblocks arbitrary spec keys), make `engine` a
   first-class field; lab migration + validator both sides.
 - **C3. Resume + run metadata** — convoy-style debounced tmp+rename metadata, resumable interrupted
