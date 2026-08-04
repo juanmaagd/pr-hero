@@ -121,9 +121,21 @@ The two known capability gaps, in attack order:
      has no mean. Converting them requires replicates. Recording them as unknown is more truthful than
      promoting one sample to a verdict.
 
-  Measured under this rule so far (lifecycle class, its own trees): **G5 0.50** (3 of 6), **G4 0.00**
-  (0 of 6, after A6 added three more), **G2** — 0 of 4 before A5, 1 of 3 under A5; pool it only when the arms
-  are stated, as G5's 3-of-6 is.
+  **The scoreboard, measured clean (2026-08-04, set `slice3b-lifecycle-v6-clean` `8671784895536467`).** Every
+  number before this line was produced by a prompt whose worked examples named the goldens' own anchors — see
+  the contamination correction in `../deep-review/bench/METRICS.md`. These are the first scores that are not:
+
+  | golden | clean | before | note |
+  |---|---|---|---|
+  | **G4** | **1.00** (3 of 3) | 0.33 under A7, 0.00 across six runs before | single-variable v5→v6; removing the leak **tripled** it |
+  | **G3** | **0.33** (1 of 3) | 3 of 3 under A5 | its severity calibration WAS the leak; ~0.33 is the honest rate |
+  | **G2** | **0.00** (0 of 3) | 1 of 3 under A5 | does not reproduce without the leak; A5's headline stays retired |
+  | **G1** | **0.00** (0 of 3) | 0 of 3 | unchanged |
+
+  Only G4's row is a clean single-variable comparison. The G2-tree rows span three changes (A6, A7, the
+  decontamination) and show direction, not cause — isolating them needs an arm that does not exist, v3 with
+  clean examples. **Stated plainly: the benchmark was reading higher than the engine deserved on at least two
+  goldens, and the only number that went UP when the prompt was cleaned is the one A7 earned.**
 - **A4. Held-out benchmark** — only after the smoke-level bar is met: full run over the lab's
   `dataset/test.jsonl` (first and only read), measure against the bar, F2/SNR reported alongside. This is
   one of the few places a full smoke-scale run is mandatory.
