@@ -29,6 +29,28 @@ describe("parseArgs", () => {
     });
   });
 
+  // Both exist so a tree you cannot add a file to is still reviewable: an
+  // in-tree-only gotchas file dirties the checkout (which the clean-tree gate
+  // then rightly refuses), and an in-tree-only config silently disables the
+  // conditional parity hunter, which looks exactly like parity finding nothing.
+  test("gotchas and config can be supplied from outside the repo", () => {
+    const { options } = parseArgs([
+      "review",
+      "--gotchas",
+      "/elsewhere/gotchas.md",
+      "--config",
+      "/elsewhere/config.json",
+    ]);
+    expect(options.gotchas).toBe("/elsewhere/gotchas.md");
+    expect(options.config).toBe("/elsewhere/config.json");
+  });
+
+  test("neither is set by default, so the in-repo paths win", () => {
+    const { options } = parseArgs(["review"]);
+    expect(options.gotchas).toBeUndefined();
+    expect(options.config).toBeUndefined();
+  });
+
   test("reads every option", () => {
     const { options } = parseArgs([
       "review",

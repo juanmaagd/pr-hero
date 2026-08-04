@@ -191,8 +191,16 @@ async function review(options: CliOptions): Promise<number> {
     );
   }
 
-  // 6 — optional repo config.
-  const configPath = path.join(repoRoot, ".prhero", "config.json");
+  // 6 — optional repo config. An explicit --config is an ERROR when missing:
+  // silently falling back to "no parity triggers" would disable a hunter the
+  // caller just asked for, and a hunter that never fires looks exactly like a
+  // hunter that found nothing.
+  const configPath = options.config
+    ? path.resolve(options.config)
+    : path.join(repoRoot, ".prhero", "config.json");
+  if (options.config && !existsSync(configPath)) {
+    throw new CliError(`config file not found: ${configPath}`);
+  }
   const config: LocalConfig = existsSync(configPath)
     ? parseLocalConfig(await Bun.file(configPath).text())
     : EMPTY_LOCAL_CONFIG;
@@ -200,7 +208,15 @@ async function review(options: CliOptions): Promise<number> {
   // 7 — gotchas. Checked HERE rather than left to the pipeline's fail-loud
   // abort: the pipeline is right to refuse, but all it can return is a
   // zero-cost partial run, which reads like a clean review to a human.
-  const gotchasPath = path.join(repoRoot, ".prhero", "gotchas.md");
+  //
+  // `--gotchas` exists because requiring the file INSIDE the reviewed tree
+  // makes two legitimate cases impossible: reviewing a historical commit (the
+  // file would be an untracked addition, and the clean-tree gate rightly
+  // refuses), and reviewing a repo you do not control. The gotchas describe
+  // the repo, not the commit, so they do not belong to the checkout.
+  const gotchasPath = options.gotchas
+    ? path.resolve(options.gotchas)
+    : path.join(repoRoot, ".prhero", "gotchas.md");
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
   if (gotchas.trim().length === 0) {

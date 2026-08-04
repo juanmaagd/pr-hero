@@ -32,6 +32,13 @@ export interface CliOptions {
   head: string;
   agents?: string;
   out?: string;
+  // Gotchas describe the REPO, not the commit under review, so they must be
+  // supplyable from outside the reviewed tree — see the note in cli.ts. The
+  // same is true of the config: parity triggers and priors are properties of
+  // the project, and requiring them in-tree silently disables the conditional
+  // parity hunter on any tree you cannot add a file to.
+  gotchas?: string;
+  config?: string;
   model?: string;
   hopBudget: number;
   dryRun: boolean;
@@ -56,6 +63,10 @@ Options:
                       PRHERO_AGENTS_DIR)
   --out <dir>         Run directory; must live OUTSIDE the reviewed repo
                       (default: <repo-parent>/<repo>-prhero-runs/<sha>-<n>)
+  --gotchas <file>    Repo gotchas file (default: <repo>/.prhero/gotchas.md);
+                      supply it from outside to review a tree you cannot dirty
+  --config <file>     Local config (default: <repo>/.prhero/config.json) with
+                      parity_trigger_paths and suspicion_priors
   --model <model>     Override every agent's model
   --hop-budget <n>    Hops per hunter (default: ${DEFAULT_HOP_BUDGET}); the biggest
                       per-hunter cost lever there is
@@ -73,6 +84,8 @@ const VALUE_FLAGS = new Set([
   "--head",
   "--agents",
   "--out",
+  "--gotchas",
+  "--config",
   "--model",
   "--hop-budget",
 ]);
@@ -152,6 +165,12 @@ function applyValueFlag(
       return;
     case "--out":
       options.out = value;
+      return;
+    case "--gotchas":
+      options.gotchas = value;
+      return;
+    case "--config":
+      options.config = value;
       return;
     case "--model":
       options.model = value;
