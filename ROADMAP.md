@@ -219,6 +219,47 @@ The two known capability gaps, in attack order:
 
 Gate to Phase B: bar met on the held-out set.
 
+## Phase B0 — Local mode (usable NOW, deliberately not gated on the bar)
+
+Added 2026-08-04, and it corrects a conflation this document was making. Phase B was gated on the
+benchmark bar because it *cancels Greptile* — a fail-closed merge gate had better not have holes. But
+"Juanma can run it on a PR and read what it found" needs none of that, and the roadmap was making him
+wait on a research campaign to touch his own tool.
+
+The bar has two halves and they are in very different places: **precision is already met** (2/15 false
+positives, 13%, against a ≤20% target) while **recall sits at 0.33** over the four goldens measured
+clean. A tool with good precision and mediocre recall is useless as a GATE and genuinely useful as an
+ASSISTANT — what it tells you is mostly true, it just does not tell you everything. That is exactly the
+profile B0 ships.
+
+`pr-hero review [--repo --base --head --agents --out --model --hop-budget --dry-run --yes]`
+(`src/cli.ts`, pure decisions in `src/preflight.ts`, renderer in `src/report.ts`). It resolves refs,
+generates the diff, preflights, runs the existing pipeline unchanged, and writes `findings.json` plus a
+markdown `report.md`. Explicitly OUT of scope: posting to GitHub, the required status check, anything
+fail-closed. Those stay in Phase B behind the bar, where they belong.
+
+Three things it fixes that were latent, each found while building it:
+
+1. **`defaultReviewSpec()` omits the lifecycle hunter.** Running the 5-file clean set with the 4-agent
+   default silently drops the hunter the entire 2026-08 campaign is about, and nothing downstream
+   notices. Local mode ships an explicit 5-agent spec and a **bidirectional** agents-dir preflight —
+   every spec file must exist, and every agent file present must be referenced.
+2. **Nothing in either repo measured a diff's size.** Two recorded cost overruns (`~$21`→actual,
+   `~$34`→`$48.30`) share one root: estimating from the previous arm instead of from the change.
+   `estimateCost` now reads `git diff --numstat` and prints a BAND before anything spawns, with its two
+   calibration points named in the output. It is a guide, not a quote — the same tree has billed 34%
+   apart across runs.
+3. **A dirty working tree used to be reviewable.** Every step runs with the repo as cwd, so uncommitted
+   changes get reviewed but never reported. Local mode refuses to run on a dirty tree or a head that
+   does not match `HEAD`.
+
+`--dry-run` is the $0 gate and does everything except spawn: resolve, preflight, diff, plan, cost band.
+Use it first, always. The plan also surfaces that steps run under `--permission-mode bypassPermissions`
+bounded only by each agent's read-only tool allow-list — the user should see that before every run, not
+find it in the source.
+
+Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it and does not pretend to.
+
 ## Phase B — Production wiring (cancels Greptile)
 
 From the original design, unchanged: post findings as inline PR threads via `gh` (orchestrator-only I/O);
