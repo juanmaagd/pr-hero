@@ -18,6 +18,7 @@ import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import {
   buildComparisonJson,
   decideWorktree,
+  findMarkedCommentId,
   type WorktreeDecision,
   worktreeDirty,
 } from "./pr-preflight";
@@ -46,6 +47,7 @@ async function git(
 async function gh(
   operatorRoot: string,
   args: string[],
+  stdin?: string,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   // A missing gh must name itself: Bun.spawn's error for a binary that is
   // not there reads like a crash, not like "install the GitHub CLI".
@@ -58,8 +60,14 @@ async function gh(
   // cwd = operator root: gh resolves owner/repo from the checkout's remote,
   // so the PR consulted always belongs to the repo passed as --repo — same
   // reasoning as scripts/compare-pr.ts.
+  //
+  // stdin carries a field value when the caller passes `-F key=@-` (gh reads
+  // `@-` from stdin; verified against `gh api --help`, 2026-08-10): a report
+  // body on stdin dodges ARG_MAX and needs no shell-quoting, because there
+  // is no shell anywhere in this call.
   const proc = Bun.spawn(["gh", ...args], {
     cwd: operatorRoot,
+    ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -276,6 +284,72 @@ export async function writeComparison(input: {
   };
 }
 
+// Publishes the review as ONE marked PR comment: update the existing marked
+// comment when there is one, create it otherwise. Idempotency lives in the
+// marker contract (PR_COMMENT_MARKER as the body's first line +
+// findMarkedCommentId) — a re-run refreshes the same comment instead of
+// stacking a new one per run. Throws CliError on any gh failure and is NOT
+// caught here: the caller asked for a public side effect, so the caller
+// decides what a failed one means.
+export async function postPrComment(
+  operatorRoot: string,
+  pr: number,
+  body: string,
+): Promise<{ action: "created" | "updated"; commentId: number }> {
+  const comments = await fetchPrComments(operatorRoot, pr);
+  const existingId = findMarkedCommentId(comments);
+  const action = existingId === null ? "created" : "updated";
+  // The body travels on stdin via `-F body=@-` (see gh()); PATCH updates the
+  // found comment in place, POST creates the first one.
+  const result =
+    existingId === null
+      ? await gh(
+          operatorRoot,
+          [
+            "api",
+            "--method",
+            "POST",
+            `repos/{owner}/{repo}/issues/${pr}/comments`,
+            "-F",
+            "body=@-",
+          ],
+          body,
+        )
+      : await gh(
+          operatorRoot,
+          [
+            "api",
+            "--method",
+            "PATCH",
+            `repos/{owner}/{repo}/issues/comments/${existingId}`,
+            "-F",
+            "body=@-",
+          ],
+          body,
+        );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api (${action} PR comment) failed: ${result.stderr.trim()}`,
+    );
+  }
+  // gh api prints the API's response object; its .id names the comment this
+  // run touched, which the summary reports for later verification by hand.
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    parsed = null;
+  }
+  const commentId = (parsed as { id?: unknown } | null)?.id;
+  if (typeof commentId !== "number") {
+    throw new CliError(
+      `gh api ${action} a PR comment but returned no comment id: ` +
+        result.stdout.slice(0, 120),
+    );
+  }
+  return { action, commentId };
+}
+
 // Mirror of scripts/compare-pr.ts's fetch, kept shape-identical on purpose.
 // --paginate matters: a busy PR accumulates enough comments to push
 // Greptile's off page 1, and a missing comment looks identical to "Greptile
@@ -285,13 +359,13 @@ export async function writeComparison(input: {
 async function fetchPrComments(
   operatorRoot: string,
   pr: number,
-): Promise<{ user: string; body: string }[]> {
+): Promise<{ id: number; user: string; body: string }[]> {
   const result = await gh(operatorRoot, [
     "api",
     "--paginate",
     `repos/{owner}/{repo}/issues/${pr}/comments`,
     "--jq",
-    ".[] | {user: .user.login, body: .body}",
+    ".[] | {id: .id, user: .user.login, body: .body}",
   ]);
   if (!result.ok) {
     throw new CliError(
@@ -299,11 +373,13 @@ async function fetchPrComments(
     );
   }
   // `--jq` streams one JSON object per line.
-  const comments: { user: string; body: string }[] = [];
+  const comments: { id: number; user: string; body: string }[] = [];
   for (const line of result.stdout.split("\n")) {
     if (line.trim() === "") continue;
     try {
-      comments.push(JSON.parse(line) as { user: string; body: string });
+      comments.push(
+        JSON.parse(line) as { id: number; user: string; body: string },
+      );
     } catch {
       throw new CliError(`unparseable line from gh api: ${line.slice(0, 120)}`);
     }

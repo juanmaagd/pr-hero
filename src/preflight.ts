@@ -62,6 +62,11 @@ export interface CliOptions {
   // PR record itself, so parseArgs rejects --base/--head/--two-dot beside it
   // — a hand-picked endpoint would silently contradict the PR's own range.
   pr?: number;
+  // Publish the review as ONE marked PR comment (ROADMAP B2) — created the
+  // first time, updated in place after, never stacked. Explicit and never a
+  // default: posting is a public side effect. Requires --pr (parseArgs
+  // enforces it): a comment needs a PR to land on.
+  post: boolean;
   // The escape hatch for change 3's default. See resolveDiffRange's WHY: the
   // three-dot (merge-base) range is right almost always, and this flag exists
   // for the rare caller who genuinely wants the literal two-point diff.
@@ -86,6 +91,10 @@ Options:
                       codegraph index, and the result is compared against
                       Greptile's comment on the PR. Excludes --base, --head
                       and --two-dot
+  --post              With --pr only: publish the review to the PR as one
+                      marked comment — created the first time, updated in
+                      place on re-runs, never stacked. Explicit, never a
+                      default
   --base <ref>        Base branch or sha. Default, in order: the config's
                       default_base, then the remote head
                       (refs/remotes/origin/HEAD), then ${DEFAULT_BASE_REF}
@@ -139,6 +148,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     hopBudget: DEFAULT_HOP_BUDGET,
     dryRun: false,
     yes: false,
+    post: false,
     twoDot: false,
   };
   let command: "review" | "init" | "help" | undefined;
@@ -169,6 +179,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--yes" || arg === "-y") {
       options.yes = true;
+      continue;
+    }
+    if (arg === "--post") {
+      options.post = true;
       continue;
     }
     if (arg === "--two-dot") {
@@ -216,6 +230,13 @@ export function parseArgs(argv: string[]): ParsedCli {
           "combined with --two-dot",
       );
     }
+  }
+  // Also after the loop, for the same flag-order reason: posting publishes a
+  // PR comment, and only --pr names a PR to publish to.
+  if (options.post && options.pr === undefined) {
+    throw new CliUsageError(
+      "--post publishes the review as a PR comment, so it requires --pr",
+    );
   }
   return { command, options };
 }

@@ -15,6 +15,8 @@ import type { GreptileFinding } from "../src/greptile";
 import {
   buildComparisonJson,
   decideWorktree,
+  findMarkedCommentId,
+  PR_COMMENT_MARKER,
   prRunDirCandidate,
   prWorktreePath,
   resolvePrTarget,
@@ -127,6 +129,84 @@ describe("parseArgs --pr", () => {
     expect(options.hopBudget).toBe(4);
     expect(options.dryRun).toBe(true);
     expect(options.yes).toBe(true);
+  });
+});
+
+describe("parseArgs --post", () => {
+  test("defaults to false", () => {
+    expect(parseArgs(["review"]).options.post).toBe(false);
+    expect(parseArgs(["review", "--pr", "5"]).options.post).toBe(false);
+  });
+
+  test("parses beside --pr, in either flag order", () => {
+    expect(parseArgs(["review", "--pr", "5", "--post"]).options.post).toBe(
+      true,
+    );
+    expect(parseArgs(["review", "--post", "--pr", "5"]).options.post).toBe(
+      true,
+    );
+  });
+
+  // Posting publishes a PR comment, so without --pr there is no PR to
+  // publish to — and the error must name both flags.
+  test("without --pr it throws, naming both flags", () => {
+    for (const argv of [
+      ["review", "--post"],
+      ["review", "--post", "--repo", "/tmp/x"],
+    ]) {
+      try {
+        parseArgs(argv);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("--post");
+        expect((error as Error).message).toContain("--pr");
+      }
+    }
+  });
+});
+
+describe("findMarkedCommentId", () => {
+  const marked = (id: number) => ({
+    id,
+    body: `${PR_COMMENT_MARKER}\n\n## pr-hero review — 1 blocking`,
+  });
+
+  test("no comments is null", () => {
+    expect(findMarkedCommentId([])).toBeNull();
+  });
+
+  test("one marked comment is found by id", () => {
+    expect(findMarkedCommentId([marked(101)])).toBe(101);
+  });
+
+  test("only marked comments match in a mix", () => {
+    expect(
+      findMarkedCommentId([
+        { id: 1, body: "LGTM" },
+        marked(2),
+        { id: 3, body: "one more pass please" },
+      ]),
+    ).toBe(2);
+  });
+
+  // Idempotency is find-and-update, never stack: with legacy duplicates the
+  // NEWEST (last in API order) gets the update and history stays untouched.
+  test("two marked comments yield the LAST id", () => {
+    expect(
+      findMarkedCommentId([marked(10), { id: 20, body: "noise" }, marked(30)]),
+    ).toBe(30);
+  });
+
+  // Only a body that STARTS with the marker is ours: a human quoting the
+  // report (or indenting it) must never have their comment overwritten.
+  test("a marker quoted mid-body is not a match", () => {
+    expect(
+      findMarkedCommentId([
+        { id: 7, body: `replying to the bot:\n${PR_COMMENT_MARKER}\nquoted` },
+        { id: 8, body: ` ${PR_COMMENT_MARKER} leading space` },
+      ]),
+    ).toBeNull();
   });
 });
 

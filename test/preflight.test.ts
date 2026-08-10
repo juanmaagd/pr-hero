@@ -36,6 +36,7 @@ describe("parseArgs", () => {
       hopBudget: DEFAULT_HOP_BUDGET,
       dryRun: false,
       yes: false,
+      post: false,
       twoDot: false,
     });
     expect(options.base).toBeUndefined();

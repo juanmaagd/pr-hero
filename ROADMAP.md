@@ -353,6 +353,21 @@ What is still manual, in the order it should be closed:
    already populated, the whole command inside that checkout is literally `pr-hero review --pr <n>`.
 2. **Post the report to the PR** via `gh` — orchestrator-only I/O; the spawned steps are sandboxed away
    from `gh` by `--strict-mcp-config` and `--setting-sources ""`, and that stays true.
+
+   **BUILT 2026-08-10** (`--post`, explicit and never default; needs `--pr` by parseArgs rule).
+   Idempotent by construction: the comment leads with `PR_COMMENT_MARKER` (`<!-- pr-hero-report -->`),
+   and posting finds the NEWEST marked comment and PATCHes it in place — one comment per PR, re-runs
+   refresh instead of stack. The body travels on stdin (`-F body=@-`), so no ARG_MAX and no shell. The
+   public comment carries findings, the reviewed range, `run_status` and the engine identity — never
+   cost or tokens, and always the not-a-merge-gate disclaimer, because at the measured recall this
+   engine has no business implying it gates anything. A `sessionFailed` run never posts (a clean-bill
+   comment from a review that never ran would be a public lie); a posting failure exits 1 because it
+   was explicitly asked for. Verified boundary, stated plainly: the READ path (comments fetch now
+   carrying ids) is live-verified against PR 1682 — where a `<!-- linear-linkback -->` bot comment
+   confirmed in the wild why marker matching is exact-prefix; the WRITE path (POST create, PATCH
+   update, stdin body, response-id parse) has never executed and stays that way until an authorized
+   live post. The live protocol is TWO posts: the first proves create, an immediate second must report
+   `updated` with the SAME comment id — one post alone leaves the idempotency untested.
 3. **Trigger** — `branch-pr` hook or a local watcher (launchd/cron) so a review happens rather than being
    remembered. Note this spends money per PR without asking, so it needs an explicit opt-in.
 4. **Accumulate the head-to-head** into a ledger across PRs, so the three buckets become a rate rather

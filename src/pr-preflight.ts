@@ -267,6 +267,31 @@ export function decideWorktree(input: {
   };
 }
 
+// The tag that makes posting idempotent (ROADMAP B2): the FIRST line of
+// every comment pr-hero publishes. An HTML comment renders invisibly on
+// GitHub, so readers see the report and the machine sees the tag.
+// renderPrComment (report.ts) writes it; findMarkedCommentId reads it.
+export const PR_COMMENT_MARKER = "<!-- pr-hero-report -->";
+
+// Finds the comment a --post run should update. A comment matches only when
+// its body STARTS WITH the marker: a marker quoted mid-body (someone
+// replying with the report pasted in) must never be treated as ours. The
+// LAST match wins — the API returns oldest→newest, so last is newest — and
+// idempotency is find-and-update, never stack: if legacy duplicates exist we
+// update the newest and leave history alone. None → null (the caller
+// creates).
+export function findMarkedCommentId(
+  comments: { id: number; body: string }[],
+): number | null {
+  let found: number | null = null;
+  for (const comment of comments) {
+    if (typeof comment?.body !== "string") continue;
+    if (!comment.body.startsWith(PR_COMMENT_MARKER)) continue;
+    found = comment.id;
+  }
+  return found;
+}
+
 // ---------------------------------------------------------------------------
 // comparison.json — the machine-readable half of the head-to-head artifact.
 

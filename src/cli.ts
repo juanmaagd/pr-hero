@@ -23,6 +23,7 @@ import {
   fetchPrRefs,
   ghPrView,
   initCodegraphIndex,
+  postPrComment,
   writeComparison,
 } from "./pr";
 import {
@@ -62,7 +63,12 @@ import {
   SUGGESTED_AGENTS_DIR,
 } from "./preflight";
 import { type ParsedAgent, parseAgentFile } from "./prompt-set";
-import { type DiffStat, estimateCost, renderReport } from "./report";
+import {
+  type DiffStat,
+  estimateCost,
+  renderPrComment,
+  renderReport,
+} from "./report";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
 
@@ -755,7 +761,31 @@ async function reviewPr(
     }
   }
 
-  // 14 — the summary.
+  // 14 — the posting, only when asked. AFTER the comparison on purpose: a
+  // posting failure must never cost the comparison artifact. And unlike the
+  // comparison, posting does NOT degrade to a warning — it was explicitly
+  // requested, so a failure propagates as CliError and exits 1 (the review
+  // artifacts are already on disk; a lying exit 0 would hide a failed ask).
+  let posted: { action: "created" | "updated"; commentId: number } | null =
+    null;
+  if (options.post) {
+    if (result.sessionFailed) {
+      // Same honesty rule as the comparison guard above: a clean-bill
+      // comment from a review that never ran would be a public lie.
+      log(
+        "post skipped: every hunter failed, so there is no review to publish",
+      );
+    } else {
+      posted = await postPrComment(
+        operatorRoot,
+        prNumber,
+        renderPrComment(doc),
+      );
+      log(`posted: ${posted.action} comment ${posted.commentId}`);
+    }
+  }
+
+  // 15 — the summary.
   const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
   const advisory = doc.findings.length - blocking;
   const rootCauses = doc.debug.root_causes?.distinct_root_causes ?? 0;
@@ -779,6 +809,9 @@ async function reviewPr(
         (comparison.greptileFound ? "" : " — no Greptile comment on this PR") +
         ` (${comparison.markdownPath})`,
     );
+  }
+  if (posted) {
+    log(`posted:     ${posted.action} PR comment ${posted.commentId}`);
   }
   // The worktree is kept and reused by decision; cleanup is manual, so hand
   // over the exact command (worktree remove, never rm -rf — a live
@@ -1266,6 +1299,13 @@ function printPrPlan(ctx: PrPlanContext): void {
   }
   row("hop budget", String(ctx.options.hopBudget));
   row("run dir", ctx.runDir);
+  if (ctx.options.post) {
+    row(
+      "post",
+      "a marked PR comment will be created, or updated in place if one " +
+        "exists (idempotent — one comment per PR, found by its marker)",
+    );
+  }
   row(
     "parity",
     ctx.config.parity_trigger_paths.length === 0

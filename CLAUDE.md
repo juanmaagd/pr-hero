@@ -40,7 +40,7 @@ been burned by a manual match that inflated a score by 50%.
 ## Commands
 
 ```bash
-bun test               # 289 tests, all offline (fake spawn/runner)
+bun test               # 305 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
 bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
 bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
