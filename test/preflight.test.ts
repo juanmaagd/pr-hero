@@ -4,29 +4,47 @@ import {
   assertBasenameOnly,
   assertOutsideRepo,
   CliUsageError,
+  DEFAULT_BASE_REF,
   DEFAULT_HOP_BUDGET,
   defaultRunRoot,
+  emptyDiffMessage,
+  headContainedInBaseMessage,
+  initConfigTemplate,
   isFullCommitId,
   localReviewSpec,
   parseArgs,
   parseLocalConfig,
   parseNumstat,
+  parseRemoteHead,
+  resolveAgentsDirSetting,
+  resolveBaseRef,
   runDirCandidate,
 } from "../src/preflight";
 import { validateReviewSpec } from "../src/spec";
 
 describe("parseArgs", () => {
-  test("defaults are the documented ones", () => {
+  // `base` is deliberately ABSENT here: resolving the repo's real default
+  // branch needs git, parseArgs is pure, so an unset base is the honest
+  // answer and cli.ts finishes the job. A literal "main" baked in here is a
+  // wrong ref nothing downstream can tell apart from one the user chose.
+  test("defaults are the documented ones, and base is left unset", () => {
     const { command, options } = parseArgs(["review"]);
     expect(command).toBe("review");
     expect(options).toEqual({
       repo: ".",
-      base: "main",
       head: "HEAD",
       hopBudget: DEFAULT_HOP_BUDGET,
       dryRun: false,
       yes: false,
+      twoDot: false,
     });
+    expect(options.base).toBeUndefined();
+  });
+
+  test("init is a command, and unknown commands still fail", () => {
+    expect(parseArgs(["init"]).command).toBe("init");
+    expect(parseArgs(["init", "--repo", "/tmp/x"]).options.repo).toBe("/tmp/x");
+    expect(() => parseArgs(["initialise"])).toThrow(CliUsageError);
   });
 
   // Both exist so a tree you cannot add a file to is still reviewable: an
@@ -68,9 +86,11 @@ describe("parseArgs", () => {
       "opus",
       "--hop-budget",
       "4",
+      "--two-dot",
       "--dry-run",
       "--yes",
     ]);
+    expect(options.twoDot).toBe(true);
     expect(options.repo).toBe("/tmp/repo");
     expect(options.base).toBe("release");
     expect(options.head).toBe("feature");
@@ -115,6 +135,142 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["review", "--hop-budget", "many"])).toThrow(
       CliUsageError,
     );
+  });
+});
+
+describe("parseRemoteHead", () => {
+  test("strips the remote prefix", () => {
+    expect(parseRemoteHead("refs/remotes/origin/dev\n")).toBe("dev");
+    expect(parseRemoteHead("refs/remotes/origin/release/2026-08")).toBe(
+      "release/2026-08",
+    );
+  });
+
+  // A repo whose origin/HEAD was never set answers with nothing, and
+  // `symbolic-ref --quiet` exits 1. That is a normal local-only clone, not an
+  // error — so it must come back as "no remote head", never as a ref.
+  test("anything that is not that shape is no remote head", () => {
+    expect(parseRemoteHead("")).toBeUndefined();
+    expect(parseRemoteHead("refs/remotes/origin/")).toBeUndefined();
+    expect(parseRemoteHead("refs/heads/dev")).toBeUndefined();
+    expect(parseRemoteHead("refs/remotes/upstream/main")).toBeUndefined();
+  });
+});
+
+describe("resolveBaseRef", () => {
+  test("the flag wins over everything", () => {
+    expect(
+      resolveBaseRef({
+        flag: "release",
+        configDefaultBase: "dev",
+        remoteHead: "trunk",
+      }),
+    ).toEqual({ ref: "release", source: "flag" });
+  });
+
+  test("then the config, then the remote head", () => {
+    expect(
+      resolveBaseRef({ configDefaultBase: "dev", remoteHead: "trunk" }),
+    ).toEqual({ ref: "dev", source: "config" });
+    expect(resolveBaseRef({ remoteHead: "trunk" })).toEqual({
+      ref: "trunk",
+      source: "remote",
+    });
+  });
+
+  // "main" is the LAST resort, and it is reported as such: a hardcoded default
+  // branch silently reviews the wrong range on any repo that does not use it.
+  test("main is the last resort and says so", () => {
+    expect(resolveBaseRef({})).toEqual({
+      ref: DEFAULT_BASE_REF,
+      source: "fallback",
+    });
+  });
+
+  test("an empty string is not a choice", () => {
+    expect(resolveBaseRef({ flag: "", configDefaultBase: "dev" }).ref).toBe(
+      "dev",
+    );
+  });
+});
+
+describe("resolveAgentsDirSetting", () => {
+  test("the flag wins, resolved against cwd", () => {
+    expect(
+      resolveAgentsDirSetting({
+        flag: "agents",
+        configAgentsDir: "/from/config",
+        env: "/from/env",
+        cwd: "/work",
+      }),
+    ).toEqual({ dir: "/work/agents", source: "flag" });
+  });
+
+  // THE point of the key: the config names a prompt set in a sibling repo, so
+  // a relative path travels with the CONFIG FILE. Reading it against cwd would
+  // make one config mean different prompt sets depending on which
+  // subdirectory the developer happened to be standing in.
+  test("a relative config path resolves against the config file's dir", () => {
+    expect(
+      resolveAgentsDirSetting({
+        // Two levels up: the config lives in <repo>/.prhero/, so a sibling
+        // repo is `../../` from there, not `../`.
+        configAgentsDir: "../../deep-review/agents/clean",
+        configDir: "/Users/x/Desktop/musive/.prhero",
+        env: "/from/env",
+        cwd: "/somewhere/else",
+      }),
+    ).toEqual({
+      dir: "/Users/x/Desktop/deep-review/agents/clean",
+      source: "config",
+    });
+  });
+
+  test("an absolute config path is taken as is", () => {
+    expect(
+      resolveAgentsDirSetting({
+        configAgentsDir: "/abs/agents",
+        configDir: "/repo/.prhero",
+        cwd: "/work",
+      }).dir,
+    ).toBe("/abs/agents");
+  });
+
+  test("the env var is the last fallback before the hard error", () => {
+    expect(resolveAgentsDirSetting({ env: "/from/env", cwd: "/work" })).toEqual(
+      { dir: "/from/env", source: "env" },
+    );
+    expect(() => resolveAgentsDirSetting({ cwd: "/work" })).toThrow(
+      CliUsageError,
+    );
+  });
+
+  test("the error names all three ways to fix it", () => {
+    try {
+      resolveAgentsDirSetting({ cwd: "/work" });
+      throw new Error("should have thrown");
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain("--agents");
+      expect(message).toContain("agents_dir");
+      expect(message).toContain("PRHERO_AGENTS_DIR");
+    }
+  });
+});
+
+describe("range messages", () => {
+  // The already-merged branch is the case the merge-base default was written
+  // for, so its message must name that cause rather than leave a human
+  // wondering whether the tool broke.
+  test("the contained-in-base message names the cause", () => {
+    const message = headContainedInBaseMessage("dev", "feature");
+    expect(message).toContain("already contained in base");
+    expect(message).toContain("--two-dot");
+  });
+
+  test("the empty-diff message reflects which range was used", () => {
+    expect(emptyDiffMessage("dev", "HEAD", false)).toContain("dev...HEAD");
+    expect(emptyDiffMessage("dev", "HEAD", true)).toContain("dev..HEAD");
   });
 });
 
@@ -293,6 +449,35 @@ describe("parseLocalConfig", () => {
     expect(config.suspicion_priors).toHaveLength(2);
   });
 
+  test("agents_dir and default_base are read when present", () => {
+    const config = parseLocalConfig(
+      JSON.stringify({
+        agents_dir: "../deep-review/agents/clean",
+        default_base: "dev",
+      }),
+    );
+    expect(config.agents_dir).toBe("../deep-review/agents/clean");
+    expect(config.default_base).toBe("dev");
+  });
+
+  test("both new keys are optional", () => {
+    const config = parseLocalConfig("{}");
+    expect(config.agents_dir).toBeUndefined();
+    expect(config.default_base).toBeUndefined();
+  });
+
+  // Same discipline as the array keys: a wrong-typed or blank value read as
+  // "absent" is how a config silently stops configuring anything.
+  test("a malformed agents_dir or default_base throws", () => {
+    expect(() => parseLocalConfig('{"agents_dir": 3}')).toThrow(CliUsageError);
+    expect(() => parseLocalConfig('{"agents_dir": "  "}')).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseLocalConfig('{"default_base": ""}')).toThrow(
+      CliUsageError,
+    );
+  });
+
   // A typo'd key read as "no triggers" is exactly how the parity hunter stops
   // firing without anyone noticing.
   test("malformed shapes throw instead of degrading silently", () => {
@@ -310,5 +495,41 @@ describe("parseLocalConfig", () => {
     expect(() =>
       parseLocalConfig('{"suspicion_priors": [{"path":"a","weight":1}]}'),
     ).toThrow(CliUsageError);
+  });
+});
+
+describe("initConfigTemplate", () => {
+  // A scaffold its own parser rejects is a bug that only shows up on someone
+  // else's machine, on their first ever command.
+  test("what init writes round-trips through parseLocalConfig", () => {
+    const raw = initConfigTemplate({
+      agentsDir: "/Users/x/Desktop/deep-review/agents/clean",
+      defaultBase: "dev",
+    });
+    const config = parseLocalConfig(raw);
+    expect(config).toEqual({
+      agents_dir: "/Users/x/Desktop/deep-review/agents/clean",
+      default_base: "dev",
+      parity_trigger_paths: [],
+      suspicion_priors: [],
+    });
+    expect(raw.endsWith("\n")).toBe(true);
+  });
+
+  test("the written values are what a review would then resolve", () => {
+    const config = parseLocalConfig(
+      initConfigTemplate({ agentsDir: "/abs/agents", defaultBase: "trunk" }),
+    );
+    expect(
+      resolveAgentsDirSetting({
+        configAgentsDir: config.agents_dir,
+        configDir: "/repo/.prhero",
+        cwd: "/work",
+      }).dir,
+    ).toBe("/abs/agents");
+    expect(resolveBaseRef({ configDefaultBase: config.default_base })).toEqual({
+      ref: "trunk",
+      source: "config",
+    });
   });
 });
