@@ -40,7 +40,7 @@ been burned by a manual match that inflated a score by 50%.
 ## Commands
 
 ```bash
-bun test               # 305 tests, all offline (fake spawn/runner)
+bun test               # 323 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
 bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
 bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
@@ -71,6 +71,8 @@ with an explicit `bunx tsc` / `bunx biome check` over them.
   its pure decisions — PR record → range, the worktree reuse gate, comparison.json (B4's seed).
 - `src/greptile.ts` + `src/compare.ts` + `src/compare-report.ts` — the head-to-head: parse Greptile's
   PR comment, bucket findings against ours, render the comparison.
+- `src/ledger.ts` — B4 pure half (`pr-hero ledger`): comparison.json read-back, one-vote-per-PR
+  aggregation, as-is verdict tally, markdown ledger with the pending-triage list.
 - `fixtures/` + `scripts/` — the planted-bug eval and live micro-eval.
 
 ## Rules that outrank convenience

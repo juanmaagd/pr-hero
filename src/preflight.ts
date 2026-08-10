@@ -67,6 +67,10 @@ export interface CliOptions {
   // default: posting is a public side effect. Requires --pr (parseArgs
   // enforces it): a comment needs a PR to land on.
   post: boolean;
+  // ledger only (ROADMAP B4): the runs root to scan for comparison.json
+  // files. Unset means defaultRunRoot(repoRoot) — the shell resolves it,
+  // because the default needs the repo toplevel and parseArgs stays pure.
+  runs?: string;
   // The escape hatch for change 3's default. See resolveDiffRange's WHY: the
   // three-dot (merge-base) range is right almost always, and this flag exists
   // for the rare caller who genuinely wants the literal two-point diff.
@@ -74,7 +78,7 @@ export interface CliOptions {
 }
 
 export interface ParsedCli {
-  command: "review" | "init" | "help";
+  command: "review" | "init" | "ledger" | "help";
   options: CliOptions;
 }
 
@@ -83,6 +87,8 @@ export const HELP_TEXT = `pr-hero — multi-agent review of a real repo + branch
 Usage:
   pr-hero review [options]   Review a branch (zero flags inside a configured repo)
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
+  pr-hero ledger [options]   Accumulate every run's comparison.json into one
+                             markdown ledger (the three buckets as a rate)
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
@@ -103,7 +109,10 @@ Options:
                       agents_dir (relative paths resolve against the config
                       file), then PRHERO_AGENTS_DIR
   --out <dir>         Run directory; must live OUTSIDE the reviewed repo
-                      (default: <repo-parent>/<repo>-prhero-runs/<sha>-<n>)
+                      (default: <repo-parent>/<repo>-prhero-runs/<sha>-<n>).
+                      For ledger: the file to write instead of stdout
+  --runs <dir>        ledger only: the runs root to scan for comparison.json
+                      files (default: <repo-parent>/<repo>-prhero-runs)
   --gotchas <file>    Repo gotchas file (default: <repo>/.prhero/gotchas.md);
                       supply it from outside to review a tree you cannot dirty
   --config <file>     Local config (default: <repo>/.prhero/config.json) with
@@ -135,6 +144,7 @@ const VALUE_FLAGS = new Set([
   "--head",
   "--agents",
   "--out",
+  "--runs",
   "--gotchas",
   "--config",
   "--model",
@@ -151,7 +161,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     post: false,
     twoDot: false,
   };
-  let command: "review" | "init" | "help" | undefined;
+  let command: "review" | "init" | "ledger" | "help" | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
   // be read off options afterwards — and the --pr exclusion below must fire
   // on an explicit --head even when its value equals that default.
@@ -195,9 +205,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (command !== undefined) {
       throw new CliUsageError(`unexpected argument: ${arg}`);
     }
-    if (arg !== "review" && arg !== "init") {
+    if (arg !== "review" && arg !== "init" && arg !== "ledger") {
       throw new CliUsageError(
-        `unknown command: ${arg} (the commands are "review" and "init")`,
+        `unknown command: ${arg} (the commands are "review", "init" and ` +
+          '"ledger")',
       );
     }
     command = arg;
@@ -270,6 +281,9 @@ function applyValueFlag(
       return;
     case "--model":
       options.model = value;
+      return;
+    case "--runs":
+      options.runs = value;
       return;
     case "--pr": {
       const parsed = Number(value);

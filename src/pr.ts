@@ -248,6 +248,7 @@ export async function writeComparison(input: {
   headSha: string;
   diffFromSha: string;
   runDir: string;
+  generatedAt: string;
   runStatus: RunStatus;
   findings: PrHeroFindingRef[];
 }): Promise<ComparisonOutcome> {
@@ -266,6 +267,7 @@ export async function writeComparison(input: {
         headSha: input.headSha,
         diffFromSha: input.diffFromSha,
         runDir: input.runDir,
+        generatedAt: input.generatedAt,
         runStatus: input.runStatus,
         greptileFound: body !== null,
         result,

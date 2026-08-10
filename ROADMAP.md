@@ -375,6 +375,22 @@ What is still manual, in the order it should be closed:
    reasoning is required — the A3 lesson was that verdicts recorded without reasoning cannot be
    re-examined when new evidence arrives.
 
+   **BUILT 2026-08-10** (`pr-hero ledger [--repo --runs --out]`; pure half in `src/ledger.ts`).
+   Sweeps `<runs-root>/*/comparison.json`, parses each back with loud per-field validation (a silently
+   mis-read artifact becomes a silently wrong rate), and renders one markdown ledger to stdout. The
+   denominator rule is the design: **one PR, one vote** — only each PR's latest run counts toward the
+   totals (ordered by the new `generated_at` stamp, mtime as the fallback for files that predate it),
+   because totals over all runs would let a re-reviewed PR vote twice. Verdicts are tallied AS-IS,
+   whatever strings the triage wrote — the ledger reports the triage's own vocabulary and never defines
+   a taxonomy; the A3 lesson lives in each row's reasoning, not in an enum invented before any triage
+   happened. A **Pending triage** section names every verdict-null row of every latest run with an
+   actionable identity (finding id or Greptile index + path:line), and the closing line routes verdicts
+   INTO the run's own comparison.json. Verified against the real runs root: the 1682 row renders
+   1/0/4 with 0/5 triaged and all five pending identities; counts stay counts ("N of M"), no
+   percentage theater on small denominators. comparison.json gains `generated_at` (ISO 8601, stamped
+   by the I/O shell — the pure builder owns no clock) going forward; no artifact carries it yet, since
+   the stamping call site first executes on the next paid run.
+
 Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
 the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this
 engine has no business blocking a merge yet.

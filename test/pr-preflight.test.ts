@@ -415,11 +415,13 @@ describe("buildComparisonJson", () => {
       headSha: "e3ab386a63020c6f5c21d814d176ff33849eef8d",
       diffFromSha: "b22c3b367f6ac8531ad40e172f7aa82384dbbeb1",
       runDir: "/x/musive-prhero-runs/pr-1682-e3ab386a-1",
+      generatedAt: "2026-08-10T18:00:00.000Z",
       runStatus: "complete",
       greptileFound: true,
       result,
     });
     expect(json.pr).toBe(1682);
+    expect(json.generated_at).toBe("2026-08-10T18:00:00.000Z");
     expect(json.head_sha).toBe("e3ab386a63020c6f5c21d814d176ff33849eef8d");
     expect(json.diff_from_sha).toBe("b22c3b367f6ac8531ad40e172f7aa82384dbbeb1");
     expect(json.run_dir).toBe("/x/musive-prhero-runs/pr-1682-e3ab386a-1");
@@ -487,6 +489,7 @@ describe("buildComparisonJson", () => {
       headSha: "e3ab386a63020c6f5c21d814d176ff33849eef8d",
       diffFromSha: "b22c3b367f6ac8531ad40e172f7aa82384dbbeb1",
       runDir: "/x/runs/pr-1682-e3ab386a-1",
+      generatedAt: "2026-08-10T18:00:00.000Z",
       runStatus: "complete",
       greptileFound: true,
       result,
@@ -506,6 +509,7 @@ describe("buildComparisonJson", () => {
       headSha: "30e038b0c71742432eea11a7d5964c97251c5e49",
       diffFromSha: "7395db0d33d0f3fae8eb2f98795c8748335986ca",
       runDir: "/x/runs/pr-1660-30e038b0-1",
+      generatedAt: "2026-08-10T18:05:00.000Z",
       runStatus: "partial",
       greptileFound: false,
       result: { greptileOnly: [], both: [], prheroOnly: [extra] },

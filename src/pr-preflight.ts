@@ -329,6 +329,10 @@ export interface ComparisonJson {
   head_sha: string;
   diff_from_sha: string;
   run_dir: string;
+  // ISO 8601, stamped by the I/O caller (this module owns no clock): the
+  // ledger (B4) orders a PR's runs by it so the LATEST run is the one that
+  // votes. Files written before this field existed are ordered by mtime.
+  generated_at: string;
   // "complete" or "partial" — stamped so B4's ledger can weigh a comparison
   // by how much of the engine actually ran. (A run where EVERY hunter died
   // never reaches this file: the caller skips the comparison outright,
@@ -352,6 +356,7 @@ export function buildComparisonJson(input: {
   headSha: string;
   diffFromSha: string;
   runDir: string;
+  generatedAt: string;
   runStatus: RunStatus;
   greptileFound: boolean;
   result: ComparisonResult;
@@ -373,6 +378,7 @@ export function buildComparisonJson(input: {
     head_sha: input.headSha,
     diff_from_sha: input.diffFromSha,
     run_dir: input.runDir,
+    generated_at: input.generatedAt,
     run_status: input.runStatus,
     greptile: { found: input.greptileFound },
     rows,
