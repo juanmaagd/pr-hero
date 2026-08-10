@@ -1,0 +1,442 @@
+// Pure-decision tests for PR mode (ROADMAP B1): the --pr flag surface, the
+// PR-record parser, the two-root naming rules, the worktree reuse gate, and
+// the comparison.json projection. All offline, literal in → literal out.
+//
+// The two real fixtures below are REAL `gh pr view` bodies captured
+// 2026-08-10 with
+//   gh pr view <n> --json number,title,state,headRefOid,baseRefName,\
+//     baseRefOid,mergeCommit,additions,deletions,changedFiles
+// against musive PRs 1682 and 1660, inlined verbatim — the shape this parser
+// handles is the shape gh actually emits, not the shape a spec described.
+
+import { describe, expect, test } from "bun:test";
+import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
+import type { GreptileFinding } from "../src/greptile";
+import {
+  buildComparisonJson,
+  decideWorktree,
+  prRunDirCandidate,
+  prWorktreePath,
+  resolvePrTarget,
+  worktreeDirty,
+} from "../src/pr-preflight";
+import { CliError, CliUsageError, parseArgs } from "../src/preflight";
+
+// Merged the ordinary way: mergeCommit present, base branch is the default.
+const PR_1682_MERGED = `{"additions":21,"baseRefName":"dev","baseRefOid":"b22c3b367f6ac8531ad40e172f7aa82384dbbeb1","changedFiles":7,"deletions":8,"headRefOid":"e3ab386a63020c6f5c21d814d176ff33849eef8d","mergeCommit":{"oid":"0f7d53cc602a0dbf51372e8a601fef87ea85cc94"},"number":1682,"state":"MERGED","title":"chore(MUS-716): loading-flag resets, style arrays and fetch check (slice 5)"}`;
+
+// Closed WITHOUT merging, and stacked: its base is another PR's branch, not
+// the default branch — baseRefName matters to the fetch in exactly this case.
+const PR_1660_CLOSED = `{"additions":175,"baseRefName":"chore/MUS-708-4a-pin-script","baseRefOid":"7395db0d33d0f3fae8eb2f98795c8748335986ca","changedFiles":5,"deletions":174,"headRefOid":"30e038b0c71742432eea11a7d5964c97251c5e49","mergeCommit":null,"number":1660,"state":"CLOSED","title":"chore(MUS-708): pin root/backend/common ranges [5/8]"}`;
+
+// synthetic: no open PR existed at capture time; shape mirrors 1660
+// (mergeCommit null).
+const PR_OPEN_SYNTHETIC = `{"additions":175,"baseRefName":"chore/MUS-708-4a-pin-script","baseRefOid":"7395db0d33d0f3fae8eb2f98795c8748335986ca","changedFiles":5,"deletions":174,"headRefOid":"30e038b0c71742432eea11a7d5964c97251c5e49","mergeCommit":null,"number":1660,"state":"OPEN","title":"chore(MUS-708): pin root/backend/common ranges [5/8]"}`;
+
+describe("parseArgs --pr", () => {
+  test("reads the PR number", () => {
+    expect(parseArgs(["review", "--pr", "1682"]).options.pr).toBe(1682);
+  });
+
+  test("is absent unless given", () => {
+    expect(parseArgs(["review"]).options.pr).toBeUndefined();
+  });
+
+  test("must be a positive integer", () => {
+    for (const value of ["0", "-3", "2.5", "many"]) {
+      expect(() => parseArgs(["review", "--pr", value])).toThrow(CliUsageError);
+    }
+  });
+
+  // Each exclusion in both flag orders: the check runs after the loop, so
+  // whichever flag comes first must not smuggle the other through.
+  test("excludes --base", () => {
+    expect(() => parseArgs(["review", "--pr", "5", "--base", "dev"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["review", "--base", "dev", "--pr", "5"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  // The default head IS "HEAD", so the exclusion must fire on explicitness,
+  // not on the value — an explicit --head HEAD still contradicts --pr.
+  test("excludes --head even when the value equals the default", () => {
+    expect(() => parseArgs(["review", "--pr", "5", "--head", "HEAD"])).toThrow(
+      CliUsageError,
+    );
+    expect(() =>
+      parseArgs(["review", "--head", "feature", "--pr", "5"]),
+    ).toThrow(CliUsageError);
+  });
+
+  test("excludes --two-dot", () => {
+    expect(() => parseArgs(["review", "--pr", "5", "--two-dot"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["review", "--two-dot", "--pr", "5"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  test("each exclusion names the conflicting flag", () => {
+    for (const [argv, flag] of [
+      [["review", "--pr", "5", "--base", "dev"], "--base"],
+      [["review", "--pr", "5", "--head", "x"], "--head"],
+      [["review", "--pr", "5", "--two-dot"], "--two-dot"],
+    ] as const) {
+      try {
+        parseArgs([...argv]);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect((error as Error).message).toContain(flag);
+        expect((error as Error).message).toContain("--pr");
+      }
+    }
+  });
+
+  test("everything PR mode keeps working still parses beside it", () => {
+    const { options } = parseArgs([
+      "review",
+      "--pr",
+      "1682",
+      "--repo",
+      "/tmp/repo",
+      "--agents",
+      "/tmp/agents",
+      "--out",
+      "/tmp/runs",
+      "--gotchas",
+      "/g.md",
+      "--config",
+      "/c.json",
+      "--model",
+      "opus",
+      "--hop-budget",
+      "4",
+      "--dry-run",
+      "--yes",
+    ]);
+    expect(options.pr).toBe(1682);
+    expect(options.repo).toBe("/tmp/repo");
+    expect(options.agents).toBe("/tmp/agents");
+    expect(options.out).toBe("/tmp/runs");
+    expect(options.gotchas).toBe("/g.md");
+    expect(options.config).toBe("/c.json");
+    expect(options.model).toBe("opus");
+    expect(options.hopBudget).toBe(4);
+    expect(options.dryRun).toBe(true);
+    expect(options.yes).toBe(true);
+  });
+});
+
+describe("resolvePrTarget", () => {
+  test("MERGED resolves base to the merge commit's first parent", () => {
+    expect(resolvePrTarget(PR_1682_MERGED)).toEqual({
+      number: 1682,
+      title:
+        "chore(MUS-716): loading-flag resets, style arrays and fetch " +
+        "check (slice 5)",
+      state: "MERGED",
+      headSha: "e3ab386a63020c6f5c21d814d176ff33849eef8d",
+      baseRef: "0f7d53cc602a0dbf51372e8a601fef87ea85cc94^1",
+      baseRefName: "dev",
+      baseSource: "merge-commit-parent",
+      ghDiffStat: { files: 7, insertions: 21, deletions: 8 },
+    });
+  });
+
+  test("CLOSED-unmerged uses the recorded base tip, stacked bases included", () => {
+    const target = resolvePrTarget(PR_1660_CLOSED);
+    expect(target.state).toBe("CLOSED");
+    expect(target.baseRef).toBe("7395db0d33d0f3fae8eb2f98795c8748335986ca");
+    expect(target.baseSource).toBe("base-branch");
+    expect(target.baseRefName).toBe("chore/MUS-708-4a-pin-script");
+    expect(target.headSha).toBe("30e038b0c71742432eea11a7d5964c97251c5e49");
+    expect(target.ghDiffStat).toEqual({
+      files: 5,
+      insertions: 175,
+      deletions: 174,
+    });
+  });
+
+  test("OPEN behaves exactly like CLOSED-unmerged", () => {
+    const target = resolvePrTarget(PR_OPEN_SYNTHETIC);
+    expect(target.state).toBe("OPEN");
+    expect(target.baseRef).toBe("7395db0d33d0f3fae8eb2f98795c8748335986ca");
+    expect(target.baseSource).toBe("base-branch");
+  });
+
+  test("invalid JSON fails loud", () => {
+    expect(() => resolvePrTarget("not json")).toThrow(CliUsageError);
+    expect(() => resolvePrTarget("[]")).toThrow(CliUsageError);
+    expect(() => resolvePrTarget("null")).toThrow(CliUsageError);
+  });
+
+  test("a missing field names itself", () => {
+    const record = JSON.parse(PR_1682_MERGED) as Record<string, unknown>;
+    delete record.headRefOid;
+    try {
+      resolvePrTarget(JSON.stringify(record));
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("headRefOid");
+    }
+  });
+
+  // The abbreviated-sha lesson (preflight's isFullCommitId): a short id in
+  // the record must fail here, never propagate into artifacts.
+  test("an abbreviated sha is rejected, naming the field", () => {
+    const record = JSON.parse(PR_1682_MERGED) as Record<string, unknown>;
+    record.headRefOid = "e3ab386a";
+    try {
+      resolvePrTarget(JSON.stringify(record));
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("headRefOid");
+    }
+  });
+
+  test("MERGED with a null mergeCommit refuses to guess", () => {
+    const record = JSON.parse(PR_1682_MERGED) as Record<string, unknown>;
+    record.mergeCommit = null;
+    const raw = JSON.stringify(record);
+    expect(() => resolvePrTarget(raw)).toThrow(CliError);
+    try {
+      resolvePrTarget(raw);
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect((error as Error).message).toContain("refusing to guess");
+    }
+  });
+});
+
+describe("PR naming", () => {
+  test("the worktree is a sibling <repo>-worktrees/pr-<n>", () => {
+    expect(prWorktreePath("/Users/x/Desktop/musive", 1682)).toBe(
+      "/Users/x/Desktop/musive-worktrees/pr-1682",
+    );
+  });
+
+  test("run dirs lead with the PR and pin the head sha", () => {
+    const root = "/Users/x/Desktop/musive-prhero-runs";
+    const head = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
+    expect(prRunDirCandidate(root, 1682, head, 1)).toBe(
+      `${root}/pr-1682-e3ab386a-1`,
+    );
+    expect(prRunDirCandidate(root, 1682, head, 2)).toBe(
+      `${root}/pr-1682-e3ab386a-2`,
+    );
+  });
+});
+
+describe("worktreeDirty", () => {
+  test("an empty status is clean", () => {
+    expect(worktreeDirty("")).toBe(false);
+    expect(worktreeDirty("\n")).toBe(false);
+  });
+
+  // THE filter this function exists for: the index is always untracked in
+  // the worktree, and reading it as dirt would make reuse impossible.
+  test("the untracked .codegraph/ alone is clean", () => {
+    expect(worktreeDirty("?? .codegraph/\n")).toBe(false);
+  });
+
+  test("a modified tracked file is dirty", () => {
+    expect(worktreeDirty(" M src/a.ts\n")).toBe(true);
+  });
+
+  test("any other untracked file is dirty", () => {
+    expect(worktreeDirty("?? notes.md\n")).toBe(true);
+    // .codegraph entries do not launder the rest of the status.
+    expect(worktreeDirty("?? .codegraph/\n?? notes.md\n")).toBe(true);
+  });
+
+  test("a lookalike path outside .codegraph/ is dirty", () => {
+    expect(worktreeDirty("?? .codegraphx/file\n")).toBe(true);
+    expect(worktreeDirty(" M src/.codegraph-notes.md\n")).toBe(true);
+  });
+});
+
+describe("decideWorktree", () => {
+  test("the full decision table", () => {
+    const table = [
+      [{ exists: false, headMatches: false, dirty: false }, "create"],
+      [{ exists: false, headMatches: true, dirty: true }, "create"],
+      [{ exists: true, headMatches: false, dirty: false }, "recreate"],
+      [{ exists: true, headMatches: false, dirty: true }, "recreate"],
+      [{ exists: true, headMatches: true, dirty: true }, "recreate"],
+      [{ exists: true, headMatches: true, dirty: false }, "reuse"],
+    ] as const;
+    for (const [input, action] of table) {
+      expect(decideWorktree(input).action).toBe(action);
+    }
+  });
+
+  test("every decision carries a reason, and the two recreate causes differ", () => {
+    const headMoved = decideWorktree({
+      exists: true,
+      headMatches: false,
+      dirty: false,
+    });
+    const dirtied = decideWorktree({
+      exists: true,
+      headMatches: true,
+      dirty: true,
+    });
+    expect(headMoved.reason.length).toBeGreaterThan(0);
+    expect(dirtied.reason.length).toBeGreaterThan(0);
+    expect(headMoved.reason).not.toBe(dirtied.reason);
+  });
+});
+
+describe("buildComparisonJson", () => {
+  const matched: GreptileFinding = {
+    index: 1,
+    path: "src/a.ts",
+    startLine: 100,
+    endLine: 104,
+    title: "Stale cache",
+    description: "The derived value is never invalidated.",
+  };
+  const missed: GreptileFinding = {
+    index: 2,
+    path: "src/b.ts",
+    startLine: 7,
+    endLine: 7,
+    title: "Missed",
+    description: "Only Greptile saw this.",
+  };
+  const paired: PrHeroFindingRef = {
+    id: "F001",
+    path: "src/a.ts",
+    line: 102,
+    claim: "Cached list survives the mutation.",
+    tier: "blocking",
+  };
+  const extra: PrHeroFindingRef = {
+    id: "F002",
+    path: "src/c.ts",
+    line: 40,
+    claim: "Only pr-hero saw this.",
+    tier: "advisory",
+  };
+  const result: ComparisonResult = {
+    greptileOnly: [missed],
+    both: [{ greptile: matched, prhero: paired }],
+    prheroOnly: [extra],
+  };
+
+  test("projects the same result the renderer consumes, miss first", () => {
+    const json = buildComparisonJson({
+      pr: 1682,
+      headSha: "e3ab386a63020c6f5c21d814d176ff33849eef8d",
+      diffFromSha: "b22c3b367f6ac8531ad40e172f7aa82384dbbeb1",
+      runDir: "/x/musive-prhero-runs/pr-1682-e3ab386a-1",
+      runStatus: "complete",
+      greptileFound: true,
+      result,
+    });
+    expect(json.pr).toBe(1682);
+    expect(json.head_sha).toBe("e3ab386a63020c6f5c21d814d176ff33849eef8d");
+    expect(json.diff_from_sha).toBe("b22c3b367f6ac8531ad40e172f7aa82384dbbeb1");
+    expect(json.run_dir).toBe("/x/musive-prhero-runs/pr-1682-e3ab386a-1");
+    expect(json.run_status).toBe("complete");
+    expect(json.greptile).toEqual({ found: true });
+    expect(json.rows.map((r) => r.bucket)).toEqual([
+      "greptile_only",
+      "both",
+      "prhero_only",
+    ]);
+    expect(json.rows[0]).toEqual({
+      bucket: "greptile_only",
+      greptile: {
+        index: 2,
+        path: "src/b.ts",
+        start_line: 7,
+        end_line: 7,
+        title: "Missed",
+        description: "Only Greptile saw this.",
+      },
+      prhero: null,
+      verdict: null,
+      reasoning: null,
+    });
+    expect(json.rows[1]).toEqual({
+      bucket: "both",
+      greptile: {
+        index: 1,
+        path: "src/a.ts",
+        start_line: 100,
+        end_line: 104,
+        title: "Stale cache",
+        description: "The derived value is never invalidated.",
+      },
+      prhero: {
+        id: "F001",
+        path: "src/a.ts",
+        line: 102,
+        claim: "Cached list survives the mutation.",
+        tier: "blocking",
+      },
+      verdict: null,
+      reasoning: null,
+    });
+    expect(json.rows[2]).toEqual({
+      bucket: "prhero_only",
+      greptile: null,
+      prhero: {
+        id: "F002",
+        path: "src/c.ts",
+        line: 40,
+        claim: "Only pr-hero saw this.",
+        tier: "advisory",
+      },
+      verdict: null,
+      reasoning: null,
+    });
+  });
+
+  // The A3 lesson made structural: the triage columns exist, and they ship
+  // empty — never pre-filled, never omitted.
+  test("every row ships verdict and reasoning as literal nulls", () => {
+    const json = buildComparisonJson({
+      pr: 1682,
+      headSha: "e3ab386a63020c6f5c21d814d176ff33849eef8d",
+      diffFromSha: "b22c3b367f6ac8531ad40e172f7aa82384dbbeb1",
+      runDir: "/x/runs/pr-1682-e3ab386a-1",
+      runStatus: "complete",
+      greptileFound: true,
+      result,
+    });
+    expect(json.rows.length).toBeGreaterThan(0);
+    for (const row of json.rows) {
+      expect(row.verdict).toBeNull();
+      expect(row.reasoning).toBeNull();
+    }
+  });
+
+  // found: false ("no Greptile comment") must stay distinguishable from
+  // "Greptile commented and reported nothing" (found: true, no rows).
+  test("a PR without a Greptile comment records found: false", () => {
+    const json = buildComparisonJson({
+      pr: 1660,
+      headSha: "30e038b0c71742432eea11a7d5964c97251c5e49",
+      diffFromSha: "7395db0d33d0f3fae8eb2f98795c8748335986ca",
+      runDir: "/x/runs/pr-1660-30e038b0-1",
+      runStatus: "partial",
+      greptileFound: false,
+      result: { greptileOnly: [], both: [], prheroOnly: [extra] },
+    });
+    expect(json.greptile.found).toBe(false);
+    // A partial run's comparison stays readable, weighted by its status —
+    // only the all-hunters-dead case is never written at all (cli.ts skips
+    // it: "pr-hero 0" from a review that never ran is not a measured miss).
+    expect(json.run_status).toBe("partial");
+    expect(json.rows).toHaveLength(1);
+    expect(json.rows[0].bucket).toBe("prhero_only");
+    expect(json.rows[0].greptile).toBeNull();
+  });
+});

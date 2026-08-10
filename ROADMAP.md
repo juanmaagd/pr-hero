@@ -329,6 +329,28 @@ What is still manual, in the order it should be closed:
    bytes), run, then compare against Greptile automatically. Today that is ~6 hand-run steps per PR and
    it is the single biggest friction left. Worktree teardown is `git worktree remove`, never `rm -rf`:
    a live index holds an open `.codegraph/daemon.sock`.
+
+   **BUILT 2026-08-10** (`src/pr.ts` I/O + `src/pr-preflight.ts` pure decisions). The design's spine is
+   two roots, deliberately assigned: the OPERATOR checkout (gh + git cwd, `.prhero/` trust anchor, run-dir
+   anchor; its dirtiness is irrelevant and both local gates are skipped there on purpose) and the REVIEW
+   worktree (`<repo-parent>/<basename>-worktrees/pr-<n>`, pipeline cwd, owns its codegraph index — the
+   availability check runs against IT, or hunters would ride another checkout's index). MERGED resolves
+   base to `mergeCommit^1` (base as it was when the PR landed — squash/rebase/merge all converge at the
+   fork point via the existing merge-base default); OPEN/CLOSED use `baseRefOid`. The fetch rides
+   `refs/pull/<n>/head` because a merged PR's branch is usually deleted. `--dry-run` is fetch-free and
+   creates nothing: the cost band rides GitHub's own diff counters. Worktrees are KEPT AND REUSED
+   (Juanma's call, 2026-08-10): reuse requires HEAD == PR head AND a clean porcelain ignoring the
+   always-untracked `.codegraph/`; head-moved or dirtied trees are recreated via
+   `git worktree remove --force` (verified: plain remove refuses on the untracked index). The Greptile
+   comparison runs in-process and emits `comparison.md` + `comparison.json` — B4's seed, rows carrying
+   `verdict: null, reasoning: null` (the A3 lesson) and the run's `run_status`; a run where every hunter
+   died writes NO comparison at all, because "pr-hero 0" from a review that never happened would land in
+   the ledger as a measured miss. Verified for $0 against real PR 1682: offline gates (289 tests), the
+   fetch-free dry run, and a declined-confirm run that exercised fetch, `^1` resolution, merge-base and
+   the real numstat (gh's counters matched exactly). Unexecuted until the first paid run: worktree
+   creation, `codegraph init`, the pipeline itself, comparison writing. Known edge, loud by design: a
+   CLOSED-unmerged PR whose base branch was deleted fails at the fetch. With musive-s3's `.prhero/`
+   already populated, the whole command inside that checkout is literally `pr-hero review --pr <n>`.
 2. **Post the report to the PR** via `gh` — orchestrator-only I/O; the spawned steps are sandboxed away
    from `gh` by `--strict-mcp-config` and `--setting-sources ""`, and that stays true.
 3. **Trigger** — `branch-pr` hook or a local watcher (launchd/cron) so a review happens rather than being

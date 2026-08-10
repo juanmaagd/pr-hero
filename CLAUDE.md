@@ -40,7 +40,7 @@ been burned by a manual match that inflated a score by 50%.
 ## Commands
 
 ```bash
-bun test               # 113 tests, all offline (fake spawn/runner)
+bun test               # 289 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
 bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
 bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
@@ -65,6 +65,12 @@ with an explicit `bunx tsc` / `bunx biome check` over them.
 - `src/dedupe.ts` / `src/drafts.ts` — pure: merge/renumber; extraction + draft/refuter validation.
 - `src/findings.ts` — schema v1.0.0 (shared meaning with the lab's validator; byte-compatible artifacts).
 - `src/prompt-set.ts` — agent-file parsing + `{{PRIORS}}`/`{{GOTCHAS}}` templating.
+- `src/cli.ts` + `src/preflight.ts` + `src/report.ts` — local mode (B0): the I/O shell, its pure
+  decisions (all offline-tested), and the cost band + report renderer.
+- `src/pr.ts` + `src/pr-preflight.ts` — PR mode (B1, `--pr <n>`): gh/worktree/codegraph I/O shell and
+  its pure decisions — PR record → range, the worktree reuse gate, comparison.json (B4's seed).
+- `src/greptile.ts` + `src/compare.ts` + `src/compare-report.ts` — the head-to-head: parse Greptile's
+  PR comment, bucket findings against ours, render the comparison.
 - `fixtures/` + `scripts/` — the planted-bug eval and live micro-eval.
 
 ## Rules that outrank convenience

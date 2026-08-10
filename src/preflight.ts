@@ -29,6 +29,11 @@ export const SUGGESTED_AGENTS_DIR =
 
 export class CliUsageError extends Error {}
 
+// Runtime failure (git, gh, the filesystem) as opposed to a usage error.
+// Defined here rather than in a shell so both I/O shells (cli.ts, pr.ts)
+// can throw the same class without importing each other.
+export class CliError extends Error {}
+
 export interface CliOptions {
   // Relative on purpose: parseArgs is pure, so "resolve against cwd" is the
   // caller's job, not a hidden dependency on process.cwd() in a pure function.
@@ -53,6 +58,10 @@ export interface CliOptions {
   hopBudget: number;
   dryRun: boolean;
   yes: boolean;
+  // PR mode (ROADMAP B1). Set only by --pr: head and base both come from the
+  // PR record itself, so parseArgs rejects --base/--head/--two-dot beside it
+  // — a hand-picked endpoint would silently contradict the PR's own range.
+  pr?: number;
   // The escape hatch for change 3's default. See resolveDiffRange's WHY: the
   // three-dot (merge-base) range is right almost always, and this flag exists
   // for the rare caller who genuinely wants the literal two-point diff.
@@ -72,6 +81,11 @@ Usage:
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
+  --pr <n>            Review GitHub PR #n: head and base come from gh, the
+                      review runs in a detached worktree with its own
+                      codegraph index, and the result is compared against
+                      Greptile's comment on the PR. Excludes --base, --head
+                      and --two-dot
   --base <ref>        Base branch or sha. Default, in order: the config's
                       default_base, then the remote head
                       (refs/remotes/origin/HEAD), then ${DEFAULT_BASE_REF}
@@ -107,6 +121,7 @@ questions; use it first.`;
 
 const VALUE_FLAGS = new Set([
   "--repo",
+  "--pr",
   "--base",
   "--head",
   "--agents",
@@ -127,6 +142,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     twoDot: false,
   };
   let command: "review" | "init" | "help" | undefined;
+  // --head carries a baked-in default, so "was it explicitly given" cannot
+  // be read off options afterwards — and the --pr exclusion below must fire
+  // on an explicit --head even when its value equals that default.
+  let headExplicit = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined) continue;
@@ -140,6 +159,7 @@ export function parseArgs(argv: string[]): ParsedCli {
         throw new CliUsageError(`${arg} needs a value`);
       }
       i++;
+      if (arg === "--head") headExplicit = true;
       applyValueFlag(options, arg, value);
       continue;
     }
@@ -172,6 +192,30 @@ export function parseArgs(argv: string[]): ParsedCli {
     throw new CliUsageError(
       'no command given (did you mean "pr-hero review"?)',
     );
+  }
+  // --pr derives the whole range from the PR record — head from GitHub, base
+  // from the merge commit's parent or the base branch — so a hand-picked
+  // endpoint or range shape beside it would silently contradict what the PR
+  // actually contains. Checked after the loop so flag order cannot matter.
+  if (options.pr !== undefined) {
+    if (options.base !== undefined) {
+      throw new CliUsageError(
+        "--pr resolves base from the PR itself, so it cannot be combined " +
+          "with --base",
+      );
+    }
+    if (headExplicit) {
+      throw new CliUsageError(
+        "--pr reviews the PR's own head commit, so it cannot be combined " +
+          "with --head",
+      );
+    }
+    if (options.twoDot) {
+      throw new CliUsageError(
+        "--pr always diffs the PR from its merge base, so it cannot be " +
+          "combined with --two-dot",
+      );
+    }
   }
   return { command, options };
 }
@@ -206,6 +250,16 @@ function applyValueFlag(
     case "--model":
       options.model = value;
       return;
+    case "--pr": {
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new CliUsageError(
+          `--pr must be a positive integer, got: ${value}`,
+        );
+      }
+      options.pr = parsed;
+      return;
+    }
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {
