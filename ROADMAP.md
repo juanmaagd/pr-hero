@@ -219,6 +219,59 @@ The two known capability gaps, in attack order:
 
 Gate to Phase B: bar met on the held-out set.
 
+## THE PIVOT — 2026-08-10. The golden dataset is retired as the benchmark.
+
+Decided by Juanma, and it reorders everything below: **stop improving the number, stabilize a version,
+wire it up, and take the numbers from running in parallel with Greptile on live PRs.** His words:
+*"dejemos de dar vueltas para mejorar el número"*, and — the constraint that reframed the method —
+*"no me importa el gasto, me jode más el tiempo que está llevando esto."*
+
+Cost was never the binding constraint; TIME WAS. The $0-diagnosis-first discipline and three rounds of
+blind review over a six-line prompt edit saved money and spent sessions. That trade was mispriced.
+
+**What replaced it.** Greptile already reviews every PR, so it is the oracle: nobody has to know in
+advance whether a PR contains a bug. `pr-hero review` on the PR, `scripts/compare-pr.ts` against
+Greptile's own comment, three buckets. **~$3 and ~4 minutes per PR**, on code from this week — against
+a session and $12+ for one arm on July trees whose dataset turned out contaminated.
+
+**First run, 8 PRs (1676-1684), $23.51, and the headline was not the one expected:**
+
+| | Greptile | pr-hero | |
+|---|---|---|---|
+| 1677 | 1 (real bug: duplicate React keys) | 0 | **measured miss** |
+| 1682 | 1 (style) | 3 blocking | pr-hero only |
+| 1683 | 1 (convention) | 0 | out of scope |
+| 1679 | 0 | 2 advisory | pr-hero only |
+| 1684 | 0 | 1 blocking | pr-hero only |
+| 1676, 1678, 1681 | 0 | 0 | agreement, clean |
+
+**Greptile-only 3 · Both 0 · pr-hero-only 6. The overlap is ZERO.** In eight PRs they never once found
+the same thing. These are not two reviewers on one scale — they have different biases. Greptile sweeps
+wide and flags convention; pr-hero digs into lifecycle and state machines and says nothing elsewhere.
+
+Two pr-hero findings verified by hand in the code:
+- **1682** — `RenameSlider/index.tsx:65` passes `enabled={!isLoading}` to a `styled(TouchableOpacity)`
+  whose `enabled` only drives `opacity` (`Styles.ts:8-16`). `TouchableOpacity` has `disabled`, not
+  `enabled`. The button dims to 50% and stays pressable: **the UI lies**. Greptile reviewed that PR.
+- **1679** — `LoadingSpinner.tsx:7-19` starts `Animated.loop` with `useNativeDriver` and returns no
+  cleanup, in a component unmounted every time loading ends. Correctly tiered advisory, not blocking.
+
+Zero false positives across the five PRs Greptile passed clean. The profile, now measured rather than
+assumed: **high precision, narrow coverage.**
+
+**What this does to the north star.** This document says the goal is to cancel Greptile ($912-1632/yr).
+At zero overlap that question is malformed — each covers what the other does not. Cancelling Greptile
+today loses 1677's duplicate keys; dropping pr-hero loses 1682's lying button. The decision is what each
+is FOR, and the head-to-head answers it per PR for the price of a coffee.
+
+**Phase A is closed.** A8 (`slice3b-lifecycle-v7-cellproof`, lab `4da15bd`) was its last arm and it
+worked on both mechanism gates — `incoherent` cells fell 55%→37.5%, defect cells rose 2→5, and G2's own
+cell went from 0-of-3 to 2-of-3 adjudicated `defect`. It was deliberately NOT scored against the
+goldens: scoring it would have been the exact loop this pivot ends. A4 (held-out set) does not run;
+`dataset/test.jsonl` stays sealed, now permanently unless the decision is revisited.
+
+**Next session starts at Phase B.**
+
 ## Phase B0 — Local mode (usable NOW, deliberately not gated on the bar)
 
 Added 2026-08-04, and it corrects a conflation this document was making. Phase B was gated on the
@@ -260,12 +313,36 @@ find it in the source.
 
 Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it and does not pretend to.
 
-## Phase B — Production wiring (cancels Greptile)
+## Phase B — Production wiring — THE NEXT SESSION STARTS HERE
 
-From the original design, unchanged: post findings as inline PR threads via `gh` (orchestrator-only I/O);
-required status check per head SHA (fail-closed, no run = no merge); `branch-pr` hook + local watcher
-(launchd/cron) for contributor/agent PRs; audited `skip-deep-review` label. Run both systems in parallel
-until the bar holds in production; then cancel Greptile ($912–1,632/yr).
+Gate removed 2026-08-10: this no longer waits on the bar. See THE PIVOT above.
+
+Where it already stands: `pr-hero review` runs with zero flags inside a configured repo, the diff comes
+from the merge base, `.prhero/` carries gotchas/priors/agents_dir, `pr-hero` is a linked global command,
+and `scripts/compare-pr.ts` does the head-to-head read-only through `gh`. Eight PRs have been through it
+end to end.
+
+What is still manual, in the order it should be closed:
+
+1. **`pr-hero review --pr <n>`** — the one command. Resolve head and `mergeCommit^1` through `gh`, create
+   the detached worktree, ensure its own codegraph index (never reuse another checkout's — different
+   bytes), run, then compare against Greptile automatically. Today that is ~6 hand-run steps per PR and
+   it is the single biggest friction left. Worktree teardown is `git worktree remove`, never `rm -rf`:
+   a live index holds an open `.codegraph/daemon.sock`.
+2. **Post the report to the PR** via `gh` — orchestrator-only I/O; the spawned steps are sandboxed away
+   from `gh` by `--strict-mcp-config` and `--setting-sources ""`, and that stays true.
+3. **Trigger** — `branch-pr` hook or a local watcher (launchd/cron) so a review happens rather than being
+   remembered. Note this spends money per PR without asking, so it needs an explicit opt-in.
+4. **Accumulate the head-to-head** into a ledger across PRs, so the three buckets become a rate rather
+   than a snapshot. Six of the eight findings so far are unverified one by one; a verdict column with its
+   reasoning is required — the A3 lesson was that verdicts recorded without reasoning cannot be
+   re-examined when new evidence arrives.
+
+Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
+the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this
+engine has no business blocking a merge yet.
+
+Cancelling Greptile is no longer the goal of this phase — see the north-star note in THE PIVOT.
 
 ## Phase C — Engine hardening (parallel-friendly, no benchmark coupling)
 
