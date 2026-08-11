@@ -525,6 +525,16 @@ CLAUDE_CODE_OAUTH_TOKEN as the documented fallback), built-in provider bench, hu
 TUI/dashboard (live per-step status, cost, provider limits — convoy's strongest UX), `runs` browser.
 Timing: only after Phase B proves the engine in anger on our own repo.
 
+**Onboarding DX (added 2026-08-11 by Juanma, from the first real onboarding pass):** a guided
+`pr-hero init` that collapses today's per-project ritual — scaffold, hand-write gotchas, decide
+commit-vs-ignore for `.prhero/`, optionally `watch add` — into one complete, intuitive flow with
+options. Concretely: walk the gotchas instead of leaving a template (refusing to run on empty is
+right; writing them should be easier), make the ignore choice actionable (offer to append
+`.git/info/exclude` — the polite variant for shared repos, and the reminder text already explains
+why), offer watcher enrollment with its post flag, and keep every step flag-addressable so the
+non-interactive path stays scriptable. The three-command onboarding is correct; it should also be
+one obvious command.
+
 ## Standing rules (apply to every phase)
 
 - Design before code: no step starts without certainty of what and how — verified against the real code
