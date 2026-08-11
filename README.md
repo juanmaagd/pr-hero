@@ -29,7 +29,8 @@ pr-hero review --dry-run
 
 # 5. Review
 pr-hero review                   # your checked-out branch vs the merge base
-pr-hero review --pr 123          # any PR by number, in an isolated worktree
+pr-hero review --pr              # the current branch's PR, in an isolated worktree
+pr-hero review --pr 123          # any PR by number
 ```
 
 Every paid run prints a plan and a cost band, then asks for confirmation (`--yes` skips the prompt).
@@ -89,9 +90,17 @@ sense:
 
 1. **Before opening the PR** — `pr-hero review` on your branch. The cheapest moment to catch
    something: you are still in context and nothing is published yet.
-2. **On an existing PR** — `pr-hero review --pr <n>`, whenever you want a second reviewer's pass;
-   typically after Greptile has commented, so the head-to-head has both sides. Ran it too early?
-   The comparison can be redone later for $0 without paying a new review:
+2. **On an existing PR** — the moment it opens, standing on its branch, the whole command is:
+
+   ```bash
+   pr-hero review --pr --post
+   ```
+
+   Bare `--pr` resolves the branch's own PR (loud error if there is none), the review runs in its
+   worktree while you keep working, and `--post` publishes the one marked comment. A PR number works
+   anywhere (`--pr <n>`), no matter what you have checked out. Launch timing is forgiving: the
+   Greptile comparison happens at the END of the run, and if it still ran too early it can be redone
+   later for $0 without paying a new review:
    `bun run scripts/compare-pr.ts --pr <n> --findings <run-dir>/findings.json`.
 
 ### Automation and CI — status
@@ -116,9 +125,10 @@ Run artifacts land **outside** the repo, in `<repo-parent>/<repo>-prhero-runs/<r
 
 ## Cost and expectations
 
-- **$1–5 per review** of a typical PR-sized diff; wall time is minutes, not seconds — ~10 for a
-  small diff, up to ~25 measured on a large tree. The printed band is an order-of-magnitude guide,
-  not a quote — the same tree has billed 34% apart across runs.
+- **$2–5 per review** of a typical PR-sized diff — the floor is real, because hunters read the tree,
+  not just the diff — and larger trees cost more (a 45-file tree measured $11–15). Wall time is
+  minutes, not seconds: ~10 for a small diff, up to ~25 measured on a large tree. The printed band
+  is an order-of-magnitude guide, not a quote — the same tree has billed 34% apart across runs.
 - Findings vary run to run on the same tree. That is the nature of the instrument: treat single
   runs as evidence, not verdicts, and triage before acting.
 - Verify what it reports. Findings are claims with cited code, tiered by deterministic rules — the
