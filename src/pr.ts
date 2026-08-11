@@ -119,6 +119,30 @@ export async function ghCurrentBranchPr(operatorRoot: string): Promise<string> {
   return result.stdout;
 }
 
+// The repository's web URL (https://github.com/org/repo), used only to turn
+// the PR comment's locations into links. Cosmetic by contract: ANY failure
+// returns undefined and the comment renders plain — a review must never die,
+// or even warn loudly, because a nicety could not be resolved.
+export async function ghRepoWebUrl(
+  operatorRoot: string,
+): Promise<string | undefined> {
+  try {
+    const result = await gh(operatorRoot, [
+      "repo",
+      "view",
+      "--json",
+      "url",
+      "-q",
+      ".url",
+    ]);
+    if (!result.ok) return undefined;
+    const url = result.stdout.trim();
+    return url === "" ? undefined : url;
+  } catch {
+    return undefined;
+  }
+}
+
 // WHY this exact refspec pair (paid-for): a merged PR's branch is usually
 // deleted, so nothing but `refs/pull/<n>/head` keeps headRefOid fetchable —
 // and fetching the base branch by name in the same call brings the merge

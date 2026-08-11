@@ -35,6 +35,7 @@ import {
   fetchPrRefs,
   ghCurrentBranchPr,
   ghPrView,
+  ghRepoWebUrl,
   initCodegraphIndex,
   postPrComment,
   writeComparison,
@@ -846,10 +847,16 @@ async function reviewPr(
         "post skipped: every hunter failed, so there is no review to publish",
       );
     } else {
+      // The repo web URL upgrades the comment's locations to links; it is
+      // cosmetic, so an unresolved URL logs one quiet line and posts plain.
+      const repoWebUrl = await ghRepoWebUrl(operatorRoot);
+      if (repoWebUrl === undefined) {
+        log("repo web url unavailable: posting plain locations");
+      }
       posted = await postPrComment(
         operatorRoot,
         prNumber,
-        renderPrComment(doc),
+        renderPrComment(doc, repoWebUrl),
       );
       log(`posted: ${posted.action} comment ${posted.commentId}`);
     }

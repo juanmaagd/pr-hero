@@ -11,6 +11,7 @@ import type { Finding, FindingsDocument, Tier } from "./findings";
 import { PR_COMMENT_MARKER } from "./pr-preflight";
 import {
   clusterByRootCause,
+  extractAnchor,
   type RootCauseSummary,
   rootCauseIdByFinding,
 } from "./root-cause";
@@ -157,39 +158,159 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // The first line is PR_COMMENT_MARKER, verbatim: postPrComment (pr.ts) finds
 // the previous comment by that prefix and updates it in place, so this
 // renderer and that finder share one constant and posting stays idempotent.
-export function renderPrComment(doc: FindingsDocument): string {
+//
+// The summary line (not the footer) names the exact range reviewed:
+// doc.base_sha IS the diff-from commit — the recorded rule in cli.ts.
+//
+// `repoWebUrl` (e.g. https://github.com/org/repo) turns locations into
+// links pinned to doc.head_sha. It is OPTIONAL and cosmetic by contract:
+// absent, the comment renders as plain code spans, byte-identical to the
+// linkless shape — the renderer stays offline-testable and a posted comment
+// stays re-renderable from the artifact alone.
+export function renderPrComment(
+  doc: FindingsDocument,
+  repoWebUrl?: string,
+): string {
+  // Normalize away one trailing slash so `gh repo view` output and a
+  // hand-typed URL build the same links.
+  const webUrl = repoWebUrl?.endsWith("/")
+    ? repoWebUrl.slice(0, -1)
+    : repoWebUrl;
   const blocking = doc.findings.filter((f) => f.tier === "blocking");
   const advisory = doc.findings.filter((f) => f.tier === "advisory");
+  const headSha8 = code(doc.head_sha.slice(0, 8));
+  const headRef =
+    webUrl === undefined
+      ? headSha8
+      : `[${headSha8}](${webUrl}/commit/${doc.head_sha})`;
   const out: string[] = [PR_COMMENT_MARKER];
+  out.push("## pr-hero review");
+  out.push("");
   out.push(
-    `## pr-hero review — ${blocking.length} blocking, ` +
-      `${advisory.length} advisory`,
+    `**${blocking.length} blocking · ${advisory.length} advisory** — ` +
+      `${headRef}, diff from ${code(doc.base_sha.slice(0, 8))}`,
   );
   out.push("");
   if (doc.findings.length === 0) {
-    out.push("pr-hero reviewed this PR and found nothing to report.");
+    out.push("✅ pr-hero reviewed this PR and found nothing to report.");
+    out.push("");
   }
   // Blocking first, then advisory — the same order the report's sections use.
-  for (const finding of [...blocking, ...advisory]) {
-    out.push(
-      `- **${finding.tier}** ${code(`${finding.path}:${finding.line}`)} — ` +
-        oneLine(finding.claim),
-    );
-  }
-  out.push("");
+  out.push(...commentTierSection("🔴 Blocking", blocking, doc, webUrl));
+  out.push(...commentTierSection("🟡 Advisory", advisory, doc, webUrl));
   out.push("---");
   out.push("");
-  // The footer names the exact range reviewed (doc.base_sha IS the diff-from
-  // commit — the recorded rule in cli.ts) and keeps the report's public
-  // register: a comment that says "blocking" without the not-a-merge-gate
-  // sentence would overstate the tool's own contract.
+  // The footer keeps the report's public register: a comment that says
+  // "blocking" without the not-a-merge-gate sentence would overstate the
+  // tool's own contract. Comment voice: no em dashes in prose — the
+  // disclaimer joins with a colon.
   out.push(
-    `Reviewed \`${doc.head_sha.slice(0, 8)}\` (diff from ` +
-      `\`${doc.base_sha.slice(0, 8)}\`) · run ${doc.run_status} · ` +
-      `${engineLabel(doc)}. Assistant report, not a merge gate — every ` +
-      "line above is a claim to verify.",
+    `<sub>run ${doc.run_status} · ${engineLabel(doc)} · Assistant report, ` +
+      "not a merge gate: every line above is a claim to verify.</sub>",
   );
   return `${out.join("\n").trimEnd()}\n`;
+}
+
+// One tier of the PR comment. Omitted entirely at zero findings: an empty
+// "Blocking (0)" heading reads as a section that lost its content, not as
+// good news. No finding ids here — they are engine internals; the team
+// navigates by location (report.md keeps the ids).
+function commentTierSection(
+  heading: string,
+  findings: Finding[],
+  doc: FindingsDocument,
+  webUrl: string | undefined,
+): string[] {
+  if (findings.length === 0) return [];
+  const out: string[] = [`### ${heading} (${findings.length})`, ""];
+  for (const finding of findings) {
+    const location = code(`${finding.path}:${finding.line}`);
+    out.push(
+      webUrl === undefined
+        ? `#### ${location}`
+        : `#### [${location}](${blobUrl(webUrl, doc.head_sha, finding.path, `L${finding.line}`)})`,
+    );
+    out.push("");
+    // The claim is a paragraph, not a bullet: the section heading already
+    // carries the tier, and a ~100-word claim crammed into one bullet is
+    // exactly the wall of text this shape replaced.
+    out.push(oneLine(finding.claim));
+    out.push("");
+    if (finding.proof_refs.length > 0) {
+      // The refs are the substance behind the footer's "claim to verify".
+      // GitHub only renders markdown inside <details> when blank lines
+      // separate the HTML tags from the list — every blank line below is
+      // load-bearing, including the one before </details>.
+      out.push("<details><summary>Evidence</summary>");
+      out.push("");
+      for (const ref of finding.proof_refs) {
+        out.push(`- ${renderRef(ref, doc, webUrl)}`);
+      }
+      out.push("");
+      out.push("</details>");
+      out.push("");
+    }
+  }
+  return out;
+}
+
+// One Evidence bullet. With a web URL, the ref's leading `path:line` /
+// `path:start-end` anchor becomes a blob link and the trailing prose stays
+// plain text; a ref whose anchor does not parse falls back to the plain
+// backtick-guarded rendering — a broken link would be worse than none.
+function renderRef(
+  ref: string,
+  doc: FindingsDocument,
+  webUrl: string | undefined,
+): string {
+  if (webUrl === undefined) return code(ref);
+  const parsed = parseRefAnchor(ref);
+  if (parsed === null) return code(ref);
+  const fragment =
+    parsed.end === undefined
+      ? `L${parsed.start}`
+      : `L${parsed.start}-L${parsed.end}`;
+  const url = blobUrl(webUrl, doc.head_sha, parsed.path, fragment);
+  const link = `[${code(`${parsed.path}:${parsed.lines}`)}](${url})`;
+  return parsed.prose === "" ? link : `${link} ${oneLine(parsed.prose)}`;
+}
+
+// Splits one proof_ref into its leading location anchor and trailing prose,
+// REUSING extractAnchor (root-cause.ts) so the comment and the root-cause
+// clustering read the exact same token as "the location" — two parsers for
+// one format would drift. On top of the shared token this only checks that
+// the line part is numeric (`19` or `19-20`): extractAnchor accepts any
+// non-empty text after the colon, but only numbers make a #L fragment.
+function parseRefAnchor(ref: string): {
+  path: string;
+  lines: string;
+  start: number;
+  end?: number;
+  prose: string;
+} | null {
+  const anchor = extractAnchor([ref]);
+  if (anchor === null) return null;
+  const colon = anchor.lastIndexOf(":");
+  const path = anchor.slice(0, colon);
+  const lines = anchor.slice(colon + 1);
+  const match = /^(\d+)(?:-(\d+))?$/.exec(lines);
+  if (path.length === 0 || match?.[1] === undefined) return null;
+  return {
+    path,
+    lines,
+    start: Number(match[1]),
+    end: match[2] === undefined ? undefined : Number(match[2]),
+    prose: ref.trim().slice(anchor.length).trim(),
+  };
+}
+
+function blobUrl(
+  webUrl: string,
+  sha: string,
+  path: string,
+  fragment: string,
+): string {
+  return `${webUrl}/blob/${sha}/${path}#${fragment}`;
 }
 
 function runLines(doc: FindingsDocument, meta: ReportMeta): string[] {

@@ -278,6 +278,9 @@ describe("renderReport", () => {
 });
 
 describe("renderPrComment", () => {
+  const WEB_URL = "https://github.com/musivetech/musive";
+  const HEAD = "b".repeat(40);
+
   // The idempotency contract: postPrComment finds the previous comment by
   // this exact prefix, so the marker must be the very first line, always.
   test("the first line is exactly the marker", () => {
@@ -289,7 +292,9 @@ describe("renderPrComment", () => {
     ).toBe(PR_COMMENT_MARKER);
   });
 
-  test("the title carries the blocking/advisory counts", () => {
+  // doc.base_sha IS the diff-from commit (the recorded rule in cli.ts), so
+  // the summary line's two 8-char shas name the exact range reviewed.
+  test("the summary line carries the counts and the reviewed range", () => {
     const findings = [
       finding({ id: "F001", path: "src/a.ts", line: 10 }),
       finding({ id: "F002", path: "src/b.ts", line: 20 }),
@@ -302,47 +307,94 @@ describe("renderPrComment", () => {
       }),
     ];
     const body = renderPrComment(doc({ findings }));
-    expect(body).toContain("## pr-hero review — 2 blocking, 1 advisory");
+    expect(body).toContain("## pr-hero review");
+    expect(body).toContain(
+      "**2 blocking · 1 advisory** — `bbbbbbbb`, diff from `aaaaaaaa`",
+    );
   });
 
-  test("each finding carries tier, path:line and claim", () => {
+  test("tier sections carry the emoji headings and counts", () => {
     const findings = [
       finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      finding({ id: "F002", path: "src/b.ts", line: 20 }),
       finding({
-        id: "F002",
+        id: "F003",
         path: "src/c.ts",
         line: 30,
         severity: "WARNING",
         tier: "advisory",
-        claim: "the spinner loop never gets a cleanup",
       }),
     ];
     const body = renderPrComment(doc({ findings }));
-    expect(body).toContain(
-      "- **blocking** `src/a.ts:10` — the value is stored in seconds and " +
-        "read as milliseconds",
+    expect(body).toContain("### 🔴 Blocking (2)");
+    expect(body).toContain("### 🟡 Advisory (1)");
+  });
+
+  // The heading form, not the word: the summary line always says
+  // "0 blocking", so only "### 🔴 Blocking" discriminates.
+  test("an empty tier's section is omitted entirely", () => {
+    const body = renderPrComment(
+      doc({
+        findings: [
+          finding({ id: "F001", severity: "WARNING", tier: "advisory" }),
+        ],
+      }),
     );
-    expect(body).toContain(
-      "- **advisory** `src/c.ts:30` — the spinner loop never gets a cleanup",
+    expect(body).not.toContain("### 🔴 Blocking");
+    expect(body).toContain("### 🟡 Advisory (1)");
+  });
+
+  test("a finding renders as an h4 location plus a claim paragraph", () => {
+    const body = renderPrComment(
+      doc({
+        findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+      }),
     );
+    expect(body).toContain("#### `src/a.ts:10`");
+    expect(body).toContain(
+      "\n\nthe value is stored in seconds and read as milliseconds\n\n",
+    );
+    // The old wall-of-text shape must stay dead: no bullet, no bold tier.
+    expect(body).not.toContain("- the value is stored");
+    expect(body).not.toContain("**blocking**");
+    // And no finding ids: engine internals stay in report.md.
+    expect(body).not.toContain("F001");
+  });
+
+  // GitHub renders markdown inside <details> only when blank lines separate
+  // the HTML tags from the list — BOTH blanks below are load-bearing.
+  test("evidence folds into details with the blank-line discipline", () => {
+    const body = renderPrComment(doc({ findings: [finding({ id: "F001" })] }));
+    expect(body).toContain(
+      "<details><summary>Evidence</summary>\n\n" +
+        "- `src/duration.ts:19-20 (fromSeconds stores raw seconds)`\n\n" +
+        "</details>",
+    );
+  });
+
+  test("a finding without proof refs has no evidence block", () => {
+    const body = renderPrComment(
+      doc({ findings: [finding({ id: "F001", proof_refs: [] })] }),
+    );
+    expect(body).not.toContain("<details>");
+    expect(body).not.toContain("Evidence");
   });
 
   test("zero findings render the explicit clean bill", () => {
     const body = renderPrComment(doc());
-    expect(body).toContain("## pr-hero review — 0 blocking, 0 advisory");
+    expect(body).toContain("**0 blocking · 0 advisory**");
     expect(body).toContain(
-      "pr-hero reviewed this PR and found nothing to report.",
+      "✅ pr-hero reviewed this PR and found nothing to report.",
     );
+    expect(body).not.toContain("### ");
   });
 
-  // doc.base_sha IS the diff-from commit (the recorded rule in cli.ts), so
-  // the footer's two 8-char shas name the exact range that was reviewed.
-  test("the footer names the range, the run status and the engine", () => {
+  test("the footer is the sub line with run status and engine", () => {
     const body = renderPrComment(doc());
-    expect(body).toContain("`bbbbbbbb`");
-    expect(body).toContain("`aaaaaaaa`");
-    expect(body).toContain("run complete");
-    expect(body).toContain("pr-hero 0.1.0");
+    expect(body).toContain(
+      "<sub>run complete · pr-hero 0.1.0 · Assistant report, not a merge " +
+        "gate: every line above is a claim to verify.</sub>",
+    );
   });
 
   test("a document without engine info degrades honestly", () => {
@@ -356,7 +408,7 @@ describe("renderPrComment", () => {
   test("no cost and no token counts anywhere", () => {
     const bodies = [
       renderPrComment(doc()),
-      renderPrComment(doc({ findings: [finding({ id: "F001" })] })),
+      renderPrComment(doc({ findings: [finding({ id: "F001" })] }), WEB_URL),
     ];
     for (const body of bodies) {
       expect(body).not.toContain("$");
@@ -372,12 +424,80 @@ describe("renderPrComment", () => {
             id: "F001",
             claim: "line one\nline two",
             path: "src/`weird`.ts",
+            proof_refs: ["src/`x`.ts:1 (a\nmultiline ref)"],
           }),
         ],
       }),
     );
     expect(body).toContain("line one line two");
-    expect(body).toContain("`src/'weird'.ts:42`");
+    expect(body).toContain("#### `src/'weird'.ts:42`");
+    expect(body).toContain("- `src/'x'.ts:1 (a multiline ref)`");
+  });
+
+  test("a repo web url turns the location heading into a blob link", () => {
+    const body = renderPrComment(
+      doc({
+        findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+      }),
+      WEB_URL,
+    );
+    expect(body).toContain(
+      `#### [\`src/a.ts:10\`](${WEB_URL}/blob/${HEAD}/src/a.ts#L10)`,
+    );
+  });
+
+  test("a range ref links #L19-L20 and a single-line ref links #L19", () => {
+    const body = renderPrComment(
+      doc({
+        findings: [
+          finding({
+            id: "F001",
+            proof_refs: [
+              "src/duration.ts:19-20 (stores raw seconds)",
+              "src/consumer.ts:13 (reads as ms)",
+            ],
+          }),
+        ],
+      }),
+      WEB_URL,
+    );
+    expect(body).toContain(
+      `- [\`src/duration.ts:19-20\`](${WEB_URL}/blob/${HEAD}/src/duration.ts#L19-L20) (stores raw seconds)`,
+    );
+    expect(body).toContain(
+      `- [\`src/consumer.ts:13\`](${WEB_URL}/blob/${HEAD}/src/consumer.ts#L13) (reads as ms)`,
+    );
+  });
+
+  test("a ref with no parseable anchor falls back to a code span", () => {
+    const body = renderPrComment(
+      doc({
+        findings: [
+          finding({ id: "F001", proof_refs: ["see the config handling"] }),
+        ],
+      }),
+      WEB_URL,
+    );
+    expect(body).toContain("- `see the config handling`");
+    expect(body).not.toContain("- [`see");
+  });
+
+  test("the summary head sha links to the commit only with a url", () => {
+    const linked = renderPrComment(doc(), WEB_URL);
+    expect(linked).toContain(`[\`bbbbbbbb\`](${WEB_URL}/commit/${HEAD})`);
+    expect(renderPrComment(doc())).not.toContain("/commit/");
+  });
+
+  test("a trailing slash on the url is normalized away", () => {
+    const d = doc({ findings: [finding({ id: "F001" })] });
+    const withSlash = renderPrComment(d, `${WEB_URL}/`);
+    expect(withSlash).toBe(renderPrComment(d, WEB_URL));
+    expect(withSlash).not.toContain("musive//");
+  });
+
+  test("an absent url renders byte-identical to the plain shape", () => {
+    const d = doc({ findings: [finding({ id: "F001" })] });
+    expect(renderPrComment(d, undefined)).toBe(renderPrComment(d));
   });
 });
 
