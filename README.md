@@ -82,6 +82,27 @@ never touched, and reviews run while you keep working. Worktrees are kept and re
 each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
 codegraph daemon holds a socket in there).
 
+## When to run it
+
+Today every review is launched **by hand** — nothing fires on its own. The two moments that make
+sense:
+
+1. **Before opening the PR** — `pr-hero review` on your branch. The cheapest moment to catch
+   something: you are still in context and nothing is published yet.
+2. **On an existing PR** — `pr-hero review --pr <n>`, whenever you want a second reviewer's pass;
+   typically after Greptile has commented, so the head-to-head has both sides. Ran it too early?
+   The comparison can be redone later for $0 without paying a new review:
+   `bun run scripts/compare-pr.ts --pr <n> --findings <run-dir>/findings.json`.
+
+### Automation and CI — status
+
+| Stage | Status |
+| --- | --- |
+| Manual CLI (`review`, `--pr`, `--post`, `ledger`) | **Available now** — this README. |
+| Auto-trigger on PR creation (local watcher / hook) | Roadmap (Phase B3). Deliberately opt-in: every review spends real money, so nothing will ever fire without an explicit subscription to that spend. |
+| CI mode (GitHub Actions) | Roadmap (Phase E). Needs Claude auth in the runner and a per-PR budget decision. |
+| Required status check that blocks merges | **Deliberately deferred.** At the engine's measured recall it has no business gating a merge — the disclaimer in every report is the contract. |
+
 ## What a run produces
 
 Run artifacts land **outside** the repo, in `<repo-parent>/<repo>-prhero-runs/<run>/`:
