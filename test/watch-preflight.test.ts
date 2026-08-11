@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { CliUsageError, parseArgs } from "../src/preflight";
+import { DEFAULT_SIZE_GATE } from "../src/size-gate";
 import {
   contractTilde,
   countAttempts,
@@ -30,6 +31,7 @@ import {
   parseMarkerHead,
   parsePipelineMeta,
   parsePlistInterval,
+  parsePrFiles,
   parsePrList,
   parseWatchConfig,
   prheroHomePaths,
@@ -42,6 +44,7 @@ import {
   tickGate,
   upsertWatchRepo,
   WATCH_LAUNCHD_LABEL,
+  type WatchPrCandidate,
 } from "../src/watch-preflight";
 
 const HEAD_A = "a".repeat(40);
@@ -134,7 +137,17 @@ describe("parseWatchConfig", () => {
   test("minimal config gets every default", () => {
     const config = parseWatchConfig('{"repos":[{"path":"~/Desktop/x"}]}');
     expect(config).toEqual({
-      repos: [{ path: "~/Desktop/x", post: false, onPush: false }],
+      repos: [
+        {
+          path: "~/Desktop/x",
+          post: false,
+          onPush: false,
+          // Missing size keys fall back to the shipped defaults, so every
+          // config written before the size gate landed keeps working.
+          maxChangedLines: DEFAULT_SIZE_GATE.maxChangedLines,
+          maxChangedFiles: DEFAULT_SIZE_GATE.maxChangedFiles,
+        },
+      ],
       dailyCap: DEFAULT_DAILY_CAP,
       window: null,
     });
@@ -143,16 +156,72 @@ describe("parseWatchConfig", () => {
   test("full config round-trips", () => {
     const config = parseWatchConfig(
       JSON.stringify({
-        repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: true }],
+        repos: [
+          {
+            path: "~/Desktop/musive-s3",
+            post: true,
+            on_push: true,
+            max_changed_lines: 800,
+            max_changed_files: 40,
+          },
+        ],
         daily_cap: 3,
         window: { start: "09:00", end: "19:00" },
       }),
     );
     expect(config).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true, onPush: true }],
+      repos: [
+        {
+          path: "~/Desktop/musive-s3",
+          post: true,
+          onPush: true,
+          maxChangedLines: 800,
+          maxChangedFiles: 40,
+        },
+      ],
       dailyCap: 3,
       window: { start: "09:00", end: "19:00" },
     });
+  });
+
+  // Old config files predate the size gate entirely and must keep working
+  // untouched — the whole point of falling back rather than requiring keys.
+  test("a legacy entry without size keys keeps working on the defaults", () => {
+    const config = parseWatchConfig(
+      '{"repos":[{"path":"~/x","post":true,"on_push":true}]}',
+    );
+    expect(config.repos[0]?.maxChangedLines).toBe(
+      DEFAULT_SIZE_GATE.maxChangedLines,
+    );
+    expect(config.repos[0]?.maxChangedFiles).toBe(
+      DEFAULT_SIZE_GATE.maxChangedFiles,
+    );
+  });
+
+  // 0 is the documented "disable this limit" value, exactly like the
+  // daily_cap pause switch — so the floor is 0, not 1.
+  test("a zero size limit is legal and survives", () => {
+    const config = parseWatchConfig(
+      '{"repos":[{"path":"~/x","max_changed_lines":0,"max_changed_files":0}]}',
+    );
+    expect(config.repos[0]?.maxChangedLines).toBe(0);
+    expect(config.repos[0]?.maxChangedFiles).toBe(0);
+  });
+
+  test("a bad size limit names itself and its value", () => {
+    for (const raw of [
+      '{"repos":[{"path":"~/x","max_changed_lines":-1}]}',
+      '{"repos":[{"path":"~/x","max_changed_lines":"800"}]}',
+      '{"repos":[{"path":"~/x","max_changed_files":2.5}]}',
+    ]) {
+      expect(() => parseWatchConfig(raw)).toThrow(CliUsageError);
+    }
+    try {
+      parseWatchConfig('{"repos":[{"path":"~/x","max_changed_lines":-1}]}');
+    } catch (error) {
+      expect((error as Error).message).toContain("max_changed_lines");
+      expect((error as Error).message).toContain("-1");
+    }
   });
 
   // "daily_cap": 0 is the pause switch — legal, launches nothing.
@@ -254,12 +323,18 @@ describe("parsePrList", () => {
   test("reads the open-PR candidates", () => {
     expect(
       parsePrList(
-        `[{"number":5,"headRefOid":"${HEAD_A}","isDraft":false},` +
-          `{"number":7,"headRefOid":"${HEAD_B}","isDraft":true}]`,
+        `[{"number":5,"headRefOid":"${HEAD_A}","isDraft":false,` +
+          `"additions":10,"deletions":2,"changedFiles":3},` +
+          `{"number":7,"headRefOid":"${HEAD_B}","isDraft":true,` +
+          `"additions":0,"deletions":0,"changedFiles":0}]`,
       ),
     ).toEqual([
-      { pr: 5, head: HEAD_A, isDraft: false },
-      { pr: 7, head: HEAD_B, isDraft: true },
+      cand(5, HEAD_A, false, {
+        additions: 10,
+        deletions: 2,
+        changedFiles: 3,
+      }),
+      cand(7, HEAD_B, true),
     ]);
   });
 
@@ -273,11 +348,25 @@ describe("parsePrList", () => {
   });
 
   test("a failing field names itself", () => {
+    const SIZE = '"additions":0,"deletions":0,"changedFiles":0';
     const cases: [string, string][] = [
-      ['[{"headRefOid":"x","isDraft":false}]', "number"],
-      [`[{"number":0,"headRefOid":"${HEAD_A}","isDraft":false}]`, "number"],
-      ['[{"number":5,"headRefOid":"abc123","isDraft":false}]', "headRefOid"],
-      [`[{"number":5,"headRefOid":"${HEAD_A}"}]`, "isDraft"],
+      [`[{"headRefOid":"x","isDraft":false,${SIZE}}]`, "number"],
+      [
+        `[{"number":0,"headRefOid":"${HEAD_A}","isDraft":false,${SIZE}}]`,
+        "number",
+      ],
+      [
+        `[{"number":5,"headRefOid":"abc123","isDraft":false,${SIZE}}]`,
+        "headRefOid",
+      ],
+      [`[{"number":5,"headRefOid":"${HEAD_A}",${SIZE}}]`, "isDraft"],
+      // The size counters are validated just as loudly: a counter silently
+      // read as 0 would wave a monster PR straight past the gate.
+      [
+        `[{"number":5,"headRefOid":"${HEAD_A}","isDraft":false,` +
+          `"deletions":0,"changedFiles":0}]`,
+        "additions",
+      ],
     ];
     for (const [raw, field] of cases) {
       try {
@@ -288,6 +377,40 @@ describe("parsePrList", () => {
         expect((error as Error).message).toContain(field);
       }
     }
+  });
+});
+
+describe("parsePrFiles", () => {
+  // Projected into the SAME NumstatFile shape the git path produces, so one
+  // evaluateSizeGate serves both and the two can never drift.
+  test("projects gh's file list into numstat files", () => {
+    expect(
+      parsePrFiles(
+        '{"files":[{"path":"src/a.ts","additions":10,"deletions":2,' +
+          '"changeType":"MODIFIED"},' +
+          '{"path":"bun.lock","additions":900,"deletions":80,' +
+          '"changeType":"MODIFIED"}]}',
+      ),
+    ).toEqual([
+      { path: "src/a.ts", insertions: 10, deletions: 2, binary: false },
+      { path: "bun.lock", insertions: 900, deletions: 80, binary: false },
+    ]);
+  });
+
+  test("an empty file list is a valid shape", () => {
+    expect(parsePrFiles('{"files":[]}')).toEqual([]);
+  });
+
+  test("invalid JSON, wrong shapes and bad fields all fail loud", () => {
+    expect(() => parsePrFiles("not json")).toThrow(CliUsageError);
+    expect(() => parsePrFiles("[]")).toThrow(CliUsageError);
+    expect(() => parsePrFiles('{"files":"x"}')).toThrow(CliUsageError);
+    expect(() =>
+      parsePrFiles('{"files":[{"additions":1,"deletions":1}]}'),
+    ).toThrow(CliUsageError);
+    expect(() =>
+      parsePrFiles('{"files":[{"path":"a","deletions":1}]}'),
+    ).toThrow(CliUsageError);
   });
 });
 
@@ -466,6 +589,28 @@ describe("attempts counting", () => {
 // ---------------------------------------------------------------------------
 // The tick decision.
 
+// Size counters default to 0 (a trivially small PR): the size gate is
+// evaluated by the SHELL and handed in through TickRepoFacts.tooLarge, so
+// these fields only matter to the parser's own tests.
+function cand(
+  pr: number,
+  head: string,
+  isDraft = false,
+  size: Partial<
+    Pick<WatchPrCandidate, "additions" | "deletions" | "changedFiles">
+  > = {},
+): WatchPrCandidate {
+  return {
+    pr,
+    head,
+    isDraft,
+    additions: 0,
+    deletions: 0,
+    changedFiles: 0,
+    ...size,
+  };
+}
+
 function repo(overrides: Partial<TickRepoFacts> = {}): TickRepoFacts {
   return {
     path: "/x/musive",
@@ -477,6 +622,7 @@ function repo(overrides: Partial<TickRepoFacts> = {}): TickRepoFacts {
     localReviews: [],
     remoteHeads: [],
     attempts: [],
+    tooLarge: [],
     ...overrides,
   };
 }
@@ -532,11 +678,11 @@ describe("decideTick", () => {
         repos: [
           repo({
             prs: [
-              { pr: 1, head: HEAD_A, isDraft: true },
-              { pr: 2, head: HEAD_A, isDraft: false },
-              { pr: 3, head: HEAD_A, isDraft: false },
-              { pr: 4, head: HEAD_A, isDraft: false },
-              { pr: 5, head: HEAD_A, isDraft: false },
+              cand(1, HEAD_A, true),
+              cand(2, HEAD_A, false),
+              cand(3, HEAD_A, false),
+              cand(4, HEAD_A, false),
+              cand(5, HEAD_A, false),
             ],
             localReviews: [{ pr: 2, head: HEAD_A }],
             remoteHeads: [{ pr: 3, heads: [HEAD_A], markerSeen: true }],
@@ -568,7 +714,7 @@ describe("decideTick", () => {
   // reviewed-prior-head, and a push never re-bills.
   test("a new head re-arms the PR only under on_push", () => {
     const facts = {
-      prs: [{ pr: 2, head: HEAD_B, isDraft: false }],
+      prs: [cand(2, HEAD_B, false)],
       localReviews: [{ pr: 2, head: HEAD_A }],
       remoteHeads: [{ pr: 2, heads: [HEAD_A], markerSeen: true }],
       attempts: [{ pr: 2, head: HEAD_A, count: 2 }],
@@ -587,11 +733,121 @@ describe("decideTick", () => {
     ]);
   });
 
+  // ---------------------------------------------------------------------
+  // The size gate's skip. It is a COST skip, and the three properties below
+  // are what keep it from behaving like a review or a failure.
+
+  test("a too-large candidate is skipped, never launched", () => {
+    const decision = decideTick(
+      tick({
+        repos: [repo({ prs: [cand(4, HEAD_A)], tooLarge: [4] })],
+      }),
+    );
+    expect(decision.skips).toEqual([
+      { repo: "/x/musive", pr: 4, head: HEAD_A, reason: "too-large" },
+    ]);
+    expect(decision.eligible).toEqual([]);
+    expect(decision.launch).toBeNull();
+  });
+
+  test("only the listed PR is skipped; the rest of the queue still runs", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({ prs: [cand(4, HEAD_A), cand(6, HEAD_B)], tooLarge: [4] }),
+        ],
+      }),
+    );
+    expect(decision.skips.map((s) => s.pr)).toEqual([4]);
+    expect(decision.launch?.pr).toBe(6);
+  });
+
+  // Ordering: an already-reviewed PR reads as reviewed, not as too-large —
+  // the reason a human sees in the log must be the one that actually
+  // settled it, and "reviewed" is the more informative of the two.
+  test("a reviewed PR keeps its reviewed reason even when oversized", () => {
+    expect(
+      decideTick(
+        tick({
+          repos: [
+            repo({
+              prs: [cand(4, HEAD_A)],
+              localReviews: [{ pr: 4, head: HEAD_A }],
+              tooLarge: [4],
+            }),
+          ],
+        }),
+      ).skips[0]?.reason,
+    ).toBe("reviewed-local");
+  });
+
+  // (a) It must NOT consume an attempt. MAX_WATCH_ATTEMPTS is the poison-PR
+  // guard; an oversized PR is not a failing review, and a skip that ate an
+  // attempt would permanently retire a PR after two ticks.
+  test("(a) a too-large skip does not consume an attempt", () => {
+    const facts = { prs: [cand(4, HEAD_A)], tooLarge: [4] };
+    // Ticking it again and again never moves the reason toward exhaustion,
+    // because decideTick reads attempts and never writes them.
+    for (let i = 0; i < MAX_WATCH_ATTEMPTS + 3; i++) {
+      const decision = decideTick(tick({ repos: [repo(facts)] }));
+      expect(decision.skips[0]?.reason).toBe("too-large");
+    }
+    // And the attempts guard, when it does apply, is untouched by the gate:
+    // the same PR under the attempts cap still reads as exhausted.
+    expect(
+      decideTick(
+        tick({
+          repos: [
+            repo({
+              prs: [cand(4, HEAD_A)],
+              attempts: [{ pr: 4, head: HEAD_A, count: MAX_WATCH_ATTEMPTS }],
+            }),
+          ],
+        }),
+      ).skips[0]?.reason,
+    ).toBe("attempts-exhausted");
+  });
+
+  // (b) It writes no review marker, so a force-push that SHRINKS the PR
+  // makes it eligible again on the very next tick. The verdict lives only
+  // in tooLarge, which the shell recomputes from live counters each tick.
+  test("(b) a shrunk PR becomes eligible again with no state to clear", () => {
+    const prs = [cand(4, HEAD_A)];
+    expect(
+      decideTick(tick({ repos: [repo({ prs, tooLarge: [4] })] })).launch,
+    ).toBeNull();
+    // Next tick, same PR, same head, now under the limits: nothing had to
+    // be forgotten for it to run.
+    expect(
+      decideTick(tick({ repos: [repo({ prs, tooLarge: [] })] })).launch?.pr,
+    ).toBe(4);
+  });
+
+  // (c) It does not arm the on_push "one review per PR" state. That state
+  // is armed by a comparison.json or a marker comment — both of which only
+  // a review that RAN produces — so under the default policy a previously
+  // skipped PR is still a first review, not a repeat.
+  test("(c) a too-large skip never arms the one-review-per-PR state", () => {
+    // The skip leaves no local review and no marker behind…
+    const after = repo({
+      prs: [cand(4, HEAD_A)],
+      localReviews: [],
+      remoteHeads: [],
+      tooLarge: [],
+    });
+    const decision = decideTick(tick({ repos: [after] }));
+    // …so on the default (on_push: false) policy it launches, rather than
+    // reading as reviewed-prior-head.
+    expect(after.onPush).toBe(false);
+    expect(decision.skips).toEqual([]);
+    expect(decision.launch?.pr).toBe(4);
+  });
+
   // The local half alone also blocks under the default: any comparison.json
   // with the same PR number, whatever head it reviewed.
   test("a local prior-head review blocks without on_push, by itself", () => {
     const facts = {
-      prs: [{ pr: 7, head: HEAD_B, isDraft: false }],
+      prs: [cand(7, HEAD_B, false)],
       localReviews: [{ pr: 7, head: HEAD_A }],
     };
     expect(decideTick(tick({ repos: [repo(facts)] })).skips[0]?.reason).toBe(
@@ -610,7 +866,7 @@ describe("decideTick", () => {
       tick({
         repos: [
           repo({
-            prs: [{ pr: 2, head: HEAD_A, isDraft: false }],
+            prs: [cand(2, HEAD_A, false)],
             localReviews: [{ pr: 2, head: HEAD_A }],
           }),
         ],
@@ -621,7 +877,7 @@ describe("decideTick", () => {
       tick({
         repos: [
           repo({
-            prs: [{ pr: 3, head: HEAD_A, isDraft: false }],
+            prs: [cand(3, HEAD_A, false)],
             remoteHeads: [{ pr: 3, heads: [HEAD_A], markerSeen: true }],
           }),
         ],
@@ -636,7 +892,7 @@ describe("decideTick", () => {
   // one-review-per-PR default asks.
   test("a headless legacy marker blocks only without on_push", () => {
     const facts = {
-      prs: [{ pr: 9, head: HEAD_A, isDraft: false }],
+      prs: [cand(9, HEAD_A, false)],
       remoteHeads: [{ pr: 9, heads: [], markerSeen: true }],
     };
     const rearmed = decideTick(
@@ -657,7 +913,7 @@ describe("decideTick", () => {
           repos: [
             repo({
               onPush,
-              prs: [{ pr: 11, head: HEAD_A, isDraft: false }],
+              prs: [cand(11, HEAD_A, false)],
               remoteHeads: [{ pr: 11, heads: [], markerSeen: false }],
             }),
           ],
@@ -672,7 +928,7 @@ describe("decideTick", () => {
       tick({
         repos: [
           repo({
-            prs: [{ pr: 4, head: HEAD_A, isDraft: false }],
+            prs: [cand(4, HEAD_A, false)],
             attempts: [{ pr: 4, head: HEAD_A, count: 1 }],
           }),
         ],
@@ -687,15 +943,12 @@ describe("decideTick", () => {
         repos: [
           repo({
             path: "/x/alpha",
-            prs: [{ pr: 12, head: HEAD_A, isDraft: false }],
+            prs: [cand(12, HEAD_A, false)],
           }),
           repo({
             path: "/x/beta",
             post: true,
-            prs: [
-              { pr: 3, head: HEAD_B, isDraft: false },
-              { pr: 8, head: HEAD_C, isDraft: false },
-            ],
+            prs: [cand(3, HEAD_B, false), cand(8, HEAD_C, false)],
           }),
         ],
       }),
@@ -717,11 +970,11 @@ describe("decideTick", () => {
         repos: [
           repo({
             path: "/x/first",
-            prs: [{ pr: 5, head: HEAD_A, isDraft: false }],
+            prs: [cand(5, HEAD_A, false)],
           }),
           repo({
             path: "/x/second",
-            prs: [{ pr: 5, head: HEAD_B, isDraft: false }],
+            prs: [cand(5, HEAD_B, false)],
           }),
         ],
       }),
@@ -738,10 +991,7 @@ describe("decideTick", () => {
         localMinutes: 20 * 60,
         repos: [
           repo({
-            prs: [
-              { pr: 1, head: HEAD_A, isDraft: true },
-              { pr: 2, head: HEAD_B, isDraft: false },
-            ],
+            prs: [cand(1, HEAD_A, true), cand(2, HEAD_B, false)],
           }),
         ],
       }),
@@ -757,7 +1007,7 @@ describe("decideTick", () => {
       tick({
         dailyCap: 5,
         launchedToday: 5,
-        repos: [repo({ prs: [{ pr: 2, head: HEAD_B, isDraft: false }] })],
+        repos: [repo({ prs: [cand(2, HEAD_B, false)] })],
       }),
     );
     expect(decision.gate).toBe("cap-reached");
@@ -1076,14 +1326,30 @@ describe("contractTilde", () => {
 describe("upsertWatchRepo", () => {
   const HOME = "/Users/juanma";
   const REPO = "/Users/juanma/Desktop/musive-s3";
-  const FLAGS = { post: true, onPush: false };
+  const FLAGS = {
+    post: true,
+    onPush: false,
+    maxChangedLines: DEFAULT_SIZE_GATE.maxChangedLines,
+    maxChangedFiles: DEFAULT_SIZE_GATE.maxChangedFiles,
+  };
+  const SIZE_KEYS = {
+    max_changed_lines: DEFAULT_SIZE_GATE.maxChangedLines,
+    max_changed_files: DEFAULT_SIZE_GATE.maxChangedFiles,
+  };
 
   test("no config yet: creates one with the shipped defaults", () => {
     const result = upsertWatchRepo(null, REPO, FLAGS, HOME);
     expect(result.action).toBe("added");
     expect(result.storedPath).toBe("~/Desktop/musive-s3");
     expect(JSON.parse(result.config)).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: false }],
+      repos: [
+        {
+          path: "~/Desktop/musive-s3",
+          post: true,
+          on_push: false,
+          ...SIZE_KEYS,
+        },
+      ],
       daily_cap: DEFAULT_DAILY_CAP,
       window: null,
     });
@@ -1102,14 +1368,19 @@ describe("upsertWatchRepo", () => {
     const result = upsertWatchRepo(
       raw,
       REPO,
-      { post: false, onPush: true },
+      { ...FLAGS, post: false, onPush: true },
       HOME,
     );
     expect(result.action).toBe("added");
     expect(JSON.parse(result.config)).toEqual({
       repos: [
         { path: "~/other", post: true },
-        { path: "~/Desktop/musive-s3", post: false, on_push: true },
+        {
+          path: "~/Desktop/musive-s3",
+          post: false,
+          on_push: true,
+          ...SIZE_KEYS,
+        },
       ],
       daily_cap: 3,
       window: { start: "09:00", end: "19:00" },
@@ -1129,7 +1400,14 @@ describe("upsertWatchRepo", () => {
     expect(result.action).toBe("updated");
     expect(result.storedPath).toBe("~/Desktop/musive-s3");
     expect(JSON.parse(result.config)).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: false }],
+      repos: [
+        {
+          path: "~/Desktop/musive-s3",
+          post: true,
+          on_push: false,
+          ...SIZE_KEYS,
+        },
+      ],
     });
   });
 
@@ -1141,11 +1419,18 @@ describe("upsertWatchRepo", () => {
     const result = upsertWatchRepo(
       raw,
       REPO,
-      { post: true, onPush: true },
+      { ...FLAGS, post: true, onPush: true },
       HOME,
     );
     expect(JSON.parse(result.config)).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: true }],
+      repos: [
+        {
+          path: "~/Desktop/musive-s3",
+          post: true,
+          on_push: true,
+          ...SIZE_KEYS,
+        },
+      ],
     });
   });
 
@@ -1166,6 +1451,7 @@ describe("upsertWatchRepo", () => {
           path: "~/Desktop/musive-s3",
           post: true,
           on_push: false,
+          ...SIZE_KEYS,
           note: "prod",
         },
       ],
@@ -1178,7 +1464,7 @@ describe("upsertWatchRepo", () => {
     const result = upsertWatchRepo(
       null,
       "/opt/repo",
-      { post: false, onPush: false },
+      { ...FLAGS, post: false, onPush: false },
       HOME,
     );
     expect(result.storedPath).toBe("/opt/repo");
@@ -1313,7 +1599,15 @@ describe("renderWatchStatus", () => {
   const BASE = {
     configPath: "/Users/x/.prhero/watch.json",
     config: {
-      repos: [{ path: "~/Desktop/musive-s3", post: true, onPush: false }],
+      repos: [
+        {
+          path: "~/Desktop/musive-s3",
+          post: true,
+          onPush: false,
+          maxChangedLines: DEFAULT_SIZE_GATE.maxChangedLines,
+          maxChangedFiles: DEFAULT_SIZE_GATE.maxChangedFiles,
+        },
+      ],
       dailyCap: 5,
       window: { start: "09:00", end: "19:00" },
     },

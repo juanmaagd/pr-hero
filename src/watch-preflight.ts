@@ -10,7 +10,8 @@
 
 import path from "node:path";
 import { PR_COMMENT_MARKER_PREFIX } from "./pr-preflight";
-import { CliUsageError, isFullCommitId } from "./preflight";
+import { CliUsageError, isFullCommitId, type NumstatFile } from "./preflight";
+import { DEFAULT_SIZE_GATE } from "./size-gate";
 
 // ---------------------------------------------------------------------------
 // ~/.prhero/ layout — one source for every path the watcher owns, so the
@@ -62,6 +63,11 @@ export interface WatchRepoConfig {
   // NUMBER blocks it, whatever head it covered. true: the original (pr,
   // head) key — every push re-arms the PR. See candidateSkipReason.
   onPush: boolean;
+  // The size gate's per-repo thresholds (see size-gate.ts). A MISSING key
+  // falls back to DEFAULT_SIZE_GATE, so every config file written before
+  // the gate landed keeps working untouched.
+  maxChangedLines: number;
+  maxChangedFiles: number;
 }
 
 export interface WatchWindow {
@@ -121,7 +127,23 @@ export function parseWatchConfig(raw: string): WatchConfig {
           JSON.stringify(repo.on_push),
       );
     }
-    return { path: repo.path, post, onPush };
+    return {
+      path: repo.path,
+      post,
+      onPush,
+      maxChangedLines: sizeLimit(
+        repo.max_changed_lines,
+        DEFAULT_SIZE_GATE.maxChangedLines,
+        i,
+        "max_changed_lines",
+      ),
+      maxChangedFiles: sizeLimit(
+        repo.max_changed_files,
+        DEFAULT_SIZE_GATE.maxChangedFiles,
+        i,
+        "max_changed_files",
+      ),
+    };
   });
   const cap = record.daily_cap ?? DEFAULT_DAILY_CAP;
   // Zero is legal on purpose: `"daily_cap": 0` is the pause switch — the
@@ -134,6 +156,25 @@ export function parseWatchConfig(raw: string): WatchConfig {
   }
   const window = parseWindow(record.window);
   return { repos: parsedRepos, dailyCap: cap, window };
+}
+
+// Zero is legal and MEANINGFUL — like daily_cap's pause switch, it is the
+// documented "disable this limit" value, not a nonsense input — so the
+// validation floor is 0, not 1. Absent falls back to the shipped default.
+function sizeLimit(
+  value: unknown,
+  fallback: number,
+  i: number,
+  key: string,
+): number {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new CliUsageError(
+      `watch.json repos[${i}].${key} must be a non-negative integer ` +
+        `(0 disables the limit), got: ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
 }
 
 function parseWindow(value: unknown): WatchWindow | null {
@@ -218,6 +259,11 @@ export interface ConfigUpsert {
 export interface WatchRepoFlags {
   post: boolean;
   onPush: boolean;
+  // Size-gate thresholds, written on every add/update like every other flag
+  // here — absent on the command line means "the shipped default", per this
+  // command's disclosed reset semantics.
+  maxChangedLines: number;
+  maxChangedFiles: number;
 }
 
 // Idempotent by design: re-adding a listed repo UPDATES its flags in place
@@ -236,7 +282,7 @@ export function upsertWatchRepo(
   if (raw === null) {
     return {
       config: serializeConfig({
-        repos: [{ path: storedPath, post: flags.post, on_push: flags.onPush }],
+        repos: [repoEntry(storedPath, flags)],
         daily_cap: DEFAULT_DAILY_CAP,
         window: null,
       }),
@@ -252,6 +298,8 @@ export function upsertWatchRepo(
     if (sameRepoPath(entry.path as string, repoRoot, home)) {
       entry.post = flags.post;
       entry.on_push = flags.onPush;
+      entry.max_changed_lines = flags.maxChangedLines;
+      entry.max_changed_files = flags.maxChangedFiles;
       return {
         config: serializeConfig(record),
         action: "updated",
@@ -259,8 +307,23 @@ export function upsertWatchRepo(
       };
     }
   }
-  repos.push({ path: storedPath, post: flags.post, on_push: flags.onPush });
+  repos.push(repoEntry(storedPath, flags));
   return { config: serializeConfig(record), action: "added", storedPath };
+}
+
+// One shape for both the create and the append path: two literals would
+// drift the day a knob is added.
+function repoEntry(
+  storedPath: string,
+  flags: WatchRepoFlags,
+): Record<string, unknown> {
+  return {
+    path: storedPath,
+    post: flags.post,
+    on_push: flags.onPush,
+    max_changed_lines: flags.maxChangedLines,
+    max_changed_files: flags.maxChangedFiles,
+  };
 }
 
 export interface ConfigRemoval {
@@ -320,10 +383,15 @@ export interface WatchPrCandidate {
   pr: number;
   head: string;
   isDraft: boolean;
+  // GitHub's own aggregate counters, free in the same list response — the
+  // size gate's zero-extra-call first tier.
+  additions: number;
+  deletions: number;
+  changedFiles: number;
 }
 
-// Parses the raw stdout of `gh pr list --json number,headRefOid,isDraft`
-// (open PRs only — gh's default state filter is the one the watcher wants).
+// Parses the raw stdout of `gh pr list --json <PR_LIST_JSON_FIELDS>` (open
+// PRs only — gh's default state filter is the one the watcher wants).
 export function parsePrList(raw: string): WatchPrCandidate[] {
   let parsed: unknown;
   try {
@@ -362,7 +430,80 @@ export function parsePrList(raw: string): WatchPrCandidate[] {
           JSON.stringify(isDraft),
       );
     }
-    return { pr, head, isDraft };
+    return {
+      pr,
+      head,
+      isDraft,
+      additions: countField(record, i, "additions"),
+      deletions: countField(record, i, "deletions"),
+      changedFiles: countField(record, i, "changedFiles"),
+    };
+  });
+}
+
+// Loud, like every other field here: a size counter silently read as 0 would
+// wave a monster PR straight past the gate — the exact failure the gate
+// exists to prevent — and it would look identical to a genuinely tiny PR.
+function countField(
+  record: Record<string, unknown>,
+  i: number,
+  key: string,
+): number {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new CliUsageError(
+      `gh pr list [${i}].${key} must be a non-negative integer, got: ` +
+        JSON.stringify(value),
+    );
+  }
+  return value;
+}
+
+// Parses the raw stdout of `gh pr view <n> --json files` into the same
+// NumstatFile shape the local gate uses, so ONE evaluateSizeGate serves both
+// the git path and the GitHub path — two size gates would drift.
+//
+// `binary` is always false: GitHub's file list carries no binary marker, and
+// for a binary file it simply reports 0/0 — which is what a binary file
+// contributes anyway, so the gate's arithmetic is unaffected.
+export function parsePrFiles(raw: string): NumstatFile[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new CliUsageError(
+      `gh pr view --json files returned invalid JSON: ${(error as Error).message}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new CliUsageError(
+      "gh pr view --json files must return a JSON object",
+    );
+  }
+  const files = (parsed as Record<string, unknown>).files;
+  if (!Array.isArray(files)) {
+    throw new CliUsageError(
+      `gh pr view --json files "files" must be an array, got: ${JSON.stringify(files)}`,
+    );
+  }
+  return files.map((entry, i) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new CliUsageError(`gh pr view files[${i}] must be an object`);
+    }
+    const record = entry as Record<string, unknown>;
+    const filePath = record.path;
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      throw new CliUsageError(
+        `gh pr view files[${i}].path must be a non-empty string, got: ` +
+          JSON.stringify(filePath),
+      );
+    }
+    return {
+      path: filePath,
+      insertions: countField(record, i, "additions"),
+      deletions: countField(record, i, "deletions"),
+      binary: false,
+    };
   });
 }
 
@@ -541,6 +682,7 @@ export type SkipReason =
   | "reviewed-local"
   | "reviewed-remote"
   | "reviewed-prior-head"
+  | "too-large"
   | "attempts-exhausted";
 
 export interface TickRepoFacts {
@@ -562,6 +704,11 @@ export interface TickRepoFacts {
   // PR must read as unguarded, not covered.
   remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[];
   attempts: { pr: number; head: string; count: number }[];
+  // PR numbers the size gate rejected THIS TICK. Computed fresh by the
+  // shell every tick and never persisted — see the recompute-every-tick WHY
+  // on candidateSkipReason. A PR absent here was either under the limits or
+  // never evaluated (the shell settles cheaper reasons first).
+  tooLarge: number[];
 }
 
 export type TickGate = "open" | "window-closed" | "cap-reached";
@@ -653,8 +800,9 @@ export function decideTick(input: TickInput): TickDecision {
 
 // The checks run in a FIXED order because the first hit is the reason a
 // human reads in the log: draft → reviewed-local → local prior head →
-// reviewed-remote → remote prior marker → attempts. The same-head checks
-// run BEFORE the prior-head ones so the more specific reason always wins.
+// too-large → reviewed-remote → remote prior marker → attempts. The
+// same-head checks run BEFORE the prior-head ones so the more specific
+// reason always wins.
 //
 // The re-arm policy: under on_push (the original behavior) a new push
 // changes the head, every (pr, head) key is fresh by construction, and an
@@ -679,6 +827,28 @@ function candidateSkipReason(
   if (!repo.onPush && repo.localReviews.some((r) => r.pr === candidate.pr)) {
     return "reviewed-prior-head";
   }
+  // The size gate (size-gate.ts) — a COST skip, not a quality judgement and
+  // not a failure. It sits here, after the local review checks and before
+  // the remote ones, because the shell can settle it from facts it already
+  // holds and thereby skip the per-PR comments fetch for an oversized PR.
+  //
+  // Three properties this skip MUST have, each of which a later change could
+  // quietly break:
+  //
+  //   (a) It does NOT consume an attempt. MAX_WATCH_ATTEMPTS exists for a
+  //       POISON PR — one that keeps killing the review — and attempts are
+  //       counted from run artifacts, which a gate skip never creates (the
+  //       CLI gate fires before createPrRunDir). Nothing here touches the
+  //       attempts bookkeeping below, and nothing here may start.
+  //   (b) It writes NO review marker, local or remote. A force-push can
+  //       shrink a PR back under the limits, and it must become eligible on
+  //       the very next tick — so the verdict is RECOMPUTED every tick from
+  //       live gh counters and never persisted anywhere.
+  //   (c) It does NOT arm the on_push "one review per PR" state. That state
+  //       is armed by a comparison.json or a marker comment, both of which
+  //       only a review that actually ran produces. A skip is not a review;
+  //       treating it as one would permanently retire the PR.
+  if (repo.tooLarge.includes(candidate.pr)) return "too-large";
   const remote = repo.remoteHeads.find((r) => r.pr === candidate.pr);
   if ((remote?.heads ?? []).includes(candidate.head)) {
     return "reviewed-remote";
@@ -965,7 +1135,11 @@ export function renderWatchStatus(facts: WatchStatusFacts): string[] {
     }
     for (const repo of facts.config.repos) {
       lines.push(
-        row("", `${repo.path} post=${repo.post} on_push=${repo.onPush}`),
+        row(
+          "",
+          `${repo.path} post=${repo.post} on_push=${repo.onPush} ` +
+            `max_lines=${repo.maxChangedLines} max_files=${repo.maxChangedFiles}`,
+        ),
       );
     }
     lines.push(

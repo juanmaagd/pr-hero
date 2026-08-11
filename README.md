@@ -214,6 +214,40 @@ Run artifacts land **outside** the repo, in `<repo-parent>/<repo>-prhero-runs/<r
   not just the diff — and larger trees cost more (a 45-file tree measured $11–15). Wall time is
   minutes, not seconds: ~10 for a small diff, up to ~25 measured on a large tree. The printed band
   is an order-of-magnitude guide, not a quote — the same tree has billed 34% apart across runs.
+### The size gate — a cost gate, not a quality gate
+
+Past a size threshold pr-hero **skips the review** instead of running it. Small trees bill $1.9–$4.8;
+the 45-file / +2775 −1237 bench tree billed $6.58–$17.92 across 18 iterations — the cost roughly
+triples *and* its spread widens to ~2.7x. The gate exists because that bill is unpredictable, and
+because an unattended watcher must not be the thing that discovers it.
+
+**It is not a claim about quality.** We have no evidence that a bigger diff reviews worse: attention
+dilution was tested and falsified (`fixtures/scale-probe.ts`), and the one measured Greptile-only
+miss came from a 7-file PR. If a large diff is worth its price, `--force` reviews it.
+
+The gate counts **effective** changed lines (insertions + deletions) and files — generated content is
+excluded first, so a regenerated lockfile beside a ten-line change does not trip it. Excluded by
+default: `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`,
+`*.min.js`, `*.min.css`, `*.snap`.
+
+| Profile | Lines | Files | For |
+| --- | --- | --- | --- |
+| Conservative | `--max-changed-lines 800` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
+| **Default (shipped)** | **1500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
+| Permissive | `--max-changed-lines 3000` | `--max-changed-files 150` | You would rather pay than skip. |
+
+```bash
+pr-hero review --pr 42 --dry-run          # prints the gate verdict, spends nothing
+pr-hero review --pr 42 --force            # review it anyway (does NOT skip the cost prompt)
+pr-hero review --pr 42 --max-changed-lines 0   # 0 disables that limit entirely
+pr-hero watch add --max-changed-lines 800      # per-repo threshold for the watcher
+```
+
+A skipped review exits 1 with a one-line reason and no stack. In watch mode it logs
+`skipped … reason=too-large` and costs nothing further: it does **not** consume a poison-PR attempt,
+writes no review marker, and does not arm the one-review-per-PR state — a force-push that shrinks the
+PR makes it eligible again on the next tick, because the gate is recomputed every tick.
+
 - Findings vary run to run on the same tree. That is the nature of the instrument: treat single
   runs as evidence, not verdicts, and triage before acting.
 - Verify what it reports. Findings are claims with cited code, tiered by deterministic rules — the

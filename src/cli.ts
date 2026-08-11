@@ -71,6 +71,7 @@ import {
   parseArgs,
   parseLocalConfig,
   parseNumstat,
+  parseNumstatFiles,
   parseRemoteHead,
   resolveAgentsDirSetting,
   resolveBaseRef,
@@ -90,6 +91,12 @@ import {
   renderPrComment,
   renderReport,
 } from "./report";
+import {
+  evaluateSizeGate,
+  evaluateSizeGateAggregate,
+  sizeGateConfig,
+  sizeGateLine,
+} from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
 import { watchCommand } from "./watch";
@@ -316,7 +323,9 @@ async function review(options: CliOptions): Promise<number> {
   if (!numstat.ok) {
     throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
   }
+  const numstatFiles = parseNumstatFiles(numstat.stdout);
   const diffStat: DiffStat = parseNumstat(numstat.stdout);
+  const sizeGate = evaluateSizeGate(numstatFiles, sizeGateConfig(options));
 
   // 10 — MCP registry.
   const mcpConfigPath = path.join(runDir, "mcp.json");
@@ -360,21 +369,39 @@ async function review(options: CliOptions): Promise<number> {
     estimate,
     hunterCount,
   });
+  log();
+  log(sizeGateLine(sizeGate));
+  if (!sizeGate.ok && options.force) {
+    log("--force given: reviewing anyway.");
+  }
 
-  // 12 — the free exit.
+  // 12 — the free exit. Dry run reports the gate verdict (including that it
+  // WOULD skip) and still exits 0: its contract is "everything except
+  // spawn", and a $0 report is never a failure.
   if (options.dryRun) {
     log();
+    if (!sizeGate.ok && !options.force) {
+      log("dry run: this diff would be SKIPPED by the size gate (exit 1).");
+    }
     log("dry run: nothing was spawned and nothing was spent.");
     return 0;
   }
 
-  // 13 — the paid one.
+  // 13 — the size gate, BEFORE the cost band's confirm() and never behind
+  // it. That ordering is the whole feature: the watcher spawns reviews with
+  // --yes, so a gate living inside the confirmation would never fire in the
+  // one place — unattended spend — it exists to protect.
+  if (!sizeGate.ok && !options.force) {
+    throw new CliError(sizeGate.message);
+  }
+
+  // 14 — the paid one.
   if (!options.yes && !(await confirm(estimate.low, estimate.high))) {
     log("aborted; nothing was spent.");
     return 1;
   }
 
-  // 14 — run, with live progress: the expectation line up front, then one
+  // 15 — run, with live progress: the expectation line up front, then one
   // stderr line per pipeline event (plus a TTY heartbeat between them).
   log(
     `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
@@ -420,7 +447,7 @@ async function review(options: CliOptions): Promise<number> {
   }
   const wallMs = Math.round(performance.now() - started);
 
-  // 15 — the artifact.
+  // 16 — the artifact.
   const telemetry: Telemetry = {
     // Local mode neither builds nor syncs a codegraph index: it consumes
     // whatever the repo already has, so there is no index cost to report.
@@ -451,7 +478,7 @@ async function review(options: CliOptions): Promise<number> {
   const findingsPath = path.join(runDir, "findings.json");
   await writeFindings(findingsPath, doc);
 
-  // 16 — the report.
+  // 17 — the report.
   const reportPath = path.join(runDir, "report.md");
   await Bun.write(
     reportPath,
@@ -465,7 +492,7 @@ async function review(options: CliOptions): Promise<number> {
     }),
   );
 
-  // 17 — the summary.
+  // 18 — the summary.
   const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
   const advisory = doc.findings.length - blocking;
   const rootCauses = doc.debug.root_causes?.distinct_root_causes ?? 0;
@@ -588,7 +615,25 @@ async function reviewPr(
       estimate,
       hunterCount,
     });
+    // The gate, ESTIMATED. A PR dry run creates nothing and fetches nothing,
+    // so the only size facts on hand are GitHub's own aggregate counters —
+    // no per-file paths, therefore no exclusions. Fetching `gh pr view
+    // --json files` here would buy exactness at the price of the "nothing
+    // was fetched" contract, and the estimate is only ever wrong in the
+    // conservative direction (a gate that fires here may pass for real once
+    // lockfiles come off). Labelled so nobody reads it as the verdict.
+    const estimated = evaluateSizeGateAggregate(
+      target.ghDiffStat,
+      sizeGateConfig(options),
+    );
     log();
+    log(
+      `${sizeGateLine(estimated)} (estimate from GitHub's aggregate ` +
+        "counters; exclusions not applied)",
+    );
+    if (!estimated.ok && !options.force) {
+      log("dry run: this PR would likely be SKIPPED by the size gate.");
+    }
     log("dry run: nothing was fetched, created, or spent.");
     return 0;
   }
@@ -630,6 +675,26 @@ async function reviewPr(
     throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
   }
   const diffStat: DiffStat = parseNumstat(numstat.stdout);
+
+  // 5b — the size gate, on the REAL per-file numstat and placed here on
+  // purpose: before createPrRunDir, so a skipped PR leaves no run dir
+  // behind. That matters beyond tidiness — the watcher counts attempts from
+  // run artifacts, so a gate skip cannot consume a poison-PR attempt even
+  // when the watcher was the one that launched this review. And, exactly as
+  // in local mode, this sits BEFORE the cost band's confirm(): the watcher
+  // passes --yes, so a gate behind the prompt would never fire unattended.
+  const sizeGate = evaluateSizeGate(
+    parseNumstatFiles(numstat.stdout),
+    sizeGateConfig(options),
+  );
+  log(sizeGateLine(sizeGate));
+  if (!sizeGate.ok) {
+    if (options.force) {
+      log("--force given: reviewing anyway.");
+    } else {
+      throw new CliError(sizeGate.message);
+    }
+  }
 
   // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
   const runDir = await createPrRunDir(

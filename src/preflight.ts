@@ -6,6 +6,10 @@
 
 import path from "node:path";
 import type { SuspicionPrior } from "./prompt-set";
+// size-gate.ts imports only a TYPE from here, so this is not a runtime
+// cycle — the type import is erased and size-gate has no load-time
+// dependency on this module.
+import { DEFAULT_SIZE_GATE } from "./size-gate";
 import type { ReviewSpec } from "./spec";
 
 // The lab's production value. Also the single biggest per-hunter cost lever
@@ -95,6 +99,15 @@ export interface CliOptions {
   // re-arms its PRs. The default (false) reviews each PR once — see the
   // re-arm policy note on candidateSkipReason in watch-preflight.ts.
   onPush: boolean;
+  // Bypass the size gate for THIS run (see size-gate.ts). Deliberately does
+  // NOT imply --yes: --force answers "is this diff too big to be worth its
+  // cost", and the cost band's own confirmation answers "do you want to
+  // spend this" — collapsing them would let one flag skip two gates.
+  force: boolean;
+  // Size-gate overrides. UNSET means "use DEFAULT_SIZE_GATE"; 0 is a real,
+  // distinct value that DISABLES the limit, so these cannot default to 0.
+  maxChangedLines?: number;
+  maxChangedFiles?: number;
 }
 
 export interface ParsedCli {
@@ -115,7 +128,9 @@ Usage:
                              is the scheduler; this never daemonizes
   pr-hero watch add          Opt the current repo (or --repo) into the watch
                              config; --post makes its reviews publish to the
-                             PR, --on-push re-reviews on every push.
+                             PR, --on-push re-reviews on every push,
+                             --max-changed-lines/--max-changed-files set the
+                             repo's size gate.
                              Idempotent — re-adding updates the flags
   pr-hero watch remove       Remove the current repo (or --repo) from the
                              watch config (idempotent)
@@ -173,6 +188,17 @@ Options:
                       then exit without spawning anything. For watch --once:
                       print what would be skipped/launched and why, touching
                       nothing
+  --max-changed-lines <n>
+                      Size gate: skip the review when the diff has more than
+                      n effective changed lines (insertions + deletions,
+                      generated files like lockfiles and minified bundles
+                      excluded). Default ${DEFAULT_SIZE_GATE.maxChangedLines}; 0 disables the limit.
+                      With watch add: record the threshold for the repo
+  --max-changed-files <n>
+                      Size gate: same, on the effective changed-FILE count.
+                      Default ${DEFAULT_SIZE_GATE.maxChangedFiles}; 0 disables the limit
+  --force             Review the diff even when the size gate would skip it.
+                      Does NOT imply --yes — the cost band still asks
   --yes               Skip the confirmation prompt
   --help              Show this text
 
@@ -181,7 +207,11 @@ range), so only what this branch adds is reviewed. The plan prints both the
 base ref you asked for and the merge-base sha it actually used.
 
 Every run costs real money. --dry-run costs nothing and answers most
-questions; use it first.`;
+questions; use it first.
+
+The size gate is a COST gate, not a quality gate: past its limits a diff bills
+several times more with a much wider spread, so pr-hero skips it rather than
+guess at the bill. It says nothing about how well a large diff reviews.`;
 
 const VALUE_FLAGS = new Set([
   "--repo",
@@ -195,6 +225,8 @@ const VALUE_FLAGS = new Set([
   "--model",
   "--hop-budget",
   "--interval",
+  "--max-changed-lines",
+  "--max-changed-files",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -207,6 +239,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     post: false,
     twoDot: false,
     onPush: false,
+    force: false,
   };
   let command: "review" | "init" | "ledger" | "watch" | "help" | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -277,6 +310,12 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--on-push") {
       options.onPush = true;
+      continue;
+    }
+    // NOT folded into --yes: --force overrides the size gate only. See the
+    // WHY on CliOptions.force.
+    if (arg === "--force") {
+      options.force = true;
       continue;
     }
     if (arg.startsWith("-")) {
@@ -443,6 +482,14 @@ function applyValueFlag(
       options.interval = parsed;
       return;
     }
+    // >= 0, unlike every other numeric flag here: 0 is the documented
+    // "disable this limit" value, not a nonsense input.
+    case "--max-changed-lines":
+      options.maxChangedLines = parseLimit(flag, value);
+      return;
+    case "--max-changed-files":
+      options.maxChangedFiles = parseLimit(flag, value);
+      return;
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {
@@ -453,6 +500,17 @@ function applyValueFlag(
       options.hopBudget = parsed;
     }
   }
+}
+
+function parseLimit(flag: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new CliUsageError(
+      `${flag} must be a non-negative integer (0 disables the limit), ` +
+        `got: ${value}`,
+    );
+  }
+  return parsed;
 }
 
 export type BaseRefSource = "flag" | "config" | "remote" | "fallback";
@@ -583,21 +641,71 @@ export interface NumstatDiffStat {
   deletions: number;
 }
 
+export interface NumstatFile {
+  // The DESTINATION path — see resolveNumstatPath.
+  path: string;
+  insertions: number;
+  deletions: number;
+  binary: boolean;
+}
+
 // `git diff --numstat` emits `<added>\t<deleted>\t<path>` per file, and for a
 // binary file both counters are a literal `-`. A binary file is still a
 // changed file (it counts toward `files`) but contributes no lines — reading
 // `-` as NaN would poison the whole cost estimate.
-export function parseNumstat(raw: string): NumstatDiffStat {
-  let files = 0;
-  let insertions = 0;
-  let deletions = 0;
+export function parseNumstatFiles(raw: string): NumstatFile[] {
+  const out: NumstatFile[] = [];
   for (const line of raw.split("\n")) {
     if (line.trim().length === 0) continue;
     const fields = line.split("\t");
     if (fields.length < 3) continue;
+    // The path field may itself contain tabs only in quoted form, which git
+    // escapes; joining the remainder keeps such a path whole instead of
+    // truncating it at the first tab.
+    const rawPath = fields.slice(2).join("\t");
+    out.push({
+      path: resolveNumstatPath(rawPath),
+      insertions: countField(fields[0]),
+      deletions: countField(fields[1]),
+      binary: fields[0] === "-" && fields[1] === "-",
+    });
+  }
+  return out;
+}
+
+// A rename does NOT arrive as a plain path. git renders it either whole
+// (`old/name => new/name`) or with the common prefix/suffix factored out
+// (`src/{old => new}/file.ts`, and the one-sided `src/{ => sub}/file.ts` /
+// `src/{old => }/file.ts`). WHY resolving to the DESTINATION matters: every
+// consumer here matches the path against globs, and `src/{a => b}/x.min.js`
+// matches no exclusion pattern at all — a renamed lockfile would silently
+// stop being excluded and push a small PR over the gate.
+function resolveNumstatPath(field: string): string {
+  const braced = /^(.*)\{(.*) => (.*)\}(.*)$/.exec(field);
+  if (braced !== null) {
+    // The one-sided forms leave an empty segment behind (`src/` + `` +
+    // `/file`), so collapse the doubled separator the substitution creates.
+    return collapseSeparators(`${braced[1]}${braced[3]}${braced[4]}`);
+  }
+  const arrow = field.indexOf(" => ");
+  return arrow === -1 ? field : field.slice(arrow + 4);
+}
+
+function collapseSeparators(p: string): string {
+  return p.replace(/\/{2,}/g, "/");
+}
+
+// The aggregate view, a pure sum over the per-file one: two parsers of the
+// same format would drift, and the cost estimate and the size gate must
+// never disagree about how big a diff is.
+export function parseNumstat(raw: string): NumstatDiffStat {
+  let files = 0;
+  let insertions = 0;
+  let deletions = 0;
+  for (const file of parseNumstatFiles(raw)) {
     files++;
-    insertions += countField(fields[0]);
-    deletions += countField(fields[1]);
+    insertions += file.insertions;
+    deletions += file.deletions;
   }
   return { files, insertions, deletions };
 }
