@@ -398,13 +398,26 @@ describe("estimateCost", () => {
     expect(estimate.high).toBeGreaterThanOrEqual(14.78);
   });
 
-  test("brackets the measured small run", () => {
+  // PR 1682's tree, run twice (2026-08-10/11): $4.74 and $3.92. The band
+  // must bracket BOTH — this is the per-agent-floor evidence that retired
+  // the legacy ~$2.61 point (two same-engine runs of a comparable tree both
+  // landed far above it; a point the instrument contradicts is decoration).
+  test("brackets both measured runs of the 1682 tree", () => {
     const estimate = estimateCost(
-      { files: 5, insertions: 150, deletions: 50 },
+      { files: 7, insertions: 21, deletions: 8 },
+      3,
+    );
+    expect(estimate.low).toBeLessThanOrEqual(3.92);
+    expect(estimate.high).toBeGreaterThanOrEqual(4.74);
+  });
+
+  test("brackets the first B0 local run", () => {
+    const estimate = estimateCost(
+      { files: 5, insertions: 484, deletions: 0 },
       4,
     );
-    expect(estimate.low).toBeLessThanOrEqual(2.61);
-    expect(estimate.high).toBeGreaterThanOrEqual(2.61);
+    expect(estimate.low).toBeLessThanOrEqual(3.68);
+    expect(estimate.high).toBeGreaterThanOrEqual(3.68);
   });
 
   test("grows with diff size", () => {

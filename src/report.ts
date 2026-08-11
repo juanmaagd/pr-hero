@@ -29,17 +29,24 @@ export interface CostEstimate {
   basis: string;
 }
 
-// Per-hunter marginal cost, fitted to two measured runs (see BAND below).
+// Per-hunter marginal cost, fitted to the measured runs (see BAND below).
 // Deliberately three transparent coefficients instead of a regression: with
-// two calibration points anything fancier is false precision.
-const USD_PER_AGENT_BASE = 0.5;
-const USD_PER_CHANGED_LINE = 0.00042;
+// this few calibration points anything fancier is false precision.
+//
+// The base is the load-bearing coefficient, recalibrated 2026-08-11 from
+// 0.5 to 1.2: a hunter's floor is reading the TREE and the prompt
+// machinery, nearly independent of a small diff. The proof was two PR-mode
+// runs of the same 7-file / +21 −8 tree billing $4.74 and $3.92 against a
+// $1.19–$2.39 band — both ~2x above the top, the exact under-estimate
+// failure this band exists to prevent.
+const USD_PER_AGENT_BASE = 1.2;
+const USD_PER_CHANGED_LINE = 0.00021;
 const USD_PER_FILE = 0.008;
 
-// Skewed on purpose. Both recorded overruns were UNDER-estimates, never over,
-// so the upper arm is the wider one: a band that is too generous costs a
-// second of hesitation, a band that is too tight costs real money.
-const BAND_LOW = 0.7;
+// Skewed on purpose. Every recorded overrun was an UNDER-estimate, never
+// over, so the upper arm is the wider one: a band that is too generous costs
+// a second of hesitation, a band that is too tight costs real money.
+const BAND_LOW = 0.65;
 const BAND_HIGH = 1.4;
 
 // WHY this function exists at all: the ROADMAP logs two cost overruns in a
@@ -48,16 +55,21 @@ const BAND_HIGH = 1.4;
 // PREVIOUS arm instead of being computed from the tree about to be reviewed.
 // So this estimates from the diff, and only from the diff.
 //
-// Calibration points, both measured on real runs:
-//   - a small tree billed ~$2.61 end to end;
+// Calibration points, all measured on real runs of the current engine:
+//   - PR 1682's tree (7 files / +21 −8, 3 hunters + refuter) billed $4.74
+//     and $3.92 across two runs — the per-agent floor evidence;
 //   - a 45-file / +2775 −1237 tree with 5 hunters + refuter billed ~$14.78,
-//     and the same tree was recorded at ~$11/run elsewhere in the campaign.
-// That ~$11 vs ~$14.78 spread on ONE tree is the whole argument for returning
-// a band: the same diff, the same agents, a 34% swing. A point estimate here
-// would be a fiction with a decimal point on it.
+//     and the same tree was recorded at ~$11/run elsewhere in the campaign;
+//   - the first B0 local run (5 files / +484, 4 hunters + refuter), $3.68.
+// A legacy "~$2.61 small tree" point from before PR mode existed was
+// RETIRED by the 1682 evidence: two same-engine runs of a comparable tree
+// both landed far above it, and a calibration point the instrument itself
+// contradicts is decoration. The ~$11 vs ~$14.78 spread on ONE tree is the
+// whole argument for returning a band: the same diff, the same agents, a
+// 34% swing. A point estimate here would be a fiction with a decimal point.
 //
 // The refuter is not a separate term: its cost rides in the coefficients,
-// because the $14.78 point was measured with the refuter leg included and a
+// because every calibration run had the refuter leg included and a
 // refuter's size tracks how much the hunters found, which tracks diff size.
 export function estimateCost(
   diffStat: DiffStat,
@@ -77,11 +89,11 @@ export function estimateCost(
     low: round2(mid * BAND_LOW),
     high: round2(mid * BAND_HIGH),
     basis:
-      "coarse band from two calibration points (a small tree ~$2.61; a " +
-      "45-file / +2775 −1237 tree with 5 hunters + refuter ~$11–$14.78), " +
-      "scaled by changed lines, changed files and hunter count. It is an " +
-      "order-of-magnitude guide, not a quote — the same tree has billed 34% " +
-      "apart across runs.",
+      "coarse band from measured runs (a 7-file / +21 −8 tree with 3 " +
+      "hunters + refuter, $3.92–$4.74 across two runs; a 45-file / " +
+      "+2775 −1237 tree with 5 hunters + refuter, ~$11–$14.78): a " +
+      "per-hunter floor plus changed lines and files. An order-of-magnitude " +
+      "guide, not a quote — the same tree has billed 34% apart across runs.",
   };
 }
 
