@@ -119,6 +119,30 @@ export async function ghCurrentBranchPr(operatorRoot: string): Promise<string> {
   return result.stdout;
 }
 
+// The open-PR listing the watch tick (B3) candidates from. Raw stdout for
+// the pure parsePrList — same contract as ghPrView/resolvePrTarget. An
+// explicit --limit, because gh's default caps the list at 30 NEWEST PRs:
+// the watcher picks the LOWEST eligible number (FIFO), and a busy repo's
+// oldest open PRs falling off the list would be exactly the silent
+// truncation the comments fetch already learned to avoid with --paginate.
+export const PR_LIST_JSON_FIELDS = "number,headRefOid,isDraft";
+export const PR_LIST_LIMIT = 200;
+
+export async function ghPrList(operatorRoot: string): Promise<string> {
+  const result = await gh(operatorRoot, [
+    "pr",
+    "list",
+    "--limit",
+    String(PR_LIST_LIMIT),
+    "--json",
+    PR_LIST_JSON_FIELDS,
+  ]);
+  if (!result.ok) {
+    throw new CliError(`gh pr list failed: ${result.stderr.trim()}`);
+  }
+  return result.stdout;
+}
+
 // The repository's web URL (https://github.com/org/repo), used only to turn
 // the PR comment's locations into links. Cosmetic by contract: ANY failure
 // returns undefined and the comment renders plain — a review must never die,
@@ -329,9 +353,10 @@ export async function writeComparison(input: {
 
 // Publishes the review as ONE marked PR comment: update the existing marked
 // comment when there is one, create it otherwise. Idempotency lives in the
-// marker contract (PR_COMMENT_MARKER as the body's first line +
-// findMarkedCommentId) — a re-run refreshes the same comment instead of
-// stacking a new one per run. Throws CliError on any gh failure and is NOT
+// marker contract (prCommentMarker as the body's first line, matched by
+// findMarkedCommentId on the bare prefix) — a re-run refreshes the same
+// comment instead of stacking a new one per run. Throws CliError on any gh
+// failure and is NOT
 // caught here: the caller asked for a public side effect, so the caller
 // decides what a failed one means.
 export async function postPrComment(
@@ -399,7 +424,11 @@ export async function postPrComment(
 // found nothing" — the exact failure mode that would silently flatter
 // pr-hero. API order is preserved verbatim (no sort, no reverse):
 // pickGreptileComment reads "newest" as LAST.
-async function fetchPrComments(
+//
+// Exported since B3: the watch guard reads the same comments to learn which
+// heads a pr-hero marker already declares (watch.ts imports this one-way;
+// pr.ts never imports watch.ts, so the no-mutual-shells rule holds).
+export async function fetchPrComments(
   operatorRoot: string,
   pr: number,
 ): Promise<{ id: number; user: string; body: string }[]> {

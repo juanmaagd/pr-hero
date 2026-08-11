@@ -1,0 +1,850 @@
+// Pure-decision tests for the watcher (ROADMAP B3): the watch CLI surface,
+// the config parser, the window/cap gates, the eligibility matrix and FIFO
+// pick, the marker-head parse (the cross-machine guard), the attempts
+// counter, the log round-trip that IS the daily-cap counter, the plist
+// render, and the notification args. All offline, literal in → literal out.
+
+import { describe, expect, test } from "bun:test";
+import { CliUsageError, parseArgs } from "../src/preflight";
+import {
+  countAttempts,
+  countLaunchedToday,
+  DEFAULT_DAILY_CAP,
+  decideTick,
+  expandTilde,
+  findingsTierCounts,
+  insideWindow,
+  latestRunDirName,
+  launchedLine,
+  localIsoTimestamp,
+  logLine,
+  MAX_WATCH_ATTEMPTS,
+  markerDeclaredHeads,
+  osascriptNotifyArgs,
+  outcomeLine,
+  outcomeNotificationText,
+  parseLockPid,
+  parseMarkerHead,
+  parsePipelineMeta,
+  parsePrList,
+  parseWatchConfig,
+  prheroHomePaths,
+  renderWatchPlist,
+  skipLine,
+  type TickInput,
+  type TickRepoFacts,
+  tickGate,
+  WATCH_LAUNCHD_LABEL,
+} from "../src/watch-preflight";
+
+const HEAD_A = "a".repeat(40);
+const HEAD_B = "b".repeat(40);
+const HEAD_C = "c".repeat(40);
+
+describe("parseArgs watch", () => {
+  test("watch --once, order-blind", () => {
+    expect(parseArgs(["watch", "--once"]).command).toBe("watch");
+    expect(parseArgs(["watch", "--once"]).options.watch).toBe("once");
+    expect(parseArgs(["--once", "watch"]).options.watch).toBe("once");
+  });
+
+  test("watch --once --dry-run parses", () => {
+    const { options } = parseArgs(["watch", "--once", "--dry-run"]);
+    expect(options.watch).toBe("once");
+    expect(options.dryRun).toBe(true);
+  });
+
+  test("watch install, with and without --interval", () => {
+    expect(parseArgs(["watch", "install"]).options.watch).toBe("install");
+    const { options } = parseArgs(["watch", "install", "--interval", "5"]);
+    expect(options.watch).toBe("install");
+    expect(options.interval).toBe(5);
+  });
+
+  test("watch uninstall parses", () => {
+    expect(parseArgs(["watch", "uninstall"]).options.watch).toBe("uninstall");
+  });
+
+  // A bare `pr-hero watch` has no daemon mode to fall into — it must name
+  // the three actions instead of silently doing nothing.
+  test("bare watch fails naming the actions", () => {
+    try {
+      parseArgs(["watch"]);
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("--once");
+      expect((error as Error).message).toContain("install");
+      expect((error as Error).message).toContain("uninstall");
+    }
+  });
+
+  test("--once conflicts with install/uninstall", () => {
+    expect(() => parseArgs(["watch", "install", "--once"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["watch", "--once", "uninstall"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  test("--dry-run only applies to --once", () => {
+    expect(() => parseArgs(["watch", "install", "--dry-run"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["watch", "uninstall", "--dry-run"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  test("--interval only applies to install", () => {
+    expect(() => parseArgs(["watch", "--once", "--interval", "5"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["review", "--interval", "5", "--yes"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  test("--interval must be a positive integer", () => {
+    for (const value of ["0", "-3", "2.5", "soon"]) {
+      expect(() =>
+        parseArgs(["watch", "install", "--interval", value]),
+      ).toThrow(CliUsageError);
+    }
+  });
+
+  test("--once outside watch fails", () => {
+    expect(() => parseArgs(["review", "--once"])).toThrow(CliUsageError);
+  });
+
+  test("install without watch stays an unknown command", () => {
+    expect(() => parseArgs(["install"])).toThrow(CliUsageError);
+  });
+});
+
+describe("parseWatchConfig", () => {
+  test("minimal config gets every default", () => {
+    const config = parseWatchConfig('{"repos":[{"path":"~/Desktop/x"}]}');
+    expect(config).toEqual({
+      repos: [{ path: "~/Desktop/x", post: false }],
+      dailyCap: DEFAULT_DAILY_CAP,
+      window: null,
+    });
+  });
+
+  test("full config round-trips", () => {
+    const config = parseWatchConfig(
+      JSON.stringify({
+        repos: [{ path: "~/Desktop/musive-s3", post: true }],
+        daily_cap: 3,
+        window: { start: "09:00", end: "19:00" },
+      }),
+    );
+    expect(config).toEqual({
+      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      dailyCap: 3,
+      window: { start: "09:00", end: "19:00" },
+    });
+  });
+
+  // "daily_cap": 0 is the pause switch — legal, launches nothing.
+  test("a zero cap is legal", () => {
+    expect(parseWatchConfig('{"repos":[],"daily_cap":0}').dailyCap).toBe(0);
+  });
+
+  test("invalid JSON and non-objects fail loud", () => {
+    expect(() => parseWatchConfig("not json")).toThrow(CliUsageError);
+    expect(() => parseWatchConfig("[]")).toThrow(CliUsageError);
+    expect(() => parseWatchConfig("null")).toThrow(CliUsageError);
+  });
+
+  test("every failing field names itself and its got-value", () => {
+    const cases: [string, string][] = [
+      ["{}", "repos"],
+      ['{"repos":"x"}', "repos"],
+      ['{"repos":[42]}', "repos[0]"],
+      ['{"repos":[{}]}', "repos[0].path"],
+      ['{"repos":[{"path":""}]}', "repos[0].path"],
+      ['{"repos":[{"path":"/x","post":"yes"}]}', "repos[0].post"],
+      ['{"repos":[],"daily_cap":-1}', "daily_cap"],
+      ['{"repos":[],"daily_cap":2.5}', "daily_cap"],
+      ['{"repos":[],"window":"office"}', "window"],
+      ['{"repos":[],"window":{"start":"9:00","end":"19:00"}}', "window.start"],
+      ['{"repos":[],"window":{"start":"09:00"}}', "window.end"],
+      ['{"repos":[],"window":{"start":"09:00","end":"24:00"}}', "window.end"],
+    ];
+    for (const [raw, field] of cases) {
+      try {
+        parseWatchConfig(raw);
+        throw new Error(`should have thrown for ${raw}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain(field);
+      }
+    }
+  });
+
+  // start === end would be an always-closed window with a plausible face;
+  // "no window" is spelled null.
+  test("a degenerate window is rejected", () => {
+    expect(() =>
+      parseWatchConfig('{"repos":[],"window":{"start":"09:00","end":"09:00"}}'),
+    ).toThrow(CliUsageError);
+  });
+});
+
+describe("expandTilde", () => {
+  const HOME = "/Users/juanma";
+
+  test("expands ~ and ~/", () => {
+    expect(expandTilde("~", HOME)).toBe(HOME);
+    expect(expandTilde("~/Desktop/x", HOME)).toBe("/Users/juanma/Desktop/x");
+  });
+
+  test("leaves absolute paths and ~user alone", () => {
+    expect(expandTilde("/opt/repo", HOME)).toBe("/opt/repo");
+    expect(expandTilde("~other/repo", HOME)).toBe("~other/repo");
+  });
+});
+
+describe("insideWindow", () => {
+  const at = (hhmm: string): number =>
+    Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
+
+  test("null means always", () => {
+    expect(insideWindow(null, 0)).toBe(true);
+    expect(insideWindow(null, 23 * 60 + 59)).toBe(true);
+  });
+
+  // Start-inclusive, end-exclusive: back-to-back windows neither overlap
+  // nor gap.
+  test("a day window: inclusive start, exclusive end", () => {
+    const window = { start: "09:00", end: "19:00" };
+    expect(insideWindow(window, at("08:59"))).toBe(false);
+    expect(insideWindow(window, at("09:00"))).toBe(true);
+    expect(insideWindow(window, at("12:00"))).toBe(true);
+    expect(insideWindow(window, at("18:59"))).toBe(true);
+    expect(insideWindow(window, at("19:00"))).toBe(false);
+  });
+
+  // start > end is an overnight window, not an error.
+  test("an overnight window wraps midnight", () => {
+    const window = { start: "22:00", end: "06:00" };
+    expect(insideWindow(window, at("21:59"))).toBe(false);
+    expect(insideWindow(window, at("22:00"))).toBe(true);
+    expect(insideWindow(window, at("23:30"))).toBe(true);
+    expect(insideWindow(window, at("00:00"))).toBe(true);
+    expect(insideWindow(window, at("05:59"))).toBe(true);
+    expect(insideWindow(window, at("06:00"))).toBe(false);
+    expect(insideWindow(window, at("12:00"))).toBe(false);
+  });
+});
+
+describe("parsePrList", () => {
+  test("reads the open-PR candidates", () => {
+    expect(
+      parsePrList(
+        `[{"number":5,"headRefOid":"${HEAD_A}","isDraft":false},` +
+          `{"number":7,"headRefOid":"${HEAD_B}","isDraft":true}]`,
+      ),
+    ).toEqual([
+      { pr: 5, head: HEAD_A, isDraft: false },
+      { pr: 7, head: HEAD_B, isDraft: true },
+    ]);
+  });
+
+  test("an empty list is a valid state of the world", () => {
+    expect(parsePrList("[]")).toEqual([]);
+  });
+
+  test("invalid JSON and non-arrays fail loud", () => {
+    expect(() => parsePrList("not json")).toThrow(CliUsageError);
+    expect(() => parsePrList("{}")).toThrow(CliUsageError);
+  });
+
+  test("a failing field names itself", () => {
+    const cases: [string, string][] = [
+      ['[{"headRefOid":"x","isDraft":false}]', "number"],
+      [`[{"number":0,"headRefOid":"${HEAD_A}","isDraft":false}]`, "number"],
+      ['[{"number":5,"headRefOid":"abc123","isDraft":false}]', "headRefOid"],
+      [`[{"number":5,"headRefOid":"${HEAD_A}"}]`, "isDraft"],
+    ];
+    for (const [raw, field] of cases) {
+      try {
+        parsePrList(raw);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain(field);
+      }
+    }
+  });
+});
+
+describe("parseMarkerHead", () => {
+  test("reads the declared head off a new-format comment", () => {
+    expect(
+      parseMarkerHead(`<!-- pr-hero-report head=${HEAD_A} -->\n\n## review`),
+    ).toBe(HEAD_A);
+  });
+
+  test("a marker-only body with no newline still parses", () => {
+    expect(parseMarkerHead(`<!-- pr-hero-report head=${HEAD_A} -->`)).toBe(
+      HEAD_A,
+    );
+  });
+
+  // THE eligibility rule: an old-format marker declares NO head, so it
+  // covers none — the PR stays eligible and the next post upgrades the
+  // comment in place.
+  test("the legacy headless marker declares no head", () => {
+    expect(parseMarkerHead("<!-- pr-hero-report -->\n\n## review")).toBeNull();
+  });
+
+  test("malformed declarations never parse and never throw", () => {
+    expect(parseMarkerHead("<!-- pr-hero-report head=abc123 -->")).toBeNull();
+    expect(
+      parseMarkerHead(`<!-- pr-hero-report head=${HEAD_A.toUpperCase()} -->`),
+    ).toBeNull();
+    expect(parseMarkerHead("<!-- pr-hero-report head= -->")).toBeNull();
+  });
+
+  // Foreign comment bodies are arbitrary text; the guard must shrug, not
+  // crash — this is the never-throw contract.
+  test("foreign bodies are null", () => {
+    expect(parseMarkerHead("LGTM")).toBeNull();
+    expect(parseMarkerHead("")).toBeNull();
+    expect(parseMarkerHead("<!-- linear-linkback -->")).toBeNull();
+    expect(parseMarkerHead("<!-- pr-hero-reporter -->")).toBeNull();
+    expect(
+      parseMarkerHead(`quoted:\n<!-- pr-hero-report head=${HEAD_A} -->`),
+    ).toBeNull();
+  });
+
+  test("markerDeclaredHeads collects only real declarations", () => {
+    expect(
+      markerDeclaredHeads([
+        { body: "LGTM" },
+        { body: `<!-- pr-hero-report head=${HEAD_A} -->\nbody` },
+        { body: "<!-- pr-hero-report -->\nold format" },
+        { body: `<!-- pr-hero-report head=${HEAD_B} -->` },
+      ]),
+    ).toEqual([HEAD_A, HEAD_B]);
+  });
+});
+
+describe("attempts counting", () => {
+  test("parsePipelineMeta reads pr and head_sha", () => {
+    expect(
+      parsePipelineMeta(`{"pr":5,"head_sha":"${HEAD_A}","steps":[]}`),
+    ).toEqual({ pr: 5, head_sha: HEAD_A });
+  });
+
+  // pr 0 is local mode's schema-legal "not a PR" — it parses (the artifact
+  // is fine) and simply never matches a real PR number.
+  test("parsePipelineMeta accepts local-mode pr 0", () => {
+    expect(parsePipelineMeta(`{"pr":0,"head_sha":"${HEAD_A}"}`)).toEqual({
+      pr: 0,
+      head_sha: HEAD_A,
+    });
+  });
+
+  // Tolerant by design (see the WHY on countAttempts): a corrupt artifact
+  // falls back to the dir-name count instead of bricking the watcher.
+  test("parsePipelineMeta is null on anything malformed, never a throw", () => {
+    expect(parsePipelineMeta("not json")).toBeNull();
+    expect(parsePipelineMeta("[]")).toBeNull();
+    expect(parsePipelineMeta('{"pr":"5","head_sha":"x"}')).toBeNull();
+    expect(parsePipelineMeta(`{"pr":5,"head_sha":"abc123"}`)).toBeNull();
+    expect(parsePipelineMeta(`{"head_sha":"${HEAD_A}"}`)).toBeNull();
+  });
+
+  test("parsed pipeline fields are the preferred source", () => {
+    const dirs = [
+      // Counted: meta matches, regardless of what the name says.
+      { name: "whatever-1", pipelineMeta: { pr: 5, head_sha: HEAD_A } },
+      // NOT counted: parsed fields win over a matching dir name.
+      {
+        name: `pr-5-${HEAD_A.slice(0, 8)}-2`,
+        pipelineMeta: { pr: 6, head_sha: HEAD_B },
+      },
+    ];
+    expect(countAttempts(dirs, 5, HEAD_A)).toBe(1);
+  });
+
+  // The fallback exists for runs that died before the pipeline wrote
+  // anything: the dir NAME still encodes pr + sha8.
+  test("a dir without pipeline.json counts by its name", () => {
+    const dirs = [
+      { name: `pr-5-${HEAD_A.slice(0, 8)}-1`, pipelineMeta: null },
+      { name: `pr-5-${HEAD_A.slice(0, 8)}-2`, pipelineMeta: null },
+      { name: `pr-5-${HEAD_B.slice(0, 8)}-1`, pipelineMeta: null },
+      { name: `pr-6-${HEAD_A.slice(0, 8)}-1`, pipelineMeta: null },
+      { name: `${HEAD_A.slice(0, 8)}-1`, pipelineMeta: null },
+      { name: "notes", pipelineMeta: null },
+    ];
+    expect(countAttempts(dirs, 5, HEAD_A)).toBe(2);
+  });
+
+  test("the two sources mix", () => {
+    const dirs = [
+      {
+        name: `pr-5-${HEAD_A.slice(0, 8)}-1`,
+        pipelineMeta: { pr: 5, head_sha: HEAD_A },
+      },
+      { name: `pr-5-${HEAD_A.slice(0, 8)}-2`, pipelineMeta: null },
+    ];
+    expect(countAttempts(dirs, 5, HEAD_A)).toBe(2);
+  });
+
+  test("latestRunDirName picks the highest suffix", () => {
+    const names = [
+      `pr-5-${HEAD_A.slice(0, 8)}-1`,
+      `pr-5-${HEAD_A.slice(0, 8)}-3`,
+      `pr-5-${HEAD_A.slice(0, 8)}-2`,
+      `pr-5-${HEAD_B.slice(0, 8)}-9`,
+    ];
+    expect(latestRunDirName(names, 5, HEAD_A)).toBe(
+      `pr-5-${HEAD_A.slice(0, 8)}-3`,
+    );
+    expect(latestRunDirName(names, 7, HEAD_A)).toBeNull();
+  });
+
+  test("findingsTierCounts splits blocking from the rest", () => {
+    expect(
+      findingsTierCounts({
+        findings: [
+          { tier: "blocking" },
+          { tier: "advisory" },
+          { tier: "advisory" },
+        ],
+      }),
+    ).toEqual({ blocking: 1, advisory: 2 });
+    expect(findingsTierCounts({ findings: [] })).toEqual({
+      blocking: 0,
+      advisory: 0,
+    });
+    expect(findingsTierCounts(null)).toBeNull();
+    expect(findingsTierCounts({ findings: "x" })).toBeNull();
+    expect(findingsTierCounts({ findings: [null] })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The tick decision.
+
+function repo(overrides: Partial<TickRepoFacts> = {}): TickRepoFacts {
+  return {
+    path: "/x/musive",
+    post: false,
+    prs: [],
+    localReviews: [],
+    remoteHeads: [],
+    attempts: [],
+    ...overrides,
+  };
+}
+
+function tick(overrides: Partial<TickInput> = {}): TickInput {
+  return {
+    repos: [],
+    dailyCap: 5,
+    launchedToday: 0,
+    window: null,
+    localMinutes: 12 * 60,
+    ...overrides,
+  };
+}
+
+describe("tickGate", () => {
+  test("window closes before the cap is even consulted", () => {
+    expect(
+      tickGate({
+        window: { start: "09:00", end: "19:00" },
+        localMinutes: 8 * 60,
+        dailyCap: 5,
+        launchedToday: 5,
+      }),
+    ).toBe("window-closed");
+  });
+
+  // The cap boundary: 4 of 5 still runs, 5 of 5 does not.
+  test("the cap boundary is exact", () => {
+    const base = { window: null, localMinutes: 0 };
+    expect(tickGate({ ...base, dailyCap: 5, launchedToday: 4 })).toBe("open");
+    expect(tickGate({ ...base, dailyCap: 5, launchedToday: 5 })).toBe(
+      "cap-reached",
+    );
+  });
+
+  test("a zero cap never opens", () => {
+    expect(
+      tickGate({
+        window: null,
+        localMinutes: 0,
+        dailyCap: 0,
+        launchedToday: 0,
+      }),
+    ).toBe("cap-reached");
+  });
+});
+
+describe("decideTick", () => {
+  test("the eligibility matrix, one candidate each", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            prs: [
+              { pr: 1, head: HEAD_A, isDraft: true },
+              { pr: 2, head: HEAD_A, isDraft: false },
+              { pr: 3, head: HEAD_A, isDraft: false },
+              { pr: 4, head: HEAD_A, isDraft: false },
+              { pr: 5, head: HEAD_A, isDraft: false },
+            ],
+            localReviews: [{ pr: 2, head: HEAD_A }],
+            remoteHeads: [{ pr: 3, heads: [HEAD_A] }],
+            attempts: [{ pr: 4, head: HEAD_A, count: MAX_WATCH_ATTEMPTS }],
+          }),
+        ],
+      }),
+    );
+    expect(decision.gate).toBe("open");
+    expect(decision.skips).toEqual([
+      { repo: "/x/musive", pr: 1, head: HEAD_A, reason: "draft" },
+      { repo: "/x/musive", pr: 2, head: HEAD_A, reason: "reviewed-local" },
+      { repo: "/x/musive", pr: 3, head: HEAD_A, reason: "reviewed-remote" },
+      { repo: "/x/musive", pr: 4, head: HEAD_A, reason: "attempts-exhausted" },
+    ]);
+    expect(decision.launch).toEqual({
+      repo: "/x/musive",
+      post: false,
+      pr: 5,
+      head: HEAD_A,
+    });
+  });
+
+  // A new push mints a new (pr, head) key, so every guard keyed on the old
+  // head releases — intended: with auto-post the comment must track the
+  // live head.
+  test("a new head makes a reviewed PR eligible again", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            prs: [{ pr: 2, head: HEAD_B, isDraft: false }],
+            localReviews: [{ pr: 2, head: HEAD_A }],
+            remoteHeads: [{ pr: 2, heads: [HEAD_A] }],
+            attempts: [{ pr: 2, head: HEAD_A, count: 2 }],
+          }),
+        ],
+      }),
+    );
+    expect(decision.skips).toEqual([]);
+    expect(decision.launch?.pr).toBe(2);
+    expect(decision.launch?.head).toBe(HEAD_B);
+  });
+
+  // An old-format marker declared no head, so the shell hands the pure
+  // decision an empty heads list — still eligible by construction.
+  test("a PR with only a headless legacy marker stays eligible", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            prs: [{ pr: 9, head: HEAD_A, isDraft: false }],
+            remoteHeads: [{ pr: 9, heads: [] }],
+          }),
+        ],
+      }),
+    );
+    expect(decision.launch?.pr).toBe(9);
+  });
+
+  test("one attempt left still runs; the guard is a maximum of two", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            prs: [{ pr: 4, head: HEAD_A, isDraft: false }],
+            attempts: [{ pr: 4, head: HEAD_A, count: 1 }],
+          }),
+        ],
+      }),
+    );
+    expect(decision.launch?.pr).toBe(4);
+  });
+
+  test("FIFO: the lowest PR number wins across repos", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            path: "/x/alpha",
+            prs: [{ pr: 12, head: HEAD_A, isDraft: false }],
+          }),
+          repo({
+            path: "/x/beta",
+            post: true,
+            prs: [
+              { pr: 3, head: HEAD_B, isDraft: false },
+              { pr: 8, head: HEAD_C, isDraft: false },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(decision.launch).toEqual({
+      repo: "/x/beta",
+      post: true,
+      pr: 3,
+      head: HEAD_B,
+    });
+    expect(decision.eligible.map((e) => e.pr)).toEqual([3, 8, 12]);
+  });
+
+  // Two repos can share a PR number; the stable sort makes config order the
+  // tie-break — the operator's own priority order.
+  test("a PR-number tie breaks by config order", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            path: "/x/first",
+            prs: [{ pr: 5, head: HEAD_A, isDraft: false }],
+          }),
+          repo({
+            path: "/x/second",
+            prs: [{ pr: 5, head: HEAD_B, isDraft: false }],
+          }),
+        ],
+      }),
+    );
+    expect(decision.launch?.repo).toBe("/x/first");
+  });
+
+  // The gate nulls the launch but never hides the picture: the $0 dry run
+  // still shows what would have run.
+  test("a closed gate keeps skips and eligible visible", () => {
+    const decision = decideTick(
+      tick({
+        window: { start: "09:00", end: "19:00" },
+        localMinutes: 20 * 60,
+        repos: [
+          repo({
+            prs: [
+              { pr: 1, head: HEAD_A, isDraft: true },
+              { pr: 2, head: HEAD_B, isDraft: false },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(decision.gate).toBe("window-closed");
+    expect(decision.launch).toBeNull();
+    expect(decision.skips).toHaveLength(1);
+    expect(decision.eligible.map((e) => e.pr)).toEqual([2]);
+  });
+
+  test("cap-reached also nulls the launch", () => {
+    const decision = decideTick(
+      tick({
+        dailyCap: 5,
+        launchedToday: 5,
+        repos: [repo({ prs: [{ pr: 2, head: HEAD_B, isDraft: false }] })],
+      }),
+    );
+    expect(decision.gate).toBe("cap-reached");
+    expect(decision.launch).toBeNull();
+    expect(decision.eligible).toHaveLength(1);
+  });
+
+  test("no candidates anywhere is an open gate with a null launch", () => {
+    const decision = decideTick(tick({ repos: [repo()] }));
+    expect(decision.gate).toBe("open");
+    expect(decision.launch).toBeNull();
+    expect(decision.skips).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The log — builders and the counter that reads them back.
+
+describe("watch log", () => {
+  test("localIsoTimestamp is local ISO-8601 with a numeric offset", () => {
+    const d = new Date(2026, 7, 11, 14, 3, 22); // local components in, local out
+    const ts = localIsoTimestamp(d);
+    expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    expect(ts.startsWith("2026-08-11T14:03:22")).toBe(true);
+  });
+
+  test("launchedLine carries pr, repo and the 8-char head", () => {
+    expect(launchedLine("2026-08-11T14:03:22+02:00", 5, "musive", HEAD_A)).toBe(
+      `2026-08-11T14:03:22+02:00 launched pr=5 repo=musive head=${HEAD_A.slice(0, 8)}`,
+    );
+  });
+
+  // The round-trip that makes the log the cap counter: builder-written
+  // lines count, and ONLY today's.
+  test("countLaunchedToday counts only today's launched lines", () => {
+    const logText = [
+      logLine("2026-08-10T23:59:00+02:00", "tick start"),
+      launchedLine("2026-08-10T23:59:01+02:00", 4, "musive", HEAD_A),
+      logLine("2026-08-11T09:00:00+02:00", "tick start"),
+      launchedLine("2026-08-11T09:00:01+02:00", 5, "musive", HEAD_A),
+      skipLine("2026-08-11T09:15:00+02:00", "musive", 6, HEAD_B, "draft"),
+      launchedLine("2026-08-11T10:00:01+02:00", 6, "musive", HEAD_B),
+      outcomeLine("2026-08-11T10:20:00+02:00", "musive", {
+        pr: 6,
+        ok: true,
+        exitCode: 0,
+        counts: { blocking: 1, advisory: 0 },
+      }),
+      "garbage line that parses as nothing",
+      "",
+    ].join("\n");
+    expect(countLaunchedToday(logText, "2026-08-11")).toBe(2);
+    expect(countLaunchedToday(logText, "2026-08-10")).toBe(1);
+    expect(countLaunchedToday(logText, "2026-08-12")).toBe(0);
+    expect(countLaunchedToday("", "2026-08-11")).toBe(0);
+  });
+
+  // Only the literal `launched` token after the timestamp counts — a free
+  // text line that merely mentions the word must not inflate the cap.
+  test("non-launched events never count", () => {
+    const logText = [
+      logLine("2026-08-11T09:00:00+02:00", "tick idle reason=window-closed"),
+      logLine("2026-08-11T09:10:00+02:00", "note: launched nothing today"),
+      logLine("2026-08-11T09:20:00+02:00", "tick end launched=0 skipped=2"),
+    ].join("\n");
+    expect(countLaunchedToday(logText, "2026-08-11")).toBe(0);
+  });
+
+  test("skip and outcome lines carry their fields", () => {
+    expect(skipLine("T", "musive", 7, HEAD_B, "reviewed-remote")).toBe(
+      `T skip repo=musive pr=7 head=${HEAD_B.slice(0, 8)} reason=reviewed-remote`,
+    );
+    expect(
+      outcomeLine("T", "musive", {
+        pr: 7,
+        ok: true,
+        exitCode: 0,
+        counts: { blocking: 2, advisory: 1 },
+      }),
+    ).toBe("T outcome pr=7 repo=musive status=ok blocking=2 advisory=1");
+    expect(
+      outcomeLine("T", "musive", {
+        pr: 7,
+        ok: false,
+        exitCode: 3,
+        counts: null,
+      }),
+    ).toBe("T outcome pr=7 repo=musive status=failed exit=3");
+  });
+});
+
+describe("parseLockPid", () => {
+  test("a bare PID parses, anything else is null", () => {
+    expect(parseLockPid("12345\n")).toBe(12345);
+    expect(parseLockPid("  67  ")).toBe(67);
+    expect(parseLockPid("")).toBeNull();
+    expect(parseLockPid("0")).toBeNull();
+    expect(parseLockPid("-3")).toBeNull();
+    expect(parseLockPid("pid 12")).toBeNull();
+  });
+});
+
+describe("renderWatchPlist", () => {
+  const input = {
+    runtimePath: "/Users/x/.bun/bin/bun",
+    entryPath: "/Users/x/Desktop/pr-hero/src/cli.ts",
+    intervalSeconds: 900,
+    logPath: "/Users/x/.prhero/launchd.log",
+    pathEnv: "/opt/homebrew/bin:/usr/bin:/bin",
+  };
+
+  test("program arguments are absolute runtime + entry + watch --once", () => {
+    const plist = renderWatchPlist(input);
+    expect(plist).toContain(`<string>${WATCH_LAUNCHD_LABEL}</string>`);
+    expect(plist).toContain(
+      "    <string>/Users/x/.bun/bin/bun</string>\n" +
+        "    <string>/Users/x/Desktop/pr-hero/src/cli.ts</string>\n" +
+        "    <string>watch</string>\n" +
+        "    <string>--once</string>",
+    );
+    expect(plist).toContain("<integer>900</integer>");
+    expect(plist.endsWith("\n")).toBe(true);
+  });
+
+  // The launchd trap this file exists to disarm: gh/codegraph/claude/bun
+  // are not on launchd's default PATH, so the captured PATH ships in the
+  // plist, and process output goes to the SEPARATE launchd.log so watch.log
+  // stays a parseable cap counter.
+  test("the captured PATH and the separate process log are wired in", () => {
+    const plist = renderWatchPlist(input);
+    expect(plist).toContain("<key>PATH</key>");
+    expect(plist).toContain("<string>/opt/homebrew/bin:/usr/bin:/bin</string>");
+    const stdoutKey = plist.indexOf("<key>StandardOutPath</key>");
+    const stderrKey = plist.indexOf("<key>StandardErrorPath</key>");
+    expect(stdoutKey).toBeGreaterThan(-1);
+    expect(stderrKey).toBeGreaterThan(-1);
+    expect(plist).toContain("<string>/Users/x/.prhero/launchd.log</string>");
+  });
+
+  test("XML-hostile characters in paths are escaped", () => {
+    const plist = renderWatchPlist({
+      ...input,
+      pathEnv: "/a&b:/c<d>:/usr/bin",
+    });
+    expect(plist).toContain("<string>/a&amp;b:/c&lt;d&gt;:/usr/bin</string>");
+  });
+});
+
+describe("notification", () => {
+  test("osascript args escape AppleScript string hazards", () => {
+    expect(
+      osascriptNotifyArgs("pr-hero", 'PR #5: 1 blocking, "quoted"'),
+    ).toEqual([
+      "osascript",
+      "-e",
+      'display notification "PR #5: 1 blocking, \\"quoted\\"" with title "pr-hero"',
+    ]);
+    expect(osascriptNotifyArgs("t", "back\\slash")).toEqual([
+      "osascript",
+      "-e",
+      'display notification "back\\\\slash" with title "t"',
+    ]);
+  });
+
+  test("outcome text: counts, countless success, failure", () => {
+    expect(
+      outcomeNotificationText({
+        pr: 5,
+        ok: true,
+        exitCode: 0,
+        counts: { blocking: 1, advisory: 2 },
+      }),
+    ).toBe("PR #5: 1 blocking, 2 advisory");
+    expect(
+      outcomeNotificationText({ pr: 5, ok: true, exitCode: 0, counts: null }),
+    ).toBe("PR #5 reviewed (counts unavailable)");
+    expect(
+      outcomeNotificationText({ pr: 5, ok: false, exitCode: 3, counts: null }),
+    ).toBe("PR #5 review failed (exit 3)");
+  });
+});
+
+describe("prheroHomePaths", () => {
+  test("every watcher path hangs off one home", () => {
+    const paths = prheroHomePaths("/Users/x");
+    expect(paths).toEqual({
+      dir: "/Users/x/.prhero",
+      configPath: "/Users/x/.prhero/watch.json",
+      logPath: "/Users/x/.prhero/watch.log",
+      lockPath: "/Users/x/.prhero/watch.lock",
+      launchdLogPath: "/Users/x/.prhero/launchd.log",
+      plistPath: `/Users/x/Library/LaunchAgents/${WATCH_LAUNCHD_LABEL}.plist`,
+    });
+  });
+});

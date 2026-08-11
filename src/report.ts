@@ -8,7 +8,7 @@
 // a renderer that reached for `new Date()` would make that a lie).
 
 import type { Finding, FindingsDocument, Tier } from "./findings";
-import { PR_COMMENT_MARKER } from "./pr-preflight";
+import { prCommentMarker } from "./pr-preflight";
 import {
   clusterByRootCause,
   extractAnchor,
@@ -155,9 +155,11 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // telemetry of any kind — the engine's internal economics never reach a
 // public comment.
 //
-// The first line is PR_COMMENT_MARKER, verbatim: postPrComment (pr.ts) finds
-// the previous comment by that prefix and updates it in place, so this
-// renderer and that finder share one constant and posting stays idempotent.
+// The first line is the pr-hero marker carrying doc.head_sha: postPrComment
+// (pr.ts) finds the previous comment by the marker PREFIX and updates it in
+// place, so this renderer and that finder share one contract and posting
+// stays idempotent — while the declared head lets the watch guard (B3) tell
+// which head a posted comment covers.
 //
 // The summary line (not the footer) names the exact range reviewed:
 // doc.base_sha IS the diff-from commit — the recorded rule in cli.ts.
@@ -183,7 +185,7 @@ export function renderPrComment(
     webUrl === undefined
       ? headSha8
       : `[${headSha8}](${webUrl}/commit/${doc.head_sha})`;
-  const out: string[] = [PR_COMMENT_MARKER];
+  const out: string[] = [prCommentMarker(doc.head_sha)];
   out.push("## pr-hero review");
   out.push("");
   out.push(

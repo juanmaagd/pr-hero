@@ -68,6 +68,9 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
 | `pr-hero ledger` | Accumulate every run's `comparison.json` into one markdown ledger — the head-to-head buckets as a rate. One PR, one vote (only its latest run counts). |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. |
+| `pr-hero watch --once` | Run ONE watcher tick: scan the repos in `~/.prhero/watch.json`, pick the next unreviewed open PR, review it. `--dry-run` shows the whole decision for $0. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
+| `pr-hero watch install` | Install the macOS launchd agent that runs a tick every `--interval` minutes (default 15). **This is the opt-in to automatic spend.** |
+| `pr-hero watch uninstall` | Unload and remove that agent. |
 
 Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `--model <m>`,
 `--out <dir>` (run dir for `review`, output file for `ledger`), `--runs <dir>` (ledger's runs root).
@@ -85,8 +88,8 @@ codegraph daemon holds a socket in there).
 
 ## When to run it
 
-Today every review is launched **by hand** — nothing fires on its own. The two moments that make
-sense:
+Reviews launch two ways: **by hand**, or through the opt-in local watcher (`pr-hero watch`, below)
+— nothing else ever fires on its own. The two moments where a manual run makes sense:
 
 1. **Before opening the PR** — `pr-hero review` on your branch. The cheapest moment to catch
    something: you are still in context and nothing is published yet.
@@ -108,9 +111,71 @@ sense:
 | Stage | Status |
 | --- | --- |
 | Manual CLI (`review`, `--pr`, `--post`, `ledger`) | **Available now** — this README. |
-| Auto-trigger on PR creation (local watcher / hook) | Roadmap (Phase B3). Deliberately opt-in: every review spends real money, so nothing will ever fire without an explicit subscription to that spend. |
+| Auto-trigger on new PRs / new pushes (local watcher) | **Available now** — `pr-hero watch`, below. Deliberately opt-in: every review spends real money, so nothing fires until you write the config AND install the agent. |
 | CI mode (GitHub Actions) | Roadmap (Phase E). Needs Claude auth in the runner and a per-PR budget decision. |
 | Required status check that blocks merges | **Deliberately deferred.** At the engine's measured recall it has no business gating a merge — the disclaimer in every report is the contract. |
+
+## Watching PRs automatically — `pr-hero watch`
+
+The watcher is a **tick, not a daemon**: `pr-hero watch --once` makes one pass — list open PRs in
+each configured repo, skip what is already covered, launch **at most one** review — and exits.
+launchd (installed below) fires a tick every N minutes and is the supervisor. Drafts are skipped;
+a new push makes a PR eligible again (with `post: true` the PR's single marked comment is updated
+in place to track the new head).
+
+### Opt in
+
+1. Create `~/.prhero/watch.json` — a repo is watched **only** if listed here:
+
+   ```json
+   {
+     "repos": [{ "path": "~/Desktop/your-repo", "post": true }],
+     "daily_cap": 5,
+     "window": { "start": "09:00", "end": "19:00" }
+   }
+   ```
+
+   | Key | Default | What it does |
+   | --- | --- | --- |
+   | `repos[].path` | — | Operator checkout of a repo to watch (its `.prhero/` config and gotchas are used, exactly like `review --pr`). |
+   | `repos[].post` | `false` | Pass `--post` to the spawned review — publish each result as the PR's one marked comment. |
+   | `daily_cap` | `5` | Global max reviews launched per local calendar day, across all repos. `0` pauses launching entirely. |
+   | `window` | `null` (always) | Local-time window outside which ticks do nothing, e.g. `{"start":"09:00","end":"19:00"}`. Overnight windows (`start` > `end`) work. |
+
+2. Preview for $0: `pr-hero watch --once --dry-run` prints every candidate, every skip and its
+   reason (draft / reviewed-local / reviewed-remote / attempts / cap / window), and the one
+   (pr, head) a real tick would launch.
+
+3. Install the schedule — **this is the moment automatic spending starts**:
+
+   ```bash
+   pr-hero watch install              # launchd agent, one tick every 15 min
+   pr-hero watch install --interval 5 # or your own cadence
+   pr-hero watch uninstall            # stop it
+   ```
+
+   The agent captures your current `PATH` at install time (launchd's own PATH knows nothing of
+   `bun`, `gh`, `claude` or `codegraph`) — re-run `install` after moving tools around.
+
+### What keeps the bill bounded
+
+- **The cap and the window** exist because the watcher and your interactive Claude sessions share
+  the same subscription quota — a runaway watcher would starve the work you are actually doing.
+  The cap is counted from `~/.prhero/watch.log` (the `launched` lines ARE the counter), and a
+  launch is logged *before* it starts, so even a crashed review counts.
+- **Max 2 attempts per (pr, head)**: a PR that keeps killing the review is dropped until it gets
+  a new push, instead of eating the cap every day.
+- **Cross-machine guard**: a posted pr-hero comment declares which head it reviewed; any watcher
+  that sees the current head already declared skips the PR.
+
+### Operating model and honest limits
+
+Run **one watcher per repo per team**. The cross-machine guard only protects repos with
+`post: true`, and only after the first comment lands — two watchers racing the same fresh PR is a
+known gap (tech debt, accepted): the worst case is one duplicated review, and with `post: true`
+the PR still converges to a single comment. Not macOS? `watch --once` from cron works the same —
+the PID lockfile keeps overlapping ticks from doubling up. Logs: structured events in
+`~/.prhero/watch.log`, raw tick/review output in `~/.prhero/launchd.log`.
 
 ## What a run produces
 

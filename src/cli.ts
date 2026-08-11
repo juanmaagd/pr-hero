@@ -92,6 +92,7 @@ import {
 } from "./report";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
+import { watchCommand } from "./watch";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
 // handed to every step together with the runner's --strict-mcp-config: an
@@ -171,7 +172,9 @@ async function main(argv: string[]): Promise<number> {
       ? await init(parsed.options)
       : parsed.command === "ledger"
         ? await ledgerCommand(parsed.options)
-        : await review(parsed.options);
+        : parsed.command === "watch"
+          ? await watchCommand(parsed.options)
+          : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);

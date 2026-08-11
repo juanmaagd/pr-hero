@@ -16,7 +16,8 @@ import {
   buildComparisonJson,
   decideWorktree,
   findMarkedCommentId,
-  PR_COMMENT_MARKER,
+  PR_COMMENT_MARKER_PREFIX,
+  prCommentMarker,
   prRunDirCandidate,
   prWorktreePath,
   resolveCurrentPrNumber,
@@ -240,10 +241,35 @@ describe("parseArgs --post", () => {
   });
 });
 
+describe("prCommentMarker", () => {
+  const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
+
+  test("declares the full head sha and starts with the matcher's prefix", () => {
+    const marker = prCommentMarker(HEAD);
+    expect(marker).toBe(`<!-- pr-hero-report head=${HEAD} -->`);
+    expect(marker.startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(true);
+  });
+
+  // The old headless marker must ALSO start with the prefix — that identity
+  // is the whole backward-compatibility argument for prefix matching.
+  test("the legacy headless marker starts with the same prefix", () => {
+    expect("<!-- pr-hero-report -->".startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(
+      true,
+    );
+  });
+});
+
 describe("findMarkedCommentId", () => {
+  const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
   const marked = (id: number) => ({
     id,
-    body: `${PR_COMMENT_MARKER}\n\n## pr-hero review — 1 blocking`,
+    body: `${prCommentMarker(HEAD)}\n\n## pr-hero review — 1 blocking`,
+  });
+  // The format every comment already in the wild carries — posted before
+  // B3 taught the marker to declare a head.
+  const legacyMarked = (id: number) => ({
+    id,
+    body: "<!-- pr-hero-report -->\n\n## pr-hero review — 1 blocking",
   });
 
   test("no comments is null", () => {
@@ -252,6 +278,29 @@ describe("findMarkedCommentId", () => {
 
   test("one marked comment is found by id", () => {
     expect(findMarkedCommentId([marked(101)])).toBe(101);
+  });
+
+  // THE backward-compatibility pin: matching moved to the bare prefix so
+  // OLD comments keep being found and PATCHed — a matcher that required
+  // `head=` would stack a second comment on every pre-B3 PR.
+  test("a legacy headless comment is still found", () => {
+    expect(findMarkedCommentId([legacyMarked(55)])).toBe(55);
+  });
+
+  test("a legacy comment and a new one mix; the last still wins", () => {
+    expect(findMarkedCommentId([legacyMarked(10), marked(20)])).toBe(20);
+  });
+
+  // The exact-prefix lesson (a real `<!-- linear-linkback -->` bot comment
+  // motivated it): a foreign marker that merely shares the leading words
+  // must not match — the trailing space in the prefix rejects it.
+  test("a lookalike foreign marker is not ours", () => {
+    expect(
+      findMarkedCommentId([
+        { id: 9, body: "<!-- pr-hero-reporter -->\nsomeone else's bot" },
+        { id: 10, body: "<!-- pr-hero-reportage head=abc -->" },
+      ]),
+    ).toBeNull();
   });
 
   test("only marked comments match in a mix", () => {
@@ -277,8 +326,11 @@ describe("findMarkedCommentId", () => {
   test("a marker quoted mid-body is not a match", () => {
     expect(
       findMarkedCommentId([
-        { id: 7, body: `replying to the bot:\n${PR_COMMENT_MARKER}\nquoted` },
-        { id: 8, body: ` ${PR_COMMENT_MARKER} leading space` },
+        {
+          id: 7,
+          body: `replying to the bot:\n${prCommentMarker(HEAD)}\nquoted`,
+        },
+        { id: 8, body: ` ${prCommentMarker(HEAD)} leading space` },
       ]),
     ).toBeNull();
   });

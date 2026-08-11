@@ -297,10 +297,25 @@ export function decideWorktree(input: {
 // every comment pr-hero publishes. An HTML comment renders invisibly on
 // GitHub, so readers see the report and the machine sees the tag.
 // renderPrComment (report.ts) writes it; findMarkedCommentId reads it.
-export const PR_COMMENT_MARKER = "<!-- pr-hero-report -->";
+//
+// B3 added the head declaration: the emitted marker carries the FULL head
+// sha the posted review describes, so the watch guard (watch-preflight.ts)
+// can tell from the comment alone whether THIS head was already reviewed on
+// another machine. Matching, though, stays on the bare prefix — comments
+// already in the wild carry the old headless `<!-- pr-hero-report -->`, and
+// a matcher that required the head (or the closing `-->` right after the
+// name) would orphan every one of them, so --post would stack a second
+// comment instead of updating. The trailing space in the prefix is
+// deliberate: both formats continue with a space (` -->` / ` head=`), while
+// a foreign lookalike marker such as `<!-- pr-hero-reporter -->` does not.
+export const PR_COMMENT_MARKER_PREFIX = "<!-- pr-hero-report ";
+
+export function prCommentMarker(headSha: string): string {
+  return `<!-- pr-hero-report head=${headSha} -->`;
+}
 
 // Finds the comment a --post run should update. A comment matches only when
-// its body STARTS WITH the marker: a marker quoted mid-body (someone
+// its body STARTS WITH the marker prefix: a marker quoted mid-body (someone
 // replying with the report pasted in) must never be treated as ours. The
 // LAST match wins — the API returns oldest→newest, so last is newest — and
 // idempotency is find-and-update, never stack: if legacy duplicates exist we
@@ -312,7 +327,7 @@ export function findMarkedCommentId(
   let found: number | null = null;
   for (const comment of comments) {
     if (typeof comment?.body !== "string") continue;
-    if (!comment.body.startsWith(PR_COMMENT_MARKER)) continue;
+    if (!comment.body.startsWith(PR_COMMENT_MARKER_PREFIX)) continue;
     found = comment.id;
   }
   return found;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
-import { PR_COMMENT_MARKER } from "../src/pr-preflight";
+import { PR_COMMENT_MARKER_PREFIX, prCommentMarker } from "../src/pr-preflight";
 import {
   estimateCost,
   formatElapsed,
@@ -282,14 +282,24 @@ describe("renderPrComment", () => {
   const HEAD = "b".repeat(40);
 
   // The idempotency contract: postPrComment finds the previous comment by
-  // this exact prefix, so the marker must be the very first line, always.
-  test("the first line is exactly the marker", () => {
-    expect(renderPrComment(doc()).split("\n")[0]).toBe(PR_COMMENT_MARKER);
+  // the marker prefix, so the marker must be the very first line, always —
+  // and since B3 it declares the document's own head sha, so the watch
+  // guard can read WHICH head this comment covers.
+  test("the first line is the marker declaring doc.head_sha", () => {
+    expect(renderPrComment(doc()).split("\n")[0]).toBe(prCommentMarker(HEAD));
     expect(
       renderPrComment(doc({ findings: [finding({ id: "F001" })] })).split(
         "\n",
       )[0],
-    ).toBe(PR_COMMENT_MARKER);
+    ).toBe(prCommentMarker(HEAD));
+  });
+
+  // findMarkedCommentId matches on the prefix; a rendered comment that
+  // stopped starting with it would orphan its own update path.
+  test("the rendered body starts with the matcher's prefix", () => {
+    expect(renderPrComment(doc()).startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(
+      true,
+    );
   });
 
   // doc.base_sha IS the diff-from commit (the recorded rule in cli.ts), so

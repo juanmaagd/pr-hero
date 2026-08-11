@@ -370,6 +370,27 @@ What is still manual, in the order it should be closed:
    `updated` with the SAME comment id — one post alone leaves the idempotency untested.
 3. **Trigger** — `branch-pr` hook or a local watcher (launchd/cron) so a review happens rather than being
    remembered. Note this spends money per PR without asking, so it needs an explicit opt-in.
+
+   **BUILT 2026-08-11** (`src/watch.ts` I/O + `src/watch-preflight.ts` pure decisions; design ratified by
+   Juanma the same day). Reframed during design: pr-hero is OSS, so the trigger is a PRODUCT feature —
+   trigger adapters over the same `review --pr` command. The GitHub Action adapter stays in Phase E by
+   Juanma's call; B3 is the local adapter. Tick model, never a daemon: launchd (or cron + the advisory
+   lockfile) fires `pr-hero watch --once`; a workless tick costs one `gh pr list` per repo, and the gate
+   (window/cap) runs before ANY call. Opt-in is structural — `~/.prhero/watch.json` lists exactly the
+   repos the watcher may spend on, `post` per repo (ON for musive, OFF is the OSS default), global
+   `daily_cap` (5) protecting the shared subscription-quota window, optional local-time window. The cap
+   counter is watch.log itself, appended BEFORE each spawn: over-counting skips a review, under-counting
+   is unbounded spend. Eligibility is per (pr, head) — a push re-arms the review so the posted comment
+   tracks the live head: open non-draft, no comparison.json match (parsed fields via the ledger parser,
+   never dir names), no marked comment declaring the head, and <2 artifact-counted attempts (poison-PR
+   guard). The cross-machine guard rides the marker: it now carries `head=<sha>` and matching moved to
+   the bare prefix `<!-- pr-hero-report ` so pre-B3 comments still PATCH instead of stacking (pinned by
+   tests). Known debt, accepted ("no es perfecto pero está bien por ahora"): two watchers on one repo
+   can duplicate one review inside a ~10-min race window (the PR still converges to one comment), and
+   `post: false` has no shared state at all — exactly-once needs central event delivery, which is Phase
+   E's Action; until then the operating model is one watcher per repo per team. Verified offline (428
+   tests, marker back-compat pins, full eligibility matrix); the live tick, launchd install and first
+   auto-spawned review are UNEXECUTED — `pr-hero watch --once --dry-run` is the $0 gate, always first.
 4. **Accumulate the head-to-head** into a ledger across PRs, so the three buckets become a rate rather
    than a snapshot. Six of the eight findings so far are unverified one by one; a verdict column with its
    reasoning is required — the A3 lesson was that verdicts recorded without reasoning cannot be

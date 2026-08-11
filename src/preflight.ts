@@ -14,6 +14,11 @@ import type { ReviewSpec } from "./spec";
 // size. The fixture eval runs at 4 precisely because 12 is not cheap.
 export const DEFAULT_HOP_BUDGET = 12;
 
+// watch install's default StartInterval, in minutes. 15 keeps a fresh PR's
+// wait bounded by the tick while staying far below GitHub's rate-limit radar
+// (a tick is one `pr list` per repo plus a comments read per candidate).
+export const DEFAULT_WATCH_INTERVAL_MIN = 15;
+
 // The LAST resort only. WHY it is not simply "the default": a hardcoded
 // default branch silently reviews the wrong range on every repo that does not
 // use `main` — musive's default branch is `dev`, so "main" there is not a
@@ -78,10 +83,17 @@ export interface CliOptions {
   // three-dot (merge-base) range is right almost always, and this flag exists
   // for the rare caller who genuinely wants the literal two-point diff.
   twoDot: boolean;
+  // watch only (ROADMAP B3): which of the three watch actions was asked for.
+  // "once" is one tick (the launchd unit of work), install/uninstall manage
+  // the launchd agent. Required for `watch` — a bare `pr-hero watch` has no
+  // daemon mode to fall into, so it fails loud instead of hanging.
+  watch?: "once" | "install" | "uninstall";
+  // watch install only: launchd StartInterval, in minutes.
+  interval?: number;
 }
 
 export interface ParsedCli {
-  command: "review" | "init" | "ledger" | "help";
+  command: "review" | "init" | "ledger" | "watch" | "help";
   options: CliOptions;
 }
 
@@ -92,6 +104,13 @@ Usage:
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero ledger [options]   Accumulate every run's comparison.json into one
                              markdown ledger (the three buckets as a rate)
+  pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
+                             pick the next unreviewed open PR across the
+                             configured repos and review it. launchd (or cron)
+                             is the scheduler; this never daemonizes
+  pr-hero watch install      Install the macOS launchd agent that runs
+                             "watch --once" every --interval minutes
+  pr-hero watch uninstall    Unload and remove that launchd agent
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
@@ -129,8 +148,14 @@ Options:
                       of from the merge base. Rarely what you want: when base
                       has moved on, its newer commits show up REVERSED in the
                       review
+  --once              watch only: run one tick and exit (launchd's unit of
+                      work). Required — watch has no daemon mode
+  --interval <min>    watch install only: minutes between launchd ticks
+                      (default: ${DEFAULT_WATCH_INTERVAL_MIN})
   --dry-run           Resolve, preflight, print the plan and the cost band,
-                      then exit without spawning anything
+                      then exit without spawning anything. For watch --once:
+                      print what would be skipped/launched and why, touching
+                      nothing
   --yes               Skip the confirmation prompt
   --help              Show this text
 
@@ -152,6 +177,7 @@ const VALUE_FLAGS = new Set([
   "--config",
   "--model",
   "--hop-budget",
+  "--interval",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -164,11 +190,14 @@ export function parseArgs(argv: string[]): ParsedCli {
     post: false,
     twoDot: false,
   };
-  let command: "review" | "init" | "ledger" | "help" | undefined;
+  let command: "review" | "init" | "ledger" | "watch" | "help" | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
   // be read off options afterwards — and the --pr exclusion below must fire
   // on an explicit --head even when its value equals that default.
   let headExplicit = false;
+  // --once is watch's tick switch; folded into options.watch after the loop
+  // so flag order (watch --once vs --once watch) cannot matter.
+  let once = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === undefined) continue;
@@ -224,16 +253,36 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.twoDot = true;
       continue;
     }
+    if (arg === "--once") {
+      once = true;
+      continue;
+    }
     if (arg.startsWith("-")) {
       throw new CliUsageError(`unknown option: ${arg}`);
+    }
+    // install/uninstall are watch's sub-words, not commands of their own:
+    // they only parse AFTER `watch`, so `pr-hero install` still fails with
+    // the unknown-command list instead of silently touching launchd.
+    if (
+      command === "watch" &&
+      options.watch === undefined &&
+      (arg === "install" || arg === "uninstall")
+    ) {
+      options.watch = arg;
+      continue;
     }
     if (command !== undefined) {
       throw new CliUsageError(`unexpected argument: ${arg}`);
     }
-    if (arg !== "review" && arg !== "init" && arg !== "ledger") {
+    if (
+      arg !== "review" &&
+      arg !== "init" &&
+      arg !== "ledger" &&
+      arg !== "watch"
+    ) {
       throw new CliUsageError(
-        `unknown command: ${arg} (the commands are "review", "init" and ` +
-          '"ledger")',
+        `unknown command: ${arg} (the commands are "review", "init", ` +
+          '"ledger" and "watch")',
       );
     }
     command = arg;
@@ -274,6 +323,35 @@ export function parseArgs(argv: string[]): ParsedCli {
       "--post publishes the review as a PR comment, so it requires --pr",
     );
   }
+  // The watch surface, validated after the loop for the same order-blindness.
+  if (command === "watch") {
+    if (once && options.watch !== undefined) {
+      throw new CliUsageError(
+        `--once cannot be combined with "${options.watch}"`,
+      );
+    }
+    if (once) options.watch = "once";
+    if (options.watch === undefined) {
+      throw new CliUsageError(
+        'watch needs an action: --once (one tick), "install" or "uninstall"',
+      );
+    }
+    if (options.dryRun && options.watch !== "once") {
+      throw new CliUsageError(
+        `--dry-run only applies to watch --once, not "${options.watch}"`,
+      );
+    }
+    if (options.interval !== undefined && options.watch !== "install") {
+      throw new CliUsageError("--interval only applies to watch install");
+    }
+  } else {
+    if (once) {
+      throw new CliUsageError("--once only applies to the watch command");
+    }
+    if (options.interval !== undefined) {
+      throw new CliUsageError("--interval only applies to watch install");
+    }
+  }
   return { command, options };
 }
 
@@ -310,6 +388,16 @@ function applyValueFlag(
     case "--runs":
       options.runs = value;
       return;
+    case "--interval": {
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new CliUsageError(
+          `--interval must be a positive integer (minutes), got: ${value}`,
+        );
+      }
+      options.interval = parsed;
+      return;
+    }
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {
