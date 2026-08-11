@@ -23,16 +23,30 @@ export interface SizeGateConfig {
   excludeGlobs: string[];
 }
 
-// The shipped defaults. 1500 lines sits above the everyday PR and below the
+// The shipped defaults. 2500 lines sits above the everyday PR and below the
 // bench tree that produced the cost blow-up above; 150 files is the "this is
 // a mechanical sweep, not a review" ceiling.
+//
+// 2500 is a CORRECTION, and the reason it moved is worth keeping. The first
+// shipped default was 1500, extrapolated from "everything measured cheap was
+// under 830 lines". But the measurements are 830 lines at $4.78 and ~4000
+// lines at $6.58-17.92, with NOTHING in between — 1500 was a guess into that
+// hole. This repo's own PR #1 (1603 lines) then printed both `size gate:
+// SKIP` and a $3.18-6.86 cost band in the same breath: the gate refused, on
+// cost grounds, a diff whose cost was ordinary. A limit that fires where its
+// own stated reason does not hold is miscalibrated, not strict. 2500 keeps
+// real headroom under the ~4000-line tree that actually blows up.
+//
+// The band 830..4000 is still unmeasured. If a diff in it ever bills like the
+// bench tree, this number is the thing to revisit — with a measurement, not
+// another extrapolation.
 //
 // The exclusion list is generated-content only: lockfiles, minified bundles
 // and jest-style snapshots are enormous, mechanical, and nothing a hunter can
 // usefully read. Excluding them keeps the gate from firing on a PR whose real
 // change is ten lines beside a regenerated lockfile.
 export const DEFAULT_SIZE_GATE: SizeGateConfig = {
-  maxChangedLines: 1500,
+  maxChangedLines: 2500,
   maxChangedFiles: 150,
   excludeGlobs: [
     "**/bun.lock",
