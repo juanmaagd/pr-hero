@@ -391,6 +391,15 @@ What is still manual, in the order it should be closed:
    E's Action; until then the operating model is one watcher per repo per team. Verified offline (428
    tests, marker back-compat pins, full eligibility matrix); the live tick, launchd install and first
    auto-spawned review are UNEXECUTED — `pr-hero watch --once --dry-run` is the $0 gate, always first.
+
+   **Deferred by design (Juanma, 2026-08-11): parallel PR reviews per tick.** Today the tick is ONE
+   review, FIFO by PR number, and the queue drains at ~4 PRs/hour — deliberate, because each review is
+   already internally parallel (the hunter fan-out) and K simultaneous reviews would contend for the
+   same subscription-quota window, CPU and rate limits while making the cap and the log illegible.
+   Revisit when musive's PR volume outgrows the drain rate: the cheap knobs are a shorter interval or a
+   `reviews_per_tick: K` config (needs per-PR locking and concurrent log-append discipline). True
+   per-PR parallelism — one runner per PR, instantly — is what Phase E's GitHub Action gives for free,
+   so measure whether the local knob is worth building before the Action makes it moot.
 4. **Accumulate the head-to-head** into a ledger across PRs, so the three buckets become a rate rather
    than a snapshot. Six of the eight findings so far are unverified one by one; a verdict column with its
    reasoning is required — the A3 lesson was that verdicts recorded without reasoning cannot be
