@@ -14,7 +14,7 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseComparisonJson } from "./ledger";
-import { fetchPrComments, ghPrList } from "./pr";
+import { fetchPrComments, ghPrFiles, ghPrList } from "./pr";
 import {
   CliError,
   type CliOptions,
@@ -22,6 +22,11 @@ import {
   DEFAULT_WATCH_INTERVAL_MIN,
   defaultRunRoot,
 } from "./preflight";
+import {
+  DEFAULT_SIZE_GATE,
+  evaluateSizeGate,
+  evaluateSizeGateAggregate,
+} from "./size-gate";
 import {
   countAttempts,
   countLaunchedToday,
@@ -42,6 +47,7 @@ import {
   parseLockPid,
   parsePipelineMeta,
   parsePlistInterval,
+  parsePrFiles,
   parsePrList,
   parseWatchConfig,
   prheroHomePaths,
@@ -133,6 +139,11 @@ interface WatchedRepoFacts extends TickRepoFacts {
   // TickRepoFacts.path is the resolved toplevel; the runs root rides along
   // for the post-run outcome scan.
   runsRoot: string;
+  // The repo's own size-gate thresholds, carried to the SPAWN. See the WHY
+  // on the review args in runTick: the spawned CLI re-runs the gate on the
+  // real numstat, and it must be told the same numbers this tick used.
+  maxChangedLines: number;
+  maxChangedFiles: number;
 }
 
 async function watchOnce(dryRun: boolean): Promise<number> {
@@ -238,8 +249,14 @@ async function gatherRepoFacts(
     // candidate, while the one-review-per-PR default is done after ANY
     // local review of that number (reviewed-prior-head from local facts
     // alone), so its comments fetch is skipped too.
+    const gateConfig = {
+      maxChangedLines: entry.maxChangedLines,
+      maxChangedFiles: entry.maxChangedFiles,
+      excludeGlobs: DEFAULT_SIZE_GATE.excludeGlobs,
+    };
     const remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[] =
       [];
+    const tooLarge: number[] = [];
     for (const candidate of prs) {
       if (candidate.isDraft) continue;
       const locallyBlocked = runDirs.localReviews.some(
@@ -247,6 +264,40 @@ async function gatherRepoFacts(
           r.pr === candidate.pr && (r.head === candidate.head || !entry.onPush),
       );
       if (locallyBlocked) continue;
+      // The size gate, TIERED, same frugality rule as the comments fetch
+      // below: `gh pr list` already handed us GitHub's aggregate counters,
+      // so a PR under both limits by its aggregate is settled for FREE —
+      // exclusions can only ever make it smaller. Only a PR whose aggregate
+      // exceeds a limit is worth a second call, and then the per-file list
+      // is fetched so an excluded lockfile can still rescue it.
+      //
+      // Recomputed from live counters on EVERY tick and never persisted: a
+      // force-push that shrinks the PR must make it eligible again next
+      // tick (constraint (b) on candidateSkipReason).
+      if (
+        !evaluateSizeGateAggregate(
+          {
+            files: candidate.changedFiles,
+            insertions: candidate.additions,
+            deletions: candidate.deletions,
+          },
+          gateConfig,
+        ).ok
+      ) {
+        const perFile = parsePrFiles(await ghPrFiles(repoRoot, candidate.pr));
+        // gh's `files` list can be truncated on a very large PR. A short
+        // list under-counts, and under-counting here FALSELY RESCUES exactly
+        // the monster the gate exists to stop — so a count that disagrees
+        // with GitHub's own changedFiles is not trusted to rescue anything.
+        const trustworthy = perFile.length >= candidate.changedFiles;
+        if (!trustworthy || !evaluateSizeGate(perFile, gateConfig).ok) {
+          tooLarge.push(candidate.pr);
+          // No comments fetch for a PR that is already skipped — the pure
+          // decision reads an unfetched PR as unguarded, and too-large
+          // fires before the remote checks.
+          continue;
+        }
+      }
       const comments = await fetchPrComments(repoRoot, candidate.pr);
       remoteHeads.push({
         pr: candidate.pr,
@@ -267,7 +318,10 @@ async function gatherRepoFacts(
         head: candidate.head,
         count: countAttempts(runDirs.facts, candidate.pr, candidate.head),
       })),
+      tooLarge,
       runsRoot,
+      maxChangedLines: entry.maxChangedLines,
+      maxChangedFiles: entry.maxChangedFiles,
     });
   }
   return repos;
@@ -350,6 +404,28 @@ async function runTick(
   }
 
   const repoBase = path.basename(launch.repo);
+  // The launched repo's own size-gate thresholds, forwarded to the spawn.
+  // NOT optional: the spawned CLI runs the gate AGAIN, on the real git
+  // numstat, and without these it would use DEFAULT_SIZE_GATE — so a repo
+  // configured with a RAISED threshold would pass the watch tier, get
+  // launched, and then be refused by the CLI's default. That refusal
+  // happens before createPrRunDir, so it leaves no run dir, so the attempts
+  // guard never sees it: the same PR would be relaunched every tick and eat
+  // the whole daily cap, every day, reviewing nothing.
+  //
+  // Deliberately NOT --force: the CLI gate stays live as the backstop (it
+  // sees the true diff, not GitHub's counters). It just has to agree with
+  // this tick on what the limits are.
+  const launched = repos.find((r) => r.path === launch.repo);
+  const sizeArgs =
+    launched === undefined
+      ? []
+      : [
+          "--max-changed-lines",
+          String(launched.maxChangedLines),
+          "--max-changed-files",
+          String(launched.maxChangedFiles),
+        ];
   // Append-BEFORE-spawn, the fail-safe direction: if the tick crashes with
   // the review in flight, the launch must already be on the books — an
   // over-counted cap skips one review, an under-counted cap is unbounded
@@ -374,6 +450,7 @@ async function runTick(
       "--pr",
       String(launch.pr),
       "--yes",
+      ...sizeArgs,
       ...(launch.post ? ["--post"] : []),
     ],
     {
@@ -395,11 +472,7 @@ async function runTick(
     exitCode,
     counts:
       exitCode === 0
-        ? await readTierCounts(
-            repos.find((r) => r.path === launch.repo)?.runsRoot,
-            launch.pr,
-            launch.head,
-          )
+        ? await readTierCounts(launched?.runsRoot, launch.pr, launch.head)
         : null,
   };
   await appendLog(
@@ -622,14 +695,27 @@ async function watchAdd(options: CliOptions): Promise<number> {
   const result = upsertWatchRepo(
     raw,
     repoRoot,
-    { post: options.post, onPush: options.onPush },
+    {
+      post: options.post,
+      onPush: options.onPush,
+      // Same disclosed reset semantics as post/on_push: an absent flag
+      // records the shipped default rather than preserving the old value —
+      // `watch add` states the whole intent on the command line.
+      maxChangedLines:
+        options.maxChangedLines ?? DEFAULT_SIZE_GATE.maxChangedLines,
+      maxChangedFiles:
+        options.maxChangedFiles ?? DEFAULT_SIZE_GATE.maxChangedFiles,
+    },
     home,
   );
   await mkdir(paths.dir, { recursive: true });
   await Bun.write(paths.configPath, result.config);
   log(
     `${result.action} ${result.storedPath} (post=${options.post} ` +
-      `on_push=${options.onPush}) in ${paths.configPath}`,
+      `on_push=${options.onPush} ` +
+      `max_changed_lines=${options.maxChangedLines ?? DEFAULT_SIZE_GATE.maxChangedLines} ` +
+      `max_changed_files=${options.maxChangedFiles ?? DEFAULT_SIZE_GATE.maxChangedFiles}` +
+      `) in ${paths.configPath}`,
   );
   // The same hint install prints in reverse: config without a schedule is
   // as inert as a schedule without config — but only when the plist is

@@ -15,6 +15,7 @@ import {
   parseArgs,
   parseLocalConfig,
   parseNumstat,
+  parseNumstatFiles,
   parseRemoteHead,
   resolveAgentsDirSetting,
   resolveBaseRef,
@@ -39,8 +40,13 @@ describe("parseArgs", () => {
       post: false,
       twoDot: false,
       onPush: false,
+      force: false,
     });
     expect(options.base).toBeUndefined();
+    // Unset, never 0: 0 DISABLES a size limit, so it cannot double as
+    // "not asked for".
+    expect(options.maxChangedLines).toBeUndefined();
+    expect(options.maxChangedFiles).toBeUndefined();
   });
 
   test("init is a command, and unknown commands still fail", () => {
@@ -135,6 +141,54 @@ describe("parseArgs", () => {
       CliUsageError,
     );
     expect(() => parseArgs(["review", "--hop-budget", "many"])).toThrow(
+      CliUsageError,
+    );
+  });
+
+  // --force answers "is this diff too big to be worth its cost"; --yes
+  // answers "do you want to spend this". One flag must never skip two
+  // gates, so this is asserted rather than left to reading.
+  test("--force does NOT imply --yes", () => {
+    const { options } = parseArgs(["review", "--force"]);
+    expect(options.force).toBe(true);
+    expect(options.yes).toBe(false);
+  });
+
+  test("--yes does not imply --force either", () => {
+    const { options } = parseArgs(["review", "--yes"]);
+    expect(options.yes).toBe(true);
+    expect(options.force).toBe(false);
+  });
+
+  test("the size-gate limits parse, and 0 survives as 0", () => {
+    const { options } = parseArgs([
+      "review",
+      "--max-changed-lines",
+      "800",
+      "--max-changed-files",
+      "0",
+    ]);
+    expect(options.maxChangedLines).toBe(800);
+    // 0 DISABLES the limit — it must not be confused with "unset".
+    expect(options.maxChangedFiles).toBe(0);
+  });
+
+  test("the size-gate limits reject negatives and non-integers", () => {
+    for (const value of ["-1", "2.5", "many"]) {
+      expect(() => parseArgs(["review", "--max-changed-lines", value])).toThrow(
+        CliUsageError,
+      );
+      expect(() => parseArgs(["review", "--max-changed-files", value])).toThrow(
+        CliUsageError,
+      );
+    }
+  });
+
+  test("the size-gate limits need a value and never swallow a flag", () => {
+    expect(() => parseArgs(["review", "--max-changed-lines"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["review", "--max-changed-lines", "--yes"])).toThrow(
       CliUsageError,
     );
   });
@@ -310,6 +364,74 @@ describe("parseNumstat", () => {
       files: 0,
       insertions: 0,
       deletions: 0,
+    });
+  });
+});
+
+describe("parseNumstatFiles", () => {
+  test("keeps the path beside the per-file counters", () => {
+    expect(parseNumstatFiles("10\t2\tsrc/a.ts\n0\t7\tsrc/b.ts\n")).toEqual([
+      { path: "src/a.ts", insertions: 10, deletions: 2, binary: false },
+      { path: "src/b.ts", insertions: 0, deletions: 7, binary: false },
+    ]);
+  });
+
+  test("a binary file is flagged, counted as a file, and worth zero lines", () => {
+    expect(parseNumstatFiles("-\t-\tassets/logo.png\n")).toEqual([
+      {
+        path: "assets/logo.png",
+        insertions: 0,
+        deletions: 0,
+        binary: true,
+      },
+    ]);
+  });
+
+  // Renames arrive in two shapes, and BOTH must resolve to the destination:
+  // the path is matched against exclusion globs, so `src/{a => b}/x.min.js`
+  // matching nothing would silently un-exclude a generated file.
+  test("a whole-path rename resolves to the destination", () => {
+    expect(
+      parseNumstatFiles("4\t4\told/dir/name.ts => new/dir/name.ts\n")[0]?.path,
+    ).toBe("new/dir/name.ts");
+  });
+
+  test("a braced rename resolves to the destination", () => {
+    expect(parseNumstatFiles("4\t4\tsrc/{old => new}/file.ts\n")[0]?.path).toBe(
+      "src/new/file.ts",
+    );
+  });
+
+  // The one-sided braced forms leave an empty segment behind; the doubled
+  // separator must be collapsed or no glob will ever match.
+  test("one-sided braced renames collapse the empty segment", () => {
+    expect(parseNumstatFiles("1\t1\tsrc/{ => sub}/file.ts\n")[0]?.path).toBe(
+      "src/sub/file.ts",
+    );
+    expect(parseNumstatFiles("1\t1\tsrc/{old => }/file.ts\n")[0]?.path).toBe(
+      "src/file.ts",
+    );
+  });
+
+  test("a renamed lockfile is still recognisable as a lockfile", () => {
+    expect(parseNumstatFiles("9\t9\t{ => web}/bun.lock\n")[0]?.path).toBe(
+      "web/bun.lock",
+    );
+  });
+
+  test("blank and malformed lines are ignored", () => {
+    expect(parseNumstatFiles("")).toEqual([]);
+    expect(parseNumstatFiles("\n\ngarbage\n")).toEqual([]);
+  });
+
+  // The aggregate is a pure sum over this, so the two can never disagree.
+  test("parseNumstat is the sum of parseNumstatFiles", () => {
+    const raw = "10\t2\tsrc/a.ts\n-\t-\tlogo.png\n0\t7\tsrc/{a => b}/c.ts\n";
+    const files = parseNumstatFiles(raw);
+    expect(parseNumstat(raw)).toEqual({
+      files: files.length,
+      insertions: files.reduce((n, f) => n + f.insertions, 0),
+      deletions: files.reduce((n, f) => n + f.deletions, 0),
     });
   });
 });

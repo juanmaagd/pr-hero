@@ -71,6 +71,9 @@ with an explicit `bunx tsc` / `bunx biome check` over them.
   its pure decisions — PR record → range, the worktree reuse gate, comparison.json (B4's seed).
 - `src/greptile.ts` + `src/compare.ts` + `src/compare-report.ts` — the head-to-head: parse Greptile's
   PR comment, bucket findings against ours, render the comparison.
+- `src/size-gate.ts` — pure: "this diff is too big, skip it". A COST/predictability gate, never a
+  quality one (the size↔quality question is unmeasured — see `scripts/scope-probe.ts`). Wired into
+  local review, PR review and the watcher, always BEFORE the cost-band confirm.
 - `src/ledger.ts` — B4 pure half (`pr-hero ledger`): comparison.json read-back, one-vote-per-PR
   aggregation, as-is verdict tally, markdown ledger with the pending-triage list.
 - `fixtures/` + `scripts/` — the planted-bug eval and live micro-eval.

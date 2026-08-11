@@ -421,6 +421,28 @@ What is still manual, in the order it should be closed:
    by the I/O shell — the pure builder owns no clock) going forward; no artifact carries it yet, since
    the stamping call site first executes on the next paid run.
 
+5. **The size gate — "PR too large → skip"** — **BUILT 2026-08-11** (`src/size-gate.ts` pure;
+   wired into local review, PR review, and the watcher). Defaults: **1500 effective changed lines,
+   150 effective changed files**, with generated content (lockfiles, `*.min.js`/`*.min.css`, `*.snap`)
+   excluded before the count. Escape hatches: `--force`, `--max-changed-lines`, `--max-changed-files`
+   (0 disables a limit); per-repo thresholds ride `watch add`.
+
+   The gate runs BEFORE the cost-band `confirm()`, never behind it — the watcher passes `--yes`, so a
+   gate inside the prompt would never fire in the one place unattended spend actually happens. In
+   watch mode the skip is `too-large`: it consumes no poison-PR attempt, writes no marker, and does
+   not arm the on_push one-review-per-PR state, so a force-push that shrinks the PR re-qualifies it on
+   the next tick. The watcher tiers its check — GitHub's aggregate counters ride free on the existing
+   `gh pr list`, and only a PR that exceeds a limit costs a second call for per-file data.
+
+   **The WHY is COST AND PREDICTABILITY, and only that**: small trees bill $1.9–$4.8, the 45-file
+   bench tree billed $6.58–$17.92 across 18 iterations — ~3x the cost with ~2.7x the spread.
+   **The size↔quality question remains UNMEASURED.** Attention dilution was tested and falsified in
+   `fixtures/scale-probe.ts`, and the one measured Greptile-only miss was a 7-file PR — so there is no
+   evidence a bigger diff reviews worse, and nothing in the code or the docs claims one. The
+   experiment that would actually answer it is `scripts/scope-probe.ts`, still unreported: until it
+   runs, these thresholds are a budget decision, not a quality boundary, and they should be argued
+   about on cost grounds alone.
+
 Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
 the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this
 engine has no business blocking a merge yet.

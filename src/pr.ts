@@ -125,7 +125,14 @@ export async function ghCurrentBranchPr(operatorRoot: string): Promise<string> {
 // the watcher picks the LOWEST eligible number (FIFO), and a busy repo's
 // oldest open PRs falling off the list would be exactly the silent
 // truncation the comments fetch already learned to avoid with --paginate.
-export const PR_LIST_JSON_FIELDS = "number,headRefOid,isDraft";
+// additions/deletions/changedFiles ride along FREE: gh returns them in the
+// same list response, and they are the watcher's zero-extra-call first tier
+// for the size gate (see gatherRepoFacts). Verified against `gh pr list
+// --json` on 2026-08-11 — all three are real list fields, alongside the
+// per-file `files`, which is deliberately NOT requested here: it would make
+// every tick carry the full file list of every open PR.
+export const PR_LIST_JSON_FIELDS =
+  "number,headRefOid,isDraft,additions,deletions,changedFiles";
 export const PR_LIST_LIMIT = 200;
 
 export async function ghPrList(operatorRoot: string): Promise<string> {
@@ -147,6 +154,34 @@ export async function ghPrList(operatorRoot: string): Promise<string> {
 // the PR comment's locations into links. Cosmetic by contract: ANY failure
 // returns undefined and the comment renders plain — a review must never die,
 // or even warn loudly, because a nicety could not be resolved.
+// The size gate's SECOND tier, and only for a PR whose aggregate already
+// exceeds a limit: the per-file list, so an exclusion (a regenerated
+// lockfile, a minified bundle) can still rescue it. One gh call per such PR
+// — the same "pay per candidate, only when the free check did not settle
+// it" shape the comments fetch already uses.
+//
+// Field names verified live against `gh pr view <n> -R cli/cli --json files`
+// on 2026-08-11: `{"files":[{"path":…,"additions":…,"deletions":…,
+// "changeType":…}]}`.
+export async function ghPrFiles(
+  operatorRoot: string,
+  pr: number,
+): Promise<string> {
+  const result = await gh(operatorRoot, [
+    "pr",
+    "view",
+    String(pr),
+    "--json",
+    "files",
+  ]);
+  if (!result.ok) {
+    throw new CliError(
+      `gh pr view ${pr} --json files failed: ${result.stderr.trim()}`,
+    );
+  }
+  return result.stdout;
+}
+
 export async function ghRepoWebUrl(
   operatorRoot: string,
 ): Promise<string | undefined> {
