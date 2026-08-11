@@ -27,6 +27,7 @@ import {
   type ComparisonOutcome,
   ensureWorktree,
   fetchPrRefs,
+  ghCurrentBranchPr,
   ghPrView,
   initCodegraphIndex,
   postPrComment,
@@ -36,6 +37,7 @@ import {
   type PrTarget,
   prRunDirCandidate,
   prWorktreePath,
+  resolveCurrentPrNumber,
   resolvePrTarget,
 } from "./pr-preflight";
 import {
@@ -469,11 +471,21 @@ async function review(options: CliOptions): Promise<number> {
 //     second root the run dir must stay outside of.
 async function reviewPr(
   options: CliOptions,
-  prNumber: number,
+  prArg: number | "current",
 ): Promise<number> {
   // 1 — the operator root, and everything .prhero/ decides — loaded exactly
   // as local mode loads it, all against the operator root.
   const operatorRoot = await resolveRepoRoot(options.repo);
+  // Bare --pr: the PR is whichever one the operator checkout's current
+  // branch belongs to. Resolved first and said out loud, so the user sees
+  // WHICH PR is about to be reviewed before any plan prints.
+  const prNumber =
+    prArg === "current"
+      ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
+      : prArg;
+  if (prArg === "current") {
+    log(`pr resolved from current branch: #${prNumber}`);
+  }
   const configPath = options.config
     ? path.resolve(options.config)
     : path.join(operatorRoot, ".prhero", "config.json");

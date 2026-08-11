@@ -128,6 +128,32 @@ export function resolvePrTarget(raw: string): PrTarget {
   };
 }
 
+// Parses the stdout of the NO-ARGUMENT `gh pr view --json number`, which gh
+// resolves against the checkout's current branch — the call behind bare
+// `--pr`. Same loud register as resolvePrTarget: a mis-read number would
+// review a PR nobody is standing on.
+export function resolveCurrentPrNumber(raw: string): number {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new CliUsageError(
+      `gh pr view returned invalid JSON: ${(error as Error).message}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new CliUsageError("gh pr view must return a single JSON object");
+  }
+  const number = (parsed as Record<string, unknown>).number;
+  if (typeof number !== "number" || !Number.isInteger(number) || number < 1) {
+    throw new CliUsageError(
+      `gh pr view "number" must be a positive integer, got: ` +
+        JSON.stringify(number),
+    );
+  }
+  return number;
+}
+
 function readString(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string" || value.length === 0) {

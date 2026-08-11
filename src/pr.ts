@@ -102,6 +102,23 @@ export async function ghPrView(
   return result.stdout;
 }
 
+// The NO-ARGUMENT `gh pr view`: gh resolves the PR belonging to the
+// checkout's current branch, which is the whole feature behind bare `--pr`
+// — "review the PR I am standing on". Returns raw stdout for the pure
+// resolveCurrentPrNumber; a branch with no PR fails loud, with gh's own
+// message appended because it names the branch.
+export async function ghCurrentBranchPr(operatorRoot: string): Promise<string> {
+  const result = await gh(operatorRoot, ["pr", "view", "--json", "number"]);
+  if (!result.ok) {
+    throw new CliError(
+      `no PR found for the current branch of ${operatorRoot} — open one ` +
+        "first or pass --pr <n> explicitly" +
+        (result.stderr.trim() ? `: ${result.stderr.trim()}` : ""),
+    );
+  }
+  return result.stdout;
+}
+
 // WHY this exact refspec pair (paid-for): a merged PR's branch is usually
 // deleted, so nothing but `refs/pull/<n>/head` keeps headRefOid fetchable —
 // and fetching the base branch by name in the same call brings the merge

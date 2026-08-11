@@ -61,7 +61,10 @@ export interface CliOptions {
   // PR mode (ROADMAP B1). Set only by --pr: head and base both come from the
   // PR record itself, so parseArgs rejects --base/--head/--two-dot beside it
   // — a hand-picked endpoint would silently contradict the PR's own range.
-  pr?: number;
+  // "current" is bare `--pr`: resolve the PR from the operator checkout's
+  // current branch at run time (the shell owns that gh call). Absent means
+  // local mode.
+  pr?: number | "current";
   // Publish the review as ONE marked PR comment (ROADMAP B2) — created the
   // first time, updated in place after, never stacked. Explicit and never a
   // default: posting is a public side effect. Requires --pr (parseArgs
@@ -92,11 +95,12 @@ Usage:
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
-  --pr <n>            Review GitHub PR #n: head and base come from gh, the
-                      review runs in a detached worktree with its own
-                      codegraph index, and the result is compared against
-                      Greptile's comment on the PR. Excludes --base, --head
-                      and --two-dot
+  --pr [n]            Review GitHub PR #n — or, with no number, the PR that
+                      belongs to the current branch. head and base come from
+                      gh, the review runs in a detached worktree with its
+                      own codegraph index, and the result is compared
+                      against Greptile's comment on the PR. Excludes --base,
+                      --head and --two-dot
   --post              With --pr only: publish the review to the PR as one
                       marked comment — created the first time, updated in
                       place on re-runs, never stacked. Explicit, never a
@@ -139,7 +143,6 @@ questions; use it first.`;
 
 const VALUE_FLAGS = new Set([
   "--repo",
-  "--pr",
   "--base",
   "--head",
   "--agents",
@@ -170,6 +173,28 @@ export function parseArgs(argv: string[]): ParsedCli {
     const arg = argv[i];
     if (arg === undefined) continue;
     if (arg === "--help" || arg === "-h") return { command: "help", options };
+    // --pr takes an OPTIONAL value. A digit-LEADING next token is consumed
+    // and validated — digit-leading on purpose, not full-match: garbage like
+    // "12abc" must still reach the validator and fail loudly, never silently
+    // become branch-mode. Anything else (nothing, a flag, a word — including
+    // the command token, which the non-digit rule protects) is left alone
+    // and the sentinel says "resolve the PR from the current branch".
+    if (arg === "--pr") {
+      const value = argv[i + 1];
+      if (value !== undefined && /^\d/.test(value)) {
+        i++;
+        const parsed = Number(value);
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          throw new CliUsageError(
+            `--pr must be a positive integer, got: ${value}`,
+          );
+        }
+        options.pr = parsed;
+      } else {
+        options.pr = "current";
+      }
+      continue;
+    }
     if (VALUE_FLAGS.has(arg)) {
       const value = argv[i + 1];
       // A flag swallowing the NEXT flag as its value is the classic way to
@@ -285,16 +310,6 @@ function applyValueFlag(
     case "--runs":
       options.runs = value;
       return;
-    case "--pr": {
-      const parsed = Number(value);
-      if (!Number.isInteger(parsed) || parsed < 1) {
-        throw new CliUsageError(
-          `--pr must be a positive integer, got: ${value}`,
-        );
-      }
-      options.pr = parsed;
-      return;
-    }
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {

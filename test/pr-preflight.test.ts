@@ -19,6 +19,7 @@ import {
   PR_COMMENT_MARKER,
   prRunDirCandidate,
   prWorktreePath,
+  resolveCurrentPrNumber,
   resolvePrTarget,
   worktreeDirty,
 } from "../src/pr-preflight";
@@ -129,6 +130,79 @@ describe("parseArgs --pr", () => {
     expect(options.hopBudget).toBe(4);
     expect(options.dryRun).toBe(true);
     expect(options.yes).toBe(true);
+  });
+});
+
+describe("parseArgs bare --pr", () => {
+  test("a trailing bare --pr means the current branch's PR", () => {
+    expect(parseArgs(["review", "--pr"]).options.pr).toBe("current");
+  });
+
+  test("--pr followed by a flag stays bare, and the flag still parses", () => {
+    const { options } = parseArgs(["review", "--pr", "--post"]);
+    expect(options.pr).toBe("current");
+    expect(options.post).toBe(true);
+  });
+
+  // THE guard for the optional value: only a digit-leading token is a PR
+  // number, so the command word can never be swallowed as one.
+  test("the non-digit rule protects the command token", () => {
+    const { command, options } = parseArgs(["--pr", "review"]);
+    expect(command).toBe("review");
+    expect(options.pr).toBe("current");
+  });
+
+  // Digit-leading on purpose, not full-match: digit-leading garbage must
+  // reach the validator and fail loudly, never silently become branch-mode.
+  test("digit-leading garbage still fails the --pr validator by name", () => {
+    for (const value of ["0", "2.5", "12abc"]) {
+      try {
+        parseArgs(["review", "--pr", value]);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("--pr");
+      }
+    }
+  });
+
+  test("the exclusions still fire in bare mode, both flag orders", () => {
+    for (const argv of [
+      ["review", "--pr", "--base", "dev"],
+      ["review", "--base", "dev", "--pr"],
+    ]) {
+      try {
+        parseArgs(argv);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("--base");
+      }
+    }
+  });
+});
+
+describe("resolveCurrentPrNumber", () => {
+  test("reads the number gh reports for the current branch", () => {
+    expect(resolveCurrentPrNumber('{"number":1682}')).toBe(1682);
+  });
+
+  test("invalid JSON and non-objects fail loud", () => {
+    expect(() => resolveCurrentPrNumber("not json")).toThrow(CliUsageError);
+    expect(() => resolveCurrentPrNumber("[]")).toThrow(CliUsageError);
+    expect(() => resolveCurrentPrNumber("null")).toThrow(CliUsageError);
+  });
+
+  test("a missing or bad number names the field", () => {
+    for (const raw of ["{}", '{"number":0}', '{"number":2.5}']) {
+      try {
+        resolveCurrentPrNumber(raw);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("number");
+      }
+    }
   });
 });
 

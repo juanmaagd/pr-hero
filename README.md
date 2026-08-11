@@ -63,7 +63,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | Command | What it does |
 | --- | --- |
 | `pr-hero review` | Review the checked-out branch against the merge base with `--base`. Requires a clean tree sitting on `--head` (default `HEAD`). |
-| `pr-hero review --pr <n>` | Review a GitHub PR by number: resolves the range through `gh`, runs in a detached worktree with its own codegraph index, then compares the result against Greptile's comment on that PR. |
+| `pr-hero review --pr [n]` | Review a GitHub PR: by number, or — bare, no number — the PR that belongs to the current branch (errors loudly if it has none). Resolves the range through `gh`, runs in a detached worktree with its own codegraph index, then compares the result against Greptile's comment on that PR. |
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
 | `pr-hero ledger` | Accumulate every run's `comparison.json` into one markdown ledger — the head-to-head buckets as a rate. One PR, one vote (only its latest run counts). |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. |
