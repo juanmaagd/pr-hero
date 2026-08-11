@@ -375,6 +375,19 @@ function usd(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
 
+// Elapsed time as the compact `3m12s` the CLI's live progress prefixes onto
+// every event line. Floor, never round: 59.9s read as "60s" would tick the
+// minute early. Minutes deliberately never roll into hours — a review past
+// the hour reading "61m..." is itself information.
+export function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes === 0
+    ? `${seconds}s`
+    : `${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+
 function duration(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   const minutes = Math.floor(totalSeconds / 60);

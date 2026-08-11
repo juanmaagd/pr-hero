@@ -84,6 +84,40 @@ export interface PipelineInput {
 
 export interface PipelineDeps {
   runner: StepRunner;
+  // Live-progress tap, born from a real incident: the CLI went silent for
+  // ~10 minutes mid-run and a PAID run died to a Ctrl-C from a user who
+  // reasonably believed it hung. OPTIONAL and observational only — absent
+  // means byte-identical behavior, and emission never changes control flow
+  // (see emit()).
+  onProgress?: (event: PipelineProgressEvent) => void;
+}
+
+// What the pipeline is doing, as it does it. `hunter-finished` and
+// `refuter-step-finished` fire as EACH parallel step settles, never at the
+// join — at the join every event would fire at once at the end, which is
+// exactly the silence this exists to break.
+export type PipelineProgressEvent =
+  | { kind: "hunters-started"; hunters: string[] }
+  | { kind: "hunter-finished"; hunter: string; ok: boolean; durationMs: number }
+  | { kind: "dedupe-finished"; drafts: number; findings: number }
+  | { kind: "refuter-started"; severeFindings: number }
+  | {
+      kind: "refuter-step-finished";
+      findingId: string;
+      verdict: string;
+      durationMs: number;
+    };
+
+// A throwing callback is swallowed ON PURPOSE: the review outranks the
+// progress bar, and a cosmetic listener must never be able to kill a paid
+// run.
+function emit(deps: PipelineDeps, event: PipelineProgressEvent): void {
+  if (!deps.onProgress) return;
+  try {
+    deps.onProgress(event);
+  } catch {
+    // Swallowed — see above.
+  }
 }
 
 export interface PerAgentUsage {
@@ -384,8 +418,35 @@ async function execute(
     state.steps.push(stepMeta(spec));
   }
   state.hunterCount = hunterSpecs.length;
+  emit(deps, {
+    kind: "hunters-started",
+    hunters: hunterSpecs.map(({ key }) => key),
+  });
+  // hunter-finished is attached PER PROMISE, before the join. The handlers
+  // are attached to each step's promise ahead of allSettled's own, so each
+  // event fires as ITS step settles — while the others are still running.
   const settled = await Promise.allSettled(
-    hunterSpecs.map(({ spec }) => deps.runner.run(spec)),
+    hunterSpecs.map(({ key, spec }) => {
+      const startedAt = Date.now();
+      const promise = deps.runner.run(spec);
+      promise.then(
+        (result) =>
+          emit(deps, {
+            kind: "hunter-finished",
+            hunter: key,
+            ok: result.status === "ok",
+            durationMs: Date.now() - startedAt,
+          }),
+        () =>
+          emit(deps, {
+            kind: "hunter-finished",
+            hunter: key,
+            ok: false,
+            durationMs: Date.now() - startedAt,
+          }),
+      );
+      return promise;
+    }),
   );
   for (const [i, entry] of hunterSpecs.entries()) {
     const outcome = settled[i];
@@ -416,6 +477,11 @@ async function execute(
   const { survivors, deduped } = mergeAndDedupe(state.drafts);
   state.survivors = survivors;
   state.deduped = deduped;
+  emit(deps, {
+    kind: "dedupe-finished",
+    drafts: state.drafts.length,
+    findings: survivors.length,
+  });
 
   // Step 6 — one refuter batch: every BLOCKER/CRITICAL survivor, whatever its
   // evidence_class. Severity alone is the test, because severity alone decides
@@ -438,6 +504,7 @@ async function execute(
   // the run stays complete.
   const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
   if (batch.length > 0 && refuterAgent) {
+    emit(deps, { kind: "refuter-started", severeFindings: batch.length });
     await runRefuter(input, deps, state, batch, {
       stepsDir,
       stepTimeoutMs,
@@ -552,8 +619,36 @@ async function runRefuter(
   // inflated and incomparable with its siblings — and this engine exists to be
   // compared on time and cost against a paid competitor.
   const legStartedAt = Date.now();
+  // Same per-promise attachment as the hunter fan-out: each step's event
+  // fires as IT settles. A failed or rejected step reports the same
+  // conservative "inconclusive" the join below records for it.
   const settled = await Promise.allSettled(
-    specs.map(({ spec }) => deps.runner.run(spec)),
+    specs.map(({ id, spec }) => {
+      const startedAt = Date.now();
+      const promise = deps.runner.run(spec);
+      promise.then(
+        (result) =>
+          emit(deps, {
+            kind: "refuter-step-finished",
+            findingId: id,
+            verdict:
+              result.status === "ok"
+                ? ((result.output as RefuterResult).results.find(
+                    (r) => r.finding_id === id,
+                  )?.outcome ?? "inconclusive")
+                : "inconclusive",
+            durationMs: Date.now() - startedAt,
+          }),
+        () =>
+          emit(deps, {
+            kind: "refuter-step-finished",
+            findingId: id,
+            verdict: "inconclusive",
+            durationMs: Date.now() - startedAt,
+          }),
+      );
+      return promise;
+    }),
   );
   const legElapsedMs = Date.now() - legStartedAt;
   let usage: SessionUsage | undefined;

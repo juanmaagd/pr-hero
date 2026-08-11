@@ -22,7 +22,13 @@ import {
   renderLedger,
   type StoredComparison,
 } from "./ledger";
-import { changedPathsFromDiff, parityTriggered, runPipeline } from "./pipeline";
+import {
+  changedPathsFromDiff,
+  type PipelineProgressEvent,
+  type PipelineResult,
+  parityTriggered,
+  runPipeline,
+} from "./pipeline";
 import {
   type ComparisonOutcome,
   ensureWorktree,
@@ -70,10 +76,16 @@ import {
   runDirCandidate,
   SUGGESTED_AGENTS_DIR,
 } from "./preflight";
+import {
+  applyProgressEvent,
+  createPanelState,
+  renderPanelLines,
+} from "./progress";
 import { type ParsedAgent, parseAgentFile } from "./prompt-set";
 import {
   type DiffStat,
   estimateCost,
+  formatElapsed,
   renderPrComment,
   renderReport,
 } from "./report";
@@ -320,9 +332,10 @@ async function review(options: CliOptions): Promise<number> {
     changedPaths,
     config.parity_trigger_paths,
   );
-  const hunterCount = spec.agents.filter(
+  const activeHunters = spec.agents.filter(
     (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-  ).length;
+  );
+  const hunterCount = activeHunters.length;
   const estimate = estimateCost(diffStat, hunterCount);
   printPlan({
     options,
@@ -357,33 +370,50 @@ async function review(options: CliOptions): Promise<number> {
     return 1;
   }
 
-  // 14 — run.
-  const started = performance.now();
-  const result = await runPipeline(
-    {
-      // Local mode has no PR number. 0 is the schema-legal "not a PR" value
-      // the fixture eval already uses.
-      pr: 0,
-      // The commit the diff was actually computed against, not the tip of the
-      // base branch: the recorded base_sha must name the range that was
-      // reviewed, or nothing downstream can reproduce it.
-      baseSha: diffFromSha,
-      headSha,
-      worktree: repoRoot,
-      diffPath,
-      gotchasPath,
-      agentsDir,
-      runDir,
-      outPath: path.join(runDir, "findings.json"),
-      mcpConfigPath,
-      hopBudget: options.hopBudget,
-      ...(options.model ? { model: options.model } : {}),
-      parityTriggerPaths: config.parity_trigger_paths,
-      suspicionPriors: config.suspicion_priors,
-      spec,
-    },
-    { runner: new ClaudeCodeRunner() },
+  // 14 — run, with live progress: the expectation line up front, then one
+  // stderr line per pipeline event (plus a TTY heartbeat between them).
+  log(
+    `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+      "refuter; comparable trees have taken 8–25 minutes",
   );
+  const started = performance.now();
+  const progress = startProgressRenderer(
+    started,
+    `${baseRef.ref}..${options.head}`,
+    activeHunters.map((a) => a.key),
+  );
+  let result: PipelineResult;
+  try {
+    result = await runPipeline(
+      {
+        // Local mode has no PR number. 0 is the schema-legal "not a PR" value
+        // the fixture eval already uses.
+        pr: 0,
+        // The commit the diff was actually computed against, not the tip of the
+        // base branch: the recorded base_sha must name the range that was
+        // reviewed, or nothing downstream can reproduce it.
+        baseSha: diffFromSha,
+        headSha,
+        worktree: repoRoot,
+        diffPath,
+        gotchasPath,
+        agentsDir,
+        runDir,
+        outPath: path.join(runDir, "findings.json"),
+        mcpConfigPath,
+        hopBudget: options.hopBudget,
+        ...(options.model ? { model: options.model } : {}),
+        parityTriggerPaths: config.parity_trigger_paths,
+        suspicionPriors: config.suspicion_priors,
+        spec,
+      },
+      { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+    );
+  } finally {
+    // try/finally, never success-only: a leaked interval keeps the event
+    // loop alive and hangs process exit on the error path.
+    progress.stop();
+  }
   const wallMs = Math.round(performance.now() - started);
 
   // 15 — the artifact.
@@ -615,9 +645,10 @@ async function reviewPr(
     changedPaths,
     config.parity_trigger_paths,
   );
-  const hunterCount = spec.agents.filter(
+  const activeHunters = spec.agents.filter(
     (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-  ).length;
+  );
+  const hunterCount = activeHunters.length;
   const estimate = estimateCost(diffStat, hunterCount);
   printPrPlan({
     options,
@@ -675,31 +706,48 @@ async function reviewPr(
     )}\n`,
   );
 
-  // 11 — run. The pipeline is untouched: it gets the worktree as its cwd
-  // and the PR's real number for the envelope.
-  const started = performance.now();
-  const result = await runPipeline(
-    {
-      pr: prNumber,
-      // Same rule as local mode: record the commit the diff was actually
-      // computed against, or nothing downstream can reproduce the range.
-      baseSha: diffFromSha,
-      headSha,
-      worktree: worktreePath,
-      diffPath,
-      gotchasPath,
-      agentsDir,
-      runDir,
-      outPath: path.join(runDir, "findings.json"),
-      mcpConfigPath,
-      hopBudget: options.hopBudget,
-      ...(options.model ? { model: options.model } : {}),
-      parityTriggerPaths: config.parity_trigger_paths,
-      suspicionPriors: config.suspicion_priors,
-      spec,
-    },
-    { runner: new ClaudeCodeRunner() },
+  // 11 — run, with live progress (same shape as local mode's leg). The
+  // pipeline is untouched beyond the observational tap: it gets the worktree
+  // as its cwd and the PR's real number for the envelope.
+  log(
+    `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+      "refuter; comparable trees have taken 8–25 minutes",
   );
+  const started = performance.now();
+  const progress = startProgressRenderer(
+    started,
+    `PR #${prNumber}`,
+    activeHunters.map((a) => a.key),
+  );
+  let result: PipelineResult;
+  try {
+    result = await runPipeline(
+      {
+        pr: prNumber,
+        // Same rule as local mode: record the commit the diff was actually
+        // computed against, or nothing downstream can reproduce the range.
+        baseSha: diffFromSha,
+        headSha,
+        worktree: worktreePath,
+        diffPath,
+        gotchasPath,
+        agentsDir,
+        runDir,
+        outPath: path.join(runDir, "findings.json"),
+        mcpConfigPath,
+        hopBudget: options.hopBudget,
+        ...(options.model ? { model: options.model } : {}),
+        parityTriggerPaths: config.parity_trigger_paths,
+        suspicionPriors: config.suspicion_priors,
+        spec,
+      },
+      { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+    );
+  } finally {
+    // try/finally, never success-only: a leaked interval keeps the event
+    // loop alive and hangs process exit on the error path.
+    progress.stop();
+  }
   const wallMs = Math.round(performance.now() - started);
 
   // 12 — the artifact and the report, exactly as local mode writes them.
@@ -1415,6 +1463,115 @@ function printPrPlan(ctx: PrPlanContext): void {
     "steps run with --permission-mode bypassPermissions, bounded only by " +
       "each agent's read-only tool allow-list",
   );
+}
+
+// Live progress for the paid leg, born from a real incident: the CLI went
+// silent for ~10 minutes between `codegraph init` and `run complete`, and a
+// paid run died to a Ctrl-C from a user who reasonably believed it hung.
+// On a TTY: a multi-line panel redrawn in place (state and frame text are
+// pure in progress.ts). Non-TTY (piped, backgrounded): one plain stderr
+// line per event. I/O by nature, untested by construction — formatElapsed
+// and the progress.ts halves are the pure, tested pieces.
+interface ProgressRenderer {
+  onProgress: (event: PipelineProgressEvent) => void;
+  stop: () => void;
+}
+
+function startProgressRenderer(
+  startedAtMs: number,
+  subject: string,
+  hunterKeys: string[],
+): ProgressRenderer {
+  return process.stderr.isTTY
+    ? startPanelRenderer(startedAtMs, subject, hunterKeys)
+    : startLineRenderer(startedAtMs);
+}
+
+// The TTY panel: header + one row per agent, redrawn in place with
+// cursor-up (\x1b[<n>A) + per-line clear (\x1b[2K) on every event and on a
+// 250ms tick that advances the spinner and the elapsed clocks. The cursor
+// is deliberately NOT hidden: \x1b[?25l would need a restore on every exit
+// path, and a leaked hidden cursor wrecks the user's terminal — a visible
+// cursor over a redrawing panel is fine.
+function startPanelRenderer(
+  startedAtMs: number,
+  subject: string,
+  hunterKeys: string[],
+): ProgressRenderer {
+  // The NO_COLOR convention: any value disables color; a TTY alone is not
+  // consent.
+  const colors = process.env.NO_COLOR === undefined;
+  const state = createPanelState(subject, startedAtMs, hunterKeys);
+  let frame = 0;
+  let drawnLines = 0;
+  const draw = (): void => {
+    const lines = renderPanelLines(state, performance.now(), frame, colors);
+    if (drawnLines > 0) process.stderr.write(`\x1b[${drawnLines}A`);
+    for (const line of lines) {
+      process.stderr.write(`\x1b[2K${line}\n`);
+    }
+    drawnLines = lines.length;
+  };
+  const ticker = setInterval(() => {
+    frame += 1;
+    draw();
+  }, 250);
+  draw();
+  return {
+    onProgress: (event: PipelineProgressEvent): void => {
+      applyProgressEvent(state, event, performance.now());
+      draw();
+    },
+    stop: (): void => {
+      clearInterval(ticker);
+      // One last draw so the completed states land; the frame then stays as
+      // the static record, and the summary prints below it.
+      draw();
+    },
+  };
+}
+
+// Non-TTY: no redraw art, one plain line per event, elapsed prefix.
+function startLineRenderer(startedAtMs: number): ProgressRenderer {
+  const line = (text: string): void => {
+    log(`  [${formatElapsed(performance.now() - startedAtMs)}] ${text}`);
+  };
+  return {
+    onProgress: (event: PipelineProgressEvent): void => {
+      switch (event.kind) {
+        case "hunters-started":
+          // The expectation line printed right before runPipeline already
+          // announced the fan-out; restating it here would be its echo.
+          return;
+        case "hunter-finished":
+          // A failed hunter is honest, not alarming: one dead hunter is a
+          // partial run, never an abort.
+          line(
+            `hunter ${event.hunter}: ` +
+              (event.ok ? "done" : "failed (the run continues)"),
+          );
+          return;
+        case "dedupe-finished":
+          line(
+            `dedupe: ${event.drafts} draft${event.drafts === 1 ? "" : "s"} ` +
+              `-> ${event.findings} finding${event.findings === 1 ? "" : "s"}`,
+          );
+          return;
+        case "refuter-started":
+          line(
+            `refuter: ${event.severeFindings} severe finding` +
+              `${event.severeFindings === 1 ? "" : "s"} to judge`,
+          );
+          return;
+        case "refuter-step-finished":
+          line(`refuter ${event.findingId}: ${event.verdict}`);
+          return;
+      }
+    },
+    stop: (): void => {
+      // Nothing ticking to stop — kept so both renderers share one shape.
+    },
+  };
 }
 
 async function confirm(low: number, high: number): Promise<boolean> {

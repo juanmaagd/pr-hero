@@ -12,6 +12,7 @@ import {
 import {
   changedPathsFromDiff,
   type PipelineInput,
+  type PipelineProgressEvent,
   parityTriggered,
   runPipeline,
 } from "../src/pipeline";
@@ -979,5 +980,170 @@ describe("assembly", () => {
     expect(result.usage.tokens_total).toBe(550);
     expect(result.usage.wall_ms).toBe(3_500);
     expect(result.usage.cost_usd_est).toBeCloseTo(0.08);
+  });
+});
+
+describe("progress events", () => {
+  // The absent-callback contract ("no onProgress = byte-identical behavior,
+  // no events, no crash") is deliberately NOT re-tested here: every other
+  // test in this file passes deps without onProgress, so the whole suite
+  // staying green IS that proof.
+
+  test("events arrive in pipeline order, per hunter, with honest ok flags", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => failed(spec),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+
+    const kinds = events.map((e) => e.kind);
+    // hunters-started leads, and names exactly the trigger-filtered keys.
+    expect(kinds[0]).toBe("hunters-started");
+    const startedEvent = events[0] as Extract<
+      PipelineProgressEvent,
+      { kind: "hunters-started" }
+    >;
+    expect([...startedEvent.hunters].sort()).toEqual([
+      "reliability",
+      "resilience",
+    ]);
+
+    // Every hunter settles (and reports, with its own ok flag) BEFORE the
+    // dedupe joins them — the load-bearing per-promise attachment.
+    const dedupeAt = kinds.indexOf("dedupe-finished");
+    expect(dedupeAt).toBeGreaterThan(0);
+    const finished = events.filter(
+      (e) => e.kind === "hunter-finished",
+    ) as Extract<PipelineProgressEvent, { kind: "hunter-finished" }>[];
+    expect(finished).toHaveLength(2);
+    for (const event of finished) {
+      expect(kinds.indexOf("hunter-finished")).toBeLessThan(dedupeAt);
+      expect(typeof event.durationMs).toBe("number");
+    }
+    expect(finished.map((e) => [e.hunter, e.ok]).sort()).toEqual([
+      ["reliability", true],
+      ["resilience", false],
+    ]);
+
+    // One draft in, one survivor out (the failed hunter contributed none).
+    const dedupeEvent = events[dedupeAt] as Extract<
+      PipelineProgressEvent,
+      { kind: "dedupe-finished" }
+    >;
+    expect(dedupeEvent.drafts).toBe(1);
+    expect(dedupeEvent.findings).toBe(1);
+
+    // Refuter events come only after dedupe, started before step-finished.
+    const refuterStartedAt = kinds.indexOf("refuter-started");
+    const refuterStepAt = kinds.indexOf("refuter-step-finished");
+    expect(refuterStartedAt).toBeGreaterThan(dedupeAt);
+    expect(refuterStepAt).toBeGreaterThan(refuterStartedAt);
+    const refuterStarted = events[refuterStartedAt] as Extract<
+      PipelineProgressEvent,
+      { kind: "refuter-started" }
+    >;
+    expect(refuterStarted.severeFindings).toBe(1);
+    const refuterStep = events[refuterStepAt] as Extract<
+      PipelineProgressEvent,
+      { kind: "refuter-step-finished" }
+    >;
+    expect(refuterStep.findingId).toBe("F001");
+    expect(refuterStep.verdict).toBe("corroborated");
+  });
+
+  // THE load-bearing subtlety, tested so it cannot silently regress: the
+  // order-only test above would still pass if emission moved to the join
+  // (the sequence would be identical). This one holds the slow hunter's
+  // resolver, so a hunter-finished event existing while dedupe-finished
+  // does not is possible ONLY with per-settle emission — under join-time
+  // emission the poll below finds nothing and the assertion fails cleanly,
+  // never by hanging.
+  test("hunter-finished fires as each hunter settles, not at the join", async () => {
+    let releaseSlow: (() => void) | undefined;
+    const runner: StepRunner = {
+      run(spec: StepSpec): Promise<StepResult> {
+        if (spec.name === "hunter-reliability") {
+          return Promise.resolve(ok(spec, emptyDraft()));
+        }
+        if (spec.name === "hunter-resilience") {
+          return new Promise<StepResult>((resolve) => {
+            releaseSlow = () => resolve(ok(spec, emptyDraft()));
+          });
+        }
+        throw new Error(`unscripted step ${spec.name}`);
+      },
+    };
+    const events: PipelineProgressEvent[] = [];
+    const pipeline = runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    // The pipeline awaits file I/O before the fan-out, so poll (bounded)
+    // for the fast lane's event instead of counting on one macrotask.
+    const deadline = Date.now() + 2_000;
+    while (
+      !events.some((e) => e.kind === "hunter-finished") &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toContain("hunter-finished");
+    expect(kinds).not.toContain("dedupe-finished");
+    const finished = events.filter(
+      (e) => e.kind === "hunter-finished",
+    ) as Extract<PipelineProgressEvent, { kind: "hunter-finished" }>[];
+    expect(finished.map((e) => e.hunter)).toEqual(["reliability"]);
+    expect(releaseSlow).toBeDefined();
+    releaseSlow?.();
+    const result = await pipeline;
+    expect(result.skillOutput.run_status).toBe("complete");
+    expect(events.map((e) => e.kind)).toContain("dedupe-finished");
+  });
+
+  test("no refuter-started event when nothing severe survives", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    // HUNTERS_OK yields one WARNING draft — no severe batch, no refuter leg.
+    expect(events.map((e) => e.kind)).toEqual([
+      "hunters-started",
+      "hunter-finished",
+      "hunter-finished",
+      "dedupe-finished",
+    ]);
+  });
+
+  // The swallow contract: emission must never change control flow, so a
+  // listener that explodes on every event cannot fail a paid run.
+  test("a throwing onProgress cannot fail the pipeline", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const result = await runPipeline(await makeInput(), {
+      runner,
+      onProgress: () => {
+        throw new Error("progress bar exploded");
+      },
+    });
+    expect(result.skillOutput.run_status).toBe("complete");
+    expect(result.sessionFailed).toBe(false);
+    expect(result.skillOutput.findings).toHaveLength(1);
   });
 });

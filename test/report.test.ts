@@ -3,6 +3,7 @@ import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { PR_COMMENT_MARKER } from "../src/pr-preflight";
 import {
   estimateCost,
+  formatElapsed,
   type ReportMeta,
   renderPrComment,
   renderReport,
@@ -448,5 +449,29 @@ describe("estimateCost", () => {
     );
     expect(estimate.low).toBeGreaterThanOrEqual(0);
     expect(estimate.low).toBeLessThan(estimate.high);
+  });
+});
+
+describe("formatElapsed", () => {
+  test("seconds only under a minute, floored never rounded", () => {
+    expect(formatElapsed(0)).toBe("0s");
+    expect(formatElapsed(999)).toBe("0s");
+    expect(formatElapsed(59_000)).toBe("59s");
+    // 59.9s must not tick the minute early.
+    expect(formatElapsed(59_999)).toBe("59s");
+  });
+
+  test("minutes with zero-padded seconds from 60s up", () => {
+    expect(formatElapsed(60_000)).toBe("1m00s");
+    expect(formatElapsed(192_000)).toBe("3m12s");
+    expect(formatElapsed(302_000)).toBe("5m02s");
+  });
+
+  test("minutes never roll into hours", () => {
+    expect(formatElapsed(61 * 60_000)).toBe("61m00s");
+  });
+
+  test("negative input clamps to zero", () => {
+    expect(formatElapsed(-5)).toBe("0s");
   });
 });
