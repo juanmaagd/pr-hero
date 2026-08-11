@@ -91,6 +91,10 @@ export interface CliOptions {
   watch?: "once" | "install" | "uninstall" | "add" | "remove" | "status";
   // watch install only: launchd StartInterval, in minutes.
   interval?: number;
+  // watch add only: record on_push: true for the repo, so every new push
+  // re-arms its PRs. The default (false) reviews each PR once — see the
+  // re-arm policy note on candidateSkipReason in watch-preflight.ts.
+  onPush: boolean;
 }
 
 export interface ParsedCli {
@@ -111,7 +115,8 @@ Usage:
                              is the scheduler; this never daemonizes
   pr-hero watch add          Opt the current repo (or --repo) into the watch
                              config; --post makes its reviews publish to the
-                             PR. Idempotent — re-adding updates the post flag
+                             PR, --on-push re-reviews on every push.
+                             Idempotent — re-adding updates the flags
   pr-hero watch remove       Remove the current repo (or --repo) from the
                              watch config (idempotent)
   pr-hero watch status       Read-only: config summary, today's launch count
@@ -159,6 +164,9 @@ Options:
                       review
   --once              watch only: run one tick and exit (launchd's unit of
                       work). Required — watch has no daemon mode
+  --on-push           watch add only: re-review the repo's PRs on every new
+                      push. Default: each PR is reviewed ONCE — a push does
+                      not re-bill; re-review manually with review --pr <n>
   --interval <min>    watch install only: minutes between launchd ticks
                       (default: ${DEFAULT_WATCH_INTERVAL_MIN})
   --dry-run           Resolve, preflight, print the plan and the cost band,
@@ -198,6 +206,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     yes: false,
     post: false,
     twoDot: false,
+    onPush: false,
   };
   let command: "review" | "init" | "ledger" | "watch" | "help" | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -264,6 +273,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--once") {
       once = true;
+      continue;
+    }
+    if (arg === "--on-push") {
+      options.onPush = true;
       continue;
     }
     if (arg.startsWith("-")) {
@@ -367,12 +380,21 @@ export function parseArgs(argv: string[]): ParsedCli {
         `--post with watch only applies to "watch add", not "${options.watch}"`,
       );
     }
+    // Same rule for --on-push, for the same silently-dropped reason.
+    if (options.onPush && options.watch !== "add") {
+      throw new CliUsageError(
+        `--on-push only applies to "watch add", not "${options.watch}"`,
+      );
+    }
   } else {
     if (once) {
       throw new CliUsageError("--once only applies to the watch command");
     }
     if (options.interval !== undefined) {
       throw new CliUsageError("--interval only applies to watch install");
+    }
+    if (options.onPush) {
+      throw new CliUsageError('--on-push only applies to "watch add"');
     }
   }
   return { command, options };

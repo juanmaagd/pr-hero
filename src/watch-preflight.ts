@@ -58,6 +58,10 @@ export interface WatchRepoConfig {
   // As written in the config (tilde and all); the shell expands it.
   path: string;
   post: boolean;
+  // false (the default): one review per PR — any prior review of the PR
+  // NUMBER blocks it, whatever head it covered. true: the original (pr,
+  // head) key — every push re-arms the PR. See candidateSkipReason.
+  onPush: boolean;
 }
 
 export interface WatchWindow {
@@ -110,7 +114,14 @@ export function parseWatchConfig(raw: string): WatchConfig {
           JSON.stringify(repo.post),
       );
     }
-    return { path: repo.path, post };
+    const onPush = repo.on_push ?? false;
+    if (typeof onPush !== "boolean") {
+      throw new CliUsageError(
+        `watch.json repos[${i}].on_push must be a boolean, got: ` +
+          JSON.stringify(repo.on_push),
+      );
+    }
+    return { path: repo.path, post, onPush };
   });
   const cap = record.daily_cap ?? DEFAULT_DAILY_CAP;
   // Zero is legal on purpose: `"daily_cap": 0` is the pause switch — the
@@ -204,21 +215,28 @@ export interface ConfigUpsert {
   storedPath: string;
 }
 
-// Idempotent by design: re-adding a listed repo UPDATES its post flag in
-// place (every other key of the entry survives) and is never an error —
-// `watch add` doubles as "change this repo's post setting". A null raw means
-// no config file yet: one is created with the shipped defaults.
+export interface WatchRepoFlags {
+  post: boolean;
+  onPush: boolean;
+}
+
+// Idempotent by design: re-adding a listed repo UPDATES its flags in place
+// (every other key of the entry survives) and is never an error — `watch
+// add` doubles as "change this repo's settings", and an absent flag RESETS
+// to its default rather than keeping the old value (disclosed semantics:
+// the command line states the whole intent). A null raw means no config
+// file yet: one is created with the shipped defaults.
 export function upsertWatchRepo(
   raw: string | null,
   repoRoot: string,
-  post: boolean,
+  flags: WatchRepoFlags,
   home: string,
 ): ConfigUpsert {
   const storedPath = contractTilde(repoRoot, home);
   if (raw === null) {
     return {
       config: serializeConfig({
-        repos: [{ path: storedPath, post }],
+        repos: [{ path: storedPath, post: flags.post, on_push: flags.onPush }],
         daily_cap: DEFAULT_DAILY_CAP,
         window: null,
       }),
@@ -232,7 +250,8 @@ export function upsertWatchRepo(
   const repos = record.repos as Record<string, unknown>[];
   for (const entry of repos) {
     if (sameRepoPath(entry.path as string, repoRoot, home)) {
-      entry.post = post;
+      entry.post = flags.post;
+      entry.on_push = flags.onPush;
       return {
         config: serializeConfig(record),
         action: "updated",
@@ -240,7 +259,7 @@ export function upsertWatchRepo(
       };
     }
   }
-  repos.push({ path: storedPath, post });
+  repos.push({ path: storedPath, post: flags.post, on_push: flags.onPush });
   return { config: serializeConfig(record), action: "added", storedPath };
 }
 
@@ -378,6 +397,20 @@ export function markerDeclaredHeads(comments: { body: string }[]): string[] {
   return heads;
 }
 
+// Whether ANY pr-hero marker comment exists on the PR, head-declaring or
+// not. Distinct from markerDeclaredHeads on purpose: a legacy headless
+// marker declares no head — it can never prove THIS head was reviewed — but
+// it does prove the PR was reviewed at some point, which is exactly what
+// the one-review-per-PR default (on_push: false) needs to know. Same
+// never-throw contract as parseMarkerHead: bodies are foreign text.
+export function markerCommentSeen(comments: { body: string }[]): boolean {
+  return comments.some(
+    (comment) =>
+      typeof comment?.body === "string" &&
+      comment.body.startsWith(PR_COMMENT_MARKER_PREFIX),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The attempts guard (poison-PR): max 2 total launches per (pr, head), so a
 // PR that keeps killing the review cannot eat the daily cap every day
@@ -507,6 +540,7 @@ export type SkipReason =
   | "draft"
   | "reviewed-local"
   | "reviewed-remote"
+  | "reviewed-prior-head"
   | "attempts-exhausted";
 
 export interface TickRepoFacts {
@@ -514,13 +548,19 @@ export interface TickRepoFacts {
   // lines' identity.
   path: string;
   post: boolean;
+  // The re-arm policy (config on_push): false = one review per PR, any
+  // prior review of the number blocks; true = the (pr, head) key, every
+  // push re-arms.
+  onPush: boolean;
   prs: WatchPrCandidate[];
   // Parsed comparison.json fields (pr + head_sha) — never dir names.
   localReviews: { pr: number; head: string }[];
-  // Marker-declared heads per PR. A PR absent here means "no marked comment
-  // seen" — the shell may skip the fetch for candidates a cheaper check
-  // already killed, and an unfetched PR must read as unguarded, not covered.
-  remoteHeads: { pr: number; heads: string[] }[];
+  // Marker facts per PR: the declared heads AND whether any marker comment
+  // exists at all (a legacy headless marker is seen but declares nothing).
+  // A PR absent here means "comments not fetched" — the shell may skip the
+  // fetch for candidates a cheaper check already killed, and an unfetched
+  // PR must read as unguarded, not covered.
+  remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[];
   attempts: { pr: number; head: string; count: number }[];
 }
 
@@ -612,11 +652,18 @@ export function decideTick(input: TickInput): TickDecision {
 }
 
 // The checks run in a FIXED order because the first hit is the reason a
-// human reads in the log: draft → reviewed-local → reviewed-remote →
-// attempts. A new push changes the head, so every (pr, head) key is fresh by
-// construction and an updated PR becomes eligible again — intended: with
-// auto-post the comment must track the live head (B2's PATCH converges to
-// one comment).
+// human reads in the log: draft → reviewed-local → local prior head →
+// reviewed-remote → remote prior marker → attempts. The same-head checks
+// run BEFORE the prior-head ones so the more specific reason always wins.
+//
+// The re-arm policy: under on_push (the original behavior) a new push
+// changes the head, every (pr, head) key is fresh by construction, and an
+// updated PR becomes eligible again — with auto-post the comment tracks the
+// live head. Under the DEFAULT (on_push: false) each PR is reviewed ONCE:
+// any prior review of the PR number — a local comparison.json at any head,
+// or any pr-hero marker comment whatever it declares (a legacy headless
+// marker proves a review happened even though it covers no specific head) —
+// skips it as `reviewed-prior-head`, so a push never re-bills a review.
 function candidateSkipReason(
   repo: TickRepoFacts,
   candidate: WatchPrCandidate,
@@ -629,9 +676,16 @@ function candidateSkipReason(
   ) {
     return "reviewed-local";
   }
-  const heads =
-    repo.remoteHeads.find((r) => r.pr === candidate.pr)?.heads ?? [];
-  if (heads.includes(candidate.head)) return "reviewed-remote";
+  if (!repo.onPush && repo.localReviews.some((r) => r.pr === candidate.pr)) {
+    return "reviewed-prior-head";
+  }
+  const remote = repo.remoteHeads.find((r) => r.pr === candidate.pr);
+  if ((remote?.heads ?? []).includes(candidate.head)) {
+    return "reviewed-remote";
+  }
+  if (!repo.onPush && remote?.markerSeen === true) {
+    return "reviewed-prior-head";
+  }
   const attempts =
     repo.attempts.find(
       (a) => a.pr === candidate.pr && a.head === candidate.head,
@@ -910,7 +964,9 @@ export function renderWatchStatus(facts: WatchStatusFacts): string[] {
       lines.push(row("", 'no repos watched — "pr-hero watch add" opts one in'));
     }
     for (const repo of facts.config.repos) {
-      lines.push(row("", `${repo.path} post=${repo.post}`));
+      lines.push(
+        row("", `${repo.path} post=${repo.post} on_push=${repo.onPush}`),
+      );
     }
     lines.push(
       row(

@@ -33,6 +33,7 @@ import {
   launchedLine,
   localIsoTimestamp,
   logLine,
+  markerCommentSeen,
   markerDeclaredHeads,
   osascriptNotifyArgs,
   outcomeLine,
@@ -231,25 +232,33 @@ async function gatherRepoFacts(
     const prs = parsePrList(await ghPrList(repoRoot));
 
     // The remote guard costs one gh call per PR, so it only runs for
-    // candidates the free checks (draft, reviewed-local) have not already
-    // killed — the pure decision treats an unfetched PR as unguarded.
-    const remoteHeads: { pr: number; heads: string[] }[] = [];
+    // candidates the free checks have not already killed — the pure
+    // decision treats an unfetched PR as unguarded. "Free" depends on the
+    // re-arm policy: under on_push only a SAME-head local review kills a
+    // candidate, while the one-review-per-PR default is done after ANY
+    // local review of that number (reviewed-prior-head from local facts
+    // alone), so its comments fetch is skipped too.
+    const remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[] =
+      [];
     for (const candidate of prs) {
       if (candidate.isDraft) continue;
-      const reviewedLocally = runDirs.localReviews.some(
-        (r) => r.pr === candidate.pr && r.head === candidate.head,
+      const locallyBlocked = runDirs.localReviews.some(
+        (r) =>
+          r.pr === candidate.pr && (r.head === candidate.head || !entry.onPush),
       );
-      if (reviewedLocally) continue;
+      if (locallyBlocked) continue;
       const comments = await fetchPrComments(repoRoot, candidate.pr);
       remoteHeads.push({
         pr: candidate.pr,
         heads: markerDeclaredHeads(comments),
+        markerSeen: markerCommentSeen(comments),
       });
     }
 
     repos.push({
       path: repoRoot,
       post: entry.post,
+      onPush: entry.onPush,
       prs,
       localReviews: runDirs.localReviews,
       remoteHeads,
@@ -610,12 +619,17 @@ async function watchAdd(options: CliOptions): Promise<number> {
   const raw = existsSync(paths.configPath)
     ? await Bun.file(paths.configPath).text()
     : null;
-  const result = upsertWatchRepo(raw, repoRoot, options.post, home);
+  const result = upsertWatchRepo(
+    raw,
+    repoRoot,
+    { post: options.post, onPush: options.onPush },
+    home,
+  );
   await mkdir(paths.dir, { recursive: true });
   await Bun.write(paths.configPath, result.config);
   log(
-    `${result.action} ${result.storedPath} (post=${options.post}) in ` +
-      paths.configPath,
+    `${result.action} ${result.storedPath} (post=${options.post} ` +
+      `on_push=${options.onPush}) in ${paths.configPath}`,
   );
   // The same hint install prints in reverse: config without a schedule is
   // as inert as a schedule without config — but only when the plist is

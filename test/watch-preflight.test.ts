@@ -21,6 +21,7 @@ import {
   localIsoTimestamp,
   logLine,
   MAX_WATCH_ATTEMPTS,
+  markerCommentSeen,
   markerDeclaredHeads,
   osascriptNotifyArgs,
   outcomeLine,
@@ -133,7 +134,7 @@ describe("parseWatchConfig", () => {
   test("minimal config gets every default", () => {
     const config = parseWatchConfig('{"repos":[{"path":"~/Desktop/x"}]}');
     expect(config).toEqual({
-      repos: [{ path: "~/Desktop/x", post: false }],
+      repos: [{ path: "~/Desktop/x", post: false, onPush: false }],
       dailyCap: DEFAULT_DAILY_CAP,
       window: null,
     });
@@ -142,13 +143,13 @@ describe("parseWatchConfig", () => {
   test("full config round-trips", () => {
     const config = parseWatchConfig(
       JSON.stringify({
-        repos: [{ path: "~/Desktop/musive-s3", post: true }],
+        repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: true }],
         daily_cap: 3,
         window: { start: "09:00", end: "19:00" },
       }),
     );
     expect(config).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      repos: [{ path: "~/Desktop/musive-s3", post: true, onPush: true }],
       dailyCap: 3,
       window: { start: "09:00", end: "19:00" },
     });
@@ -173,6 +174,8 @@ describe("parseWatchConfig", () => {
       ['{"repos":[{}]}', "repos[0].path"],
       ['{"repos":[{"path":""}]}', "repos[0].path"],
       ['{"repos":[{"path":"/x","post":"yes"}]}', "repos[0].post"],
+      ['{"repos":[{"path":"/x","on_push":"yes"}]}', "repos[0].on_push"],
+      ['{"repos":[{"path":"/x","on_push":1}]}', "repos[0].on_push"],
       ['{"repos":[],"daily_cap":-1}', "daily_cap"],
       ['{"repos":[],"daily_cap":2.5}', "daily_cap"],
       ['{"repos":[],"window":"office"}', "window"],
@@ -338,6 +341,29 @@ describe("parseMarkerHead", () => {
       ]),
     ).toEqual([HEAD_A, HEAD_B]);
   });
+
+  // The two marker facts differ exactly on the legacy headless marker: it
+  // declares no head (heads stay empty) yet proves a review happened
+  // (markerSeen true) — the fact the one-review-per-PR default consumes.
+  test("markerCommentSeen sees any marker, headless included", () => {
+    expect(
+      markerCommentSeen([{ body: "<!-- pr-hero-report -->\nold format" }]),
+    ).toBe(true);
+    expect(
+      markerCommentSeen([
+        { body: `<!-- pr-hero-report head=${HEAD_A} -->\nbody` },
+      ]),
+    ).toBe(true);
+    expect(
+      markerCommentSeen([
+        { body: "LGTM" },
+        { body: "<!-- linear-linkback -->" },
+        { body: "<!-- pr-hero-reporter -->" },
+        { body: `quoted:\n<!-- pr-hero-report head=${HEAD_A} -->` },
+      ]),
+    ).toBe(false);
+    expect(markerCommentSeen([])).toBe(false);
+  });
 });
 
 describe("attempts counting", () => {
@@ -444,6 +470,9 @@ function repo(overrides: Partial<TickRepoFacts> = {}): TickRepoFacts {
   return {
     path: "/x/musive",
     post: false,
+    // The config default: one review per PR. Tests of the re-arm behavior
+    // opt in explicitly, mirroring what an operator must do.
+    onPush: false,
     prs: [],
     localReviews: [],
     remoteHeads: [],
@@ -510,7 +539,7 @@ describe("decideTick", () => {
               { pr: 5, head: HEAD_A, isDraft: false },
             ],
             localReviews: [{ pr: 2, head: HEAD_A }],
-            remoteHeads: [{ pr: 3, heads: [HEAD_A] }],
+            remoteHeads: [{ pr: 3, heads: [HEAD_A], markerSeen: true }],
             attempts: [{ pr: 4, head: HEAD_A, count: MAX_WATCH_ATTEMPTS }],
           }),
         ],
@@ -531,41 +560,111 @@ describe("decideTick", () => {
     });
   });
 
-  // A new push mints a new (pr, head) key, so every guard keyed on the old
-  // head releases — intended: with auto-post the comment must track the
-  // live head.
-  test("a new head makes a reviewed PR eligible again", () => {
-    const decision = decideTick(
-      tick({
-        repos: [
-          repo({
-            prs: [{ pr: 2, head: HEAD_B, isDraft: false }],
-            localReviews: [{ pr: 2, head: HEAD_A }],
-            remoteHeads: [{ pr: 2, heads: [HEAD_A] }],
-            attempts: [{ pr: 2, head: HEAD_A, count: 2 }],
-          }),
-        ],
-      }),
+  // The re-arm policy, both modes over the SAME facts (a PR reviewed at an
+  // old head, pushed to a new one). Under on_push a new push mints a new
+  // (pr, head) key and every guard keyed on the old head releases — with
+  // auto-post the comment tracks the live head. Under the default each PR
+  // is reviewed once: the very same prior review now blocks as
+  // reviewed-prior-head, and a push never re-bills.
+  test("a new head re-arms the PR only under on_push", () => {
+    const facts = {
+      prs: [{ pr: 2, head: HEAD_B, isDraft: false }],
+      localReviews: [{ pr: 2, head: HEAD_A }],
+      remoteHeads: [{ pr: 2, heads: [HEAD_A], markerSeen: true }],
+      attempts: [{ pr: 2, head: HEAD_A, count: 2 }],
+    };
+    const rearmed = decideTick(
+      tick({ repos: [repo({ ...facts, onPush: true })] }),
     );
-    expect(decision.skips).toEqual([]);
-    expect(decision.launch?.pr).toBe(2);
-    expect(decision.launch?.head).toBe(HEAD_B);
+    expect(rearmed.skips).toEqual([]);
+    expect(rearmed.launch?.pr).toBe(2);
+    expect(rearmed.launch?.head).toBe(HEAD_B);
+
+    const once = decideTick(tick({ repos: [repo(facts)] }));
+    expect(once.launch).toBeNull();
+    expect(once.skips).toEqual([
+      { repo: "/x/musive", pr: 2, head: HEAD_B, reason: "reviewed-prior-head" },
+    ]);
   });
 
-  // An old-format marker declared no head, so the shell hands the pure
-  // decision an empty heads list — still eligible by construction.
-  test("a PR with only a headless legacy marker stays eligible", () => {
-    const decision = decideTick(
+  // The local half alone also blocks under the default: any comparison.json
+  // with the same PR number, whatever head it reviewed.
+  test("a local prior-head review blocks without on_push, by itself", () => {
+    const facts = {
+      prs: [{ pr: 7, head: HEAD_B, isDraft: false }],
+      localReviews: [{ pr: 7, head: HEAD_A }],
+    };
+    expect(decideTick(tick({ repos: [repo(facts)] })).skips[0]?.reason).toBe(
+      "reviewed-prior-head",
+    );
+    expect(
+      decideTick(tick({ repos: [repo({ ...facts, onPush: true })] })).launch
+        ?.pr,
+    ).toBe(7);
+  });
+
+  // The same-head reasons stay themselves under the default: prior-head is
+  // only the DIFFERENT-head verdict, never a relabeling of same-head.
+  test("same-head reasons win over reviewed-prior-head", () => {
+    const local = decideTick(
       tick({
         repos: [
           repo({
-            prs: [{ pr: 9, head: HEAD_A, isDraft: false }],
-            remoteHeads: [{ pr: 9, heads: [] }],
+            prs: [{ pr: 2, head: HEAD_A, isDraft: false }],
+            localReviews: [{ pr: 2, head: HEAD_A }],
           }),
         ],
       }),
     );
-    expect(decision.launch?.pr).toBe(9);
+    expect(local.skips[0]?.reason).toBe("reviewed-local");
+    const remote = decideTick(
+      tick({
+        repos: [
+          repo({
+            prs: [{ pr: 3, head: HEAD_A, isDraft: false }],
+            remoteHeads: [{ pr: 3, heads: [HEAD_A], markerSeen: true }],
+          }),
+        ],
+      }),
+    );
+    expect(remote.skips[0]?.reason).toBe("reviewed-remote");
+  });
+
+  // THE legacy-headless-marker asymmetry: it declares no head, so it can
+  // never prove THIS head was covered (on_push keeps it non-blocking, as
+  // always) — but it does prove the PR was reviewed, which is all the
+  // one-review-per-PR default asks.
+  test("a headless legacy marker blocks only without on_push", () => {
+    const facts = {
+      prs: [{ pr: 9, head: HEAD_A, isDraft: false }],
+      remoteHeads: [{ pr: 9, heads: [], markerSeen: true }],
+    };
+    const rearmed = decideTick(
+      tick({ repos: [repo({ ...facts, onPush: true })] }),
+    );
+    expect(rearmed.launch?.pr).toBe(9);
+
+    const once = decideTick(tick({ repos: [repo(facts)] }));
+    expect(once.launch).toBeNull();
+    expect(once.skips[0]?.reason).toBe("reviewed-prior-head");
+  });
+
+  // No prior review anywhere: the default is exactly as eager as on_push.
+  test("an unreviewed PR is eligible in both modes", () => {
+    for (const onPush of [false, true]) {
+      const decision = decideTick(
+        tick({
+          repos: [
+            repo({
+              onPush,
+              prs: [{ pr: 11, head: HEAD_A, isDraft: false }],
+              remoteHeads: [{ pr: 11, heads: [], markerSeen: false }],
+            }),
+          ],
+        }),
+      );
+      expect(decision.launch?.pr).toBe(11);
+    }
   });
 
   test("one attempt left still runs; the guard is a maximum of two", () => {
@@ -876,6 +975,35 @@ describe("parseArgs watch add/remove/status", () => {
     expect(parseArgs(["watch", "add"]).options.post).toBe(false);
   });
 
+  test("--on-push parses on add and defaults to false", () => {
+    expect(parseArgs(["watch", "add", "--on-push"]).options.onPush).toBe(true);
+    expect(parseArgs(["watch", "add"]).options.onPush).toBe(false);
+    const both = parseArgs(["watch", "add", "--post", "--on-push"]).options;
+    expect(both.post).toBe(true);
+    expect(both.onPush).toBe(true);
+  });
+
+  // Same silently-dropped-intention rule as --post: --on-push means
+  // something only on the add path.
+  test("--on-push is rejected everywhere else, naming watch add", () => {
+    for (const argv of [
+      ["watch", "--once", "--on-push"],
+      ["watch", "remove", "--on-push"],
+      ["watch", "status", "--on-push"],
+      ["watch", "install", "--on-push"],
+      ["review", "--on-push"],
+    ]) {
+      try {
+        parseArgs(argv);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("--on-push");
+        expect((error as Error).message).toContain("watch add");
+      }
+    }
+  });
+
   // --post configures the repo being added; anywhere else in the watch
   // surface it would be a silently dropped intention.
   test("--post is rejected on every other watch action", () => {
@@ -948,13 +1076,14 @@ describe("contractTilde", () => {
 describe("upsertWatchRepo", () => {
   const HOME = "/Users/juanma";
   const REPO = "/Users/juanma/Desktop/musive-s3";
+  const FLAGS = { post: true, onPush: false };
 
   test("no config yet: creates one with the shipped defaults", () => {
-    const result = upsertWatchRepo(null, REPO, true, HOME);
+    const result = upsertWatchRepo(null, REPO, FLAGS, HOME);
     expect(result.action).toBe("added");
     expect(result.storedPath).toBe("~/Desktop/musive-s3");
     expect(JSON.parse(result.config)).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: false }],
       daily_cap: DEFAULT_DAILY_CAP,
       window: null,
     });
@@ -970,12 +1099,17 @@ describe("upsertWatchRepo", () => {
       daily_cap: 3,
       window: { start: "09:00", end: "19:00" },
     });
-    const result = upsertWatchRepo(raw, REPO, false, HOME);
+    const result = upsertWatchRepo(
+      raw,
+      REPO,
+      { post: false, onPush: true },
+      HOME,
+    );
     expect(result.action).toBe("added");
     expect(JSON.parse(result.config)).toEqual({
       repos: [
         { path: "~/other", post: true },
-        { path: "~/Desktop/musive-s3", post: false },
+        { path: "~/Desktop/musive-s3", post: false, on_push: true },
       ],
       daily_cap: 3,
       window: { start: "09:00", end: "19:00" },
@@ -983,16 +1117,35 @@ describe("upsertWatchRepo", () => {
   });
 
   // Idempotency: `~/x` in the file and a resolved `/Users/juanma/x` are the
-  // same repo — the post flag updates in place, never a duplicate entry.
-  test("re-adding a listed repo updates post in place", () => {
+  // same repo — the flags update in place, never a duplicate entry. An
+  // absent flag RESETS (the command line states the whole intent), so a
+  // re-add without --on-push turns the re-arm off — disclosed semantics,
+  // same as --post.
+  test("re-adding a listed repo updates both flags in place", () => {
     const raw = JSON.stringify({
-      repos: [{ path: "~/Desktop/musive-s3", post: false }],
+      repos: [{ path: "~/Desktop/musive-s3", post: false, on_push: true }],
     });
-    const result = upsertWatchRepo(raw, REPO, true, HOME);
+    const result = upsertWatchRepo(raw, REPO, FLAGS, HOME);
     expect(result.action).toBe("updated");
     expect(result.storedPath).toBe("~/Desktop/musive-s3");
     expect(JSON.parse(result.config)).toEqual({
+      repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: false }],
+    });
+  });
+
+  // A legacy entry that predates on_push gains the key on update.
+  test("updating a legacy entry stamps on_push explicitly", () => {
+    const raw = JSON.stringify({
       repos: [{ path: "~/Desktop/musive-s3", post: true }],
+    });
+    const result = upsertWatchRepo(
+      raw,
+      REPO,
+      { post: true, onPush: true },
+      HOME,
+    );
+    expect(JSON.parse(result.config)).toEqual({
+      repos: [{ path: "~/Desktop/musive-s3", post: true, on_push: true }],
     });
   });
 
@@ -1005,26 +1158,38 @@ describe("upsertWatchRepo", () => {
       daily_cap: 5,
       future_key: { keep: "me" },
     });
-    const result = upsertWatchRepo(raw, REPO, true, HOME);
+    const result = upsertWatchRepo(raw, REPO, FLAGS, HOME);
     expect(result.action).toBe("updated");
     expect(JSON.parse(result.config)).toEqual({
-      repos: [{ path: "~/Desktop/musive-s3", post: true, note: "prod" }],
+      repos: [
+        {
+          path: "~/Desktop/musive-s3",
+          post: true,
+          on_push: false,
+          note: "prod",
+        },
+      ],
       daily_cap: 5,
       future_key: { keep: "me" },
     });
   });
 
   test("a repo outside home stays absolute", () => {
-    const result = upsertWatchRepo(null, "/opt/repo", false, HOME);
+    const result = upsertWatchRepo(
+      null,
+      "/opt/repo",
+      { post: false, onPush: false },
+      HOME,
+    );
     expect(result.storedPath).toBe("/opt/repo");
   });
 
   // A malformed config fails loud instead of being "repaired" into loss.
   test("a malformed existing config is never rewritten", () => {
-    expect(() => upsertWatchRepo("not json", REPO, true, HOME)).toThrow(
+    expect(() => upsertWatchRepo("not json", REPO, FLAGS, HOME)).toThrow(
       CliUsageError,
     );
-    expect(() => upsertWatchRepo('{"repos":"x"}', REPO, true, HOME)).toThrow(
+    expect(() => upsertWatchRepo('{"repos":"x"}', REPO, FLAGS, HOME)).toThrow(
       CliUsageError,
     );
   });
@@ -1148,7 +1313,7 @@ describe("renderWatchStatus", () => {
   const BASE = {
     configPath: "/Users/x/.prhero/watch.json",
     config: {
-      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      repos: [{ path: "~/Desktop/musive-s3", post: true, onPush: false }],
       dailyCap: 5,
       window: { start: "09:00", end: "19:00" },
     },
@@ -1165,7 +1330,7 @@ describe("renderWatchStatus", () => {
   test("the full healthy picture", () => {
     const text = renderWatchStatus(BASE).join("\n");
     expect(text).toContain("/Users/x/.prhero/watch.json");
-    expect(text).toContain("~/Desktop/musive-s3 post=true");
+    expect(text).toContain("~/Desktop/musive-s3 post=true on_push=false");
     expect(text).toContain("2 of 5 launches used");
     expect(text).toContain("09:00-19:00");
     expect(text).toContain("installed — one tick every 15 min");

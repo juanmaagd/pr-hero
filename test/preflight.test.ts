@@ -38,6 +38,7 @@ describe("parseArgs", () => {
       yes: false,
       post: false,
       twoDot: false,
+      onPush: false,
     });
     expect(options.base).toBeUndefined();
   });

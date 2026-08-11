@@ -122,9 +122,8 @@ Reviews launch two ways: **by hand**, or through the opt-in local watcher (`pr-h
 
 The watcher is a **tick, not a daemon**: `pr-hero watch --once` makes one pass — list open PRs in
 each configured repo, skip what is already covered, launch **at most one** review — and exits.
-launchd (installed below) fires a tick every N minutes and is the supervisor. Drafts are skipped;
-a new push makes a PR eligible again (with `post: true` the PR's single marked comment is updated
-in place to track the new head).
+launchd (installed below) fires a tick every N minutes and is the supervisor. Drafts are skipped,
+and each PR is reviewed **once** by default — see the `on_push` knob below.
 
 ### Opt in
 
@@ -162,8 +161,20 @@ plain JSON you may tune directly:
 | --- | --- | --- |
 | `repos[].path` | — | Operator checkout of a repo to watch (its `.prhero/` config and gotchas are used, exactly like `review --pr`). Managed by `watch add`/`remove`. |
 | `repos[].post` | `false` | Pass `--post` to the spawned review — publish each result as the PR's one marked comment. Managed by `watch add [--post]`. |
+| `repos[].on_push` | `false` | Re-review the repo's PRs on every new push. Default: one review per PR — see below. Managed by `watch add [--on-push]`. |
 | `daily_cap` | `5` | Global max reviews launched per local calendar day, across all repos. `0` pauses launching entirely. |
 | `window` | `null` (always) | Local-time window outside which ticks do nothing, e.g. `{"start":"09:00","end":"19:00"}`. Overnight windows (`start` > `end`) work. |
+
+### One review per PR — the `on_push` knob
+
+By default a push to an already-reviewed PR does **not** re-trigger a review: an active PR takes
+many pushes, and re-billing $2–5 for each would drain the cap on one PR's churn. The posted
+comment names the exact sha it reviewed, so it never lies about coverage — a reader sees at a
+glance that later pushes are unreviewed. When the new head deserves a fresh pass, run it by hand
+(`pr-hero review --pr <n> --post`); `pr-hero watch add --on-push` restores per-push re-review for
+a repo that wants it. Planned follow-up: a cheap independent judge that reacts to pushes by
+checking whether the new head addressed the posted findings and replies in-thread, instead of
+re-reviewing from scratch.
 
 ### What keeps the bill bounded
 
@@ -174,7 +185,8 @@ plain JSON you may tune directly:
 - **Max 2 attempts per (pr, head)**: a PR that keeps killing the review is dropped until it gets
   a new push, instead of eating the cap every day.
 - **Cross-machine guard**: a posted pr-hero comment declares which head it reviewed; any watcher
-  that sees the current head already declared skips the PR.
+  that sees the current head already declared skips the PR (and under the one-review-per-PR
+  default, any pr-hero comment at all is proof enough).
 
 ### Operating model and honest limits
 
