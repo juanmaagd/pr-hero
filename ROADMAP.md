@@ -422,7 +422,7 @@ What is still manual, in the order it should be closed:
    the stamping call site first executes on the next paid run.
 
 5. **The size gate — "PR too large → skip"** — **BUILT 2026-08-11** (`src/size-gate.ts` pure;
-   wired into local review, PR review, and the watcher). Defaults: **1500 effective changed lines,
+   wired into local review, PR review, and the watcher). Defaults: **2500 effective changed lines,
    150 effective changed files**, with generated content (lockfiles, `*.min.js`/`*.min.css`, `*.snap`)
    excluded before the count. Escape hatches: `--force`, `--max-changed-lines`, `--max-changed-files`
    (0 disables a limit); per-repo thresholds ride `watch add`.

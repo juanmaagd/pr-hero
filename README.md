@@ -232,15 +232,15 @@ default: `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.
 
 | Profile | Lines | Files | For |
 | --- | --- | --- | --- |
-| Conservative | `--max-changed-lines 800` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
-| **Default (shipped)** | **1500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
-| Permissive | `--max-changed-lines 3000` | `--max-changed-files 150` | You would rather pay than skip. |
+| Conservative | `--max-changed-lines 1200` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
+| **Default (shipped)** | **2500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
+| Permissive | `--max-changed-lines 4000` | `--max-changed-files 150` | You would rather pay than skip. |
 
 ```bash
 pr-hero review --pr 42 --dry-run          # prints the gate verdict, spends nothing
 pr-hero review --pr 42 --force            # review it anyway (does NOT skip the cost prompt)
 pr-hero review --pr 42 --max-changed-lines 0   # 0 disables that limit entirely
-pr-hero watch add --max-changed-lines 800      # per-repo threshold for the watcher
+pr-hero watch add --max-changed-lines 1200      # per-repo threshold for the watcher
 ```
 
 A skipped review exits 1 with a one-line reason and no stack. In watch mode it logs

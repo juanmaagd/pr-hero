@@ -237,8 +237,13 @@ describe("sizeGateConfig", () => {
     });
   });
 
+  // Pins the shipped numbers to the README's profile table. Moving a default
+  // must be a deliberate edit here, not a drift — 1500 became 2500 once this
+  // repo's own PR #1 (1603 lines) was refused while its cost band read
+  // $3.18-6.86, which is the gate firing where its stated reason does not
+  // hold. See the WHY on DEFAULT_SIZE_GATE.
   test("the shipped defaults are the documented ones", () => {
-    expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(1500);
+    expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(2500);
     expect(DEFAULT_SIZE_GATE.maxChangedFiles).toBe(150);
   });
 });
