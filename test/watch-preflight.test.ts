@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import { CliUsageError, parseArgs } from "../src/preflight";
 import {
+  contractTilde,
   countAttempts,
   countLaunchedToday,
   DEFAULT_DAILY_CAP,
@@ -14,6 +15,7 @@ import {
   expandTilde,
   findingsTierCounts,
   insideWindow,
+  lastLogActivity,
   latestRunDirName,
   launchedLine,
   localIsoTimestamp,
@@ -26,14 +28,18 @@ import {
   parseLockPid,
   parseMarkerHead,
   parsePipelineMeta,
+  parsePlistInterval,
   parsePrList,
   parseWatchConfig,
   prheroHomePaths,
+  removeWatchRepo,
   renderWatchPlist,
+  renderWatchStatus,
   skipLine,
   type TickInput,
   type TickRepoFacts,
   tickGate,
+  upsertWatchRepo,
   WATCH_LAUNCHD_LABEL,
 } from "../src/watch-preflight";
 
@@ -846,5 +852,397 @@ describe("prheroHomePaths", () => {
       launchdLogPath: "/Users/x/.prhero/launchd.log",
       plistPath: `/Users/x/Library/LaunchAgents/${WATCH_LAUNCHD_LABEL}.plist`,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config management (watch add/remove/status).
+
+describe("parseArgs watch add/remove/status", () => {
+  test("the three verbs parse", () => {
+    expect(parseArgs(["watch", "add"]).options.watch).toBe("add");
+    expect(parseArgs(["watch", "remove"]).options.watch).toBe("remove");
+    expect(parseArgs(["watch", "status"]).options.watch).toBe("status");
+  });
+
+  test("add takes --post and --repo", () => {
+    const { options } = parseArgs(["watch", "add", "--post", "--repo", "/x"]);
+    expect(options.watch).toBe("add");
+    expect(options.post).toBe(true);
+    expect(options.repo).toBe("/x");
+  });
+
+  test("--post defaults to false on add", () => {
+    expect(parseArgs(["watch", "add"]).options.post).toBe(false);
+  });
+
+  // --post configures the repo being added; anywhere else in the watch
+  // surface it would be a silently dropped intention.
+  test("--post is rejected on every other watch action", () => {
+    for (const action of ["--once", "remove", "status", "install"]) {
+      try {
+        parseArgs(["watch", action, "--post"]);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("--post");
+        expect((error as Error).message).toContain("add");
+      }
+    }
+  });
+
+  // The review-side contract is untouched: --post still requires --pr.
+  test("review --post still requires --pr", () => {
+    expect(() => parseArgs(["review", "--post"])).toThrow(CliUsageError);
+  });
+
+  test("remove takes --repo", () => {
+    expect(parseArgs(["watch", "remove", "--repo", "/x"]).options.repo).toBe(
+      "/x",
+    );
+  });
+
+  test("--dry-run is rejected on the config verbs", () => {
+    for (const action of ["add", "remove", "status"]) {
+      expect(() => parseArgs(["watch", action, "--dry-run"])).toThrow(
+        CliUsageError,
+      );
+    }
+  });
+
+  test("the verbs conflict with --once and each other", () => {
+    expect(() => parseArgs(["watch", "add", "--once"])).toThrow(CliUsageError);
+    expect(() => parseArgs(["watch", "add", "status"])).toThrow(CliUsageError);
+  });
+
+  test("the verbs are not commands of their own", () => {
+    for (const word of ["add", "remove", "status"]) {
+      expect(() => parseArgs([word])).toThrow(CliUsageError);
+    }
+  });
+});
+
+describe("contractTilde", () => {
+  const HOME = "/Users/juanma";
+
+  test("contracts home and its children", () => {
+    expect(contractTilde("/Users/juanma", HOME)).toBe("~");
+    expect(contractTilde("/Users/juanma/Desktop/x", HOME)).toBe("~/Desktop/x");
+  });
+
+  test("leaves foreign paths and lookalikes alone", () => {
+    expect(contractTilde("/opt/repo", HOME)).toBe("/opt/repo");
+    // A sibling that merely shares the prefix must not contract.
+    expect(contractTilde("/Users/juanmartin/x", HOME)).toBe(
+      "/Users/juanmartin/x",
+    );
+  });
+
+  test("round-trips through expandTilde", () => {
+    for (const p of ["/Users/juanma", "/Users/juanma/Desktop/musive-s3"]) {
+      expect(expandTilde(contractTilde(p, HOME), HOME)).toBe(p);
+    }
+  });
+});
+
+describe("upsertWatchRepo", () => {
+  const HOME = "/Users/juanma";
+  const REPO = "/Users/juanma/Desktop/musive-s3";
+
+  test("no config yet: creates one with the shipped defaults", () => {
+    const result = upsertWatchRepo(null, REPO, true, HOME);
+    expect(result.action).toBe("added");
+    expect(result.storedPath).toBe("~/Desktop/musive-s3");
+    expect(JSON.parse(result.config)).toEqual({
+      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      daily_cap: DEFAULT_DAILY_CAP,
+      window: null,
+    });
+    expect(result.config.endsWith("\n")).toBe(true);
+    // The created file must satisfy its own parser — same round-trip rule
+    // as initConfigTemplate.
+    expect(() => parseWatchConfig(result.config)).not.toThrow();
+  });
+
+  test("appends to an existing config, everything else untouched", () => {
+    const raw = JSON.stringify({
+      repos: [{ path: "~/other", post: true }],
+      daily_cap: 3,
+      window: { start: "09:00", end: "19:00" },
+    });
+    const result = upsertWatchRepo(raw, REPO, false, HOME);
+    expect(result.action).toBe("added");
+    expect(JSON.parse(result.config)).toEqual({
+      repos: [
+        { path: "~/other", post: true },
+        { path: "~/Desktop/musive-s3", post: false },
+      ],
+      daily_cap: 3,
+      window: { start: "09:00", end: "19:00" },
+    });
+  });
+
+  // Idempotency: `~/x` in the file and a resolved `/Users/juanma/x` are the
+  // same repo — the post flag updates in place, never a duplicate entry.
+  test("re-adding a listed repo updates post in place", () => {
+    const raw = JSON.stringify({
+      repos: [{ path: "~/Desktop/musive-s3", post: false }],
+    });
+    const result = upsertWatchRepo(raw, REPO, true, HOME);
+    expect(result.action).toBe("updated");
+    expect(result.storedPath).toBe("~/Desktop/musive-s3");
+    expect(JSON.parse(result.config)).toEqual({
+      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+    });
+  });
+
+  // parseWatchConfig tolerates unknown keys, so the rewrite must PRESERVE
+  // them — top-level and per-repo alike; a canonical re-projection would be
+  // silent data loss.
+  test("unknown keys survive the rewrite, at both levels", () => {
+    const raw = JSON.stringify({
+      repos: [{ path: "~/Desktop/musive-s3", post: false, note: "prod" }],
+      daily_cap: 5,
+      future_key: { keep: "me" },
+    });
+    const result = upsertWatchRepo(raw, REPO, true, HOME);
+    expect(result.action).toBe("updated");
+    expect(JSON.parse(result.config)).toEqual({
+      repos: [{ path: "~/Desktop/musive-s3", post: true, note: "prod" }],
+      daily_cap: 5,
+      future_key: { keep: "me" },
+    });
+  });
+
+  test("a repo outside home stays absolute", () => {
+    const result = upsertWatchRepo(null, "/opt/repo", false, HOME);
+    expect(result.storedPath).toBe("/opt/repo");
+  });
+
+  // A malformed config fails loud instead of being "repaired" into loss.
+  test("a malformed existing config is never rewritten", () => {
+    expect(() => upsertWatchRepo("not json", REPO, true, HOME)).toThrow(
+      CliUsageError,
+    );
+    expect(() => upsertWatchRepo('{"repos":"x"}', REPO, true, HOME)).toThrow(
+      CliUsageError,
+    );
+  });
+});
+
+describe("removeWatchRepo", () => {
+  const HOME = "/Users/juanma";
+  const REPO = "/Users/juanma/Desktop/musive-s3";
+
+  test("removes the entry however the config spells it", () => {
+    const raw = JSON.stringify({
+      repos: [
+        { path: "~/Desktop/musive-s3", post: true },
+        { path: "~/other", post: false },
+      ],
+      daily_cap: 2,
+    });
+    const result = removeWatchRepo(raw, REPO, HOME);
+    expect(result.action).toBe("removed");
+    expect(JSON.parse(result.config as string)).toEqual({
+      repos: [{ path: "~/other", post: false }],
+      daily_cap: 2,
+    });
+  });
+
+  // Removing the last repo leaves repos: [] — a valid "watch nothing"
+  // state; the cap and window settings survive.
+  test("removing the last repo keeps the config, empty", () => {
+    const raw = JSON.stringify({
+      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      daily_cap: 2,
+      window: null,
+    });
+    const result = removeWatchRepo(raw, REPO, HOME);
+    expect(result.action).toBe("removed");
+    const parsed = JSON.parse(result.config as string);
+    expect(parsed.repos).toEqual([]);
+    expect(parsed.daily_cap).toBe(2);
+    expect(() => parseWatchConfig(result.config as string)).not.toThrow();
+  });
+
+  // Idempotent: not listed is an answer, not an error — and config: null
+  // means the caller does not even rewrite (reformat) the file.
+  test("a repo that is not listed reports not-listed and changes nothing", () => {
+    const raw = JSON.stringify({ repos: [{ path: "~/other", post: false }] });
+    const result = removeWatchRepo(raw, REPO, HOME);
+    expect(result.action).toBe("not-listed");
+    expect(result.config).toBeNull();
+  });
+
+  test("a malformed config fails loud", () => {
+    expect(() => removeWatchRepo("not json", REPO, HOME)).toThrow(
+      CliUsageError,
+    );
+  });
+});
+
+describe("watch status pure pieces", () => {
+  test("parsePlistInterval round-trips renderWatchPlist", () => {
+    const plist = renderWatchPlist({
+      runtimePath: "/b/bun",
+      entryPath: "/x/cli.ts",
+      intervalSeconds: 900,
+      logPath: "/x/l.log",
+      pathEnv: "/usr/bin",
+    });
+    expect(parsePlistInterval(plist)).toBe(900);
+  });
+
+  // Tolerant by contract: a hand-edited or foreign plist reads as
+  // "unreadable", never a throw.
+  test("parsePlistInterval is null on anything else", () => {
+    expect(parsePlistInterval("")).toBeNull();
+    expect(parsePlistInterval("<plist></plist>")).toBeNull();
+    expect(
+      parsePlistInterval("<key>StartInterval</key>\n<string>soon</string>"),
+    ).toBeNull();
+    expect(
+      parsePlistInterval("<key>StartInterval</key>\n<integer>0</integer>"),
+    ).toBeNull();
+  });
+
+  test("lastLogActivity returns the FINAL launched and outcome lines", () => {
+    const logText = [
+      launchedLine("2026-08-10T09:00:00+02:00", 4, "musive", HEAD_A),
+      outcomeLine("2026-08-10T09:20:00+02:00", "musive", {
+        pr: 4,
+        ok: false,
+        exitCode: 1,
+        counts: null,
+      }),
+      logLine("2026-08-11T09:00:00+02:00", "tick start"),
+      launchedLine("2026-08-11T09:00:01+02:00", 5, "musive", HEAD_B),
+      outcomeLine("2026-08-11T09:25:00+02:00", "musive", {
+        pr: 5,
+        ok: true,
+        exitCode: 0,
+        counts: { blocking: 1, advisory: 2 },
+      }),
+    ].join("\n");
+    expect(lastLogActivity(logText)).toEqual({
+      launched: launchedLine("2026-08-11T09:00:01+02:00", 5, "musive", HEAD_B),
+      outcome: outcomeLine("2026-08-11T09:25:00+02:00", "musive", {
+        pr: 5,
+        ok: true,
+        exitCode: 0,
+        counts: { blocking: 1, advisory: 2 },
+      }),
+    });
+  });
+
+  test("an empty or eventless log yields nulls", () => {
+    expect(lastLogActivity("")).toEqual({ launched: null, outcome: null });
+    expect(
+      lastLogActivity(logLine("2026-08-11T09:00:00+02:00", "tick start")),
+    ).toEqual({ launched: null, outcome: null });
+  });
+});
+
+describe("renderWatchStatus", () => {
+  const BASE = {
+    configPath: "/Users/x/.prhero/watch.json",
+    config: {
+      repos: [{ path: "~/Desktop/musive-s3", post: true }],
+      dailyCap: 5,
+      window: { start: "09:00", end: "19:00" },
+    },
+    configError: null,
+    launchedToday: 2,
+    plistPath: "/Users/x/Library/LaunchAgents/io.prhero.watch.plist",
+    installed: true,
+    intervalSeconds: 900,
+    lockPid: null,
+    lastLaunched: "T launched pr=5 repo=musive head=bbbbbbbb",
+    lastOutcome: "T outcome pr=5 repo=musive status=ok blocking=1 advisory=2",
+  };
+
+  test("the full healthy picture", () => {
+    const text = renderWatchStatus(BASE).join("\n");
+    expect(text).toContain("/Users/x/.prhero/watch.json");
+    expect(text).toContain("~/Desktop/musive-s3 post=true");
+    expect(text).toContain("2 of 5 launches used");
+    expect(text).toContain("09:00-19:00");
+    expect(text).toContain("installed — one tick every 15 min");
+    expect(text).toContain("lock         free");
+    expect(text).toContain("T launched pr=5");
+    expect(text).toContain("T outcome pr=5");
+  });
+
+  test("no config points at watch add and still counts the log", () => {
+    const text = renderWatchStatus({
+      ...BASE,
+      config: null,
+      launchedToday: 1,
+    }).join("\n");
+    expect(text).toContain("none (/Users/x/.prhero/watch.json)");
+    expect(text).toContain("watch add");
+    expect(text).toContain("1 launched");
+  });
+
+  // A broken config is REPORTED, never thrown over — status is the tool
+  // for looking at broken setups.
+  test("an invalid config renders as INVALID with the parse error", () => {
+    const text = renderWatchStatus({
+      ...BASE,
+      config: null,
+      configError: 'watch.json "repos" must be an array, got: "x"',
+    }).join("\n");
+    expect(text).toContain("INVALID");
+    expect(text).toContain('"repos" must be an array');
+  });
+
+  test("zero watched repos names the empty state", () => {
+    const text = renderWatchStatus({
+      ...BASE,
+      config: { repos: [], dailyCap: 5, window: null },
+    }).join("\n");
+    expect(text).toContain("no repos watched");
+    expect(text).toContain("always");
+  });
+
+  test("launchd states: not installed, unreadable interval", () => {
+    expect(
+      renderWatchStatus({
+        ...BASE,
+        installed: false,
+        intervalSeconds: null,
+      }).join("\n"),
+    ).toContain('not installed — run "pr-hero watch install"');
+    expect(
+      renderWatchStatus({ ...BASE, intervalSeconds: null }).join("\n"),
+    ).toContain("interval unreadable");
+  });
+
+  test("a held lock and an empty history are named", () => {
+    const text = renderWatchStatus({
+      ...BASE,
+      lockPid: 4242,
+      lastLaunched: null,
+      lastOutcome: null,
+    }).join("\n");
+    expect(text).toContain("held by pid 4242");
+    expect(text).toContain("none recorded");
+  });
+});
+
+// The empty-repos tolerance, pinned on both halves: the parser accepts it
+// and a tick over zero repos is an open gate with nothing to do.
+describe("empty repos is a valid watch-nothing state", () => {
+  test("parseWatchConfig accepts repos: []", () => {
+    expect(parseWatchConfig('{"repos":[]}').repos).toEqual([]);
+  });
+
+  test("decideTick over zero repos launches nothing, loudly-nothing", () => {
+    const decision = decideTick(tick({ repos: [] }));
+    expect(decision.gate).toBe("open");
+    expect(decision.skips).toEqual([]);
+    expect(decision.eligible).toEqual([]);
+    expect(decision.launch).toBeNull();
   });
 });

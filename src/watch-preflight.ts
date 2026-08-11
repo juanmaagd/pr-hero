@@ -164,6 +164,115 @@ export function expandTilde(p: string, home: string): string {
   return p;
 }
 
+// The write-side inverse of expandTilde: paths STORED in watch.json contract
+// $HOME back to `~`, so the file stays readable, matches the README's
+// examples, and survives a home-directory rename.
+export function contractTilde(p: string, home: string): string {
+  if (p === home) return "~";
+  if (p.startsWith(`${home}${path.sep}`)) {
+    return `~/${p.slice(home.length + 1)}`;
+  }
+  return p;
+}
+
+// ---------------------------------------------------------------------------
+// Config management (watch add/remove) — the config file is machine-owned so
+// nobody hand-edits JSON. Both rewrites are SURGICAL over the raw JSON
+// record, never a re-projection of the parsed WatchConfig: parseWatchConfig
+// tolerates unknown keys (top-level and per-repo alike), so a canonical
+// re-projection would silently drop whatever a future version — or a careful
+// hand — put there. The raw text is still validated through parseWatchConfig
+// FIRST: a malformed config fails loud instead of being "repaired" into
+// data loss.
+
+// A stored path and a freshly resolved repo root must collide however the
+// config spells the repo — `~/x` and `/Users/juanma/x` are the same entry.
+function sameRepoPath(stored: string, repoRoot: string, home: string): boolean {
+  return path.resolve(expandTilde(stored, home)) === path.resolve(repoRoot);
+}
+
+function serializeConfig(record: unknown): string {
+  return `${JSON.stringify(record, null, 2)}\n`;
+}
+
+export interface ConfigUpsert {
+  // The new file body, ready to write.
+  config: string;
+  action: "added" | "updated";
+  // As recorded in the file: the tilde-contracted form on an add, the
+  // entry's own existing spelling on an update.
+  storedPath: string;
+}
+
+// Idempotent by design: re-adding a listed repo UPDATES its post flag in
+// place (every other key of the entry survives) and is never an error —
+// `watch add` doubles as "change this repo's post setting". A null raw means
+// no config file yet: one is created with the shipped defaults.
+export function upsertWatchRepo(
+  raw: string | null,
+  repoRoot: string,
+  post: boolean,
+  home: string,
+): ConfigUpsert {
+  const storedPath = contractTilde(repoRoot, home);
+  if (raw === null) {
+    return {
+      config: serializeConfig({
+        repos: [{ path: storedPath, post }],
+        daily_cap: DEFAULT_DAILY_CAP,
+        window: null,
+      }),
+      action: "added",
+      storedPath,
+    };
+  }
+  // Loud validation first; the raw re-parse below is then known-shaped.
+  parseWatchConfig(raw);
+  const record = JSON.parse(raw) as Record<string, unknown>;
+  const repos = record.repos as Record<string, unknown>[];
+  for (const entry of repos) {
+    if (sameRepoPath(entry.path as string, repoRoot, home)) {
+      entry.post = post;
+      return {
+        config: serializeConfig(record),
+        action: "updated",
+        storedPath: entry.path as string,
+      };
+    }
+  }
+  repos.push({ path: storedPath, post });
+  return { config: serializeConfig(record), action: "added", storedPath };
+}
+
+export interface ConfigRemoval {
+  // null when nothing changed (the repo was not listed) — the caller skips
+  // the write, so a no-op remove cannot even reformat the file.
+  config: string | null;
+  action: "removed" | "not-listed";
+}
+
+// Removing the last repo leaves `"repos": []` — a VALID config state
+// ("watch nothing"): parseWatchConfig accepts it and a tick over zero repos
+// gates, logs and exits cleanly. Deleting the file instead would throw away
+// the operator's cap and window settings.
+export function removeWatchRepo(
+  raw: string,
+  repoRoot: string,
+  home: string,
+): ConfigRemoval {
+  parseWatchConfig(raw);
+  const record = JSON.parse(raw) as Record<string, unknown>;
+  const repos = record.repos as Record<string, unknown>[];
+  const kept = repos.filter(
+    (entry) => !sameRepoPath(entry.path as string, repoRoot, home),
+  );
+  if (kept.length === repos.length) {
+    return { config: null, action: "not-listed" };
+  }
+  record.repos = kept;
+  return { config: serializeConfig(record), action: "removed" };
+}
+
 // Start-inclusive, end-EXCLUSIVE, so back-to-back windows neither overlap
 // nor gap. An inverted range (start > end) is an overnight window — 22:00 to
 // 06:00 means "late evening through early morning", not an error.
@@ -615,6 +724,25 @@ export function countLaunchedToday(logText: string, dayPrefix: string): number {
   return count;
 }
 
+export interface LastActivity {
+  launched: string | null;
+  outcome: string | null;
+}
+
+// The status view's "what happened last": the FINAL launched and outcome
+// lines of the log, whole — the line already carries its timestamp, pr,
+// repo and result, so re-parsing it into fields would only lose fidelity.
+// Same event-token discipline as the cap counter: free text never matches.
+export function lastLogActivity(logText: string): LastActivity {
+  let launched: string | null = null;
+  let outcome: string | null = null;
+  for (const line of logText.split("\n")) {
+    if (/^\S+\s+launched(?:\s|$)/.test(line)) launched = line;
+    else if (/^\S+\s+outcome(?:\s|$)/.test(line)) outcome = line;
+  }
+  return { launched, outcome };
+}
+
 // ---------------------------------------------------------------------------
 // The lockfile — belt and suspenders under cron or a hand-run tick (launchd
 // itself is already single-instance per label). Advisory: the file holds a
@@ -692,6 +820,20 @@ function xmlEscape(text: string): string {
     .replaceAll(">", "&gt;");
 }
 
+// StartInterval read back OUT of an installed plist, for `watch status`.
+// TOLERANT (null, never throw) against the module's loud grain: the plist
+// on disk may predate this parser or have been edited by hand, and status
+// is a read-only report — "installed (interval unreadable)" is the honest
+// answer, a crash is not.
+export function parsePlistInterval(plist: string): number | null {
+  const match = /<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/.exec(
+    plist,
+  );
+  if (match === null) return null;
+  const seconds = Number(match[1]);
+  return seconds > 0 ? seconds : null;
+}
+
 // ---------------------------------------------------------------------------
 // The macOS notification — argv for `osascript`, built here so the
 // AppleScript string escaping is testable. The args are spawned as an ARRAY
@@ -719,4 +861,100 @@ export function outcomeNotificationText(outcome: ReviewOutcome): string {
     `PR #${outcome.pr}: ${outcome.counts.blocking} blocking, ` +
     `${outcome.counts.advisory} advisory`
   );
+}
+
+// ---------------------------------------------------------------------------
+// `watch status` — a read-only report over whatever exists. The shell
+// gathers the facts (it never throws on an absent piece: no config, no log,
+// no plist and no lock are all ordinary states worth reporting), and this
+// renders them — same shape as the dry-run printer, pure so a test can pin
+// every branch.
+
+export interface WatchStatusFacts {
+  configPath: string;
+  // null = no config file. configError carries the parse failure when the
+  // file exists but is invalid — status REPORTS brokenness instead of
+  // crashing over it, because a status you cannot run on a broken setup is
+  // useless exactly when you need it.
+  config: WatchConfig | null;
+  configError: string | null;
+  launchedToday: number;
+  plistPath: string;
+  installed: boolean;
+  // null when not installed OR the plist's StartInterval is unreadable.
+  intervalSeconds: number | null;
+  lockPid: number | null;
+  lastLaunched: string | null;
+  lastOutcome: string | null;
+}
+
+export function renderWatchStatus(facts: WatchStatusFacts): string[] {
+  const row = (label: string, value: string): string =>
+    `  ${label.padEnd(13)}${value}`;
+  const lines = ["pr-hero watch — status", ""];
+  if (facts.configError !== null) {
+    lines.push(
+      row("config", `INVALID — ${facts.configPath}: ${facts.configError}`),
+    );
+  } else if (facts.config === null) {
+    lines.push(
+      row(
+        "config",
+        `none (${facts.configPath}) — run "pr-hero watch add" inside a ` +
+          "repo to opt it in",
+      ),
+    );
+  } else {
+    lines.push(row("config", facts.configPath));
+    if (facts.config.repos.length === 0) {
+      lines.push(row("", 'no repos watched — "pr-hero watch add" opts one in'));
+    }
+    for (const repo of facts.config.repos) {
+      lines.push(row("", `${repo.path} post=${repo.post}`));
+    }
+    lines.push(
+      row(
+        "today",
+        `${facts.launchedToday} of ${facts.config.dailyCap} launches used`,
+      ),
+    );
+    lines.push(
+      row(
+        "window",
+        facts.config.window === null
+          ? "always"
+          : `${facts.config.window.start}-${facts.config.window.end}`,
+      ),
+    );
+  }
+  // Without a valid config there is no cap to report against, but the log
+  // exists independently — the raw count still says whether money moved.
+  if (facts.config === null || facts.configError !== null) {
+    lines.push(row("today", `${facts.launchedToday} launched`));
+  }
+  lines.push(
+    row(
+      "launchd",
+      facts.installed
+        ? facts.intervalSeconds === null
+          ? `installed (${facts.plistPath}, interval unreadable)`
+          : `installed — one tick every ${formatIntervalSeconds(facts.intervalSeconds)}`
+        : 'not installed — run "pr-hero watch install" to start ticking',
+    ),
+  );
+  lines.push(
+    row(
+      "lock",
+      facts.lockPid === null
+        ? "free"
+        : `held by pid ${facts.lockPid} (a tick is running)`,
+    ),
+  );
+  lines.push(row("last launch", facts.lastLaunched ?? "none recorded"));
+  lines.push(row("last outcome", facts.lastOutcome ?? "none recorded"));
+  return lines;
+}
+
+function formatIntervalSeconds(seconds: number): string {
+  return seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds}s`;
 }

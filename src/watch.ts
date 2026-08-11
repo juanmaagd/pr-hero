@@ -28,6 +28,7 @@ import {
   decideTick,
   expandTilde,
   findingsTierCounts,
+  lastLogActivity,
   latestRunDirName,
   launchedLine,
   localIsoTimestamp,
@@ -39,16 +40,20 @@ import {
   type PrheroHomePaths,
   parseLockPid,
   parsePipelineMeta,
+  parsePlistInterval,
   parsePrList,
   parseWatchConfig,
   prheroHomePaths,
   type ReviewOutcome,
   type RunDirFact,
+  removeWatchRepo,
   renderWatchPlist,
+  renderWatchStatus,
   skipLine,
   type TickDecision,
   type TickRepoFacts,
   tickGate,
+  upsertWatchRepo,
   WATCH_LAUNCHD_LABEL,
   type WatchConfig,
 } from "./watch-preflight";
@@ -97,18 +102,27 @@ function cliEntryPath(): string {
   return path.join(import.meta.dir, "cli.ts");
 }
 
-const WATCH_CONFIG_EXAMPLE = `{
-  "repos": [{ "path": "~/Desktop/your-repo", "post": true }],
-  "daily_cap": 5,
-  "window": { "start": "09:00", "end": "19:00" }
-}`;
-
 export async function watchCommand(options: CliOptions): Promise<number> {
   if (options.watch === "install") {
     return watchInstall(options.interval ?? DEFAULT_WATCH_INTERVAL_MIN);
   }
   if (options.watch === "uninstall") return watchUninstall();
+  if (options.watch === "add") return watchAdd(options);
+  if (options.watch === "remove") return watchRemove(options);
+  if (options.watch === "status") return watchStatus();
   return watchOnce(options.dryRun);
+}
+
+// Same resolution shape review uses (cli.ts's resolveRepoRoot), carried as
+// this shell's own copy: --repo or cwd, through git's own idea of the
+// toplevel, loud when it is not a repository.
+async function resolveRepoRoot(repoOption: string): Promise<string> {
+  const repoArg = path.resolve(repoOption);
+  const toplevel = await git(repoArg, ["rev-parse", "--show-toplevel"]);
+  if (!toplevel.ok) {
+    throw new CliError(`not a git repository: ${repoArg}`);
+  }
+  return toplevel.stdout.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -126,8 +140,8 @@ async function watchOnce(dryRun: boolean): Promise<number> {
     throw new CliError(
       `no watch config at ${paths.configPath} — the watcher reviews (and ` +
         "spends money on) exactly the repos listed there, so it refuses to " +
-        "guess. Create it, for example:\n" +
-        WATCH_CONFIG_EXAMPLE,
+        "guess. Opt a repo in with `pr-hero watch add` (run inside the " +
+        "repo, or with --repo <path>).",
     );
   }
   const config = parseWatchConfig(await Bun.file(paths.configPath).text());
@@ -554,10 +568,9 @@ async function watchInstall(intervalMin: number): Promise<number> {
   if (!existsSync(paths.configPath)) {
     log();
     log(
-      `NOTE: no ${paths.configPath} yet — ticks will fail until it exists. ` +
-        "Example:",
+      `NOTE: no ${paths.configPath} yet — ticks will fail until a repo is ` +
+        "opted in. Run `pr-hero watch add` inside the repo to watch.",
     );
-    log(WATCH_CONFIG_EXAMPLE);
   }
   return 0;
 }
@@ -582,5 +595,103 @@ async function watchUninstall(): Promise<number> {
   );
   await rm(paths.plistPath, { force: true });
   log(`removed ${paths.plistPath}`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Config management (add/remove) and the read-only status view. The config
+// file is machine-owned through these verbs so nobody hand-edits JSON; every
+// decision (upsert, removal, rendering) is pure in watch-preflight.ts.
+
+async function watchAdd(options: CliOptions): Promise<number> {
+  const repoRoot = await resolveRepoRoot(options.repo);
+  const home = os.homedir();
+  const paths = prheroHomePaths(home);
+  const raw = existsSync(paths.configPath)
+    ? await Bun.file(paths.configPath).text()
+    : null;
+  const result = upsertWatchRepo(raw, repoRoot, options.post, home);
+  await mkdir(paths.dir, { recursive: true });
+  await Bun.write(paths.configPath, result.config);
+  log(
+    `${result.action} ${result.storedPath} (post=${options.post}) in ` +
+      paths.configPath,
+  );
+  // The same hint install prints in reverse: config without a schedule is
+  // as inert as a schedule without config — but only when the plist is
+  // genuinely absent, an installed watcher needs no reminder.
+  if (!existsSync(paths.plistPath)) {
+    log();
+    log(
+      "NOTE: launchd agent not installed — run `pr-hero watch install` to " +
+        "start ticking (this is the moment automatic spending starts).",
+    );
+  }
+  return 0;
+}
+
+async function watchRemove(options: CliOptions): Promise<number> {
+  const repoRoot = await resolveRepoRoot(options.repo);
+  const home = os.homedir();
+  const paths = prheroHomePaths(home);
+  // Idempotent by contract: removing what is not there succeeds saying so —
+  // a missing config file is just the emptiest way of not being listed.
+  if (!existsSync(paths.configPath)) {
+    log(`not listed: no ${paths.configPath} exists`);
+    return 0;
+  }
+  const result = removeWatchRepo(
+    await Bun.file(paths.configPath).text(),
+    repoRoot,
+    home,
+  );
+  if (result.action === "not-listed" || result.config === null) {
+    log(`not listed: ${repoRoot} is not in ${paths.configPath}`);
+    return 0;
+  }
+  await Bun.write(paths.configPath, result.config);
+  log(`removed ${repoRoot} from ${paths.configPath}`);
+  return 0;
+}
+
+// $0 and read-only, and it never throws over an absent piece: no config, no
+// log, no plist and no lock are all ordinary states the report simply
+// names. Even an INVALID config renders as a status line — a status that
+// crashes on a broken setup is useless exactly when it is needed.
+async function watchStatus(): Promise<number> {
+  const home = os.homedir();
+  const paths = prheroHomePaths(home);
+  let config: WatchConfig | null = null;
+  let configError: string | null = null;
+  if (existsSync(paths.configPath)) {
+    try {
+      config = parseWatchConfig(await Bun.file(paths.configPath).text());
+    } catch (error) {
+      configError = (error as Error).message;
+    }
+  }
+  const logText = existsSync(paths.logPath)
+    ? await Bun.file(paths.logPath).text()
+    : "";
+  const installed = existsSync(paths.plistPath);
+  const activity = lastLogActivity(logText);
+  const lines = renderWatchStatus({
+    configPath: paths.configPath,
+    config,
+    configError,
+    launchedToday: countLaunchedToday(
+      logText,
+      localIsoTimestamp(new Date()).slice(0, 10),
+    ),
+    plistPath: paths.plistPath,
+    installed,
+    intervalSeconds: installed
+      ? parsePlistInterval(await Bun.file(paths.plistPath).text())
+      : null,
+    lockPid: await lockHolder(paths.lockPath),
+    lastLaunched: activity.launched,
+    lastOutcome: activity.outcome,
+  });
+  for (const line of lines) log(line);
   return 0;
 }

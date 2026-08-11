@@ -83,11 +83,12 @@ export interface CliOptions {
   // three-dot (merge-base) range is right almost always, and this flag exists
   // for the rare caller who genuinely wants the literal two-point diff.
   twoDot: boolean;
-  // watch only (ROADMAP B3): which of the three watch actions was asked for.
-  // "once" is one tick (the launchd unit of work), install/uninstall manage
-  // the launchd agent. Required for `watch` — a bare `pr-hero watch` has no
+  // watch only (ROADMAP B3): which watch action was asked for. "once" is one
+  // tick (the launchd unit of work), install/uninstall manage the launchd
+  // agent, add/remove/status manage and inspect the watch config so nobody
+  // hand-edits JSON. Required for `watch` — a bare `pr-hero watch` has no
   // daemon mode to fall into, so it fails loud instead of hanging.
-  watch?: "once" | "install" | "uninstall";
+  watch?: "once" | "install" | "uninstall" | "add" | "remove" | "status";
   // watch install only: launchd StartInterval, in minutes.
   interval?: number;
 }
@@ -108,6 +109,13 @@ Usage:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
                              is the scheduler; this never daemonizes
+  pr-hero watch add          Opt the current repo (or --repo) into the watch
+                             config; --post makes its reviews publish to the
+                             PR. Idempotent — re-adding updates the post flag
+  pr-hero watch remove       Remove the current repo (or --repo) from the
+                             watch config (idempotent)
+  pr-hero watch status       Read-only: config summary, today's launch count
+                             vs the cap, launchd state, lock, last activity
   pr-hero watch install      Install the macOS launchd agent that runs
                              "watch --once" every --interval minutes
   pr-hero watch uninstall    Unload and remove that launchd agent
@@ -123,7 +131,8 @@ Options:
   --post              With --pr only: publish the review to the PR as one
                       marked comment — created the first time, updated in
                       place on re-runs, never stacked. Explicit, never a
-                      default
+                      default. With watch add: record post: true, so the
+                      watcher-launched reviews of that repo publish
   --base <ref>        Base branch or sha. Default, in order: the config's
                       default_base, then the remote head
                       (refs/remotes/origin/HEAD), then ${DEFAULT_BASE_REF}
@@ -260,13 +269,18 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (arg.startsWith("-")) {
       throw new CliUsageError(`unknown option: ${arg}`);
     }
-    // install/uninstall are watch's sub-words, not commands of their own:
-    // they only parse AFTER `watch`, so `pr-hero install` still fails with
-    // the unknown-command list instead of silently touching launchd.
+    // install/uninstall/add/remove/status are watch's sub-words, not
+    // commands of their own: they only parse AFTER `watch`, so `pr-hero
+    // install` still fails with the unknown-command list instead of
+    // silently touching launchd.
     if (
       command === "watch" &&
       options.watch === undefined &&
-      (arg === "install" || arg === "uninstall")
+      (arg === "install" ||
+        arg === "uninstall" ||
+        arg === "add" ||
+        arg === "remove" ||
+        arg === "status")
     ) {
       options.watch = arg;
       continue;
@@ -317,8 +331,9 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
   }
   // Also after the loop, for the same flag-order reason: posting publishes a
-  // PR comment, and only --pr names a PR to publish to.
-  if (options.post && options.pr === undefined) {
+  // PR comment, and only --pr names a PR to publish to. `watch` is excused —
+  // there --post is `watch add`'s flag, validated in the watch block below.
+  if (options.post && options.pr === undefined && command !== "watch") {
     throw new CliUsageError(
       "--post publishes the review as a PR comment, so it requires --pr",
     );
@@ -333,7 +348,8 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (once) options.watch = "once";
     if (options.watch === undefined) {
       throw new CliUsageError(
-        'watch needs an action: --once (one tick), "install" or "uninstall"',
+        'watch needs an action: --once (one tick), "add", "remove", ' +
+          '"status", "install" or "uninstall"',
       );
     }
     if (options.dryRun && options.watch !== "once") {
@@ -343,6 +359,13 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (options.interval !== undefined && options.watch !== "install") {
       throw new CliUsageError("--interval only applies to watch install");
+    }
+    // On watch, --post configures the repo being added — anywhere else in
+    // the watch surface it would be a silently dropped intention.
+    if (options.post && options.watch !== "add") {
+      throw new CliUsageError(
+        `--post with watch only applies to "watch add", not "${options.watch}"`,
+      );
     }
   } else {
     if (once) {

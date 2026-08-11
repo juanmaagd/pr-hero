@@ -68,7 +68,10 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
 | `pr-hero ledger` | Accumulate every run's `comparison.json` into one markdown ledger — the head-to-head buckets as a rate. One PR, one vote (only its latest run counts). |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. |
-| `pr-hero watch --once` | Run ONE watcher tick: scan the repos in `~/.prhero/watch.json`, pick the next unreviewed open PR, review it. `--dry-run` shows the whole decision for $0. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
+| `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
+| `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |
+| `pr-hero watch status` | Read-only, $0: config summary, today's launches vs the cap, launchd state, lock, last activity. |
+| `pr-hero watch --once` | Run ONE watcher tick: scan the watched repos, pick the next unreviewed open PR, review it. `--dry-run` shows the whole decision for $0. |
 | `pr-hero watch install` | Install the macOS launchd agent that runs a tick every `--interval` minutes (default 15). **This is the opt-in to automatic spend.** |
 | `pr-hero watch uninstall` | Unload and remove that agent. |
 
@@ -111,7 +114,7 @@ Reviews launch two ways: **by hand**, or through the opt-in local watcher (`pr-h
 | Stage | Status |
 | --- | --- |
 | Manual CLI (`review`, `--pr`, `--post`, `ledger`) | **Available now** — this README. |
-| Auto-trigger on new PRs / new pushes (local watcher) | **Available now** — `pr-hero watch`, below. Deliberately opt-in: every review spends real money, so nothing fires until you write the config AND install the agent. |
+| Auto-trigger on new PRs / new pushes (local watcher) | **Available now** — `pr-hero watch`, below. Deliberately opt-in: every review spends real money, so nothing fires until you `watch add` a repo AND `watch install` the agent. |
 | CI mode (GitHub Actions) | Roadmap (Phase E). Needs Claude auth in the runner and a per-PR budget decision. |
 | Required status check that blocks merges | **Deliberately deferred.** At the engine's measured recall it has no business gating a merge — the disclaimer in every report is the contract. |
 
@@ -125,37 +128,42 @@ in place to track the new head).
 
 ### Opt in
 
-1. Create `~/.prhero/watch.json` — a repo is watched **only** if listed here:
+```bash
+cd /path/to/your-repo
+pr-hero init             # once per repo, if .prhero/ does not exist yet
+pr-hero watch add --post # opt THIS repo in; --post publishes each review to its PR
+pr-hero watch install    # start ticking — this is the moment automatic spending starts
+pr-hero watch status     # anytime: config, cap usage, launchd, lock, last activity
+```
 
-   ```json
-   {
-     "repos": [{ "path": "~/Desktop/your-repo", "post": true }],
-     "daily_cap": 5,
-     "window": { "start": "09:00", "end": "19:00" }
-   }
-   ```
+A repo is watched **only** if added (`--repo <path>` works from anywhere; `watch remove` takes it
+back out; both are idempotent). Preview any tick for $0 first: `pr-hero watch --once --dry-run`
+prints every candidate, every skip and its reason (draft / reviewed-local / reviewed-remote /
+attempts / cap / window), and the one (pr, head) a real tick would launch. `install` accepts
+`--interval <min>` (default 15) and captures your current `PATH` (launchd's own PATH knows nothing
+of `bun`, `gh`, `claude` or `codegraph`) — re-run `install` after moving tools around;
+`watch uninstall` stops the schedule.
 
-   | Key | Default | What it does |
-   | --- | --- | --- |
-   | `repos[].path` | — | Operator checkout of a repo to watch (its `.prhero/` config and gotchas are used, exactly like `review --pr`). |
-   | `repos[].post` | `false` | Pass `--post` to the spawned review — publish each result as the PR's one marked comment. |
-   | `daily_cap` | `5` | Global max reviews launched per local calendar day, across all repos. `0` pauses launching entirely. |
-   | `window` | `null` (always) | Local-time window outside which ticks do nothing, e.g. `{"start":"09:00","end":"19:00"}`. Overnight windows (`start` > `end`) work. |
+### The underlying file — `~/.prhero/watch.json`
 
-2. Preview for $0: `pr-hero watch --once --dry-run` prints every candidate, every skip and its
-   reason (draft / reviewed-local / reviewed-remote / attempts / cap / window), and the one
-   (pr, head) a real tick would launch.
+`watch add`/`watch remove` own the repo list — there is no need to edit the file by hand for
+membership, and their rewrites preserve any keys they do not know. The two global knobs are still
+plain JSON you may tune directly:
 
-3. Install the schedule — **this is the moment automatic spending starts**:
+```json
+{
+  "repos": [{ "path": "~/Desktop/your-repo", "post": true }],
+  "daily_cap": 5,
+  "window": { "start": "09:00", "end": "19:00" }
+}
+```
 
-   ```bash
-   pr-hero watch install              # launchd agent, one tick every 15 min
-   pr-hero watch install --interval 5 # or your own cadence
-   pr-hero watch uninstall            # stop it
-   ```
-
-   The agent captures your current `PATH` at install time (launchd's own PATH knows nothing of
-   `bun`, `gh`, `claude` or `codegraph`) — re-run `install` after moving tools around.
+| Key | Default | What it does |
+| --- | --- | --- |
+| `repos[].path` | — | Operator checkout of a repo to watch (its `.prhero/` config and gotchas are used, exactly like `review --pr`). Managed by `watch add`/`remove`. |
+| `repos[].post` | `false` | Pass `--post` to the spawned review — publish each result as the PR's one marked comment. Managed by `watch add [--post]`. |
+| `daily_cap` | `5` | Global max reviews launched per local calendar day, across all repos. `0` pauses launching entirely. |
+| `window` | `null` (always) | Local-time window outside which ticks do nothing, e.g. `{"start":"09:00","end":"19:00"}`. Overnight windows (`start` > `end`) work. |
 
 ### What keeps the bill bounded
 
