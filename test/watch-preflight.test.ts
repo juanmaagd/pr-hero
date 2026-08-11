@@ -623,6 +623,7 @@ function repo(overrides: Partial<TickRepoFacts> = {}): TickRepoFacts {
     remoteHeads: [],
     attempts: [],
     tooLarge: [],
+    nothingToReview: [],
     ...overrides,
   };
 }
@@ -748,6 +749,50 @@ describe("decideTick", () => {
     ]);
     expect(decision.eligible).toEqual([]);
     expect(decision.launch).toBeNull();
+  });
+
+  // The other end of the same instrument: a lockfile-only PR passes the gate
+  // on zero effective files, and spawning it would have the child exit before
+  // it creates a run dir — no run dir, no attempt, so the watcher would
+  // re-spawn the same PR forever. It is skipped here instead, under its own
+  // honest reason (it is not too large; there is simply nothing to review).
+  test("a nothing-to-review candidate is skipped, never launched", () => {
+    const decision = decideTick(
+      tick({
+        repos: [repo({ prs: [cand(4, HEAD_A)], nothingToReview: [4] })],
+      }),
+    );
+    expect(decision.skips).toEqual([
+      { repo: "/x/musive", pr: 4, head: HEAD_A, reason: "nothing-to-review" },
+    ]);
+    expect(decision.launch).toBeNull();
+  });
+
+  test("nothing-to-review never consumes an attempt either", () => {
+    const facts = { prs: [cand(4, HEAD_A)], nothingToReview: [4] };
+    for (let i = 0; i < MAX_WATCH_ATTEMPTS + 3; i++) {
+      expect(decideTick(tick({ repos: [repo(facts)] })).skips[0]?.reason).toBe(
+        "nothing-to-review",
+      );
+    }
+  });
+
+  // Too-large wins the ordering: it is the more specific fact, and the two
+  // are mutually exclusive in practice anyway.
+  test("a too-large PR keeps its reason over nothing-to-review", () => {
+    expect(
+      decideTick(
+        tick({
+          repos: [
+            repo({
+              prs: [cand(4, HEAD_A)],
+              tooLarge: [4],
+              nothingToReview: [4],
+            }),
+          ],
+        }),
+      ).skips[0]?.reason,
+    ).toBe("too-large");
   });
 
   test("only the listed PR is skipped; the rest of the queue still runs", () => {

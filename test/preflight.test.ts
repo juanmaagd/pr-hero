@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   agentsDirProblems,
+  allExcludedMessage,
   assertBasenameOnly,
   assertOutsideRepo,
   CliUsageError,
@@ -11,6 +12,7 @@ import {
   headContainedInBaseMessage,
   initConfigTemplate,
   isFullCommitId,
+  listPaths,
   localReviewSpec,
   parseArgs,
   parseLocalConfig,
@@ -655,5 +657,35 @@ describe("initConfigTemplate", () => {
       ref: "trunk",
       source: "config",
     });
+  });
+});
+
+describe("allExcludedMessage", () => {
+  // The all-excluded case is a "nothing to review" exit, not a review of an
+  // empty patch — the message has to make it obvious no money moved.
+  test("names the excluded paths and that nothing was spent", () => {
+    const message = allExcludedMessage(["bun.lock", "go.sum"]);
+    expect(message).toContain("bun.lock, go.sum");
+    expect(message).toContain("nothing to review");
+    expect(message).toContain("nothing was spent");
+  });
+
+  test("a long list is truncated rather than dumped", () => {
+    const message = allExcludedMessage(
+      Array.from({ length: 9 }, (_, i) => `pkg/${i}/bun.lock`),
+    );
+    expect(message).toContain("+4 more");
+    expect(message).not.toContain("pkg/8/bun.lock");
+  });
+});
+
+describe("listPaths", () => {
+  test("short lists are printed whole", () => {
+    expect(listPaths(["a", "b"])).toBe("a, b");
+  });
+
+  test("the limit is exact", () => {
+    expect(listPaths(["a", "b", "c"], 3)).toBe("a, b, c");
+    expect(listPaths(["a", "b", "c", "d"], 3)).toBe("a, b, c, +1 more");
   });
 });

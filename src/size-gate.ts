@@ -14,7 +14,7 @@
 // miss came from a 7-file PR. Nothing here — comment, message or flag help —
 // may imply otherwise.
 
-import type { NumstatFile } from "./preflight";
+import type { NumstatDiffStat, NumstatFile } from "./preflight";
 
 export interface SizeGateConfig {
   // <= 0 disables the limit. Both knobs, independently.
@@ -23,19 +23,29 @@ export interface SizeGateConfig {
   excludeGlobs: string[];
 }
 
-// The shipped defaults. 2500 lines sits above the everyday PR and below the
-// bench tree that produced the cost blow-up above; 150 files is the "this is
-// a mechanical sweep, not a review" ceiling.
+// The shipped defaults. 1500 lines sits above the everyday PR and well below
+// the bench tree that produced the cost blow-up above; 150 files is the "this
+// is a mechanical sweep, not a review" ceiling.
 //
-// 2500 is a CORRECTION, and the reason it moved is worth keeping. The first
-// shipped default was 1500, extrapolated from "everything measured cheap was
-// under 830 lines". But the measurements are 830 lines at $4.78 and ~4000
-// lines at $6.58-17.92, with NOTHING in between — 1500 was a guess into that
-// hole. This repo's own PR #1 (1603 lines) then printed both `size gate:
-// SKIP` and a $3.18-6.86 cost band in the same breath: the gate refused, on
-// cost grounds, a diff whose cost was ordinary. A limit that fires where its
-// own stated reason does not hold is miscalibrated, not strict. 2500 keeps
-// real headroom under the ~4000-line tree that actually blows up.
+// 1500 has a history, and the whole arc matters because the middle of it was
+// a wrong diagnosis. 1500 shipped first, extrapolated from "everything
+// measured cheap was under 830 lines". Then this repo's own PR #1 (1603
+// lines) printed `size gate: SKIP` and a $3.18-6.86 cost band in the same
+// breath — the gate refusing, on cost grounds, a diff whose cost was
+// ordinary. The conclusion drawn at the time was "the limit is too tight",
+// and it was raised to 2500.
+//
+// That was treating the symptom. The real cause was that the gate was
+// counting lines it was not actually filtering out of the bill:
+//   - F001 — the exclusion list shrank the GATE's count but not the diff
+//     handed to the hunters, so an excluded lockfile was still paid for in
+//     full. The count and the bill were two different numbers.
+//   - whitespace — a formatter sweep consumed budget it costs nothing to
+//     review, because the count was taken from a plain `--numstat`.
+// With both fixed (the reviewed diff IS the filtered diff, and the gate
+// counts from `git diff -w --ignore-blank-lines`), the number the gate
+// measures is the number that gets paid for, and 1500 is a real 1500. So it
+// stands, and 2500 is retired.
 //
 // The band 830..4000 is still unmeasured. If a diff in it ever bills like the
 // bench tree, this number is the thing to revisit — with a measurement, not
@@ -46,7 +56,7 @@ export interface SizeGateConfig {
 // usefully read. Excluding them keeps the gate from firing on a PR whose real
 // change is ten lines beside a regenerated lockfile.
 export const DEFAULT_SIZE_GATE: SizeGateConfig = {
-  maxChangedLines: 2500,
+  maxChangedLines: 1500,
   maxChangedFiles: 150,
   excludeGlobs: [
     "**/bun.lock",
@@ -141,6 +151,214 @@ export function evaluateSizeGate(
   return { ok: true, ...counts };
 }
 
+// THE POINT OF THE EXCLUSION LIST, restated as an invariant: the number the
+// gate measures and the number that gets paid for must be the SAME number.
+// Before this existed, exclusions shrank the gate's count while the hunters
+// were still handed the full unfiltered diff — so a PR with a regenerated
+// 5000-line lockfile passed the gate on a small effective count and then paid
+// to feed that lockfile to every hunter, defeating the gate in exactly the
+// case it was built for.
+//
+// So the excluded files fall out of the REVIEWED DIFF itself: `diff.patch` is
+// this function's output, which makes it literally what the hunters saw, and
+// the cost basis is `effectiveDiffStat` over the same glob list.
+//
+// Filtering a unified diff by path has to be done on RECORDS, never on lines:
+// a `diff --git ` header at column 0 starts a record and everything up to the
+// next one belongs to it (content lines always carry a ` `/`+`/`-`/`\` prefix,
+// so they can never be mistaken for a header). Whole records are dropped or
+// kept — never individual hunks.
+export interface DiffFilterResult {
+  // The effective diff: every record whose destination path matched an
+  // exclusion glob removed. Byte-identical to the input when nothing matched.
+  patch: string;
+  // Destination paths of the dropped records, in diff order. Empty means the
+  // filter was a no-op — callers use this to decide whether a raw copy of the
+  // diff is worth keeping and what to report as provenance.
+  droppedPaths: string[];
+}
+
+export function filterDiffByGlobs(
+  patch: string,
+  excludeGlobs: string[],
+): DiffFilterResult {
+  const records = splitDiffRecords(patch);
+  if (records.length === 0) return { patch, droppedPaths: [] };
+  const globs = excludeGlobs.map((pattern) => new Bun.Glob(pattern));
+  const kept: string[] = [];
+  const droppedPaths: string[] = [];
+  for (const record of records) {
+    const target = diffRecordPath(record);
+    // A record whose path cannot be resolved is KEPT. Failing open here is
+    // the conservative direction: the worst case is paying to review a file
+    // that could have been excluded, where failing closed would silently
+    // delete real changed code out of the reviewed diff.
+    if (target !== undefined && globs.some((glob) => glob.match(target))) {
+      droppedPaths.push(target);
+      continue;
+    }
+    kept.push(record);
+  }
+  return { patch: kept.join(""), droppedPaths };
+}
+
+// Split on column-0 `diff --git ` headers, keeping each record's own bytes
+// (including its trailing newline) so a no-op filter reassembles the input
+// exactly. Anything before the first header — git emits nothing there, but a
+// hand-assembled patch might — is carried as a leading record with no path,
+// which the fail-open rule above keeps.
+function splitDiffRecords(patch: string): string[] {
+  const records: string[] = [];
+  let start = -1;
+  let offset = 0;
+  for (const line of patch.split("\n")) {
+    const lineLength = line.length + 1;
+    if (line.startsWith("diff --git ")) {
+      if (start !== -1) records.push(patch.slice(start, offset));
+      start = offset;
+    } else if (start === -1 && line.length > 0) {
+      start = offset;
+    }
+    offset += lineLength;
+  }
+  if (start !== -1) records.push(patch.slice(start));
+  return records;
+}
+
+// The DESTINATION path of a record, resolved the same way and for the same
+// reason as resolveNumstatPath (preflight.ts): a rename must be matched on
+// where the file ENDED UP, or a renamed lockfile silently stops being
+// excluded. Preference order runs from the most explicit source to the least:
+//
+//   `rename to` / `copy to`  — the only unambiguous destination for a rename,
+//                              and present even when the record is binary and
+//                              carries no ---/+++ pair at all;
+//   `+++ b/<path>`           — the ordinary textual case;
+//   `--- a/<path>`           — a deletion (+++ is /dev/null), where the source
+//                              path is the only path there is;
+//   the header itself        — binary adds/deletes, which have neither.
+//
+// KNOWN, ACCEPTED divergence: git quotes paths with control or non-ASCII
+// characters (`"caf\303\251/bun.lock"`), and this unquotes them while
+// resolveNumstatPath does not. The two can therefore disagree for such a
+// path — always in the direction of the filter dropping a file the gate still
+// counted, i.e. the gate stays conservative (its count >= what the hunters
+// were handed). Never the reverse.
+export function diffRecordPath(record: string): string | undefined {
+  const lines = record.split("\n");
+  let minusPath: string | undefined;
+  for (const line of lines) {
+    if (line.startsWith("rename to ")) return unquotePath(line.slice(10));
+    if (line.startsWith("copy to ")) return unquotePath(line.slice(8));
+    if (line.startsWith("+++ ")) {
+      const target = stripDiffPrefix(line.slice(4));
+      if (target !== undefined) return target;
+    }
+    if (line.startsWith("--- ") && minusPath === undefined) {
+      minusPath = stripDiffPrefix(line.slice(4));
+    }
+    // The header and the ---/+++ pair live in the record's preamble; hunks
+    // below can contain any text at all, so stop before reading them as
+    // metadata.
+    if (line.startsWith("@@")) break;
+  }
+  if (minusPath !== undefined) return minusPath;
+  return headerPath(lines[0] ?? "");
+}
+
+// `a/<path>` / `b/<path>`, with /dev/null meaning "this side does not exist".
+function stripDiffPrefix(field: string): string | undefined {
+  // The path may be followed by a tab and a timestamp (git does not emit one,
+  // other producers do).
+  const raw = unquotePath(field.split("\t")[0] ?? "");
+  if (raw === "/dev/null") return undefined;
+  return raw.startsWith("a/") || raw.startsWith("b/") ? raw.slice(2) : raw;
+}
+
+// `diff --git a/<src> b/<dst>`. The separator is ambiguous when a path itself
+// contains " b/", so prefer the split where source and destination agree (the
+// non-rename case, which is nearly all of them) and fall back to the first
+// candidate. Only reached for records that carry no other path evidence.
+function headerPath(header: string): string | undefined {
+  if (!header.startsWith("diff --git ")) return undefined;
+  const rest = header.slice(11);
+  let first: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    if (!rest.startsWith(" b/", i)) continue;
+    const source = unquotePath(rest.slice(0, i));
+    const destination = unquotePath(rest.slice(i + 1));
+    const src = source.startsWith("a/") ? source.slice(2) : source;
+    const dst = destination.startsWith("b/")
+      ? destination.slice(2)
+      : destination;
+    if (src === dst) return dst;
+    if (first === undefined) first = dst;
+  }
+  return first;
+}
+
+// git's C-style quoting, undone. Only the escapes git actually emits.
+function unquotePath(field: string): string {
+  const raw = field.trim();
+  if (!(raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2)) {
+    return raw;
+  }
+  const body = raw.slice(1, -1);
+  let out = "";
+  const bytes: number[] = [];
+  const flush = (): void => {
+    if (bytes.length === 0) return;
+    out += new TextDecoder().decode(new Uint8Array(bytes));
+    bytes.length = 0;
+  };
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== "\\") {
+      flush();
+      out += body[i];
+      continue;
+    }
+    const next = body[i + 1] ?? "";
+    const octal = /^[0-7]{3}$/.exec(body.slice(i + 1, i + 4));
+    if (octal !== null) {
+      bytes.push(Number.parseInt(octal[0], 8));
+      i += 3;
+      continue;
+    }
+    flush();
+    const simple: Record<string, string> = {
+      n: "\n",
+      t: "\t",
+      r: "\r",
+      '"': '"',
+      "\\": "\\",
+    };
+    out += simple[next] ?? next;
+    i += 1;
+  }
+  flush();
+  return out;
+}
+
+// The cost basis: the same aggregate the plan and the cost band read, but
+// summed over the files that SURVIVE the exclusions. Feeding estimateCost the
+// raw stat would price a lockfile the hunters never see.
+export function effectiveDiffStat(
+  files: NumstatFile[],
+  excludeGlobs: string[],
+): NumstatDiffStat {
+  const globs = excludeGlobs.map((pattern) => new Bun.Glob(pattern));
+  let count = 0;
+  let insertions = 0;
+  let deletions = 0;
+  for (const file of files) {
+    if (globs.some((glob) => glob.match(file.path))) continue;
+    count++;
+    insertions += file.insertions;
+    deletions += file.deletions;
+  }
+  return { files: count, insertions, deletions };
+}
+
 // The message names the COST reason and the escape hatch, in that order: an
 // operator who hits this must be able to tell in one line that nothing is
 // wrong with their PR and exactly which two levers move the gate.
@@ -180,6 +398,17 @@ function plural(n: number): string {
 // wrong in the CONSERVATIVE direction — it may say "too large" for a diff
 // whose lockfiles would have rescued it — so every caller must either label
 // it an estimate or escalate to real per-file data before acting.
+//
+// WHY THE GATE IS TWO DIFFERENT INSTRUMENTS, and it is not an oversight:
+// where git is reachable (local mode, PR mode after the fetch) the count
+// comes from `git diff -w --ignore-blank-lines --numstat`, so a formatter
+// sweep counts zero. GitHub's counters — `additions`/`deletions`/
+// `changedFiles` here, and `gh pr view --json files` in the watcher's second
+// tier — carry NO whitespace information at all, and no amount of arithmetic
+// can recover it. Those paths are whitespace-NAIVE and must say so wherever
+// they print, because a reformat can push them over a limit that the real
+// git-side gate would never have fired. Both errors point the same way
+// (overcount, never undercount), which is what makes the asymmetry safe.
 export function evaluateSizeGateAggregate(
   stat: { files: number; insertions: number; deletions: number },
   config: SizeGateConfig,

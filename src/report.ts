@@ -102,7 +102,14 @@ export interface ReportMeta {
   repo: string;
   base: string;
   head: string;
+  // The stat of the EFFECTIVE diff — the one the hunters were handed, with
+  // generated content already excluded. Never the raw range's stat: a report
+  // that claims 5000 changed lines beside a review of 40 of them is lying
+  // about what was read.
   diffStat: DiffStat;
+  // Paths the exclusion filter dropped from the reviewed diff, if any. Stated
+  // in the report because it is a mutation of the input, not a detail.
+  excludedPaths?: string[];
   costUsd: number;
   wallMs: number;
 }
@@ -321,6 +328,16 @@ function runLines(doc: FindingsDocument, meta: ReportMeta): string[] {
     `${files} file${files === 1 ? "" : "s"}, +${insertions} −${deletions}` +
       ` · run ${doc.run_status} · ${usd(meta.costUsd)} · ${duration(meta.wallMs)}`,
   ];
+  const excluded = meta.excludedPaths ?? [];
+  if (excluded.length > 0) {
+    lines.push("");
+    lines.push(
+      `${excluded.length} generated file${excluded.length === 1 ? " was" : "s were"} ` +
+        `excluded from the reviewed diff: ${excluded.join(", ")}. The counts ` +
+        "above, and the diff the hunters read, are after that exclusion " +
+        "(`diff.raw.patch` holds the unfiltered diff).",
+    );
+  }
   const rows = agentRows(doc);
   if (rows.length > 0) {
     lines.push("");
