@@ -257,6 +257,7 @@ async function gatherRepoFacts(
     const remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[] =
       [];
     const tooLarge: number[] = [];
+    const nothingToReview: number[] = [];
     for (const candidate of prs) {
       if (candidate.isDraft) continue;
       const locallyBlocked = runDirs.localReviews.some(
@@ -270,6 +271,14 @@ async function gatherRepoFacts(
       // exclusions can only ever make it smaller. Only a PR whose aggregate
       // exceeds a limit is worth a second call, and then the per-file list
       // is fetched so an excluded lockfile can still rescue it.
+      //
+      // BOTH tiers are whitespace-NAIVE, and nothing here can fix that:
+      // GitHub's aggregate counters and `gh pr view --json files` alike carry
+      // no whitespace information, so a formatter sweep counts in full where
+      // the real git-side gate (cli.ts, `git diff -w --ignore-blank-lines`)
+      // counts zero. The error is one-directional — the watcher can only
+      // OVER-count and therefore only over-skip, never under-skip — and the
+      // spawned review re-runs the real gate on real git data anyway.
       //
       // Recomputed from live counters on EVERY tick and never persisted: a
       // force-push that shrinks the PR must make it eligible again next
@@ -290,11 +299,21 @@ async function gatherRepoFacts(
         // the monster the gate exists to stop — so a count that disagrees
         // with GitHub's own changedFiles is not trusted to rescue anything.
         const trustworthy = perFile.length >= candidate.changedFiles;
-        if (!trustworthy || !evaluateSizeGate(perFile, gateConfig).ok) {
+        const verdict = evaluateSizeGate(perFile, gateConfig);
+        if (!trustworthy || !verdict.ok) {
           tooLarge.push(candidate.pr);
           // No comments fetch for a PR that is already skipped — the pure
           // decision reads an unfetched PR as unguarded, and too-large
           // fires before the remote checks.
+          continue;
+        }
+        // Rescued by the exclusions, but rescued into NOTHING: every changed
+        // file was generated content. Spawning would have the child exit on
+        // an empty effective diff before it creates a run dir, and with no
+        // run dir there is no attempt to count — so the same PR would be
+        // re-spawned every tick. Settle it here instead.
+        if (verdict.effectiveFiles === 0) {
+          nothingToReview.push(candidate.pr);
           continue;
         }
       }
@@ -319,6 +338,7 @@ async function gatherRepoFacts(
         count: countAttempts(runDirs.facts, candidate.pr, candidate.head),
       })),
       tooLarge,
+      nothingToReview,
       runsRoot,
       maxChangedLines: entry.maxChangedLines,
       maxChangedFiles: entry.maxChangedFiles,
@@ -412,6 +432,16 @@ async function runTick(
   // happens before createPrRunDir, so it leaves no run dir, so the attempts
   // guard never sees it: the same PR would be relaunched every tick and eat
   // the whole daily cap, every day, reviewing nothing.
+  //
+  // KNOWN GAP of the same shape, recorded rather than fixed: a PR whose files
+  // are ALL excluded generated content (a lockfile-only bump) but whose
+  // AGGREGATE is under both limits never reaches the tier-2 per-file fetch,
+  // so `nothingToReview` cannot see it. It launches, the CLI exits on the
+  // empty effective diff before createPrRunDir, and it relaunches next tick —
+  // $0 each time, but `launched` is logged at spawn, so it consumes the daily
+  // cap and the tick's single launch slot. The cheap fix is a pre-launch veto
+  // (one ghPrFiles call for the chosen PR only, then re-decide); it is not
+  // built because it costs a gh call per tick and the call is Juanma's.
   //
   // Deliberately NOT --force: the CLI gate stays live as the backstop (it
   // sees the true diff, not GitHub's counters). It just has to agree with

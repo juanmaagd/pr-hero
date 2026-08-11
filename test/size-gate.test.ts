@@ -5,8 +5,11 @@ import { describe, expect, test } from "bun:test";
 import type { NumstatFile } from "../src/preflight";
 import {
   DEFAULT_SIZE_GATE,
+  diffRecordPath,
+  effectiveDiffStat,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
+  filterDiffByGlobs,
   sizeGateConfig,
   sizeGateLine,
 } from "../src/size-gate";
@@ -238,12 +241,14 @@ describe("sizeGateConfig", () => {
   });
 
   // Pins the shipped numbers to the README's profile table. Moving a default
-  // must be a deliberate edit here, not a drift — 1500 became 2500 once this
-  // repo's own PR #1 (1603 lines) was refused while its cost band read
-  // $3.18-6.86, which is the gate firing where its stated reason does not
-  // hold. See the WHY on DEFAULT_SIZE_GATE.
+  // must be a deliberate edit here, not a drift. The number moved 1500 → 2500
+  // → 1500: this repo's own PR #1 (1603 lines) was refused while its cost
+  // band read $3.18-6.86, which was read as "too tight" and answered with
+  // 2500. The real cause was that the gate counted lines it did not filter
+  // (F001) and counted formatting noise it should ignore; with both fixed,
+  // 1500 stands. See the WHY on DEFAULT_SIZE_GATE.
   test("the shipped defaults are the documented ones", () => {
-    expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(2500);
+    expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(1500);
     expect(DEFAULT_SIZE_GATE.maxChangedFiles).toBe(150);
   });
 });
@@ -264,5 +269,192 @@ describe("sizeGateLine", () => {
     );
     expect(line).toContain("size gate: SKIP");
     expect(line).toContain("--force");
+  });
+});
+
+// The exclusion list is only honest if the excluded files leave the diff the
+// hunters are actually handed (F001). These pin the record splitter, because
+// dropping the wrong record deletes real changed code out of a review.
+const ORDINARY = `diff --git a/src/a.ts b/src/a.ts
+index 1111111..2222222 100644
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,3 +1,3 @@
+ keep
+-old
++new
+`;
+
+const LOCKFILE = `diff --git a/bun.lock b/bun.lock
+index 3333333..4444444 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -1,2 +1,2 @@
+-a
++b
+`;
+
+// A pure rename carries NO ---/+++ pair at all: \`rename to\` is the only
+// path evidence in the record.
+const RENAME = `diff --git a/vendor/lib.js b/vendor/lib.min.js
+similarity index 100%
+rename from vendor/lib.js
+rename to vendor/lib.min.js
+`;
+
+// A binary record has no hunks and no ---/+++ pair either — only the header
+// and git's one-line summary.
+const BINARY = `diff --git a/dist/app.min.js b/dist/app.min.js
+index 5555555..6666666 100644
+GIT binary patch
+literal 4
+Mc$_
+`;
+
+const DELETED = `diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+deleted file mode 100644
+index 7777777..0000000
+--- a/pnpm-lock.yaml
++++ /dev/null
+@@ -1,2 +0,0 @@
+-a
+-b
+`;
+
+const CREATED = `diff --git a/go.sum b/go.sum
+new file mode 100644
+index 0000000..8888888
+--- /dev/null
++++ b/go.sum
+@@ -0,0 +1,2 @@
++a
++b
+`;
+
+// A record whose hunk body contains a line that LOOKS like a diff header:
+// content lines always carry a prefix character, so the splitter must not be
+// fooled by one.
+const NESTED = `diff --git a/test/fixture.md b/test/fixture.md
+index 9999999..aaaaaaa 100644
+--- a/test/fixture.md
++++ b/test/fixture.md
+@@ -1,2 +1,3 @@
+ sample patch:
++ diff --git a/bun.lock b/bun.lock
+ end
+`;
+
+describe("diffRecordPath", () => {
+  test("an ordinary modification resolves to its path", () => {
+    expect(diffRecordPath(ORDINARY)).toBe("src/a.ts");
+  });
+
+  // The DESTINATION, for the same reason resolveNumstatPath resolves it: a
+  // renamed lockfile that resolved to its old name would stop being excluded.
+  test("a rename resolves to the destination, from `rename to`", () => {
+    expect(diffRecordPath(RENAME)).toBe("vendor/lib.min.js");
+  });
+
+  test("a binary record falls back to the header", () => {
+    expect(diffRecordPath(BINARY)).toBe("dist/app.min.js");
+  });
+
+  test("a deletion resolves to the source (+++ is /dev/null)", () => {
+    expect(diffRecordPath(DELETED)).toBe("pnpm-lock.yaml");
+  });
+
+  test("an addition resolves to the destination (--- is /dev/null)", () => {
+    expect(diffRecordPath(CREATED)).toBe("go.sum");
+  });
+
+  test("hunk content is never read as metadata", () => {
+    expect(diffRecordPath(NESTED)).toBe("test/fixture.md");
+  });
+
+  test("a non-record resolves to nothing", () => {
+    expect(diffRecordPath("not a diff at all\n")).toBeUndefined();
+  });
+});
+
+describe("filterDiffByGlobs", () => {
+  const globs = DEFAULT_SIZE_GATE.excludeGlobs;
+
+  test("drops whole excluded records and keeps the rest byte-for-byte", () => {
+    const result = filterDiffByGlobs(`${ORDINARY}${LOCKFILE}${NESTED}`, globs);
+    expect(result.patch).toBe(`${ORDINARY}${NESTED}`);
+    expect(result.droppedPaths).toEqual(["bun.lock"]);
+  });
+
+  // Nothing excluded must be a strict no-op: diff.patch is the provenance
+  // artifact, and a filter that reflows bytes would break replay.
+  test("with nothing to drop the patch is byte-identical", () => {
+    const patch = `${ORDINARY}${NESTED}`;
+    const result = filterDiffByGlobs(patch, globs);
+    expect(result.patch).toBe(patch);
+    expect(result.droppedPaths).toEqual([]);
+  });
+
+  test("renames, binaries, deletions and additions all drop by destination", () => {
+    const result = filterDiffByGlobs(
+      `${RENAME}${ORDINARY}${BINARY}${DELETED}${CREATED}`,
+      globs,
+    );
+    expect(result.patch).toBe(ORDINARY);
+    expect(result.droppedPaths).toEqual([
+      "vendor/lib.min.js",
+      "dist/app.min.js",
+      "pnpm-lock.yaml",
+      "go.sum",
+    ]);
+  });
+
+  // The case the CLI turns into "nothing to review": every record excluded
+  // leaves an EMPTY patch, never three hunters spawned on nothing.
+  test("an all-excluded diff produces an empty patch", () => {
+    const result = filterDiffByGlobs(`${LOCKFILE}${CREATED}`, globs);
+    expect(result.patch).toBe("");
+    expect(result.droppedPaths).toEqual(["bun.lock", "go.sum"]);
+  });
+
+  test("an empty patch stays empty", () => {
+    expect(filterDiffByGlobs("", globs)).toEqual({
+      patch: "",
+      droppedPaths: [],
+    });
+  });
+
+  // Failing OPEN is deliberate: an unresolvable record is kept, because the
+  // cost of keeping it is money and the cost of dropping it is a silent hole
+  // in the review.
+  test("a record with no resolvable path is kept", () => {
+    const weird = "diff --git nonsense\n@@ -1 +1 @@\n-a\n+b\n";
+    expect(filterDiffByGlobs(weird, globs).patch).toBe(weird);
+  });
+
+  test("no globs drops nothing", () => {
+    const patch = `${ORDINARY}${LOCKFILE}`;
+    expect(filterDiffByGlobs(patch, []).patch).toBe(patch);
+  });
+});
+
+describe("effectiveDiffStat", () => {
+  // The cost basis and the gate must agree about which files exist: the band
+  // prices what the hunters read, and they read the filtered diff.
+  test("sums only the files that survive the exclusions", () => {
+    expect(
+      effectiveDiffStat(
+        [file("src/a.ts", 10, 5), file("bun.lock", 900, 800)],
+        DEFAULT_SIZE_GATE.excludeGlobs,
+      ),
+    ).toEqual({ files: 1, insertions: 10, deletions: 5 });
+  });
+
+  test("everything excluded is a zero stat", () => {
+    expect(
+      effectiveDiffStat(
+        [file("bun.lock", 900), file("dist/x.min.js", 40)],
+        DEFAULT_SIZE_GATE.excludeGlobs,
+      ),
+    ).toEqual({ files: 0, insertions: 0, deletions: 0 });
   });
 });

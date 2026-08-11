@@ -422,10 +422,25 @@ What is still manual, in the order it should be closed:
    the stamping call site first executes on the next paid run.
 
 5. **The size gate — "PR too large → skip"** — **BUILT 2026-08-11** (`src/size-gate.ts` pure;
-   wired into local review, PR review, and the watcher). Defaults: **2500 effective changed lines,
+   wired into local review, PR review, and the watcher). Defaults: **1500 effective changed lines,
    150 effective changed files**, with generated content (lockfiles, `*.min.js`/`*.min.css`, `*.snap`)
    excluded before the count. Escape hatches: `--force`, `--max-changed-lines`, `--max-changed-files`
    (0 disables a limit); per-repo thresholds ride `watch add`.
+
+   The line default moved 1500 → 2500 → 1500, and the round trip is the point. 2500 was a response to
+   this repo's own PR #1 (1603 lines) being refused while its cost band read $3.18–6.86 — the gate
+   firing where its stated reason did not hold. The real cause was found later: the gate counted lines
+   it was not filtering (exclusions shrank the COUNT but the hunters were still handed the unfiltered
+   diff, so the bill was never reduced) and counted formatting noise it should ignore. Both are fixed —
+   `diff.patch` IS the effective diff (`diff.raw.patch` keeps the unfiltered bytes for audit, and
+   `pipeline.json` records the dropped paths), and where git is reachable the count comes from
+   `git diff -w --ignore-blank-lines --numstat` — so 1500 measures what actually gets paid for. The
+   830..4000-line cost band remains unmeasured. An all-excluded diff is now a `nothing-to-review` exit
+   (and its own watcher skip reason) instead of three hunters spawned on an empty patch.
+
+   The whitespace-blindness is ASYMMETRIC by necessity: the PR dry run and both watcher tiers read
+   GitHub's counters (`additions`/`deletions`/`changedFiles`, `gh pr view --json files`), which carry no
+   whitespace information at all. Those paths label themselves estimates and can only over-count.
 
    The gate runs BEFORE the cost-band `confirm()`, never behind it — the watcher passes `--yes`, so a
    gate inside the prompt would never fire in the one place unattended spend actually happens. In
@@ -442,6 +457,36 @@ What is still manual, in the order it should be closed:
    experiment that would actually answer it is `scripts/scope-probe.ts`, still unreported: until it
    runs, these thresholds are a budget decision, not a quality boundary, and they should be argued
    about on cost grounds alone.
+
+6. **Answer back in the thread — the conversation loop.** NOT BUILT, not started, named here 2026-08-11
+   so it stops being invisible. Today pr-hero posts once and leaves: `--post` creates or PATCHes one
+   marked comment, and that is the whole of its voice. `fetchPrComments` exists but never listens —
+   its three callers are the watcher's marker guard (`watch.ts:301`), Greptile's comment for the
+   head-to-head (`pr.ts:355`), and finding our own comment to update it (`pr.ts:402`). Nothing reads a
+   human's reply, so a reviewer who answers a finding is talking to a wall.
+
+   **Why it matters more than it looks.** This is where a reviewer earns trust, and the cost of not
+   having it is already on the record: reviewing its own PR #1, the engine filed F003 as `introduced`
+   when it is plainly pre-existing — `ghPrList` (`watch.ts:243`) has carried the identical unbounded-gh
+   hang the whole time, and there is not one `AbortController`/`Promise.race`/timeout anywhere in
+   `pr.ts` or `watch.ts`. The refuter corroborated it without questioning the class. A human catches
+   that in one sentence. Today that sentence dies in the ledger and the engine never hears it — which
+   also means the adversarial loop only ever runs against the refuter, never against the one critic
+   who has the repo's history in their head.
+
+   **What it needs, and the hazards that make it a slice of its own** (do NOT bolt it onto `--post`):
+   read replies threaded under our marked comment; bind each reply to the finding it answers (our
+   comment is one body with many findings — the binding is the hard part, and finding ids in the
+   rendered markdown are the obvious lever); decide whether an objection changes the verdict, which is
+   a judgement step and therefore a spawned step with its own cost, not a string match; and answer
+   without duplicating comments or ping-ponging forever with a human. The `updated-in-place`
+   idempotency already solves the "one comment per PR" half; none of the rest exists. A reply that
+   overturns a finding must also reach the ledger, or the head-to-head keeps scoring a finding the
+   author already disproved.
+
+   Two things to decide before any code: whether a human's objection can flip a verdict on its own or
+   only re-open it for another adjudicated pass, and what stops an argument. Neither is answerable
+   from the current data.
 
 Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
 the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this

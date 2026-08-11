@@ -626,6 +626,26 @@ export function emptyDiffMessage(
   );
 }
 
+// The other empty diff: the range had changes, but every one of them was in a
+// generated file the size gate excludes, so the EFFECTIVE diff — the one the
+// hunters would be handed — is empty. Treated exactly like the empty-range
+// case above rather than spawning hunters on an empty patch: three sessions
+// reading nothing is a bill for no review at all.
+export function allExcludedMessage(droppedPaths: string[]): string {
+  return (
+    `every changed file is excluded from review as generated content ` +
+    `(${listPaths(droppedPaths)}), so the effective diff is empty and there ` +
+    "is nothing to review. Nothing was spawned and nothing was spent."
+  );
+}
+
+// Enough paths to recognise the diff, never a wall of them: a lockfile-only
+// PR is the common case and a hundred-line list helps nobody.
+export function listPaths(paths: string[], limit = 5): string {
+  if (paths.length <= limit) return paths.join(", ");
+  return `${paths.slice(0, limit).join(", ")}, +${paths.length - limit} more`;
+}
+
 // A full 40-hex commit id and nothing else. WHY it is enforced this hard: an
 // abbreviated head sha once made a COMPLETED three-replicate arm — $29.15
 // already spent — unscoreable, because nothing downstream could match the

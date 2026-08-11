@@ -864,6 +864,29 @@ describe("assembly", () => {
     expect(doc.findings[0]?.tier).toBe("blocking");
   });
 
+  // Provenance: diff.patch is the EFFECTIVE diff, so the plan has to record
+  // what was taken out of it — otherwise a run's diff cannot be told apart
+  // from the range it came from.
+  test("pipeline.json records the excluded paths", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline({ ...input, excludedPaths: ["bun.lock"] }, { runner });
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as { excluded_paths: string[] };
+    expect(plan.excluded_paths).toEqual(["bun.lock"]);
+  });
+
+  test("pipeline.json records an empty exclusion list when nothing was dropped", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline(input, { runner });
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as { excluded_paths: string[] };
+    expect(plan.excluded_paths).toEqual([]);
+  });
+
   test("writes pipeline.json with the resolved plan sans prompts", async () => {
     const runner = new FakeStepRunner(HUNTERS_OK);
     const input = await makeInput();

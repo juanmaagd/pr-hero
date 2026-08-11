@@ -50,6 +50,7 @@ import {
 import {
   AGENT_FILE_PATTERNS,
   agentsDirProblems,
+  allExcludedMessage,
   assertBasenameOnly,
   assertOutsideRepo,
   type BaseRefResolution,
@@ -67,10 +68,10 @@ import {
   initConfigTemplate,
   isFullCommitId,
   type LocalConfig,
+  listPaths,
   localReviewSpec,
   parseArgs,
   parseLocalConfig,
-  parseNumstat,
   parseNumstatFiles,
   parseRemoteHead,
   resolveAgentsDirSetting,
@@ -92,8 +93,10 @@ import {
   renderReport,
 } from "./report";
 import {
+  effectiveDiffStat,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
+  filterDiffByGlobs,
   sizeGateConfig,
   sizeGateLine,
 } from "./size-gate";
@@ -119,6 +122,18 @@ const EMPTY_MCP_CONFIG = { mcpServers: {} };
 
 function log(line = ""): void {
   process.stderr.write(`${line}\n`);
+}
+
+// Exclusions are a MUTATION of the reviewed diff, so they are stated out
+// loud: an operator who is told "3 files reviewed" must be able to see that
+// two more were dropped, and where the unfiltered bytes went.
+function logExclusions(droppedPaths: string[]): void {
+  if (droppedPaths.length === 0) return;
+  log(
+    `exclusions: ${droppedPaths.length} generated file(s) dropped from the ` +
+      `reviewed diff (${listPaths(droppedPaths)}); the unfiltered diff is ` +
+      "kept as diff.raw.patch",
+  );
 }
 
 async function git(
@@ -312,9 +327,31 @@ async function review(options: CliOptions): Promise<number> {
       emptyDiffMessage(baseRef.ref, options.head, options.twoDot),
     );
   }
-  await Bun.write(diffPath, diff.stdout);
+  // The EFFECTIVE diff is what lands in diff.patch, because diff.patch is
+  // what the pipeline hands to every hunter: excluded files must fall out of
+  // the reviewed diff itself, or the gate discounts a lockfile the bill still
+  // pays for in full (see filterDiffByGlobs). diff.raw.patch keeps the
+  // unfiltered bytes for audit, and only when there is a difference to audit.
+  const gateConfig = sizeGateConfig(options);
+  const effectiveDiff = filterDiffByGlobs(diff.stdout, gateConfig.excludeGlobs);
+  if (effectiveDiff.patch.trim().length === 0) {
+    throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
+  }
+  await Bun.write(diffPath, effectiveDiff.patch);
+  if (effectiveDiff.droppedPaths.length > 0) {
+    await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
+  }
 
-  // 9 — diff stat.
+  // 9 — diff stat, TWICE and on purpose.
+  //
+  // The GATE counts from `-w --ignore-blank-lines`: a pure formatter sweep
+  // must not consume the budget, and a file whose every change is whitespace
+  // drops out of that numstat entirely (verified: git emits no row for it).
+  //
+  // The COST BAND counts from the plain numstat, exclusions applied. The
+  // hunters are handed diff.patch verbatim, whitespace hunks included, so
+  // those bytes are genuinely billed — pricing them at zero would be the same
+  // class of lie the exclusion bug was.
   const numstat = await git(repoRoot, [
     "diff",
     "--numstat",
@@ -323,9 +360,24 @@ async function review(options: CliOptions): Promise<number> {
   if (!numstat.ok) {
     throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
   }
-  const numstatFiles = parseNumstatFiles(numstat.stdout);
-  const diffStat: DiffStat = parseNumstat(numstat.stdout);
-  const sizeGate = evaluateSizeGate(numstatFiles, sizeGateConfig(options));
+  const gateNumstat = await git(repoRoot, [
+    "diff",
+    "-w",
+    "--ignore-blank-lines",
+    "--numstat",
+    `${diffFromSha}..${headSha}`,
+  ]);
+  if (!gateNumstat.ok) {
+    throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
+  }
+  const diffStat: DiffStat = effectiveDiffStat(
+    parseNumstatFiles(numstat.stdout),
+    gateConfig.excludeGlobs,
+  );
+  const sizeGate = evaluateSizeGate(
+    parseNumstatFiles(gateNumstat.stdout),
+    gateConfig,
+  );
 
   // 10 — MCP registry.
   const mcpConfigPath = path.join(runDir, "mcp.json");
@@ -339,8 +391,10 @@ async function review(options: CliOptions): Promise<number> {
     )}\n`,
   );
 
-  // 11 — the plan.
-  const changedPaths = changedPathsFromDiff(diff.stdout);
+  // 11 — the plan. Triggers read the EFFECTIVE diff, the same bytes the
+  // pipeline will read back from diff.patch: a conditional hunter must never
+  // fire on a path no hunter was given.
+  const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
   const parityFires = parityTriggered(
     changedPaths,
     config.parity_trigger_paths,
@@ -371,6 +425,7 @@ async function review(options: CliOptions): Promise<number> {
   });
   log();
   log(sizeGateLine(sizeGate));
+  logExclusions(effectiveDiff.droppedPaths);
   if (!sizeGate.ok && options.force) {
     log("--force given: reviewing anyway.");
   }
@@ -427,6 +482,7 @@ async function review(options: CliOptions): Promise<number> {
         headSha,
         worktree: repoRoot,
         diffPath,
+        excludedPaths: effectiveDiff.droppedPaths,
         gotchasPath,
         agentsDir,
         runDir,
@@ -487,6 +543,7 @@ async function review(options: CliOptions): Promise<number> {
       base: baseRef.ref,
       head: options.head,
       diffStat,
+      excludedPaths: effectiveDiff.droppedPaths,
       costUsd: result.usage.cost_usd_est,
       wallMs,
     }),
@@ -621,7 +678,10 @@ async function reviewPr(
     // --json files` here would buy exactness at the price of the "nothing
     // was fetched" contract, and the estimate is only ever wrong in the
     // conservative direction (a gate that fires here may pass for real once
-    // lockfiles come off). Labelled so nobody reads it as the verdict.
+    // lockfiles come off, and GitHub's counters carry no whitespace
+    // information, so a formatter sweep counts in full here and counts zero
+    // in the real git-side gate). Labelled on both counts so nobody reads it
+    // as the verdict.
     const estimated = evaluateSizeGateAggregate(
       target.ghDiffStat,
       sizeGateConfig(options),
@@ -629,7 +689,8 @@ async function reviewPr(
     log();
     log(
       `${sizeGateLine(estimated)} (estimate from GitHub's aggregate ` +
-        "counters; exclusions not applied)",
+        "counters; exclusions not applied and the count is not " +
+        "whitespace-adjusted)",
     );
     if (!estimated.ok && !options.force) {
       log("dry run: this PR would likely be SKIPPED by the size gate.");
@@ -666,6 +727,17 @@ async function reviewPr(
   if (diff.stdout.trim().length === 0) {
     throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
   }
+  // The effective diff, and the empty check on it, BOTH before the run dir
+  // exists — same rule as the gate below: a PR that cannot be reviewed leaves
+  // nothing behind.
+  const gateConfig = sizeGateConfig(options);
+  const effectiveDiff = filterDiffByGlobs(diff.stdout, gateConfig.excludeGlobs);
+  if (effectiveDiff.patch.trim().length === 0) {
+    throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
+  }
+  // Two numstats, for the reason spelled out in local mode: the gate counts
+  // whitespace-blind so a formatter sweep cannot eat the budget, the cost
+  // band counts the bytes the hunters are actually handed.
   const numstat = await git(operatorRoot, [
     "diff",
     "--numstat",
@@ -674,7 +746,20 @@ async function reviewPr(
   if (!numstat.ok) {
     throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
   }
-  const diffStat: DiffStat = parseNumstat(numstat.stdout);
+  const gateNumstat = await git(operatorRoot, [
+    "diff",
+    "-w",
+    "--ignore-blank-lines",
+    "--numstat",
+    `${diffFromSha}..${headSha}`,
+  ]);
+  if (!gateNumstat.ok) {
+    throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
+  }
+  const diffStat: DiffStat = effectiveDiffStat(
+    parseNumstatFiles(numstat.stdout),
+    gateConfig.excludeGlobs,
+  );
 
   // 5b — the size gate, on the REAL per-file numstat and placed here on
   // purpose: before createPrRunDir, so a skipped PR leaves no run dir
@@ -684,10 +769,11 @@ async function reviewPr(
   // in local mode, this sits BEFORE the cost band's confirm(): the watcher
   // passes --yes, so a gate behind the prompt would never fire unattended.
   const sizeGate = evaluateSizeGate(
-    parseNumstatFiles(numstat.stdout),
-    sizeGateConfig(options),
+    parseNumstatFiles(gateNumstat.stdout),
+    gateConfig,
   );
   log(sizeGateLine(sizeGate));
+  logExclusions(effectiveDiff.droppedPaths);
   if (!sizeGate.ok) {
     if (options.force) {
       log("--force given: reviewing anyway.");
@@ -704,12 +790,18 @@ async function reviewPr(
     prNumber,
     headSha,
   );
+  // diff.patch is the EFFECTIVE diff — exactly what the hunters read (see
+  // filterDiffByGlobs); diff.raw.patch preserves the unfiltered bytes, and
+  // only when the filter actually dropped something.
   const diffPath = path.join(runDir, "diff.patch");
-  await Bun.write(diffPath, diff.stdout);
+  await Bun.write(diffPath, effectiveDiff.patch);
+  if (effectiveDiff.droppedPaths.length > 0) {
+    await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
+  }
 
   // 7 — the plan and the paid gate, exactly like local mode but with the
   // real numstat replacing GitHub's counters.
-  const changedPaths = changedPathsFromDiff(diff.stdout);
+  const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
   const parityFires = parityTriggered(
     changedPaths,
     config.parity_trigger_paths,
@@ -799,6 +891,7 @@ async function reviewPr(
         headSha,
         worktree: worktreePath,
         diffPath,
+        excludedPaths: effectiveDiff.droppedPaths,
         gotchasPath,
         agentsDir,
         runDir,
@@ -857,6 +950,7 @@ async function reviewPr(
       base: target.baseRef,
       head: `PR #${prNumber}`,
       diffStat,
+      excludedPaths: effectiveDiff.droppedPaths,
       costUsd: result.usage.cost_usd_est,
       wallMs,
     }),

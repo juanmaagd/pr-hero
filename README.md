@@ -206,7 +206,8 @@ Run artifacts land **outside** the repo, in `<repo-parent>/<repo>-prhero-runs/<r
 | `report.md` | The human-readable review. |
 | `findings.json` | The machine artifact (schema v1.0.0): findings, tiers, refuter verdicts, usage, provenance. |
 | `comparison.md` / `comparison.json` | PR mode only — the head-to-head against Greptile, three buckets. The JSON rows carry `verdict`/`reasoning` columns for triage; `pr-hero ledger` accumulates them. |
-| `diff.patch`, `pipeline.json`, `steps/` | The exact diff reviewed, pipeline provenance, per-agent drafts and logs. |
+| `diff.patch`, `pipeline.json`, `steps/` | The exact diff reviewed — after exclusions, so it is byte-for-byte what the hunters read — plus pipeline provenance (including the excluded paths), per-agent drafts and logs. |
+| `diff.raw.patch` | The unfiltered diff of the same range. Written **only** when exclusions actually dropped a file, since otherwise it would duplicate `diff.patch`. |
 
 ## Cost and expectations
 
@@ -230,21 +231,32 @@ excluded first, so a regenerated lockfile beside a ten-line change does not trip
 default: `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`,
 `*.min.js`, `*.min.css`, `*.snap`.
 
+Those exclusions come out of the **reviewed diff itself**: `diff.patch` is what the hunters are
+handed, so the number the gate measures is the number that gets paid for. If every changed file is
+excluded, there is nothing to review — pr-hero exits without spawning anything.
+
+The count is also **whitespace-blind wherever git is reachable** (local mode and PR mode count from
+`git diff -w --ignore-blank-lines --numstat`), so a formatter or linter sweep does not consume the
+budget. Two paths cannot be: `--pr <n> --dry-run` and the watcher's per-tick checks read GitHub's own
+counters, which carry no whitespace information — both label their verdict an estimate, and both can
+only ever over-count, never under-count.
+
 | Profile | Lines | Files | For |
 | --- | --- | --- | --- |
-| Conservative | `--max-changed-lines 1200` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
-| **Default (shipped)** | **2500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
-| Permissive | `--max-changed-lines 4000` | `--max-changed-files 150` | You would rather pay than skip. |
+| Conservative | `--max-changed-lines 800` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
+| **Default (shipped)** | **1500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
+| Permissive | `--max-changed-lines 3000` | `--max-changed-files 150` | You would rather pay than skip. |
 
 ```bash
 pr-hero review --pr 42 --dry-run          # prints the gate verdict, spends nothing
 pr-hero review --pr 42 --force            # review it anyway (does NOT skip the cost prompt)
 pr-hero review --pr 42 --max-changed-lines 0   # 0 disables that limit entirely
-pr-hero watch add --max-changed-lines 1200      # per-repo threshold for the watcher
+pr-hero watch add --max-changed-lines 800       # per-repo threshold for the watcher
 ```
 
 A skipped review exits 1 with a one-line reason and no stack. In watch mode it logs
-`skipped … reason=too-large` and costs nothing further: it does **not** consume a poison-PR attempt,
+`skipped … reason=too-large` (or `reason=nothing-to-review`, when every changed file is excluded
+generated content) and costs nothing further: it does **not** consume a poison-PR attempt,
 writes no review marker, and does not arm the one-review-per-PR state — a force-push that shrinks the
 PR makes it eligible again on the next tick, because the gate is recomputed every tick.
 

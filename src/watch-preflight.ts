@@ -683,6 +683,7 @@ export type SkipReason =
   | "reviewed-remote"
   | "reviewed-prior-head"
   | "too-large"
+  | "nothing-to-review"
   | "attempts-exhausted";
 
 export interface TickRepoFacts {
@@ -709,6 +710,14 @@ export interface TickRepoFacts {
   // on candidateSkipReason. A PR absent here was either under the limits or
   // never evaluated (the shell settles cheaper reasons first).
   tooLarge: number[];
+  // PR numbers whose changed files are ALL generated content the size gate
+  // excludes — so the effective diff is empty and there is nothing to review.
+  // Same fresh-every-tick, never-persisted rule as tooLarge. WHY it is its
+  // own reason and not folded into too-large: spawning here would have the
+  // child CLI exit on an empty effective diff without creating a run dir, and
+  // a run dir is where attempts are counted — so the watcher would re-spawn
+  // the same PR every tick forever. Skipping it here is what stops that loop.
+  nothingToReview: number[];
 }
 
 export type TickGate = "open" | "window-closed" | "cap-reached";
@@ -849,6 +858,10 @@ function candidateSkipReason(
   //       only a review that actually ran produces. A skip is not a review;
   //       treating it as one would permanently retire the PR.
   if (repo.tooLarge.includes(candidate.pr)) return "too-large";
+  // The other end of the same instrument: everything changed is excluded
+  // generated content, so a review would read an empty diff. Same three
+  // properties as above — no attempt, no marker, recomputed every tick.
+  if (repo.nothingToReview.includes(candidate.pr)) return "nothing-to-review";
   const remote = repo.remoteHeads.find((r) => r.pr === candidate.pr);
   if ((remote?.heads ?? []).includes(candidate.head)) {
     return "reviewed-remote";

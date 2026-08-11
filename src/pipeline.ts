@@ -54,7 +54,12 @@ export interface PipelineInput {
   headSha: string;
   // Where hunters resolve the diff's changed-file list (steps run cwd here).
   worktree: string;
+  // The EFFECTIVE diff: whatever is at this path is what every hunter reads,
+  // verbatim. The driver filters generated content out before writing it.
   diffPath: string;
+  // Provenance only — the paths the driver excluded from that diff. Recorded
+  // in pipeline.json so a run's diff.patch can be told apart from its range.
+  excludedPaths?: string[];
   gotchasPath: string;
   agentsDir: string;
   runDir: string;
@@ -777,6 +782,7 @@ async function writePipelinePlan(
     base_sha: input.baseSha,
     head_sha: input.headSha,
     out_path: input.outPath,
+    excluded_paths: input.excludedPaths ?? [],
     parity_hunter_fired: state.parityFired,
     steps: state.steps,
   };
