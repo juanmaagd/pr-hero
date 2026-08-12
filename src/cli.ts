@@ -563,6 +563,7 @@ async function review(options: CliOptions): Promise<number> {
     started,
     `${baseRef.ref}..${options.head}`,
     activeHunters.map((a) => a.key),
+    spec.agents.some((a) => a.role === "refuter"),
   );
   let result: PipelineResult;
   try {
@@ -996,6 +997,7 @@ async function reviewPr(
     started,
     `PR #${prNumber}`,
     activeHunters.map((a) => a.key),
+    spec.agents.some((a) => a.role === "refuter"),
   );
   let result: PipelineResult;
   try {
@@ -2798,39 +2800,71 @@ interface ProgressRenderer {
   stop: () => void;
 }
 
+// Height the panel assumes when the stream will not say (a TTY without rows),
+// and the rows it leaves free below itself.
+const PANEL_FALLBACK_ROWS = 24;
+const PANEL_HEADROOM = 3;
+
 function startProgressRenderer(
   startedAtMs: number,
   subject: string,
   hunterKeys: string[],
+  hasRefuter = true,
 ): ProgressRenderer {
   return process.stderr.isTTY
-    ? startPanelRenderer(startedAtMs, subject, hunterKeys)
+    ? startPanelRenderer(startedAtMs, subject, hunterKeys, hasRefuter)
     : startLineRenderer(startedAtMs);
 }
 
-// The TTY panel: header + one row per agent, redrawn in place with
-// cursor-up (\x1b[<n>A) + per-line clear (\x1b[2K) on every event and on a
-// 250ms tick that advances the spinner and the elapsed clocks. The cursor
-// is deliberately NOT hidden: \x1b[?25l would need a restore on every exit
-// path, and a leaked hidden cursor wrecks the user's terminal — a visible
-// cursor over a redrawing panel is fine.
+// The TTY panel: header + a TREE of agent rows (the refuter's per-finding
+// leaves under it), redrawn in place with cursor-up (\x1b[<n>A) + per-line
+// clear (\x1b[2K) on every event and on a 250ms tick that advances the
+// spinner and the elapsed clocks. The cursor is deliberately NOT hidden:
+// \x1b[?25l would need a restore on every exit path, and a leaked hidden
+// cursor wrecks the user's terminal — a visible cursor over a redrawing
+// panel is fine.
+//
+// Two things the tree made load-bearing that a fixed-height list did not:
+//   - the height budget, recomputed EVERY draw (a mid-run resize must tighten
+//     it on the next tick, not walk the cursor off the top of the screen);
+//   - \x1b[0J after the frame. The old panel could only grow, so leftover
+//     lines were impossible; a tree that collapses a finished branch shrinks,
+//     and without the erase-to-end the previous frame's tail stays on screen
+//     as orphaned rows.
 function startPanelRenderer(
   startedAtMs: number,
   subject: string,
   hunterKeys: string[],
+  hasRefuter = true,
 ): ProgressRenderer {
   // The NO_COLOR convention: any value disables color; a TTY alone is not
   // consent.
   const colors = process.env.NO_COLOR === undefined;
-  const state = createPanelState(subject, startedAtMs, hunterKeys);
+  const state = createPanelState(subject, startedAtMs, hunterKeys, {
+    refuter: hasRefuter,
+  });
   let frame = 0;
   let drawnLines = 0;
+  // Headroom, not the whole window: the summary block prints below the final
+  // frame, and a panel that fills the terminal exactly would scroll it away
+  // the moment anything else is written. 24 is the classic default for a
+  // stream that will not say how tall it is.
+  const budget = (): number =>
+    Math.max((process.stderr.rows ?? PANEL_FALLBACK_ROWS) - PANEL_HEADROOM, 3);
   const draw = (): void => {
-    const lines = renderPanelLines(state, performance.now(), frame, colors);
+    const lines = renderPanelLines(
+      state,
+      performance.now(),
+      frame,
+      colors,
+      budget(),
+    );
     if (drawnLines > 0) process.stderr.write(`\x1b[${drawnLines}A`);
     for (const line of lines) {
       process.stderr.write(`\x1b[2K${line}\n`);
     }
+    // See the header: the frame can shrink, so anything below it must go.
+    process.stderr.write("\x1b[0J");
     drawnLines = lines.length;
   };
   const ticker = setInterval(() => {
