@@ -96,6 +96,7 @@ import {
   parseLocalConfig,
   parseNumstatFiles,
   parseRemoteHead,
+  repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
   runDirCandidate,
@@ -141,7 +142,7 @@ import {
   styleEnabled,
   yellow,
 } from "./ui";
-import { renderResult } from "./ui-result";
+import { type ResultLinks, renderResult } from "./ui-result";
 import { type ConfirmResult, confirmReview } from "./ui-select";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
@@ -221,6 +222,40 @@ async function resolveCommit(repo: string, rev: string): Promise<string> {
     );
   }
   return sha;
+}
+
+// The repo's web url from the remote already on disk — no `gh`, no network,
+// no cost, which is precisely why the terminal can afford a link on EVERY run
+// and not only on a `--post` one (see repoWebUrlFromRemote's WHY). Cosmetic by
+// contract, same as ghRepoWebUrl: any failure returns undefined and the block
+// prints plain locations.
+async function gitRemoteWebUrl(repo: string): Promise<string | undefined> {
+  const remote = await git(repo, ["remote", "get-url", "origin"]);
+  if (!remote.ok) return undefined;
+  return repoWebUrlFromRemote(remote.stdout);
+}
+
+// Local mode's links, and the ONE extra condition PR mode does not need: a PR
+// head was fetched from origin, so it is pushed by construction, but a local
+// `--head HEAD` is usually a commit that exists only here — and a blob link to
+// an unpushed commit is a 404. `git branch -r --contains` answers "does any
+// remote-tracking ref already contain this commit" from the local object db:
+// free, offline, and the only thing standing between the block and a dead link.
+//
+// Safe because local mode reviews a COMMITTED range (`diffFromSha..headSha`,
+// step 8) — every finding's line lives in headSha itself, so a link pinned to
+// that sha points at the bytes the hunters actually read. Were the working
+// tree ever reviewed directly, containment would prove nothing and this would
+// have to go back to printing no links at all.
+async function localResultLinks(
+  repoRoot: string,
+  headSha: string,
+): Promise<ResultLinks | undefined> {
+  const webUrl = await gitRemoteWebUrl(repoRoot);
+  if (webUrl === undefined) return undefined;
+  const contains = await git(repoRoot, ["branch", "-r", "--contains", headSha]);
+  if (!contains.ok || contains.stdout.trim().length === 0) return undefined;
+  return { webUrl, headSha };
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -610,9 +645,12 @@ async function review(options: CliOptions): Promise<number> {
     }),
   );
 
-  // 18 — the summary. Counts, the FINDINGS THEMSELVES, and where the
-  // artifacts landed: the renderer derives every number from `doc`, so the
-  // terminal cannot disagree with the findings.json written two steps up.
+  // 18 — the summary. Counts, the FINDINGS THEMSELVES, where the artifacts
+  // landed, and a clickable url per finding: the renderer derives every number
+  // from `doc`, so the terminal cannot disagree with the findings.json written
+  // two steps up. Links are best-effort and silent when unavailable (no github
+  // remote, or a head this repo has not pushed) — see localResultLinks.
+  const links = await localResultLinks(repoRoot, headSha);
   for (const line of renderResult({
     doc,
     costUsd: result.usage.cost_usd_est,
@@ -620,6 +658,7 @@ async function review(options: CliOptions): Promise<number> {
     estimate: { low: estimate.low, high: estimate.high },
     runDir,
     artifacts: [path.basename(reportPath), path.basename(findingsPath)],
+    ...(links === undefined ? {} : { links }),
     sessionFailed: result.sessionFailed,
     styles: styleEnabled(),
   })) {
@@ -1084,9 +1123,14 @@ async function reviewPr(
   // posting"): a clean-bill comment set from a review that never ran would
   // be a public lie, same reasoning as the comparison guard above.
   let posted: InlinePostOutcome | null = null;
+  // Hoisted out of the branch below ONLY so step 15 can reuse it: when posting
+  // ran, the terminal's links must be built from the SAME web url the comments
+  // were published against, or a finding's comment fragment could hang off a
+  // different host than the comment itself.
+  let postedWebUrl: string | undefined;
   if (postEnabled) {
-    const repoWebUrl = await ghRepoWebUrl(operatorRoot);
-    if (repoWebUrl === undefined) {
+    postedWebUrl = await ghRepoWebUrl(operatorRoot);
+    if (postedWebUrl === undefined) {
       log("repo web url unavailable: posting plain locations");
     }
     posted = await postInlineIfEligible({
@@ -1098,7 +1142,7 @@ async function reviewPr(
       headSha,
       doc,
       diffPatch: effectiveDiff.patch,
-      webUrl: repoWebUrl,
+      webUrl: postedWebUrl,
     });
     if (posted) {
       await writePostReceipt(runDir, prNumber, headSha, posted);
@@ -1122,6 +1166,26 @@ async function reviewPr(
   // at the moment it happened, and two differently-worded reports of the same
   // POST read as two postings. What this block keeps is the durable trace —
   // post.json in the artifact list below.
+  //
+  // The links, in the order that keeps them honest: `gh`'s answer when posting
+  // already paid for it, otherwise the free git-remote derivation — so a run
+  // WITHOUT --post still prints a clickable url for every finding, which is
+  // the whole reason repoWebUrlFromRemote exists. No pushed-ness check here
+  // (unlike local mode): a PR head came out of `refs/pull/<n>/head`, so origin
+  // has it by construction.
+  const webUrl = postedWebUrl ?? (await gitRemoteWebUrl(operatorRoot));
+  const links: ResultLinks | undefined =
+    webUrl === undefined
+      ? undefined
+      : {
+          webUrl,
+          headSha,
+          pr: prNumber,
+          // Only when this run actually posted: a comment url for a comment
+          // that does not exist is the dead link the whole degradation rule
+          // exists to prevent. Absent ids fall through to a blob link.
+          ...(posted ? { commentUrls: posted.commentUrls } : {}),
+        };
   for (const line of renderResult({
     doc,
     costUsd: result.usage.cost_usd_est,
@@ -1145,6 +1209,7 @@ async function reviewPr(
         }
       : {}),
     worktree: { operatorRoot, worktreePath },
+    ...(links === undefined ? {} : { links }),
     sessionFailed: result.sessionFailed,
     styles: styleEnabled(),
   })) {
@@ -1200,6 +1265,14 @@ export interface InlinePostOutcome {
   // of the primitive's opinion, because trusting the primitive's opinion is
   // exactly what let CRIT-1 through undetected in PR2's own test suite.
   droppedFindingIds: string[];
+  // findingId -> the url of the comment that finding now lives at (persisting
+  // from a prior run, or posted by this one). Built by buildCommentUrlMap for
+  // the summary's index; handed OUT as well so the terminal's result block can
+  // link each finding to the thread the reader will reply in rather than to a
+  // read-only blob view. Deliberately NOT in post.json: writePostReceipt names
+  // its fields one by one, so the receipt's shape is unchanged, and a Map
+  // would JSON.stringify to `{}` anyway.
+  commentUrls: ReadonlyMap<string, string>;
 }
 
 // Fetch + anchor + plan, with NO posting — the exact subset `post --dry-run`
@@ -1472,6 +1545,7 @@ export async function postInlineFindings(input: {
     summary,
     delta: plan.delta,
     droppedFindingIds,
+    commentUrls: commentUrlByFindingId,
   };
 }
 

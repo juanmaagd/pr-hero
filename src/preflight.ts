@@ -599,6 +599,59 @@ export function parseRemoteHead(raw: string): string | undefined {
   return branch.length > 0 ? branch : undefined;
 }
 
+// The repository's web URL, derived from a git remote instead of asked of
+// `gh`. WHY it exists next to pr.ts's ghRepoWebUrl rather than replacing it:
+// ghRepoWebUrl is one `gh repo view` process per call and used to live ONLY
+// inside the `--post` branch, so every run without --post had no web URL and
+// the terminal could not print a single clickable link. The remote is already
+// on disk — free, offline, no API — which is what makes a link affordable on
+// EVERY run. Posting keeps ghRepoWebUrl: it is the authority GitHub itself
+// answers with (renames, transfers, forks), and the comment bodies it feeds
+// are published artifacts, not a terminal nicety.
+//
+// The three shapes a github remote actually takes, all normalised to the same
+// canonical https form: SCP-style `git@github.com:owner/repo(.git)`,
+// `https://github.com/owner/repo(.git)(/)`, and `ssh://git@github.com/owner/
+// repo(.git)`. ANYTHING else — a non-github host, an enterprise host, a
+// missing remote, an owner/repo that does not parse — returns undefined, and
+// the caller degrades to a plain `path:line`. A GUESSED url is strictly worse
+// than no url: a 404 teaches the reader to stop trusting every link in the
+// block (the same honesty rule as cli.ts's "repo web url unavailable:
+// posting plain locations").
+const GITHUB_HOST = "github.com";
+
+export function repoWebUrlFromRemote(remote: string): string | undefined {
+  const trimmed = remote.trim();
+  if (trimmed.length === 0) return undefined;
+  // SCP syntax first: it is NOT a URL (no scheme), so `new URL` rejects it —
+  // and it is the shape a cloned-over-ssh checkout carries by default.
+  const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(trimmed);
+  let host: string;
+  let repoPath: string;
+  if (scp?.[1] !== undefined && scp[2] !== undefined) {
+    host = scp[1];
+    repoPath = scp[2];
+  } else {
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return undefined;
+    }
+    host = parsed.hostname;
+    repoPath = parsed.pathname;
+  }
+  if (host.toLowerCase() !== GITHUB_HOST) return undefined;
+  const slug = repoPath
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "");
+  // Exactly owner/repo. A deeper path is not a repository root, and building
+  // a blob url on top of one produces a link that resolves to nothing.
+  if (!/^[^/\s]+\/[^/\s]+$/.test(slug)) return undefined;
+  return `https://${GITHUB_HOST}/${slug}`;
+}
+
 // WHY this order, and WHY it is a function rather than a default: the base ref
 // decides WHICH range gets reviewed, and a hardcoded "main" is silently wrong
 // on any repo that does not use it (musive is on `dev`). So the explicit flag

@@ -19,7 +19,7 @@
 
 import type { ComparisonResult } from "./compare";
 import type { Finding, FindingsDocument } from "./findings";
-import { formatElapsed } from "./report";
+import { blobUrl, formatElapsed } from "./report";
 import {
   cyan,
   dim,
@@ -47,6 +47,30 @@ interface ResultWorktree {
   worktreePath: string;
 }
 
+// What it takes to turn a finding into something clickable. Absent when the
+// repo has no usable github remote, which is the honest degradation: the block
+// falls back to today's plain `path:line` and never prints a guessed url.
+//
+// WHY a URL and not an interactive findings browser (the thing this replaced):
+// a url survives in scrollback and can be opened whenever the reader gets to
+// it, while an interactive view forces a decision in the moment and dies with
+// the process. The cheaper surface is also the more durable one.
+export interface ResultLinks {
+  // Canonical repo web url, no trailing slash: `https://github.com/owner/repo`.
+  webUrl: string;
+  // The sha the review actually read. Blob links are pinned to it, never to a
+  // branch name — a branch link drifts and starts pointing at other people's
+  // code under our claim.
+  headSha: string;
+  // PR mode only. Its presence is what earns the PR's own url a line, and it
+  // is also the pull number every comment fragment hangs off.
+  pr?: number;
+  // findingId -> the url of the comment this finding was POSTED as, when it
+  // was. Preferred over a blob link because it lands the reader in the
+  // conversation where they will reply, not in a read-only file view.
+  commentUrls?: ReadonlyMap<string, string>;
+}
+
 export interface ResultInput {
   // The document, not a pre-chewed tally: every count in the header is
   // derived here, from the same bytes that were just written to disk, so the
@@ -66,6 +90,7 @@ export interface ResultInput {
   // hands over the exact removal command. `worktree remove`, never `rm -rf` —
   // a live codegraph daemon holds .codegraph/daemon.sock.
   worktree?: ResultWorktree;
+  links?: ResultLinks;
   sessionFailed: boolean;
   styles: boolean;
   width?: number;
@@ -136,10 +161,33 @@ function tierMarker(f: Finding): string {
   return f.tier === "blocking" ? "⛔ " : "·  ";
 }
 
-// One finding: marker + severity + location, the claim wrapped underneath, and
-// the refuter's verdict as the provenance line. NOTHING is truncated — a claim
-// is the payload, and a payload you have to open a file to read is the defect
-// this whole work unit fixes.
+// Where a reader should go to act on this finding, in priority order:
+//   1. its own posted comment, when the run posted one — that is the thread
+//      the reply belongs in, so it beats a read-only file view outright;
+//   2. the blob at the reviewed head sha, via report.ts's shared blobUrl.
+// `undefined` when there are no links at all, which is the plain-location
+// fallback, never a fabricated url.
+function findingUrl(
+  f: Finding,
+  links: ResultLinks | undefined,
+): string | undefined {
+  if (links === undefined) return undefined;
+  const posted = links.commentUrls?.get(f.id);
+  if (posted !== undefined) return posted;
+  return blobUrl(links.webUrl, links.headSha, f.path, `L${f.line}`);
+}
+
+// One finding: marker + severity + location, the claim wrapped underneath, the
+// refuter's verdict as the provenance line, and — last, because it is the
+// ACTION rather than the evidence — a clickable url. NOTHING is truncated — a
+// claim is the payload, and a payload you have to open a file to read is the
+// defect this whole work unit fixes.
+//
+// The url gets a whole line to itself and is passed through neither wrapText
+// nor truncate: a folded url is not clickable and a truncated one is a lie
+// about where the finding lives, so an overlong line is the correct trade
+// (exactly the reasoning wrapText's own comment gives for never splitting a
+// long word, and the worktree-removal command below).
 //
 // Built with padding computed from the UNSTYLED severity and painted per
 // segment: an escape sequence inside a measured string is counted as visible
@@ -149,10 +197,12 @@ function findingLines(
   indent: string,
   width: number,
   styles: boolean,
+  links: ResultLinks | undefined,
 ): string[] {
   const pad = " ".repeat(Math.max(10 - f.severity.length, 1));
   const prose = indent + PROSE_INDENT.slice(0, 3);
   const proseWidth = Math.max(width - prose.length, 20);
+  const url = findingUrl(f, links);
   return [
     `${indent}${tierMarker(f)}` +
       `${severityLabel(f.severity, f.tier, styles)}${pad}` +
@@ -164,6 +214,9 @@ function findingLines(
           `${f.hunter} · ${f.evidence_class}`,
         styles,
       ),
+    ...(url === undefined
+      ? []
+      : [prose + dim("↗ ", styles) + cyan(url, styles)]),
   ];
 }
 
@@ -179,6 +232,7 @@ function findingsSection(
   doc: FindingsDocument,
   width: number,
   styles: boolean,
+  links: ResultLinks | undefined,
 ): string[] {
   if (doc.findings.length === 0) return [];
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
@@ -203,7 +257,10 @@ function findingsSection(
     const cluster = clusterOf.get(finding.id);
     const members = cluster === undefined ? undefined : groups.get(cluster);
     if (cluster === undefined || members === undefined) {
-      lines.push("", ...findingLines(finding, MARKER_INDENT, width, styles));
+      lines.push(
+        "",
+        ...findingLines(finding, MARKER_INDENT, width, styles, links),
+      );
       emitted.add(finding.id);
       continue;
     }
@@ -213,7 +270,9 @@ function findingsSection(
         dim(`${cluster} · ${members.length} findings, one root cause`, styles),
     );
     for (const member of members) {
-      lines.push(...findingLines(member, `${MARKER_INDENT}  `, width, styles));
+      lines.push(
+        ...findingLines(member, `${MARKER_INDENT}  `, width, styles, links),
+      );
       emitted.add(member.id);
     }
   }
@@ -290,7 +349,23 @@ export function renderResult(input: ResultInput): string[] {
     `${refuted} refuted`;
   const right = `$${input.costUsd.toFixed(2)} · ${formatElapsed(input.wallMs)}`;
   const header = headerRule(left, right, width, styles);
-  const lines = ["", header.line, ...findingsSection(doc, width, styles)];
+  // The PR's own url, directly under the rule rather than down in the artifact
+  // footer, for two reasons. It is the WHERE of everything above and below it,
+  // so it belongs with the counts it describes; and the footer is built out of
+  // row(), which wraps its value to the value column — the one thing a url
+  // must never do. Local mode has no PR and gets no such line.
+  const prUrl =
+    input.links?.pr === undefined
+      ? undefined
+      : `${input.links.webUrl}/pull/${input.links.pr}`;
+  const lines = [
+    "",
+    header.line,
+    ...(prUrl === undefined
+      ? []
+      : [MARKER_INDENT + dim("↗ ", styles) + cyan(prUrl, styles)]),
+    ...findingsSection(doc, width, styles, input.links),
+  ];
   // A green all-clear is only allowed when the review actually RAN. A dead
   // session also reaches here with `findings: []`, and "no findings" over a
   // review that never happened is the same lie the comparison and posting
