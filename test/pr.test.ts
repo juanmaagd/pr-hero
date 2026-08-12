@@ -20,6 +20,7 @@
 // identity marker and its claim, verbatim, never via argv".
 
 import { describe, expect, test } from "bun:test";
+import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
 import {
   fetchPostedFindingComments,
@@ -282,6 +283,14 @@ describe("fetchPostedFindingComments — marker prefix disjointness", () => {
   });
 });
 
+// PrHeroFindingRef conversion — postPrReview's `allFindings` argument is the
+// FULL finding list the plan matched against (CRIT-A fix, verify-report-pr3
+// #3305), not the review-submission subset. Findings' own shape already
+// carries every field a ref needs.
+function toRef(f: Finding): PrHeroFindingRef {
+  return { id: f.id, path: f.path, line: f.line, claim: f.claim, tier: f.tier };
+}
+
 describe("postPrReview", () => {
   test("zero anchorable findings never reaches gh at all", async () => {
     const { spawnFn, calls } = makeFakeGh([]);
@@ -290,7 +299,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings: [],
-      consumedCommentIds: [],
+      allFindings: [],
       spawnFn,
     });
     expect(outcome).toEqual({ outcome: "posted", findings: [] });
@@ -313,7 +322,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
-      consumedCommentIds: [],
+      allFindings: findings.map(toRef),
       spawnFn,
     });
     expect(outcome).toEqual({ outcome: "posted", findings });
@@ -357,7 +366,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
-      consumedCommentIds: [],
+      allFindings: findings.map(toRef),
       spawnFn,
     });
     expect(capturedStdin).toBeDefined();
@@ -394,7 +403,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
-      consumedCommentIds: [],
+      allFindings: findings.map(toRef),
       spawnFn,
     });
     expect(outcome.outcome).toBe("demoted");
@@ -460,7 +469,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
-      consumedCommentIds: [],
+      allFindings: findings.map(toRef),
       spawnFn,
     });
     expect(outcome.outcome).toBe("demoted");
@@ -468,15 +477,40 @@ describe("postPrReview", () => {
     expect(outcome.findings.map((f) => f.id)).toEqual(["F002"]);
   });
 
-  // A comment the PLAN already claimed for a persisting finding must not be
-  // available to the recovery's re-match: matchPostedFindings is one-to-one
-  // only across the list it is handed, and the recovery is handed a SUBSET,
-  // so a claimed comment would swallow a genuinely new finding and drop it
-  // from both channels. Fails without `consumedCommentIds`.
-  test("a claimed comment cannot swallow a fresh finding on 422", async () => {
-    const claimed =
+  // CRIT-A (verify-report-pr3, #3305) — the property this whole recovery
+  // exists to hold: a finding must reach neither-channel NEVER, for ANY
+  // arrangement, not just the one arrangement PR2's regression test covered.
+  // This is the verifier's exact tie-dissolution repro. Prior comments R1 @
+  // line 100 and R2 @ line 104 both sit within FINDING_LINE_WINDOW (5) of
+  // F001 @ line 102 — a genuine tie the ORIGINAL plan (buildPostPlan, called
+  // with the full finding list) resolves by posting F001 fresh, because
+  // F002 @ line 104 exactly claims R2 and F001's distance to R1 and R2 is
+  // identical (2 and 2). The bug this guards: re-matching only the review
+  // submission's OWN subset (`findings: [F001]`) against a comment set with
+  // R2 excluded would leave R1 as F001's SOLE candidate, dissolving the tie
+  // and silently swallowing F001. Passing the FULL finding list as
+  // `allFindings` reproduces the plan's own tie exactly, so F001 stays
+  // fresh — this is the assertion that fails if `allFindings` is ever
+  // narrowed back to `findings` (reintroducing CRIT-A).
+  test("a tie the plan already resolved to 'post fresh' survives the 422 recovery (CRIT-A)", async () => {
+    const r1 =
       "<!-- pr-hero-finding path=src%2Fa.ts line=100 head=" +
-      `${HEAD} c=abcdef123456 -->\nclaim text`;
+      `${HEAD} c=000000000000 -->\nprior claim one`;
+    const r2 =
+      "<!-- pr-hero-finding path=src%2Fa.ts line=104 head=" +
+      `${HEAD} c=000000000000 -->\nprior claim two`;
+    const f001 = finding({
+      id: "F001",
+      path: "src/a.ts",
+      line: 102,
+      claim: "a genuinely new finding, distinct from either prior comment",
+    });
+    const f002 = finding({
+      id: "F002",
+      path: "src/a.ts",
+      line: 104,
+      claim: "matches the prior comment at line 104 exactly",
+    });
     const { spawnFn } = makeFakeGh([
       {
         match: ["pulls/42/reviews"],
@@ -490,12 +524,21 @@ describe("postPrReview", () => {
         response: {
           stdout: ndjson([
             {
-              id: 7,
+              id: 101,
               user: "pr-hero",
-              body: claimed,
+              body: r1,
               path: "src/a.ts",
               line: 100,
               original_line: 100,
+              in_reply_to_id: null,
+            },
+            {
+              id: 102,
+              user: "pr-hero",
+              body: r2,
+              path: "src/a.ts",
+              line: 104,
+              original_line: 104,
               in_reply_to_id: null,
             },
           ]),
@@ -507,14 +550,19 @@ describe("postPrReview", () => {
       operatorRoot: OPERATOR_ROOT,
       pr: 42,
       headSha: HEAD,
-      // Comment 7 belongs to a persisting finding the plan handled; F002 sits
-      // 3 lines away, inside FINDING_LINE_WINDOW.
-      findings: [finding({ id: "F002", path: "src/a.ts", line: 103 })],
-      consumedCommentIds: [7],
+      // The submission the plan actually made: only F001 (F002 already
+      // persisted to R2 and never reached the review endpoint at all).
+      findings: [f001],
+      // The FULL finding list, exactly as buildPostPlan saw it — this is
+      // what preserves the tie.
+      allFindings: [f001, f002].map(toRef),
       spawnFn,
     });
     expect(outcome.outcome).toBe("demoted");
-    expect(outcome.findings.map((f) => f.id)).toEqual(["F002"]);
+    // F001 must still be here — reaching the issue-comment channel — never
+    // silently dropped because R2 (claimed by F002) briefly looked like its
+    // sole remaining candidate.
+    expect(outcome.findings.map((f) => f.id)).toEqual(["F001"]);
   });
 
   test("a non-422 failure fails loud rather than silently degrading", async () => {
@@ -524,13 +572,14 @@ describe("postPrReview", () => {
         response: { stderr: "gh: server error (HTTP 500)", exitCode: 1 },
       },
     ]);
+    const f001 = finding({ id: "F001" });
     await expect(
       postPrReview({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
         headSha: HEAD,
-        findings: [finding({ id: "F001" })],
-        consumedCommentIds: [],
+        findings: [f001],
+        allFindings: [f001].map(toRef),
         spawnFn,
       }),
     ).rejects.toThrow(/post PR review/);

@@ -128,8 +128,16 @@ export async function ghPrView(
 // — "review the PR I am standing on". Returns raw stdout for the pure
 // resolveCurrentPrNumber; a branch with no PR fails loud, with gh's own
 // message appended because it names the branch.
-export async function ghCurrentBranchPr(operatorRoot: string): Promise<string> {
-  const result = await gh(operatorRoot, ["pr", "view", "--json", "number"]);
+export async function ghCurrentBranchPr(
+  operatorRoot: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<string> {
+  const result = await gh(
+    operatorRoot,
+    ["pr", "view", "--json", "number"],
+    undefined,
+    options?.spawnFn,
+  );
   if (!result.ok) {
     throw new CliError(
       `no PR found for the current branch of ${operatorRoot} — open one ` +
@@ -205,16 +213,15 @@ export async function ghPrFiles(
 
 export async function ghRepoWebUrl(
   operatorRoot: string,
+  options?: { spawnFn?: typeof Bun.spawn },
 ): Promise<string | undefined> {
   try {
-    const result = await gh(operatorRoot, [
-      "repo",
-      "view",
-      "--json",
-      "url",
-      "-q",
-      ".url",
-    ]);
+    const result = await gh(
+      operatorRoot,
+      ["repo", "view", "--json", "url", "-q", ".url"],
+      undefined,
+      options?.spawnFn,
+    );
     if (!result.ok) return undefined;
     const url = result.stdout.trim();
     return url === "" ? undefined : url;
@@ -643,14 +650,27 @@ function is422(stderr: string): boolean {
 
 export interface ReviewSubmissionOutcome {
   // "posted": every finding in `findings` is now in the one review.
-  // "demoted": the review was rejected (422); `findings` is the subset
-  //   STILL unmatched after a live re-fetch + re-match — the caller posts
-  //   these as individual issue comments instead. A finding drops out of this
-  //   set ONLY when the re-match found it already covered by a comment no
-  //   other finding claims (a race, or a leftover from a crashed prior
-  //   attempt) — it already has a home. That guarantee holds only because
-  //   `consumedCommentIds` keeps the plan's already-claimed comments out of
-  //   the re-match; see the WHY on that field.
+  // "demoted": the review was rejected (422); `findings` is the subset of
+  //   the ORIGINAL submission still classified fresh after a FULL re-match —
+  //   the caller posts these as individual issue comments instead.
+  //
+  // WHY a full re-match, not a re-match over `findings` alone (CRIT-A,
+  // verify-report-pr3 #3305 — the bug the previous `consumedCommentIds`
+  // design left in place): matchPostedFindings is one-to-one only across the
+  // finding list it is handed. Re-running it over `findings` — a SUBSET of
+  // what buildPostPlan matched in the first place — can DISSOLVE A TIE: a
+  // comment the full plan adjudicated to some OTHER, already-persisting
+  // finding becomes the sole remaining candidate here and silently swallows
+  // a genuinely new finding, even though the plan itself resolved that exact
+  // tie by posting fresh. Re-matching the FULL finding list (`allFindings`,
+  // the exact set the plan matched) against the fresh fetch reproduces the
+  // plan's own adjudication byte-for-byte whenever GitHub created nothing —
+  // the common case, since a 422 means the review was never persisted — and
+  // diverges from it only where GitHub genuinely created something between
+  // the plan and this call, which is the only case the recovery should
+  // differ in at all. Tie- and order-independent by construction: unlike the
+  // old subset-and-exclude approach, nothing here depends on which findings
+  // happened to be excluded first.
   outcome: "posted" | "demoted";
   findings: Finding[];
 }
@@ -685,17 +705,12 @@ export async function postPrReview(input: {
   pr: number;
   headSha: string;
   findings: Finding[];
-  // Ids of comments the plan ALREADY matched to a persisting finding.
-  // REQUIRED, not optional, so a caller cannot forget it silently.
-  //
-  // WHY: matchPostedFindings is one-to-one only across the finding list it
-  // is handed. The recovery re-runs it over `findings` alone — the plan's
-  // anchorable-fresh subset — so a comment the full plan already claimed for
-  // some OTHER finding is free again here and can swallow a genuinely new
-  // one, which then lands in neither channel. A one-to-one matcher re-run
-  // over a subset of its inputs silently loses the guarantee. Excluding the
-  // claimed comments restores it.
-  consumedCommentIds: number[];
+  // The FULL finding list this run is considering — the exact set
+  // buildPostPlan matched against `posted` to produce the plan in the first
+  // place (not just `findings`, the anchorable-fresh subset). REQUIRED, not
+  // optional, so a caller cannot silently narrow it and reintroduce CRIT-A —
+  // see ReviewSubmissionOutcome's WHY above for the failure this closes.
+  allFindings: PrHeroFindingRef[];
   webUrl?: string;
   spawnFn?: typeof Bun.spawn;
 }): Promise<ReviewSubmissionOutcome> {
@@ -736,23 +751,20 @@ export async function postPrReview(input: {
       `gh api (post PR review) failed: ${result.stderr.trim()}`,
     );
   }
-  const claimed = new Set(input.consumedCommentIds);
-  const posted = (
-    await fetchPostedFindingComments(input.operatorRoot, input.pr, {
-      spawnFn: input.spawnFn,
-    })
-  ).filter((comment) => !claimed.has(comment.id));
+  const posted = await fetchPostedFindingComments(
+    input.operatorRoot,
+    input.pr,
+    { spawnFn: input.spawnFn },
+  );
   const match = matchPostedFindings({
-    findings: input.findings,
+    findings: input.allFindings,
     posted,
     headSha: input.headSha,
   });
-  const stillUnmatched = new Set(match.fresh.map((finding) => finding.id));
+  const stillFreshIds = new Set(match.fresh.map((finding) => finding.id));
   return {
     outcome: "demoted",
-    findings: input.findings.filter((finding) =>
-      stillUnmatched.has(finding.id),
-    ),
+    findings: input.findings.filter((finding) => stillFreshIds.has(finding.id)),
   };
 }
 

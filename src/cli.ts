@@ -1118,6 +1118,24 @@ async function reviewPr(
 // here so test/cli.test.ts can drive the WHOLE sequence, including the
 // summary PATCH, through one shared fake gh.
 
+// The exact oracle behind `droppedFindingIds` (design D6's exit-1 rule),
+// pinned as its own pure function — WARN-1 (verify-report-pr3, #3305): under
+// the CRIT-A fix, a genuine drop is no longer REACHABLE through normal
+// execution (every finding the plan classified fresh now ends up in exactly
+// one of `reachedIds` or the demoted-and-matched set), which is the correct
+// outcome but leaves the formula itself untestable through composition
+// alone — the only way to exercise a non-empty result is a hand-built
+// `reached` set, exactly the way `postingExitCode` is already tested against
+// a hand-built literal. Extracted so a future regression in the SET
+// arithmetic (not the posting sequence) is still caught.
+export function computeDroppedFindingIds(
+  expectedFresh: PrHeroFindingRef[],
+  reached: ReadonlySet<string>,
+): string[] {
+  const expectedIds = new Set(expectedFresh.map((f) => f.id));
+  return [...expectedIds].filter((id) => !reached.has(id));
+}
+
 export interface InlinePostOutcome {
   reviewOutcome: "posted" | "demoted";
   reviewFindingCount: number;
@@ -1147,7 +1165,16 @@ async function resolveInlinePostPlan(input: {
   doc: FindingsDocument;
   diffPatch: string;
   spawnFn?: typeof Bun.spawn;
-}): Promise<{ plan: PostPlan; previousHeadSha: string | undefined }> {
+}): Promise<{
+  plan: PostPlan;
+  previousHeadSha: string | undefined;
+  // The FULL finding list the plan matched against — threaded through to
+  // postPrReview's 422 recovery so it can re-match with the SAME finding
+  // set the plan used, never a narrower one (CRIT-A, verify-report-pr3
+  // #3305: re-matching a subset can dissolve a tie the plan already
+  // resolved). See ReviewSubmissionOutcome's WHY in pr.ts.
+  findingRefs: PrHeroFindingRef[];
+}> {
   const issueComments = await fetchPrComments(input.operatorRoot, input.pr, {
     spawnFn: input.spawnFn,
   });
@@ -1177,7 +1204,7 @@ async function resolveInlinePostPlan(input: {
     posted,
     headSha: input.headSha,
   });
-  return { plan, previousHeadSha };
+  return { plan, previousHeadSha, findingRefs };
 }
 
 // The actual post sequence (design D6): review submission (with 422
@@ -1195,21 +1222,14 @@ export async function postInlineFindings(input: {
   spawnFn?: typeof Bun.spawn;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
-  const { plan, previousHeadSha } = await resolveInlinePostPlan(input);
+  const { plan, previousHeadSha, findingRefs } =
+    await resolveInlinePostPlan(input);
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
   const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
     refs
       .map((ref) => byId.get(ref.id))
       .filter((f): f is Finding => f !== undefined);
 
-  // Ids of comments the plan ALREADY matched to a persisting finding — passed
-  // to postPrReview's `consumedCommentIds` so a 422 recovery cannot let one
-  // of them swallow a DIFFERENT, genuinely new finding (a3b3d3a, the CRIT-1
-  // fix). Deriving it from `plan.persisting` here — not an empty array — is
-  // exactly the thing a caller could silently get wrong and reintroduce the
-  // bug; see the mutation test in test/cli.test.ts that fails when this line
-  // is replaced with `[]`.
-  const consumedCommentIds = plan.persisting.map((match) => match.posted.id);
   const reviewFindings = findingsFor(plan.reviewComments);
   const reachedIds = new Set<string>();
 
@@ -1218,7 +1238,12 @@ export async function postInlineFindings(input: {
     pr,
     headSha,
     findings: reviewFindings,
-    consumedCommentIds,
+    // The FULL finding list, not just `reviewFindings` — see
+    // ReviewSubmissionOutcome's WHY in pr.ts (CRIT-A, verify-report-pr3
+    // #3305). This is exactly the line a caller could silently narrow and
+    // reintroduce the tie-dissolution bug; test/cli.test.ts's tie-repro
+    // fails if this is ever swapped back to `reviewFindings`.
+    allFindings: findingRefs,
     webUrl,
     spawnFn,
   });
@@ -1249,11 +1274,9 @@ export async function postInlineFindings(input: {
     reachedIds.add(finding.id);
   }
 
-  const expectedFreshIds = new Set(
-    [...plan.reviewComments, ...plan.issueComments].map((f) => f.id),
-  );
-  const droppedFindingIds = [...expectedFreshIds].filter(
-    (id) => !reachedIds.has(id),
+  const droppedFindingIds = computeDroppedFindingIds(
+    [...plan.reviewComments, ...plan.issueComments],
+    reachedIds,
   );
 
   const delta: PrCommentDelta = { ...plan.delta, previousHeadSha };
@@ -1362,6 +1385,17 @@ export function assertRunMatchesPr(
 // step 3, BEFORE any findings exist (see the comment there): it is
 // structurally impossible for `--pr --dry-run` to preview a comment plan, so
 // this verb is the only way to preview one at $0.
+//
+// `postCommand` itself stays unexported and untestable on purpose — it is
+// nothing but `resolveRepoRoot` (a real `git rev-parse`) plus flag
+// narrowing. Everything that can actually go wrong (dry-run vs live, the
+// run-status guard, `assertRunMatchesPr`, the receipt) lives in
+// `runPostCommand`, exported and `spawnFn`-injectable on EVERY gh-touching
+// path including dry-run (CRIT-B, verify-report-pr3 #3305: an unexported
+// verb whose dry-run branch never threaded spawnFn could not be proven not
+// to reach a real `gh` — this is the $0 gate standing in front of the first
+// live GitHub write this project will ever make, and it must not be
+// possible to invert it with a green suite).
 async function postCommand(options: CliOptions): Promise<number> {
   const operatorRoot = await resolveRepoRoot(options.repo);
   // parseArgs already enforces both of these for the "post" command; the
@@ -1376,7 +1410,23 @@ async function postCommand(options: CliOptions): Promise<number> {
     options.pr === "current"
       ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
       : options.pr;
-  const runDir = path.resolve(options.from);
+  return runPostCommand({
+    operatorRoot,
+    pr: prNumber,
+    from: options.from,
+    dryRun: options.dryRun,
+  });
+}
+
+export async function runPostCommand(input: {
+  operatorRoot: string;
+  pr: number;
+  from: string;
+  dryRun: boolean;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const { operatorRoot, pr: prNumber, dryRun, spawnFn } = input;
+  const runDir = path.resolve(input.from);
   const findingsPath = path.join(runDir, "findings.json");
   const diffPath = path.join(runDir, "diff.patch");
   if (!existsSync(findingsPath) || !existsSync(diffPath)) {
@@ -1395,30 +1445,38 @@ async function postCommand(options: CliOptions): Promise<number> {
   // #17's findings to PR #18 because someone reused a stale --from.
   assertRunMatchesPr(doc, prNumber, runDir);
   const diffPatch = await Bun.file(diffPath).text();
-  // sessionFailed itself is never PERSISTED to findings.json — only the
-  // pipeline's own in-memory result carries it (mergeRunEnvelope only reads
-  // it to decide run_status, see findings.ts). run_status !== "complete" is
-  // the closest signal a disk artifact retains, and it is the conservative
-  // direction: every genuinely-sessionFailed run IS "partial" (mergeRunEnvelope
-  // forces it), so this guard never UNDER-fires; it can only over-fire on a
-  // partial run that failed for some OTHER reason, which still means "do not
-  // publish this as a clean review" — the honest answer either way.
-  const sessionFailedEquivalent = doc.run_status !== "complete";
+  // Juanma's decision (verify-report-pr3, #3305): guard on the PERSISTED
+  // `sessionFailed`, matching `--pr --post` (cli.ts's `postInlineIfEligible`
+  // call, guarded on `result.sessionFailed`) exactly — a partial run with
+  // findings from SOME hunters still publishes, same as the live path.
+  //
+  // Back-compat is mandatory: `sessionFailed` is additive/optional
+  // (findings.ts), so a run written before this change has no such field.
+  // Absent MUST mean "unknown", never "false" — falling back to `false`
+  // would publish a dead run's clean bill. The fallback is today's
+  // conservative proxy, `run_status !== "complete"`: every genuinely
+  // sessionFailed run IS "partial" (mergeRunEnvelope forces it), so the
+  // proxy never UNDER-fires; it can only OVER-fire on a partial run that
+  // failed for some other reason, which is still the honest "do not publish
+  // this as a clean review" answer.
+  const sessionFailedEquivalent =
+    doc.sessionFailed ?? doc.run_status !== "complete";
   if (sessionFailedEquivalent) {
     log(
       `post skipped: ${findingsPath} is not a complete run ` +
         `(run_status=${doc.run_status}), so there is no review to publish`,
     );
-    return options.dryRun ? 0 : 1;
+    return dryRun ? 0 : 1;
   }
 
-  if (options.dryRun) {
+  if (dryRun) {
     const { plan, previousHeadSha } = await resolveInlinePostPlan({
       operatorRoot,
       pr: prNumber,
       headSha: doc.head_sha,
       doc,
       diffPatch,
+      spawnFn,
     });
     log(
       `plan: ${plan.reviewComments.length} review comment(s), ` +
@@ -1441,7 +1499,7 @@ async function postCommand(options: CliOptions): Promise<number> {
     return 0;
   }
 
-  const repoWebUrl = await ghRepoWebUrl(operatorRoot);
+  const repoWebUrl = await ghRepoWebUrl(operatorRoot, { spawnFn });
   if (repoWebUrl === undefined) {
     log("repo web url unavailable: posting plain locations");
   }
@@ -1452,6 +1510,7 @@ async function postCommand(options: CliOptions): Promise<number> {
     doc,
     diffPatch,
     webUrl: repoWebUrl,
+    spawnFn,
   });
   await writePostReceipt(runDir, prNumber, doc.head_sha, outcome);
   log(
