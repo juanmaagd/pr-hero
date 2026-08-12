@@ -636,11 +636,12 @@ export interface ReviewSubmissionOutcome {
   // "posted": every finding in `findings` is now in the one review.
   // "demoted": the review was rejected (422); `findings` is the subset
   //   STILL unmatched after a live re-fetch + re-match — the caller posts
-  //   these as individual issue comments instead. A finding dropped out of
-  //   this set because the re-match found it already covered (a race, or a
-  //   leftover from a crashed prior attempt) is neither reposted nor lost —
-  //   it already has a home, which is the whole point of recovering through
-  //   the matcher instead of through the failed POST's own bookkeeping.
+  //   these as individual issue comments instead. A finding drops out of this
+  //   set ONLY when the re-match found it already covered by a comment no
+  //   other finding claims (a race, or a leftover from a crashed prior
+  //   attempt) — it already has a home. That guarantee holds only because
+  //   `consumedCommentIds` keeps the plan's already-claimed comments out of
+  //   the re-match; see the WHY on that field.
   outcome: "posted" | "demoted";
   findings: Finding[];
 }
@@ -675,6 +676,17 @@ export async function postPrReview(input: {
   pr: number;
   headSha: string;
   findings: Finding[];
+  // Ids of comments the plan ALREADY matched to a persisting finding.
+  // REQUIRED, not optional, so a caller cannot forget it silently.
+  //
+  // WHY: matchPostedFindings is one-to-one only across the finding list it
+  // is handed. The recovery re-runs it over `findings` alone — the plan's
+  // anchorable-fresh subset — so a comment the full plan already claimed for
+  // some OTHER finding is free again here and can swallow a genuinely new
+  // one, which then lands in neither channel. A one-to-one matcher re-run
+  // over a subset of its inputs silently loses the guarantee. Excluding the
+  // claimed comments restores it.
+  consumedCommentIds: number[];
   webUrl?: string;
   spawnFn?: typeof Bun.spawn;
 }): Promise<ReviewSubmissionOutcome> {
@@ -715,11 +727,12 @@ export async function postPrReview(input: {
       `gh api (post PR review) failed: ${result.stderr.trim()}`,
     );
   }
-  const posted = await fetchPostedFindingComments(
-    input.operatorRoot,
-    input.pr,
-    { spawnFn: input.spawnFn },
-  );
+  const claimed = new Set(input.consumedCommentIds);
+  const posted = (
+    await fetchPostedFindingComments(input.operatorRoot, input.pr, {
+      spawnFn: input.spawnFn,
+    })
+  ).filter((comment) => !claimed.has(comment.id));
   const match = matchPostedFindings({
     findings: input.findings,
     posted,
