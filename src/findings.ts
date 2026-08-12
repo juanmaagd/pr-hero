@@ -125,6 +125,21 @@ export interface FindingsDocument {
   engine?: { name: string; version: string };
   parity_hunter_fired: boolean;
   run_status: RunStatus;
+  // Juanma's decision (verify-report-pr3, #3305), over the verifier's cheaper
+  // "make `post` as permissive as `--pr --post`" suggestion: `run_status:
+  // "partial"` with zero findings covers at least THREE distinct situations
+  // — every hunter failed (the true sessionFailed case, pipeline.ts:771),
+  // no hunter ran at all because gotchas were missing (pipeline.ts:330-352,
+  // sessionFailed: false), or one hunter died while the others found
+  // nothing. `run_status` alone cannot tell these apart, so a permissive
+  // `post` verb would publish a clean bill for a review that never ran.
+  // ADDITIVE and OPTIONAL, same precedent as `root_cause_id` above: both
+  // validators are allowlists that never reject unknown keys, so schema
+  // stays 1.0.0 (project rule 5 — lab compatibility is sacred) and an
+  // existing artifact without this field still validates. Absent MUST mean
+  // "unknown", never "false" — see `runPostCommand`'s guard in cli.ts for
+  // the back-compat fallback this enables.
+  sessionFailed?: boolean;
   telemetry: Telemetry;
   findings: Finding[];
   debug: {
@@ -270,6 +285,14 @@ export function validateFindingsDocument(candidate: unknown): FindingsDocument {
     d.run_status === "complete" || d.run_status === "partial",
     "run_status must be complete|partial",
   );
+  // Additive/optional (root_cause_id precedent): absent is valid (older
+  // artifacts), but a PRESENT value must be a boolean — same "reject only
+  // bad values of known keys, never unknown keys" allowlist discipline as
+  // every other optional field here.
+  must(
+    d.sessionFailed === undefined || typeof d.sessionFailed === "boolean",
+    "sessionFailed must be a boolean when present",
+  );
   must(
     typeof d.telemetry === "object" && d.telemetry !== null,
     "telemetry required",
@@ -337,6 +360,7 @@ export function mergeRunEnvelope(params: {
     ...(params.engine ? { engine: params.engine } : {}),
     parity_hunter_fired: params.skillOutput.parity_hunter_fired,
     run_status,
+    sessionFailed: params.sessionFailed,
     telemetry: params.telemetry,
     findings: params.skillOutput.findings,
     debug: params.skillOutput.debug,

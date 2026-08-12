@@ -5,6 +5,7 @@ import {
   deriveTier,
   type Finding,
   type FindingsDocument,
+  mergeRunEnvelope,
   SCHEMA_VERSION,
   validateFindingsDocument,
 } from "../src/findings";
@@ -86,6 +87,89 @@ describe("findings schema round-trip", () => {
       engine: { name: "pr-hero", version: "0.1.0" },
     };
     expect(() => validateFindingsDocument(doc)).not.toThrow();
+  });
+
+  // Juanma's decision (verify-report-pr3, #3305): sessionFailed is additive
+  // and optional, same root_cause_id precedent — schema stays 1.0.0.
+  test("accepts an optional sessionFailed: true", () => {
+    const doc = { ...baseDocument(), sessionFailed: true };
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+  });
+
+  test("accepts an optional sessionFailed: false", () => {
+    const doc = { ...baseDocument(), sessionFailed: false };
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+  });
+
+  test("accepts a document with sessionFailed entirely absent (legacy artifact)", () => {
+    const doc = baseDocument();
+    expect("sessionFailed" in doc).toBe(false);
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+  });
+
+  test("rejects a non-boolean sessionFailed", () => {
+    const doc = { ...baseDocument(), sessionFailed: "true" };
+    expect(() => validateFindingsDocument(doc)).toThrow();
+  });
+});
+
+describe("mergeRunEnvelope — sessionFailed persistence", () => {
+  const envelopeArgs = {
+    pr: 1546,
+    base_sha: "b4efc4c2c2e3b37445b4505171006ed05130c2cc",
+    head_sha: "067297acd7e7aac125a156bf597f4d05d255659e",
+    model: "sonnet",
+    iteration: 1,
+    telemetry: {
+      index_ms: 1000,
+      index_mode: "fresh" as const,
+      index_disk_mb: 12,
+      wall_ms: 5000,
+      tokens_in: 100,
+      tokens_out: 50,
+      tokens_total: 150,
+      cost_usd_est: 0.5,
+    },
+  };
+  function skillOutput(runStatus: "complete" | "partial") {
+    return {
+      findings: [],
+      debug: { refuted: [] },
+      parity_hunter_fired: false,
+      run_status: runStatus,
+    };
+  }
+
+  test("sessionFailed: true is persisted onto the document", () => {
+    const doc = mergeRunEnvelope({
+      ...envelopeArgs,
+      skillOutput: skillOutput("partial"),
+      sessionFailed: true,
+    });
+    expect(doc.sessionFailed).toBe(true);
+    expect(doc.run_status).toBe("partial");
+  });
+
+  test("sessionFailed: false is persisted, even on a partial run (some hunter died, others found nothing)", () => {
+    const doc = mergeRunEnvelope({
+      ...envelopeArgs,
+      skillOutput: skillOutput("partial"),
+      sessionFailed: false,
+    });
+    expect(doc.sessionFailed).toBe(false);
+    expect(doc.run_status).toBe("partial");
+    // The artifact can tell "every hunter failed" and "a partial run for
+    // some OTHER reason" apart even though run_status alone cannot.
+  });
+
+  test("sessionFailed: false on a complete run round-trips through validateFindingsDocument", () => {
+    const doc = mergeRunEnvelope({
+      ...envelopeArgs,
+      skillOutput: skillOutput("complete"),
+      sessionFailed: false,
+    });
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+    expect(doc.sessionFailed).toBe(false);
   });
 });
 
