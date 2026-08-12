@@ -670,6 +670,32 @@ What is still manual, in the order it should be closed:
      subsequent run: `2 persist (1 dismissed)`. It is never reposted (no ping-pong) and never
      disappears. Zero extra cost — it reuses the matcher item 6 already builds.
 
+   **WHAT STOPS AN ARGUMENT — decided with Juanma 2026-08-12, and this was the stated precondition for
+   starting 6b at all.** Tracing it first corrected the fear: the loop does not spin on its own. Triage
+   runs on FRESH findings, and by run two the matcher classifies an already-posted finding as
+   `persist`, so it is never reposted and nobody calls the adjudicator again. The runaway cost was an
+   assumption about an automatic re-triage that exists nowhere.
+
+   The real hazard is the opposite one. Without a rule, an `inconclusive` sits open forever — neither
+   settled nor dismissed, a thread nobody revisits. Not a loop, a LEAK. The design has to land between
+   "re-triage always" (unbounded cost) and "never re-triage" (silent accumulation).
+
+   **The head is the budget unit: one adjudication per finding per head.** This needs no new state —
+   the per-finding marker already carries `head=<sha>`, so the bound is checkable by reading the
+   posted comment itself, exactly like every other piece of cross-run state in item 6. Everything else
+   follows:
+   - head unchanged → no new code, nothing to re-judge, nothing spent;
+   - head changed AND it touched the finding's lines → the evidence itself changed, so re-opening the
+     adjudication is legitimate and is the only case that pays again;
+   - head changed but did not touch those lines → the verdict stands, nothing spent.
+
+   **The stop is escalation, not a retry counter: after 2 consecutive heads at `inconclusive`, the
+   finding leaves the machine and goes to a human.** If two different heads with real code changes
+   between them did not settle it, a third will not — and by then the thread carries enough material
+   for a person to rule in a minute. The machine admitting it cannot converge is the terminator; a
+   bigger attempt budget would only buy more of the same. This is also the human-as-objector rule
+   arriving where it belongs: as the tie-break when the author and the adjudicator cannot agree.
+
    **What none of this fixes, stated because it is true.** Isolation is not a guarantee. The refuter is
    a detached, adversarial, per-finding judge built to demand cited disproof, and on this repo's own
    PR #1 it corroborated `pr.ts:68` — filed `introduced` when `ghPrList` (`watch.ts:243`) has carried
