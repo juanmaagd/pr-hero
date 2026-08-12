@@ -126,6 +126,7 @@ import {
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
 import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
+import { log } from "./ui";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
@@ -149,10 +150,6 @@ const CODEGRAPH_ONLY_MCP_CONFIG = {
 };
 
 const EMPTY_MCP_CONFIG = { mcpServers: {} };
-
-function log(line = ""): void {
-  process.stderr.write(`${line}\n`);
-}
 
 // Exclusions are a MUTATION of the reviewed diff, so they are stated out
 // loud: an operator who is told "3 files reviewed" must be able to see that
