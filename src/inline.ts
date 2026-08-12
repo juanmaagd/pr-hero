@@ -11,7 +11,7 @@
 // network, no filesystem. cli.ts and pr.ts execute what this module plans.
 
 import type { PrHeroFindingRef } from "./compare";
-import type { ParsedFindingMarker } from "./pr-preflight";
+import { claimFingerprint, type ParsedFindingMarker } from "./pr-preflight";
 import { diffRecordPath, splitDiffRecords } from "./size-gate";
 
 // ---------------------------------------------------------------------------
@@ -133,6 +133,55 @@ export interface MatchResult {
   resolved: PostedFindingComment[];
 }
 
+interface Candidate {
+  posted: PostedFindingComment;
+  // 0 for a same-head exact stored-line match; otherwise the window
+  // distance computed on the live line. Kept as one number so tie-detection
+  // (`resolveWinner`) does not need to know which branch produced it.
+  distance: number;
+}
+
+// Per-candidate: same head → exact match on the marker's STORED line first,
+// falling back to the ±window on the live line; different head → window
+// only (design D2). WHY the branch exists at all, not just "window on live
+// line" everywhere: GitHub RE-ANCHORS a review comment's live `line`
+// whenever the PR's diff changes — and the diff changes when the BASE
+// branch advances, with no new push to the head. A marker stored at
+// `a.ts:100`, a finding still at `a.ts:100`, and a base-driven live line of
+// `112` is a same-head, zero-drift finding; keying on the live line alone
+// (distance 12 > window 5) misses it and reposts a finding that never
+// moved, which is exactly the daylight spec R11's "an unchanged head MUST
+// NOT repost" exists to close. The live PATH is still preferred in both
+// branches (it follows renames; the marker's path goes stale) — it is only
+// the LINE that must prefer the marker on a same-head comparison.
+function candidatesFor(
+  finding: PrHeroFindingRef,
+  available: Iterable<PostedFindingComment>,
+  window: number,
+  headSha: string,
+): Candidate[] {
+  const exact: Candidate[] = [];
+  const windowed: Candidate[] = [];
+  for (const posted of available) {
+    const path = posted.livePath ?? posted.marker.path;
+    if (path !== finding.path) continue;
+    const sameHead = posted.marker.headSha === headSha;
+    if (sameHead && posted.marker.line === finding.line) {
+      exact.push({ posted, distance: 0 });
+      continue;
+    }
+    const line = posted.liveLine ?? posted.marker.line;
+    const distance = Math.abs(line - finding.line);
+    if (distance > window) continue;
+    windowed.push({ posted, distance });
+  }
+  // A same-head exact stored-line match always outranks every window
+  // candidate for this finding, even one that happens to also sit at
+  // distance 0 on the live line — the exact branch is authoritative, not
+  // merely a tiebreak, per design D2's ordering ("exact first, THEN window").
+  return exact.length > 0 ? exact : windowed;
+}
+
 // One-to-one, greedy-nearest, UNDER-match by construction (spec "Match by
 // path and a narrow line window, one-to-one" + "Ambiguous matches post as
 // new, never a forced match"). Findings are matched in input order; each
@@ -141,7 +190,25 @@ export interface MatchResult {
 // identical minimum distance) resolves to POST, never to an arbitrary pick —
 // this is the test that would fail if someone later widened the window or
 // made the match many-to-many: widen it and a tie that used to post fresh
-// starts silently forcing a match instead.
+// starts silently forcing a match instead. The one exception is the `c`
+// fingerprint tie-break (design D3): among candidates ALREADY tied at the
+// minimum distance, a fingerprint match picks the winner. It never widens
+// the window and never overrides a strictly nearer candidate — it only
+// resolves a tie that would otherwise post fresh, and a tie where no
+// candidate's fingerprint matches still falls through to post-as-new.
+function resolveWinner(
+  finding: PrHeroFindingRef,
+  candidates: Candidate[],
+): PostedFindingComment | undefined {
+  if (candidates.length === 0) return undefined;
+  const minDistance = Math.min(...candidates.map((c) => c.distance));
+  const tied = candidates.filter((c) => c.distance === minDistance);
+  if (tied.length === 1) return tied[0]?.posted;
+  const fingerprint = claimFingerprint(finding.claim);
+  const matching = tied.filter((c) => c.posted.marker.c === fingerprint);
+  return matching.length === 1 ? matching[0]?.posted : undefined;
+}
+
 export function matchPostedFindings(input: {
   findings: PrHeroFindingRef[];
   posted: PostedFindingComment[];
@@ -154,31 +221,14 @@ export function matchPostedFindings(input: {
   const fresh: PrHeroFindingRef[] = [];
 
   for (const finding of input.findings) {
-    let best: PostedFindingComment | undefined;
-    let bestDistance = Number.POSITIVE_INFINITY;
-    let ambiguous = false;
-    for (const posted of available) {
-      // Live path (follows renames) wins over the marker's stored path —
-      // design D2.
-      const path = posted.livePath ?? posted.marker.path;
-      if (path !== finding.path) continue;
-      const line = posted.liveLine ?? posted.marker.line;
-      const distance = Math.abs(line - finding.line);
-      if (distance > window) continue;
-      if (distance < bestDistance) {
-        best = posted;
-        bestDistance = distance;
-        ambiguous = false;
-      } else if (distance === bestDistance) {
-        ambiguous = true;
-      }
-    }
-    if (best === undefined || ambiguous) {
+    const candidates = candidatesFor(finding, available, window, input.headSha);
+    const winner = resolveWinner(finding, candidates);
+    if (winner === undefined) {
       fresh.push(finding);
       continue;
     }
-    available.delete(best);
-    persist.push({ finding, posted: best });
+    available.delete(winner);
+    persist.push({ finding, posted: winner });
   }
 
   const matched = new Set(persist.map((match) => match.posted));
