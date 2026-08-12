@@ -124,6 +124,7 @@ function prheroRow(
     },
     verdict: null,
     reasoning: null,
+    actor: null,
     ...over,
   };
 }
@@ -144,6 +145,7 @@ function greptileRow(
     prhero: null,
     verdict: null,
     reasoning: null,
+    actor: null,
     ...over,
   };
 }
@@ -276,6 +278,38 @@ describe("parseComparisonJson", () => {
     expect(comparison.rows[1].reasoning).toBe("verified in the code by hand");
   });
 
+  // ROADMAP B6c: actor gets the same loud per-field validation verdict and
+  // reasoning already have — a closed enum, "agent" | "human" | null —
+  // plus back-compat: files written before `actor` existed have no such
+  // key at all, and absence must fold to explicit `null`, never throw (the
+  // same fallback shape `generated_at` already gets).
+  test.each(["agent", "human", null])("actor: %p parses", (value) => {
+    const comparison = parseComparisonJson(
+      mutated((record) => {
+        (record.rows as Record<string, unknown>[])[1].actor = value;
+      }),
+    );
+    expect(comparison.rows[1].actor).toBe(value);
+  });
+
+  test("a missing actor field (legacy artifact) folds to null, not undefined", () => {
+    expect(parseComparisonJson(PR_1682_RAW).rows[0].actor).toBeNull();
+  });
+
+  test("an unknown actor string is rejected, naming the row", () => {
+    try {
+      parseComparisonJson(
+        mutated((record) => {
+          (record.rows as Record<string, unknown>[])[1].actor = "robot";
+        }),
+      );
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("rows[1].actor");
+    }
+  });
+
   test("a present generated_at must be a non-empty string", () => {
     const stamped = parseComparisonJson(
       mutated((record) => {
@@ -390,6 +424,53 @@ describe("aggregateLedger", () => {
     expect(ledger.prs[0].latest.pending).toHaveLength(1);
     expect(ledger.prs[1].latest.pending).toHaveLength(0);
   });
+
+  // ROADMAP B6c: "the agent decides, and it is audited" — the split must be
+  // visible in the tally, merged across PRs the same way verdictTally is.
+  test("actor tallies split agent/human and merge across PRs", () => {
+    const a = stored({
+      pr: 1,
+      rows: [
+        prheroRow({ verdict: "applied", actor: "agent" }),
+        prheroRow({ verdict: "dismissed/upheld", actor: "agent" }),
+        prheroRow({ verdict: "misclassified/rejected", actor: "human" }),
+      ],
+    });
+    const b = stored({
+      pr: 2,
+      rows: [greptileRow({ verdict: "real", actor: "agent" })],
+    });
+    const ledger = aggregateLedger([
+      { comparison: a, mtimeMs: 1 },
+      { comparison: b, mtimeMs: 2 },
+    ]);
+    // Asymmetric on purpose (3 agent, 1 human): a swap of the two buckets
+    // must fail this test, not slip through on a symmetric fixture.
+    expect(ledger.totals.actorTally).toEqual({ agent: 3, human: 1 });
+    expect(ledger.totals.triaged).toBe(4);
+  });
+
+  // Two null-adjacent edges in one test: (1) a verdict with no recorded
+  // actor (legacy artifact, or a human hand-editing the JSON) counts toward
+  // `triaged` but is NOT guessed into either actor bucket — undercounting
+  // the split is more honest than inventing an actor. (2) an `inconclusive`
+  // adjudication (6c: "actor set with verdict null means adjudicated,
+  // could not settle") stays Pending, never triaged, even though actor IS
+  // written on that row.
+  test("actor: null on a triaged row is uncounted; verdict: null with actor set stays Pending", () => {
+    const comparison = stored({
+      pr: 1,
+      rows: [
+        prheroRow({ verdict: "real", actor: null }),
+        prheroRow({ verdict: null, actor: "agent" }),
+      ],
+    });
+    const ledger = aggregateLedger([{ comparison, mtimeMs: 1 }]);
+    expect(ledger.totals.triaged).toBe(1);
+    expect(ledger.totals.actorTally).toEqual({ agent: 0, human: 0 });
+    expect(ledger.prs[0].latest.pending).toHaveLength(1);
+    expect(ledger.prs[0].latest.pending[0].actor).toBe("agent");
+  });
 });
 
 describe("renderLedger", () => {
@@ -408,6 +489,8 @@ describe("renderLedger", () => {
     expect(markdown).toContain("pr-hero found something on 1 of 1 PRs");
     expect(markdown).toContain("0 of 5 rows triaged");
     expect(markdown).toContain("No verdicts recorded yet");
+    // Nothing triaged yet: the split line reads all-zero, not omitted.
+    expect(markdown).toContain("0 verdicts · 0 by agent · 0 by human.");
     expect(markdown).toContain(
       "- PR 1682 · greptile_only · G1 `packages/app/hooks/useUpdateUserIp.ts:13`",
     );
@@ -426,8 +509,16 @@ describe("renderLedger", () => {
           comparison: stored({
             pr: 1,
             rows: [
-              prheroRow({ verdict: "real", reasoning: "verified" }),
-              greptileRow({ verdict: "fp", reasoning: "style" }),
+              prheroRow({
+                verdict: "real",
+                reasoning: "verified",
+                actor: "agent",
+              }),
+              greptileRow({
+                verdict: "fp",
+                reasoning: "style",
+                actor: "human",
+              }),
             ],
           }),
           mtimeMs: 1,
@@ -439,6 +530,7 @@ describe("renderLedger", () => {
     expect(markdown).not.toContain("No verdicts recorded yet");
     expect(markdown).toContain("Nothing pending");
     expect(markdown).toContain("2 of 2 rows triaged");
+    expect(markdown).toContain("2 verdicts · 1 by agent · 1 by human.");
   });
 
   test("a pending both-row is identified by its pr-hero side", () => {
