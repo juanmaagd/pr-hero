@@ -292,20 +292,26 @@ describe("renderPrComment", () => {
   // and since B3 it declares the document's own head sha, so the watch
   // guard can read WHICH head this comment covers.
   test("the first line is the marker declaring doc.head_sha", () => {
-    expect(renderPrComment(doc()).split("\n")[0]).toBe(prCommentMarker(HEAD));
+    expect(renderPrComment(doc(), undefined, undefined).split("\n")[0]).toBe(
+      prCommentMarker(HEAD),
+    );
     expect(
-      renderPrComment(doc({ findings: [finding({ id: "F001" })] })).split(
-        "\n",
-      )[0],
+      renderPrComment(
+        doc({ findings: [finding({ id: "F001" })] }),
+        undefined,
+        undefined,
+      ).split("\n")[0],
     ).toBe(prCommentMarker(HEAD));
   });
 
   // findMarkedCommentId matches on the prefix; a rendered comment that
   // stopped starting with it would orphan its own update path.
   test("the rendered body starts with the matcher's prefix", () => {
-    expect(renderPrComment(doc()).startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(
-      true,
-    );
+    expect(
+      renderPrComment(doc(), undefined, undefined).startsWith(
+        PR_COMMENT_MARKER_PREFIX,
+      ),
+    ).toBe(true);
   });
 
   // doc.base_sha IS the diff-from commit (the recorded rule in cli.ts), so
@@ -322,7 +328,7 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }));
+    const body = renderPrComment(doc({ findings }), undefined, undefined);
     expect(body).toContain("## pr-hero review");
     expect(body).toContain(
       "**2 blocking · 1 advisory** — `bbbbbbbb`, diff from `aaaaaaaa`",
@@ -349,7 +355,7 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }));
+    const body = renderPrComment(doc({ findings }), undefined, undefined);
     expect(body).not.toContain("### 🔴 Blocking");
     expect(body).not.toContain("### 🟡 Advisory");
     expect(body).not.toContain("#### `src/a.ts:10`");
@@ -361,7 +367,7 @@ describe("renderPrComment", () => {
   });
 
   test("zero findings render the explicit clean bill", () => {
-    const body = renderPrComment(doc());
+    const body = renderPrComment(doc(), undefined, undefined);
     expect(body).toContain("**0 blocking · 0 advisory**");
     expect(body).toContain(
       "✅ pr-hero reviewed this PR and found nothing to report.",
@@ -370,7 +376,7 @@ describe("renderPrComment", () => {
   });
 
   test("the footer is the sub line with run status and engine", () => {
-    const body = renderPrComment(doc());
+    const body = renderPrComment(doc(), undefined, undefined);
     expect(body).toContain(
       "<sub>run complete · pr-hero 0.1.0 · Assistant report, not a merge " +
         "gate: every line above is a claim to verify.</sub>",
@@ -378,7 +384,11 @@ describe("renderPrComment", () => {
   });
 
   test("a document without engine info degrades honestly", () => {
-    const body = renderPrComment(doc({ engine: undefined }));
+    const body = renderPrComment(
+      doc({ engine: undefined }),
+      undefined,
+      undefined,
+    );
     expect(body).toContain("pr-hero (version not recorded)");
   });
 
@@ -387,8 +397,12 @@ describe("renderPrComment", () => {
   // "$" anywhere in the body means the contract broke.
   test("no cost and no token counts anywhere", () => {
     const bodies = [
-      renderPrComment(doc()),
-      renderPrComment(doc({ findings: [finding({ id: "F001" })] }), WEB_URL),
+      renderPrComment(doc(), undefined, undefined),
+      renderPrComment(
+        doc({ findings: [finding({ id: "F001" })] }),
+        WEB_URL,
+        undefined,
+      ),
     ];
     for (const body of bodies) {
       expect(body).not.toContain("$");
@@ -397,28 +411,32 @@ describe("renderPrComment", () => {
   });
 
   test("the summary head sha links to the commit only with a url", () => {
-    const linked = renderPrComment(doc(), WEB_URL);
+    const linked = renderPrComment(doc(), WEB_URL, undefined);
     expect(linked).toContain(`[\`bbbbbbbb\`](${WEB_URL}/commit/${HEAD})`);
-    expect(renderPrComment(doc())).not.toContain("/commit/");
+    expect(renderPrComment(doc(), undefined, undefined)).not.toContain(
+      "/commit/",
+    );
   });
 
   test("a trailing slash on the url is normalized away", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
-    const withSlash = renderPrComment(d, `${WEB_URL}/`);
-    expect(withSlash).toBe(renderPrComment(d, WEB_URL));
+    const withSlash = renderPrComment(d, `${WEB_URL}/`, undefined);
+    expect(withSlash).toBe(renderPrComment(d, WEB_URL, undefined));
     expect(withSlash).not.toContain("musive//");
   });
 
   test("an absent url renders byte-identical to the plain shape", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
-    expect(renderPrComment(d, undefined)).toBe(renderPrComment(d));
+    expect(renderPrComment(d, undefined, undefined)).toBe(
+      renderPrComment(d, undefined, undefined),
+    );
   });
 
   // The delta line (design D5) is omitted entirely when the caller passes
   // no delta at all — every test above exercises exactly that path, so this
   // is the one asserting the negative explicitly.
   test("no delta argument renders no delta line", () => {
-    const body = renderPrComment(doc());
+    const body = renderPrComment(doc(), undefined, undefined);
     expect(body).not.toContain("Δ");
   });
 

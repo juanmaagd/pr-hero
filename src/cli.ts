@@ -1018,7 +1018,10 @@ async function reviewPr(
       posted = await postPrComment(
         operatorRoot,
         prNumber,
-        renderPrComment(doc, repoWebUrl),
+        // No delta here: this is the pre-B6 `--post` path (not the B6
+        // step-14 rewire, out of scope for this fix), which has no prior-
+        // run comment stream to diff against.
+        renderPrComment(doc, repoWebUrl, undefined),
       );
       log(`posted: ${posted.action} comment ${posted.commentId}`);
     }

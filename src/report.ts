@@ -196,14 +196,20 @@ export interface PrCommentDelta {
 // ROADMAP B6 reshape: this no longer lists findings by tier — that moved to
 // per-finding inline review comments and issue comments (renderInlineComment
 // / renderIssueFindingComment below), so the same claim is never duplicated
-// between the summary and the per-finding surface. `delta` is OPTIONAL for
-// the same reason `repoWebUrl` is: a caller with no prior-state knowledge
-// (or an existing test exercising the summary alone) still gets a valid
-// comment, just without the delta line.
+// between the summary and the per-finding surface. `delta` may be absent —
+// a caller with no prior-state knowledge (or a same-run first post) still
+// gets a valid comment, just without the delta line — but the PARAMETER
+// itself is REQUIRED, not optional (PR2 verification WARN-3, same fix
+// shape as `consumedCommentIds` on `postPrReview`, a3b3d3a): an optional
+// third argument is one a PR3 wiring call can simply forget, and the
+// summary would then render silently without the delta line spec R13
+// requires. `delta: PrCommentDelta | undefined` forces every call site to
+// say so explicitly, so the type system — not a missed review comment —
+// catches the omission.
 export function renderPrComment(
   doc: FindingsDocument,
-  repoWebUrl?: string,
-  delta?: PrCommentDelta,
+  repoWebUrl: string | undefined,
+  delta: PrCommentDelta | undefined,
 ): string {
   // Normalize away one trailing slash so `gh repo view` output and a
   // hand-typed URL build the same links.
