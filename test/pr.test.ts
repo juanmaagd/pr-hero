@@ -2,6 +2,22 @@
 // fetcher, the atomic review submission with its 422 recovery, and the
 // per-finding issue comment. Same fake-spawn pattern as
 // test/step-runner.test.ts's makeFakeSpawn: no real gh/PR anywhere here.
+//
+// Design Threat Matrix scope note (PR2 verification, WARN-1): the matrix's
+// "Git repository selection" row (Applicable — "the `post` verb resolves
+// operator root; rejects a run-dir from another PR") names a RED test that
+// genuinely cannot be written here. The `post` verb it describes is WU6
+// (tasks 3.1-3.3), not yet built — this file only exercises the I/O
+// primitives (fetch/postPrReview/postIssueComment) the verb will eventually
+// call, and none of them take a run-dir or resolve an operator root by
+// themselves (their caller already has one). That RED test belongs beside
+// the verb's own parsing/dispatch, in a future test/cli.test.ts addition
+// for WU6 — flagged here rather than skipped in silence.
+//
+// The matrix's OTHER applicable row — "PR commands" (bodies travel on
+// stdin, never interpolated into argv) — IS in scope for this file, and is
+// covered below: "the body reaching gh on stdin carries the finding's
+// identity marker and its claim, verbatim, never via argv".
 
 import { describe, expect, test } from "bun:test";
 import type { Finding } from "../src/findings";
@@ -11,6 +27,8 @@ import {
   postIssueComment,
   postPrReview,
 } from "../src/pr";
+import { PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+import { renderIssueFindingComment } from "../src/report";
 
 // ---------------------------------------------------------------------------
 // FakeSpawn: scripted {stdout, stderr, exitCode} per call, in call order.
@@ -134,6 +152,31 @@ describe("fetchPrReviewComments", () => {
     const call = calls[0];
     expect(call?.argv).toContain("--paginate");
     expect(call?.argv.join(" ")).toContain("pulls/42/comments");
+    // The fake gh harness returns scripted stdout regardless of --jq, so
+    // pinning the RESPONSE (above) never proves the projection string
+    // itself asks for every field the matcher needs — dropping one from
+    // `--jq` would still pass a fixture-shaped test. Assert the field
+    // names the matcher and a human reader both rely on actually reached
+    // gh's argv (WARN-2, PR2 verification): id/user/body for identity and
+    // display, path/line for the matcher's live-location preference (D2),
+    // original_line + in_reply_to_id for the fields a raw fetch documents.
+    const jqIndex = call?.argv.indexOf("--jq") ?? -1;
+    expect(jqIndex).toBeGreaterThanOrEqual(0);
+    const projection = call?.argv[jqIndex + 1] ?? "";
+    // Exact "<key>: .<jq-path>" tokens, not bare field names: "line" is a
+    // substring of "original_line", so a bare-name check would stay green
+    // even if the `line: .line` clause itself were dropped.
+    for (const token of [
+      "id: .id",
+      "user: .user.login",
+      "body: .body",
+      "path: .path",
+      "line: .line",
+      "original_line: .original_line",
+      "in_reply_to_id: .in_reply_to_id",
+    ]) {
+      expect(projection).toContain(token);
+    }
   });
 
   test("a non-2xx response fails loud", async () => {
@@ -516,6 +559,65 @@ describe("postIssueComment", () => {
     );
     expect(call?.argv).toContain("POST");
     expect(call?.argv).toContain("-F");
+  });
+
+  // WARN-1 from the PR2 verification: mutating this function to send
+  // NOTHING on stdin left the suite green, so nothing proved the body —
+  // including its identity marker, the thing spec R11's no-repost
+  // guarantee rides on — ever reaches gh. Also closes the design's
+  // Threat Matrix "PR commands" row's promised RED test: a body with
+  // shell-special characters posts VERBATIM on stdin, never composed
+  // into argv (no interpolation surface).
+  test("the body reaching gh on stdin carries the finding's identity marker and its claim, verbatim, never via argv", async () => {
+    let capturedStdin: Uint8Array | undefined;
+    let capturedArgv: string[] = [];
+    const spawnFn = ((argv: string[], opts?: { stdin?: Uint8Array }) => {
+      capturedArgv = argv;
+      capturedStdin = opts?.stdin;
+      const encoder = new TextEncoder();
+      const stream = (text: string) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(text));
+            controller.close();
+          },
+        });
+      return {
+        stdout: stream(JSON.stringify({ id: 55 })),
+        stderr: stream(""),
+        exited: Promise.resolve(0),
+        kill() {},
+      };
+    }) as unknown as typeof Bun.spawn;
+    const tricky = finding({
+      id: "F009",
+      path: "src/a.ts",
+      line: 10,
+      claim: "shell danger: `backticks`, --flags, $(subshell), and | pipes",
+    });
+    const id = await postIssueComment(
+      OPERATOR_ROOT,
+      42,
+      tricky,
+      HEAD,
+      undefined,
+      spawnFn,
+    );
+    expect(id).toBe(55);
+    expect(capturedStdin).toBeDefined();
+    const body = new TextDecoder().decode(capturedStdin);
+    // Byte-identical to the renderer's own output — the exact body a
+    // second run's matcher will parse back.
+    expect(body).toBe(renderIssueFindingComment(tricky, HEAD, undefined));
+    expect(body.startsWith(PR_FINDING_MARKER_PREFIX)).toBe(true);
+    expect(body).toContain(
+      "shell danger: `backticks`, --flags, $(subshell), and | pipes",
+    );
+    // No shell interpolation surface: none of the tricky claim text ever
+    // reaches argv — the body travels ONLY on stdin.
+    const argvJoined = capturedArgv.join(" ");
+    expect(argvJoined).not.toContain("backticks");
+    expect(argvJoined).not.toContain("subshell");
   });
 
   test("a response with no comment id fails loud", async () => {
