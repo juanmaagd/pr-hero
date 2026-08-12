@@ -15,8 +15,11 @@ import type { GreptileFinding } from "../src/greptile";
 import {
   buildComparisonJson,
   decideWorktree,
+  findingMarker,
   findMarkedCommentId,
   PR_COMMENT_MARKER_PREFIX,
+  PR_FINDING_MARKER_PREFIX,
+  parseFindingMarker,
   prCommentMarker,
   prRunDirCandidate,
   prWorktreePath,
@@ -332,6 +335,98 @@ describe("findMarkedCommentId", () => {
         },
         { id: 8, body: ` ${prCommentMarker(HEAD)} leading space` },
       ]),
+    ).toBeNull();
+  });
+});
+
+// The collision test named in design D3: both marker families now post into
+// the same issue-comment stream (the summary comment and per-finding issue
+// comments), so a matcher that could confuse one for the other would either
+// orphan the summary or mistake a per-finding comment for it.
+describe("marker prefix disjointness", () => {
+  test("neither marker prefix is a prefix of the other", () => {
+    expect(PR_FINDING_MARKER_PREFIX.startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(
+      false,
+    );
+    expect(PR_COMMENT_MARKER_PREFIX.startsWith(PR_FINDING_MARKER_PREFIX)).toBe(
+      false,
+    );
+  });
+});
+
+describe("findingMarker + parseFindingMarker", () => {
+  const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
+
+  test("round-trips path, line, and head", () => {
+    const marker = findingMarker({
+      path: "src/pr.ts",
+      line: 68,
+      headSha: HEAD,
+      claim: "unhandled null dereference",
+    });
+    expect(marker.startsWith(PR_FINDING_MARKER_PREFIX)).toBe(true);
+    const parsed = parseFindingMarker(marker);
+    expect(parsed?.path).toBe("src/pr.ts");
+    expect(parsed?.line).toBe(68);
+    expect(parsed?.headSha).toBe(HEAD);
+    expect(parsed?.c).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  // The C-quoting family of bugs (c717fe4): a path with a space or a
+  // percent-meaningful character must survive the marker round-trip intact.
+  test("percent-encodes a path with a space or reserved character", () => {
+    const marker = findingMarker({
+      path: "café/a file.ts",
+      line: 5,
+      headSha: HEAD,
+      claim: "x",
+    });
+    expect(marker).not.toContain("café/a file.ts");
+    expect(parseFindingMarker(marker)?.path).toBe("café/a file.ts");
+  });
+
+  test("the same claim yields the same tie-breaker; a different claim does not", () => {
+    const a = findingMarker({
+      path: "a.ts",
+      line: 1,
+      headSha: HEAD,
+      claim: "the same defect",
+    });
+    const b = findingMarker({
+      path: "a.ts",
+      line: 1,
+      headSha: HEAD,
+      claim: "the same defect",
+    });
+    const c = findingMarker({
+      path: "a.ts",
+      line: 1,
+      headSha: HEAD,
+      claim: "a different defect",
+    });
+    expect(parseFindingMarker(a)?.c).toBe(parseFindingMarker(b)?.c);
+    expect(parseFindingMarker(a)?.c).not.toBe(parseFindingMarker(c)?.c);
+  });
+
+  test("a marker quoted mid-body does not parse (mirrors findMarkedCommentId)", () => {
+    const marker = findingMarker({
+      path: "a.ts",
+      line: 1,
+      headSha: HEAD,
+      claim: "x",
+    });
+    expect(parseFindingMarker(`quoting:\n${marker}`)).toBeNull();
+    expect(parseFindingMarker(` ${marker}`)).toBeNull();
+  });
+
+  test("a foreign marker-shaped body does not parse", () => {
+    expect(parseFindingMarker("not a marker at all")).toBeNull();
+    expect(parseFindingMarker(PR_COMMENT_MARKER_PREFIX)).toBeNull();
+  });
+
+  test("a malformed marker (missing field) does not parse", () => {
+    expect(
+      parseFindingMarker("<!-- pr-hero-finding path=a.ts line=1 -->"),
     ).toBeNull();
   });
 });
