@@ -603,7 +603,12 @@ function parseRefAnchor(ref: string): {
   };
 }
 
-function blobUrl(
+// Exported for ui-result.ts, the second surface that links a finding to its
+// source. Deliberately SHARED rather than re-derived: the markdown report and
+// the terminal block must point a reader at the same bytes, and two copies of
+// `/blob/<sha>/<path>#<fragment>` is exactly how the pinned line of one
+// surface drifts from the other.
+export function blobUrl(
   webUrl: string,
   sha: string,
   path: string,

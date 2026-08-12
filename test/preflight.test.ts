@@ -19,6 +19,7 @@ import {
   parseNumstat,
   parseNumstatFiles,
   parseRemoteHead,
+  repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
   runDirCandidate,
@@ -212,6 +213,51 @@ describe("parseRemoteHead", () => {
     expect(parseRemoteHead("refs/remotes/origin/")).toBeUndefined();
     expect(parseRemoteHead("refs/heads/dev")).toBeUndefined();
     expect(parseRemoteHead("refs/remotes/upstream/main")).toBeUndefined();
+  });
+});
+
+// The terminal's clickable links stand or fall on this parser, and the whole
+// point of deriving the url from the remote (instead of a `gh` call) is that it
+// costs nothing on a run without --post. A silent miss here is a run with no
+// links at all, so every shape a real github remote takes is pinned.
+describe("repoWebUrlFromRemote", () => {
+  test("ssh, https and ssh:// all normalise to the same canonical url", () => {
+    const canonical = "https://github.com/musive/pr-hero";
+    for (const remote of [
+      "git@github.com:musive/pr-hero.git",
+      "git@github.com:musive/pr-hero",
+      "https://github.com/musive/pr-hero.git",
+      "https://github.com/musive/pr-hero",
+      "https://github.com/musive/pr-hero/",
+      "ssh://git@github.com/musive/pr-hero.git",
+      "  https://github.com/musive/pr-hero.git\n",
+    ]) {
+      expect(repoWebUrlFromRemote(remote)).toBe(canonical);
+    }
+  });
+
+  // A guessed url is strictly worse than none: one 404 teaches the reader to
+  // stop trusting every link in the block.
+  test("anything not a github repo remote yields NO url, never a guess", () => {
+    for (const remote of [
+      "",
+      "   ",
+      "git@gitlab.com:musive/pr-hero.git",
+      "https://gitlab.com/musive/pr-hero.git",
+      "git@github.example.com:musive/pr-hero.git",
+      "https://github.com/musive",
+      "https://github.com/",
+      "/srv/git/pr-hero.git",
+      "not a url at all",
+    ]) {
+      expect(repoWebUrlFromRemote(remote)).toBeUndefined();
+    }
+  });
+
+  test("the host check is case-insensitive, the slug is left alone", () => {
+    expect(repoWebUrlFromRemote("git@GitHub.com:Musive/PR-Hero.git")).toBe(
+      "https://github.com/Musive/PR-Hero",
+    );
   });
 });
 

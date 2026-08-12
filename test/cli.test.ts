@@ -1046,6 +1046,7 @@ describe("postingExitCode — design D6's exit-1 rule", () => {
       summary: { action: "created", commentId: 1 },
       delta: { resolved: 0, new: 0, persist: 0 },
       droppedFindingIds: [],
+      commentUrls: new Map(),
       ...overrides,
     };
   }

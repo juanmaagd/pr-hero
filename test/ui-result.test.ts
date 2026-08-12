@@ -517,6 +517,151 @@ describe("renderResult footer", () => {
   });
 });
 
+// The work unit that replaced a planned interactive findings browser with
+// printed urls, and the reason it is the better trade: a url persists in
+// scrollback and can be opened whenever, while an interactive view forces a
+// decision in the moment and dies with the process. Which means the url is
+// worthless unless it survives INTACT — never wrapped, never truncated — which
+// is what most of these assertions are about.
+describe("renderResult links", () => {
+  const links = {
+    webUrl: "https://github.com/musive/pr-hero",
+    headSha: "b".repeat(40),
+  };
+  const blob = `https://github.com/musive/pr-hero/blob/${"b".repeat(40)}/src/triage-write.ts#L70`;
+  const commentUrl = "https://github.com/musive/pr-hero/pull/6#discussion_r99";
+
+  test("no links input means today's block, verbatim — plain path:line", () => {
+    const text = joined(renderResult(input()));
+    expect(text).toContain("src/triage-write.ts:70");
+    expect(text).not.toContain("https://");
+    expect(text).not.toContain("↗");
+  });
+
+  test("a finding with no posted comment links to the blob at the head sha", () => {
+    const text = joined(renderResult(input({ links })));
+    expect(text).toContain(blob);
+  });
+
+  test("a POSTED finding links to its comment, never to the blob", () => {
+    const text = joined(
+      renderResult(
+        input({
+          links: {
+            ...links,
+            pr: 6,
+            commentUrls: new Map([["F001", commentUrl]]),
+          },
+        }),
+      ),
+    );
+    expect(text).toContain(commentUrl);
+    expect(text).not.toContain(blob);
+  });
+
+  test("a finding absent from the comment map still gets its blob link", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: doc({
+            findings: [finding(), finding({ id: "F002", path: "src/x.ts" })],
+          }),
+          links: {
+            ...links,
+            pr: 6,
+            commentUrls: new Map([["F001", commentUrl]]),
+          },
+        }),
+      ),
+    );
+    expect(text).toContain(commentUrl);
+    expect(text).toContain("/blob/");
+    expect(text).toContain("/src/x.ts#L70");
+  });
+
+  test("the PR's own url is printed once, right under the header rule", () => {
+    const lines = renderResult(input({ links: { ...links, pr: 6 } }));
+    const text = joined(lines);
+    expect(stripAnsi(lines[2] ?? "")).toContain(
+      "https://github.com/musive/pr-hero/pull/6",
+    );
+    expect(text.split("/pull/6\n").length - 1).toBe(1);
+  });
+
+  test("local mode has no PR, so no PR url line — only blob links", () => {
+    const lines = renderResult(input({ links }));
+    expect(joined(lines)).not.toContain("/pull/");
+    expect(joined(lines)).toContain(blob);
+  });
+
+  // The load-bearing one. A url folded across two lines is not clickable, so an
+  // overlong line is the correct trade at any width.
+  test("a url is NEVER folded or truncated, even at 60 columns", () => {
+    const lines = renderResult(
+      input({ width: 60, links: { ...links, pr: 6 } }),
+    ).map(stripAnsi);
+    expect(lines.some((l) => l.includes(blob))).toBe(true);
+    expect(
+      lines.some((l) => l.includes("https://github.com/musive/pr-hero/pull/6")),
+    ).toBe(true);
+    // No ellipsis anywhere: truncate() never touched either url.
+    expect(lines.join("\n")).not.toContain("…");
+  });
+
+  test("a grouped finding keeps its link under the cluster header", () => {
+    const text = joined(
+      renderResult(
+        input({
+          links,
+          doc: doc({
+            findings: [
+              finding({ id: "F001" }),
+              finding({ id: "F002", path: "src/other.ts", line: 9 }),
+            ],
+            debug: {
+              refuted: [],
+              root_causes: {
+                clusters: [
+                  {
+                    id: "RC001",
+                    anchor: "src/triage-write.ts:70",
+                    finding_ids: ["F001", "F002"],
+                  },
+                ],
+                distinct_root_causes: 1,
+              },
+            },
+          }),
+        }),
+      ),
+    );
+    expect(text).toContain("RC001 · 2 findings, one root cause");
+    expect(text).toContain(blob);
+    expect(text).toContain("/src/other.ts#L9");
+  });
+
+  test("styles off means not one escape byte, links and all", () => {
+    expect(
+      renderResult(
+        input({
+          links: {
+            ...links,
+            pr: 6,
+            commentUrls: new Map([["F001", commentUrl]]),
+          },
+        }),
+      ).join("\n"),
+    ).not.toContain(ESC);
+  });
+
+  test("painting a url changes the bytes around it, never the url", () => {
+    const over: Partial<ResultInput> = { links: { ...links, pr: 6 } };
+    expect(joined(renderResult(input({ ...over, styles: true })))).toBe(
+      joined(renderResult(input(over))),
+    );
+  });
+});
+
 describe("renderResult styling", () => {
   const styled = (over: Partial<ResultInput> = {}): string[] =>
     renderResult(input({ styles: true, ...over }));
