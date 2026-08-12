@@ -449,14 +449,49 @@ What is still manual, in the order it should be closed:
    the next tick. The watcher tiers its check — GitHub's aggregate counters ride free on the existing
    `gh pr list`, and only a PR that exceeds a limit costs a second call for per-file data.
 
-   **The WHY is COST AND PREDICTABILITY, and only that**: small trees bill $1.9–$4.8, the 45-file
+   **The WHY was COST AND PREDICTABILITY, and only that**: small trees bill $1.9–$4.8, the 45-file
    bench tree billed $6.58–$17.92 across 18 iterations — ~3x the cost with ~2.7x the spread.
-   **The size↔quality question remains UNMEASURED.** Attention dilution was tested and falsified in
-   `fixtures/scale-probe.ts`, and the one measured Greptile-only miss was a 7-file PR — so there is no
-   evidence a bigger diff reviews worse, and nothing in the code or the docs claims one. The
-   experiment that would actually answer it is `scripts/scope-probe.ts`, still unreported: until it
-   runs, these thresholds are a budget decision, not a quality boundary, and they should be argued
-   about on cost grounds alone.
+
+   **UPDATED 2026-08-12 — the size↔quality question is no longer unmeasured, and this entry used to
+   say it was.** The scope probes ran and are reported here for the first time; the scripts are now
+   tracked in `scripts/` rather than living untracked in a working tree.
+
+   The first run (`scripts/scope-probe.ts`, ±12-line-window scoring) put G2 at **full 1/8 vs narrowed
+   6/8, Fisher two-tailed p≈0.041**. That instrument was then proven broken in BOTH directions by the
+   mechanism-scored G3 probes — it swallowed a real hit (`index.tsx:139` IS G3, 14 lines from the
+   golden's recorded line) and credited a non-hit (`index.tsx:108` matched no golden at all). A number
+   from an instrument that errs both ways cannot be corrected, only re-measured.
+
+   `scripts/scope-probe-scored-g2.ts` re-measured it with the lab's pairwise mechanism judge
+   (`runner/scorer.ts`'s SAME MECHANISM OR NO MATCH rule) as the ONLY changed variable — same tree,
+   same `narrowPatch`, same lifecycle agent, codegraph off in both arms. Result over 8 replicates
+   (`../deep-review/bench/probes/scope-probe-scored-g2.json`):
+
+   | arm | G2 (`:96`) | findings/run | novel/run | cost, 8 runs |
+   |---|---|---|---|---|
+   | full | **0/8** | 0.63 | 0.63 | $6.71 |
+   | narrowed | **4/8** | 0.63 | 0.13 | $4.41 |
+
+   Fisher two-tailed **p≈0.077**. Against the reading PRE-REGISTERED before the run — deliberately,
+   because the author had a stake in the exciting outcome — this is the "narrowed materially above
+   full at a comparable margin" branch: **the headline SURVIVES the instrument fix.** The instrument
+   changed, the number moved, the direction held.
+
+   The unexpected part is the shape, not the size: total findings per run are IDENTICAL across arms
+   (0.63), while novel non-golden findings fall 0.63 → 0.13. Narrowing does not produce less — it
+   REDIRECTS attention onto the defect that matters. It is also ~34% cheaper.
+
+   **Limits, stated as loudly as the result**: one golden, one tree, one hunter, n=8, and p≈0.077 has
+   lost conventional significance. This is evidence, not proof, and the probe's own pre-registration
+   says it is "still not a licence to redesign anything". G1 (`:111`) and G3 (`:153`) scored 0 in both
+   arms and are confounded by which hunter slot ran, so they license nothing on their own.
+
+   **What it does change**: this entry may no longer claim the thresholds rest on cost alone. There is
+   now directional evidence that a narrower diff reviews BETTER, which means forcing past the gate on
+   a large diff may cost recall and not only money — worth knowing, since pr-hero's own PR #4 needed
+   `--force` at ~3330 changed lines. Attention dilution remains falsified as a MECHANISM
+   (`fixtures/scale-probe.ts`), and these two results are not in conflict: nothing here says the
+   hunter degrades with size, only that a narrowed diff concentrates it.
 
 6. **Speak where the conversation happens — the inline surface.** NOT BUILT. Named 2026-08-11, and
    **RE-SCOPED 2026-08-12 after measuring Greptile instead of theorising about it** (musive PR 1583).
