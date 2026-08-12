@@ -2748,7 +2748,12 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
       ctx.resolved
         ? `${shortSha(ctx.resolved.diffFromSha)} → ` +
             `${shortSha(ctx.target.headSha)}  (merge base)`
-        : `? → ${shortSha(ctx.target.headSha)}  (merge base, after fetch)`,
+        : // A bare "?" for the unresolved endpoint was honest and read as a
+          // bug. Name the operation instead: the reader learns WHAT will be
+          // reviewed (only what the PR adds) without being shown a
+          // placeholder where a sha belongs.
+          `merge base of ${shortRev(ctx.target.baseRef)} → ` +
+            `${shortSha(ctx.target.headSha)}  (exact sha after fetch)`,
       { styles },
     ),
     ...row(
