@@ -43,7 +43,31 @@ const TRIAGE_ACTORS: ReadonlySet<string> = new Set<TriageActor>([
   "human",
 ]);
 
+// The adjudicator's own vocabulary (ROADMAP B6b "What the adjudicator
+// returns"), NOT the same set as TriageTag — the author's tag is what they
+// claim, this is what the isolated judge independently ruled. Deliberately
+// disjoint from `refuter_verdict` (findings.ts) for the same reason TriageTag
+// is: that enum is schema-shared with the lab and sacred under rule 5, this
+// one is project-owned and costs no coordination to extend.
+export type TriageVerdict = "upheld" | "rejected" | "inconclusive";
+
+const TRIAGE_VERDICTS: ReadonlySet<string> = new Set<TriageVerdict>([
+  "upheld",
+  "rejected",
+  "inconclusive",
+]);
+
 const FULL_SHA = /^[0-9a-f]{40}$/;
+
+// Tags that spawn an adjudicator (SKILL.md step 4) and therefore MUST carry
+// its verdict on the marker. `applied` pays no adjudicator and is excluded
+// on purpose — see the builder/parser below for what that means in both
+// directions.
+const ADJUDICATED_TAGS: ReadonlySet<TriageTag> = new Set<TriageTag>([
+  "dismissed",
+  "deferred",
+  "misclassified",
+]);
 
 export interface TriageMarkerFields {
   tag: TriageTag;
@@ -55,23 +79,51 @@ export interface TriageMarkerFields {
   // marker that would decay into an un-tracked dismiss. Meaningless for
   // every other tag and ignored if supplied.
   issue?: number;
+  // The isolated adjudicator's ruling (ROADMAP B6b "the label is the
+  // verdict and it closes the row"). REQUIRED for `dismissed`, `deferred`,
+  // and `misclassified` — the three tags that spawn an adjudicator — for
+  // the same reason `issue` is required for `deferred`: without it, 6c
+  // cannot tell a settled finding from an unsettled one, and the escalation
+  // rule (2 consecutive `inconclusive` heads) has nothing to count.
+  // FORBIDDEN for `applied`, stricter than `issue`'s "ignored if supplied":
+  // `applied` never spawns an adjudicator (SKILL.md, ROADMAP B6b), so a
+  // verdict on an `applied` marker is not harmless noise, it is a false
+  // claim that a ruling happened when the rule says none may. The builder
+  // throws and the parser rejects rather than silently drop it.
+  verdict?: TriageVerdict;
 }
 
 // Builds the marker. Throws on a `deferred` fields object with no `issue`
 // rather than silently omitting it — the whole point of the field is that a
 // deferred finding without a real destination is a bug, not a valid state,
 // and a pure function that accepted one anyway would let that bug reach
-// GitHub before anyone could catch it.
+// GitHub before anyone could catch it. The same two-way discipline now
+// applies to `verdict`: required for the three adjudicated tags, forbidden
+// for `applied`.
 export function triageMarker(fields: TriageMarkerFields): string {
   if (fields.tag === "deferred" && fields.issue === undefined) {
     throw new Error(
       "triageMarker: tag=deferred requires an issue number (ROADMAP B6b)",
     );
   }
+  if (ADJUDICATED_TAGS.has(fields.tag) && fields.verdict === undefined) {
+    throw new Error(
+      `triageMarker: tag=${fields.tag} requires a verdict — it spawns an ` +
+        "adjudicator (ROADMAP B6b)",
+    );
+  }
+  if (fields.tag === "applied" && fields.verdict !== undefined) {
+    throw new Error(
+      "triageMarker: tag=applied must not carry a verdict — applied pays " +
+        "no adjudicator (ROADMAP B6b)",
+    );
+  }
   const issuePart = fields.tag === "deferred" ? ` issue=${fields.issue}` : "";
+  const verdictPart =
+    fields.verdict !== undefined ? ` verdict=${fields.verdict}` : "";
   return (
     `${TRIAGE_MARKER_PREFIX}tag=${fields.tag} head=${fields.headSha} ` +
-    `actor=${fields.actor}${issuePart} -->`
+    `actor=${fields.actor}${issuePart}${verdictPart} -->`
   );
 }
 
@@ -83,6 +135,11 @@ export interface ParsedTriageMarker {
   // a deferred marker with no issue never reaches this type, it returns
   // null instead).
   issue?: number;
+  // Present only when tag is "dismissed", "deferred", or "misclassified"
+  // (parseTriageMarker enforces this the same way it enforces `issue`) —
+  // absent for "applied", which never returns null for a MISSING verdict
+  // but DOES for a PRESENT one (see parseTriageMarker).
+  verdict?: TriageVerdict;
 }
 
 // Parses ONLY the first line of a reply body, mirroring
@@ -118,6 +175,28 @@ export function parseTriageMarker(body: string): ParsedTriageMarker | null {
   const tag = rawTag as TriageTag;
   const actor = rawActor as TriageActor;
 
+  // `applied` pays no adjudicator (SKILL.md, ROADMAP B6b), so a verdict on
+  // an `applied` marker is not a harmless extra field, it is a false claim
+  // that an adjudicator ruled when the rule says none may run — reject it
+  // the same way an unknown tag is rejected, rather than silently ignore it.
+  if (tag === "applied") {
+    if (parts.has("verdict")) return null;
+    return { tag, headSha, actor };
+  }
+
+  // `dismissed`, `deferred`, and `misclassified` all spawn an adjudicator
+  // (SKILL.md step 4) and therefore MUST carry its verdict — the same
+  // two-way guard `deferred`/`issue` already has, and for the same reason:
+  // a missing verdict would silently read as "settled" (6c would count it
+  // as answered) when in fact nobody has ruled on it at all, and the
+  // escalation rule (2 consecutive `inconclusive` heads) would have nothing
+  // to count.
+  const rawVerdict = parts.get("verdict");
+  if (rawVerdict === undefined || !TRIAGE_VERDICTS.has(rawVerdict)) {
+    return null;
+  }
+  const verdict = rawVerdict as TriageVerdict;
+
   // `deferred` MUST carry a valid issue number — the ROADMAP B6b rule this
   // parser exists to enforce, not just record. A deferred marker with no
   // issue, or a non-numeric one, is malformed: returning null here (rather
@@ -128,7 +207,7 @@ export function parseTriageMarker(body: string): ParsedTriageMarker | null {
     if (rawIssue === undefined) return null;
     const issue = Number.parseInt(rawIssue, 10);
     if (!Number.isInteger(issue) || issue <= 0) return null;
-    return { tag, headSha, actor, issue };
+    return { tag, headSha, actor, issue, verdict };
   }
-  return { tag, headSha, actor };
+  return { tag, headSha, actor, verdict };
 }
