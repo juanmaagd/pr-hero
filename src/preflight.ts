@@ -83,6 +83,11 @@ export interface CliOptions {
   // files. Unset means defaultRunRoot(repoRoot) — the shell resolves it,
   // because the default needs the repo toplevel and parseArgs stays pure.
   runs?: string;
+  // post only (ROADMAP B6): the run dir to read findings.json + diff.patch
+  // from instead of producing a new run — the `ledger` verb's precedent
+  // (read run artifacts off disk) applied to publishing instead of
+  // aggregating. Required by `post`; parseArgs enforces it.
+  from?: string;
   // The escape hatch for change 3's default. See resolveDiffRange's WHY: the
   // three-dot (merge-base) range is right almost always, and this flag exists
   // for the rare caller who genuinely wants the literal two-point diff.
@@ -111,7 +116,7 @@ export interface CliOptions {
 }
 
 export interface ParsedCli {
-  command: "review" | "init" | "ledger" | "watch" | "help";
+  command: "review" | "init" | "ledger" | "watch" | "post" | "help";
   options: CliOptions;
 }
 
@@ -122,6 +127,15 @@ Usage:
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero ledger [options]   Accumulate every run's comparison.json into one
                              markdown ledger (the three buckets as a rate)
+  pr-hero post --pr <n> --from <run-dir> [--dry-run]
+                             Publish a PREVIOUSLY RUN review's findings.json
+                             to PR <n>, reading it (and diff.patch) off disk
+                             instead of running a fresh review — the same
+                             fetch → match → post flow --pr --post uses.
+                             --dry-run renders the planned comment set at $0
+                             and posts nothing (the only way to preview a
+                             plan, since --pr --dry-run returns before any
+                             findings exist)
   pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
@@ -165,6 +179,8 @@ Options:
                       For ledger: the file to write instead of stdout
   --runs <dir>        ledger only: the runs root to scan for comparison.json
                       files (default: <repo-parent>/<repo>-prhero-runs)
+  --from <dir>        post only: the run dir to read findings.json and
+                      diff.patch from (required)
   --gotchas <file>    Repo gotchas file (default: <repo>/.prhero/gotchas.md);
                       supply it from outside to review a tree you cannot dirty
   --config <file>     Local config (default: <repo>/.prhero/config.json) with
@@ -220,6 +236,7 @@ const VALUE_FLAGS = new Set([
   "--agents",
   "--out",
   "--runs",
+  "--from",
   "--gotchas",
   "--config",
   "--model",
@@ -241,7 +258,14 @@ export function parseArgs(argv: string[]): ParsedCli {
     onPush: false,
     force: false,
   };
-  let command: "review" | "init" | "ledger" | "watch" | "help" | undefined;
+  let command:
+    | "review"
+    | "init"
+    | "ledger"
+    | "watch"
+    | "post"
+    | "help"
+    | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
   // be read off options afterwards — and the --pr exclusion below must fire
   // on an explicit --head even when its value equals that default.
@@ -344,11 +368,12 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "review" &&
       arg !== "init" &&
       arg !== "ledger" &&
-      arg !== "watch"
+      arg !== "watch" &&
+      arg !== "post"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger" and "watch")',
+          '"ledger", "watch" and "post")',
       );
     }
     command = arg;
@@ -385,10 +410,32 @@ export function parseArgs(argv: string[]): ParsedCli {
   // Also after the loop, for the same flag-order reason: posting publishes a
   // PR comment, and only --pr names a PR to publish to. `watch` is excused —
   // there --post is `watch add`'s flag, validated in the watch block below.
-  if (options.post && options.pr === undefined && command !== "watch") {
+  // `post` (the command) is ALSO excused: it always targets a PR via its own
+  // required --pr, so it needs no --post flag at all — see the "post" block
+  // below.
+  if (
+    options.post &&
+    options.pr === undefined &&
+    command !== "watch" &&
+    command !== "post"
+  ) {
     throw new CliUsageError(
       "--post publishes the review as a PR comment, so it requires --pr",
     );
+  }
+  // `post` (ROADMAP B6): publishes a PRIOR run's findings.json, read from
+  // --from, to the PR named by --pr. Both required — a "post" with neither
+  // has nothing to read and nowhere to send it, and guessing either would
+  // silently publish the wrong run to the wrong PR.
+  if (command === "post") {
+    if (options.pr === undefined) {
+      throw new CliUsageError("post requires --pr <n>");
+    }
+    if (options.from === undefined) {
+      throw new CliUsageError("post requires --from <run-dir>");
+    }
+  } else if (options.from !== undefined) {
+    throw new CliUsageError("--from only applies to the post command");
   }
   // The watch surface, validated after the loop for the same order-blindness.
   if (command === "watch") {
@@ -471,6 +518,9 @@ function applyValueFlag(
       return;
     case "--runs":
       options.runs = value;
+      return;
+    case "--from":
+      options.from = value;
       return;
     case "--interval": {
       const parsed = Number(value);
