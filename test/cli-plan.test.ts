@@ -256,7 +256,12 @@ describe("renderPrPlan", () => {
   test("pre-fetch the plan admits both unknowns instead of guessing", () => {
     const text = joined(renderPrPlan(prPlanContext(), false));
     expect(text).toContain("resolved after fetch");
-    expect(text).toContain("? → 3333333333  (merge base, after fetch)");
+    // The unresolved endpoint names the OPERATION, never a placeholder where a
+    // sha belongs: a bare "?" was equally honest and read as a bug.
+    expect(text).toContain(
+      "merge base of main → 3333333333  (exact sha after fetch)",
+    );
+    expect(text).not.toContain("?");
     expect(text).toContain("decided by the diff after fetch");
   });
 
