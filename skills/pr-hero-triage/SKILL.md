@@ -144,12 +144,40 @@ MUST NOT appear on `applied`, which spawns no adjudicator and therefore has no v
 `deferred` additionally carries `issue=<n>` on the same line. `head=` is this PR's CURRENT head
 sha — the same one the finding's own marker was evaluated against for this triage round.
 
+### The badge line is REQUIRED, and it is not decoration
+
+The marker is an HTML comment, so **GitHub renders it invisible**. A reply carrying only the
+marker tells the machine everything and the reader nothing — which breaks the rule this whole
+loop rests on: the human is the objector, and **a human cannot object to what they cannot see**.
+This was found on pr-hero's own PR #6, where an `applied` reply displayed as bare prose with no
+sign of the tag anywhere.
+
+So the SECOND line of every reply is a visible badge, mirroring how the finding itself renders
+its severity:
+
+```
+<tag emoji> **<TAG>** · <actor>[ · adjudicator: <verdict>][ · #<issue>]
+```
+
+| tag | emoji | what the badge must also show |
+|---|---|---|
+| `applied` | ✅ | nothing more — no adjudicator ran |
+| `dismissed` | ❌ | `adjudicator: <verdict>` |
+| `deferred` | 📋 | `adjudicator: <verdict>` and the issue as `#<n>` |
+| `misclassified` | 🏷️ | `adjudicator: <verdict>` |
+
+The badge duplicates what the marker already says, on purpose. The marker is for the ledger; the
+badge is for the person scrolling the thread. Neither substitutes for the other, and the reply is
+malformed without both.
+
 ### Example reply — `applied`
 
 No adjudicator; the fix speaks for itself. No `verdict=` field.
 
 ```
 <!-- pr-hero-triage tag=applied head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent -->
+
+✅ **APPLIED** · agent
 
 Fixed in this PR — see 3f9a2c1: `parseConfig` now validates `retries` before use.
 ```
@@ -159,7 +187,7 @@ Fixed in this PR — see 3f9a2c1: `parseConfig` now validates `retries` before u
 ```
 <!-- pr-hero-triage tag=dismissed head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
 
-Adjudicator verdict: upheld
+❌ **DISMISSED** · agent · adjudicator: upheld
 
 The finding claims `parseConfig` can throw when `raw.retries` is undefined. It cannot:
 `config.ts:42` already guards it — `const retries = raw.retries ?? 3;` — and that line predates
@@ -171,7 +199,7 @@ this PR. The isolated adjudicator confirmed the citation independently and retur
 ```
 <!-- pr-hero-triage tag=deferred head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent issue=482 verdict=upheld -->
 
-Adjudicator verdict: upheld
+📋 **DEFERRED** · agent · adjudicator: upheld · #482
 
 The finding is correct — `retryQueue.ts` has no backoff cap — but fixing it means redesigning the
 retry policy, which is out of scope for this PR. Filed as #482 to track it. The adjudicator
@@ -183,7 +211,7 @@ confirmed the finding is real and that scope, not correctness, is the actual iss
 ```
 <!-- pr-hero-triage tag=misclassified head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
 
-Adjudicator verdict: upheld
+🏷️ **MISCLASSIFIED** · agent · adjudicator: upheld
 
 The defect is real, but `causal_disposition` is wrong: this is filed `introduced` and it is
 pre-existing — `ghPrList` (watch.ts:243) has carried this exact unbounded `gh` hang since before
