@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
-import { PR_COMMENT_MARKER_PREFIX, prCommentMarker } from "../src/pr-preflight";
+import {
+  findingMarker,
+  PR_COMMENT_MARKER_PREFIX,
+  prCommentMarker,
+} from "../src/pr-preflight";
 import {
   estimateCost,
   formatElapsed,
   type ReportMeta,
+  renderInlineComment,
+  renderIssueFindingComment,
   renderPrComment,
   renderReport,
 } from "../src/report";
@@ -323,71 +329,35 @@ describe("renderPrComment", () => {
     );
   });
 
-  test("tier sections carry the emoji headings and counts", () => {
+  // ROADMAP B6 reshape: the summary no longer lists findings by tier at
+  // all — that moved to renderInlineComment/renderIssueFindingComment. No
+  // heading, no per-finding claim text, no Evidence block belongs here any
+  // more; only the aggregate counts, the delta line, and the disclaimer.
+  test("the summary carries no tier headings, claim text, or evidence blocks", () => {
     const findings = [
-      finding({ id: "F001", path: "src/a.ts", line: 10 }),
-      finding({ id: "F002", path: "src/b.ts", line: 20 }),
       finding({
-        id: "F003",
-        path: "src/c.ts",
-        line: 30,
+        id: "F001",
+        path: "src/a.ts",
+        line: 10,
+        proof_refs: ["src/duration.ts:19-20 (fromSeconds stores raw seconds)"],
+      }),
+      finding({
+        id: "F002",
+        path: "src/b.ts",
+        line: 20,
         severity: "WARNING",
         tier: "advisory",
       }),
     ];
     const body = renderPrComment(doc({ findings }));
-    expect(body).toContain("### 🔴 Blocking (2)");
-    expect(body).toContain("### 🟡 Advisory (1)");
-  });
-
-  // The heading form, not the word: the summary line always says
-  // "0 blocking", so only "### 🔴 Blocking" discriminates.
-  test("an empty tier's section is omitted entirely", () => {
-    const body = renderPrComment(
-      doc({
-        findings: [
-          finding({ id: "F001", severity: "WARNING", tier: "advisory" }),
-        ],
-      }),
-    );
     expect(body).not.toContain("### 🔴 Blocking");
-    expect(body).toContain("### 🟡 Advisory (1)");
-  });
-
-  test("a finding renders as an h4 location plus a claim paragraph", () => {
-    const body = renderPrComment(
-      doc({
-        findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
-      }),
-    );
-    expect(body).toContain("#### `src/a.ts:10`");
-    expect(body).toContain(
-      "\n\nthe value is stored in seconds and read as milliseconds\n\n",
-    );
-    // The old wall-of-text shape must stay dead: no bullet, no bold tier.
-    expect(body).not.toContain("- the value is stored");
-    expect(body).not.toContain("**blocking**");
-    // And no finding ids: engine internals stay in report.md.
-    expect(body).not.toContain("F001");
-  });
-
-  // GitHub renders markdown inside <details> only when blank lines separate
-  // the HTML tags from the list — BOTH blanks below are load-bearing.
-  test("evidence folds into details with the blank-line discipline", () => {
-    const body = renderPrComment(doc({ findings: [finding({ id: "F001" })] }));
-    expect(body).toContain(
-      "<details><summary>Evidence</summary>\n\n" +
-        "- `src/duration.ts:19-20 (fromSeconds stores raw seconds)`\n\n" +
-        "</details>",
-    );
-  });
-
-  test("a finding without proof refs has no evidence block", () => {
-    const body = renderPrComment(
-      doc({ findings: [finding({ id: "F001", proof_refs: [] })] }),
-    );
+    expect(body).not.toContain("### 🟡 Advisory");
+    expect(body).not.toContain("#### `src/a.ts:10`");
+    expect(body).not.toContain("the value is stored in seconds");
     expect(body).not.toContain("<details>");
     expect(body).not.toContain("Evidence");
+    // No finding ids: engine internals stay in report.md.
+    expect(body).not.toContain("F001");
   });
 
   test("zero findings render the explicit clean bill", () => {
@@ -426,72 +396,6 @@ describe("renderPrComment", () => {
     }
   });
 
-  test("hunter prose that could break markdown is neutralised", () => {
-    const body = renderPrComment(
-      doc({
-        findings: [
-          finding({
-            id: "F001",
-            claim: "line one\nline two",
-            path: "src/`weird`.ts",
-            proof_refs: ["src/`x`.ts:1 (a\nmultiline ref)"],
-          }),
-        ],
-      }),
-    );
-    expect(body).toContain("line one line two");
-    expect(body).toContain("#### `src/'weird'.ts:42`");
-    expect(body).toContain("- `src/'x'.ts:1 (a multiline ref)`");
-  });
-
-  test("a repo web url turns the location heading into a blob link", () => {
-    const body = renderPrComment(
-      doc({
-        findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
-      }),
-      WEB_URL,
-    );
-    expect(body).toContain(
-      `#### [\`src/a.ts:10\`](${WEB_URL}/blob/${HEAD}/src/a.ts#L10)`,
-    );
-  });
-
-  test("a range ref links #L19-L20 and a single-line ref links #L19", () => {
-    const body = renderPrComment(
-      doc({
-        findings: [
-          finding({
-            id: "F001",
-            proof_refs: [
-              "src/duration.ts:19-20 (stores raw seconds)",
-              "src/consumer.ts:13 (reads as ms)",
-            ],
-          }),
-        ],
-      }),
-      WEB_URL,
-    );
-    expect(body).toContain(
-      `- [\`src/duration.ts:19-20\`](${WEB_URL}/blob/${HEAD}/src/duration.ts#L19-L20) (stores raw seconds)`,
-    );
-    expect(body).toContain(
-      `- [\`src/consumer.ts:13\`](${WEB_URL}/blob/${HEAD}/src/consumer.ts#L13) (reads as ms)`,
-    );
-  });
-
-  test("a ref with no parseable anchor falls back to a code span", () => {
-    const body = renderPrComment(
-      doc({
-        findings: [
-          finding({ id: "F001", proof_refs: ["see the config handling"] }),
-        ],
-      }),
-      WEB_URL,
-    );
-    expect(body).toContain("- `see the config handling`");
-    expect(body).not.toContain("- [`see");
-  });
-
   test("the summary head sha links to the commit only with a url", () => {
     const linked = renderPrComment(doc(), WEB_URL);
     expect(linked).toContain(`[\`bbbbbbbb\`](${WEB_URL}/commit/${HEAD})`);
@@ -508,6 +412,189 @@ describe("renderPrComment", () => {
   test("an absent url renders byte-identical to the plain shape", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
     expect(renderPrComment(d, undefined)).toBe(renderPrComment(d));
+  });
+
+  // The delta line (design D5) is omitted entirely when the caller passes
+  // no delta at all — every test above exercises exactly that path, so this
+  // is the one asserting the negative explicitly.
+  test("no delta argument renders no delta line", () => {
+    const body = renderPrComment(doc());
+    expect(body).not.toContain("Δ");
+  });
+
+  // Spec "First-ever run": the delta STILL renders on the very first post
+  // (0 resolved · K new · 0 persist), just without a "since <sha>" clause —
+  // there is no previous head to name yet.
+  test("a first run renders the delta without a since-sha clause", () => {
+    const body = renderPrComment(
+      doc({ findings: [finding({ id: "F001" })] }),
+      undefined,
+      {
+        resolved: 0,
+        new: 1,
+        persist: 0,
+      },
+    );
+    expect(body).toContain("Δ: 0 resolved · 1 new · 0 persist");
+    expect(body).not.toContain("since");
+  });
+
+  // Spec "Mixed run": a since-sha clause appears once a previous head is
+  // known (the prior summary marker's own head=, per design D5).
+  test("a second run renders the delta with a since-sha clause", () => {
+    const body = renderPrComment(doc(), undefined, {
+      resolved: 1,
+      new: 1,
+      persist: 2,
+      previousHeadSha: "c".repeat(40),
+    });
+    expect(body).toContain(
+      "Δ since `cccccccc`: 1 resolved · 1 new · 2 persist",
+    );
+  });
+});
+
+describe("renderInlineComment", () => {
+  const WEB_URL = "https://github.com/musivetech/musive";
+  const HEAD = "b".repeat(40);
+
+  // The identity marker (pr-preflight.ts) is the FIRST line of every
+  // per-finding comment, mirroring prCommentMarker's own contract — this is
+  // what lets a second run tell "already posted" from "new" without
+  // touching dedupe_key/root_cause_id.
+  test("the first line is the finding marker for this path/line/head", () => {
+    const f = finding({ id: "F001", path: "src/a.ts", line: 10 });
+    const body = renderInlineComment(f, HEAD);
+    expect(body.split("\n")[0]).toBe(
+      findingMarker({
+        path: "src/a.ts",
+        line: 10,
+        headSha: HEAD,
+        claim: f.claim,
+      }),
+    );
+  });
+
+  test("carries the severity, tier, and the claim as a paragraph", () => {
+    const body = renderInlineComment(finding({ id: "F001" }), HEAD);
+    expect(body).toContain("**pr-hero · BLOCKER (blocking)**");
+    expect(body).toContain(
+      "the value is stored in seconds and read as milliseconds",
+    );
+    // No finding id: engine internals stay in report.md.
+    expect(body).not.toContain("F001");
+  });
+
+  test("evidence folds into details with the blank-line discipline", () => {
+    const body = renderInlineComment(finding({ id: "F001" }), HEAD);
+    expect(body).toContain(
+      "<details><summary>Evidence</summary>\n\n" +
+        "- `src/duration.ts:19-20 (fromSeconds stores raw seconds)`\n\n" +
+        "</details>",
+    );
+  });
+
+  test("a finding without proof refs has no evidence block", () => {
+    const body = renderInlineComment(
+      finding({ id: "F001", proof_refs: [] }),
+      HEAD,
+    );
+    expect(body).not.toContain("<details>");
+    expect(body).not.toContain("Evidence");
+  });
+
+  test("a repo web url turns an evidence ref into a blob link", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F001",
+        proof_refs: ["src/duration.ts:19-20 (stores raw seconds)"],
+      }),
+      HEAD,
+      WEB_URL,
+    );
+    expect(body).toContain(
+      `- [\`src/duration.ts:19-20\`](${WEB_URL}/blob/${HEAD}/src/duration.ts#L19-L20) (stores raw seconds)`,
+    );
+  });
+
+  test("a ref with no parseable anchor falls back to a code span", () => {
+    const body = renderInlineComment(
+      finding({ id: "F001", proof_refs: ["see the config handling"] }),
+      HEAD,
+      WEB_URL,
+    );
+    expect(body).toContain("- `see the config handling`");
+    expect(body).not.toContain("- [`see");
+  });
+
+  test("hunter prose that could break markdown is neutralised", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F001",
+        claim: "line one\nline two",
+        proof_refs: ["src/`x`.ts:1 (a\nmultiline ref)"],
+      }),
+      HEAD,
+    );
+    expect(body).toContain("line one line two");
+    expect(body).toContain("- `src/'x'.ts:1 (a multiline ref)`");
+  });
+
+  test("no cost or token figures anywhere", () => {
+    const body = renderInlineComment(finding({ id: "F001" }), HEAD, WEB_URL);
+    expect(body).not.toContain("$");
+    expect(body).not.toContain("token");
+  });
+});
+
+describe("renderIssueFindingComment", () => {
+  const WEB_URL = "https://github.com/musivetech/musive";
+  const HEAD = "b".repeat(40);
+
+  test("the first line is the finding marker, same contract as inline", () => {
+    const f = finding({ id: "F001", path: "src/a.ts", line: 10 });
+    const body = renderIssueFindingComment(f, HEAD);
+    expect(body.split("\n")[0]).toBe(
+      findingMarker({
+        path: "src/a.ts",
+        line: 10,
+        headSha: HEAD,
+        claim: f.claim,
+      }),
+    );
+  });
+
+  // Unlike the inline comment (already attached to a line by GitHub), the
+  // issue comment carries its own location heading — otherwise a reader has
+  // no idea what the comment is even about.
+  test("carries a location heading and states it is standalone", () => {
+    const body = renderIssueFindingComment(
+      finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      HEAD,
+    );
+    expect(body).toContain("#### `src/a.ts:10`");
+    expect(body).toContain("could not anchor this");
+  });
+
+  test("the location heading becomes a blob link with a repo url", () => {
+    const body = renderIssueFindingComment(
+      finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      HEAD,
+      WEB_URL,
+    );
+    expect(body).toContain(
+      `#### [\`src/a.ts:10\`](${WEB_URL}/blob/${HEAD}/src/a.ts#L10)`,
+    );
+  });
+
+  test("no cost or token figures anywhere", () => {
+    const body = renderIssueFindingComment(
+      finding({ id: "F001" }),
+      HEAD,
+      WEB_URL,
+    );
+    expect(body).not.toContain("$");
+    expect(body).not.toContain("token");
   });
 });
 

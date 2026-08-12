@@ -8,7 +8,7 @@
 // a renderer that reached for `new Date()` would make that a lie).
 
 import type { Finding, FindingsDocument, Tier } from "./findings";
-import { prCommentMarker } from "./pr-preflight";
+import { findingMarker, prCommentMarker } from "./pr-preflight";
 import {
   clusterByRootCause,
   extractAnchor,
@@ -153,6 +153,22 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
   return `${out.join("\n").trimEnd()}\n`;
 }
 
+// The deterministic delta line (ROADMAP B6, design D5): computed by
+// inline.ts's matcher from the live comment stream, never from a stored
+// count. `previousHeadSha` is the PRIOR summary marker's `head=` value — free
+// because the marker already carries it — and is absent on the very first
+// run (no prior marked comment exists yet) or against a pre-B3 markerless
+// comment (no `head=` to parse). Both cases render the counts WITHOUT a
+// "since <sha>" clause rather than omitting the line: spec's own "First-ever
+// run" scenario requires `0 resolved · K new · 0 persist` to be visible, not
+// silent, on the first post.
+export interface PrCommentDelta {
+  resolved: number;
+  new: number;
+  persist: number;
+  previousHeadSha?: string;
+}
+
 // The PR-comment renderer (ROADMAP B2): the same findings document, shaped
 // for a public GitHub comment instead of a run artifact. Pure for the same
 // reason renderReport is — a posted comment must be re-renderable from the
@@ -176,9 +192,18 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // absent, the comment renders as plain code spans, byte-identical to the
 // linkless shape — the renderer stays offline-testable and a posted comment
 // stays re-renderable from the artifact alone.
+//
+// ROADMAP B6 reshape: this no longer lists findings by tier — that moved to
+// per-finding inline review comments and issue comments (renderInlineComment
+// / renderIssueFindingComment below), so the same claim is never duplicated
+// between the summary and the per-finding surface. `delta` is OPTIONAL for
+// the same reason `repoWebUrl` is: a caller with no prior-state knowledge
+// (or an existing test exercising the summary alone) still gets a valid
+// comment, just without the delta line.
 export function renderPrComment(
   doc: FindingsDocument,
   repoWebUrl?: string,
+  delta?: PrCommentDelta,
 ): string {
   // Normalize away one trailing slash so `gh repo view` output and a
   // hand-typed URL build the same links.
@@ -199,14 +224,15 @@ export function renderPrComment(
     `**${blocking.length} blocking · ${advisory.length} advisory** — ` +
       `${headRef}, diff from ${code(doc.base_sha.slice(0, 8))}`,
   );
+  if (delta) {
+    out.push("");
+    out.push(deltaLine(delta));
+  }
   out.push("");
   if (doc.findings.length === 0) {
     out.push("✅ pr-hero reviewed this PR and found nothing to report.");
     out.push("");
   }
-  // Blocking first, then advisory — the same order the report's sections use.
-  out.push(...commentTierSection("🔴 Blocking", blocking, doc, webUrl));
-  out.push(...commentTierSection("🟡 Advisory", advisory, doc, webUrl));
   out.push("---");
   out.push("");
   // The footer keeps the report's public register: a comment that says
@@ -220,46 +246,93 @@ export function renderPrComment(
   return `${out.join("\n").trimEnd()}\n`;
 }
 
-// One tier of the PR comment. Omitted entirely at zero findings: an empty
-// "Blocking (0)" heading reads as a section that lost its content, not as
-// good news. No finding ids here — they are engine internals; the team
-// navigates by location (report.md keeps the ids).
-function commentTierSection(
-  heading: string,
-  findings: Finding[],
-  doc: FindingsDocument,
+function deltaLine(delta: PrCommentDelta): string {
+  const since =
+    delta.previousHeadSha === undefined
+      ? "Δ"
+      : `Δ since ${code(delta.previousHeadSha.slice(0, 8))}`;
+  return `${since}: ${delta.resolved} resolved · ${delta.new} new · ${delta.persist} persist`;
+}
+
+// Per-finding comment bodies (ROADMAP B6). Every posted finding — anchored
+// inline or standalone — carries the pr-preflight.ts identity marker as its
+// FIRST line, mirroring prCommentMarker's own contract, so a second run can
+// tell "already posted" from "new" (inline.ts's matcher) without ever
+// touching dedupe_key or root_cause_id. Deliberately as sparse as
+// renderPrComment on economics: no cost, no tokens, nothing internal.
+export function renderInlineComment(
+  finding: Finding,
+  headSha: string,
+  webUrl?: string,
+): string {
+  const out: string[] = [
+    findingMarker({
+      path: finding.path,
+      line: finding.line,
+      headSha,
+      claim: finding.claim,
+    }),
+    "",
+    `**pr-hero · ${finding.severity} (${finding.tier})**`,
+    "",
+    oneLine(finding.claim),
+  ];
+  out.push(...evidenceBlock(finding, headSha, webUrl));
+  return `${out.join("\n").trimEnd()}\n`;
+}
+
+// The un-anchorable twin of renderInlineComment: posted as a standalone
+// issue comment (never anchored to a diff line, so it carries its own
+// `path:line` heading — an inline comment does not need one, GitHub already
+// shows the line it is attached to).
+export function renderIssueFindingComment(
+  finding: Finding,
+  headSha: string,
+  webUrl?: string,
+): string {
+  const location = code(`${finding.path}:${finding.line}`);
+  const heading =
+    webUrl === undefined
+      ? `#### ${location}`
+      : `#### [${location}](${blobUrl(webUrl, headSha, finding.path, `L${finding.line}`)})`;
+  const out: string[] = [
+    findingMarker({
+      path: finding.path,
+      line: finding.line,
+      headSha,
+      claim: finding.claim,
+    }),
+    "",
+    heading,
+    "",
+    `**pr-hero · ${finding.severity} (${finding.tier})**`,
+    "",
+    oneLine(finding.claim),
+  ];
+  out.push(...evidenceBlock(finding, headSha, webUrl));
+  out.push("");
+  out.push(
+    "<sub>Posted as a standalone comment: pr-hero could not anchor this " +
+      "finding to a line in the current diff.</sub>",
+  );
+  return `${out.join("\n").trimEnd()}\n`;
+}
+
+// Shared Evidence <details> block, extracted from the pre-B6
+// commentTierSection so both per-finding renderers stay byte-identical on
+// the blank-line discipline GitHub requires around <details> markdown.
+function evidenceBlock(
+  finding: Finding,
+  headSha: string,
   webUrl: string | undefined,
 ): string[] {
-  if (findings.length === 0) return [];
-  const out: string[] = [`### ${heading} (${findings.length})`, ""];
-  for (const finding of findings) {
-    const location = code(`${finding.path}:${finding.line}`);
-    out.push(
-      webUrl === undefined
-        ? `#### ${location}`
-        : `#### [${location}](${blobUrl(webUrl, doc.head_sha, finding.path, `L${finding.line}`)})`,
-    );
-    out.push("");
-    // The claim is a paragraph, not a bullet: the section heading already
-    // carries the tier, and a ~100-word claim crammed into one bullet is
-    // exactly the wall of text this shape replaced.
-    out.push(oneLine(finding.claim));
-    out.push("");
-    if (finding.proof_refs.length > 0) {
-      // The refs are the substance behind the footer's "claim to verify".
-      // GitHub only renders markdown inside <details> when blank lines
-      // separate the HTML tags from the list — every blank line below is
-      // load-bearing, including the one before </details>.
-      out.push("<details><summary>Evidence</summary>");
-      out.push("");
-      for (const ref of finding.proof_refs) {
-        out.push(`- ${renderRef(ref, doc, webUrl)}`);
-      }
-      out.push("");
-      out.push("</details>");
-      out.push("");
-    }
+  if (finding.proof_refs.length === 0) return [];
+  const out: string[] = ["", "<details><summary>Evidence</summary>", ""];
+  for (const ref of finding.proof_refs) {
+    out.push(`- ${renderRef(ref, headSha, webUrl)}`);
   }
+  out.push("");
+  out.push("</details>");
   return out;
 }
 
@@ -269,7 +342,7 @@ function commentTierSection(
 // backtick-guarded rendering — a broken link would be worse than none.
 function renderRef(
   ref: string,
-  doc: FindingsDocument,
+  headSha: string,
   webUrl: string | undefined,
 ): string {
   if (webUrl === undefined) return code(ref);
@@ -279,7 +352,7 @@ function renderRef(
     parsed.end === undefined
       ? `L${parsed.start}`
       : `L${parsed.start}-L${parsed.end}`;
-  const url = blobUrl(webUrl, doc.head_sha, parsed.path, fragment);
+  const url = blobUrl(webUrl, headSha, parsed.path, fragment);
   const link = `[${code(`${parsed.path}:${parsed.lines}`)}](${url})`;
   return parsed.prose === "" ? link : `${link} ${oneLine(parsed.prose)}`;
 }
