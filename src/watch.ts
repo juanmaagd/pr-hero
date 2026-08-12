@@ -27,7 +27,15 @@ import {
   evaluateSizeGate,
   evaluateSizeGateAggregate,
 } from "./size-gate";
-import { log } from "./ui";
+import {
+  box,
+  log,
+  row,
+  section,
+  shortPath,
+  shortSha,
+  styleEnabled,
+} from "./ui";
 import {
   countAttempts,
   countLaunchedToday,
@@ -571,6 +579,10 @@ async function lockHolder(lockPath: string): Promise<number | null> {
   }
 }
 
+// Rendered through the same src/ui.ts primitives as the review plan card, on
+// purpose: two surfaces that answer the same question ("what would this
+// spend?") that look nothing alike cost the reader a re-orientation every
+// time they switch.
 function printDryRun(
   paths: PrheroHomePaths,
   config: WatchConfig,
@@ -578,20 +590,33 @@ function printDryRun(
   decision: TickDecision,
   repos: WatchedRepoFacts[],
 ): void {
-  log("pr-hero watch — dry run (nothing spawned, logged, or locked)");
+  const styles = styleEnabled();
+  const emit = (label: string, value: string): void => {
+    for (const line of row(label, value, { styles })) log(line);
+  };
+  for (const line of box(
+    "pr-hero · watch",
+    [
+      "dry run — nothing spawned, logged, or locked",
+      `${config.repos.length} repo(s) · ${launchedToday}/${config.dailyCap} ` +
+        "launches used today",
+    ],
+    { styles },
+  )) {
+    log(line);
+  }
   log();
-  log(
-    `  config     ${paths.configPath} — ${config.repos.length} repo(s), ` +
-      `daily cap ${config.dailyCap}, window ` +
-      (config.window === null
-        ? "always"
-        : `${config.window.start}-${config.window.end}`),
+  emit("CONFIG", shortPath(paths.configPath));
+  emit(
+    "WINDOW",
+    config.window === null
+      ? "always"
+      : `${config.window.start}-${config.window.end}`,
   );
-  log(`  today      ${launchedToday} of ${config.dailyCap} launches used`);
-  log(`  gate       ${decision.gate}`);
+  emit("GATE", decision.gate);
   for (const repo of repos) {
     log();
-    log(`  ${repo.path}`);
+    log(`  ${section(shortPath(repo.path), styles)}`);
     if (repo.prs.length === 0) {
       log("    no open PRs");
       continue;
@@ -604,30 +629,31 @@ function printDryRun(
           s.head === candidate.head,
       );
       log(
-        `    pr ${candidate.pr} head ${candidate.head.slice(0, 8)} — ` +
+        `    pr ${candidate.pr} head ${shortSha(candidate.head, 8)} — ` +
           (skip === undefined ? "eligible" : `skip: ${skip.reason}`),
       );
     }
   }
   log();
   if (decision.launch !== null) {
-    log(
-      `  would launch: pr ${decision.launch.pr} in ${decision.launch.repo}` +
+    emit(
+      "LAUNCH",
+      `pr ${decision.launch.pr} in ${shortPath(decision.launch.repo)}` +
         ` (review --pr ${decision.launch.pr} --yes` +
         `${decision.launch.post ? " --post" : ""})`,
     );
   } else if (decision.gate !== "open") {
-    log(`  would launch: nothing — gate is ${decision.gate}`);
+    emit("LAUNCH", `nothing — gate is ${decision.gate}`);
   } else {
-    log("  would launch: nothing — no eligible (pr, head)");
+    emit("LAUNCH", "nothing — no eligible (pr, head)");
   }
   if (decision.eligible.length > 1) {
-    log(
-      "  waiting behind it: " +
-        decision.eligible
-          .slice(1)
-          .map((e) => `pr ${e.pr} (${path.basename(e.repo)})`)
-          .join(", "),
+    emit(
+      "WAITING",
+      decision.eligible
+        .slice(1)
+        .map((e) => `pr ${e.pr} (${path.basename(e.repo)})`)
+        .join(", "),
     );
   }
 }
