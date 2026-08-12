@@ -468,7 +468,18 @@ describe("postInlineFindings — idempotency, same head, drifted live line", () 
       headSha: HEAD, // SAME head as this run
       claim: "unchanged claim",
     });
-    const findings = [finding({ id: "F001", path: "src/a.ts", line: 100 })];
+    // F002 fix: the exact same-head branch now consults the claim
+    // fingerprint too, so this genuinely idempotent case needs the
+    // finding's claim to match what the marker was posted with — an
+    // UNCHANGED claim, as the describe block's name promises.
+    const findings = [
+      finding({
+        id: "F001",
+        path: "src/a.ts",
+        line: 100,
+        claim: "unchanged claim",
+      }),
+    ];
     const { spawnFn, calls } = makeFakeGh([
       {
         match: ["issues/42/comments", "--paginate"],

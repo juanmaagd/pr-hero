@@ -67,8 +67,20 @@ function anchorLinesForRecord(record: string): Set<number> {
       continue;
     }
     if (line.startsWith("-")) continue; // left-side only; right counter holds
-    // Anything else inside a hunk body ("\ No newline at end of file", or the
-    // record simply ending) closes it — the next header line reopens.
+    // WHY skip, not close: `\ No newline at end of file` is not a tail-only
+    // marker. Git emits it immediately after the last `-` line whenever the
+    // OLD file lacked a trailing newline, and the hunk continues with more
+    // `+` content lines in the SAME hunk when the file's last line is
+    // edited (verified against real `git diff` output, not assumed shape).
+    // The old code treated ANY non +/-/space line as the hunk's end, so
+    // every `+` line after a mid-hunk marker was dropped from the anchor
+    // set — classifyAnchorability then reported those lines un-anchorable
+    // and buildPostPlan misrouted them to issueComments instead of
+    // reviewComments. Closing on a genuine hunk end still works without
+    // this branch: the next `@@` header (if any) sets inHunk back to true,
+    // and the record simply running out of lines ends the loop regardless.
+    if (line.startsWith("\\")) continue;
+    // Anything else inside a hunk body closes it — the next header reopens.
     inHunk = false;
   }
   return out;
@@ -166,8 +178,32 @@ function candidatesFor(
     const path = posted.livePath ?? posted.marker.path;
     if (path !== finding.path) continue;
     const sameHead = posted.marker.headSha === headSha;
+    // WHY the fingerprint is consulted here too, not just in resolveWinner's
+    // tie-break: this branch used to treat same-head path+line alone as
+    // sufficient identity, and it is almost always the SOLE candidate (a
+    // same-head exact-line hit crowds out any windowed alternative), so the
+    // tie-break fingerprint check below never ran for it. Consequence: a
+    // genuinely DIFFERENT defect reported at a path:line that already
+    // carries an unrelated posted comment was silently classified `persist`
+    // and never surfaced — the invisible miss this module's own doc comment
+    // (above, "the worst failure mode a review tool can have") warns about,
+    // via the one path built to bypass the safeguard meant to prevent it. A
+    // fingerprint mismatch means "not established to be the same finding",
+    // which resolves to fresh (POST AS NEW) per the demote-not-guess
+    // direction: a visible duplicate is self-correcting, an invisible miss
+    // is not. The honest cost: claimFingerprint is sha256 over the full
+    // trimmed claim text, "nowhere near enough (nor intended) to be a
+    // content-addressed identity on its own" (pr-preflight.ts), and LLM
+    // claim wording drifts run to run for the SAME defect — so re-reviewing
+    // an UNCHANGED head can now post a visible duplicate where it used to
+    // silently persist. That trade is deliberate. It is also bounded: this
+    // branch only fires on the SAME head, and `post --from` replays the
+    // exact same findings.json, so identical claims yield identical
+    // fingerprints and that path is unaffected.
     if (sameHead && posted.marker.line === finding.line) {
-      exact.push({ posted, distance: 0 });
+      if (posted.marker.c === claimFingerprint(finding.claim)) {
+        exact.push({ posted, distance: 0 });
+      }
       continue;
     }
     const line = posted.liveLine ?? posted.marker.line;

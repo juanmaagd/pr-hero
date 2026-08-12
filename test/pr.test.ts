@@ -28,7 +28,7 @@ import {
   postIssueComment,
   postPrReview,
 } from "../src/pr";
-import { PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
 import { renderIssueFindingComment } from "../src/report";
 
 // ---------------------------------------------------------------------------
@@ -435,9 +435,16 @@ describe("postPrReview", () => {
       finding({ id: "F001", path: "src/a.ts", line: 10 }),
       finding({ id: "F002", path: "src/b.ts", line: 20 }),
     ];
-    const leftoverMarker =
-      "<!-- pr-hero-finding path=src%2Fa.ts line=10 head=" +
-      `${HEAD} c=abcdef123456 -->\nclaim text`;
+    // F002 fix: the exact same-head branch now consults the claim
+    // fingerprint too, so a "same finding, already posted" fixture needs a
+    // REAL matching fingerprint — F001's default claim, not an arbitrary
+    // placeholder `c` that happened to be irrelevant before this fix.
+    const leftoverMarker = `${findingMarker({
+      path: "src/a.ts",
+      line: 10,
+      headSha: HEAD,
+      claim: "the value is stored in seconds and read as milliseconds",
+    })}\nthe value is stored in seconds and read as milliseconds`;
     const { spawnFn } = makeFakeGh([
       {
         match: ["pulls/42/reviews"],
