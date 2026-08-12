@@ -42,7 +42,11 @@ function posted(
       path,
       line,
       headSha: "aaaa000011112222333344445555666677778888",
-      c: "c1c1c1c1c1c1",
+      // Matches finding()'s default claim ("a defect") so the exact-match
+      // fingerprint check (F002 fix) does not spuriously break every test
+      // that relies on the default finding/posted pairing actually
+      // matching. Tests that need a genuine MISMATCH override this.
+      c: claimFingerprint("a defect"),
     },
     ...overrides,
   };
@@ -131,6 +135,56 @@ describe("parseHunkAnchors + classifyAnchorability", () => {
     expect(classifyAnchorability({ path: "src/a.ts", line: 2 }, anchors)).toBe(
       "un-anchorable",
     );
+  });
+
+  // F001 fix: `\ No newline at end of file` is not tail-only. Verified
+  // against REAL `git diff` output (editing the last line of a file that
+  // itself lacked a trailing newline): the marker appears immediately after
+  // the last `-` line, and the hunk continues with a `+` content line in
+  // the SAME hunk. Before the fix, the catch-all `inHunk = false` treated
+  // that marker as the hunk's end, so the trailing `+` line was dropped
+  // from the anchor set and classifyAnchorability reported it
+  // un-anchorable even though GitHub would accept an inline comment there.
+  test("a mid-hunk 'no newline' marker does not drop the +line that follows it", () => {
+    const patch =
+      "diff --git a/f.txt b/f.txt\n" +
+      "index 757ad52..d76aff9 100644\n" +
+      "--- a/f.txt\n" +
+      "+++ b/f.txt\n" +
+      "@@ -1,3 +1,3 @@\n" +
+      " line1\n" +
+      " line2\n" +
+      "-lastline\n" +
+      "\\ No newline at end of file\n" +
+      "+EDITED lastline\n";
+    const anchors = parseHunkAnchors(patch);
+    expect(classifyAnchorability({ path: "f.txt", line: 3 }, anchors)).toBe(
+      "anchorable",
+    );
+  });
+
+  // Same real shape, but the NEW file also lacks a trailing newline: git
+  // emits the marker a SECOND time, right after the final `+` line. The
+  // marker must never anchor a phantom line by itself, and the `+` line
+  // immediately before it must still count.
+  test("a 'no newline' marker after the trailing +line still anchors that line, and adds nothing of its own", () => {
+    const patch =
+      "diff --git a/f.txt b/f.txt\n" +
+      "index 757ad52..541d5b5 100644\n" +
+      "--- a/f.txt\n" +
+      "+++ b/f.txt\n" +
+      "@@ -1,3 +1,3 @@\n" +
+      " line1\n" +
+      " line2\n" +
+      "-lastline\n" +
+      "\\ No newline at end of file\n" +
+      "+EDITED lastline\n" +
+      "\\ No newline at end of file\n";
+    const anchors = parseHunkAnchors(patch);
+    expect(classifyAnchorability({ path: "f.txt", line: 3 }, anchors)).toBe(
+      "anchorable",
+    );
+    expect(anchors.get("f.txt")?.size).toBe(3);
   });
 });
 
@@ -249,6 +303,26 @@ describe("matchPostedFindings", () => {
     });
     expect(result.persist).toHaveLength(1);
     expect(result.fresh).toHaveLength(0);
+  });
+
+  // F002 fix: same head, same stored line, DIFFERENT claim. Before this
+  // fix, the exact same-head branch keyed on path+line alone and never
+  // consulted the fingerprint (it only ran for genuine WINDOWED ties), so a
+  // distinct defect landing at a path:line that already carried an
+  // unrelated posted comment was silently classified `persist` and never
+  // surfaced — the invisible miss. Every OTHER exact-match test in this
+  // file reuses the default (matching) claim/fingerprint pair; this is the
+  // one that pins the mismatch actually causing a post, not a swallow.
+  test("same head, same line, DIFFERENT claim: posts as new rather than persisting silently", () => {
+    const result = matchPostedFindings({
+      findings: [
+        finding("a.ts", 100, { claim: "a brand new, unrelated defect" }),
+      ],
+      posted: [posted("a.ts", 100)], // marker.c fingerprints "a defect"
+      headSha: HEAD,
+    });
+    expect(result.fresh).toHaveLength(1);
+    expect(result.persist).toHaveLength(0);
   });
 
   // Fix 2 (WARN-1): pins the live-line preference on a DIFFERENT head, where
