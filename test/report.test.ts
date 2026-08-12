@@ -13,6 +13,7 @@ import {
   renderIssueFindingComment,
   renderPrComment,
   renderReport,
+  severityEmoji,
 } from "../src/report";
 import { clusterByRootCause } from "../src/root-cause";
 
@@ -316,7 +317,10 @@ describe("renderPrComment", () => {
 
   // doc.base_sha IS the diff-from commit (the recorded rule in cli.ts), so
   // the summary line's two 8-char shas name the exact range reviewed.
-  test("the summary line carries the counts and the reviewed range", () => {
+  // Counted by SEVERITY, not tier (Juanma's PR #2 feedback item 3): F003 is
+  // WARNING/advisory and counts in "warning", while F001/F002 are BLOCKER
+  // (default) and count in "critical" regardless of what tier they landed.
+  test("the summary line carries the severity counts and the reviewed range", () => {
     const findings = [
       finding({ id: "F001", path: "src/a.ts", line: 10 }),
       finding({ id: "F002", path: "src/b.ts", line: 20 }),
@@ -331,15 +335,43 @@ describe("renderPrComment", () => {
     const body = renderPrComment(doc({ findings }), undefined, undefined);
     expect(body).toContain("## pr-hero review");
     expect(body).toContain(
-      "**2 blocking · 1 advisory** — `bbbbbbbb`, diff from `aaaaaaaa`",
+      "🔴 2 critical · 🟡 1 warning — `bbbbbbbb`, diff from `aaaaaaaa`",
     );
   });
 
-  // ROADMAP B6 reshape: the summary no longer lists findings by tier at
-  // all — that moved to renderInlineComment/renderIssueFindingComment. No
-  // heading, no per-finding claim text, no Evidence block belongs here any
-  // more; only the aggregate counts, the delta line, and the disclaimer.
-  test("the summary carries no tier headings, claim text, or evidence blocks", () => {
+  // Item 3's actual point: counted by SEVERITY, not tier — a real posted PR
+  // (PR #2) had two CRITICAL findings BOTH downgraded to advisory tier, and
+  // the old tier-based headline read "0 blocking · 2 advisory", hiding that
+  // both were genuinely CRITICAL. This is the case that distinguishes the
+  // two counting rules: severity-based reads 2 critical / 0 warning here,
+  // tier-based would read 0 / 0 (both landed advisory, neither is WARNING).
+  test("a downgraded CRITICAL still counts as critical, never hidden by its advisory tier", () => {
+    const findings = [
+      finding({
+        id: "F001",
+        severity: "CRITICAL",
+        refuter_verdict: "downgraded-latent",
+        tier: "advisory",
+      }),
+      finding({
+        id: "F002",
+        severity: "CRITICAL",
+        refuter_verdict: "downgraded-latent",
+        tier: "advisory",
+      }),
+    ];
+    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    expect(body).toContain("🔴 2 critical · 🟡 0 warning");
+  });
+
+  // ROADMAP B6 rework (Juanma's PR #2 feedback item 1): the earlier "one
+  // finding, one place" decision stripped the summary's finding list
+  // entirely, which read as empty on first contact. This partially reverses
+  // it — but the reinstated list is a ONE-LINE index (emoji, location, a
+  // short lead-in) with no tier headings, no full claim paragraph, and no
+  // Evidence block of its own; those still live only on the per-finding
+  // comment (renderInlineComment/renderIssueFindingComment).
+  test("the summary carries a one-line index, never tier headings or evidence blocks", () => {
     const findings = [
       finding({
         id: "F001",
@@ -359,16 +391,93 @@ describe("renderPrComment", () => {
     expect(body).not.toContain("### 🔴 Blocking");
     expect(body).not.toContain("### 🟡 Advisory");
     expect(body).not.toContain("#### `src/a.ts:10`");
-    expect(body).not.toContain("the value is stored in seconds");
     expect(body).not.toContain("<details>");
     expect(body).not.toContain("Evidence");
+    // The one-line index DOES carry a short lead-in of the claim now — the
+    // partial reversal above — so this only asserts the FULL claim sentence
+    // never appears (that stays on the per-finding comment).
+    expect(body).toContain(
+      `${severityEmoji("BLOCKER")} \`src/a.ts:10\` — the value is stored ` +
+        "in seconds and read as milliseconds",
+    );
     // No finding ids: engine internals stay in report.md.
     expect(body).not.toContain("F001");
   });
 
+  // Priority order (Juanma's PR #2 feedback): severity rank first (BLOCKER,
+  // CRITICAL, WARNING, SUGGESTION), then path, then line — this is the ONE
+  // place priority ordering actually applies; posted inline comments
+  // themselves sort however GitHub lays out file/line, not by pr-hero.
+  test("the index sorts by severity rank, then path, then line", () => {
+    const findings = [
+      finding({
+        id: "F001",
+        path: "src/z.ts",
+        line: 1,
+        severity: "SUGGESTION",
+        tier: "advisory",
+      }),
+      finding({
+        id: "F002",
+        path: "src/a.ts",
+        line: 5,
+        severity: "CRITICAL",
+      }),
+      finding({
+        id: "F003",
+        path: "src/a.ts",
+        line: 1,
+        severity: "CRITICAL",
+      }),
+      finding({
+        id: "F004",
+        path: "src/m.ts",
+        line: 1,
+        severity: "WARNING",
+        tier: "advisory",
+      }),
+    ];
+    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    const lines = body
+      .split("\n")
+      .filter(
+        (l) =>
+          (l.startsWith("🔴") || l.startsWith("🟡") || l.startsWith("🔵")) &&
+          !l.includes("critical"),
+      );
+    expect(lines).toEqual([
+      `🔴 \`src/a.ts:1\` — ${finding({ id: "F003" }).claim}`,
+      `🔴 \`src/a.ts:5\` — ${finding({ id: "F002" }).claim}`,
+      `🟡 \`src/m.ts:1\` — ${finding({ id: "F004" }).claim}`,
+      `🔵 \`src/z.ts:1\` — ${finding({ id: "F001" }).claim}`,
+    ]);
+  });
+
+  test("an index line links to the finding's comment when the url map has one", () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      new Map([
+        ["F001", "https://github.com/musivetech/musive/pull/1#discussion_r5"],
+      ]),
+    );
+    expect(body).toContain(
+      "🔴 [`src/a.ts:10`](https://github.com/musivetech/musive/pull/1#discussion_r5) — the value",
+    );
+  });
+
+  test("an index line without a url map entry renders plain, unlinked text", () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    expect(body).toContain("🔴 `src/a.ts:10` — the value");
+    expect(body).not.toContain("[`src/a.ts:10`]");
+  });
+
   test("zero findings render the explicit clean bill", () => {
     const body = renderPrComment(doc(), undefined, undefined);
-    expect(body).toContain("**0 blocking · 0 advisory**");
+    expect(body).toContain("🔴 0 critical · 🟡 0 warning");
     expect(body).toContain(
       "✅ pr-hero reviewed this PR and found nothing to report.",
     );
@@ -470,6 +579,20 @@ describe("renderPrComment", () => {
       "Δ since `cccccccc`: 1 resolved · 1 new · 2 persist",
     );
   });
+
+  // Juanma's PR #2 feedback: "Δ since f933fda8" printed on head f933fda8 is
+  // noise — a re-run on an UNCHANGED head, not a genuinely absent prior
+  // state, which the "first run" test above already covers separately.
+  test("the since-sha clause is omitted when the previous head equals the current head", () => {
+    const body = renderPrComment(doc(), undefined, {
+      resolved: 0,
+      new: 0,
+      persist: 2,
+      previousHeadSha: "b".repeat(40), // same as doc().head_sha
+    });
+    expect(body).toContain("Δ: 0 resolved · 0 new · 2 persist");
+    expect(body).not.toContain("since");
+  });
 });
 
 describe("renderInlineComment", () => {
@@ -493,9 +616,55 @@ describe("renderInlineComment", () => {
     );
   });
 
-  test("carries the severity, tier, and the claim as a paragraph", () => {
+  // Header line (Juanma's PR #2 feedback item 3/4): severity, causal
+  // disposition, and hunter, all on one scannable line — none of these three
+  // was visible anywhere before this rework.
+  test("the header line carries severity, causal disposition, and hunter", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F001",
+        causal_disposition: "introduced",
+        hunter: "lifecycle",
+      }),
+      HEAD,
+    );
+    expect(body).toContain(
+      `${severityEmoji("BLOCKER")} BLOCKER · introduced · lifecycle`,
+    );
+  });
+
+  test("the location line carries path:line and the symbol when present", () => {
+    const withSymbol = renderInlineComment(
+      finding({
+        id: "F001",
+        path: "src/inline.ts",
+        line: 72,
+        symbol: "anchorLinesForRecord()",
+      }),
+      HEAD,
+    );
+    expect(withSymbol).toContain("`src/inline.ts:72` — anchorLinesForRecord()");
+    const withoutSymbol = renderInlineComment(
+      finding({ id: "F001", path: "src/inline.ts", line: 72 }),
+      HEAD,
+    );
+    expect(withoutSymbol).toContain("`src/inline.ts:72`\n");
+    expect(withoutSymbol).not.toContain("`src/inline.ts:72` —");
+  });
+
+  // No link on the inline variant: GitHub already anchors this comment to
+  // the diff line, so a self-link would be redundant.
+  test("the inline location line is never a link, even with a repo url", () => {
+    const body = renderInlineComment(
+      finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      HEAD,
+      WEB_URL,
+    );
+    expect(body).not.toContain("[`src/a.ts:10`]");
+  });
+
+  test("carries the claim as a paragraph", () => {
     const body = renderInlineComment(finding({ id: "F001" }), HEAD);
-    expect(body).toContain("**pr-hero · BLOCKER (blocking)**");
     expect(body).toContain(
       "the value is stored in seconds and read as milliseconds",
     );
@@ -503,22 +672,78 @@ describe("renderInlineComment", () => {
     expect(body).not.toContain("F001");
   });
 
-  test("evidence folds into details with the blank-line discipline", () => {
+  // Item 3/4: the tier-explanation line appears ONLY when severity and tier
+  // disagree — never a tautology when they already agree.
+  test("no tier-explanation line when severity and tier agree", () => {
+    const body = renderInlineComment(finding({ id: "F001" }), HEAD);
+    expect(body).not.toContain("Downgraded to advisory");
+  });
+
+  test("a downgraded-latent CRITICAL names the refuter verdict and its gloss", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F001",
+        severity: "CRITICAL",
+        refuter_verdict: "downgraded-latent",
+        tier: "advisory",
+      }),
+      HEAD,
+    );
+    expect(body).toContain(
+      "⚖️ Downgraded to advisory — the refuter returned `downgraded-latent`",
+    );
+    expect(body).toContain("(real, but no live trigger today)");
+  });
+
+  test("a demoted CRITICAL with a different verdict names it without a gloss", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F001",
+        severity: "CRITICAL",
+        evidence_class: "inferential",
+        refuter_verdict: "inconclusive",
+        tier: "advisory",
+      }),
+      HEAD,
+    );
+    expect(body).toContain(
+      "⚖️ Downgraded to advisory — the refuter returned `inconclusive`",
+    );
+    expect(body).not.toContain("real, but no live trigger");
+  });
+
+  test("evidence folds into details with the blank-line discipline, count in the label", () => {
     const body = renderInlineComment(finding({ id: "F001" }), HEAD);
     expect(body).toContain(
-      "<details><summary>Evidence</summary>\n\n" +
+      "<details><summary>Evidence (1)</summary>\n\n" +
         "- `src/duration.ts:19-20 (fromSeconds stores raw seconds)`\n\n" +
         "</details>",
     );
   });
 
-  test("a finding without proof refs has no evidence block", () => {
+  test("a finding without proof refs has no evidence block, but keeps the prompt block", () => {
     const body = renderInlineComment(
       finding({ id: "F001", proof_refs: [] }),
       HEAD,
     );
-    expect(body).not.toContain("<details>");
     expect(body).not.toContain("Evidence");
+    expect(body).toContain("Prompt to fix with AI");
+  });
+
+  // Item "Prompt to fix with AI": a copy-pasteable prompt naming the path,
+  // line, and claim — never a deep link to a hosted service this project
+  // does not have.
+  test("the prompt-to-fix block is copy-pasteable, never a deep link", () => {
+    const body = renderInlineComment(
+      finding({ id: "F001", path: "src/inline.ts", line: 72 }),
+      HEAD,
+    );
+    expect(body).toContain("<details><summary>Prompt to fix with AI</summary>");
+    expect(body).toContain("Fix this issue in src/inline.ts at line 72:");
+    expect(body).toContain(
+      "the value is stored in seconds and read as milliseconds",
+    );
+    expect(body).not.toContain("http");
   });
 
   test("a repo web url turns an evidence ref into a blob link", () => {
@@ -583,26 +808,38 @@ describe("renderIssueFindingComment", () => {
   });
 
   // Unlike the inline comment (already attached to a line by GitHub), the
-  // issue comment carries its own location heading — otherwise a reader has
-  // no idea what the comment is even about.
-  test("carries a location heading and states it is standalone", () => {
+  // issue comment's location line links to the blob — otherwise a reader has
+  // no way to reach the code at all.
+  test("carries a header, location line, and states it is standalone", () => {
     const body = renderIssueFindingComment(
       finding({ id: "F001", path: "src/a.ts", line: 10 }),
       HEAD,
     );
-    expect(body).toContain("#### `src/a.ts:10`");
+    expect(body).toContain(
+      `${severityEmoji("BLOCKER")} BLOCKER · introduced · reliability`,
+    );
+    expect(body).toContain("`src/a.ts:10`");
     expect(body).toContain("could not anchor this");
   });
 
-  test("the location heading becomes a blob link with a repo url", () => {
+  test("the location line becomes a blob link with a repo url", () => {
     const body = renderIssueFindingComment(
       finding({ id: "F001", path: "src/a.ts", line: 10 }),
       HEAD,
       WEB_URL,
     );
     expect(body).toContain(
-      `#### [\`src/a.ts:10\`](${WEB_URL}/blob/${HEAD}/src/a.ts#L10)`,
+      `[\`src/a.ts:10\`](${WEB_URL}/blob/${HEAD}/src/a.ts#L10)`,
     );
+  });
+
+  test("carries the prompt-to-fix block too", () => {
+    const body = renderIssueFindingComment(
+      finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      HEAD,
+    );
+    expect(body).toContain("Prompt to fix with AI");
+    expect(body).toContain("Fix this issue in src/a.ts at line 10:");
   });
 
   test("no cost or token figures anywhere", () => {
