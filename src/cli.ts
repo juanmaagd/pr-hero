@@ -610,16 +610,11 @@ async function review(options: CliOptions): Promise<number> {
     }),
   );
 
-  // 18 — the summary.
-  const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
-  const advisory = doc.findings.length - blocking;
-  const rootCauses = doc.debug.root_causes?.distinct_root_causes ?? 0;
+  // 18 — the summary. Counts, the FINDINGS THEMSELVES, and where the
+  // artifacts landed: the renderer derives every number from `doc`, so the
+  // terminal cannot disagree with the findings.json written two steps up.
   for (const line of renderResult({
-    runStatus: doc.run_status,
-    blocking,
-    advisory,
-    rootCauses,
-    refuted: doc.debug.refuted.length,
+    doc,
     costUsd: result.usage.cost_usd_est,
     wallMs,
     estimate: { low: estimate.low, high: estimate.high },
@@ -1121,22 +1116,14 @@ async function reviewPr(
     }
   }
 
-  // 15 — the summary.
-  const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
-  const advisory = doc.findings.length - blocking;
-  const rootCauses = doc.debug.root_causes?.distinct_root_causes ?? 0;
-  // One shared renderer with local mode; the mode-specific parts (comparison,
+  // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
   // the worktree hint) ride in as optional inputs. The `posted:` line that
   // used to sit here is GONE on purpose: step 14 already printed a richer one
   // at the moment it happened, and two differently-worded reports of the same
   // POST read as two postings. What this block keeps is the durable trace —
   // post.json in the artifact list below.
   for (const line of renderResult({
-    runStatus: doc.run_status,
-    blocking,
-    advisory,
-    rootCauses,
-    refuted: doc.debug.refuted.length,
+    doc,
     costUsd: result.usage.cost_usd_est,
     wallMs,
     estimate: { low: estimate.low, high: estimate.high },
@@ -1151,9 +1138,9 @@ async function reviewPr(
       ? {
           comparison: {
             greptileFound: comparison.greptileFound,
-            greptileOnly: comparison.greptileOnly,
-            both: comparison.both,
-            prheroOnly: comparison.prheroOnly,
+            // The buckets themselves, not their counts: writeComparison's
+            // widened outcome is what lets the block name a recall miss.
+            result: comparison.result,
           },
         }
       : {}),

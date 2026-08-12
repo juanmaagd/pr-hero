@@ -18,7 +18,11 @@
 
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { compareFindings, type PrHeroFindingRef } from "./compare";
+import {
+  type ComparisonResult,
+  compareFindings,
+  type PrHeroFindingRef,
+} from "./compare";
 import { renderComparison } from "./compare-report";
 import type { Finding, RunStatus } from "./findings";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
@@ -364,6 +368,13 @@ export interface ComparisonOutcome {
   prheroOnly: number;
   markdownPath: string;
   jsonPath: string;
+  // The whole bucketing, not just its cardinalities. writeComparison already
+  // computes this to write comparison.md; discarding it left the terminal
+  // structurally unable to say anything but numbers, and `greptileOnly` is
+  // THE measured number — "a recall miss with a name, a file and a line"
+  // (compare.ts). IN-MEMORY ONLY: comparison.json's bytes are unchanged, and
+  // must stay so — the ledger reads them back through StoredComparison.
+  result: ComparisonResult;
 }
 
 // The in-process replacement for scripts/compare-pr.ts, run against the
@@ -411,6 +422,7 @@ export async function writeComparison(input: {
     prheroOnly: result.prheroOnly.length,
     markdownPath,
     jsonPath,
+    result,
   };
 }
 
