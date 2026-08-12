@@ -458,35 +458,176 @@ What is still manual, in the order it should be closed:
    runs, these thresholds are a budget decision, not a quality boundary, and they should be argued
    about on cost grounds alone.
 
-6. **Answer back in the thread — the conversation loop.** NOT BUILT, not started, named here 2026-08-11
-   so it stops being invisible. Today pr-hero posts once and leaves: `--post` creates or PATCHes one
-   marked comment, and that is the whole of its voice. `fetchPrComments` exists but never listens —
-   its three callers are the watcher's marker guard (`watch.ts:301`), Greptile's comment for the
-   head-to-head (`pr.ts:355`), and finding our own comment to update it (`pr.ts:402`). Nothing reads a
-   human's reply, so a reviewer who answers a finding is talking to a wall.
+6. **Speak where the conversation happens — the inline surface.** NOT BUILT. Named 2026-08-11, and
+   **RE-SCOPED 2026-08-12 after measuring Greptile instead of theorising about it** (musive PR 1583).
+   Today pr-hero posts once and leaves: `--post` creates or PATCHes one marked issue comment, and that
+   is the whole of its voice. `fetchPrComments` exists but never listens — its three callers are the
+   watcher's marker guard (`watch.ts:320`), Greptile's comment for the head-to-head (`pr.ts:355`), and
+   finding our own comment to update it (`pr.ts:402`).
 
-   **Why it matters more than it looks.** This is where a reviewer earns trust, and the cost of not
-   having it is already on the record: reviewing its own PR #1, the engine filed F003 as `introduced`
-   when it is plainly pre-existing — `ghPrList` (`watch.ts:243`) has carried the identical unbounded-gh
-   hang the whole time, and there is not one `AbortController`/`Promise.race`/timeout anywhere in
-   `pr.ts` or `watch.ts`. The refuter corroborated it without questioning the class. A human catches
-   that in one sentence. Today that sentence dies in the ledger and the engine never hears it — which
-   also means the adversarial loop only ever runs against the refuter, never against the one critic
-   who has the repo's history in their head.
+   **What the measurement changed.** The entry used to say this slice had to *adjudicate a human's
+   objection* — "a judgement step and therefore a spawned step with its own cost". The reviewer this
+   project is benchmarked against does not do that and never has. On 1583 Greptile posted, Juanma
+   replied at 13:31, and Greptile's 13:35 "answer" was a brand-new top-level finding on different
+   lines. **It never argues; it re-reviews.** Juanma confirmed the behaviour and ruled out even an
+   emoji acknowledgement. The machinery that loop needs already exists here: the `on_push` knob
+   (`bf85a6d`).
 
-   **What it needs, and the hazards that make it a slice of its own** (do NOT bolt it onto `--post`):
-   read replies threaded under our marked comment; bind each reply to the finding it answers (our
-   comment is one body with many findings — the binding is the hard part, and finding ids in the
-   rendered markdown are the obvious lever); decide whether an objection changes the verdict, which is
-   a judgement step and therefore a spawned step with its own cost, not a string match; and answer
-   without duplicating comments or ping-ponging forever with a human. The `updated-in-place`
-   idempotency already solves the "one comment per PR" half; none of the rest exists. A reply that
-   overturns a finding must also reach the ledger, or the head-to-head keeps scoring a finding the
-   author already disproved.
+   Greptile's actual architecture, measured, is a **split of surfaces by job**: ONE issue comment
+   PATCHed in place as *state* (created 12:59:04, updated 13:42:38 across two fix rounds — carrying the
+   summary, a confidence score whose prose narrates the delta since the last round, and a
+   `Comments Outside Diff` fallback bucket marked `<!-- greptile_failed_comments -->` for findings
+   GitHub refuses to anchor), and N inline review comments posted per round as *events*. That split is
+   not cosmetic: **a PATCH to an issue comment notifies nobody**, so the summary is silent by nature and
+   every notification rides the inline comments. It is the reason "answer back" cannot be bolted onto
+   `--post`.
 
-   Two things to decide before any code: whether a human's objection can flip a verdict on its own or
-   only re-open it for another adjudicated pass, and what stops an argument. Neither is answerable
-   from the current data.
+   **This slice (Juanma's scope call, 2026-08-12):** per-finding inline review comments via one review
+   submission per run (`POST /pulls/<n>/reviews`, `event: COMMENT`, `comments[]` — Greptile's own shape,
+   one notification instead of N, and partial failure collapses into one call); a `Comments Outside
+   Diff` bucket in the summary for the un-anchorable, with permalink; **cross-run identity** so a
+   re-review does not duplicate every unfixed finding; and a deterministic delta line
+   (`N resolved · M new · K persist`) — our confidence score, computed rather than written.
+
+   **Content split (Juanma, 2026-08-12): one finding, one place.** Every anchorable finding goes
+   inline, advisory included, and `renderPrComment` **stops listing findings by tier** — the summary
+   keeps the counts, the delta line and the outside-diff bucket, nothing more. This is the measured
+   Greptile split, and the reason is re-review: two views of the same finding must be kept coherent on
+   every push, and the one that drifts is the one that lies about what is already fixed. The cost is
+   accepted and stated — the Conversation tab no longer shows at a glance what was found; Files changed
+   does.
+
+   **Cross-run identity is a MATCHING problem, not a key lookup, and that is load-bearing.** None of
+   the three candidate keys survives a second run: `dedupe_key` is emitted by the LLM hunter
+   (`HUNTER_OUTPUT_CONTRACT`, `pipeline.ts:208`; validated only as a non-empty string,
+   `findings.ts:238`), `root_cause_id` derives from its first `proof_ref`, and `F00N` is positional,
+   reassigned every run (`pipeline.ts:480`). What does survive is on GitHub's side: a review comment
+   carries `line` kept current as pushes land, plus `original_line`/`original_commit_id`. Verified on
+   1583 — comment `3674442892` was posted at `original_line 478 / original_start 471` on `63c96934` and
+   now reads `line 511 / start 504` on `ecdc4808`. **GitHub tracks the drift for us**; matching runs
+   over the live `line` by path plus a window (precedent: `compare.ts`, ±25). Identity is stated on each
+   comment as `<!-- pr-hero-finding … -->`, so the state lives on GitHub and survives a machine change —
+   the same reasoning that put `head=` in the summary marker.
+
+   **Direction-of-error rule, inherited from C1a and `dedupe.ts` pass 2: err toward UNDER-matching.**
+   An under-match posts a duplicate comment — visible, annoying, self-correcting. An over-match silently
+   suppresses a genuinely new finding: an invisible miss, the worst failure mode a review tool has.
+
+   Also corrected by the measurement, because the wrong version was briefly believed: **Greptile does
+   not snap a comment to a nearby postable line.** `original_line 471-478` matches its own body's
+   "Line: 471-478" exactly. It posts at the true line when the line is in the diff, and everything else
+   falls to the outside-diff bucket. The summary keeps `ghRepoWebUrl` permalinks for those.
+
+   **Every finding gets its OWN comment — no exceptions, and this DIVERGES from Greptile (Juanma,
+   2026-08-12).** Greptile pools its un-anchorable findings into one `Comments Outside Diff` section
+   inside the summary; pr-hero must not, because 6b makes every finding a thing that has to be
+   *answerable*, and N findings pooled in one comment share one thread and one reaction box. Anchorable
+   → its own inline review comment. Un-anchorable → **its own top-level issue comment**, which still
+   carries its own reactions (verified: reactions ride inline in the comment fetch, no extra call).
+   The summary keeps counts and the delta line only.
+
+   Measured on this repo's own PR #1, which is why the pooled version was rejected: of its four
+   findings, `size-gate.ts:345` (hunk 1-486) and `watch.ts:286` (hunk 268-319) are anchorable, while
+   `pr.ts:68` (hunks 128-135, 157-184) and `cli.ts:318` (hunks 127-138, 330-343) are not. **Half would
+   have been mute** — including `pr.ts:68`, the one finding already known to be misclassified and
+   therefore the one most needing an objection. The hunters read the whole repo by design, so
+   out-of-diff findings are not an edge case here.
+
+   The cost is a noisier Conversation tab, and under the agent-first premise (see 6b) that cost is near
+   zero: tidiness is a human preference, and the primary reader is an agent. Muting a subset of findings
+   is not.
+
+   **Live protocol, and it differs from the issue-comment one.** The WRITE path stays unexecuted until
+   an authorized live post; `--dry-run` is the $0 gate, always first. Where the single marked comment
+   needed two posts to prove create-then-update, this slice's idempotency proof is: **first run posts K
+   inline comments; a second run on the SAME head must post ZERO.** One run proves nothing.
+
+6b. **The triage loop — AGENT-FIRST. Designed with Juanma 2026-08-12; supersedes the old 6b/6c.**
+
+   **The strategic why, in his words: the bottleneck of coding with AI is the review.** Everything in
+   this item hangs off that. If an agent writes the code and a human is the only thing that can answer
+   a review, the human is the queue. So the default actor is an agent and **the human is the objector,
+   not the gate** — free to weigh in whenever they have context or an opinion, never required for the
+   loop to close. Call it agent-first, AI-native, whichever; the load-bearing part is which way the
+   default points.
+
+   **The loop.** pr-hero posts one comment per finding (item 6). A skill — shipped BY pr-hero, same
+   reasoning that made the trigger a product feature in B3 — drives the PR's coding agent to triage
+   each one and reply in the thread with a label plus its reasoning. That reply is bound to its finding
+   by GitHub's native `in_reply_to_id`: no ids in the body, no DSL, no heuristic parse.
+
+   **Comments, not reactions, and the argument is this project's own.** A 👍/👎 was considered and
+   rejected: it is one bit with no reasoning, which violates the A3 lesson *"record the reasoning with
+   the verdict, always"* by construction. A labelled comment carries both. (Reactions remain available
+   and free — they ride inline in the comment fetch — as a human's one-click objection, never as the
+   record.)
+
+   **The adversarial pair, and why it is shaped this way.** The coding agent must NOT simply rule on
+   the review of its own code. But it must not be cut out either: it holds real context — it knows why
+   the code is the way it is, and sometimes that IS the refutation. So each side supplies only what it
+   actually has. **The author supplies the argument; an isolated subagent supplies the disinterest.**
+   The author writes its case, and a spawned adjudicator — which never inherits the author's reasoning,
+   only the finding, the argument and the repo — rules on it. That is the hunter/refuter pair one layer
+   up, and the machinery already exists: a detached, read-only, one-step-per-finding spawn with its
+   subject inlined in the prompt (`pipeline.ts:536-702`).
+
+   **Burden of proof, or the argument becomes the attack surface.** The adjudicator reads the author's
+   case, which is exactly the rationalization isolation was meant to exclude — a persuasive wrong
+   argument is more dangerous than none. A2 already paid for the defence: **`refuted` requires positive
+   disproof with cited code.** The burden falls on whoever wants the finding gone, and it is discharged
+   by citing code, never by stating intent. "I did it on purpose" is not evidence; "this line already
+   covers it, here" is.
+
+   **The vocabulary already exists — do not invent a taxonomy.** `refuter_verdict` (`findings.ts`)
+   covers every outcome this loop needs:
+
+   | author wants | verdict | what the adjudicator must see |
+   |---|---|---|
+   | applied | — | nothing: no judge runs, the re-review verifies it independently |
+   | dismiss | `refuted` | positive disproof with cited code |
+   | defer | `downgraded-latent` | real but unreachable today — kept, never deleted (the G6 lesson) |
+   | — | `inconclusive` | neither proven: the finding stays OPEN |
+
+   Two problems dissolve here. **`defer` needs no invented destination**: `downgraded-latent` was
+   created for exactly "real but not now", so it stays in the ledger as latent instead of vanishing.
+   And **`inconclusive` prevents a forced binary** — the party writing the argument chooses what to
+   cite, so the adjudicator must be able to say "not enough" rather than pick between two bad options.
+
+   **Cost, stated honestly because an earlier draft of this entry got it wrong.** Reading the triage is
+   $0. The adjudication is a spawned step and costs money — but **only on findings the author wants
+   rejected**. `applied` needs no judge at all: if the code changed, the re-review verifies it and the
+   code does not lie. So the scrutiny lands exactly where the incentive to cheat is, and nothing is
+   paid for what is verifiable for free. And it lands on the CONSUMER's side: pr-hero ships the skill,
+   the consumer's agent spawns the adjudicator. pr-hero stays a reviewer and does not become a triager;
+   its own cost model is unchanged.
+
+   **The agent decides, and it is audited (Juanma's call, knowing the risk).** The label is the
+   verdict and it closes the row. The risk was named before he chose: the author marks its own
+   homework. Two things carry what the prompt cannot:
+   - the isolated adjudicator with the burden-of-proof rule, and
+   - **the delta, which is the real net.** Naively the matcher SUPPRESSES a persisting finding so it is
+     not reposted — which would make a wrong `dismiss` vanish permanently, exactly the opposite of a
+     net. So a dismissed finding that is still found must appear in the summary delta on EVERY
+     subsequent run: `2 persist (1 dismissed)`. It is never reposted (no ping-pong) and never
+     disappears. Zero extra cost — it reuses the matcher item 6 already builds.
+
+   **What none of this fixes, stated because it is true.** Isolation is not a guarantee. The refuter is
+   a detached, adversarial, per-finding judge built to demand cited disproof, and on this repo's own
+   PR #1 it corroborated `pr.ts:68` — filed `introduced` when `ghPrList` (`watch.ts:243`) has carried
+   the identical unbounded-`gh` hang the whole time, with no `AbortController`/`Promise.race`/timeout
+   anywhere in `pr.ts` or `watch.ts` — without ever questioning the class. A prompt that asks for rigour
+   is not a structure that enforces it. Three layers, none sufficient alone: the skill asks for
+   criteria, the isolation removes the stake, the delta makes the failure visible over time.
+
+6c. **Ledger write-back from the triage.** The two null columns B4 leaves — `comparison.json`'s
+   `verdict: null, reasoning: null`, filled by hand today — are exactly what 6b's reply produces: the
+   label is the `verdict`, the prose is the `reasoning`. Reading it is $0 and needs no I/O change if
+   item 6's fetcher already projects `in_reply_to_id`. Constraints: schema 1.0.0 is additive-only until
+   the coordinated v1.1 (C2) and both validators are allowlists, so any new field is optional; and the
+   ledger **tallies verdicts AS-IS with no enum on purpose** (the taxonomy is not invented before the
+   triage exists) — so the skill owning a vocabulary must not put that vocabulary in the parser.
+   Record the actor (`agent` vs `human`) alongside the verdict, or the audit trail 6b is premised on
+   does not exist.
 
 Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
 the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this
@@ -592,6 +733,13 @@ CLAUDE_CODE_OAUTH_TOKEN as the documented fallback), built-in provider bench, hu
 TUI/dashboard (live per-step status, cost, provider limits — convoy's strongest UX), `runs` browser.
 Timing: only after Phase B proves the engine in anger on our own repo.
 
+**Scope note (added 2026-08-12 by Juanma):** the TUI is not just a viewer. It should also be the
+interactive front-end for configuring a review — picking which model runs which hunter, per-case
+(deeper vs. lighter review), and whatever other knobs Phase D's model routing exposes by the time this
+is built — as an alternative to memorizing flags. Concrete option set is deliberately NOT decided now;
+it depends on what D2's model routing and the rest of the CLI surface look like when Phase E starts.
+Runtime/language for the TUI (TypeScript vs. Go, etc.) is also open, not decided.
+
 **Onboarding DX (added 2026-08-11 by Juanma, from the first real onboarding pass):** a guided
 `pr-hero init` that collapses today's per-project ritual — scaffold, hand-write gotchas, decide
 commit-vs-ignore for `.prhero/`, optionally `watch add` — into one complete, intuitive flow with
@@ -601,6 +749,11 @@ right; writing them should be easier), make the ignore choice actionable (offer 
 why), offer watcher enrollment with its post flag, and keep every step flag-addressable so the
 non-interactive path stays scriptable. The three-command onboarding is correct; it should also be
 one obvious command.
+
+**Distribution (added 2026-08-12 by Juanma):** pr-hero as a product means an install, not a clone.
+Package it for a real registry — npm and/or Homebrew are the obvious candidates — so `pr-hero` is a
+single install command away instead of `git clone` + link. Mechanism (which registries, versioning,
+release process) is deliberately NOT decided now; revisit when Phase E is actually being built.
 
 ## Standing rules (apply to every phase)
 
