@@ -775,6 +775,41 @@ What is still manual, in the order it should be closed:
    "it did not come back" good enough? 6b's `applied` currently assumes the second and calls it the
    first.
 
+8. **The terminal surface is unreadable, and that is a Phase B problem. IN PROGRESS 2026-08-12** (branch
+   `feat/terminal-ui`). Raised by Juanma while running real reviews: the whole flow — plan, confirm,
+   progress, result — is one flat 15-char-padded label list. Paths, 40-char SHAs, prose paragraphs and the
+   decision to spend $6 all carry equal weight, and long values wrap to column 0 and destroy the grid.
+   Worse, after a paid run the terminal prints counts and three file paths and **never prints the findings**
+   — the payload is the one thing you have to leave the terminal to read.
+
+   **Why this is B and not E.** Phase E's TUI is a configuration front-end (dashboard, `runs` browser,
+   provider limits) and is explicitly timed "only after Phase B proves the engine in anger on our own repo".
+   This is the narrower thing that *makes* running it in anger bearable, which is squarely production
+   wiring. It is also a down-payment, not a detour: `src/ui.ts` (pure formatters) and `src/ui-tree.ts` (a
+   reusable tree component) are the substrate Phase E would build the TUI on.
+
+   Six work units, each mergeable alone: (1) `src/ui.ts` pure formatters + one shared `log`, replacing the
+   duplicate in `watch.ts`; (2) the plan card, regrouped with the size gate and cost band as the last block
+   before the confirm, and the prose demoted to an unprinted `planDetails()`; (3) the confirm as a select;
+   (4) the result block unified across local and PR mode **and the findings printed**, widening
+   `ComparisonOutcome` to keep the `ComparisonResult` it currently computes and discards; (5) the findings
+   browser; (6) the progress panel as a tree.
+
+   Constraints that are not negotiable, both already paid for elsewhere: everything degrades to plain text
+   when `process.stderr.isTTY` is falsy or `NO_COLOR` is set, and **every interactive path is guarded on
+   `process.stdin.isTTY`**. The watcher spawns review with `--yes` and `stdin: "ignore"` (`src/watch.ts:475-495`);
+   today `confirm()` degrades by accident because its stdin read resolves `{value: undefined}` immediately,
+   but a `setRawMode` call in that same spot throws under launchd. Zero runtime dependencies — the repo has
+   none today and a `[y/N]` prompt is not worth breaking that.
+
+   The tree (WU6) has three consumers, which is what justifies building it as a component rather than
+   drawing glyphs by hand: the progress panel, the plan card's agent list, and the findings browser — where
+   `debug.root_causes.clusters` is already a two-level tree (RC001 → F001, F002) that today gets flattened
+   into a counter. Its second level is deliberately NOT models: `spec.agents` assigns one model per agent
+   (see C2), so a model level would give every node exactly one child. The real second level is the
+   refuter's per-finding fan-out and runner retries, both invisible today. Bound the height — the panel
+   redraws with `\x1b[<n>A` cursor-up, and a tree that outgrows the terminal corrupts the screen.
+
 Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
 the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this
 engine has no business blocking a merge yet.
