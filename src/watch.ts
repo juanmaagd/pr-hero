@@ -27,6 +27,7 @@ import {
   evaluateSizeGate,
   evaluateSizeGateAggregate,
 } from "./size-gate";
+import { log } from "./ui";
 import {
   countAttempts,
   countLaunchedToday,
@@ -64,10 +65,6 @@ import {
   WATCH_LAUNCHD_LABEL,
   type WatchConfig,
 } from "./watch-preflight";
-
-function log(line = ""): void {
-  process.stderr.write(`${line}\n`);
-}
 
 // Third copy of the tiny git runner (cli.ts and pr.ts each carry their own,
 // deliberately, so no shell imports another shell). The WHY carries over
