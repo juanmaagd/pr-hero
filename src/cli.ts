@@ -15,7 +15,16 @@
 import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { mergeRunEnvelope, type Telemetry, writeFindings } from "./findings";
+import type { PrHeroFindingRef } from "./compare";
+import {
+  type Finding,
+  type FindingsDocument,
+  mergeRunEnvelope,
+  type Telemetry,
+  validateFindingsDocument,
+  writeFindings,
+} from "./findings";
+import { buildPostPlan, type PostPlan, parseHunkAnchors } from "./inline";
 import {
   aggregateLedger,
   parseComparisonJson,
@@ -32,15 +41,20 @@ import {
 import {
   type ComparisonOutcome,
   ensureWorktree,
+  fetchPostedFindingComments,
+  fetchPrComments,
   fetchPrRefs,
   ghCurrentBranchPr,
   ghPrView,
   ghRepoWebUrl,
   initCodegraphIndex,
+  postIssueComment,
   postPrComment,
+  postPrReview,
   writeComparison,
 } from "./pr";
 import {
+  findMarkedCommentId,
   type PrTarget,
   prRunDirCandidate,
   prWorktreePath,
@@ -89,6 +103,7 @@ import {
   type DiffStat,
   estimateCost,
   formatElapsed,
+  type PrCommentDelta,
   renderPrComment,
   renderReport,
 } from "./report";
@@ -103,6 +118,12 @@ import {
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
 import { watchCommand } from "./watch";
+// Pure decision module, not a shell — same category as pr-preflight.ts (see
+// its own header comment). Reads the ALREADY-POSTED summary marker's head=
+// declaration so the delta line's "since <sha>" clause is free (report.ts's
+// PrCommentDelta.previousHeadSha), the exact reuse watch-preflight.ts's own
+// header describes for the cross-machine guard.
+import { parseMarkerHead } from "./watch-preflight";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
 // handed to every step together with the runner's --strict-mcp-config: an
@@ -196,7 +217,9 @@ async function main(argv: string[]): Promise<number> {
         ? await ledgerCommand(parsed.options)
         : parsed.command === "watch"
           ? await watchCommand(parsed.options)
-          : await review(parsed.options);
+          : parsed.command === "post"
+            ? await postCommand(parsed.options)
+            : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -997,33 +1020,44 @@ async function reviewPr(
   // 14 — the posting, only when asked. AFTER the comparison on purpose: a
   // posting failure must never cost the comparison artifact. And unlike the
   // comparison, posting does NOT degrade to a warning — it was explicitly
-  // requested, so a failure propagates as CliError and exits 1 (the review
-  // artifacts are already on disk; a lying exit 0 would hide a failed ask).
-  let posted: { action: "created" | "updated"; commentId: number } | null =
-    null;
+  // requested. ROADMAP B6 rewire: posting now goes through the inline
+  // surface — anchorability, cross-run matching, the one review submission
+  // (with its 422 recovery), per-finding issue comments, and ONLY THEN the
+  // summary, PATCHed LAST so its delta line describes what this run actually
+  // posted, not what it planned to. `postInlineIfEligible` carries the
+  // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
+  // posting"): a clean-bill comment set from a review that never ran would
+  // be a public lie, same reasoning as the comparison guard above.
+  let posted: InlinePostOutcome | null = null;
   if (options.post) {
-    if (result.sessionFailed) {
-      // Same honesty rule as the comparison guard above: a clean-bill
-      // comment from a review that never ran would be a public lie.
-      log(
+    const repoWebUrl = await ghRepoWebUrl(operatorRoot);
+    if (repoWebUrl === undefined) {
+      log("repo web url unavailable: posting plain locations");
+    }
+    posted = await postInlineIfEligible({
+      sessionFailed: result.sessionFailed,
+      skippedReason:
         "post skipped: every hunter failed, so there is no review to publish",
+      operatorRoot,
+      pr: prNumber,
+      headSha,
+      doc,
+      diffPatch: effectiveDiff.patch,
+      webUrl: repoWebUrl,
+    });
+    if (posted) {
+      await writePostReceipt(runDir, prNumber, headSha, posted);
+      log(
+        `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
+          `finding(s)), ${posted.issueCommentIds.length} issue comment(s), ` +
+          `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
       );
-    } else {
-      // The repo web URL upgrades the comment's locations to links; it is
-      // cosmetic, so an unresolved URL logs one quiet line and posts plain.
-      const repoWebUrl = await ghRepoWebUrl(operatorRoot);
-      if (repoWebUrl === undefined) {
-        log("repo web url unavailable: posting plain locations");
+      if (posted.reviewOutcome === "demoted") {
+        log(
+          "warning: the review submission was rejected (422) and recovered " +
+            "via issue comments — see the run's post.json for detail",
+        );
       }
-      posted = await postPrComment(
-        operatorRoot,
-        prNumber,
-        // No delta here: this is the pre-B6 `--post` path (not the B6
-        // step-14 rewire, out of scope for this fix), which has no prior-
-        // run comment stream to diff against.
-        renderPrComment(doc, repoWebUrl, undefined),
-      );
-      log(`posted: ${posted.action} comment ${posted.commentId}`);
     }
   }
 
@@ -1053,7 +1087,11 @@ async function reviewPr(
     );
   }
   if (posted) {
-    log(`posted:     ${posted.action} PR comment ${posted.commentId}`);
+    log(
+      `posted:     summary ${posted.summary.action} comment ` +
+        `${posted.summary.commentId}, ${posted.reviewFindingCount} review ` +
+        `comment(s), ${posted.issueCommentIds.length} issue comment(s)`,
+    );
   }
   // The worktree is kept and reused by decision; cleanup is manual, so hand
   // over the exact command (worktree remove, never rm -rf — a live
@@ -1064,7 +1102,375 @@ async function reviewPr(
     log("every hunter failed — this run reviewed nothing.");
     return 1;
   }
-  return 0;
+  return postingExitCode(posted);
+}
+
+// ---------------------------------------------------------------------------
+// Inline review surface orchestration (ROADMAP B6, WU6) — the ONLY place
+// that composes inline.ts's pure plan with pr.ts's I/O primitives into the
+// actual post sequence. Shared verbatim by reviewPr's step 14 (a review that
+// just finished) and postCommand (a review read off disk): the SAME code
+// posts either way, because a finding does not know or care whether it came
+// from a fresh run or a `--from <run-dir>` replay.
+//
+// `spawnFn` is the same invisible-to-production seam pr.ts's own B6
+// functions already use (see gh()'s WHY comment there) — threaded through
+// here so test/cli.test.ts can drive the WHOLE sequence, including the
+// summary PATCH, through one shared fake gh.
+
+export interface InlinePostOutcome {
+  reviewOutcome: "posted" | "demoted";
+  reviewFindingCount: number;
+  issueCommentIds: number[];
+  summary: { action: "created" | "updated"; commentId: number };
+  delta: PostPlan["delta"];
+  // Finding ids the plan classified as fresh (reviewComments + issueComments)
+  // that, after every posting attempt below completed WITHOUT throwing, still
+  // have no comment anywhere on the PR — the exact shape of the bug CRIT-1
+  // (verify-report-pr2, #3296) found: a claimed comment swallowing a
+  // genuinely new finding. Computed independently of postPrReview's own
+  // return value on purpose — this is the caller's OWN check, not a re-read
+  // of the primitive's opinion, because trusting the primitive's opinion is
+  // exactly what let CRIT-1 through undetected in PR2's own test suite.
+  droppedFindingIds: string[];
+}
+
+// Fetch + anchor + plan, with NO posting — the exact subset `post --dry-run`
+// needs (spec "Dry-run from a prior run directory": a read-only comment
+// fetch, zero mutating HTTP calls) and the first half of postInlineFindings,
+// factored out so the two never compute two different plans for the same
+// state.
+async function resolveInlinePostPlan(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  doc: FindingsDocument;
+  diffPatch: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<{ plan: PostPlan; previousHeadSha: string | undefined }> {
+  const issueComments = await fetchPrComments(input.operatorRoot, input.pr, {
+    spawnFn: input.spawnFn,
+  });
+  const existingSummaryId = findMarkedCommentId(issueComments);
+  const previousHeadSha =
+    existingSummaryId === null
+      ? undefined
+      : (parseMarkerHead(
+          issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
+        ) ?? undefined);
+  const posted = await fetchPostedFindingComments(
+    input.operatorRoot,
+    input.pr,
+    { spawnFn: input.spawnFn },
+  );
+  const anchors = parseHunkAnchors(input.diffPatch);
+  const findingRefs: PrHeroFindingRef[] = input.doc.findings.map((f) => ({
+    id: f.id,
+    path: f.path,
+    line: f.line,
+    claim: f.claim,
+    tier: f.tier,
+  }));
+  const plan = buildPostPlan({
+    findings: findingRefs,
+    anchors,
+    posted,
+    headSha: input.headSha,
+  });
+  return { plan, previousHeadSha };
+}
+
+// The actual post sequence (design D6): review submission (with 422
+// recovery) → per-finding issue comments → summary PATCHed LAST. NO
+// `sessionFailed` awareness here — same contract as pr.ts's own primitives
+// (see postPrReview's own WHY): the guard belongs to the caller that decides
+// whether to invoke this at all (postInlineIfEligible, below).
+export async function postInlineFindings(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  doc: FindingsDocument;
+  diffPatch: string;
+  webUrl: string | undefined;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<InlinePostOutcome> {
+  const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
+  const { plan, previousHeadSha } = await resolveInlinePostPlan(input);
+  const byId = new Map(doc.findings.map((f) => [f.id, f]));
+  const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
+    refs
+      .map((ref) => byId.get(ref.id))
+      .filter((f): f is Finding => f !== undefined);
+
+  // Ids of comments the plan ALREADY matched to a persisting finding — passed
+  // to postPrReview's `consumedCommentIds` so a 422 recovery cannot let one
+  // of them swallow a DIFFERENT, genuinely new finding (a3b3d3a, the CRIT-1
+  // fix). Deriving it from `plan.persisting` here — not an empty array — is
+  // exactly the thing a caller could silently get wrong and reintroduce the
+  // bug; see the mutation test in test/cli.test.ts that fails when this line
+  // is replaced with `[]`.
+  const consumedCommentIds = plan.persisting.map((match) => match.posted.id);
+  const reviewFindings = findingsFor(plan.reviewComments);
+  const reachedIds = new Set<string>();
+
+  const reviewResult = await postPrReview({
+    operatorRoot,
+    pr,
+    headSha,
+    findings: reviewFindings,
+    consumedCommentIds,
+    webUrl,
+    spawnFn,
+  });
+  let toIssuePost = findingsFor(plan.issueComments);
+  if (reviewResult.outcome === "posted") {
+    for (const finding of reviewFindings) reachedIds.add(finding.id);
+  } else {
+    const stillUnmatched = new Set(
+      reviewResult.findings.map((finding) => finding.id),
+    );
+    for (const finding of reviewFindings) {
+      if (!stillUnmatched.has(finding.id)) reachedIds.add(finding.id);
+    }
+    toIssuePost = [...toIssuePost, ...reviewResult.findings];
+  }
+
+  const issueCommentIds: number[] = [];
+  for (const finding of toIssuePost) {
+    const commentId = await postIssueComment(
+      operatorRoot,
+      pr,
+      finding,
+      headSha,
+      webUrl,
+      spawnFn,
+    );
+    issueCommentIds.push(commentId);
+    reachedIds.add(finding.id);
+  }
+
+  const expectedFreshIds = new Set(
+    [...plan.reviewComments, ...plan.issueComments].map((f) => f.id),
+  );
+  const droppedFindingIds = [...expectedFreshIds].filter(
+    (id) => !reachedIds.has(id),
+  );
+
+  const delta: PrCommentDelta = { ...plan.delta, previousHeadSha };
+  const summary = await postPrComment(
+    operatorRoot,
+    pr,
+    renderPrComment(doc, webUrl, delta),
+    spawnFn,
+  );
+
+  return {
+    reviewOutcome: reviewResult.outcome,
+    reviewFindingCount: reviewFindings.length,
+    issueCommentIds,
+    summary,
+    delta: plan.delta,
+    droppedFindingIds,
+  };
+}
+
+// The `sessionFailed` guard (spec "sessionFailed suppresses all posting"):
+// the single decision point for BOTH callers on whether to invoke
+// postInlineFindings at all. `null` means "skipped, nothing was posted, zero
+// HTTP calls were made" — the exact shape the spec's scenario asserts.
+export async function postInlineIfEligible(input: {
+  sessionFailed: boolean;
+  skippedReason: string;
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  doc: FindingsDocument;
+  diffPatch: string;
+  webUrl: string | undefined;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<InlinePostOutcome | null> {
+  if (input.sessionFailed) {
+    log(input.skippedReason);
+    return null;
+  }
+  return postInlineFindings(input);
+}
+
+// Design D6's exit-code rule, pinned as its own pure function so the rule is
+// testable without a live post: exit 1 ONLY when a finding reached neither
+// channel (the CRIT-1 failure mode); a `null` outcome (sessionFailed, or
+// `--post` never given) is not itself a posting failure — its caller already
+// decides the exit code on its own terms (e.g. reviewPr's sessionFailed
+// early-return above).
+export function postingExitCode(outcome: InlinePostOutcome | null): 0 | 1 {
+  if (outcome === null) return 0;
+  return outcome.droppedFindingIds.length > 0 ? 1 : 0;
+}
+
+// post.json — the receipt (design's File Changes table): channel, comment
+// ids, demotions, mirroring pipeline.json's provenance role so the
+// idempotency proof (WU7/4.4) can read back exactly what a run posted
+// without re-deriving it from GitHub.
+async function writePostReceipt(
+  runDir: string,
+  pr: number,
+  headSha: string,
+  outcome: InlinePostOutcome,
+): Promise<void> {
+  const receipt = {
+    pr,
+    head_sha: headSha,
+    generated_at: new Date().toISOString(),
+    review: {
+      outcome: outcome.reviewOutcome,
+      finding_count: outcome.reviewFindingCount,
+    },
+    issue_comment_ids: outcome.issueCommentIds,
+    summary_comment: outcome.summary,
+    delta: outcome.delta,
+    dropped_finding_ids: outcome.droppedFindingIds,
+  };
+  await Bun.write(
+    path.join(runDir, "post.json"),
+    `${JSON.stringify(receipt, null, 2)}\n`,
+  );
+}
+
+// Pure on purpose (design Threat Matrix, "Git repository selection" row,
+// deferred from PR2's verification): --from names a directory on disk, and
+// nothing stops it from pointing at a DIFFERENT PR's run than --pr names.
+// findings.json's own `pr` field is the one thing that cannot lie about
+// which review it came from — checked here, before any fetch or post,
+// rather than trusting the operator to keep --pr and --from in sync by hand.
+export function assertRunMatchesPr(
+  doc: FindingsDocument,
+  pr: number,
+  runDir: string,
+): void {
+  if (doc.pr !== pr) {
+    throw new CliUsageError(
+      `${runDir} is a run of PR #${doc.pr}, not PR #${pr} — point --from ` +
+        "at a run directory for the PR you are posting to",
+    );
+  }
+}
+
+// `pr-hero post --pr <n> --from <run-dir> [--dry-run]` (ROADMAP B6, spec
+// "Offline replay via `post` verb"): the `ledger` verb's precedent — read a
+// prior run's artifacts off disk — applied to publishing instead of
+// aggregating. Exists because PR-mode `--dry-run` returns at reviewPr's own
+// step 3, BEFORE any findings exist (see the comment there): it is
+// structurally impossible for `--pr --dry-run` to preview a comment plan, so
+// this verb is the only way to preview one at $0.
+async function postCommand(options: CliOptions): Promise<number> {
+  const operatorRoot = await resolveRepoRoot(options.repo);
+  // parseArgs already enforces both of these for the "post" command; the
+  // checks here are the type-narrowing TypeScript needs, not new validation.
+  if (options.pr === undefined) {
+    throw new CliUsageError("post requires --pr <n>");
+  }
+  if (options.from === undefined) {
+    throw new CliUsageError("post requires --from <run-dir>");
+  }
+  const prNumber =
+    options.pr === "current"
+      ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
+      : options.pr;
+  const runDir = path.resolve(options.from);
+  const findingsPath = path.join(runDir, "findings.json");
+  const diffPath = path.join(runDir, "diff.patch");
+  if (!existsSync(findingsPath) || !existsSync(diffPath)) {
+    throw new CliUsageError(
+      `${runDir} is missing findings.json or diff.patch — point --from at ` +
+        'a completed run directory ("pr-hero review --pr <n>" writes both)',
+    );
+  }
+  const doc = validateFindingsDocument(
+    JSON.parse(await Bun.file(findingsPath).text()),
+  );
+  // Design Threat Matrix, "Git repository selection" row (deferred from
+  // PR2's verification, WARN-1's scope note): --from names a directory, and
+  // a directory is not the PR it was reviewed for — reject a run-dir whose
+  // OWN artifact disagrees with --pr rather than silently publishing PR
+  // #17's findings to PR #18 because someone reused a stale --from.
+  assertRunMatchesPr(doc, prNumber, runDir);
+  const diffPatch = await Bun.file(diffPath).text();
+  // sessionFailed itself is never PERSISTED to findings.json — only the
+  // pipeline's own in-memory result carries it (mergeRunEnvelope only reads
+  // it to decide run_status, see findings.ts). run_status !== "complete" is
+  // the closest signal a disk artifact retains, and it is the conservative
+  // direction: every genuinely-sessionFailed run IS "partial" (mergeRunEnvelope
+  // forces it), so this guard never UNDER-fires; it can only over-fire on a
+  // partial run that failed for some OTHER reason, which still means "do not
+  // publish this as a clean review" — the honest answer either way.
+  const sessionFailedEquivalent = doc.run_status !== "complete";
+  if (sessionFailedEquivalent) {
+    log(
+      `post skipped: ${findingsPath} is not a complete run ` +
+        `(run_status=${doc.run_status}), so there is no review to publish`,
+    );
+    return options.dryRun ? 0 : 1;
+  }
+
+  if (options.dryRun) {
+    const { plan, previousHeadSha } = await resolveInlinePostPlan({
+      operatorRoot,
+      pr: prNumber,
+      headSha: doc.head_sha,
+      doc,
+      diffPatch,
+    });
+    log(
+      `plan: ${plan.reviewComments.length} review comment(s), ` +
+        `${plan.issueComments.length} issue comment(s), ` +
+        `${plan.persisting.length} already posted (skipped), ` +
+        `${plan.resolved.length} resolved`,
+    );
+    log(
+      `delta: ${plan.delta.resolved} resolved · ${plan.delta.new} new · ` +
+        `${plan.delta.persist} persist` +
+        (previousHeadSha ? ` (since ${previousHeadSha.slice(0, 8)})` : ""),
+    );
+    for (const finding of plan.reviewComments) {
+      log(`  review  ${finding.path}:${finding.line} ${finding.id}`);
+    }
+    for (const finding of plan.issueComments) {
+      log(`  issue   ${finding.path}:${finding.line} ${finding.id}`);
+    }
+    log("dry run: nothing was fetched-for-mutation or posted.");
+    return 0;
+  }
+
+  const repoWebUrl = await ghRepoWebUrl(operatorRoot);
+  if (repoWebUrl === undefined) {
+    log("repo web url unavailable: posting plain locations");
+  }
+  const outcome = await postInlineFindings({
+    operatorRoot,
+    pr: prNumber,
+    headSha: doc.head_sha,
+    doc,
+    diffPatch,
+    webUrl: repoWebUrl,
+  });
+  await writePostReceipt(runDir, prNumber, doc.head_sha, outcome);
+  log(
+    `posted: review ${outcome.reviewOutcome} (${outcome.reviewFindingCount} ` +
+      `finding(s)), ${outcome.issueCommentIds.length} issue comment(s), ` +
+      `summary ${outcome.summary.action} comment ${outcome.summary.commentId}`,
+  );
+  if (outcome.droppedFindingIds.length > 0) {
+    log(
+      `error: ${outcome.droppedFindingIds.length} finding(s) reached ` +
+        `neither channel: ${outcome.droppedFindingIds.join(", ")}`,
+    );
+  } else if (outcome.reviewOutcome === "demoted") {
+    log(
+      "warning: the review submission was rejected (422) and recovered " +
+        "via issue comments",
+    );
+  }
+  return postingExitCode(outcome);
 }
 
 async function resolveRepoRoot(repoOption: string): Promise<string> {

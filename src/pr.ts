@@ -415,12 +415,19 @@ export async function writeComparison(input: {
 // failure and is NOT
 // caught here: the caller asked for a public side effect, so the caller
 // decides what a failed one means.
+// ROADMAP B6 addition: `spawnFn`, same invisible-to-production seam as the
+// other B6 functions (see gh()'s WHY). Needed so test/cli.test.ts can drive
+// the WHOLE step-14 sequence — review, issue comments, summary PATCH LAST —
+// through one shared fake gh, the same way test/pr.test.ts already does for
+// the per-finding functions; a summary PATCH the caller-level test could not
+// see would leave the "PATCHed last" ordering unpinned.
 export async function postPrComment(
   operatorRoot: string,
   pr: number,
   body: string,
+  spawnFn?: typeof Bun.spawn,
 ): Promise<{ action: "created" | "updated"; commentId: number }> {
-  const comments = await fetchPrComments(operatorRoot, pr);
+  const comments = await fetchPrComments(operatorRoot, pr, { spawnFn });
   const existingId = findMarkedCommentId(comments);
   const action = existingId === null ? "created" : "updated";
   // The body travels on stdin via `-F body=@-` (see gh()); PATCH updates the
@@ -438,6 +445,7 @@ export async function postPrComment(
             "body=@-",
           ],
           body,
+          spawnFn,
         )
       : await gh(
           operatorRoot,
@@ -450,6 +458,7 @@ export async function postPrComment(
             "body=@-",
           ],
           body,
+          spawnFn,
         );
   if (!result.ok) {
     throw new CliError(
