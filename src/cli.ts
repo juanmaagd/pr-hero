@@ -2921,6 +2921,18 @@ function startLineRenderer(startedAtMs: number): ProgressRenderer {
         case "refuter-step-finished":
           line(`refuter ${event.findingId}: ${event.verdict}`);
           return;
+        case "step-retry":
+          // EVERY step, hunters and refuter alike — this is the launchd log,
+          // where a retry that explains a long wall time has to be readable
+          // after the fact and nothing competes for the line.
+          line(
+            `retry ${event.step}: ` +
+              (event.reason === "format"
+                ? "format retry"
+                : `attempt ${event.attempt} of ${event.maxAttempts} ` +
+                  "(transient)"),
+          );
+          return;
       }
     },
     stop: (): void => {

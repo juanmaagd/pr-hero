@@ -135,6 +135,20 @@ export type PipelineProgressEvent =
       findingId: string;
       verdict: string;
       durationMs: number;
+    }
+  // A step about to be retried. Until this existed a retrying hunter looked
+  // merely slow: `attempts` was counted in PerAgentUsage after the fact, which
+  // is a post-mortem, never a live signal. OBSERVATION ONLY — the runner's
+  // retry ordering, budgets and watchdog numbers are untouched.
+  | {
+      kind: "step-retry";
+      // Step name, e.g. "hunter-reliability" or "refuter-F001".
+      step: string;
+      attempt: number;
+      // The transient budget; meaningless when reason is "format" (that retry
+      // is capped at exactly one, separately).
+      maxAttempts: number;
+      reason: "transient" | "format";
     };
 
 // A throwing callback is swallowed ON PURPOSE: the review outranks the
@@ -442,6 +456,8 @@ async function execute(
         }
         return validateHunterDraft(extracted);
       },
+      // Observational tap only; emit() swallows a throwing listener.
+      onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
     hunterSpecs.push({ key: hunter.key as Hunter, spec });
     state.steps.push(stepMeta(spec));
@@ -653,6 +669,9 @@ async function runRefuter(
         }
         return validateRefuterResult(extracted, [survivor.id]);
       },
+      // Same observational tap as the hunter steps: a refuter step retries
+      // through the same loop, and the non-TTY log is where that shows.
+      onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
     return { id: survivor.id, spec };
   });

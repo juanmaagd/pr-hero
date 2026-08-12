@@ -29,11 +29,29 @@ export interface StepSpec {
   maxAttempts: number;
   // throw = not delivered (v1's draftDelivered role, applied per step).
   parse(finalText: string): unknown;
+  // OBSERVATION ONLY. Called just before a retry is spawned, so a retrying
+  // step stops looking merely slow — `attempts` was already counted, but only
+  // after the fact in PerAgentUsage, which is a post-mortem, not a signal.
+  // Nothing here may change retry behavior: no return value is read, and a
+  // throwing callback is swallowed (the same rule pipeline.ts's emit() keeps
+  // — a cosmetic listener must never kill a paid run).
+  onRetry?(info: RetryInfo): void;
   // Stage-2 fields — typed now so specs stay forward-compatible, UNUSED in
   // Stage 1: `backend` selects the runner, `models` fans one spec out to
   // `<step>__<model-slug>` legs sharing a groupId.
   backend?: "claude-code" | "opencode";
   models?: string[];
+}
+
+export interface RetryInfo {
+  // Step name, e.g. "hunter-reliability" or "refuter-F001".
+  step: string;
+  // The attempt about to START (1-based).
+  attempt: number;
+  // The transient budget. Meaningless for `reason: "format"` — that retry has
+  // its own cap of exactly one, so a renderer must not print "N of M" there.
+  maxAttempts: number;
+  reason: FailureClass;
 }
 
 export interface StepResult {
@@ -171,6 +189,19 @@ export function buildStepArgv(
   ];
 }
 
+// A throwing observer is swallowed HERE, in the runner, not only in whatever
+// wires it: StepSpec is a public interface other callers implement against,
+// and "the progress panel cannot kill a paid step" must hold whoever wired the
+// callback.
+function notifyRetry(step: StepSpec, info: RetryInfo): void {
+  if (!step.onRetry) return;
+  try {
+    step.onRetry(info);
+  } catch {
+    // Swallowed — see above.
+  }
+}
+
 // The minimal surface this runner needs from a spawned process — lets tests
 // inject a scripted fake for the retry/watchdog paths (untested in v1).
 interface SpawnedProcess {
@@ -230,12 +261,29 @@ export class ClaudeCodeRunner implements StepRunner {
         await Bun.file(step.outPath)
           .unlink()
           .catch(() => {});
+        // Announced only when a retry will actually happen: on the last
+        // attempt the loop falls through to "failed" and there is nothing to
+        // watch for.
+        if (attempt < step.maxAttempts) {
+          notifyRetry(step, {
+            step: step.name,
+            attempt: attempt + 1,
+            maxAttempts: step.maxAttempts,
+            reason: "transient",
+          });
+        }
         continue; // exhausting maxAttempts falls through to "failed"
       }
       // Non-transient parse failure: the model delivered SOMETHING, just not
       // the mandated shape — one format-retry (cap 1, see the rationale on
       // FORMAT_RETRY_REMINDER), then the step fails visibly.
       attempts++;
+      notifyRetry(step, {
+        step: step.name,
+        attempt: attempts,
+        maxAttempts: step.maxAttempts,
+        reason: "format",
+      });
       const retry = await this.runAttempt(
         step,
         step.prompt + FORMAT_RETRY_REMINDER,

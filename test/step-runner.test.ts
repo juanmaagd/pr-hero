@@ -8,6 +8,7 @@ import {
   classifyFailure,
   FORMAT_RETRY_REMINDER,
   isTransientSessionFailure,
+  type RetryInfo,
   type StepSpec,
 } from "../src/step-runner";
 
@@ -246,6 +247,72 @@ describe("ClaudeCodeRunner transient retry", () => {
     expect(calls.length).toBe(2);
     // Debris deleted so nothing downstream trusts a truncated artifact.
     expect(await Bun.file(spec.outPath).exists()).toBe(false);
+  });
+});
+
+// OBSERVATION ONLY: these assert what the callback SAYS and that it cannot
+// change what the runner does — no test here may pin a new retry count, an
+// ordering, or a watchdog number.
+describe("ClaudeCodeRunner onRetry", () => {
+  const transientEnvelope = envelope(
+    "API Error: Connection closed mid-response",
+  );
+
+  test("announces the transient retry that is about to be spawned", async () => {
+    const { spawnFn } = makeFakeSpawn([
+      { stdout: transientEnvelope },
+      { stdout: envelope(JSON.stringify(GOOD_DRAFT)) },
+    ]);
+    const seen: RetryInfo[] = [];
+    const spec = await makeSpec({ onRetry: (info) => seen.push(info) });
+    await new ClaudeCodeRunner({ spawnFn }).run(spec);
+    expect(seen).toEqual([
+      {
+        step: "hunter-reliability",
+        attempt: 2,
+        maxAttempts: 2,
+        reason: "transient",
+      },
+    ]);
+  });
+
+  test("stays silent when the budget is spent — no retry, nothing to watch", async () => {
+    const { spawnFn } = makeFakeSpawn([{ stdout: transientEnvelope }]);
+    const seen: RetryInfo[] = [];
+    const spec = await makeSpec({
+      maxAttempts: 1,
+      onRetry: (info) => seen.push(info),
+    });
+    const stepResult = await new ClaudeCodeRunner({ spawnFn }).run(spec);
+    expect(stepResult.status).toBe("failed");
+    expect(seen).toEqual([]);
+  });
+
+  test("the format retry reports its own reason, never an N-of-M", async () => {
+    const { spawnFn } = makeFakeSpawn([
+      { stdout: envelope("Sure! Here is some prose instead of JSON.") },
+      { stdout: envelope(JSON.stringify(GOOD_DRAFT)) },
+    ]);
+    const seen: RetryInfo[] = [];
+    const spec = await makeSpec({ onRetry: (info) => seen.push(info) });
+    await new ClaudeCodeRunner({ spawnFn }).run(spec);
+    expect(seen.map((i) => i.reason)).toEqual(["format"]);
+    expect(seen[0]?.attempt).toBe(2);
+  });
+
+  test("a throwing observer cannot kill a paid step", async () => {
+    const { spawnFn } = makeFakeSpawn([
+      { stdout: transientEnvelope },
+      { stdout: envelope(JSON.stringify(GOOD_DRAFT)) },
+    ]);
+    const spec = await makeSpec({
+      onRetry: () => {
+        throw new Error("the panel exploded");
+      },
+    });
+    const stepResult = await new ClaudeCodeRunner({ spawnFn }).run(spec);
+    expect(stepResult.status).toBe("ok");
+    expect(stepResult.attempts).toBe(2);
   });
 });
 
