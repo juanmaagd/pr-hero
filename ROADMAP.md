@@ -653,6 +653,41 @@ What is still manual, in the order it should be closed:
    Record the actor (`agent` vs `human`) alongside the verdict, or the audit trail 6b is premised on
    does not exist.
 
+7. **A re-review is not a review — and today we run it as one. NOT BUILT.** Raised by Juanma
+   2026-08-12, immediately after item 6 shipped and its own live runs made the gap visible. He is right,
+   and it is worse than a matter of efficiency.
+
+   **We infer "fixed" from absence.** `MatchResult.resolved` is literally "a prior comment with nothing
+   matched to it this run", so the deterministic-looking `Δ N resolved` line is deducing repair from
+   non-detection. Absence has two causes: the defect was fixed, or the hunter simply did not find it
+   this time. **This benchmark's run-to-run variance is documented as HIGH throughout Phase A** — a
+   golden the lifecycle hunter catches in 3 of 6 runs on the same tree is recorded above. So the second
+   cause is ordinary, not theoretical, and the delta can report a repair that never happened.
+
+   **This retracts a claim made in 6b.** That entry says `applied` pays no adjudicator "because the
+   re-review verifies it independently, and code does not lie". The re-review as built does NOT verify —
+   it infers. So `applied` is currently accepted on the weakest evidence in the whole loop, which is
+   exactly backwards: it is the tag whose author benefits most from being believed.
+
+   **The gap, stated: a re-review is TWO jobs collapsed into one.**
+   - **Verification** — for each previously posted finding, "is this specific defect still present at
+     this location?" That is a bounded question with a checkable answer, and its shape is the REFUTER's
+     (given a claim and a location, corroborate or refute), not the hunter's (find what is wrong). The
+     machinery already exists — `pipeline.ts:536-702` is a detached, read-only, one-step-per-finding
+     spawn with its subject inlined.
+   - **Discovery** — over what CHANGED since the last review. Today we re-hunt the PR's whole diff, so
+     we pay to re-examine untouched code and re-roll the dice on findings already adjudicated,
+     reintroducing exactly the variance the verification half exists to remove.
+
+   **Both corrections make it cheaper, not dearer** — a bounded verification costs less than a hunter
+   pass, and discovery scoped to the delta-since-last-review is a smaller diff than the whole PR. That
+   is unusual enough to be worth stating: the correct design is also the cheap one.
+
+   Open, and the answer shapes the build: when an agent tags a finding `applied` and pushes the fix,
+   does verification run on that finding regardless — paying a step per finding to be certain — or is
+   "it did not come back" good enough? 6b's `applied` currently assumes the second and calls it the
+   first.
+
 Deliberately still deferred: the required status check per head SHA (fail-closed, no run = no merge) and
 the audited `skip-deep-review` label. Both are merge gates, and at 0.00 measured recall on 1677 this
 engine has no business blocking a merge yet.
