@@ -1,9 +1,16 @@
 // PR mode's I/O (ROADMAP B1): gh, the fetch, the detached worktree, the
 // worktree's codegraph index, and the Greptile comparison files — every side
 // effect `pr-hero review --pr <n>` needs beyond what cli.ts already owns.
-// Same contract as cli.ts: this is an I/O shell, untested by construction,
-// and every decision it acts on is a pure function in pr-preflight.ts (or
-// preflight.ts), where the tests live.
+// Same contract as cli.ts: this is an I/O shell, and every decision it acts
+// on is a pure function in pr-preflight.ts / inline.ts (or preflight.ts),
+// where most of the tests live.
+//
+// ROADMAP B6 exception, spelled out because it changes the file's own
+// header claim: the review-submission functions below (`postPrReview`,
+// `postIssueComment`, `fetchPrReviewComments`, `fetchPostedFindingComments`)
+// ARE offline-tested, in test/pr.test.ts, via an injectable `spawnFn` on the
+// internal `gh()` helper — the 422 recovery path is exactly the kind of
+// branch that must never rest on "we'll catch it live".
 //
 // Every git and gh call here runs with the OPERATOR root as cwd — the
 // worktree shares its object db — except the two read-only inspections of
@@ -13,16 +20,19 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { compareFindings, type PrHeroFindingRef } from "./compare";
 import { renderComparison } from "./compare-report";
-import type { RunStatus } from "./findings";
+import type { Finding, RunStatus } from "./findings";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
+import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
   buildComparisonJson,
   decideWorktree,
   findMarkedCommentId,
+  parseFindingMarker,
   type WorktreeDecision,
   worktreeDirty,
 } from "./pr-preflight";
 import { CliError } from "./preflight";
+import { renderInlineComment, renderIssueFindingComment } from "./report";
 
 // Same helper as cli.ts's git, duplicated rather than shared so neither
 // shell imports the other. The WHY carries over verbatim: args as an ARRAY,
@@ -44,14 +54,25 @@ async function git(
   return { ok: exitCode === 0, stdout, stderr };
 }
 
+// `spawnFn` is the ONLY seam this module adds for testability, and it is
+// deliberately invisible to production callers: every existing call site
+// omits it and gets `Bun.spawn` exactly as before. Only test/pr.test.ts
+// passes one, to script gh's response (including a 422) without a live PR.
+// The `Bun.which("gh")` guard is skipped under a fake spawn on purpose — a
+// real environment missing `gh` must still fail loud, but an offline test
+// must never depend on whether the machine RUNNING it happens to have `gh`
+// installed, or the suite becomes non-hermetic for a reason that has
+// nothing to do with the behavior under test.
 async function gh(
   operatorRoot: string,
   args: string[],
   stdin?: string,
+  spawnFn?: typeof Bun.spawn,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const spawn = spawnFn ?? Bun.spawn;
   // A missing gh must name itself: Bun.spawn's error for a binary that is
   // not there reads like a crash, not like "install the GitHub CLI".
-  if (Bun.which("gh") === null) {
+  if (spawnFn === undefined && Bun.which("gh") === null) {
     throw new CliError(
       "gh not found on PATH — PR mode resolves the PR through the GitHub " +
         "CLI. Install it and authenticate (gh auth login) first.",
@@ -65,7 +86,7 @@ async function gh(
   // `@-` from stdin; verified against `gh api --help`, 2026-08-10): a report
   // body on stdin dodges ARG_MAX and needs no shell-quoting, because there
   // is no shell anywhere in this call.
-  const proc = Bun.spawn(["gh", ...args], {
+  const proc = spawn(["gh", ...args], {
     cwd: operatorRoot,
     ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
     stdout: "pipe",
@@ -466,14 +487,20 @@ export async function postPrComment(
 export async function fetchPrComments(
   operatorRoot: string,
   pr: number,
+  options?: { spawnFn?: typeof Bun.spawn },
 ): Promise<{ id: number; user: string; body: string }[]> {
-  const result = await gh(operatorRoot, [
-    "api",
-    "--paginate",
-    `repos/{owner}/{repo}/issues/${pr}/comments`,
-    "--jq",
-    ".[] | {id: .id, user: .user.login, body: .body}",
-  ]);
+  const result = await gh(
+    operatorRoot,
+    [
+      "api",
+      "--paginate",
+      `repos/{owner}/{repo}/issues/${pr}/comments`,
+      "--jq",
+      ".[] | {id: .id, user: .user.login, body: .body}",
+    ],
+    undefined,
+    options?.spawnFn,
+  );
   if (!result.ok) {
     throw new CliError(
       `gh api issues/${pr}/comments failed: ${result.stderr.trim()}`,
@@ -492,4 +519,266 @@ export async function fetchPrComments(
     }
   }
   return comments;
+}
+
+// ---------------------------------------------------------------------------
+// Inline review surface (ROADMAP B6, WU4/WU5) — the fetcher, the atomic
+// review submission with its 422 recovery, and the per-finding issue
+// comment. inline.ts plans WHAT to post (pure); everything below executes
+// that plan and is the only place in the engine allowed to.
+
+// Review-level (inline) comments, as opposed to fetchPrComments's top-level
+// issue comments — a DIFFERENT GitHub endpoint (`pulls/<n>/comments`, not
+// `issues/<n>/comments`). Shape-identical to fetchPrComments on purpose
+// (same --paginate + --jq style, same loud parse failure): the two fetchers
+// read two different comment streams the same way, so a bug in one parsing
+// discipline is not a bug the other could hide.
+//
+// `in_reply_to_id` is unused by this change (6b/6c, not yet built) but costs
+// nothing to project alongside the fields inline.ts's matcher actually
+// needs (`path`, `line`) and the ones a human reading a raw fetch would
+// expect (`original_line`, GitHub's own "where this used to point" field).
+export interface PrReviewComment {
+  id: number;
+  user: string;
+  body: string;
+  path: string;
+  line: number | null;
+  original_line: number | null;
+  in_reply_to_id: number | null;
+}
+
+export async function fetchPrReviewComments(
+  operatorRoot: string,
+  pr: number,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<PrReviewComment[]> {
+  const result = await gh(
+    operatorRoot,
+    [
+      "api",
+      "--paginate",
+      `repos/{owner}/{repo}/pulls/${pr}/comments`,
+      "--jq",
+      ".[] | {id: .id, user: .user.login, body: .body, path: .path, " +
+        "line: .line, original_line: .original_line, " +
+        "in_reply_to_id: .in_reply_to_id}",
+    ],
+    undefined,
+    options?.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api pulls/${pr}/comments failed: ${result.stderr.trim()}`,
+    );
+  }
+  const comments: PrReviewComment[] = [];
+  for (const line of result.stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      comments.push(JSON.parse(line) as PrReviewComment);
+    } catch {
+      throw new CliError(`unparseable line from gh api: ${line.slice(0, 120)}`);
+    }
+  }
+  return comments;
+}
+
+// Both channels pr-hero's own per-finding comments can live in, reduced to
+// inline.ts's PostedFindingComment shape. A comment that does not parse as a
+// finding marker is silently excluded — this is where the two marker
+// prefixes' disjointness (pr-preflight.ts) actually pays for itself: the
+// summary comment's `<!-- pr-hero-report ` marker never parses as a
+// `<!-- pr-hero-finding ` one, so it drops out of this list without any
+// special-casing, and a human's reply (any shape) drops out the same way.
+export async function fetchPostedFindingComments(
+  operatorRoot: string,
+  pr: number,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<PostedFindingComment[]> {
+  const [reviewComments, issueComments] = await Promise.all([
+    fetchPrReviewComments(operatorRoot, pr, options),
+    fetchPrComments(operatorRoot, pr, options),
+  ]);
+  const out: PostedFindingComment[] = [];
+  for (const comment of reviewComments) {
+    const marker = parseFindingMarker(comment.body);
+    if (marker === null) continue;
+    out.push({
+      id: comment.id,
+      channel: "review",
+      marker,
+      livePath: comment.path,
+      liveLine: comment.line ?? undefined,
+    });
+  }
+  for (const comment of issueComments) {
+    const marker = parseFindingMarker(comment.body);
+    if (marker === null) continue;
+    out.push({ id: comment.id, channel: "issue", marker });
+  }
+  return out;
+}
+
+// gh api prints "<message> (HTTP <code>)" on stderr for any non-2xx
+// response. Matching only the status code — never the message, which
+// GitHub varies by cause ("Unprocessable Entity", or a specific field
+// error) — is what lets the SAME recovery apply whether the rejection is
+// "this comment could not anchor" or "you already have a pending review"
+// (a leftover from a prior crashed run): the spec explicitly rules out
+// reason-string special-casing (design D1), because GitHub's 422 body does
+// not reliably name which comment failed.
+function is422(stderr: string): boolean {
+  return /\(HTTP 422\)/.test(stderr);
+}
+
+export interface ReviewSubmissionOutcome {
+  // "posted": every finding in `findings` is now in the one review.
+  // "demoted": the review was rejected (422); `findings` is the subset
+  //   STILL unmatched after a live re-fetch + re-match — the caller posts
+  //   these as individual issue comments instead. A finding dropped out of
+  //   this set because the re-match found it already covered (a race, or a
+  //   leftover from a crashed prior attempt) is neither reposted nor lost —
+  //   it already has a home, which is the whole point of recovering through
+  //   the matcher instead of through the failed POST's own bookkeeping.
+  outcome: "posted" | "demoted";
+  findings: Finding[];
+}
+
+// The one atomic review submission (spec "One review submission for
+// anchorable findings"), plus its 422 recovery (spec "GitHub is the anchor
+// authority", design D1). `findings` is the plan's `reviewComments` — the
+// set inline.ts already classified anchorable AND unmatched to a prior
+// comment; an empty set never reaches gh at all (spec "Zero anchorable
+// findings": an empty `comments[]` review is never sent).
+//
+// WHY re-fetch-and-rematch, not fail-loud, not parse-and-retry-the-offender,
+// not N separate POSTs (design D1, rejected alternatives kept here because
+// they will keep sounding reasonable to the next person who reads this):
+// fail-loud means a review that already cost real hunter/refuter money says
+// NOTHING on the PR — the worst outcome available. Parsing the 422 to retry
+// only the offending comment assumes GitHub's error body names it reliably;
+// it does not (verified against `gh api` 2026-08-10 — the response is a
+// generic "Unprocessable Entity" with, at best, a field-level error array
+// that does not carry the comments[] index). N separate
+// `POST pulls/<n>/comments` calls trade the one atomicity problem for a
+// worse one: N GitHub notifications instead of one review, and a partial
+// failure midway leaves some findings posted and others not, with no single
+// state to reconcile against. Re-fetching and re-running matchPostedFindings
+// — the SAME function an ordinary second run already uses for cross-run
+// identity — means the recovery is not a special code path at all: whatever
+// the live PR already carries is `persist`, whatever it does not is
+// `fresh`, and only `fresh` gets posted, this time as an issue comment. The
+// matcher doubles as the recovery mechanism.
+export async function postPrReview(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  findings: Finding[];
+  webUrl?: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<ReviewSubmissionOutcome> {
+  if (input.findings.length === 0) {
+    return { outcome: "posted", findings: [] };
+  }
+  const body = {
+    event: "COMMENT",
+    comments: input.findings.map((finding) => ({
+      path: finding.path,
+      line: finding.line,
+      body: renderInlineComment(finding, input.headSha, input.webUrl),
+    })),
+  };
+  // `--input -`, not `-F`: gh's `-F`/`-f` field composition has no way to
+  // express an ARRAY of objects, and comments[] is exactly that. The whole
+  // request body travels on stdin as one JSON document — same ARG_MAX/no-
+  // shell reasoning as postPrComment's `-F body=@-`, just for a body gh
+  // cannot compose from flags at all.
+  const result = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/pulls/${input.pr}/reviews`,
+      "--input",
+      "-",
+    ],
+    JSON.stringify(body),
+    input.spawnFn,
+  );
+  if (result.ok) {
+    return { outcome: "posted", findings: input.findings };
+  }
+  if (!is422(result.stderr)) {
+    throw new CliError(
+      `gh api (post PR review) failed: ${result.stderr.trim()}`,
+    );
+  }
+  const posted = await fetchPostedFindingComments(
+    input.operatorRoot,
+    input.pr,
+    { spawnFn: input.spawnFn },
+  );
+  const match = matchPostedFindings({
+    findings: input.findings,
+    posted,
+    headSha: input.headSha,
+  });
+  const stillUnmatched = new Set(match.fresh.map((finding) => finding.id));
+  return {
+    outcome: "demoted",
+    findings: input.findings.filter((finding) =>
+      stillUnmatched.has(finding.id),
+    ),
+  };
+}
+
+// One un-anchorable (or 422-demoted) finding, posted as its own top-level
+// issue comment (spec "One issue comment per un-anchorable finding": never
+// pooled). Always a fresh POST, never a PATCH — unlike postPrComment's
+// single summary comment, there is no "the" prior comment to update; a
+// finding either already has one (the caller's plan already excluded it,
+// via inline.ts's matcher) or it does not.
+export async function postIssueComment(
+  operatorRoot: string,
+  pr: number,
+  finding: Finding,
+  headSha: string,
+  webUrl?: string,
+  spawnFn?: typeof Bun.spawn,
+): Promise<number> {
+  const body = renderIssueFindingComment(finding, headSha, webUrl);
+  const result = await gh(
+    operatorRoot,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/issues/${pr}/comments`,
+      "-F",
+      "body=@-",
+    ],
+    body,
+    spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api (post finding issue comment) failed: ${result.stderr.trim()}`,
+    );
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    parsed = null;
+  }
+  const commentId = (parsed as { id?: unknown } | null)?.id;
+  if (typeof commentId !== "number") {
+    throw new CliError(
+      "gh api posted a finding issue comment but returned no comment id: " +
+        result.stdout.slice(0, 120),
+    );
+  }
+  return commentId;
 }
