@@ -244,6 +244,82 @@ describe("parseArgs --post", () => {
   });
 });
 
+// ROADMAP B6 (WU6): the `post` verb — `pr-hero post --pr <n> --from
+// <run-dir> [--dry-run]` — reads a prior run's findings.json off disk
+// instead of running a fresh review (the `ledger` verb's precedent).
+describe("parseArgs post command", () => {
+  test("is a recognized command, and the unknown-command list names it", () => {
+    expect(parseArgs(["post", "--pr", "5", "--from", "/runs/x"]).command).toBe(
+      "post",
+    );
+    try {
+      parseArgs(["audit"]);
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("post");
+    }
+  });
+
+  test("requires --pr", () => {
+    try {
+      parseArgs(["post", "--from", "/runs/x"]);
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("--pr");
+    }
+  });
+
+  test("requires --from", () => {
+    try {
+      parseArgs(["post", "--pr", "5"]);
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("--from");
+    }
+  });
+
+  test("--from is read, and rejected on every other command", () => {
+    const { options } = parseArgs(["post", "--pr", "5", "--from", "/runs/x"]);
+    expect(options.from).toBe("/runs/x");
+    for (const argv of [
+      ["review", "--from", "/runs/x"],
+      ["ledger", "--from", "/runs/x"],
+    ]) {
+      try {
+        parseArgs(argv);
+        throw new Error("should have thrown");
+      } catch (error) {
+        expect(error).toBeInstanceOf(CliUsageError);
+        expect((error as Error).message).toContain("--from");
+      }
+    }
+  });
+
+  // Bare --pr and a numeric --pr both parse; post's own required-flag check
+  // does not care WHICH shape --pr took, only that it is present.
+  test("accepts bare --pr (current branch's PR)", () => {
+    const { options } = parseArgs(["post", "--pr", "--from", "/runs/x"]);
+    expect(options.pr).toBe("current");
+    expect(options.from).toBe("/runs/x");
+  });
+
+  test("--dry-run parses beside post, without --post the flag", () => {
+    const { options } = parseArgs([
+      "post",
+      "--pr",
+      "5",
+      "--from",
+      "/runs/x",
+      "--dry-run",
+    ]);
+    expect(options.dryRun).toBe(true);
+    expect(options.post).toBe(false);
+  });
+});
+
 describe("prCommentMarker", () => {
   const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
 
