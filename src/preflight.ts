@@ -9,7 +9,7 @@ import type { SuspicionPrior } from "./prompt-set";
 // size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
 // dependency on this module.
-import { DEFAULT_SIZE_GATE } from "./size-gate";
+import { DEFAULT_SIZE_GATE, unquotePath } from "./size-gate";
 import type { ReviewSpec } from "./spec";
 
 // The lab's production value. Also the single biggest per-hunter cost lever
@@ -700,7 +700,19 @@ export function parseNumstatFiles(raw: string): NumstatFile[] {
 // consumer here matches the path against globs, and `src/{a => b}/x.min.js`
 // matches no exclusion pattern at all — a renamed lockfile would silently
 // stop being excluded and push a small PR over the gate.
+//
+// The SAME globs also meet git's C-quoting, which `core.quotepath` leaves on by
+// default for any non-ASCII path (`"canci\303\263n.min.js"`): the leading quote
+// makes every pattern miss. Found by pr-hero reviewing its own PR #1 — the patch
+// filter unquoted and this did not, so an excluded file vanished from
+// diff.patch while its lines stayed in the count. Unquote LAST: git quotes only
+// the side that needs it (`a.min.js => "canci\303\263n.min.js"`), so unquoting
+// before resolving is a no-op that leaves the destination still quoted.
 function resolveNumstatPath(field: string): string {
+  return unquotePath(resolveRenameField(field));
+}
+
+function resolveRenameField(field: string): string {
   const braced = /^(.*)\{(.*) => (.*)\}(.*)$/.exec(field);
   if (braced !== null) {
     // The one-sided forms leave an empty segment behind (`src/` + `` +

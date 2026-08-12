@@ -421,6 +421,36 @@ describe("parseNumstatFiles", () => {
     );
   });
 
+  // git C-quotes any non-ASCII path by default (`core.quotepath`), and the
+  // quotes alone make every exclusion glob miss. Unquoting must happen AFTER
+  // rename resolution, because git quotes only the side that needs it.
+  test("a C-quoted path is unquoted to its real name", () => {
+    expect(
+      parseNumstatFiles('1\t0\t"canci\\303\\263n.min.js"\n')[0]?.path,
+    ).toBe("canción.min.js");
+  });
+
+  test("a whole-path rename unquotes its quoted destination", () => {
+    expect(
+      parseNumstatFiles('4\t4\ta.min.js => "canci\\303\\263n.min.js"\n')[0]
+        ?.path,
+    ).toBe("canción.min.js");
+  });
+
+  // git abandons the brace form entirely when either side needs quoting, so
+  // this branch is never quoted and the unquote is a harmless no-op.
+  test("a braced rename is unaffected by the unquoting", () => {
+    expect(
+      parseNumstatFiles("4\t4\tsrc/{old => nueva}/f.min.js\n")[0]?.path,
+    ).toBe("src/nueva/f.min.js");
+  });
+
+  test("an ordinary ASCII path is left exactly as it is", () => {
+    expect(parseNumstatFiles("3\t1\tsrc/a.min.js\n")[0]?.path).toBe(
+      "src/a.min.js",
+    );
+  });
+
   test("blank and malformed lines are ignored", () => {
     expect(parseNumstatFiles("")).toEqual([]);
     expect(parseNumstatFiles("\n\ngarbage\n")).toEqual([]);

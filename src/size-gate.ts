@@ -238,12 +238,12 @@ function splitDiffRecords(patch: string): string[] {
 //                              path is the only path there is;
 //   the header itself        — binary adds/deletes, which have neither.
 //
-// KNOWN, ACCEPTED divergence: git quotes paths with control or non-ASCII
-// characters (`"caf\303\251/bun.lock"`), and this unquotes them while
-// resolveNumstatPath does not. The two can therefore disagree for such a
-// path — always in the direction of the filter dropping a file the gate still
-// counted, i.e. the gate stays conservative (its count >= what the hunters
-// were handed). Never the reverse.
+// git quotes paths with control or non-ASCII characters
+// (`"caf\303\251/bun.lock"`), and this unquotes them. resolveNumstatPath in
+// preflight.ts now unquotes too: the asymmetry was NOT harmless — such a file
+// was dropped from diff.patch while its lines stayed in the gate's count, so
+// the gate could refuse a PR whose effective diff was small. Both sides must
+// keep unquoting or that divergence comes straight back.
 export function diffRecordPath(record: string): string | undefined {
   const lines = record.split("\n");
   let minusPath: string | undefined;
@@ -298,7 +298,7 @@ function headerPath(header: string): string | undefined {
 }
 
 // git's C-style quoting, undone. Only the escapes git actually emits.
-function unquotePath(field: string): string {
+export function unquotePath(field: string): string {
   const raw = field.trim();
   if (!(raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2)) {
     return raw;
