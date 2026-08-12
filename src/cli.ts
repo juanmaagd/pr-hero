@@ -141,6 +141,7 @@ import {
   styleEnabled,
   yellow,
 } from "./ui";
+import { type ConfirmResult, confirmReview } from "./ui-select";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
@@ -454,7 +455,10 @@ async function review(options: CliOptions): Promise<number> {
   );
   const hunterCount = activeHunters.length;
   const estimate = estimateCost(diffStat, hunterCount);
-  printPlan({
+  // Named rather than inlined into printPlan: the same context is what the
+  // confirm menu's "Show details" renders, and building it twice would risk
+  // the card and the details view disagreeing about the run they describe.
+  const planContext: PlanContext = {
     options,
     repoRoot,
     baseRef,
@@ -476,7 +480,8 @@ async function review(options: CliOptions): Promise<number> {
     // the plan only prints the verdict, last, where the decision is made.
     sizeGate,
     droppedPaths: effectiveDiff.droppedPaths,
-  });
+  };
+  printPlan(planContext);
 
   // 12 — the free exit. Dry run reports the gate verdict (including that it
   // WOULD skip) and still exits 0: its contract is "everything except
@@ -498,10 +503,17 @@ async function review(options: CliOptions): Promise<number> {
     throw new CliError(sizeGate.message);
   }
 
-  // 14 — the paid one.
-  if (!options.yes && !(await confirm(estimate.low, estimate.high))) {
-    log("aborted; nothing was spent.");
-    return 1;
+  // 14 — the paid one. Local mode can never post (parseArgs rejects --post
+  // without --pr), so the "don't post" option is not offered and the choice's
+  // `post` field carries nothing local mode could act on.
+  if (!options.yes) {
+    const choice = await confirm(estimate.low, estimate.high, false, () =>
+      planDetails(planContext),
+    );
+    if (choice.kind === "cancel") {
+      log("aborted; nothing was spent.");
+      return 1;
+    }
   }
 
   // 15 — run, with live progress: the expectation line up front, then one
@@ -859,7 +871,9 @@ async function reviewPr(
   );
   const hunterCount = activeHunters.length;
   const estimate = estimateCost(diffStat, hunterCount);
-  printPrPlan({
+  // Same reason as local mode's planContext: the card and the confirm menu's
+  // details view must describe one and the same planned run.
+  const planContext: PrPlanContext = {
     options,
     operatorRoot,
     target,
@@ -875,10 +889,27 @@ async function reviewPr(
     sizeGate,
     droppedPaths: effectiveDiff.droppedPaths,
     resolved: { baseSha, diffFromSha, diffPath, parityFires },
-  });
-  if (!options.yes && !(await confirm(estimate.low, estimate.high))) {
-    log("aborted; nothing was spent.");
-    return 1;
+  };
+  printPrPlan(planContext);
+  // What this run will actually publish. `options` is never mutated: the plan
+  // card and the details view print what was ASKED FOR, and only the run
+  // itself follows the answer given here.
+  let postEnabled = options.post;
+  if (!options.yes) {
+    const choice = await confirm(
+      estimate.low,
+      estimate.high,
+      options.post,
+      () => prPlanDetails(planContext),
+    );
+    if (choice.kind === "cancel") {
+      log("aborted; nothing was spent.");
+      return 1;
+    }
+    postEnabled = choice.post;
+    if (options.post && !postEnabled) {
+      log("posting disabled for this run; the review still runs.");
+    }
   }
 
   // 8 — the review root.
@@ -1056,7 +1087,7 @@ async function reviewPr(
   // posting"): a clean-bill comment set from a review that never ran would
   // be a public lie, same reasoning as the comparison guard above.
   let posted: InlinePostOutcome | null = null;
-  if (options.post) {
+  if (postEnabled) {
     const repoWebUrl = await ghRepoWebUrl(operatorRoot);
     if (repoWebUrl === undefined) {
       log("repo web url unavailable: posting plain locations");
@@ -2303,10 +2334,12 @@ function printDecision(d: PlanDecision, styles: boolean): void {
   );
 }
 
-// NOT printed by default (ROADMAP: WU3 wires it to a "Show details" menu
-// option). Exported so that wiring is a call, not a rewrite: everything the
-// card demoted lands here, and nothing is dropped on the way.
-export function planDetails(ctx: PlanContext): string[] {
+// NOT printed by default: everything the plan card demoted lands here, and
+// the confirm menu's "Show details" option is the only thing that prints it.
+// Module-private on purpose — biome's unused-symbol rule does not flag
+// exports, so an `export` for a hypothetical consumer is how dead code hides
+// through a clean `bun run check`.
+function planDetails(ctx: PlanContext): string[] {
   const styles = styleEnabled();
   const lines = [section("details", styles)];
   const push = (label: string, value: string): void => {
@@ -2518,9 +2551,9 @@ function prWorktreePlanTag(worktreePath: string): string {
     : "worktree will be created";
 }
 
-// PR mode's half of planDetails — same contract: not printed by default,
-// exported so WU3's "Show details" option is a call rather than a rewrite.
-export function prPlanDetails(ctx: PrPlanContext): string[] {
+// PR mode's half of planDetails — same contract, same module-private reason:
+// printed only when the confirm menu's "Show details" option asks for it.
+function prPlanDetails(ctx: PrPlanContext): string[] {
   const styles = styleEnabled();
   const lines = [section("details", styles)];
   const push = (label: string, value: string): void => {
@@ -2777,23 +2810,24 @@ function startLineRenderer(startedAtMs: number): ProgressRenderer {
   };
 }
 
-async function confirm(low: number, high: number): Promise<boolean> {
-  log();
-  process.stderr.write(
-    `Spend an estimated $${low.toFixed(2)}–$${high.toFixed(2)} on this ` +
-      "review? [y/N] ",
-  );
-  // One chunk off stdin, then release it. Reading the whole stream would
-  // block until EOF, which never comes on an interactive terminal.
-  const reader = Bun.stdin.stream().getReader();
-  const { value } = await reader.read();
-  await reader.cancel();
-  const answer = new TextDecoder()
-    .decode(value ?? new Uint8Array())
-    .trim()
-    .toLowerCase();
-  log();
-  return answer === "y" || answer === "yes";
+// The cost band's gate. `details` is a thunk so the details view — which
+// probes the filesystem — is built only if the human asks for it, and
+// `canSkipPost` is what decides whether "Review, but don't post" exists at
+// all: offering it to a run that was never going to post is a no-op dressed
+// as a choice.
+function confirm(
+  low: number,
+  high: number,
+  canSkipPost: boolean,
+  details: () => string[],
+): Promise<ConfirmResult> {
+  return confirmReview({
+    low,
+    high,
+    canSkipPost,
+    details,
+    styles: styleEnabled(),
+  });
 }
 
 // The envelope needs ONE model string. With no --model override each agent
