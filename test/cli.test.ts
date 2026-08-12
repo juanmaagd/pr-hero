@@ -45,7 +45,16 @@ interface ScriptedResponse {
 
 interface ScriptEntry {
   match: string[];
-  response: ScriptedResponse;
+  response?: ScriptedResponse;
+  // Sequential per-call responses for the SAME matched argv (call-counting):
+  // consumed in order across repeated calls to the same endpoint, the last
+  // entry repeating once exhausted. Needed to simulate a re-fetch of the
+  // SAME endpoint returning a DIFFERENT answer than the first fetch did —
+  // e.g. a concurrent process posting a comment between this run's plan
+  // snapshot and its immediately-pre-post re-fetch. `response` and
+  // `responses` are mutually exclusive; `response` is a plain single-value
+  // shorthand kept for every pre-existing script.
+  responses?: ScriptedResponse[];
 }
 
 interface RecordedCall {
@@ -69,12 +78,22 @@ function makeFakeGh(script: ScriptEntry[]): {
   // increments per call so two comments created in the same test never
   // collide on id.
   let nextId = 100;
+  // Per-entry call counter, only consulted when an entry uses `responses`
+  // (sequential) rather than `response` (single, repeats forever).
+  const responseIndex = new Map<ScriptEntry, number>();
   const spawnFn = ((argv: string[], opts?: { stdin?: Uint8Array }) => {
     const stdin =
       opts?.stdin === undefined ? undefined : decoder.decode(opts.stdin);
     calls.push({ argv, stdin });
     const entry = script.find((s) => argvContains(argv, s.match));
-    let scripted = entry?.response;
+    let scripted: ScriptedResponse | undefined;
+    if (entry?.responses) {
+      const i = responseIndex.get(entry) ?? 0;
+      scripted = entry.responses[Math.min(i, entry.responses.length - 1)];
+      responseIndex.set(entry, i + 1);
+    } else {
+      scripted = entry?.response;
+    }
     if (scripted === undefined) {
       // Default: any unscripted --method POST/PATCH create succeeds with a
       // fresh id — covers the per-finding issue comments and the summary
@@ -471,6 +490,178 @@ describe("postInlineFindings — the 422 recovery never drops a finding", () => 
         c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
     );
     expect(issueCall?.stdin).toContain("line=102");
+  });
+});
+
+// PR #4 live review, comment 3767088276: the issue-comment channel had no
+// re-fetch/re-match immediately before its mutating POST, unlike the review
+// channel's free 422 recovery. These two tests pin both halves of the fix:
+// the re-fetch HAPPENS and prevents a duplicate when something changed
+// underneath, and it is SKIPPED entirely when there is nothing to post.
+describe("postInlineFindings — re-fetch immediately before the issue-comment POST", () => {
+  test("a finding another process already posted between the plan snapshot and this POST is not duplicated", async () => {
+    const findings = [
+      finding({
+        id: "F001",
+        path: "src/never.ts", // not in the diff — un-anchorable
+        line: 1,
+        claim: "an un-anchorable finding",
+      }),
+    ];
+    // The comment a CONCURRENT process posted for the SAME finding, same
+    // head, same claim — exactly what a second `--post` run would leave
+    // behind between this run's plan snapshot and its own re-fetch. An
+    // existing SUMMARY comment is also scripted (so `postPrComment`'s own
+    // internal existing-comment check doesn't add a THIRD indistinguishable
+    // read to the same "issues/42/comments" endpoint before this fix's
+    // re-fetch even runs) — the call-counting assertion below only means
+    // anything if every "issues/42/comments" read in this run is accounted
+    // for.
+    const summaryMarker = `<!-- pr-hero-report head=${HEAD} -->`;
+    const concurrentMarker = findingMarker({
+      path: "src/never.ts",
+      line: 1,
+      headSha: HEAD,
+      claim: "an un-anchorable finding",
+    });
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["issues/42/comments", "--paginate"],
+        responses: [
+          {
+            stdout: ndjson([
+              {
+                id: 200,
+                user: "pr-hero",
+                body: `${summaryMarker}\nsummary body`,
+              },
+            ]),
+          }, // 1st fetch (resolveInlinePostPlan's own existingSummaryId read)
+          { stdout: "" }, // 2nd fetch (fetchPostedFindingComments, same plan snapshot): nothing posted yet
+          {
+            stdout: ndjson([
+              {
+                id: 55,
+                user: "pr-hero",
+                body: `${concurrentMarker}\nan un-anchorable finding`,
+              },
+            ]),
+          }, // 3rd fetch (this fix's re-fetch, immediately before the mutating POST): the concurrent post already landed
+        ],
+      },
+      { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/other.ts", 5),
+      webUrl: undefined,
+      spawnFn,
+    });
+    // No duplicate issue comment posted for F001.
+    expect(outcome.issueCommentIds.length).toBe(0);
+    // F001 is not misreported as dropped — it already has a home, just not
+    // one THIS run created.
+    expect(outcome.droppedFindingIds).toEqual([]);
+    const issuePostCalls = calls.filter(
+      (c) =>
+        c.argv.join(" ").includes("POST") &&
+        c.argv.join(" ").includes("issues/42/comments") &&
+        c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
+    );
+    expect(issuePostCalls).toHaveLength(0);
+    // The re-fetch itself happened: THREE GET calls to the same endpoint —
+    // existingSummaryId, the plan's own posted-comments read, and this fix's
+    // pre-POST re-fetch — never just the first two.
+    const issueGetCalls = calls.filter(
+      (c) =>
+        c.argv.join(" ").includes("issues/42/comments") &&
+        c.argv.join(" ").includes("--paginate"),
+    );
+    expect(issueGetCalls.length).toBe(3);
+  });
+
+  test("nothing to post skips the re-fetch entirely — a workless run pays for no extra gh call", async () => {
+    // Anchorable finding, already persisting from a prior run — the plan has
+    // NOTHING to post in either channel. An existing summary comment is
+    // scripted too, so `postPrComment`'s own internal existing-comment check
+    // never fires either (it PATCHes the known summary id directly) — the
+    // ONLY "issues/42/comments" reads in a fully-idempotent run are the two
+    // the plan snapshot itself makes.
+    const summaryMarker = `<!-- pr-hero-report head=${OLD_HEAD} -->`;
+    const marker = findingMarker({
+      path: "src/a.ts",
+      line: 10,
+      headSha: HEAD,
+      claim: "unchanged claim",
+    });
+    const findings = [
+      finding({
+        id: "F001",
+        path: "src/a.ts",
+        line: 10,
+        claim: "unchanged claim",
+      }),
+    ];
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["issues/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 200,
+              user: "pr-hero",
+              body: `${summaryMarker}\nsummary body`,
+            },
+          ]),
+        },
+      },
+      {
+        match: ["pulls/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 9,
+              user: "pr-hero",
+              body: `${marker}\nunchanged claim`,
+              path: "src/a.ts",
+              line: 10,
+              original_line: 10,
+              in_reply_to_id: null,
+            },
+          ]),
+        },
+      },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(outcome.issueCommentIds.length).toBe(0);
+    expect(outcome.reviewFindingCount).toBe(0);
+    expect(outcome.droppedFindingIds).toEqual([]);
+    // Exactly TWO reads of the issue endpoint (existingSummaryId + the
+    // plan's own posted-comments read) — the re-fetch never ran because
+    // there was nothing to post.
+    const issueGetCalls = calls.filter(
+      (c) =>
+        c.argv.join(" ").includes("issues/42/comments") &&
+        c.argv.join(" ").includes("--paginate"),
+    );
+    expect(issueGetCalls.length).toBe(2);
+    const reviewGetCalls = calls.filter(
+      (c) =>
+        c.argv.join(" ").includes("pulls/42/comments") &&
+        c.argv.join(" ").includes("--paginate"),
+    );
+    expect(reviewGetCalls.length).toBe(1);
   });
 });
 
