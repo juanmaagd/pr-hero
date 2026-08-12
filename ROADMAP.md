@@ -578,20 +578,44 @@ What is still manual, in the order it should be closed:
    by citing code, never by stating intent. "I did it on purpose" is not evidence; "this line already
    covers it, here" is.
 
-   **The vocabulary already exists — do not invent a taxonomy.** `refuter_verdict` (`findings.ts`)
-   covers every outcome this loop needs:
+   **TWO vocabularies, and conflating them was a real error in an earlier draft of this entry.**
+   `refuter_verdict` (`findings.ts`) is a SCHEMA enum shared with the sibling lab and sacred under rule
+   5 — not ours to extend. The triage TAGS an agent writes in a comment are a different thing entirely:
+   they are ours, there may be as many as the work needs, and `ledger.ts` already tallies verdicts
+   AS-IS with no enum in the parser — deliberately, so the taxonomy is discovered by triaging rather
+   than invented before it (the A3 lesson). Adding a tag therefore costs no schema change. Corrected
+   with Juanma 2026-08-12.
 
-   | author wants | verdict | what the adjudicator must see |
+   Separating them surfaces a second distinction the draft had lost: what the AUTHOR claims and what
+   the ADJUDICATOR returns are not the same vocabulary either.
+
+   **What the author writes:**
+
+   | tag | what it claims | what it must supply |
    |---|---|---|
-   | applied | — | nothing: no judge runs, the re-review verifies it independently |
-   | dismiss | `refuted` | positive disproof with cited code |
-   | defer | `downgraded-latent` | real but unreachable today — kept, never deleted (the G6 lesson) |
-   | — | `inconclusive` | neither proven: the finding stays OPEN |
+   | `applied` | fixed in this PR | nothing — the re-review verifies it independently, so it pays no adjudicator |
+   | `dismissed` | the finding is wrong | positive disproof with cited code |
+   | `deferred` | the finding is right, but fixing it is out of this PR's scope | a REAL destination: an issue number |
+   | `misclassified` | the finding is real, but the engine typed it wrong | which field is wrong and why |
 
-   Two problems dissolve here. **`defer` needs no invented destination**: `downgraded-latent` was
-   created for exactly "real but not now", so it stays in the ledger as latent instead of vanishing.
-   And **`inconclusive` prevents a forced binary** — the party writing the argument chooses what to
-   cite, so the adjudicator must be able to say "not enough" rather than pick between two bad options.
+   **What the adjudicator returns:** `upheld` (the author is right), `rejected` (the author is not, the
+   finding stands), `inconclusive` (neither proven — the finding stays OPEN, so the party choosing what
+   to cite can never force a binary).
+
+   **`deferred` DOES need a destination — an earlier draft claimed this problem dissolved and it does
+   not.** The draft mapped defer onto `downgraded-latent`, which means something else: "real but
+   unreachable today", the G6 lesson, a defect with no live trigger. Juanma's defer is "real, reachable,
+   and correct — it just belongs in another PR". Without an issue carrying it, defer is a dismiss with a
+   better name, and worse, the ledger counts it as agreement. The skill should CREATE the issue and put
+   its number in both the reply and the ledger row.
+
+   **`misclassified` earns its place on evidence.** It is exactly what happened to F003 on this repo's
+   own PR #1: the finding was REAL — `gh` genuinely has no timeout anywhere — but the engine filed it
+   `introduced` when it is plainly pre-existing, and the refuter corroborated it without questioning the
+   class. That is neither `dismissed` (the claim is true) nor `deferred` (scope is not the issue): it is
+   the ENGINE erring, not the code. It is also the single most valuable signal the loop can produce,
+   because it points at a hunter or refuter defect rather than a repository one — and without its own
+   tag it lands in the ledger as an ordinary disagreement and gets counted as a false positive it is not.
 
    **Cost, stated honestly because an earlier draft of this entry got it wrong.** Reading the triage is
    $0. The adjudication is a spawned step and costs money — but **only on findings the author wants
