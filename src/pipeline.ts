@@ -101,11 +101,35 @@ export interface PipelineDeps {
 // `refuter-step-finished` fire as EACH parallel step settles, never at the
 // join — at the join every event would fire at once at the end, which is
 // exactly the silence this exists to break.
+// Every field beyond the original five kinds' own is OPTIONAL on purpose: a
+// listener written against the older shape keeps compiling, and the pipeline
+// stays free to emit an event before it knows the extra (the resolved model,
+// a draft count for a hunter that died).
 export type PipelineProgressEvent =
-  | { kind: "hunters-started"; hunters: string[] }
-  | { kind: "hunter-finished"; hunter: string; ok: boolean; durationMs: number }
+  | {
+      kind: "hunters-started";
+      hunters: string[];
+      // key -> the model resolveModel actually chose. Only the pipeline knows
+      // it: the CLI sees spec/frontmatter overrides, not the outcome.
+      models?: Record<string, string>;
+    }
+  | {
+      kind: "hunter-finished";
+      hunter: string;
+      ok: boolean;
+      durationMs: number;
+      // Findings in THIS hunter's draft, pre-dedupe. Absent for a failed step
+      // — there is no draft to count.
+      drafts?: number;
+    }
   | { kind: "dedupe-finished"; drafts: number; findings: number }
-  | { kind: "refuter-started"; severeFindings: number }
+  | {
+      kind: "refuter-started";
+      severeFindings: number;
+      // The submitted batch, so a renderer can show the leg's full shape
+      // before the first verdict lands (the count alone cannot name a leaf).
+      findings?: Array<{ id: string; location: string }>;
+    }
   | {
       kind: "refuter-step-finished";
       findingId: string;
@@ -426,6 +450,9 @@ async function execute(
   emit(deps, {
     kind: "hunters-started",
     hunters: hunterSpecs.map(({ key }) => key),
+    models: Object.fromEntries(
+      hunterSpecs.map(({ key, spec }) => [key, spec.model]),
+    ),
   });
   // hunter-finished is attached PER PROMISE, before the join. The handlers
   // are attached to each step's promise ahead of allSettled's own, so each
@@ -435,13 +462,22 @@ async function execute(
       const startedAt = Date.now();
       const promise = deps.runner.run(spec);
       promise.then(
-        (result) =>
+        (result) => {
+          // The draft count is read off the SAME validated output the join
+          // below consumes, defensively: a failed step has no output, and the
+          // panel must never be the thing that throws here.
+          const drafts =
+            result.status === "ok"
+              ? (result.output as HunterDraft | undefined)?.findings?.length
+              : undefined;
           emit(deps, {
             kind: "hunter-finished",
             hunter: key,
             ok: result.status === "ok",
             durationMs: Date.now() - startedAt,
-          }),
+            ...(drafts === undefined ? {} : { drafts }),
+          });
+        },
         () =>
           emit(deps, {
             kind: "hunter-finished",
@@ -509,7 +545,14 @@ async function execute(
   // the run stays complete.
   const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
   if (batch.length > 0 && refuterAgent) {
-    emit(deps, { kind: "refuter-started", severeFindings: batch.length });
+    emit(deps, {
+      kind: "refuter-started",
+      severeFindings: batch.length,
+      findings: batch.map((s) => ({
+        id: s.id,
+        location: `${s.path}:${s.line}`,
+      })),
+    });
     await runRefuter(input, deps, state, batch, {
       stepsDir,
       stepTimeoutMs,
