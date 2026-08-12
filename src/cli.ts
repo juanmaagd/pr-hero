@@ -24,7 +24,12 @@ import {
   validateFindingsDocument,
   writeFindings,
 } from "./findings";
-import { buildPostPlan, type PostPlan, parseHunkAnchors } from "./inline";
+import {
+  buildPostPlan,
+  matchPostedFindings,
+  type PostPlan,
+  parseHunkAnchors,
+} from "./inline";
 import {
   aggregateLedger,
   parseComparisonJson,
@@ -1318,6 +1323,50 @@ export async function postInlineFindings(input: {
       if (!stillUnmatched.has(finding.id)) reachedIds.add(finding.id);
     }
     toIssuePost = [...toIssuePost, ...reviewResult.findings];
+  }
+
+  // Re-fetch + re-match immediately before the mutating issue-comment POSTs
+  // (live PR #4 review, comment 3767088276): `toIssuePost` above still comes
+  // ONLY from the snapshot `resolveInlinePostPlan` read at the top of this
+  // function. `postPrReview` gets a re-fetch-and-re-match for free from its
+  // 422 recovery; this channel had no equivalent, so two overlapping
+  // invocations against the same PR — a manual `pr-hero post --from <dir>`
+  // racing a `watch --once` tick's spawned `--post` subprocess (watch.ts's
+  // lockfile only serializes overlapping TICKS, never this path or the
+  // standalone `post` verb — see watch.ts:~194-204), or simply two manual
+  // `--post` runs — both read the same stale plan, both classify the same
+  // un-anchorable finding as fresh, and both post a duplicate issue comment.
+  // Reusing `matchPostedFindings` here (rather than inventing a second
+  // reconciliation mechanism) means the matcher IS the fix: whatever the PR
+  // carries by the time we are about to write is `persist`, whatever it does
+  // not is still `fresh`. This NARROWS the race window; it does not CLOSE
+  // it — two processes can both re-fetch, both see nothing yet, and both
+  // still post. True exactly-once needs central coordination, deferred to
+  // ROADMAP Phase E's GitHub Action (see the B3 entry's "two watchers
+  // racing" note). Skipped when there is nothing to post: a workless run
+  // must not pay for a `gh` call it does not need.
+  if (toIssuePost.length > 0) {
+    const justPosted = await fetchPostedFindingComments(operatorRoot, pr, {
+      spawnFn,
+    });
+    const rematch = matchPostedFindings({
+      findings: findingRefs,
+      posted: justPosted,
+      headSha,
+    });
+    const stillFreshIds = new Set(rematch.fresh.map((f) => f.id));
+    // A finding the re-match now resolves to a prior comment already has a
+    // home — reached by the OTHER process, not by this run's own loop below.
+    // Marking it here (not just filtering it out of `toIssuePost`) keeps
+    // `droppedFindingIds` honest: without this, a finding this run correctly
+    // declines to duplicate would look identical to one that reached NEITHER
+    // channel, and design D6's exit-1 rule would fire on a false positive.
+    for (const finding of toIssuePost) {
+      if (!stillFreshIds.has(finding.id)) reachedIds.add(finding.id);
+    }
+    toIssuePost = toIssuePost.filter((finding) =>
+      stillFreshIds.has(finding.id),
+    );
   }
 
   const issueCommentIds: number[] = [];
