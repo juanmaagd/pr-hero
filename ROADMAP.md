@@ -848,6 +848,24 @@ Convoy-inspired ops the engine still lacks, in value order:
     prompt set, a new arm, and the risk of perturbing recall — not a guess.
 - **C2. Schema v1.1** — lift the closed `Hunter` enum (unblocks arbitrary spec keys), make `engine` a
   first-class field; lab migration + validator both sides.
+
+  **What the enum actually blocks (recorded 2026-08-12).** `src/spec.ts` enforces two rules that together
+  make the enum load-bearing far beyond schema hygiene: agent keys are unique (`:76`) and a hunter key must
+  be one of the four enum values (`:93-98`). Three separate roadmap ambitions are blocked on this one line,
+  and none of them is obvious from "arbitrary spec keys":
+
+  - **Model diversity (D3).** Two hunters on the same specialty, different models (sonnet + a GPT/Grok leg).
+    Needs a second key for the same specialty — `reliability` is taken and `reliability-b` is rejected.
+  - **Review depth tiers.** Deep vs. normal vs. light is not only a UI knob (it currently appears ONLY as
+    one, in the Phase E TUI scope note below). A deeper review means MORE hunters with new perspectives —
+    `security`, `performance`, `api-contract` — and every one of those keys is rejected today.
+  - **Any new specialty at all**, independent of depth. The engine is key-agnostic; only this validator and
+    the lab-shared schema are not.
+
+  Note the asymmetry when C2 lands: distinct specialties agreeing is independent corroboration, which is
+  what `dedupe.ts` assumes today. Two instances of the SAME prompt agreeing is not — they share the bias.
+  Different MODELS on the same specialty sit in between. Whatever C2 unlocks, the merge semantics must be
+  decided with it, not after, or confidence inflates without new signal.
 - **C3. Resume + run metadata** — convoy-style debounced tmp+rename metadata, resumable interrupted
   runs, per-run SUMMARY; today a killed multi-tree run restarts from zero.
 - **C4. Runtime-safety preamble** — a non-overridable engine-owned preamble (instruction hierarchy,
@@ -866,7 +884,10 @@ like convoy uses its Codex quota. OpenRouter (paid per token) only for diversity
   backend transient classifier. The interface obligations are already documented on `StepRunner`.
 - **D2. Model routing** — convoy's `model-routing.ts` pattern: logical model identity vs gateway
   (`configured|direct|openrouter`), `provider/model#variant` effort syntax, frozen plan shows
-  Logical/Target per step. Spec already carries `backend`/`models[]`.
+  Logical/Target per step. NOTE (corrected 2026-08-12): an earlier draft of this line claimed the spec
+  already carries `backend`/`models[]`. It does not — `src/spec.ts` has neither field; `AgentSpec` carries
+  a single optional `model: string` and the validator accepts nothing else. D2 therefore includes the spec
+  widening, and D3's fan-out is blocked on it rather than on wiring alone.
 - **D3. Fan-out benchmark arm** — the honesty gate: same-hunter × N models (e.g. sonnet + GPT leg) vs
   baseline, same goldens, replicates. The Opus probe already showed tier doesn't move our misses;
   diversity must prove it buys recall (convoy's bet) before it costs a cent of routine spend.
