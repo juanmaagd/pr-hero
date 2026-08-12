@@ -141,6 +141,7 @@ import {
   styleEnabled,
   yellow,
 } from "./ui";
+import { renderResult } from "./ui-result";
 import { type ConfirmResult, confirmReview } from "./ui-select";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
@@ -171,9 +172,9 @@ const EMPTY_MCP_CONFIG = { mcpServers: {} };
 // two more were dropped, and where the unfiltered bytes went. It sits in the
 // decision block because an exclusion is what the size gate's numbers were
 // computed after.
-function logExclusions(droppedPaths: string[], styles = false): void {
-  if (droppedPaths.length === 0) return;
-  logMarkerRow(
+function exclusionLines(droppedPaths: string[], styles = false): string[] {
+  if (droppedPaths.length === 0) return [];
+  return markerRowLines(
     "!",
     `exclusions: ${droppedPaths.length} generated file(s) dropped from the ` +
       `reviewed diff (${listPaths(droppedPaths)}); the unfiltered diff is ` +
@@ -455,7 +456,7 @@ async function review(options: CliOptions): Promise<number> {
   );
   const hunterCount = activeHunters.length;
   const estimate = estimateCost(diffStat, hunterCount);
-  // Named rather than inlined into printPlan: the same context is what the
+  // Named rather than inlined into renderPlan: the same context is what the
   // confirm menu's "Show details" renders, and building it twice would risk
   // the card and the details view disagreeing about the run they describe.
   const planContext: PlanContext = {
@@ -481,7 +482,7 @@ async function review(options: CliOptions): Promise<number> {
     sizeGate,
     droppedPaths: effectiveDiff.droppedPaths,
   };
-  printPlan(planContext);
+  for (const line of renderPlan(planContext, styleEnabled())) log(line);
 
   // 12 — the free exit. Dry run reports the gate verdict (including that it
   // WOULD skip) and still exits 0: its contract is "everything except
@@ -508,7 +509,7 @@ async function review(options: CliOptions): Promise<number> {
   // `post` field carries nothing local mode could act on.
   if (!options.yes) {
     const choice = await confirm(estimate.low, estimate.high, false, () =>
-      planDetails(planContext),
+      planDetails(planContext, styleEnabled()),
     );
     if (choice.kind === "cancel") {
       log("aborted; nothing was spent.");
@@ -613,23 +614,23 @@ async function review(options: CliOptions): Promise<number> {
   const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
   const advisory = doc.findings.length - blocking;
   const rootCauses = doc.debug.root_causes?.distinct_root_causes ?? 0;
-  log();
-  log(
-    `run ${doc.run_status}: ${blocking} blocking, ${advisory} advisory, ` +
-      `${rootCauses} distinct root cause(s), ` +
-      `${doc.debug.refuted.length} refuted`,
-  );
-  log(
-    `spent $${result.usage.cost_usd_est.toFixed(2)} in ` +
-      `${Math.round(wallMs / 1000)}s (estimated ` +
-      `$${estimate.low.toFixed(2)}–$${estimate.high.toFixed(2)})`,
-  );
-  log(`report:   ${reportPath}`);
-  log(`findings: ${findingsPath}`);
-  if (result.sessionFailed) {
-    log("every hunter failed — this run reviewed nothing.");
-    return 1;
+  for (const line of renderResult({
+    runStatus: doc.run_status,
+    blocking,
+    advisory,
+    rootCauses,
+    refuted: doc.debug.refuted.length,
+    costUsd: result.usage.cost_usd_est,
+    wallMs,
+    estimate: { low: estimate.low, high: estimate.high },
+    runDir,
+    artifacts: [path.basename(reportPath), path.basename(findingsPath)],
+    sessionFailed: result.sessionFailed,
+    styles: styleEnabled(),
+  })) {
+    log(line);
   }
+  if (result.sessionFailed) return 1;
   return 0;
 }
 
@@ -726,7 +727,7 @@ async function reviewPr(
       target.ghDiffStat,
       sizeGateConfig(options),
     );
-    printPrPlan({
+    const dryRunPlan: PrPlanContext = {
       options,
       operatorRoot,
       target,
@@ -750,7 +751,8 @@ async function reviewPr(
         "(estimate from GitHub's aggregate counters; exclusions not " +
         "applied and the count is not whitespace-adjusted)",
       droppedPaths: [],
-    });
+    };
+    for (const line of renderPrPlan(dryRunPlan, styleEnabled())) log(line);
     log();
     if (!estimated.ok && !options.force) {
       log("dry run: this PR would likely be SKIPPED by the size gate.");
@@ -838,7 +840,7 @@ async function reviewPr(
   // here, immediately before dying.
   if (!sizeGate.ok && !options.force) {
     log(sizeGateLine(sizeGate));
-    logExclusions(effectiveDiff.droppedPaths);
+    for (const line of exclusionLines(effectiveDiff.droppedPaths)) log(line);
     throw new CliError(sizeGate.message);
   }
 
@@ -890,7 +892,7 @@ async function reviewPr(
     droppedPaths: effectiveDiff.droppedPaths,
     resolved: { baseSha, diffFromSha, diffPath, parityFires },
   };
-  printPrPlan(planContext);
+  for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
   // What this run will actually publish. `options` is never mutated: the plan
   // card and the details view print what was ASKED FOR, and only the run
   // itself follows the answer given here.
@@ -900,7 +902,7 @@ async function reviewPr(
       estimate.low,
       estimate.high,
       options.post,
-      () => prPlanDetails(planContext),
+      () => prPlanDetails(planContext, styleEnabled()),
     );
     if (choice.kind === "cancel") {
       log("aborted; nothing was spent.");
@@ -1123,43 +1125,45 @@ async function reviewPr(
   const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
   const advisory = doc.findings.length - blocking;
   const rootCauses = doc.debug.root_causes?.distinct_root_causes ?? 0;
-  log();
-  log(
-    `run ${doc.run_status}: ${blocking} blocking, ${advisory} advisory, ` +
-      `${rootCauses} distinct root cause(s), ` +
-      `${doc.debug.refuted.length} refuted`,
-  );
-  log(
-    `spent $${result.usage.cost_usd_est.toFixed(2)} in ` +
-      `${Math.round(wallMs / 1000)}s (estimated ` +
-      `$${estimate.low.toFixed(2)}–$${estimate.high.toFixed(2)})`,
-  );
-  log(`report:     ${reportPath}`);
-  log(`findings:   ${findingsPath}`);
-  if (comparison) {
-    log(
-      `comparison: Greptile-only ${comparison.greptileOnly} · Both ` +
-        `${comparison.both} · pr-hero-only ${comparison.prheroOnly}` +
-        (comparison.greptileFound ? "" : " — no Greptile comment on this PR") +
-        ` (${comparison.markdownPath})`,
-    );
+  // One shared renderer with local mode; the mode-specific parts (comparison,
+  // the worktree hint) ride in as optional inputs. The `posted:` line that
+  // used to sit here is GONE on purpose: step 14 already printed a richer one
+  // at the moment it happened, and two differently-worded reports of the same
+  // POST read as two postings. What this block keeps is the durable trace —
+  // post.json in the artifact list below.
+  for (const line of renderResult({
+    runStatus: doc.run_status,
+    blocking,
+    advisory,
+    rootCauses,
+    refuted: doc.debug.refuted.length,
+    costUsd: result.usage.cost_usd_est,
+    wallMs,
+    estimate: { low: estimate.low, high: estimate.high },
+    runDir,
+    artifacts: [
+      path.basename(reportPath),
+      path.basename(findingsPath),
+      ...(comparison ? [path.basename(comparison.markdownPath)] : []),
+      ...(posted ? ["post.json"] : []),
+    ],
+    ...(comparison
+      ? {
+          comparison: {
+            greptileFound: comparison.greptileFound,
+            greptileOnly: comparison.greptileOnly,
+            both: comparison.both,
+            prheroOnly: comparison.prheroOnly,
+          },
+        }
+      : {}),
+    worktree: { operatorRoot, worktreePath },
+    sessionFailed: result.sessionFailed,
+    styles: styleEnabled(),
+  })) {
+    log(line);
   }
-  if (posted) {
-    log(
-      `posted:     summary ${posted.summary.action} comment ` +
-        `${posted.summary.commentId}, ${posted.reviewFindingCount} review ` +
-        `comment(s), ${posted.issueCommentIds.length} issue comment(s)`,
-    );
-  }
-  // The worktree is kept and reused by decision; cleanup is manual, so hand
-  // over the exact command (worktree remove, never rm -rf — a live
-  // codegraph daemon holds .codegraph/daemon.sock).
-  log("worktree kept for finding-verification; remove it later with:");
-  log(`  git -C ${operatorRoot} worktree remove --force ${worktreePath}`);
-  if (result.sessionFailed) {
-    log("every hunter failed — this run reviewed nothing.");
-    return 1;
-  }
+  if (result.sessionFailed) return 1;
   return postingExitCode(posted);
 }
 
@@ -2259,12 +2263,6 @@ const PERMISSIONS_NOTE =
   "steps run with --permission-mode bypassPermissions, bounded only by " +
   "each agent's read-only tool allow-list";
 
-// One key/value row through the shared formatter, so a long value wraps to
-// the value column instead of the left margin.
-function logRow(label: string, value: string, styles: boolean): void {
-  for (const line of row(label, value, { styles })) log(line);
-}
-
 // The decision block deliberately breaks the grid above it: a one-character
 // marker instead of a label column, so the two lines that decide "spend or
 // not" do not read as two more rows of setup.
@@ -2273,15 +2271,15 @@ const MARKER_ROW = { indent: 2, labelWidth: 2 } as const;
 // Built UNSTYLED and painted whole afterwards: row() measures the value to
 // place the wrap, and an escape sequence inside that value would be counted
 // as visible width.
-function logMarkerRow(
+function markerRowLines(
   marker: string,
   value: string,
   paint: (text: string, styles: boolean) => string,
   styles: boolean,
-): void {
-  for (const line of row(marker, value, { ...MARKER_ROW, styles: false })) {
-    log(paint(line, styles));
-  }
+): string[] {
+  return row(marker, value, { ...MARKER_ROW, styles: false }).map((line) =>
+    paint(line, styles),
+  );
 }
 
 function agentRow(
@@ -2309,38 +2307,54 @@ interface PlanDecision {
   hunterCount: number;
 }
 
-function printDecision(d: PlanDecision, styles: boolean): void {
-  log();
+function decisionLines(d: PlanDecision, styles: boolean): string[] {
   // sizeGateLine's wording is FIXED — size-gate.test.ts pins five substrings
   // of it, and the watcher's log parser reads the same phrasing. The ✓/✗ is
   // decoration in front of it, never a replacement for it.
   const note = d.sizeGateNote === undefined ? "" : ` ${d.sizeGateNote}`;
-  logMarkerRow(
-    d.sizeGate.ok ? "✓" : "✗",
-    `${sizeGateLine(d.sizeGate)}${note}`,
-    d.sizeGate.ok ? green : red,
-    styles,
-  );
-  logExclusions(d.droppedPaths, styles);
+  const lines = [
+    "",
+    ...markerRowLines(
+      d.sizeGate.ok ? "✓" : "✗",
+      `${sizeGateLine(d.sizeGate)}${note}`,
+      d.sizeGate.ok ? green : red,
+      styles,
+    ),
+    ...exclusionLines(d.droppedPaths, styles),
+  ];
   if (!d.sizeGate.ok && d.force) {
-    logMarkerRow("!", "--force given: reviewing anyway.", yellow, styles);
+    lines.push(
+      ...markerRowLines(
+        "!",
+        "--force given: reviewing anyway.",
+        yellow,
+        styles,
+      ),
+    );
   }
-  logMarkerRow(
-    "$",
-    `estimate $${d.estimate.low.toFixed(2)} – ` +
-      `$${d.estimate.high.toFixed(2)} (${d.hunterCount} hunter(s) + refuter)`,
-    bold,
-    styles,
+  lines.push(
+    ...markerRowLines(
+      "$",
+      `estimate $${d.estimate.low.toFixed(2)} – ` +
+        `$${d.estimate.high.toFixed(2)} (${d.hunterCount} hunter(s) + refuter)`,
+      bold,
+      styles,
+    ),
   );
+  return lines;
 }
 
 // NOT printed by default: everything the plan card demoted lands here, and
 // the confirm menu's "Show details" option is the only thing that prints it.
-// Module-private on purpose — biome's unused-symbol rule does not flag
-// exports, so an `export` for a hypothetical consumer is how dead code hides
-// through a clean `bun run check`.
-function planDetails(ctx: PlanContext): string[] {
-  const styles = styleEnabled();
+// Exported ONLY for test/cli.test.ts — a test is a real consumer, and these
+// four renderers had zero coverage until WU4. Nothing else may import them:
+// biome's unused-symbol rule does not flag exports, so an `export` for a
+// hypothetical consumer is how dead code hides through a clean `bun run check`
+// (which is exactly how this pair sat unread for two work units).
+//
+// `styles` ARRIVES AS A PARAMETER, never sniffed here: ui.ts's contract, and
+// the only reason the returned lines can be asserted offline without a TTY.
+export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   const lines = [section("details", styles)];
   const push = (label: string, value: string): void => {
     lines.push(...row(label, value, { styles }));
@@ -2388,20 +2402,22 @@ function planDetails(ctx: PlanContext): string[] {
   return lines;
 }
 
-function printPlan(ctx: PlanContext): void {
-  const styles = styleEnabled();
-  for (const line of box(
-    "pr-hero · review",
-    [
-      `${ctx.baseRef.ref}..${ctx.options.head}`,
-      `${shortPath(ctx.repoRoot)} · ${ctx.diffStat.files} files  ` +
-        `+${ctx.diffStat.insertions} −${ctx.diffStat.deletions}`,
-    ],
-    { styles },
-  )) {
-    log(line);
-  }
-  log();
+// The plan card as LINES, printed by the shell. Returning them rather than
+// logging them is what makes the composition — card, agent grid, endpoints,
+// decision block — assertable in one offline expectation.
+export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
+  const lines = [
+    ...box(
+      "pr-hero · review",
+      [
+        `${ctx.baseRef.ref}..${ctx.options.head}`,
+        `${shortPath(ctx.repoRoot)} · ${ctx.diffStat.files} files  ` +
+          `+${ctx.diffStat.insertions} −${ctx.diffStat.deletions}`,
+      ],
+      { styles },
+    ),
+    "",
+  ];
   let label = "AGENTS";
   for (const agent of ctx.spec.agents) {
     const fires =
@@ -2412,42 +2428,45 @@ function printPlan(ctx: PlanContext): void {
           : ctx.parityFires
             ? "triggered"
             : "✗ will not fire";
-    logRow(label, agentRow(ctx, agent, fires), styles);
+    lines.push(...row(label, agentRow(ctx, agent, fires), { styles }));
     label = "";
   }
-  log();
-  logRow(
-    "BASE",
-    `${ctx.baseRef.ref} → ${shortSha(ctx.baseSha)}  (${baseSourceTag(ctx)})`,
-    styles,
+  lines.push(
+    "",
+    ...row(
+      "BASE",
+      `${ctx.baseRef.ref} → ${shortSha(ctx.baseSha)}  (${baseSourceTag(ctx)})`,
+      { styles },
+    ),
+    // The second endpoint of the pair the details view explains: what the diff
+    // is actually computed from, which is the merge base unless --two-dot moved
+    // it back to the base tip.
+    ...row(
+      "RANGE",
+      `${shortSha(ctx.diffFromSha)} → ${shortSha(ctx.headSha)}  ` +
+        (ctx.options.twoDot ? "(--two-dot, two-point range)" : "(merge base)"),
+      { styles },
+    ),
+    ...row(
+      "RUN",
+      `${path.basename(ctx.runDir)} · ` +
+        (ctx.codegraphAvailable ? "codegraph live" : "codegraph NOT FOUND") +
+        ` · hop budget ${ctx.options.hopBudget}` +
+        ` · ${ctx.config.suspicion_priors.length} prior(s)`,
+      { styles },
+    ),
+    ...decisionLines(
+      {
+        sizeGate: ctx.sizeGate,
+        droppedPaths: ctx.droppedPaths,
+        force: ctx.options.force,
+        estimate: ctx.estimate,
+        hunterCount: ctx.hunterCount,
+      },
+      styles,
+    ),
   );
-  // The second endpoint of the pair the details view explains: what the diff
-  // is actually computed from, which is the merge base unless --two-dot moved
-  // it back to the base tip.
-  logRow(
-    "RANGE",
-    `${shortSha(ctx.diffFromSha)} → ${shortSha(ctx.headSha)}  ` +
-      (ctx.options.twoDot ? "(--two-dot, two-point range)" : "(merge base)"),
-    styles,
-  );
-  logRow(
-    "RUN",
-    `${path.basename(ctx.runDir)} · ` +
-      (ctx.codegraphAvailable ? "codegraph live" : "codegraph NOT FOUND") +
-      ` · hop budget ${ctx.options.hopBudget}` +
-      ` · ${ctx.config.suspicion_priors.length} prior(s)`,
-    styles,
-  );
-  printDecision(
-    {
-      sizeGate: ctx.sizeGate,
-      droppedPaths: ctx.droppedPaths,
-      force: ctx.options.force,
-      estimate: ctx.estimate,
-      hunterCount: ctx.hunterCount,
-    },
-    styles,
-  );
+  return lines;
 }
 
 export interface PrPlanContext {
@@ -2551,10 +2570,9 @@ function prWorktreePlanTag(worktreePath: string): string {
     : "worktree will be created";
 }
 
-// PR mode's half of planDetails — same contract, same module-private reason:
+// PR mode's half of planDetails — same contract, same test-only export:
 // printed only when the confirm menu's "Show details" option asks for it.
-function prPlanDetails(ctx: PrPlanContext): string[] {
-  const styles = styleEnabled();
+export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   const lines = [section("details", styles)];
   const push = (label: string, value: string): void => {
     lines.push(...row(label, value, { styles }));
@@ -2617,22 +2635,21 @@ function prPlanDetails(ctx: PrPlanContext): string[] {
   return lines;
 }
 
-function printPrPlan(ctx: PrPlanContext): void {
-  const styles = styleEnabled();
-  for (const line of box(
-    `pr-hero · PR #${ctx.target.number}`,
-    [
-      ctx.target.title,
-      `${ctx.target.state} · base ${ctx.target.baseRefName} · ` +
-        `${ctx.diffStat.files} files  +${ctx.diffStat.insertions} ` +
-        `−${ctx.diffStat.deletions}` +
-        (ctx.resolved ? "" : " (gh counters)"),
-    ],
-    { styles },
-  )) {
-    log(line);
-  }
-  log();
+export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
+  const lines = [
+    ...box(
+      `pr-hero · PR #${ctx.target.number}`,
+      [
+        ctx.target.title,
+        `${ctx.target.state} · base ${ctx.target.baseRefName} · ` +
+          `${ctx.diffStat.files} files  +${ctx.diffStat.insertions} ` +
+          `−${ctx.diffStat.deletions}` +
+          (ctx.resolved ? "" : " (gh counters)"),
+      ],
+      { styles },
+    ),
+    "",
+  ];
   let label = "AGENTS";
   for (const agent of ctx.spec.agents) {
     const fires =
@@ -2645,60 +2662,67 @@ function printPrPlan(ctx: PrPlanContext): void {
             : ctx.resolved.parityFires
               ? "triggered"
               : "✗ will not fire";
-    logRow(label, agentRow(ctx, agent, fires), styles);
+    lines.push(...row(label, agentRow(ctx, agent, fires), { styles }));
     label = "";
   }
-  log();
-  logRow(
-    "BASE",
-    ctx.resolved
-      ? `${shortRev(ctx.target.baseRef)} → ` +
-          `${shortSha(ctx.resolved.baseSha)}  ` +
-          `(${prBaseSourceTag(ctx.target)})`
-      : `${shortRev(ctx.target.baseRef)}  (${prBaseSourceTag(ctx.target)}; ` +
-          "resolved after fetch)",
-    styles,
-  );
-  // The other endpoint. Pre-fetch there is no merge base yet, so the card
-  // says so rather than showing the head alone — a single endpoint is the
-  // ambiguity the details view's rule exists to prevent.
-  logRow(
-    "RANGE",
-    ctx.resolved
-      ? `${shortSha(ctx.resolved.diffFromSha)} → ` +
-          `${shortSha(ctx.target.headSha)}  (merge base)`
-      : `? → ${shortSha(ctx.target.headSha)}  (merge base, after fetch)`,
-    styles,
-  );
-  logRow(
-    "RUN",
-    `${path.basename(ctx.runDir)} · ` +
-      `${prWorktreePlanTag(ctx.worktreePath)} · ` +
-      `${codegraphPlanTag(ctx.worktreePath)} · ` +
-      `hop budget ${ctx.options.hopBudget} · ` +
-      `${ctx.config.suspicion_priors.length} prior(s)`,
-    styles,
+  lines.push(
+    "",
+    ...row(
+      "BASE",
+      ctx.resolved
+        ? `${shortRev(ctx.target.baseRef)} → ` +
+            `${shortSha(ctx.resolved.baseSha)}  ` +
+            `(${prBaseSourceTag(ctx.target)})`
+        : `${shortRev(ctx.target.baseRef)}  (${prBaseSourceTag(ctx.target)}; ` +
+            "resolved after fetch)",
+      { styles },
+    ),
+    // The other endpoint. Pre-fetch there is no merge base yet, so the card
+    // says so rather than showing the head alone — a single endpoint is the
+    // ambiguity the details view's rule exists to prevent.
+    ...row(
+      "RANGE",
+      ctx.resolved
+        ? `${shortSha(ctx.resolved.diffFromSha)} → ` +
+            `${shortSha(ctx.target.headSha)}  (merge base)`
+        : `? → ${shortSha(ctx.target.headSha)}  (merge base, after fetch)`,
+      { styles },
+    ),
+    ...row(
+      "RUN",
+      `${path.basename(ctx.runDir)} · ` +
+        `${prWorktreePlanTag(ctx.worktreePath)} · ` +
+        `${codegraphPlanTag(ctx.worktreePath)} · ` +
+        `hop budget ${ctx.options.hopBudget} · ` +
+        `${ctx.config.suspicion_priors.length} prior(s)`,
+      { styles },
+    ),
   );
   if (ctx.options.post) {
-    logRow(
-      "POST",
-      "✓ one marked PR comment — created, or updated in place (idempotent)",
-      styles,
+    lines.push(
+      ...row(
+        "POST",
+        "✓ one marked PR comment — created, or updated in place (idempotent)",
+        { styles },
+      ),
     );
   }
-  printDecision(
-    {
-      sizeGate: ctx.sizeGate,
-      ...(ctx.sizeGateNote === undefined
-        ? {}
-        : { sizeGateNote: ctx.sizeGateNote }),
-      droppedPaths: ctx.droppedPaths,
-      force: ctx.options.force,
-      estimate: ctx.estimate,
-      hunterCount: ctx.hunterCount,
-    },
-    styles,
+  lines.push(
+    ...decisionLines(
+      {
+        sizeGate: ctx.sizeGate,
+        ...(ctx.sizeGateNote === undefined
+          ? {}
+          : { sizeGateNote: ctx.sizeGateNote }),
+        droppedPaths: ctx.droppedPaths,
+        force: ctx.options.force,
+        estimate: ctx.estimate,
+        hunterCount: ctx.hunterCount,
+      },
+      styles,
+    ),
   );
+  return lines;
 }
 
 // Live progress for the paid leg, born from a real incident: the CLI went
