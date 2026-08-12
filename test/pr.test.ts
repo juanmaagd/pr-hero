@@ -247,6 +247,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings: [],
+      consumedCommentIds: [],
       spawnFn,
     });
     expect(outcome).toEqual({ outcome: "posted", findings: [] });
@@ -269,6 +270,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
+      consumedCommentIds: [],
       spawnFn,
     });
     expect(outcome).toEqual({ outcome: "posted", findings });
@@ -312,6 +314,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
+      consumedCommentIds: [],
       spawnFn,
     });
     expect(capturedStdin).toBeDefined();
@@ -348,6 +351,7 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
+      consumedCommentIds: [],
       spawnFn,
     });
     expect(outcome.outcome).toBe("demoted");
@@ -413,10 +417,60 @@ describe("postPrReview", () => {
       pr: 42,
       headSha: HEAD,
       findings,
+      consumedCommentIds: [],
       spawnFn,
     });
     expect(outcome.outcome).toBe("demoted");
     // F001 already has a home (the leftover comment); only F002 is fresh.
+    expect(outcome.findings.map((f) => f.id)).toEqual(["F002"]);
+  });
+
+  // A comment the PLAN already claimed for a persisting finding must not be
+  // available to the recovery's re-match: matchPostedFindings is one-to-one
+  // only across the list it is handed, and the recovery is handed a SUBSET,
+  // so a claimed comment would swallow a genuinely new finding and drop it
+  // from both channels. Fails without `consumedCommentIds`.
+  test("a claimed comment cannot swallow a fresh finding on 422", async () => {
+    const claimed =
+      "<!-- pr-hero-finding path=src%2Fa.ts line=100 head=" +
+      `${HEAD} c=abcdef123456 -->\nclaim text`;
+    const { spawnFn } = makeFakeGh([
+      {
+        match: ["pulls/42/reviews"],
+        response: {
+          stderr: "gh: Unprocessable Entity (HTTP 422)",
+          exitCode: 1,
+        },
+      },
+      {
+        match: ["pulls/42/comments"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 7,
+              user: "pr-hero",
+              body: claimed,
+              path: "src/a.ts",
+              line: 100,
+              original_line: 100,
+              in_reply_to_id: null,
+            },
+          ]),
+        },
+      },
+      { match: ["issues/42/comments"], response: { stdout: ndjson([]) } },
+    ]);
+    const outcome = await postPrReview({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      // Comment 7 belongs to a persisting finding the plan handled; F002 sits
+      // 3 lines away, inside FINDING_LINE_WINDOW.
+      findings: [finding({ id: "F002", path: "src/a.ts", line: 103 })],
+      consumedCommentIds: [7],
+      spawnFn,
+    });
+    expect(outcome.outcome).toBe("demoted");
     expect(outcome.findings.map((f) => f.id)).toEqual(["F002"]);
   });
 
@@ -433,6 +487,7 @@ describe("postPrReview", () => {
         pr: 42,
         headSha: HEAD,
         findings: [finding({ id: "F001" })],
+        consumedCommentIds: [],
         spawnFn,
       }),
     ).rejects.toThrow(/post PR review/);
