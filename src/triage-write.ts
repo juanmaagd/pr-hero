@@ -7,7 +7,7 @@
 // what counts as a reply, and never touches disk.
 
 import type { StoredComparisonRow } from "./ledger";
-import { parseFindingMarker } from "./pr-preflight";
+import { claimFingerprint, parseFindingMarker } from "./pr-preflight";
 import { type ParsedTriageMarker, parseTriageMarker } from "./triage";
 
 export interface TriageReplyCandidate {
@@ -66,13 +66,31 @@ export function applyTriageReplies(
     // (never the internal finding id, which is not stable across runs —
     // pr-preflight.ts's own comment on ComparisonPrHeroClaim.id). This is
     // the SAME identity pr-preflight's matcher keys on, matched here
-    // against a row's `prhero` side, exactly as the spec requires.
-    const row = updated.find(
+    // against a row's `prhero` side — but path+line is NOT a unique key
+    // (compare.ts documents real production data with two distinct
+    // findings at the same path:line, e.g. PR 1509). `.find()` would pick
+    // whichever tied row happens to be first and silently overwrite ITS
+    // verdict/reasoning/actor for a reply meant for the other one,
+    // corrupting the audit ledger with no error. Mirror resolveWinner's
+    // shape (inline.ts): collect every tied candidate, and when more than
+    // one ties, disambiguate with the SAME claim fingerprint the marker
+    // itself carries (`c`) — never a forced pick on ambiguity.
+    const candidates = updated.filter(
       (r) =>
         r.prhero !== null &&
         r.prhero.path === parent.path &&
         r.prhero.line === parent.line,
     );
+    let row: StoredComparisonRow | undefined;
+    if (candidates.length === 1) {
+      row = candidates[0];
+    } else if (candidates.length > 1) {
+      const matching = candidates.filter(
+        (r) =>
+          r.prhero !== null && claimFingerprint(r.prhero.claim) === parent.c,
+      );
+      row = matching.length === 1 ? matching[0] : undefined;
+    }
     if (row === undefined) {
       ignored++;
       continue;
