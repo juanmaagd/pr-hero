@@ -239,6 +239,92 @@ describe("panel state transitions", () => {
     expect(state.refuter).toBeUndefined();
   });
 
+  test("a retry becomes a leaf under the hunter that is retrying", () => {
+    const state = freshState();
+    started(state);
+    applyProgressEvent(
+      state,
+      {
+        kind: "step-retry",
+        step: "hunter-reliability",
+        attempt: 2,
+        maxAttempts: 2,
+        reason: "transient",
+      },
+      2_000,
+    );
+    const rendered = lines(state, 63_000);
+    expect(rendered[1]).toBe(`├─ ${SPIN} reliability  1m02s`);
+    expect(rendered[2]).toBe("│  └─ ↻ attempt 2 of 2  transient");
+    // The row survives the retry: a finished hunter that says "attempt 2"
+    // explains a duration that would otherwise read as a slow model.
+    applyProgressEvent(
+      state,
+      {
+        kind: "hunter-finished",
+        hunter: "reliability",
+        ok: true,
+        durationMs: 63_000,
+        drafts: 0,
+      },
+      63_000,
+    );
+    expect(lines(state, 63_000)[2]).toBe("│  └─ ↻ attempt 2 of 2  transient");
+  });
+
+  test("the format retry names itself instead of faking an N-of-M", () => {
+    const state = freshState();
+    started(state);
+    applyProgressEvent(
+      state,
+      {
+        kind: "step-retry",
+        step: "hunter-resilience",
+        attempt: 2,
+        maxAttempts: 2,
+        reason: "format",
+      },
+      2_000,
+    );
+    expect(lines(state, 2_000).at(-1)).toBe("   └─ ↻ format retry");
+  });
+
+  test("a refuter step's retry is not drawn in the panel", () => {
+    const state = freshState();
+    started(state);
+    const before = lines(state, 2_000);
+    applyProgressEvent(
+      state,
+      {
+        kind: "step-retry",
+        step: "refuter-F001",
+        attempt: 2,
+        maxAttempts: 2,
+        reason: "transient",
+      },
+      2_000,
+    );
+    expect(lines(state, 2_000)).toEqual(before);
+  });
+
+  test("a retry naming a hunter the panel does not know is ignored", () => {
+    const state = freshState();
+    started(state);
+    const before = lines(state, 2_000);
+    applyProgressEvent(
+      state,
+      {
+        kind: "step-retry",
+        step: "hunter-nope",
+        attempt: 2,
+        maxAttempts: 2,
+        reason: "transient",
+      },
+      2_000,
+    );
+    expect(lines(state, 2_000)).toEqual(before);
+  });
+
   test("the spinner advances with the frame index and wraps", () => {
     const state = freshState();
     expect(lines(state, 0, 1)[0]?.startsWith(SPINNER_FRAMES[1] ?? "")).toBe(

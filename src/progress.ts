@@ -44,6 +44,10 @@ interface PanelHunter {
   // resolveModel decided, and the panel may render a frame before it says.
   model?: string;
   drafts?: number;
+  // The latest retry this hunter's step announced, as a leaf under its row.
+  // Latest only: a step retries at most twice (one transient, one format), and
+  // what an operator needs is "it is retrying now", not a history.
+  retry?: { attempt: number; maxAttempts: number; reason: string };
 }
 
 // One refuter leaf: a finding submitted to the gate. Every leaf is running
@@ -166,11 +170,47 @@ export function applyProgressEvent(
       }
       return;
     }
+    case "step-retry": {
+      // Hunter steps only, by design: their rows are the ones an operator
+      // watches for minutes at a time. A refuter step's retry is reported on
+      // the non-TTY line renderer, where nothing competes for the space, and
+      // a leaf under a leaf would bury the verdict the row exists to show.
+      const key = event.step.startsWith("hunter-")
+        ? event.step.slice("hunter-".length)
+        : undefined;
+      if (key === undefined) return;
+      const row = state.hunters.find((h) => h.key === key);
+      if (!row) return;
+      row.retry = {
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        reason: event.reason,
+      };
+      return;
+    }
   }
 }
 
 function pad(text: string, width: number): string {
   return text.length >= width ? text : text + " ".repeat(width - text.length);
+}
+
+// The retry leaf. "attempt N of M" only for a transient retry: the format
+// retry is capped at exactly one on its OWN budget (see FORMAT_RETRY_REMINDER),
+// so printing it against maxAttempts would fabricate a number the runner's WHY
+// comments contradict.
+function retryChildren(hunter: PanelHunter): TreeNode[] {
+  const retry = hunter.retry;
+  if (retry === undefined) return [];
+  return [
+    {
+      label:
+        retry.reason === "format"
+          ? "↻ format retry"
+          : `↻ attempt ${retry.attempt} of ${retry.maxAttempts}`,
+      ...(retry.reason === "format" ? {} : { detail: retry.reason }),
+    },
+  ];
 }
 
 // Sub-columns are aligned by padding here, in the caller, exactly as
@@ -183,29 +223,38 @@ function hunterNode(
   modelWidth: number,
 ): TreeNode {
   const label = pad(hunter.key, labelWidth);
+  // The retry leaf outlives the retry: a finished row that says "attempt 2"
+  // explains a duration that would otherwise look like a slow model.
+  const children = retryChildren(hunter);
   const model = modelWidth === 0 ? "" : pad(hunter.model ?? "", modelWidth);
   const parts: string[] = [];
   if (model.length > 0) parts.push(model);
+  const node = (status: TreeNode["status"]): TreeNode => ({
+    label,
+    status,
+    detail: parts.join("   "),
+    ...(children.length === 0 ? {} : { children }),
+  });
   switch (hunter.status) {
     case "waiting":
       parts.push("waiting");
-      return { label, status: "pending", detail: parts.join("   ") };
+      return node("pending");
     case "running":
       parts.push(
         formatElapsed(nowMs - (state.huntersStartedAtMs ?? state.startedAtMs)),
       );
-      return { label, status: "running", detail: parts.join("   ") };
+      return node("running");
     case "done":
       parts.push(formatElapsed(hunter.durationMs ?? 0));
       if (hunter.drafts !== undefined) {
         parts.push(`${hunter.drafts} draft${hunter.drafts === 1 ? "" : "s"}`);
       }
-      return { label, status: "done", detail: parts.join("   ") };
+      return node("done");
     case "failed":
       // A dead hunter is a partial run, never an abort — the row says so
       // rather than leaving the operator to guess from a red mark.
       parts.push("failed — the run continues");
-      return { label, status: "failed", detail: parts.join("   ") };
+      return node("failed");
   }
 }
 
