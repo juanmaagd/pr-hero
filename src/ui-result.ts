@@ -1,8 +1,8 @@
 // The end-of-run result block, as LINES. Third member of the terminal
 // surface's pure half (ui.ts formats, ui-select.ts asks, this one reports):
 // same contract as both — everything is a total function of its inputs, the
-// style flag arrives as a PARAMETER, and the I/O shell in cli.ts owns the
-// printing and every exit code.
+// style flag and the width arrive as PARAMETERS, and the I/O shell in cli.ts
+// owns the printing and every exit code.
 //
 // WHY it exists at all: this block was written TWICE, once at the end of
 // local mode and once at the end of PR mode, with different label padding and
@@ -11,32 +11,47 @@
 // neither copy could be tested because both were a run of `log()` calls
 // inside a 400-line async shell. The mode-specific parts (comparison,
 // worktree hint, extra artifacts) are optional inputs, not a second renderer.
+//
+// WHY it prints the FINDINGS: after five minutes and $4 the terminal used to
+// report counts and file paths and never once said what was found — the
+// payload was the one thing you had to leave the terminal to read. Everything
+// below the header exists to end that.
 
-import type { RunStatus } from "./findings";
-import { row, shortPath } from "./ui";
+import type { ComparisonResult } from "./compare";
+import type { Finding, FindingsDocument } from "./findings";
+import { formatElapsed } from "./report";
+import {
+  cyan,
+  dim,
+  green,
+  red,
+  row,
+  severityLabel,
+  shortPath,
+  terminalWidth,
+  truncate,
+  wrapText,
+  yellow,
+} from "./ui";
 
-// Counts only, from the caller's already-computed tally. Deliberately NOT the
-// FindingsDocument: this half of the block reports the run, and taking the
-// whole document here would invite it to start re-deriving numbers the shell
-// already owns.
-export interface ResultComparison {
+interface ResultComparison {
   greptileFound: boolean;
-  greptileOnly: number;
-  both: number;
-  prheroOnly: number;
+  // The whole bucketing, not the three cardinalities: a Greptile-only finding
+  // is a recall miss with a name, a file and a line, and printing only its
+  // count is how a measured miss reads as a rounding error.
+  result: ComparisonResult;
 }
 
-export interface ResultWorktree {
+interface ResultWorktree {
   operatorRoot: string;
   worktreePath: string;
 }
 
 export interface ResultInput {
-  runStatus: RunStatus;
-  blocking: number;
-  advisory: number;
-  rootCauses: number;
-  refuted: number;
+  // The document, not a pre-chewed tally: every count in the header is
+  // derived here, from the same bytes that were just written to disk, so the
+  // terminal and findings.json cannot disagree about what the run found.
+  doc: FindingsDocument;
   costUsd: number;
   wallMs: number;
   estimate: { low: number; high: number };
@@ -53,47 +68,300 @@ export interface ResultInput {
   worktree?: ResultWorktree;
   sessionFailed: boolean;
   styles: boolean;
+  width?: number;
+}
+
+const MIN_WIDTH = 40;
+const MAX_WIDTH = 96;
+// Body indents: the marker column, then the prose column under it.
+const MARKER_INDENT = "  ";
+const PROSE_INDENT = "     ";
+// How many Greptile-only rows are worth a line each before the tail becomes a
+// count. Real PRs carry a handful; a 20-row dump would bury the findings this
+// block exists to show.
+const MAX_GREPTILE_ROWS = 5;
+// Wide enough for the longest footer label ("estimate", "worktree") plus a gap.
+const FOOTER_LABEL_WIDTH = 12;
+
+// Deliberately NOT ui.ts's box(): box truncates every body line to fit its
+// border, and the one thing this block must never truncate away is a claim.
+// So the card is a RULE — the top edge only — and the body below it is plain
+// indented text that wraps. Shape: `╭─ left ───── right ─╮`.
+// `spentDropped` is not cosmetic bookkeeping: when the terminal is too narrow
+// for both halves the counts win and the spend comes OFF the rule, so the
+// caller has to put it back as its own row. Reported rather than assumed,
+// because "the money is never dropped" is only true if somebody relocates it.
+function headerRule(
+  left: string,
+  right: string,
+  width: number,
+  styles: boolean,
+): { line: string; spentDropped: boolean } {
+  // 8 = "╭─ " + " " around the fill + " ─╮".
+  const fill = width - left.length - right.length - 8;
+  if (fill < 1) {
+    const shown = truncate(left, Math.max(width - 6, 1));
+    return {
+      line:
+        dim("╭─ ", styles) +
+        shown +
+        dim(` ${"─".repeat(Math.max(width - 5 - shown.length, 1))}╮`, styles),
+      spentDropped: true,
+    };
+  }
+  return {
+    line:
+      dim("╭─ ", styles) +
+      left +
+      dim(` ${"─".repeat(fill)} `, styles) +
+      right +
+      dim(" ─╮", styles),
+    spentDropped: false,
+  };
+}
+
+function locationOf(f: Finding): string {
+  return f.symbol === undefined || f.symbol.length === 0
+    ? `${f.path}:${f.line}`
+    : `${f.path}:${f.line} · ${f.symbol}`;
+}
+
+// The tier as a marker, because the tier is what decides whether a human must
+// act (the rule severityLabel's colour half already encodes). Returned WITH
+// its trailing space: ⛔ is one code unit but renders TWO columns wide, so the
+// padding cannot be computed from `.length` and is baked in here instead —
+// otherwise the severity column of a blocking and an advisory finding sit one
+// column apart on screen while looking identical in a string comparison.
+function tierMarker(f: Finding): string {
+  return f.tier === "blocking" ? "⛔ " : "·  ";
+}
+
+// One finding: marker + severity + location, the claim wrapped underneath, and
+// the refuter's verdict as the provenance line. NOTHING is truncated — a claim
+// is the payload, and a payload you have to open a file to read is the defect
+// this whole work unit fixes.
+//
+// Built with padding computed from the UNSTYLED severity and painted per
+// segment: an escape sequence inside a measured string is counted as visible
+// width, which is the same trap markerRowLines documents in cli.ts.
+function findingLines(
+  f: Finding,
+  indent: string,
+  width: number,
+  styles: boolean,
+): string[] {
+  const pad = " ".repeat(Math.max(10 - f.severity.length, 1));
+  const prose = indent + PROSE_INDENT.slice(0, 3);
+  const proseWidth = Math.max(width - prose.length, 20);
+  return [
+    `${indent}${tierMarker(f)}` +
+      `${severityLabel(f.severity, f.tier, styles)}${pad}` +
+      cyan(locationOf(f), styles),
+    ...wrapText(f.claim, proseWidth).map((line) => prose + line),
+    prose +
+      dim(
+        `↳ refuter ${f.refuter_verdict} · ${f.hops_used} hop(s) · ` +
+          `${f.hunter} · ${f.evidence_class}`,
+        styles,
+      ),
+  ];
+}
+
+// Findings in document order, except that findings sharing a root cause are
+// pulled together under their cluster id. That grouping is real signal the old
+// block flattened into a bare "K distinct root cause(s)": three findings on
+// one defect and three separate defects are the same number there.
+//
+// MEASUREMENT ONLY, exactly as root-cause.ts insists: this reorders lines on a
+// terminal. Nothing here touches findings[], and findings.json is already on
+// disk by the time this runs.
+function findingsSection(
+  doc: FindingsDocument,
+  width: number,
+  styles: boolean,
+): string[] {
+  if (doc.findings.length === 0) return [];
+  const byId = new Map(doc.findings.map((f) => [f.id, f]));
+  // Only clusters with two or more findings STILL PRESENT earn a header: a
+  // refuted sibling leaves a cluster of one, and "shared root cause" over a
+  // single finding is noise.
+  const groups = new Map<string, Finding[]>();
+  for (const cluster of doc.debug.root_causes?.clusters ?? []) {
+    const members = cluster.finding_ids
+      .map((id) => byId.get(id))
+      .filter((f): f is Finding => f !== undefined);
+    if (members.length > 1) groups.set(cluster.id, members);
+  }
+  const clusterOf = new Map<string, string>();
+  for (const [id, members] of groups) {
+    for (const member of members) clusterOf.set(member.id, id);
+  }
+  const lines: string[] = [];
+  const emitted = new Set<string>();
+  for (const finding of doc.findings) {
+    if (emitted.has(finding.id)) continue;
+    const cluster = clusterOf.get(finding.id);
+    const members = cluster === undefined ? undefined : groups.get(cluster);
+    if (cluster === undefined || members === undefined) {
+      lines.push("", ...findingLines(finding, MARKER_INDENT, width, styles));
+      emitted.add(finding.id);
+      continue;
+    }
+    lines.push(
+      "",
+      MARKER_INDENT +
+        dim(`${cluster} · ${members.length} findings, one root cause`, styles),
+    );
+    for (const member of members) {
+      lines.push(...findingLines(member, `${MARKER_INDENT}  `, width, styles));
+      emitted.add(member.id);
+    }
+  }
+  return lines;
+}
+
+function greptileLines(
+  comparison: ResultComparison,
+  doc: FindingsDocument,
+  width: number,
+  styles: boolean,
+): string[] {
+  const { greptileOnly, both, prheroOnly } = comparison.result;
+  const lines = [
+    "",
+    `${MARKER_INDENT}${dim("vs Greptile ", styles)} pr-hero ` +
+      `${prheroOnly.length} · both ${both.length} · greptile ` +
+      `${greptileOnly.length}` +
+      (comparison.greptileFound
+        ? ""
+        : dim("  (no Greptile comment on this PR)", styles)),
+  ];
+  // The recall misses, by name. This is the number the whole head-to-head
+  // exists to measure, and until WU4 widened ComparisonOutcome the terminal
+  // could not name a single one of them.
+  const shown = greptileOnly.slice(0, MAX_GREPTILE_ROWS);
+  for (const miss of shown) {
+    lines.push(
+      PROSE_INDENT +
+        yellow(
+          truncate(
+            `↳ missed ${miss.path}:${miss.startLine} — ${miss.title}`,
+            Math.max(width - PROSE_INDENT.length, 20),
+          ),
+          styles,
+        ),
+    );
+  }
+  if (greptileOnly.length > shown.length) {
+    lines.push(
+      PROSE_INDENT +
+        dim(
+          `↳ and ${greptileOnly.length - shown.length} more — see ` +
+            "comparison.md",
+          styles,
+        ),
+    );
+  }
+  // A pr-hero-only finding is not automatically a win, and a `both` row is not
+  // automatically a match (compare.ts's window over-matches by design), so the
+  // block points at the file that shows the pairings rather than scoring them.
+  if (doc.findings.length > 0 && comparison.greptileFound) {
+    lines.push(PROSE_INDENT + dim("↳ pairings: comparison.md", styles));
+  }
+  return lines;
 }
 
 export function renderResult(input: ResultInput): string[] {
-  const lines = [
-    "",
-    `run ${input.runStatus}: ${input.blocking} blocking, ` +
-      `${input.advisory} advisory, ${input.rootCauses} distinct root ` +
-      `cause(s), ${input.refuted} refuted`,
-    `spent $${input.costUsd.toFixed(2)} in ` +
-      `${Math.round(input.wallMs / 1000)}s (estimated ` +
-      `$${input.estimate.low.toFixed(2)}–$${input.estimate.high.toFixed(2)})`,
-    ...row("run dir", shortPath(input.runDir), { styles: input.styles }),
-    ...row("artifacts", input.artifacts.join(" · "), {
-      styles: input.styles,
-    }),
-  ];
-  if (input.comparison) {
+  const width = Math.max(
+    Math.min(input.width ?? terminalWidth(), MAX_WIDTH),
+    MIN_WIDTH,
+  );
+  const styles = input.styles;
+  const doc = input.doc;
+  const blocking = doc.findings.filter((f) => f.tier === "blocking").length;
+  const advisory = doc.findings.length - blocking;
+  const refuted = doc.debug.refuted.length;
+  // `partial` in the header, never in a footnote: a run where a hunter died
+  // found less than a complete one would have, and every count above is read
+  // in that light or misread.
+  const status = doc.run_status === "partial" ? "partial · " : "";
+  const left =
+    `${status}${blocking} blocking · ${advisory} advisory · ` +
+    `${refuted} refuted`;
+  const right = `$${input.costUsd.toFixed(2)} · ${formatElapsed(input.wallMs)}`;
+  const header = headerRule(left, right, width, styles);
+  const lines = ["", header.line, ...findingsSection(doc, width, styles)];
+  // A green all-clear is only allowed when the review actually RAN. A dead
+  // session also reaches here with `findings: []`, and "no findings" over a
+  // review that never happened is the same lie the comparison and posting
+  // guards exist to prevent (cli.ts steps 13/14) — the red line below is the
+  // whole message in that case.
+  if (doc.findings.length === 0 && !input.sessionFailed) {
     lines.push(
-      ...row(
-        "comparison",
-        `Greptile-only ${input.comparison.greptileOnly} · Both ` +
-          `${input.comparison.both} · pr-hero-only ` +
-          `${input.comparison.prheroOnly}` +
-          (input.comparison.greptileFound
-            ? ""
-            : " — no Greptile comment on this PR"),
-        { styles: input.styles },
-      ),
+      "",
+      MARKER_INDENT +
+        green("no findings survived to this point", styles) +
+        (refuted === 0 ? "" : dim(` — ${refuted} refuted and dropped`, styles)),
     );
+  }
+  if (input.comparison) {
+    lines.push(...greptileLines(input.comparison, doc, width, styles));
+  }
+  // The footer goes through row(), so a run dir plus four basenames wraps to
+  // the value column instead of running off the terminal. Values are handed to
+  // it UNPAINTED for the reason row() documents: it measures the value to
+  // place the wrap, and an escape sequence inside one is counted as width.
+  const footer = { styles, width, indent: 2, labelWidth: FOOTER_LABEL_WIDTH };
+  lines.push(
+    "",
+    ...row(
+      "run dir",
+      shortPath(input.runDir) +
+        (input.artifacts.length === 0
+          ? ""
+          : ` · ${input.artifacts.join(" · ")}`),
+      footer,
+    ),
+    // The band is kept because it is the only thing that makes an overrun
+    // visible: both recorded cost incidents were under-estimates, and rule 6
+    // says every live run lands in a ledger.
+    ...row(
+      "estimate",
+      `$${input.estimate.low.toFixed(2)}–$${input.estimate.high.toFixed(2)}`,
+      footer,
+    ),
+  );
+  // The relocation headerRule reported: on a terminal too narrow for the rule
+  // to carry both halves, what this run actually cost gets its own row instead
+  // of disappearing with the rule's right-hand segment.
+  if (header.spentDropped) {
+    lines.push(...row("spent", right, footer));
   }
   if (input.worktree) {
     lines.push(
-      "worktree kept for finding-verification; remove it later with:",
-      `  git -C ${input.worktree.operatorRoot} worktree remove --force ` +
-        input.worktree.worktreePath,
+      ...row(
+        "worktree",
+        "kept for finding-verification; remove it with",
+        footer,
+      ),
+      // The command on its OWN line and never wrapped: it exists to be copied,
+      // and a command broken across two indented lines is not copyable.
+      PROSE_INDENT +
+        dim(
+          `git -C ${input.worktree.operatorRoot} worktree remove --force ` +
+            input.worktree.worktreePath,
+          styles,
+        ),
     );
   }
   // The line that outranks every count above it. The exit code is the SHELL's
   // (return 1 in local mode, postingExitCode in PR mode) — this only says so.
   if (input.sessionFailed) {
-    lines.push("every hunter failed — this run reviewed nothing.");
+    lines.push(
+      "",
+      MARKER_INDENT +
+        red("every hunter failed — this run reviewed nothing.", styles),
+    );
   }
   return lines;
 }

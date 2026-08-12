@@ -1,8 +1,16 @@
 // The end-of-run result block. Written twice (once per mode) and testable in
 // neither until WU4 pulled it into one pure renderer — so these are the first
 // assertions the last thing an operator reads has ever had.
+//
+// The load-bearing one is `prints the claim`: for the whole of Phase B this
+// block reported counts and file paths and never said what the run found, so
+// the payload of a five-minute $4 review could only be read by opening a file.
+// Every assertion about a claim below is there to keep that from coming back.
 
 import { describe, expect, test } from "bun:test";
+import type { ComparisonResult } from "../src/compare";
+import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
+import type { GreptileFinding } from "../src/greptile";
 import { type ResultInput, renderResult } from "../src/ui-result";
 
 const ESC = String.fromCharCode(27);
@@ -10,12 +18,72 @@ const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 const stripAnsi = (text: string): string => text.replace(ANSI, "");
 const joined = (lines: string[]): string => stripAnsi(lines.join("\n"));
 
+const telemetry: Telemetry = {
+  index_ms: 0,
+  index_mode: "sync",
+  index_disk_mb: 0,
+  wall_ms: 327_000,
+  tokens_in: 1,
+  tokens_out: 1,
+  tokens_total: 2,
+  cost_usd_est: 4.09,
+};
+
+const finding = (over: Partial<Finding> = {}): Finding => ({
+  id: "F001",
+  category: 5,
+  path: "src/triage-write.ts",
+  line: 70,
+  severity: "BLOCKER",
+  evidence_class: "deterministic",
+  refuter_verdict: "corroborated",
+  causal_disposition: "introduced",
+  claim:
+    "path+line is not a unique key — a second finding at the same location " +
+    "binds to the wrong comparison row",
+  proof_refs: ["src/triage-write.ts:70 (the lookup)"],
+  hunter: "reliability",
+  tier: "blocking",
+  hops_used: 3,
+  hop_trail: [],
+  dedupe_key: "src/triage-write.ts:70",
+  ...over,
+});
+
+const doc = (over: Partial<FindingsDocument> = {}): FindingsDocument => ({
+  schema_version: "1.0.0",
+  pr: 6,
+  base_sha: "a".repeat(40),
+  head_sha: "b".repeat(40),
+  model: "sonnet",
+  iteration: 0,
+  parity_hunter_fired: false,
+  run_status: "complete",
+  telemetry,
+  findings: [finding()],
+  debug: { refuted: [] },
+  ...over,
+});
+
+const greptile = (over: Partial<GreptileFinding> = {}): GreptileFinding => ({
+  index: 1,
+  path: "src/watch.ts",
+  startLine: 12,
+  endLine: 12,
+  title: "unbounded retry loop",
+  description: "the tick never gives up",
+  ...over,
+});
+
+const buckets = (over: Partial<ComparisonResult> = {}): ComparisonResult => ({
+  greptileOnly: [],
+  both: [],
+  prheroOnly: [],
+  ...over,
+});
+
 const input = (over: Partial<ResultInput> = {}): ResultInput => ({
-  runStatus: "complete",
-  blocking: 1,
-  advisory: 0,
-  rootCauses: 1,
-  refuted: 0,
+  doc: doc(),
   costUsd: 4.09,
   wallMs: 327_000,
   estimate: { low: 3.5, high: 5.25 },
@@ -23,95 +91,378 @@ const input = (over: Partial<ResultInput> = {}): ResultInput => ({
   artifacts: ["report.md", "findings.json"],
   sessionFailed: false,
   styles: false,
+  width: 80,
   ...over,
 });
 
-describe("renderResult", () => {
-  test("the counts line keeps its wording, run_status included", () => {
-    expect(joined(renderResult(input()))).toContain(
-      "run complete: 1 blocking, 0 advisory, 1 distinct root cause(s), 0 refuted",
+describe("renderResult header", () => {
+  test("counts and money on one rule, tiers derived from the document", () => {
+    const lines = renderResult(input());
+    const rule = stripAnsi(lines[1] ?? "");
+    expect(rule).toContain("╭─ 1 blocking · 0 advisory · 0 refuted");
+    expect(rule).toContain("$4.09 · 5m27s");
+    expect(rule.endsWith("─╮")).toBe(true);
+    expect(rule.length).toBe(80);
+  });
+
+  test("advisory and refuted are counted, never conflated", () => {
+    const rule = stripAnsi(
+      renderResult(
+        input({
+          doc: doc({
+            findings: [
+              finding(),
+              finding({ id: "F002", tier: "advisory", severity: "WARNING" }),
+            ],
+            debug: {
+              refuted: [
+                { ...finding({ id: "F003" }), refuter_verdict: "refuted" },
+              ],
+            },
+          }),
+        }),
+      )[1] ?? "",
     );
+    expect(rule).toContain("1 blocking · 1 advisory · 1 refuted");
   });
 
-  test("a partial run says partial, never complete", () => {
-    const text = joined(renderResult(input({ runStatus: "partial" })));
-    expect(text).toContain("run partial:");
-    expect(text).not.toContain("run complete:");
+  test("a partial run says so in the header, not in a footnote", () => {
+    expect(
+      stripAnsi(
+        renderResult(input({ doc: doc({ run_status: "partial" }) }))[1] ?? "",
+      ),
+    ).toContain("partial · 1 blocking");
   });
 
-  test("spend is reported against the band that was confirmed", () => {
-    expect(joined(renderResult(input()))).toContain(
-      "spent $4.09 in 327s (estimated $3.50–$5.25)",
-    );
+  test("a terminal too narrow for both halves keeps the counts", () => {
+    const rule = stripAnsi(renderResult(input({ width: 20 }))[1] ?? "");
+    expect(rule).toContain("blocking");
+    expect(rule).not.toContain("$4.09");
   });
 
-  test("ONE run dir plus the basenames, never three absolute paths", () => {
+  test("the spend that comes off a narrow rule is relocated, never dropped", () => {
+    // Width is clamped to MIN_WIDTH (40), which is still too narrow for both
+    // halves — so the actual spend must reappear as its own footer row.
+    const text = joined(renderResult(input({ width: 20 })));
+    expect(text).toContain("spent");
+    expect(text).toContain("$4.09 · 5m27s");
+  });
+
+  test("a wide rule carries the spend itself and adds no spent row", () => {
+    const text = joined(renderResult(input({ width: 80 })));
+    expect(text).toContain("$4.09 · 5m27s");
+    expect(text).not.toContain("spent");
+  });
+});
+
+describe("renderResult findings", () => {
+  test("prints the claim — the whole point of the block", () => {
+    const text = joined(renderResult(input()));
+    expect(text).toContain("path+line is not a unique key");
+    expect(text).toContain("to the wrong comparison row");
+  });
+
+  test("severity, tier marker and location head the finding", () => {
+    const text = joined(renderResult(input()));
+    expect(text).toContain("⛔ BLOCKER");
+    expect(text).toContain("src/triage-write.ts:70");
+  });
+
+  test("a symbol rides along with the location when the finding has one", () => {
+    expect(
+      joined(
+        renderResult(
+          input({
+            doc: doc({ findings: [finding({ symbol: "writeTriage" })] }),
+          }),
+        ),
+      ),
+    ).toContain("src/triage-write.ts:70 · writeTriage");
+  });
+
+  test("an advisory finding is marked as one, not as blocking", () => {
     const text = joined(
       renderResult(
         input({
-          artifacts: ["report.md", "findings.json", "comparison.md"],
+          doc: doc({
+            findings: [finding({ tier: "advisory", severity: "WARNING" })],
+          }),
         }),
       ),
     );
-    expect(text).toContain("report.md · findings.json · comparison.md");
-    // The prefix appears exactly once, on the run-dir row.
-    const hits = text.split("/tmp/pr-hero-runs/pr-6-17069c75-1").length - 1;
-    expect(hits).toBe(1);
+    expect(text).toContain("WARNING");
+    expect(text).not.toContain("⛔");
   });
 
-  test("local mode: no comparison row, no worktree hint", () => {
-    const text = joined(renderResult(input()));
-    expect(text).not.toContain("comparison");
-    expect(text).not.toContain("worktree");
+  test("the refuter's verdict, hops, hunter and evidence class are stated", () => {
+    expect(joined(renderResult(input()))).toContain(
+      "↳ refuter corroborated · 3 hop(s) · reliability · deterministic",
+    );
   });
 
-  test("the comparison row carries the three buckets", () => {
+  test("a long claim WRAPS, never truncates — no ellipsis anywhere in it", () => {
+    const claim = `${"alpha beta gamma delta epsilon zeta eta theta ".repeat(4)}end`;
+    const lines = renderResult(
+      input({ doc: doc({ findings: [finding({ claim })] }) }),
+    );
+    const text = joined(lines);
+    expect(text).toContain("end");
+    expect(text).not.toContain("…");
+    // Wrapped to the prose column, not back to the left margin.
+    const proseLines = lines.filter((l) => l.startsWith("     alpha"));
+    expect(proseLines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(96);
+  });
+
+  test("findings sharing a root cause are grouped under their cluster", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: doc({
+            findings: [
+              finding({ id: "F001" }),
+              finding({ id: "F002", path: "src/other.ts", line: 9 }),
+            ],
+            debug: {
+              refuted: [],
+              root_causes: {
+                clusters: [
+                  {
+                    id: "RC001",
+                    anchor: "src/triage-write.ts:70",
+                    finding_ids: ["F001", "F002"],
+                  },
+                ],
+                distinct_root_causes: 1,
+              },
+            },
+          }),
+        }),
+      ),
+    );
+    expect(text).toContain("RC001 · 2 findings, one root cause");
+  });
+
+  test("a cluster of one earns no header — a refuted sibling leaves one behind", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: doc({
+            findings: [finding({ id: "F001" })],
+            debug: {
+              refuted: [],
+              root_causes: {
+                clusters: [
+                  {
+                    id: "RC001",
+                    anchor: "x",
+                    finding_ids: ["F001", "F002-refuted"],
+                  },
+                ],
+                distinct_root_causes: 1,
+              },
+            },
+          }),
+        }),
+      ),
+    );
+    expect(text).not.toContain("RC001");
+    expect(text).toContain("path+line is not a unique key");
+  });
+
+  test("every finding is printed exactly once, grouped or not", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: doc({
+            findings: [
+              finding({ id: "F001", claim: "first claim" }),
+              finding({ id: "F002", claim: "second claim" }),
+              finding({ id: "F003", claim: "third claim" }),
+            ],
+            debug: {
+              refuted: [],
+              root_causes: {
+                clusters: [
+                  { id: "RC001", anchor: "a", finding_ids: ["F001", "F003"] },
+                  { id: "RC002", anchor: "b", finding_ids: ["F002"] },
+                ],
+                distinct_root_causes: 2,
+              },
+            },
+          }),
+        }),
+      ),
+    );
+    for (const claim of ["first claim", "second claim", "third claim"]) {
+      expect(text.split(claim).length - 1).toBe(1);
+    }
+  });
+
+  test("no findings says so, and names the refuted ones it dropped", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: doc({
+            findings: [],
+            debug: {
+              refuted: [{ ...finding(), refuter_verdict: "refuted" }],
+            },
+          }),
+        }),
+      ),
+    );
+    expect(text).toContain("no findings survived to this point");
+    expect(text).toContain("1 refuted and dropped");
+  });
+
+  test("refuted findings are counted, never listed in full", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: doc({
+            debug: {
+              refuted: [
+                {
+                  ...finding({ id: "F009", claim: "a refuted claim" }),
+                  refuter_verdict: "refuted",
+                },
+              ],
+            },
+          }),
+        }),
+      ),
+    );
+    expect(text).toContain("1 refuted");
+    expect(text).not.toContain("a refuted claim");
+  });
+});
+
+describe("renderResult comparison", () => {
+  test("local mode has no comparison row at all", () => {
+    expect(joined(renderResult(input()))).not.toContain("vs Greptile");
+  });
+
+  test("the three buckets, in the order the head-to-head reads them", () => {
     const text = joined(
       renderResult(
         input({
           comparison: {
             greptileFound: true,
-            greptileOnly: 2,
-            both: 1,
-            prheroOnly: 3,
+            result: buckets({
+              greptileOnly: [greptile()],
+              prheroOnly: [
+                {
+                  id: "F001",
+                  path: "a.ts",
+                  line: 1,
+                  claim: "c",
+                  tier: "blocking",
+                },
+              ],
+            }),
           },
         }),
       ),
     );
-    expect(text).toContain("Greptile-only 2 · Both 1 · pr-hero-only 3");
-    expect(text).not.toContain("no Greptile comment");
+    expect(text).toContain("vs Greptile  pr-hero 1 · both 0 · greptile 1");
   });
 
-  test("a PR Greptile never commented on says so, so 0 is not read as a miss", () => {
-    // The note wraps to the value column at 80 columns, so it is asserted in
-    // the piece that cannot straddle the break.
+  test("a Greptile-only finding is NAMED, not counted — it is the measured miss", () => {
     const text = joined(
       renderResult(
         input({
           comparison: {
-            greptileFound: false,
-            greptileOnly: 0,
-            both: 0,
-            prheroOnly: 1,
+            greptileFound: true,
+            result: buckets({ greptileOnly: [greptile()] }),
           },
         }),
       ),
     );
-    expect(text).toContain("— no Greptile comment on");
-    expect(text).toContain("this PR");
+    expect(text).toContain("↳ missed src/watch.ts:12 — unbounded retry loop");
   });
 
-  test("the worktree hint hands over worktree remove, never rm -rf", () => {
+  test("a long miss list becomes a tail count pointing at comparison.md", () => {
+    const many = Array.from({ length: 8 }, (_, i) =>
+      greptile({ index: i, startLine: i, title: `miss ${i}` }),
+    );
     const text = joined(
       renderResult(
         input({
-          worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+          comparison: {
+            greptileFound: true,
+            result: buckets({ greptileOnly: many }),
+          },
         }),
       ),
     );
-    expect(text).toContain("worktree kept for finding-verification");
-    expect(text).toContain("git -C /repo worktree remove --force /wt/pr-6");
-    expect(text).not.toContain("rm -rf");
+    expect(text).toContain("miss 0");
+    expect(text).toContain("↳ and 3 more — see comparison.md");
+  });
+
+  test("a PR Greptile never commented on says so, so 0 is not read as a miss", () => {
+    const text = joined(
+      renderResult(
+        input({ comparison: { greptileFound: false, result: buckets() } }),
+      ),
+    );
+    expect(text).toContain("(no Greptile comment on this PR)");
+    // Nothing to pair against, so no pairings pointer either.
+    expect(text).not.toContain("pairings");
+  });
+
+  test("pairings are pointed at, never scored — the window over-matches", () => {
+    const text = joined(
+      renderResult(
+        input({
+          comparison: {
+            greptileFound: true,
+            result: buckets({
+              both: [
+                {
+                  greptile: greptile(),
+                  prhero: {
+                    id: "F001",
+                    path: "src/watch.ts",
+                    line: 12,
+                    claim: "c",
+                    tier: "blocking",
+                  },
+                },
+              ],
+            }),
+          },
+        }),
+      ),
+    );
+    expect(text).toContain("↳ pairings: comparison.md");
+  });
+});
+
+describe("renderResult footer", () => {
+  test("ONE run dir plus the basenames, never three absolute paths", () => {
+    const text = joined(
+      renderResult(
+        input({ artifacts: ["report.md", "findings.json", "comparison.md"] }),
+      ),
+    );
+    // Each basename once, and the directory prefix exactly once — the whole
+    // point of the collapse (three absolute paths carried one bit each).
+    for (const name of ["report.md", "findings.json", "comparison.md"]) {
+      expect(text.split(name).length - 1).toBe(1);
+    }
+    const hits = text.split("/tmp/pr-hero-runs/pr-6-17069c75-1").length - 1;
+    expect(hits).toBe(1);
+    // At 80 columns the value column wraps rather than overrunning the width.
+    for (const line of renderResult(
+      input({ artifacts: ["report.md", "findings.json", "comparison.md"] }),
+    )) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  test("the estimate band survives, because an overrun is only visible against it", () => {
+    expect(joined(renderResult(input()))).toContain("$3.50–$5.25");
   });
 
   test("no `posted:` line — step 14 already printed one during the run", () => {
@@ -123,26 +474,79 @@ describe("renderResult", () => {
     expect(text).toContain("post.json");
   });
 
+  test("the worktree hint hands over worktree remove, never rm -rf", () => {
+    const text = joined(
+      renderResult(
+        input({
+          worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+        }),
+      ),
+    );
+    expect(text).toContain("kept for finding-verification");
+    expect(text).toContain("git -C /repo worktree remove --force /wt/pr-6");
+    expect(text).not.toContain("rm -rf");
+  });
+
+  test("local mode gets no worktree hint", () => {
+    expect(joined(renderResult(input()))).not.toContain("worktree");
+  });
+
   test("a dead session says so, last, after every count", () => {
     const lines = renderResult(input({ sessionFailed: true }));
-    expect(lines[lines.length - 1]).toBe(
+    expect(stripAnsi(lines[lines.length - 1] ?? "")).toContain(
       "every hunter failed — this run reviewed nothing.",
+    );
+  });
+
+  test("a dead run gets NO green all-clear — a clean bill would be a lie", () => {
+    const lines = renderResult(
+      input({
+        doc: doc({ findings: [], run_status: "partial" }),
+        sessionFailed: true,
+      }),
+    );
+    const text = joined(lines);
+    expect(text).not.toContain("no findings survived");
+    expect(stripAnsi(lines[lines.length - 1] ?? "")).toContain(
+      "every hunter failed",
     );
   });
 
   test("a live session never claims one failed", () => {
     expect(joined(renderResult(input()))).not.toContain("every hunter failed");
   });
+});
 
-  test("styles off means not one escape byte; styles on paints", () => {
+describe("renderResult styling", () => {
+  const styled = (over: Partial<ResultInput> = {}): string[] =>
+    renderResult(input({ styles: true, ...over }));
+
+  test("styles off means not one escape byte", () => {
     expect(renderResult(input()).join("\n")).not.toContain(ESC);
-    expect(renderResult(input({ styles: true })).join("\n")).toContain(ESC);
+  });
+
+  test("styles on paints, including the findings and the miss list", () => {
+    expect(
+      styled({
+        comparison: {
+          greptileFound: true,
+          result: buckets({ greptileOnly: [greptile()] }),
+        },
+        worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+        sessionFailed: true,
+      }).join("\n"),
+    ).toContain(ESC);
   });
 
   test("painting changes the bytes around the text, never the text", () => {
-    expect(joined(renderResult(input({ styles: true })))).toBe(
-      joined(renderResult(input())),
-    );
+    const over: Partial<ResultInput> = {
+      comparison: {
+        greptileFound: true,
+        result: buckets({ greptileOnly: [greptile()] }),
+      },
+      worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+    };
+    expect(joined(styled(over))).toBe(joined(renderResult(input(over))));
   });
 
   test("returns lines and prints nothing itself", () => {

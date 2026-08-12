@@ -107,7 +107,7 @@ export function wrapText(text: string, width: number): string[] {
   return lines;
 }
 
-export interface RowOptions {
+interface RowOptions {
   width?: number;
   styles?: boolean;
   indent?: number;
@@ -149,7 +149,7 @@ export function row(
   return chunks.map((chunk, i) => (i === 0 ? head + chunk : pad + chunk));
 }
 
-export interface BoxOptions {
+interface BoxOptions {
   width?: number;
   styles?: boolean;
 }
@@ -189,7 +189,7 @@ export function box(
   return lines;
 }
 
-export const SHORT_SHA_LENGTH = 10;
+const SHORT_SHA_LENGTH = 10;
 
 export function shortSha(sha: string, len: number = SHORT_SHA_LENGTH): string {
   return sha.slice(0, len);

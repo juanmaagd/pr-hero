@@ -21,7 +21,7 @@ export type ConfirmResult =
 
 // What a keypress MEANS, decided once. "char" carries the lowercased
 // character so shortcut matching never re-derives it.
-export type Key =
+type Key =
   | { type: "up" }
   | { type: "down" }
   | { type: "enter" }
@@ -71,7 +71,7 @@ export function parseKey(key: string): Key {
   return { type: "char", char: key.toLowerCase() };
 }
 
-export interface MenuOption {
+interface MenuOption {
   // "review" and "cancel" terminate; "details" is a VIEW action that
   // re-presents the menu instead of resolving it.
   action: "review" | "details" | "cancel";
@@ -288,7 +288,7 @@ async function runPlainConfirm(
 
 // One chunk off Bun.stdin, then release it. Reading the whole stream would
 // block until EOF, which never comes on an interactive terminal.
-export function createLineReader(): KeyReader {
+function createLineReader(): KeyReader {
   return {
     raw: false,
     read: async () => {
@@ -307,7 +307,7 @@ export function createLineReader(): KeyReader {
 // under the watcher's `stdin: "ignore"`, and `setRawMode` is absent entirely
 // on some non-tty stdin shapes — calling it there throws, which is precisely
 // the failure this whole module is arranged to avoid.
-export function createStdinReader(stdin = process.stdin): KeyReader {
+function createStdinReader(stdin = process.stdin): KeyReader {
   if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
     return createLineReader();
   }
