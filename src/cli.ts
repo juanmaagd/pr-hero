@@ -44,6 +44,7 @@ import {
   fetchPostedFindingComments,
   fetchPrComments,
   fetchPrRefs,
+  fetchPrReviewComments,
   ghCurrentBranchPr,
   ghPrView,
   ghRepoWebUrl,
@@ -54,8 +55,10 @@ import {
   writeComparison,
 } from "./pr";
 import {
+  claimFingerprint,
   findMarkedCommentId,
   type PrTarget,
+  parseFindingMarker,
   prRunDirCandidate,
   prWorktreePath,
   resolveCurrentPrNumber,
@@ -1168,6 +1171,12 @@ async function resolveInlinePostPlan(input: {
 }): Promise<{
   plan: PostPlan;
   previousHeadSha: string | undefined;
+  // Whether a marked summary comment already exists on the PR — threaded
+  // through so postInlineFindings knows whether to CREATE the summary up
+  // front (design rework: create-first fixes the summary's position in the
+  // timeline; see postInlineFindings's own WHY) or leave a pre-existing one
+  // alone until the closing PATCH.
+  existingSummaryId: number | null;
   // The FULL finding list the plan matched against — threaded through to
   // postPrReview's 422 recovery so it can re-match with the SAME finding
   // set the plan used, never a narrower one (CRIT-A, verify-report-pr3
@@ -1204,14 +1213,48 @@ async function resolveInlinePostPlan(input: {
     posted,
     headSha: input.headSha,
   });
-  return { plan, previousHeadSha, findingRefs };
+  return { plan, previousHeadSha, existingSummaryId, findingRefs };
 }
 
-// The actual post sequence (design D6): review submission (with 422
-// recovery) → per-finding issue comments → summary PATCHed LAST. NO
-// `sessionFailed` awareness here — same contract as pr.ts's own primitives
-// (see postPrReview's own WHY): the guard belongs to the caller that decides
+// A finding's own posted comment, as a clickable link for the summary's
+// index (Juanma's PR #2 feedback: each index line links to its own
+// comment). GitHub's fragment conventions for the two comment families
+// differ — a REVIEW (inline) comment anchors on `#discussion_r<id>`, a
+// top-level issue comment on `#issuecomment-<id>` — so the channel the
+// comment actually landed in decides the shape, never guessed from one.
+function findingCommentUrl(
+  webUrl: string,
+  pr: number,
+  channel: "review" | "issue",
+  id: number,
+): string {
+  const fragment =
+    channel === "review" ? `discussion_r${id}` : `issuecomment-${id}`;
+  return `${webUrl}/pull/${pr}#${fragment}`;
+}
+
+// The actual post sequence (design D6, reordered per Juanma's PR #2
+// feedback item 2): summary CREATED FIRST when none exists yet → review
+// submission (with 422 recovery) → per-finding issue comments → summary
+// PATCHED LAST with the final delta and comment links. NO `sessionFailed`
+// awareness here — same contract as pr.ts's own primitives (see
+// postPrReview's own WHY): the guard belongs to the caller that decides
 // whether to invoke this at all (postInlineIfEligible, below).
+//
+// WHY create-first: the summary was landing BELOW every finding in the
+// Conversation timeline (real posted evidence: review comments 13:12:43,
+// summary 13:12:45) because it was created LAST. Creation order fixes a
+// comment's position; a PATCH never moves it. So on a PR with no summary
+// yet, this posts a placeholder summary — the full index and the PLANNED
+// delta, computed from `plan` before any write, just without per-finding
+// links (they do not exist yet) — as the FIRST write of the run, then
+// patches it again at the end with the ACTUAL delta and the links. On a
+// re-run (a summary already exists), the early create is skipped entirely:
+// that comment's position was already fixed by a PREVIOUS run, and creating
+// again would either duplicate it or waste an API call patching it twice.
+// The final PATCH's delta-must-describe-what-was-posted invariant (PR2
+// verification, WARN-3) is unchanged — the placeholder is provisional, the
+// closing PATCH is authoritative, same as before this rework.
 export async function postInlineFindings(input: {
   operatorRoot: string;
   pr: number;
@@ -1222,8 +1265,25 @@ export async function postInlineFindings(input: {
   spawnFn?: typeof Bun.spawn;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
-  const { plan, previousHeadSha, findingRefs } =
+  const { plan, previousHeadSha, existingSummaryId, findingRefs } =
     await resolveInlinePostPlan(input);
+
+  // The id this run's own creation just returned, if any — threaded to the
+  // closing PATCH below so it updates THIS comment directly rather than
+  // re-discovering it by marker (postPrComment's `knownCommentId`; see its
+  // own WHY).
+  let summaryCommentId = existingSummaryId;
+  if (existingSummaryId === null) {
+    const plannedDelta: PrCommentDelta = { ...plan.delta, previousHeadSha };
+    const created = await postPrComment(
+      operatorRoot,
+      pr,
+      renderPrComment(doc, webUrl, plannedDelta),
+      spawnFn,
+    );
+    summaryCommentId = created.commentId;
+  }
+
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
   const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
     refs
@@ -1261,6 +1321,10 @@ export async function postInlineFindings(input: {
   }
 
   const issueCommentIds: number[] = [];
+  // findingId -> its own comment's id, per channel — the summary's index
+  // links (Juanma's PR #2 feedback) need exactly this map, built as posting
+  // actually happens rather than re-derived from the plan afterward.
+  const issueIdByFindingId = new Map<string, number>();
   for (const finding of toIssuePost) {
     const commentId = await postIssueComment(
       operatorRoot,
@@ -1271,6 +1335,7 @@ export async function postInlineFindings(input: {
       spawnFn,
     );
     issueCommentIds.push(commentId);
+    issueIdByFindingId.set(finding.id, commentId);
     reachedIds.add(finding.id);
   }
 
@@ -1279,13 +1344,36 @@ export async function postInlineFindings(input: {
     reachedIds,
   );
 
-  const delta: PrCommentDelta = { ...plan.delta, previousHeadSha };
-  const summary = await postPrComment(
+  const commentUrlByFindingId = await buildCommentUrlMap({
     operatorRoot,
     pr,
-    renderPrComment(doc, webUrl, delta),
+    headSha,
+    webUrl,
     spawnFn,
+    persisting: plan.persisting,
+    issueIdByFindingId,
+    freshlyPostedReview:
+      reviewResult.outcome === "posted" ? reviewFindings : [],
+  });
+
+  const delta: PrCommentDelta = { ...plan.delta, previousHeadSha };
+  const patched = await postPrComment(
+    operatorRoot,
+    pr,
+    renderPrComment(doc, webUrl, delta, commentUrlByFindingId),
+    spawnFn,
+    summaryCommentId ?? undefined,
   );
+  // `patched.action` is always "updated" once the create-first branch above
+  // ran (this call PATCHes the comment it just created), which would report
+  // a first-EVER run as "updated" — misleading to a human reading the log
+  // or post.json. The outward-facing action names whether THIS RUN created
+  // the summary at all (existingSummaryId was null before this run), not
+  // which HTTP verb the LAST of its two calls happened to use.
+  const summary = {
+    action: existingSummaryId === null ? ("created" as const) : patched.action,
+    commentId: patched.commentId,
+  };
 
   return {
     reviewOutcome: reviewResult.outcome,
@@ -1295,6 +1383,70 @@ export async function postInlineFindings(input: {
     delta: plan.delta,
     droppedFindingIds,
   };
+}
+
+// Maps every CURRENTLY-live finding (persisting from a prior run, or
+// freshly posted this run) to its own comment's URL, for the summary's
+// closing PATCH (Juanma's PR #2 feedback: each index line links to its own
+// comment). Three sources, none of which can be read off the plan alone:
+//   - persisting matches already carry the prior comment's id/channel
+//     (`plan.persisting`, from inline.ts's matcher) — free, no extra fetch;
+//   - fresh issue comments' ids are known directly from postIssueComment's
+//     own return value (`issueIdByFindingId`, built in the loop above);
+//   - fresh REVIEW comments' ids are NOT returned by `POST .../reviews` at
+//     all (GitHub's response is the review object, not its comments[]), so
+//     the only way to learn them is a follow-up read-only fetch, matched
+//     back to a finding by the SAME marker fields the identity contract
+//     already uses (path, line, this run's headSha, and the claim
+//     fingerprint) — deterministic here because this run posted them
+//     moments ago with exactly those fields.
+// `webUrl === undefined` skips all of it: no repo web url means no comment
+// URL is buildable, and renderPrComment already degrades to plain text when
+// a finding's id is absent from the map, never a broken link.
+async function buildCommentUrlMap(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  webUrl: string | undefined;
+  spawnFn?: typeof Bun.spawn;
+  persisting: PostPlan["persisting"];
+  issueIdByFindingId: Map<string, number>;
+  freshlyPostedReview: Finding[];
+}): Promise<Map<string, string>> {
+  const { operatorRoot, pr, headSha, webUrl, spawnFn } = input;
+  const urls = new Map<string, string>();
+  if (webUrl === undefined) return urls;
+  for (const match of input.persisting) {
+    urls.set(
+      match.finding.id,
+      findingCommentUrl(webUrl, pr, match.posted.channel, match.posted.id),
+    );
+  }
+  for (const [findingId, id] of input.issueIdByFindingId) {
+    urls.set(findingId, findingCommentUrl(webUrl, pr, "issue", id));
+  }
+  if (input.freshlyPostedReview.length > 0) {
+    const freshReview = await fetchPrReviewComments(operatorRoot, pr, {
+      spawnFn,
+    });
+    for (const finding of input.freshlyPostedReview) {
+      const fingerprint = claimFingerprint(finding.claim);
+      const match = freshReview.find((c) => {
+        const marker = parseFindingMarker(c.body);
+        return (
+          marker !== null &&
+          marker.path === finding.path &&
+          marker.line === finding.line &&
+          marker.headSha === headSha &&
+          marker.c === fingerprint
+        );
+      });
+      if (match) {
+        urls.set(finding.id, findingCommentUrl(webUrl, pr, "review", match.id));
+      }
+    }
+  }
+  return urls;
 }
 
 // The `sessionFailed` guard (spec "sessionFailed suppresses all posting"):

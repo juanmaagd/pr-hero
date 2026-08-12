@@ -179,10 +179,15 @@ function doc(overrides: Partial<FindingsDocument> = {}): FindingsDocument {
 }
 
 describe("postInlineFindings — step-14 ordering", () => {
-  // Design D6: review submission → per-finding issue comments → summary
-  // PATCHed LAST, because the summary's delta must describe what was
-  // actually posted this run.
-  test("review, then issue comments, then the summary — always last", async () => {
+  // Design rework (Juanma's PR #2 feedback item 2): the summary is CREATED
+  // FIRST — before any finding is posted — so its position in the
+  // Conversation timeline is fixed early, then PATCHED again LAST with the
+  // final delta and comment links. Creation is a POST to
+  // `issues/<pr>/comments`; the closing PATCH targets
+  // `issues/comments/<id>` — two distinct endpoints, so the test tells them
+  // apart by argv shape, not just by stdin prefix (both carry the same
+  // marker prefix).
+  test("summary created first, then review, then issue comments, then the summary PATCHed last", async () => {
     const findings = [
       finding({ id: "F001", path: "src/a.ts", line: 10 }), // anchorable
       finding({ id: "F002", path: "src/b.ts", line: 999 }), // un-anchorable
@@ -205,6 +210,12 @@ describe("postInlineFindings — step-14 ordering", () => {
     expect(outcome.issueCommentIds.length).toBe(1);
     expect(outcome.droppedFindingIds).toEqual([]);
 
+    const createIndex = calls.findIndex(
+      (c) =>
+        c.argv.join(" ").includes("POST") &&
+        c.argv.join(" ").includes("issues/42/comments") &&
+        c.stdin?.startsWith("<!-- pr-hero-report "),
+    );
     const reviewIndex = calls.findIndex((c) =>
       c.argv.join(" ").includes("pulls/42/reviews"),
     );
@@ -213,16 +224,25 @@ describe("postInlineFindings — step-14 ordering", () => {
         c.argv.join(" ").includes("issues/42/comments") &&
         c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
     );
-    const summaryIndex = calls.findIndex(
+    const patchIndex = calls.findIndex(
       (c) =>
-        c.argv.join(" ").includes("issues/42/comments") &&
+        c.argv.join(" ").includes("PATCH") &&
+        c.argv.join(" ").includes("issues/comments/") &&
         c.stdin?.startsWith("<!-- pr-hero-report "),
     );
-    expect(reviewIndex).toBeGreaterThanOrEqual(0);
+    expect(createIndex).toBeGreaterThanOrEqual(0);
+    // The summary create is the FIRST mutating (POST/PATCH) call this run
+    // makes — every call before it is a read-only fetch (resolving the
+    // plan), never another write.
+    const firstMutatingIndex = calls.findIndex(
+      (c) => c.argv.includes("POST") || c.argv.includes("PATCH"),
+    );
+    expect(createIndex).toBe(firstMutatingIndex);
+    expect(reviewIndex).toBeGreaterThan(createIndex);
     expect(issueIndex).toBeGreaterThan(reviewIndex);
-    expect(summaryIndex).toBeGreaterThan(issueIndex);
-    // The summary PATCH/POST is the very LAST call this run makes.
-    expect(summaryIndex).toBe(calls.length - 1);
+    expect(patchIndex).toBeGreaterThan(issueIndex);
+    // The summary PATCH is the very LAST call this run makes.
+    expect(patchIndex).toBe(calls.length - 1);
   });
 
   test("zero anchorable findings never reaches the reviews endpoint at all", async () => {
@@ -527,6 +547,150 @@ describe("postInlineFindings — idempotency, same head, drifted live line", () 
           c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
       ).length,
     ).toBe(0);
+  });
+});
+
+// Juanma's PR #2 feedback: the summary's index links each line to its own
+// comment. Three sources feed `buildCommentUrlMap` (cli.ts) and none are
+// exercised by makeFakeGh's STATELESS script — a persisting match's url
+// needs no extra fetch, but a FRESHLY posted review comment's url needs a
+// re-fetch to see what THIS run just posted, which a stateless fixture
+// cannot simulate. This test uses a bespoke, call-counting fake instead.
+describe("postInlineFindings — comment url map reaches the summary's index", () => {
+  test("persisting, freshly-issued, and freshly-reviewed findings all resolve to a comment url", async () => {
+    const WEB_URL = "https://github.com/musivetech/musive";
+    const priorMarker = findingMarker({
+      path: "src/a.ts",
+      line: 10,
+      headSha: OLD_HEAD,
+      claim: "unchanged claim",
+    });
+    const findings = [
+      // Persists — matched to comment id 7 from a prior run.
+      finding({
+        id: "F001",
+        path: "src/a.ts",
+        line: 10,
+        claim: "unchanged claim",
+      }),
+      // Fresh, anchorable — goes into the review submission.
+      finding({
+        id: "F002",
+        path: "src/a.ts",
+        line: 20,
+        claim: "a fresh anchorable finding",
+      }),
+      // Fresh, un-anchorable — goes to its own issue comment.
+      finding({
+        id: "F003",
+        path: "src/never.ts",
+        line: 1,
+        claim: "a fresh un-anchorable finding",
+      }),
+    ];
+    let pullsCommentsCalls = 0;
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const calls: RecordedCall[] = [];
+    let nextId = 200;
+    const respond = (stdout: string, exitCode = 0) => {
+      const stream = (text: string) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            if (text) controller.enqueue(encoder.encode(text));
+            controller.close();
+          },
+        });
+      return {
+        stdout: stream(stdout),
+        stderr: stream(""),
+        exited: Promise.resolve(exitCode),
+        kill() {},
+      };
+    };
+    const spawnFn = ((argv: string[], opts?: { stdin?: Uint8Array }) => {
+      const stdin =
+        opts?.stdin === undefined ? undefined : decoder.decode(opts.stdin);
+      calls.push({ argv, stdin });
+      const joined = argv.join(" ");
+      if (
+        joined.includes("issues/42/comments") &&
+        joined.includes("--paginate")
+      ) {
+        return respond("");
+      }
+      if (
+        joined.includes("pulls/42/comments") &&
+        joined.includes("--paginate")
+      ) {
+        pullsCommentsCalls += 1;
+        const rows: unknown[] = [
+          {
+            id: 7,
+            user: "pr-hero",
+            body: `${priorMarker}\nunchanged claim`,
+            path: "src/a.ts",
+            line: 10,
+            original_line: 10,
+            in_reply_to_id: null,
+          },
+        ];
+        // Only the SECOND+ fetch (the re-fetch after the review posted)
+        // sees F002's own comment — simulating "this run just created it".
+        if (pullsCommentsCalls > 1) {
+          const freshMarker = findingMarker({
+            path: "src/a.ts",
+            line: 20,
+            headSha: HEAD,
+            claim: "a fresh anchorable finding",
+          });
+          rows.push({
+            id: 55,
+            user: "pr-hero",
+            body: `${freshMarker}\nfresh`,
+            path: "src/a.ts",
+            line: 20,
+            original_line: 20,
+            in_reply_to_id: null,
+          });
+        }
+        return respond(ndjson(rows));
+      }
+      if (joined.includes("pulls/42/reviews")) {
+        return respond("");
+      }
+      return respond(JSON.stringify({ id: nextId++ }));
+    }) as unknown as typeof Bun.spawn;
+
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 30),
+      webUrl: WEB_URL,
+      spawnFn,
+    });
+
+    expect(outcome.reviewFindingCount).toBe(1); // F002
+    expect(outcome.issueCommentIds.length).toBe(1); // F003
+
+    const patchCall = calls.find(
+      (c) =>
+        c.argv.join(" ").includes("PATCH") &&
+        c.stdin?.startsWith("<!-- pr-hero-report "),
+    );
+    // F001, persisting, linked from plan.persisting with no extra fetch.
+    expect(patchCall?.stdin).toContain(`${WEB_URL}/pull/42#discussion_r7`);
+    // F002, freshly posted to the review, linked via the post-posting
+    // re-fetch + marker match.
+    expect(patchCall?.stdin).toContain(`${WEB_URL}/pull/42#discussion_r55`);
+    // F003, freshly posted as an issue comment, linked directly from
+    // postIssueComment's own return value.
+    const issueId = outcome.issueCommentIds[0];
+    expect(patchCall?.stdin).toContain(
+      `${WEB_URL}/pull/42#issuecomment-${issueId}`,
+    );
   });
 });
 

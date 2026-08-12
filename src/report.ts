@@ -7,7 +7,7 @@
 // come out byte-identical (the lab already replays old findings.json files;
 // a renderer that reached for `new Date()` would make that a lie).
 
-import type { Finding, FindingsDocument, Tier } from "./findings";
+import type { Finding, FindingsDocument, Severity, Tier } from "./findings";
 import { findingMarker, prCommentMarker } from "./pr-preflight";
 import {
   clusterByRootCause,
@@ -169,6 +169,86 @@ export interface PrCommentDelta {
   previousHeadSha?: string;
 }
 
+// One consistent severity → emoji mapping (Juanma's PR #2 feedback), shared
+// by the summary's headline/index AND every per-finding body — a reader
+// who learns 🔴 means BLOCKER/CRITICAL in one place must see the SAME
+// mapping everywhere, or the emoji becomes noise instead of a scan aid.
+// BLOCKER and CRITICAL share one glyph on purpose: both are the severities
+// that can ever reach `tier: "blocking"` (deriveTier, findings.ts), so this
+// is the same grouping the engine's own gate already makes.
+export function severityEmoji(severity: Severity): string {
+  switch (severity) {
+    case "BLOCKER":
+    case "CRITICAL":
+      return "🔴";
+    case "WARNING":
+      return "🟡";
+    case "SUGGESTION":
+      return "🔵";
+  }
+}
+
+// Priority order for the summary's compact index (Juanma: "priority ordering
+// actually works" here — inline comments themselves sort by GitHub's own
+// file/line order, not ours). Lower rank sorts first.
+function severityRank(severity: Severity): number {
+  switch (severity) {
+    case "BLOCKER":
+      return 0;
+    case "CRITICAL":
+      return 1;
+    case "WARNING":
+      return 2;
+    case "SUGGESTION":
+      return 3;
+  }
+}
+
+const LEAD_IN_MAX = 100;
+
+// A short, single-line preview of a finding's claim for the summary's
+// index — the claim's full text belongs on the finding's own comment, not
+// duplicated here (the ROADMAP B6 "one finding, one place" decision this
+// index partially reinstates — see renderPrComment's own WHY). Truncates at
+// a word boundary so the ellipsis never lands mid-word.
+function leadIn(claim: string): string {
+  const text = oneLine(claim);
+  if (text.length <= LEAD_IN_MAX) return text;
+  const truncated = text.slice(0, LEAD_IN_MAX);
+  const lastSpace = truncated.lastIndexOf(" ");
+  const cut = lastSpace > 40 ? truncated.slice(0, lastSpace) : truncated;
+  return `${cut}…`;
+}
+
+// The summary's one-line-per-finding index (Juanma's PR #2 feedback item 1:
+// the earlier "one finding, one place" decision stripped this list entirely,
+// leaving counts + delta + footer — on first contact that reads as empty).
+// This partially reverses that decision, but the coherence obligation it
+// reinstates is much smaller than the pre-B6 shape: a ONE-LINE index plus
+// links, not a duplicated claim/evidence body, and the delta already had to
+// be correct. `commentUrlByFindingId` is absent (or a finding's id is
+// missing from it) before ids exist — the FIRST render of a freshly created
+// summary, before any per-finding comment has been posted — in which case
+// the line renders without a link; the closing PATCH (cli.ts) supplies the
+// map once posting has happened.
+function findingIndexLines(
+  findings: Finding[],
+  commentUrlByFindingId: ReadonlyMap<string, string> | undefined,
+): string[] {
+  const sorted = [...findings].sort((a, b) => {
+    const rankDiff = severityRank(a.severity) - severityRank(b.severity);
+    if (rankDiff !== 0) return rankDiff;
+    if (a.path !== b.path) return a.path < b.path ? -1 : 1;
+    return a.line - b.line;
+  });
+  return sorted.map((f) => {
+    const loc = code(`${f.path}:${f.line}`);
+    const url = commentUrlByFindingId?.get(f.id);
+    const locRef = url === undefined ? loc : `[${loc}](${url})`;
+    return `${severityEmoji(f.severity)} ${locRef} — ${leadIn(f.claim)}`;
+  });
+}
+
 // The PR-comment renderer (ROADMAP B2): the same findings document, shaped
 // for a public GitHub comment instead of a run artifact. Pure for the same
 // reason renderReport is — a posted comment must be re-renderable from the
@@ -206,18 +286,38 @@ export interface PrCommentDelta {
 // requires. `delta: PrCommentDelta | undefined` forces every call site to
 // say so explicitly, so the type system — not a missed review comment —
 // catches the omission.
+// `commentUrlByFindingId` is the fourth, OPTIONAL parameter (ROADMAP B6
+// rework, Juanma's PR #2 feedback): a finding id → its own posted comment's
+// URL, so the index above can link straight to it. Absent on the summary's
+// FIRST creation (cli.ts creates the summary BEFORE any per-finding comment
+// exists, to fix its position in the PR timeline — see cli.ts's
+// postInlineFindings WHY) and present on the closing PATCH once posting
+// finished. A caller that omits it gets a correct, link-free index — never a
+// broken or empty one — so this stays additive, unlike `delta`'s forced-
+// explicit contract above (PR2 WARN-3): a missing link map degrades the
+// index's usefulness, it does not make the comment lie.
 export function renderPrComment(
   doc: FindingsDocument,
   repoWebUrl: string | undefined,
   delta: PrCommentDelta | undefined,
+  commentUrlByFindingId?: ReadonlyMap<string, string>,
 ): string {
   // Normalize away one trailing slash so `gh repo view` output and a
   // hand-typed URL build the same links.
   const webUrl = repoWebUrl?.endsWith("/")
     ? repoWebUrl.slice(0, -1)
     : repoWebUrl;
-  const blocking = doc.findings.filter((f) => f.tier === "blocking");
-  const advisory = doc.findings.filter((f) => f.tier === "advisory");
+  // Counted by SEVERITY, not tier (Juanma's PR #2 feedback item 3: the old
+  // tier-based "0 blocking · 2 advisory" headline hid that both findings
+  // were actually CRITICAL, just downgraded — the exact contradiction that
+  // made "CRITICAL (advisory)" read as a bug on the finding body itself).
+  // SUGGESTION is deliberately excluded from the headline, mirroring the
+  // two-bucket 🔴/🟡 shape Juanma specified — a SUGGESTION still appears in
+  // the index below, just not double-counted in the headline.
+  const critical = doc.findings.filter(
+    (f) => f.severity === "BLOCKER" || f.severity === "CRITICAL",
+  ).length;
+  const warning = doc.findings.filter((f) => f.severity === "WARNING").length;
   const headSha8 = code(doc.head_sha.slice(0, 8));
   const headRef =
     webUrl === undefined
@@ -227,16 +327,27 @@ export function renderPrComment(
   out.push("## pr-hero review");
   out.push("");
   out.push(
-    `**${blocking.length} blocking · ${advisory.length} advisory** — ` +
-      `${headRef}, diff from ${code(doc.base_sha.slice(0, 8))}`,
+    `🔴 ${critical} critical · 🟡 ${warning} warning — ${headRef}, ` +
+      `diff from ${code(doc.base_sha.slice(0, 8))}`,
   );
-  if (delta) {
-    out.push("");
-    out.push(deltaLine(delta));
-  }
   out.push("");
   if (doc.findings.length === 0) {
     out.push("✅ pr-hero reviewed this PR and found nothing to report.");
+    out.push("");
+  } else {
+    out.push(...findingIndexLines(doc.findings, commentUrlByFindingId));
+    out.push("");
+  }
+  // Omit the "since <sha>" clause when the previous head equals the current
+  // one (Juanma's PR #2 feedback: "Δ since f933fda8" printed on head
+  // f933fda8 is noise) — a re-run on an unchanged head, not a genuinely
+  // absent prior state (which deltaLine already renders bare).
+  const normalizedDelta =
+    delta && delta.previousHeadSha === doc.head_sha
+      ? { ...delta, previousHeadSha: undefined }
+      : delta;
+  if (normalizedDelta) {
+    out.push(deltaLine(normalizedDelta));
     out.push("");
   }
   out.push("---");
@@ -260,12 +371,99 @@ function deltaLine(delta: PrCommentDelta): string {
   return `${since}: ${delta.resolved} resolved · ${delta.new} new · ${delta.persist} persist`;
 }
 
-// Per-finding comment bodies (ROADMAP B6). Every posted finding — anchored
-// inline or standalone — carries the pr-preflight.ts identity marker as its
-// FIRST line, mirroring prCommentMarker's own contract, so a second run can
-// tell "already posted" from "new" (inline.ts's matcher) without ever
-// touching dedupe_key or root_cause_id. Deliberately as sparse as
-// renderPrComment on economics: no cost, no tokens, nothing internal.
+// Per-finding comment bodies (ROADMAP B6, reworked per Juanma's PR #2
+// feedback items 2-5). Every posted finding — anchored inline or standalone
+// — carries the pr-preflight.ts identity marker as its FIRST line, mirroring
+// prCommentMarker's own contract, so a second run can tell "already posted"
+// from "new" (inline.ts's matcher) without ever touching dedupe_key or
+// root_cause_id. Deliberately as sparse as renderPrComment on economics: no
+// cost, no tokens, nothing internal.
+//
+// Shape (both renderers, `linkLocation` is the only structural difference —
+// see below):
+//   <marker>
+//
+//   🔴 CRITICAL · introduced · lifecycle
+//   `path:line` — symbol()
+//
+//   <claim, as a single unbroken-but-readable paragraph — item 5: "es solo
+//   texto y no se entiende bien" was the old five-line wall>
+//
+//   ⚖️ Downgraded to advisory — the refuter returned `downgraded-latent`
+//      (only when tier disagrees with severity — item 3/4)
+//
+//   <details>Evidence (N)</details>
+//   <details>Prompt to fix with AI</details>
+function findingHeaderLine(finding: Finding): string {
+  return (
+    `${severityEmoji(finding.severity)} ${finding.severity} · ` +
+    `${finding.causal_disposition} · ${finding.hunter}`
+  );
+}
+
+function findingLocationLine(
+  finding: Finding,
+  headSha: string,
+  webUrl: string | undefined,
+  linkLocation: boolean,
+): string {
+  const loc = code(`${finding.path}:${finding.line}`);
+  const linked =
+    linkLocation && webUrl !== undefined
+      ? `[${loc}](${blobUrl(webUrl, headSha, finding.path, `L${finding.line}`)})`
+      : loc;
+  return finding.symbol === undefined
+    ? linked
+    : `${linked} — ${oneLine(finding.symbol)}`;
+}
+
+// Item 3/4 (Juanma's PR #2 feedback): "CRITICAL (advisory)" on screen with no
+// explanation reads as a contradiction, and `causal_disposition` was never
+// shown anywhere. This line closes both — but ONLY when severity and tier
+// actually disagree (a CRITICAL/BLOCKER landed advisory); printing it when
+// they agree would be a tautology ("CRITICAL, still CRITICAL"). Mirrors
+// deriveTier's own gate (findings.ts): only BLOCKER/CRITICAL can ever
+// disagree with their tier, since every other severity is advisory by
+// definition and never needs explaining.
+function tierExplanationLines(finding: Finding): string[] {
+  const isBlockerClass =
+    finding.severity === "BLOCKER" || finding.severity === "CRITICAL";
+  if (!isBlockerClass || finding.tier !== "advisory") return [];
+  const lines = [
+    "⚖️ Downgraded to advisory — the refuter returned " +
+      `\`${finding.refuter_verdict}\``,
+  ];
+  // `downgraded-latent` is the one verdict with a documented, human-legible
+  // meaning worth spelling out inline (findings.ts's own WHY comment on the
+  // type): a real defect the refuter could not currently trigger. The other
+  // verdicts that can also land here (`inconclusive`, or an `insufficient`
+  // evidence_class regardless of verdict) have no equally short gloss, so
+  // they render with just the verdict name rather than a guessed one.
+  if (finding.refuter_verdict === "downgraded-latent") {
+    lines.push("   (real, but no live trigger today)");
+  }
+  return lines;
+}
+
+// Item "Prompt to fix with AI" (Juanma's PR #2 feedback): a copy-pasteable
+// prompt, not a deep link — Greptile's equivalent hands off to a hosted IDE
+// integration this project does not have, and inventing a link to a service
+// that does not exist would be worse than omitting the feature.
+function promptToFixBlock(finding: Finding): string[] {
+  return [
+    "",
+    "<details><summary>Prompt to fix with AI</summary>",
+    "",
+    "```",
+    `Fix this issue in ${finding.path} at line ${finding.line}:`,
+    "",
+    oneLine(finding.claim),
+    "```",
+    "",
+    "</details>",
+  ];
+}
+
 export function renderInlineComment(
   finding: Finding,
   headSha: string,
@@ -279,28 +477,32 @@ export function renderInlineComment(
       claim: finding.claim,
     }),
     "",
-    `**pr-hero · ${finding.severity} (${finding.tier})**`,
+    findingHeaderLine(finding),
+    // No link on the location line: GitHub already anchors this comment to
+    // the diff line itself, so a self-referential link would be redundant —
+    // unlike the un-anchorable twin below, which has no anchor to point at.
+    findingLocationLine(finding, headSha, webUrl, false),
     "",
     oneLine(finding.claim),
   ];
+  const tierLines = tierExplanationLines(finding);
+  if (tierLines.length > 0) {
+    out.push("");
+    out.push(...tierLines);
+  }
   out.push(...evidenceBlock(finding, headSha, webUrl));
+  out.push(...promptToFixBlock(finding));
   return `${out.join("\n").trimEnd()}\n`;
 }
 
 // The un-anchorable twin of renderInlineComment: posted as a standalone
-// issue comment (never anchored to a diff line, so it carries its own
-// `path:line` heading — an inline comment does not need one, GitHub already
-// shows the line it is attached to).
+// issue comment (never anchored to a diff line by GitHub), so its location
+// line links to the blob — the only way a reader gets to the actual code.
 export function renderIssueFindingComment(
   finding: Finding,
   headSha: string,
   webUrl?: string,
 ): string {
-  const location = code(`${finding.path}:${finding.line}`);
-  const heading =
-    webUrl === undefined
-      ? `#### ${location}`
-      : `#### [${location}](${blobUrl(webUrl, headSha, finding.path, `L${finding.line}`)})`;
   const out: string[] = [
     findingMarker({
       path: finding.path,
@@ -309,13 +511,18 @@ export function renderIssueFindingComment(
       claim: finding.claim,
     }),
     "",
-    heading,
-    "",
-    `**pr-hero · ${finding.severity} (${finding.tier})**`,
+    findingHeaderLine(finding),
+    findingLocationLine(finding, headSha, webUrl, true),
     "",
     oneLine(finding.claim),
   ];
+  const tierLines = tierExplanationLines(finding);
+  if (tierLines.length > 0) {
+    out.push("");
+    out.push(...tierLines);
+  }
   out.push(...evidenceBlock(finding, headSha, webUrl));
+  out.push(...promptToFixBlock(finding));
   out.push("");
   out.push(
     "<sub>Posted as a standalone comment: pr-hero could not anchor this " +
@@ -333,7 +540,11 @@ function evidenceBlock(
   webUrl: string | undefined,
 ): string[] {
   if (finding.proof_refs.length === 0) return [];
-  const out: string[] = ["", "<details><summary>Evidence</summary>", ""];
+  const out: string[] = [
+    "",
+    `<details><summary>Evidence (${finding.proof_refs.length})</summary>`,
+    "",
+  ];
   for (const ref of finding.proof_refs) {
     out.push(`- ${renderRef(ref, headSha, webUrl)}`);
   }

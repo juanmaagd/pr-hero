@@ -428,14 +428,28 @@ export async function writeComparison(input: {
 // through one shared fake gh, the same way test/pr.test.ts already does for
 // the per-finding functions; a summary PATCH the caller-level test could not
 // see would leave the "PATCHed last" ordering unpinned.
+//
+// `knownCommentId` (create-first rework, Juanma's PR #2 feedback item 2):
+// when the caller already knows the comment id — because IT just created
+// the comment moments ago in this same run, and now wants the closing
+// PATCH — skip the re-fetch-and-find-by-marker lookup entirely and PATCH
+// that id directly. Without this, the closing PATCH would re-discover the
+// comment via `findMarkedCommentId`, which is both a wasted round-trip
+// (the id is already known) and, in a NO-op fake spawn, indistinguishable
+// from "no comment exists yet" — silently creating a SECOND comment instead
+// of patching the first. Omitted (the ordinary re-run path, where the
+// existing comment came from a PREVIOUS run, not this one), the lookup runs
+// exactly as before.
 export async function postPrComment(
   operatorRoot: string,
   pr: number,
   body: string,
   spawnFn?: typeof Bun.spawn,
+  knownCommentId?: number,
 ): Promise<{ action: "created" | "updated"; commentId: number }> {
-  const comments = await fetchPrComments(operatorRoot, pr, { spawnFn });
-  const existingId = findMarkedCommentId(comments);
+  const existingId =
+    knownCommentId ??
+    findMarkedCommentId(await fetchPrComments(operatorRoot, pr, { spawnFn }));
   const action = existingId === null ? "created" : "updated";
   // The body travels on stdin via `-F body=@-` (see gh()); PATCH updates the
   // found comment in place, POST creates the first one.
