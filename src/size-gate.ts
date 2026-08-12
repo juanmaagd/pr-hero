@@ -207,7 +207,7 @@ export function filterDiffByGlobs(
 // exactly. Anything before the first header — git emits nothing there, but a
 // hand-assembled patch might — is carried as a leading record with no path,
 // which the fail-open rule above keeps.
-function splitDiffRecords(patch: string): string[] {
+export function splitDiffRecords(patch: string): string[] {
   const records: string[] = [];
   let start = -1;
   let offset = 0;
