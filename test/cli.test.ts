@@ -23,11 +23,14 @@ import {
   postInlineIfEligible,
   postingExitCode,
   runPostCommand,
+  runTriageCommand,
 } from "../src/cli";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
+import type { StoredComparison } from "../src/ledger";
 import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
 import { CliUsageError } from "../src/preflight";
+import { triageMarker } from "../src/triage";
 
 // ---------------------------------------------------------------------------
 // FakeGh: records every call's argv AND stdin (decoded), in order. Routes
@@ -1420,6 +1423,173 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
       expect(
         calls.some((c) => c.argv.join(" ").includes("pulls/42/reviews")),
       ).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// runTriageCommand — ROADMAP B6c. BINDING rules are proven once in
+// test/triage-write.test.ts; this only proves the WIRING (same real-dir +
+// fake-gh split as runPostCommand's suite).
+
+function storedComparison(
+  overrides: Partial<StoredComparison> = {},
+): StoredComparison {
+  return {
+    pr: 42,
+    head_sha: RUN_HEAD,
+    diff_from_sha: OLD_HEAD,
+    run_dir: "/x/runs/pr-42",
+    run_status: "complete",
+    greptile: { found: false },
+    rows: [
+      {
+        bucket: "prhero_only",
+        greptile: null,
+        prhero: {
+          id: "F001",
+          path: "src/a.ts",
+          line: 10,
+          claim: "the latch never resets",
+          tier: "blocking",
+        },
+        verdict: null,
+        reasoning: null,
+        actor: null,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+async function writeComparisonRunDir(
+  comparison: StoredComparison,
+): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-triage-test-"));
+  await Bun.write(
+    path.join(dir, "comparison.json"),
+    `${JSON.stringify(comparison, null, 2)}\n`,
+  );
+  return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
+}
+
+// One finding comment (mirrors postInlineFindings's marker + prose) plus
+// one `applied` reply to it — the single scripted thread every wiring test
+// below needs; `[]` (no gh script) is enough for the reject-before-any-call
+// tests.
+function appliedReplyScript(): ScriptEntry[] {
+  return [
+    {
+      match: ["pulls/42/comments", "--paginate"],
+      response: {
+        stdout: ndjson([
+          {
+            id: 1,
+            user: "octocat",
+            body: `${findingMarker({ path: "src/a.ts", line: 10, headSha: RUN_HEAD, claim: "the latch never resets" })}\nthe latch never resets`,
+            path: "src/a.ts",
+            line: 10,
+            original_line: 10,
+            in_reply_to_id: null,
+          },
+          {
+            id: 2,
+            user: "coding-agent",
+            body: `${triageMarker({ tag: "applied", headSha: RUN_HEAD, actor: "agent" })}\nfixed by resetting the latch on unmount`,
+            path: "src/a.ts",
+            line: 10,
+            original_line: 10,
+            in_reply_to_id: 1,
+          },
+        ]),
+      },
+    },
+  ];
+}
+
+describe("runTriageCommand", () => {
+  test("dry-run binds and reports the plan, writes nothing", async () => {
+    const { dir, cleanup } = await writeComparisonRunDir(storedComparison());
+    try {
+      const { spawnFn, calls } = makeFakeGh(appliedReplyScript());
+      const exitCode = await runTriageCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: true,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      // The read DID happen (this is a real preview) — but nothing mutates.
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) expect(call.argv).not.toContain("--method");
+      const onDisk = JSON.parse(
+        await Bun.file(path.join(dir, "comparison.json")).text(),
+      ) as StoredComparison;
+      expect(onDisk.rows[0]?.verdict).toBeNull();
+      expect(onDisk.rows[0]?.actor).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a live run writes verdict/reasoning/actor back to comparison.json, everything else untouched", async () => {
+    const { dir, cleanup } = await writeComparisonRunDir(storedComparison());
+    try {
+      const { spawnFn } = makeFakeGh(appliedReplyScript());
+      const exitCode = await runTriageCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const onDisk = JSON.parse(
+        await Bun.file(path.join(dir, "comparison.json")).text(),
+      ) as StoredComparison;
+      expect(onDisk.rows[0]?.verdict).toBe("applied");
+      expect(onDisk.rows[0]?.actor).toBe("agent");
+      expect(onDisk.rows[0]?.reasoning).toBe(
+        "fixed by resetting the latch on unmount",
+      );
+      // A write-back, not a fresh comparison.json — the rest survives.
+      expect(onDisk.pr).toBe(42);
+      expect(onDisk.head_sha).toBe(RUN_HEAD);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // Two ways a run-dir can be wrong before any gh call is made: no
+  // comparison.json at all, or one written for a different PR (the same
+  // "don't act on the wrong PR" guard runPostCommand's assertRunMatchesPr
+  // gives findings.json).
+  test.each([
+    [
+      "missing comparison.json",
+      async () => mkdtemp(path.join(tmpdir(), "pr-hero-triage-test-")),
+    ],
+    [
+      "comparison.json for a different PR",
+      async () =>
+        (await writeComparisonRunDir(storedComparison({ pr: 17 }))).dir,
+    ],
+  ])("%s is rejected before any gh call", async (_label, makeDir) => {
+    const dir = await makeDir();
+    try {
+      const { spawnFn, calls } = makeFakeGh([]);
+      await expect(
+        runTriageCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(CliUsageError);
+      expect(calls.length).toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

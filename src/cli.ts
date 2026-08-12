@@ -125,6 +125,7 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
+import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
@@ -227,7 +228,9 @@ async function main(argv: string[]): Promise<number> {
           ? await watchCommand(parsed.options)
           : parsed.command === "post"
             ? await postCommand(parsed.options)
-            : await review(parsed.options);
+            : parsed.command === "triage"
+              ? await triageCommand(parsed.options)
+              : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -1731,6 +1734,115 @@ export async function runPostCommand(input: {
     );
   }
   return postingExitCode(outcome);
+}
+
+// `pr-hero triage --pr <n> --from <run-dir> [--dry-run]` (ROADMAP B6c):
+// reads the PR's review-comment threads, binds every triage reply (ROADMAP
+// B6b's marker) to its finding's row in that run's comparison.json, and
+// writes verdict/reasoning/actor back — the ledger's two null columns
+// (pr-preflight.ts's ComparisonRow), filled from the loop instead of by
+// hand. Same shell/pure split as postCommand: the binding decision lives in
+// triage-write.ts (pure), this function is resolveRepoRoot plus flag
+// narrowing; runTriageCommand does the actual read/fetch/write and is
+// exported + spawnFn-injectable for the same CRIT-B reason runPostCommand
+// is (verify-report-pr3 #3305) — a dry-run branch that could not be proven
+// gh-free is not a $0 gate.
+async function triageCommand(options: CliOptions): Promise<number> {
+  const operatorRoot = await resolveRepoRoot(options.repo);
+  // parseArgs already enforces both of these for the "triage" command; the
+  // checks here are the type-narrowing TypeScript needs, not new validation.
+  if (options.pr === undefined) {
+    throw new CliUsageError("triage requires --pr <n>");
+  }
+  if (options.from === undefined) {
+    throw new CliUsageError("triage requires --from <run-dir>");
+  }
+  const prNumber =
+    options.pr === "current"
+      ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
+      : options.pr;
+  return runTriageCommand({
+    operatorRoot,
+    pr: prNumber,
+    from: options.from,
+    dryRun: options.dryRun,
+  });
+}
+
+export async function runTriageCommand(input: {
+  operatorRoot: string;
+  pr: number;
+  from: string;
+  dryRun: boolean;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const { operatorRoot, pr: prNumber, dryRun, spawnFn } = input;
+  const runDir = path.resolve(input.from);
+  const comparisonPath = path.join(runDir, "comparison.json");
+  if (!existsSync(comparisonPath)) {
+    throw new CliUsageError(
+      `${runDir} is missing comparison.json — point --from at a completed ` +
+        'PR-mode run directory ("pr-hero review --pr <n>" writes it)',
+    );
+  }
+  const raw = await Bun.file(comparisonPath).text();
+  let comparison: StoredComparison;
+  try {
+    comparison = parseComparisonJson(raw);
+  } catch (error) {
+    // The pure parser names the field; only the shell knows the file.
+    if (error instanceof CliUsageError) {
+      throw new CliError(`${comparisonPath}: ${error.message}`);
+    }
+    throw error;
+  }
+  // Same "don't act on the wrong PR" guard runPostCommand's
+  // assertRunMatchesPr gives findings.json — a run-dir named by --from is
+  // not the same thing as --pr, and a stale --from must not silently triage
+  // the wrong PR's ledger row.
+  if (comparison.pr !== prNumber) {
+    throw new CliUsageError(
+      `${comparisonPath} is for PR ${comparison.pr}, not --pr ${prNumber}`,
+    );
+  }
+  const reviewComments = await fetchPrReviewComments(operatorRoot, prNumber, {
+    spawnFn,
+  });
+  // id -> comment, so a reply's `in_reply_to_id` resolves to its parent in
+  // O(1) — both live in the SAME endpoint (pulls/<n>/comments), never
+  // fetched separately: reply-threading only exists on inline review
+  // comments, GitHub has no `in_reply_to_id` on top-level issue comments.
+  const byId = new Map(reviewComments.map((comment) => [comment.id, comment]));
+  // `gh api --paginate` returns comments in ascending-id (creation) order —
+  // the SAME order applyTriageReplies needs for its last-write-wins rule,
+  // so this loop feeds them through unsorted.
+  const replies: TriageReplyCandidate[] = [];
+  for (const comment of reviewComments) {
+    if (comment.in_reply_to_id === null) continue;
+    const parent = byId.get(comment.in_reply_to_id);
+    // The parent was deleted, or is outside what this fetch saw —
+    // applyTriageReplies would reject a missing parent anyway (no body to
+    // parse), but skipping here avoids handing it a body that never
+    // existed.
+    if (parent === undefined) continue;
+    replies.push({ parentBody: parent.body, replyBody: comment.body });
+  }
+  const outcome = applyTriageReplies(comparison.rows, replies);
+  if (dryRun) {
+    log(
+      `plan: ${outcome.bound} row(s) would be triaged, ${outcome.ignored} ` +
+        "reply(ies) ignored (not ours, malformed, or no matching row)",
+    );
+    log("dry run: comparison.json was not written.");
+    return 0;
+  }
+  const updated: StoredComparison = { ...comparison, rows: outcome.rows };
+  await Bun.write(comparisonPath, `${JSON.stringify(updated, null, 2)}\n`);
+  log(
+    `triaged: ${outcome.bound} row(s) written to ${comparisonPath}, ` +
+      `${outcome.ignored} reply(ies) ignored`,
+  );
+  return 0;
 }
 
 async function resolveRepoRoot(repoOption: string): Promise<string> {

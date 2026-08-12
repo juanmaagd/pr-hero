@@ -83,10 +83,11 @@ export interface CliOptions {
   // files. Unset means defaultRunRoot(repoRoot) — the shell resolves it,
   // because the default needs the repo toplevel and parseArgs stays pure.
   runs?: string;
-  // post only (ROADMAP B6): the run dir to read findings.json + diff.patch
-  // from instead of producing a new run — the `ledger` verb's precedent
-  // (read run artifacts off disk) applied to publishing instead of
-  // aggregating. Required by `post`; parseArgs enforces it.
+  // post/triage only (ROADMAP B6/B6c): the run dir to read findings.json +
+  // diff.patch (post) or comparison.json (triage) from, instead of
+  // producing a new run — the `ledger` verb's precedent (read run artifacts
+  // off disk) applied to publishing/triaging instead of aggregating.
+  // Required by both; parseArgs enforces it.
   from?: string;
   // The escape hatch for change 3's default. See resolveDiffRange's WHY: the
   // three-dot (merge-base) range is right almost always, and this flag exists
@@ -116,7 +117,7 @@ export interface CliOptions {
 }
 
 export interface ParsedCli {
-  command: "review" | "init" | "ledger" | "watch" | "post" | "help";
+  command: "review" | "init" | "ledger" | "watch" | "post" | "triage" | "help";
   options: CliOptions;
 }
 
@@ -136,6 +137,14 @@ Usage:
                              and posts nothing (the only way to preview a
                              plan, since --pr --dry-run returns before any
                              findings exist)
+  pr-hero triage --pr <n> --from <run-dir> [--dry-run]
+                             Read the PR's reply threads, bind every triage
+                             reply (ROADMAP B6b's marker) to its finding's
+                             row in that run's comparison.json, and write
+                             verdict/reasoning/actor back — the ledger's two
+                             null columns, filled from the loop instead of by
+                             hand. --dry-run reports what would be bound and
+                             writes nothing
   pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
@@ -179,8 +188,9 @@ Options:
                       For ledger: the file to write instead of stdout
   --runs <dir>        ledger only: the runs root to scan for comparison.json
                       files (default: <repo-parent>/<repo>-prhero-runs)
-  --from <dir>        post only: the run dir to read findings.json and
-                      diff.patch from (required)
+  --from <dir>        post/triage only: the run dir to read findings.json and
+                      diff.patch (post) or comparison.json (triage) from
+                      (required)
   --gotchas <file>    Repo gotchas file (default: <repo>/.prhero/gotchas.md);
                       supply it from outside to review a tree you cannot dirty
   --config <file>     Local config (default: <repo>/.prhero/config.json) with
@@ -264,6 +274,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "ledger"
     | "watch"
     | "post"
+    | "triage"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -369,11 +380,12 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "init" &&
       arg !== "ledger" &&
       arg !== "watch" &&
-      arg !== "post"
+      arg !== "post" &&
+      arg !== "triage"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger", "watch" and "post")',
+          '"ledger", "watch", "post" and "triage")',
       );
     }
     command = arg;
@@ -423,19 +435,22 @@ export function parseArgs(argv: string[]): ParsedCli {
       "--post publishes the review as a PR comment, so it requires --pr",
     );
   }
-  // `post` (ROADMAP B6): publishes a PRIOR run's findings.json, read from
-  // --from, to the PR named by --pr. Both required — a "post" with neither
-  // has nothing to read and nowhere to send it, and guessing either would
-  // silently publish the wrong run to the wrong PR.
-  if (command === "post") {
+  // `post` (ROADMAP B6) and `triage` (ROADMAP B6c) share the same shape:
+  // both read a PRIOR run's artifacts, named by --from, and act on the PR
+  // named by --pr. Both flags required for either — a command with neither
+  // has nothing to read and nowhere to bind it, and guessing either would
+  // silently act on the wrong run or the wrong PR.
+  if (command === "post" || command === "triage") {
     if (options.pr === undefined) {
-      throw new CliUsageError("post requires --pr <n>");
+      throw new CliUsageError(`${command} requires --pr <n>`);
     }
     if (options.from === undefined) {
-      throw new CliUsageError("post requires --from <run-dir>");
+      throw new CliUsageError(`${command} requires --from <run-dir>`);
     }
   } else if (options.from !== undefined) {
-    throw new CliUsageError("--from only applies to the post command");
+    throw new CliUsageError(
+      "--from only applies to the post and triage commands",
+    );
   }
   // The watch surface, validated after the loop for the same order-blindness.
   if (command === "watch") {

@@ -320,6 +320,48 @@ describe("parseArgs post command", () => {
   });
 });
 
+// ROADMAP B6c: the `triage` verb — `pr-hero triage --pr <n> --from
+// <run-dir> [--dry-run]` — shares `post`'s exact shape (both --pr and
+// --from required, --from otherwise rejected everywhere else).
+describe("parseArgs triage command", () => {
+  test("is a recognized command, and the unknown-command list names it", () => {
+    expect(
+      parseArgs(["triage", "--pr", "5", "--from", "/runs/x"]).command,
+    ).toBe("triage");
+    try {
+      parseArgs(["audit"]);
+      throw new Error("should have thrown");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      expect((error as Error).message).toContain("triage");
+    }
+  });
+
+  test("requires --pr and --from", () => {
+    expect(() => parseArgs(["triage", "--from", "/runs/x"])).toThrow(/--pr/);
+    expect(() => parseArgs(["triage", "--pr", "5"])).toThrow(/--from/);
+  });
+
+  test("--from is read, and rejected on every other command", () => {
+    const { options } = parseArgs(["triage", "--pr", "5", "--from", "/runs/x"]);
+    expect(options.from).toBe("/runs/x");
+    expect(() => parseArgs(["review", "--from", "/runs/x"])).toThrow(/--from/);
+  });
+
+  test("accepts bare --pr (current branch's PR), and --dry-run parses beside it", () => {
+    const { options } = parseArgs([
+      "triage",
+      "--pr",
+      "--from",
+      "/runs/x",
+      "--dry-run",
+    ]);
+    expect(options.pr).toBe("current");
+    expect(options.from).toBe("/runs/x");
+    expect(options.dryRun).toBe(true);
+  });
+});
+
 describe("prCommentMarker", () => {
   const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
 
@@ -742,6 +784,7 @@ describe("buildComparisonJson", () => {
       prhero: null,
       verdict: null,
       reasoning: null,
+      actor: null,
     });
     expect(json.rows[1]).toEqual({
       bucket: "both",
@@ -762,6 +805,7 @@ describe("buildComparisonJson", () => {
       },
       verdict: null,
       reasoning: null,
+      actor: null,
     });
     expect(json.rows[2]).toEqual({
       bucket: "prhero_only",
@@ -775,12 +819,14 @@ describe("buildComparisonJson", () => {
       },
       verdict: null,
       reasoning: null,
+      actor: null,
     });
   });
 
   // The A3 lesson made structural: the triage columns exist, and they ship
-  // empty — never pre-filled, never omitted.
-  test("every row ships verdict and reasoning as literal nulls", () => {
+  // empty — never pre-filled, never omitted. `actor` (ROADMAP B6c) joins
+  // them for the same reason: nobody has triaged this row yet.
+  test("every row ships verdict, reasoning and actor as literal nulls", () => {
     const json = buildComparisonJson({
       pr: 1682,
       headSha: "e3ab386a63020c6f5c21d814d176ff33849eef8d",
@@ -795,6 +841,7 @@ describe("buildComparisonJson", () => {
     for (const row of json.rows) {
       expect(row.verdict).toBeNull();
       expect(row.reasoning).toBeNull();
+      expect(row.actor).toBeNull();
     }
   });
 

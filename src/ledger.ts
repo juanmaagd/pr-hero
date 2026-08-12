@@ -13,14 +13,19 @@ import type {
 import { CliUsageError, isFullCommitId } from "./preflight";
 
 // Unlike ComparisonRow (written always-null), a stored row may have been
-// triaged by hand since it was written: verdict and reasoning read back as
-// string-or-null.
+// triaged since it was written: verdict, reasoning and actor read back as
+// string-or-null (actor: "agent" | "human" | null).
 export interface StoredComparisonRow {
   bucket: Bucket;
   greptile: ComparisonGreptileClaim | null;
   prhero: ComparisonPrHeroClaim | null;
   verdict: string | null;
   reasoning: string | null;
+  // Who wrote verdict/reasoning (ROADMAP B6c). `actor` set with `verdict`
+  // null means "adjudicated, could not settle" (the triage's `inconclusive`
+  // outcome); both null means "nobody has looked yet" — a reader can tell
+  // those apart, which is the only reason the null verdict stays safe.
+  actor: "agent" | "human" | null;
 }
 
 export interface StoredComparison {
@@ -105,7 +110,15 @@ export function parseComparisonJson(raw: string): StoredComparison {
     run_status,
     ...(generated_at === undefined ? {} : { generated_at }),
     greptile: { found: (greptile as { found: boolean }).found },
-    rows: rows as StoredComparisonRow[],
+    // Normalizes a missing `actor` key (files written before this field
+    // existed) to explicit `null` — validateRow already accepted `undefined`
+    // for back-compat, but every DOWNSTREAM read (aggregateLedger's tally,
+    // the `=== null` pending check) must see one consistent absent-value,
+    // never have to know both spellings mean the same thing.
+    rows: (rows as Record<string, unknown>[]).map((row) => ({
+      ...row,
+      actor: (row.actor as StoredComparisonRow["actor"] | undefined) ?? null,
+    })) as StoredComparisonRow[],
   };
 }
 
@@ -137,6 +150,25 @@ function validateRow(candidate: unknown, index: number): void {
       );
     }
   }
+  // actor (ROADMAP B6c): same loud per-field validation verdict/reasoning
+  // already get, but a closed enum rather than "any string" — an unknown
+  // actor string is a malformed artifact, not a new taxonomy member (unlike
+  // verdict, which the ledger deliberately tallies AS-IS). `undefined`
+  // (the field absent entirely) is accepted, back-compat for files written
+  // before this field existed — same fallback shape as `generated_at`
+  // above; readActor below folds it to `null`.
+  const actor = row.actor;
+  if (
+    actor !== undefined &&
+    actor !== null &&
+    actor !== "agent" &&
+    actor !== "human"
+  ) {
+    throw new CliUsageError(
+      `comparison.json rows[${index}].actor must be "agent", "human" or ` +
+        `null, got: ${JSON.stringify(actor)}`,
+    );
+  }
 }
 
 function readString(record: Record<string, unknown>, field: string): string {
@@ -167,6 +199,16 @@ export interface LedgerBuckets {
   prheroOnly: number;
 }
 
+// M by agent, K by human, out of a row's own triaged verdict — always M+K
+// <= that row's `triaged` count, never forced to equal it: a row can carry
+// a verdict with no recorded actor (a legacy artifact, or a human editing
+// the JSON by hand before `actor` existed), and undercounting that split is
+// more honest than inventing an actor for it (ROADMAP B6c).
+export interface ActorTally {
+  agent: number;
+  human: number;
+}
+
 export interface LedgerPrEntry {
   pr: number;
   runCount: number;
@@ -178,6 +220,7 @@ export interface LedgerPrEntry {
     triaged: number;
     totalRows: number;
     verdictTally: Record<string, number>;
+    actorTally: ActorTally;
     // Every still-untriaged row of the latest run, kept whole so the
     // renderer can name exactly what a human should pick up next.
     pending: StoredComparisonRow[];
@@ -191,6 +234,7 @@ export interface LedgerTotals {
   triaged: number;
   totalRows: number;
   verdictTally: Record<string, number>;
+  actorTally: ActorTally;
 }
 
 export interface Ledger {
@@ -240,6 +284,7 @@ export function aggregateLedger(
     triaged: 0,
     totalRows: 0,
     verdictTally: {},
+    actorTally: { agent: 0, human: 0 },
   };
   for (const entry of prs) {
     totals.buckets.greptileOnly += entry.latest.buckets.greptileOnly;
@@ -254,6 +299,8 @@ export function aggregateLedger(
       totals.verdictTally[verdict] =
         (totals.verdictTally[verdict] ?? 0) + count;
     }
+    totals.actorTally.agent += entry.latest.actorTally.agent;
+    totals.actorTally.human += entry.latest.actorTally.human;
   }
   return { prs, totals };
 }
@@ -280,6 +327,7 @@ function prEntry(
 ): LedgerPrEntry {
   const buckets: LedgerBuckets = { greptileOnly: 0, both: 0, prheroOnly: 0 };
   const verdictTally: Record<string, number> = {};
+  const actorTally: ActorTally = { agent: 0, human: 0 };
   const pending: StoredComparisonRow[] = [];
   let triaged = 0;
   for (const row of latest.rows) {
@@ -296,6 +344,13 @@ function prEntry(
     // lesson lives in the rows' reasoning, not in an enum invented before
     // any triage happened.
     verdictTally[row.verdict] = (verdictTally[row.verdict] ?? 0) + 1;
+    // "the agent decides, and it is audited" (ROADMAP B6b) is a word until
+    // a human can see, in one line, what fraction of the verdicts a machine
+    // wrote — a row with no recorded actor (legacy artifact, or a human
+    // hand-editing the JSON before `actor` existed) is simply not counted
+    // in either bucket, never guessed into one.
+    if (row.actor === "agent") actorTally.agent += 1;
+    else if (row.actor === "human") actorTally.human += 1;
   }
   return {
     pr,
@@ -308,6 +363,7 @@ function prEntry(
       triaged,
       totalRows: latest.rows.length,
       verdictTally,
+      actorTally,
       pending,
     },
   };
@@ -345,6 +401,15 @@ export function renderLedger(ledger: Ledger): string {
       `${totals.buckets.prheroOnly}. pr-hero found something on ` +
       `${totals.prsWithPrHeroFindings} of ${totals.prCount} PRs; ` +
       `${totals.triaged} of ${totals.totalRows} rows triaged.`,
+  );
+  // "the agent decides, and it is audited" (ROADMAP B6b) is a word until a
+  // human can see, in one line, what fraction of the verdicts a machine
+  // wrote. Counts as counts, same reason the rest of this render avoids a
+  // percentage — the denominator is too small, some runs, for a rate to
+  // mean anything.
+  out.push(
+    `${totals.triaged} verdicts · ${totals.actorTally.agent} by agent · ` +
+      `${totals.actorTally.human} by human.`,
   );
   out.push("");
   out.push("## Verdicts");

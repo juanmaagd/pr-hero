@@ -483,10 +483,17 @@ export interface ComparisonRow {
   prhero: ComparisonPrHeroClaim | null;
   // Always null here, and present ON PURPOSE — the A3 lesson: a verdict
   // recorded without its reasoning cannot be re-examined when new evidence
-  // arrives. These two columns exist to be filled by the human triage, and
-  // the ledger (B4) will accumulate them across PRs.
+  // arrives. These two columns exist to be filled by the triage (6b/6c),
+  // and the ledger (B4) will accumulate them across PRs.
   verdict: null;
   reasoning: null;
+  // Who will eventually write verdict/reasoning — always null at build time
+  // for the same reason verdict/reasoning are: this row is fresh off a
+  // review, nobody has triaged it yet. `comparison.json` carries no
+  // `schema_version` (it is pr-hero's own artifact, not the findings schema
+  // shared with the lab — rule 5 does not apply), so this field costs no
+  // coordination (ROADMAP B6c, decided 2026-08-12).
+  actor: null;
 }
 
 export interface ComparisonJson {
@@ -555,7 +562,14 @@ function row(
   greptile: ComparisonGreptileClaim | null,
   prhero: ComparisonPrHeroClaim | null,
 ): ComparisonRow {
-  return { bucket, greptile, prhero, verdict: null, reasoning: null };
+  return {
+    bucket,
+    greptile,
+    prhero,
+    verdict: null,
+    reasoning: null,
+    actor: null,
+  };
 }
 
 function greptileClaim(finding: GreptileFinding): ComparisonGreptileClaim {
