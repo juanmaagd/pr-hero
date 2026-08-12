@@ -644,6 +644,15 @@ What is still manual, in the order it should be closed:
    better name, and worse, the ledger counts it as agreement. The skill should CREATE the issue and put
    its number in both the reply and the ledger row.
 
+   **A `deferred` finding is suppressed only inside the PR that deferred it** (decided 2026-08-12). It
+   stays `persist` across that PR's later heads, carrying its issue number, so nobody re-argues a
+   settled point. It does NOT suppress anywhere else: a different PR is a different review, and the
+   finding surfaces there again — the reply can simply cite the issue. The alternative, keying
+   suppression on the issue's own state, buys a `gh` call per finding and a new failure mode (an issue
+   closed without a fix silently buries the defect forever). Direction of error decides it, as
+   everywhere else here: surfacing again is visible noise a human dismisses in one line, suppressing
+   globally is an invisible loss.
+
    **`misclassified` earns its place on evidence.** It is exactly what happened to F003 on this repo's
    own PR #1: the finding was REAL — `gh` genuinely has no timeout anywhere — but the engine filed it
    `introduced` when it is plainly pre-existing, and the refuter corroborated it without questioning the
@@ -711,8 +720,25 @@ What is still manual, in the order it should be closed:
    the coordinated v1.1 (C2) and both validators are allowlists, so any new field is optional; and the
    ledger **tallies verdicts AS-IS with no enum on purpose** (the taxonomy is not invented before the
    triage exists) — so the skill owning a vocabulary must not put that vocabulary in the parser.
-   Record the actor (`agent` vs `human`) alongside the verdict, or the audit trail 6b is premised on
-   does not exist.
+   **Where the actor lives, and it is free** (decided 2026-08-12). `comparison.json` carries NO
+   `schema_version` — it is pr-hero's own artifact, built by `buildComparisonJson` and read by
+   `ledger.ts`, and it is NOT the findings schema shared with the lab. Rule 5 therefore does not apply
+   and adding a field costs nothing: `actor: "agent" | "human" | null` sits beside `verdict` and
+   `reasoning` on `ComparisonRow`, with the same loud per-field validation the parser already gives
+   the other two.
+
+   **The ledger must REPORT the split, not just store it.** 6b's whole premise is "the agent decides,
+   and it is audited" — and audited is a word until a human can see, in one line, what fraction of the
+   verdicts a machine wrote. The ledger should tally `N verdicts · M by agent · K by human` next to the
+   buckets it already counts.
+
+   **`inconclusive` leaves `verdict: null`, deliberately** (decided 2026-08-12). `ledger.ts:289` sends
+   every `verdict === null` row to the Pending triage list, and a finding the adjudicator could not
+   settle IS pending a human — which is exactly where 6b's escalation rule (2 consecutive inconclusive
+   heads → a human) delivers it. The two mechanisms meet without either knowing about the other.
+   The information that would otherwise be lost is recovered by the other two fields rather than by a
+   new enum: `actor` set with `verdict` null means "adjudicated, could not settle"; both null means
+   "nobody has looked yet". A reader can tell those apart, which is the only reason the null is safe.
 
 7. **A re-review is not a review — and today we run it as one. NOT BUILT.** Raised by Juanma
    2026-08-12, immediately after item 6 shipped and its own live runs made the gap visible. He is right,
