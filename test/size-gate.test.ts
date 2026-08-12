@@ -2,7 +2,7 @@
 // money — so every branch of it is pinned here, offline.
 
 import { describe, expect, test } from "bun:test";
-import type { NumstatFile } from "../src/preflight";
+import { type NumstatFile, parseNumstatFiles } from "../src/preflight";
 import {
   DEFAULT_SIZE_GATE,
   diffRecordPath,
@@ -444,6 +444,20 @@ describe("effectiveDiffStat", () => {
     expect(
       effectiveDiffStat(
         [file("src/a.ts", 10, 5), file("bun.lock", 900, 800)],
+        DEFAULT_SIZE_GATE.excludeGlobs,
+      ),
+    ).toEqual({ files: 1, insertions: 10, deletions: 5 });
+  });
+
+  // The regression: git C-quotes non-ASCII paths, and a quoted path matches no
+  // glob. The file was dropped from diff.patch while its lines stayed here, so
+  // the gate over-counted a diff the hunters never saw.
+  test("a C-quoted excluded path is not counted", () => {
+    expect(
+      effectiveDiffStat(
+        parseNumstatFiles(
+          '10\t5\tsrc/a.ts\n900\t800\t"canci\\303\\263n.min.js"\n',
+        ),
         DEFAULT_SIZE_GATE.excludeGlobs,
       ),
     ).toEqual({ files: 1, insertions: 10, deletions: 5 });
