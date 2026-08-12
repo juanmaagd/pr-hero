@@ -78,3 +78,9 @@ Return your verdict word (`upheld`, `rejected`, or `inconclusive`) and the speci
 path:line citations you personally checked — that led you there. If your verdict is
 `inconclusive`, state exactly what would have settled it and why the repository does not currently
 show it.
+
+The caller (the PR's coding agent, running `pr-hero-triage`) copies your exact verdict word
+verbatim into its reply's triage marker (`verdict=<your word>`, see SKILL.md "The reply format")
+and into its reply prose — it never paraphrases or softens it. That marker is the only durable
+record of this ruling: it is what lets a later run tell a settled finding from an unsettled one,
+and what the escalation rule (2 consecutive `inconclusive` heads) counts.

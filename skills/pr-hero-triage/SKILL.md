@@ -100,7 +100,9 @@ adjudicator that inherited your context would simply agree with itself.
 
 The adjudicator returns exactly one of `upheld`, `rejected`, or `inconclusive` — see
 `adjudicator.md` for what each means and the burden-of-proof rule behind them. Include the exact
-verdict word in your reply.
+verdict word in your reply prose AND in the triage marker's `verdict=` field (see "The reply
+format" below) — the marker is what makes the verdict machine-readable for the ledger and for the
+escalation rule.
 
 ## One adjudication per finding per HEAD
 
@@ -119,20 +121,32 @@ say so in the reply: it escalates to a human. Do not spawn a third adjudicator r
 different answer — if two different heads with real code changes between them did not settle it,
 a third will not, and by then the thread carries enough material for a person to rule in a minute.
 
+**The count is read off the finding's PRIOR triage markers, not remembered or estimated.** Fetch
+this finding's own reply thread, parse every `<!-- pr-hero-triage ` marker already posted in it in
+order, and read their `verdict=` fields — the same field this round's reply will also carry. If
+the most recent one is `verdict=inconclusive` AND the one before it is also `verdict=inconclusive`
+(two markers, both `inconclusive`, both belonging to a head change that legitimately re-triaged —
+see "One adjudication per finding per HEAD" above), this round is the escalation, not a third
+adjudicator spawn. This is what makes the rule checkable: the markers ARE the state, there is
+nothing else to consult.
+
 ## The reply format
 
 The reply MUST open with this marker as its first line, exactly:
 
 ```
-<!-- pr-hero-triage tag=<tag> head=<40-hex> actor=agent -->
+<!-- pr-hero-triage tag=<tag> head=<40-hex> actor=agent verdict=<verdict> -->
 ```
 
+`verdict=` is the adjudicator's exact word (`upheld`, `rejected`, or `inconclusive`) and is
+REQUIRED for `dismissed`, `deferred`, and `misclassified` — the three tags that spawn one — and
+MUST NOT appear on `applied`, which spawns no adjudicator and therefore has no verdict to record.
 `deferred` additionally carries `issue=<n>` on the same line. `head=` is this PR's CURRENT head
 sha — the same one the finding's own marker was evaluated against for this triage round.
 
 ### Example reply — `applied`
 
-No adjudicator; the fix speaks for itself.
+No adjudicator; the fix speaks for itself. No `verdict=` field.
 
 ```
 <!-- pr-hero-triage tag=applied head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent -->
@@ -143,7 +157,7 @@ Fixed in this PR — see 3f9a2c1: `parseConfig` now validates `retries` before u
 ### Example reply — `dismissed`
 
 ```
-<!-- pr-hero-triage tag=dismissed head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent -->
+<!-- pr-hero-triage tag=dismissed head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
 
 Adjudicator verdict: upheld
 
@@ -155,7 +169,7 @@ this PR. The isolated adjudicator confirmed the citation independently and retur
 ### Example reply — `deferred`
 
 ```
-<!-- pr-hero-triage tag=deferred head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent issue=482 -->
+<!-- pr-hero-triage tag=deferred head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent issue=482 verdict=upheld -->
 
 Adjudicator verdict: upheld
 
@@ -167,7 +181,7 @@ confirmed the finding is real and that scope, not correctness, is the actual iss
 ### Example reply — `misclassified`
 
 ```
-<!-- pr-hero-triage tag=misclassified head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent -->
+<!-- pr-hero-triage tag=misclassified head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
 
 Adjudicator verdict: upheld
 
@@ -197,5 +211,9 @@ heuristic parse:
 - The adjudicator never sees your reasoning context — only the finding, your argument, and the
   repo.
 - `deferred` without a real issue number is malformed — do not post it.
+- `dismissed`, `deferred`, and `misclassified` without a `verdict=` field are malformed — do not
+  post them. `applied` WITH a `verdict=` field is equally malformed — it claims a ruling that
+  never happened.
 - Never re-triage a finding whose head is unchanged since its last triage on this PR.
-- After 2 consecutive `inconclusive` heads, stop and hand the finding to a human.
+- After 2 consecutive `inconclusive` heads — read off the finding's own prior triage markers, not
+  memory — stop and hand the finding to a human.
