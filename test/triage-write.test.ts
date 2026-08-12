@@ -124,6 +124,104 @@ describe("applyTriageReplies — verdict composition (ROADMAP B6c)", () => {
   });
 });
 
+describe("applyTriageReplies — path+line collisions (real data shape, compare.ts:103-107)", () => {
+  // Two distinct findings can legitimately share a path+line (e.g. PR 1509:
+  // two defects at the same location). A reply must bind to the row whose
+  // claim its marker's `c` fingerprint actually matches, never to whichever
+  // tied row happens to be first — that would silently overwrite the WRONG
+  // row's verdict/reasoning/actor.
+  const CLAIM_A = "the latch never resets";
+  const CLAIM_B = "the retry counter overflows silently";
+
+  function twoTiedRows(): StoredComparisonRow[] {
+    return [
+      prheroRow({
+        prhero: {
+          id: "F001",
+          path: "src/a.ts",
+          line: 10,
+          claim: CLAIM_A,
+          tier: "blocking",
+        },
+      }),
+      prheroRow({
+        prhero: {
+          id: "F002",
+          path: "src/a.ts",
+          line: 10,
+          claim: CLAIM_B,
+          tier: "blocking",
+        },
+      }),
+    ];
+  }
+
+  test("fingerprint picks the RIGHT row out of two tied at the same path+line", () => {
+    const parentForB = `${findingMarker({ path: "src/a.ts", line: 10, headSha: HEAD, claim: CLAIM_B })}\n${CLAIM_B}`;
+    const outcome = applyTriageReplies(twoTiedRows(), [
+      reply(
+        { tag: "applied", headSha: HEAD, actor: "agent" },
+        "fixed B",
+        parentForB,
+      ),
+    ]);
+    expect(outcome.bound).toBe(1);
+    expect(outcome.ignored).toBe(0);
+    // Row F001 (claim A) must stay untouched.
+    expect(outcome.rows[0]?.verdict).toBeNull();
+    expect(outcome.rows[0]?.actor).toBeNull();
+    // Row F002 (claim B) is the one that gets bound.
+    expect(outcome.rows[1]?.verdict).toBe("applied");
+    expect(outcome.rows[1]?.actor).toBe("agent");
+  });
+
+  test("fingerprint matches NEITHER tied row: refuses to bind", () => {
+    const foreignClaim = "something else entirely";
+    const parentForForeign = `${findingMarker({ path: "src/a.ts", line: 10, headSha: HEAD, claim: foreignClaim })}\n${foreignClaim}`;
+    const outcome = applyTriageReplies(twoTiedRows(), [
+      reply(
+        { tag: "applied", headSha: HEAD, actor: "agent" },
+        "fixed",
+        parentForForeign,
+      ),
+    ]);
+    expect(outcome.bound).toBe(0);
+    expect(outcome.ignored).toBe(1);
+    expect(outcome.rows[0]?.verdict).toBeNull();
+    expect(outcome.rows[1]?.verdict).toBeNull();
+  });
+
+  test("fingerprint matches BOTH tied rows (duplicate claims): refuses to bind", () => {
+    const rows: StoredComparisonRow[] = [
+      prheroRow({
+        prhero: {
+          id: "F001",
+          path: "src/a.ts",
+          line: 10,
+          claim: PARENT_CLAIM,
+          tier: "blocking",
+        },
+      }),
+      prheroRow({
+        prhero: {
+          id: "F002",
+          path: "src/a.ts",
+          line: 10,
+          claim: PARENT_CLAIM,
+          tier: "blocking",
+        },
+      }),
+    ];
+    const outcome = applyTriageReplies(rows, [
+      reply({ tag: "applied", headSha: HEAD, actor: "agent" }, "fixed"),
+    ]);
+    expect(outcome.bound).toBe(0);
+    expect(outcome.ignored).toBe(1);
+    expect(outcome.rows[0]?.verdict).toBeNull();
+    expect(outcome.rows[1]?.verdict).toBeNull();
+  });
+});
+
 describe("applyTriageReplies — ignored replies", () => {
   // Three distinct reasons a reply never binds — a foreign parent
   // (somebody else's conversation), a reply that is not a triage marker at
