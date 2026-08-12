@@ -383,8 +383,11 @@ export interface FindingMarkerFields {
 
 // First 12 hex chars of sha256(claim.trim()) — enough entropy to break a tie
 // between two candidates at the same distance, nowhere near enough (nor
-// intended) to be a content-addressed identity on its own.
-function claimFingerprint(claim: string): string {
+// intended) to be a content-addressed identity on its own. Exported so
+// inline.ts's matcher can derive the SAME fingerprint over a current-run
+// finding's claim to compare against a posted marker's `c` — design D3's
+// tie-breaker only works if both sides compute it identically.
+export function claimFingerprint(claim: string): string {
   return new Bun.CryptoHasher("sha256")
     .update(claim.trim())
     .digest("hex")

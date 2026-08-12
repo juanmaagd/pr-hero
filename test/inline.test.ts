@@ -13,6 +13,7 @@ import {
   type PostedFindingComment,
   parseHunkAnchors,
 } from "../src/inline";
+import { claimFingerprint } from "../src/pr-preflight";
 
 function finding(
   path: string,
@@ -233,6 +234,114 @@ describe("matchPostedFindings", () => {
     expect(result.fresh).toHaveLength(2);
     expect(result.persist).toHaveLength(0);
     expect(result.resolved).toHaveLength(0);
+  });
+
+  // Fix 1 (R11 daylight): same head, marker line == finding line, but the
+  // LIVE line drifted past the window (GitHub re-anchors on a base-branch
+  // advance, with no push to the head). The generic window-only algorithm
+  // reposts this (distance 12 > window 5); the exact same-head branch must
+  // match on the marker's stored line instead.
+  test("same head + exact marker line matches despite the live line drifting past the window", () => {
+    const result = matchPostedFindings({
+      findings: [finding("a.ts", 100)],
+      posted: [posted("a.ts", 100, { liveLine: 112 })],
+      headSha: HEAD,
+    });
+    expect(result.persist).toHaveLength(1);
+    expect(result.fresh).toHaveLength(0);
+  });
+
+  // Fix 2 (WARN-1): pins the live-line preference on a DIFFERENT head, where
+  // the exact same-head branch cannot fire and the live line is the only
+  // operative key. Marker line (900) is nowhere near the finding (100); the
+  // live line (102) is. Must fail if the `??` preference for the live line
+  // is ever dropped in favour of the marker line.
+  test("different head: the live line is the operative key, not the marker's stale line", () => {
+    const DIFFERENT_HEAD = "ffff999988887777666655554444333322221111";
+    const result = matchPostedFindings({
+      findings: [finding("a.ts", 100)],
+      posted: [posted("a.ts", 900, { liveLine: 102 })],
+      headSha: DIFFERENT_HEAD,
+    });
+    expect(result.persist).toHaveLength(1);
+    expect(result.fresh).toHaveLength(0);
+  });
+
+  // Fix 4 (D3 tie-breaker): two candidates tied at the minimum window
+  // distance; only one's marker fingerprint matches the finding's claim.
+  // The fingerprint resolves the tie instead of falling through to fresh.
+  test("a tied window match resolves via the fingerprint tie-breaker", () => {
+    const targetFinding = finding("a.ts", 100, { claim: "the real defect" });
+    const matchingFingerprint = claimFingerprint("the real defect");
+    const result = matchPostedFindings({
+      findings: [targetFinding],
+      posted: [
+        posted("a.ts", 98, {
+          id: 1,
+          marker: { ...posted("a.ts", 98).marker, c: matchingFingerprint },
+        }),
+        posted("a.ts", 102, { id: 2 }),
+      ],
+      headSha: HEAD,
+    });
+    expect(result.persist).toHaveLength(1);
+    expect(result.persist[0]?.posted.id).toBe(1);
+    expect(result.fresh).toHaveLength(0);
+  });
+
+  // Fix 4, constraint: a tie where NO candidate's fingerprint matches still
+  // resolves to post-as-new, exactly as before the tie-breaker existed.
+  test("a tied window match with no fingerprint hit still posts as new", () => {
+    const result = matchPostedFindings({
+      findings: [finding("a.ts", 100, { claim: "the real defect" })],
+      posted: [posted("a.ts", 98, { id: 1 }), posted("a.ts", 102, { id: 2 })],
+      headSha: HEAD,
+    });
+    expect(result.fresh).toHaveLength(1);
+    expect(result.persist).toHaveLength(0);
+  });
+
+  // Fix 4, constraint: the fingerprint tie-breaker must NEVER override a
+  // strictly nearer candidate. The nearer candidate (distance 1) has no
+  // fingerprint match; the farther one (distance 3, still in-window) does.
+  // The nearer candidate must still win.
+  test("the fingerprint tie-breaker never overrides a strictly nearer candidate", () => {
+    const targetFinding = finding("a.ts", 100, { claim: "the real defect" });
+    const matchingFingerprint = claimFingerprint("the real defect");
+    const result = matchPostedFindings({
+      findings: [targetFinding],
+      posted: [
+        posted("a.ts", 101, { id: 1 }), // distance 1, no fingerprint match
+        posted("a.ts", 103, {
+          id: 2,
+          marker: { ...posted("a.ts", 103).marker, c: matchingFingerprint },
+        }), // distance 3, fingerprint matches, but is not the nearest
+      ],
+      headSha: HEAD,
+    });
+    expect(result.persist).toHaveLength(1);
+    expect(result.persist[0]?.posted.id).toBe(1);
+  });
+
+  // Fix 4, constraint: the fingerprint tie-breaker must NEVER extend the
+  // window. A candidate beyond the window with a matching fingerprint must
+  // not be picked, even when it is the only candidate at all.
+  test("the fingerprint tie-breaker never extends the window", () => {
+    const targetFinding = finding("a.ts", 100, { claim: "the real defect" });
+    const matchingFingerprint = claimFingerprint("the real defect");
+    const result = matchPostedFindings({
+      findings: [targetFinding],
+      posted: [
+        posted("a.ts", 110, {
+          // distance 10, past the window; fingerprint matches, but a
+          // fingerprint hit past the window is not a candidate at all.
+          marker: { ...posted("a.ts", 110).marker, c: matchingFingerprint },
+        }),
+      ],
+      headSha: HEAD,
+    });
+    expect(result.fresh).toHaveLength(1);
+    expect(result.persist).toHaveLength(0);
   });
 });
 
