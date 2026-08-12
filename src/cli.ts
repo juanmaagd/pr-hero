@@ -120,13 +120,27 @@ import {
   evaluateSizeGate,
   evaluateSizeGateAggregate,
   filterDiffByGlobs,
+  type SizeGateVerdict,
   sizeGateConfig,
   sizeGateLine,
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
 import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
-import { log } from "./ui";
+import {
+  bold,
+  box,
+  dim,
+  green,
+  log,
+  red,
+  row,
+  section,
+  shortPath,
+  shortSha,
+  styleEnabled,
+  yellow,
+} from "./ui";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
@@ -153,13 +167,18 @@ const EMPTY_MCP_CONFIG = { mcpServers: {} };
 
 // Exclusions are a MUTATION of the reviewed diff, so they are stated out
 // loud: an operator who is told "3 files reviewed" must be able to see that
-// two more were dropped, and where the unfiltered bytes went.
-function logExclusions(droppedPaths: string[]): void {
+// two more were dropped, and where the unfiltered bytes went. It sits in the
+// decision block because an exclusion is what the size gate's numbers were
+// computed after.
+function logExclusions(droppedPaths: string[], styles = false): void {
   if (droppedPaths.length === 0) return;
-  log(
+  logMarkerRow(
+    "!",
     `exclusions: ${droppedPaths.length} generated file(s) dropped from the ` +
       `reviewed diff (${listPaths(droppedPaths)}); the unfiltered diff is ` +
       "kept as diff.raw.patch",
+    dim,
+    styles,
   );
 }
 
@@ -453,13 +472,11 @@ async function review(options: CliOptions): Promise<number> {
     codegraphAvailable,
     estimate,
     hunterCount,
+    // Evaluated above (step 9) and ENFORCED below at step 13, unchanged;
+    // the plan only prints the verdict, last, where the decision is made.
+    sizeGate,
+    droppedPaths: effectiveDiff.droppedPaths,
   });
-  log();
-  log(sizeGateLine(sizeGate));
-  logExclusions(effectiveDiff.droppedPaths);
-  if (!sizeGate.ok && options.force) {
-    log("--force given: reviewing anyway.");
-  }
 
   // 12 — the free exit. Dry run reports the gate verdict (including that it
   // WOULD skip) and still exits 0: its contract is "everything except
@@ -683,6 +700,20 @@ async function reviewPr(
   if (options.dryRun) {
     const hunterCount = dryRunHunterCount(spec, config);
     const estimate = estimateCost(target.ghDiffStat, hunterCount);
+    // The gate, ESTIMATED. A PR dry run creates nothing and fetches nothing,
+    // so the only size facts on hand are GitHub's own aggregate counters —
+    // no per-file paths, therefore no exclusions. Fetching `gh pr view
+    // --json files` here would buy exactness at the price of the "nothing
+    // was fetched" contract, and the estimate is only ever wrong in the
+    // conservative direction (a gate that fires here may pass for real once
+    // lockfiles come off, and GitHub's counters carry no whitespace
+    // information, so a formatter sweep counts in full here and counts zero
+    // in the real git-side gate). Labelled on both counts, in the plan's own
+    // decision block, so nobody reads it as the verdict.
+    const estimated = evaluateSizeGateAggregate(
+      target.ghDiffStat,
+      sizeGateConfig(options),
+    );
     printPrPlan({
       options,
       operatorRoot,
@@ -702,27 +733,13 @@ async function reviewPr(
       config,
       estimate,
       hunterCount,
+      sizeGate: estimated,
+      sizeGateNote:
+        "(estimate from GitHub's aggregate counters; exclusions not " +
+        "applied and the count is not whitespace-adjusted)",
+      droppedPaths: [],
     });
-    // The gate, ESTIMATED. A PR dry run creates nothing and fetches nothing,
-    // so the only size facts on hand are GitHub's own aggregate counters —
-    // no per-file paths, therefore no exclusions. Fetching `gh pr view
-    // --json files` here would buy exactness at the price of the "nothing
-    // was fetched" contract, and the estimate is only ever wrong in the
-    // conservative direction (a gate that fires here may pass for real once
-    // lockfiles come off, and GitHub's counters carry no whitespace
-    // information, so a formatter sweep counts in full here and counts zero
-    // in the real git-side gate). Labelled on both counts so nobody reads it
-    // as the verdict.
-    const estimated = evaluateSizeGateAggregate(
-      target.ghDiffStat,
-      sizeGateConfig(options),
-    );
     log();
-    log(
-      `${sizeGateLine(estimated)} (estimate from GitHub's aggregate ` +
-        "counters; exclusions not applied and the count is not " +
-        "whitespace-adjusted)",
-    );
     if (!estimated.ok && !options.force) {
       log("dry run: this PR would likely be SKIPPED by the size gate.");
     }
@@ -803,14 +820,14 @@ async function reviewPr(
     parseNumstatFiles(gateNumstat.stdout),
     gateConfig,
   );
-  log(sizeGateLine(sizeGate));
-  logExclusions(effectiveDiff.droppedPaths);
-  if (!sizeGate.ok) {
-    if (options.force) {
-      log("--force given: reviewing anyway.");
-    } else {
-      throw new CliError(sizeGate.message);
-    }
+  // On every surviving path the plan's decision block prints the verdict
+  // (and the --force note). A SKIP is the one case that never reaches the
+  // plan — the throw is above the run dir on purpose — so it states itself
+  // here, immediately before dying.
+  if (!sizeGate.ok && !options.force) {
+    log(sizeGateLine(sizeGate));
+    logExclusions(effectiveDiff.droppedPaths);
+    throw new CliError(sizeGate.message);
   }
 
   // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
@@ -855,6 +872,8 @@ async function reviewPr(
     config,
     estimate,
     hunterCount,
+    sizeGate,
+    droppedPaths: effectiveDiff.droppedPaths,
     resolved: { baseSha, diffFromSha, diffPath, parityFires },
   });
   if (!options.yes && !(await confirm(estimate.low, estimate.high))) {
@@ -2155,7 +2174,7 @@ function predictPrRunDir(
   }
 }
 
-interface PlanContext {
+export interface PlanContext {
   options: CliOptions;
   repoRoot: string;
   baseRef: BaseRefResolution;
@@ -2173,11 +2192,17 @@ interface PlanContext {
   codegraphAvailable: boolean;
   estimate: ReturnType<typeof estimateCost>;
   hunterCount: number;
+  // The gate's ALREADY-EVALUATED verdict, carried in so the plan can print
+  // it last. The gate is still decided by the shell, before the cost band's
+  // confirm() — this only moves where the line lands on screen.
+  sizeGate: SizeGateVerdict;
+  droppedPaths: string[];
 }
 
 // Where the base ref came from, because "main" chosen by fallback and "main"
 // asked for by name are the same string with very different confidence behind
-// them.
+// them. The full sentence lives in the details view now; the card carries the
+// short tag below, which says the same thing in one token.
 function baseSourceNote(ctx: PlanContext): string {
   switch (ctx.baseRef.source) {
     case "flag":
@@ -2191,20 +2216,112 @@ function baseSourceNote(ctx: PlanContext): string {
   }
 }
 
-function printPlan(ctx: PlanContext): void {
-  const row = (label: string, value: string): void => {
-    log(`  ${label.padEnd(15)}${value}`);
-  };
-  log("pr-hero review — plan");
+function baseSourceTag(ctx: PlanContext): string {
+  return ctx.baseRef.source === "fallback" ? "fallback" : baseSourceNote(ctx);
+}
+
+// The prose the plan card demotes: why the base ref is trusted, what the
+// range actually means, and what the cost band was computed from. Long,
+// true, and read at most once — so it does not belong between the operator
+// and the yes/no they are about to give.
+const PERMISSIONS_NOTE =
+  "steps run with --permission-mode bypassPermissions, bounded only by " +
+  "each agent's read-only tool allow-list";
+
+// One key/value row through the shared formatter, so a long value wraps to
+// the value column instead of the left margin.
+function logRow(label: string, value: string, styles: boolean): void {
+  for (const line of row(label, value, { styles })) log(line);
+}
+
+// The decision block deliberately breaks the grid above it: a one-character
+// marker instead of a label column, so the two lines that decide "spend or
+// not" do not read as two more rows of setup.
+const MARKER_ROW = { indent: 2, labelWidth: 2 } as const;
+
+// Built UNSTYLED and painted whole afterwards: row() measures the value to
+// place the wrap, and an escape sequence inside that value would be counted
+// as visible width.
+function logMarkerRow(
+  marker: string,
+  value: string,
+  paint: (text: string, styles: boolean) => string,
+  styles: boolean,
+): void {
+  for (const line of row(marker, value, { ...MARKER_ROW, styles: false })) {
+    log(paint(line, styles));
+  }
+}
+
+function agentRow(
+  ctx: { options: CliOptions; agentFiles: Map<string, ParsedAgent> },
+  agent: ReviewSpec["agents"][number],
+  fires: string,
+): string {
+  const parsed = ctx.agentFiles.get(agent.key);
+  const model = ctx.options.model ?? agent.model ?? parsed?.model ?? "?";
+  return `${agent.key.padEnd(12)} ${model.padEnd(8)} ${fires}`;
+}
+
+// The last block on screen and the only one an operator must read: the gate
+// verdict, then the money. Both used to sit mid-list, where the eye that had
+// already given up on the plan never reached them.
+interface PlanDecision {
+  sizeGate: SizeGateVerdict;
+  // Set only where the verdict is an ESTIMATE rather than the gate's own
+  // answer (the PR dry run's aggregate counters); printed beside it so
+  // nobody reads a guess as the verdict.
+  sizeGateNote?: string;
+  droppedPaths: string[];
+  force: boolean;
+  estimate: ReturnType<typeof estimateCost>;
+  hunterCount: number;
+}
+
+function printDecision(d: PlanDecision, styles: boolean): void {
   log();
-  row("repo", ctx.repoRoot);
-  row("base", `${ctx.baseRef.ref} → ${ctx.baseSha} (${baseSourceNote(ctx)})`);
-  row("head", `${ctx.options.head} → ${ctx.headSha}`);
+  // sizeGateLine's wording is FIXED — size-gate.test.ts pins five substrings
+  // of it, and the watcher's log parser reads the same phrasing. The ✓/✗ is
+  // decoration in front of it, never a replacement for it.
+  const note = d.sizeGateNote === undefined ? "" : ` ${d.sizeGateNote}`;
+  logMarkerRow(
+    d.sizeGate.ok ? "✓" : "✗",
+    `${sizeGateLine(d.sizeGate)}${note}`,
+    d.sizeGate.ok ? green : red,
+    styles,
+  );
+  logExclusions(d.droppedPaths, styles);
+  if (!d.sizeGate.ok && d.force) {
+    logMarkerRow("!", "--force given: reviewing anyway.", yellow, styles);
+  }
+  logMarkerRow(
+    "$",
+    `estimate $${d.estimate.low.toFixed(2)} – ` +
+      `$${d.estimate.high.toFixed(2)} (${d.hunterCount} hunter(s) + refuter)`,
+    bold,
+    styles,
+  );
+}
+
+// NOT printed by default (ROADMAP: WU3 wires it to a "Show details" menu
+// option). Exported so that wiring is a call, not a rewrite: everything the
+// card demoted lands here, and nothing is dropped on the way.
+export function planDetails(ctx: PlanContext): string[] {
+  const styles = styleEnabled();
+  const lines = [section("details", styles)];
+  const push = (label: string, value: string): void => {
+    lines.push(...row(label, value, { styles }));
+  };
+  push("repo", ctx.repoRoot);
+  push("base", `${ctx.baseRef.ref} → ${ctx.baseSha} (${baseSourceNote(ctx)})`);
+  push("head", `${ctx.options.head} → ${ctx.headSha}`);
   // BOTH endpoints, always. The base ref the user asked for and the commit the
   // diff is actually computed from are different things whenever base has
   // moved on, and a plan that printed only one of them would leave the range
-  // ambiguous in exactly the case that motivated the merge-base default.
-  row(
+  // ambiguous in exactly the case that motivated the merge-base default. The
+  // card satisfies that with its own BASE + RANGE pair (short shas); this
+  // view adds the full shas and the sentence explaining the range.
+  push(
     "diff from",
     ctx.options.twoDot
       ? `${ctx.baseSha} — --two-dot: the literal ${ctx.baseRef.ref}..` +
@@ -2213,28 +2330,11 @@ function printPlan(ctx: PlanContext): void {
       : `${ctx.diffFromSha} — merge base of ${ctx.baseRef.ref} and ` +
           `${ctx.options.head}; only what this branch adds is reviewed`,
   );
-  row(
-    "diff",
-    `${ctx.diffStat.files} files, +${ctx.diffStat.insertions} ` +
-      `−${ctx.diffStat.deletions} (${ctx.diffPath})`,
-  );
-  row("agents dir", ctx.agentsDir);
-  for (const agent of ctx.spec.agents) {
-    const parsed = ctx.agentFiles.get(agent.key);
-    const model = ctx.options.model ?? agent.model ?? parsed?.model ?? "?";
-    const fires =
-      agent.role === "refuter"
-        ? "per severe finding"
-        : agent.trigger === undefined
-          ? "always"
-          : ctx.parityFires
-            ? "triggered"
-            : "will NOT fire";
-    row("", `${agent.key.padEnd(12)} ${model.padEnd(8)} ${fires}`);
-  }
-  row("hop budget", String(ctx.options.hopBudget));
-  row("run dir", ctx.runDir);
-  row(
+  push("diff", ctx.diffPath);
+  push("agents dir", ctx.agentsDir);
+  push("run dir", ctx.runDir);
+  push("hop budget", String(ctx.options.hopBudget));
+  push(
     "parity",
     ctx.config.parity_trigger_paths.length === 0
       ? "no parity_trigger_paths configured — the parity hunter never fires"
@@ -2242,28 +2342,82 @@ function printPlan(ctx: PlanContext): void {
         ? `fires (a changed path matches ${ctx.config.parity_trigger_paths.length} configured pattern(s))`
         : "configured, but no changed path matches — it will not fire",
   );
-  row(
+  push(
     "codegraph",
     ctx.codegraphAvailable
       ? "available (.codegraph found; codegraph_explore is live)"
       : "NOT FOUND — the agents' codegraph_explore grant is inert, so this " +
           "review runs on Read/Grep/Glob alone",
   );
-  row("priors", `${ctx.config.suspicion_priors.length} suspicion prior(s)`);
-  row(
-    "cost estimate",
-    `$${ctx.estimate.low.toFixed(2)} – $${ctx.estimate.high.toFixed(2)} ` +
-      `(${ctx.hunterCount} hunter(s) + refuter)`,
+  push("priors", `${ctx.config.suspicion_priors.length} suspicion prior(s)`);
+  push("estimate", ctx.estimate.basis);
+  push("permissions", PERMISSIONS_NOTE);
+  return lines;
+}
+
+function printPlan(ctx: PlanContext): void {
+  const styles = styleEnabled();
+  for (const line of box(
+    "pr-hero · review",
+    [
+      `${ctx.baseRef.ref}..${ctx.options.head}`,
+      `${shortPath(ctx.repoRoot)} · ${ctx.diffStat.files} files  ` +
+        `+${ctx.diffStat.insertions} −${ctx.diffStat.deletions}`,
+    ],
+    { styles },
+  )) {
+    log(line);
+  }
+  log();
+  let label = "AGENTS";
+  for (const agent of ctx.spec.agents) {
+    const fires =
+      agent.role === "refuter"
+        ? "per severe finding"
+        : agent.trigger === undefined
+          ? "always"
+          : ctx.parityFires
+            ? "triggered"
+            : "✗ will not fire";
+    logRow(label, agentRow(ctx, agent, fires), styles);
+    label = "";
+  }
+  log();
+  logRow(
+    "BASE",
+    `${ctx.baseRef.ref} → ${shortSha(ctx.baseSha)}  (${baseSourceTag(ctx)})`,
+    styles,
   );
-  row("", ctx.estimate.basis);
-  row(
-    "permissions",
-    "steps run with --permission-mode bypassPermissions, bounded only by " +
-      "each agent's read-only tool allow-list",
+  // The second endpoint of the pair the details view explains: what the diff
+  // is actually computed from, which is the merge base unless --two-dot moved
+  // it back to the base tip.
+  logRow(
+    "RANGE",
+    `${shortSha(ctx.diffFromSha)} → ${shortSha(ctx.headSha)}  ` +
+      (ctx.options.twoDot ? "(--two-dot, two-point range)" : "(merge base)"),
+    styles,
+  );
+  logRow(
+    "RUN",
+    `${path.basename(ctx.runDir)} · ` +
+      (ctx.codegraphAvailable ? "codegraph live" : "codegraph NOT FOUND") +
+      ` · hop budget ${ctx.options.hopBudget}` +
+      ` · ${ctx.config.suspicion_priors.length} prior(s)`,
+    styles,
+  );
+  printDecision(
+    {
+      sizeGate: ctx.sizeGate,
+      droppedPaths: ctx.droppedPaths,
+      force: ctx.options.force,
+      estimate: ctx.estimate,
+      hunterCount: ctx.hunterCount,
+    },
+    styles,
   );
 }
 
-interface PrPlanContext {
+export interface PrPlanContext {
   options: CliOptions;
   operatorRoot: string;
   target: PrTarget;
@@ -2276,6 +2430,11 @@ interface PrPlanContext {
   config: LocalConfig;
   estimate: ReturnType<typeof estimateCost>;
   hunterCount: number;
+  // Same contract as PlanContext: the verdict is decided by the shell (and
+  // in PR mode enforced before the run dir even exists), printed here.
+  sizeGate: SizeGateVerdict;
+  sizeGateNote?: string;
+  droppedPaths: string[];
   // Present only once the fetch has happened: the canonical range and the
   // on-disk diff. A dry-run plan prints GitHub's own counters instead.
   resolved?: {
@@ -2290,6 +2449,24 @@ function prBaseSourceNote(target: PrTarget): string {
   return target.baseSource === "merge-commit-parent"
     ? "first parent of the merge commit — base as it was when the PR landed"
     : `tip of ${target.baseRefName} as recorded on the PR`;
+}
+
+// A merged PR's baseRef is a `<sha>^1` EXPRESSION, not a branch name, so the
+// card would otherwise carry a 40-char sha with a suffix. Shortened only for
+// display, and only when it really is a full commit id — a branch name that
+// happens to be long is left whole, because truncating a ref makes it
+// unusable. The details view and pipeline.json both keep the full form.
+function shortRev(rev: string): string {
+  const bare = rev.replace(/\^\d*$/, "");
+  return isFullCommitId(bare) ? shortSha(bare) + rev.slice(bare.length) : rev;
+}
+
+// The same fact in one token, for the card; the sentence above is the
+// details view's job.
+function prBaseSourceTag(target: PrTarget): string {
+  return target.baseSource === "merge-commit-parent"
+    ? "merge commit parent"
+    : "PR base tip";
 }
 
 // Pre-fetch the parity trigger cannot be evaluated (there is no diff yet).
@@ -2325,16 +2502,36 @@ function codegraphPlanNote(worktreePath: string): string {
     : "will `codegraph init` in the worktree (~10s measured)";
 }
 
-function printPrPlan(ctx: PrPlanContext): void {
-  const row = (label: string, value: string): void => {
-    log(`  ${label.padEnd(15)}${value}`);
+// Same three states as codegraphPlanNote, in card width.
+function codegraphPlanTag(worktreePath: string): string {
+  if (existsSync(path.join(worktreePath, ".codegraph"))) {
+    return "codegraph live";
+  }
+  return Bun.which("codegraph") === null
+    ? "codegraph NOT FOUND"
+    : "codegraph init ~10s";
+}
+
+function prWorktreePlanTag(worktreePath: string): string {
+  return existsSync(worktreePath)
+    ? "worktree exists"
+    : "worktree will be created";
+}
+
+// PR mode's half of planDetails — same contract: not printed by default,
+// exported so WU3's "Show details" option is a call rather than a rewrite.
+export function prPlanDetails(ctx: PrPlanContext): string[] {
+  const styles = styleEnabled();
+  const lines = [section("details", styles)];
+  const push = (label: string, value: string): void => {
+    lines.push(...row(label, value, { styles }));
   };
-  log("pr-hero review — plan (PR mode)");
-  log();
-  row("repo", `${ctx.operatorRoot} (operator checkout; gh and git run here)`);
-  row("pr", `#${ctx.target.number} [${ctx.target.state}] ${ctx.target.title}`);
-  row("head", `${ctx.target.headSha} (the PR's head commit)`);
-  row(
+  push("repo", `${ctx.operatorRoot} (operator checkout; gh and git run here)`);
+  push("head", `${ctx.target.headSha} (the PR's head commit)`);
+  // BOTH endpoints, always — the rule local mode's details view spells out.
+  // The card shows the pair as short shas; here they are whole, with the
+  // sentence that says which is which.
+  push(
     "base",
     ctx.resolved
       ? `${ctx.target.baseRef} → ${ctx.resolved.baseSha} ` +
@@ -2343,50 +2540,33 @@ function printPrPlan(ctx: PrPlanContext): void {
           "after fetch)",
   );
   if (ctx.resolved) {
-    row(
+    push(
       "diff from",
       `${ctx.resolved.diffFromSha} — merge base of base and the PR head; ` +
         "only what the PR adds is reviewed",
     );
   }
-  row(
+  push(
     "diff",
-    `${ctx.diffStat.files} files, +${ctx.diffStat.insertions} ` +
-      `−${ctx.diffStat.deletions} ` +
-      (ctx.resolved
-        ? `(${ctx.resolved.diffPath})`
-        : "(band from gh; exact numstat after fetch)"),
+    ctx.resolved
+      ? ctx.resolved.diffPath
+      : "band from gh; exact numstat after fetch",
   );
-  row(
+  push(
     "worktree",
     `${ctx.worktreePath} — ${worktreePlanNote(ctx.worktreePath)}`,
   );
-  row("agents dir", ctx.agentsDir);
-  for (const agent of ctx.spec.agents) {
-    const parsed = ctx.agentFiles.get(agent.key);
-    const model = ctx.options.model ?? agent.model ?? parsed?.model ?? "?";
-    const fires =
-      agent.role === "refuter"
-        ? "per severe finding"
-        : agent.trigger === undefined
-          ? "always"
-          : ctx.resolved === undefined
-            ? "decided by the diff after fetch"
-            : ctx.resolved.parityFires
-              ? "triggered"
-              : "will NOT fire";
-    row("", `${agent.key.padEnd(12)} ${model.padEnd(8)} ${fires}`);
-  }
-  row("hop budget", String(ctx.options.hopBudget));
-  row("run dir", ctx.runDir);
+  push("agents dir", ctx.agentsDir);
+  push("run dir", ctx.runDir);
+  push("hop budget", String(ctx.options.hopBudget));
   if (ctx.options.post) {
-    row(
+    push(
       "post",
       "a marked PR comment will be created, or updated in place if one " +
         "exists (idempotent — one comment per PR, found by its marker)",
     );
   }
-  row(
+  push(
     "parity",
     ctx.config.parity_trigger_paths.length === 0
       ? "no parity_trigger_paths configured — the parity hunter never fires"
@@ -2397,18 +2577,94 @@ function printPrPlan(ctx: PrPlanContext): void {
           ? `fires (a changed path matches ${ctx.config.parity_trigger_paths.length} configured pattern(s))`
           : "configured, but no changed path matches — it will not fire",
   );
-  row("codegraph", codegraphPlanNote(ctx.worktreePath));
-  row("priors", `${ctx.config.suspicion_priors.length} suspicion prior(s)`);
-  row(
-    "cost estimate",
-    `$${ctx.estimate.low.toFixed(2)} – $${ctx.estimate.high.toFixed(2)} ` +
-      `(${ctx.hunterCount} hunter(s) + refuter)`,
+  push("codegraph", codegraphPlanNote(ctx.worktreePath));
+  push("priors", `${ctx.config.suspicion_priors.length} suspicion prior(s)`);
+  push("estimate", ctx.estimate.basis);
+  push("permissions", PERMISSIONS_NOTE);
+  return lines;
+}
+
+function printPrPlan(ctx: PrPlanContext): void {
+  const styles = styleEnabled();
+  for (const line of box(
+    `pr-hero · PR #${ctx.target.number}`,
+    [
+      ctx.target.title,
+      `${ctx.target.state} · base ${ctx.target.baseRefName} · ` +
+        `${ctx.diffStat.files} files  +${ctx.diffStat.insertions} ` +
+        `−${ctx.diffStat.deletions}` +
+        (ctx.resolved ? "" : " (gh counters)"),
+    ],
+    { styles },
+  )) {
+    log(line);
+  }
+  log();
+  let label = "AGENTS";
+  for (const agent of ctx.spec.agents) {
+    const fires =
+      agent.role === "refuter"
+        ? "per severe finding"
+        : agent.trigger === undefined
+          ? "always"
+          : ctx.resolved === undefined
+            ? "decided by the diff after fetch"
+            : ctx.resolved.parityFires
+              ? "triggered"
+              : "✗ will not fire";
+    logRow(label, agentRow(ctx, agent, fires), styles);
+    label = "";
+  }
+  log();
+  logRow(
+    "BASE",
+    ctx.resolved
+      ? `${shortRev(ctx.target.baseRef)} → ` +
+          `${shortSha(ctx.resolved.baseSha)}  ` +
+          `(${prBaseSourceTag(ctx.target)})`
+      : `${shortRev(ctx.target.baseRef)}  (${prBaseSourceTag(ctx.target)}; ` +
+          "resolved after fetch)",
+    styles,
   );
-  row("", ctx.estimate.basis);
-  row(
-    "permissions",
-    "steps run with --permission-mode bypassPermissions, bounded only by " +
-      "each agent's read-only tool allow-list",
+  // The other endpoint. Pre-fetch there is no merge base yet, so the card
+  // says so rather than showing the head alone — a single endpoint is the
+  // ambiguity the details view's rule exists to prevent.
+  logRow(
+    "RANGE",
+    ctx.resolved
+      ? `${shortSha(ctx.resolved.diffFromSha)} → ` +
+          `${shortSha(ctx.target.headSha)}  (merge base)`
+      : `? → ${shortSha(ctx.target.headSha)}  (merge base, after fetch)`,
+    styles,
+  );
+  logRow(
+    "RUN",
+    `${path.basename(ctx.runDir)} · ` +
+      `${prWorktreePlanTag(ctx.worktreePath)} · ` +
+      `${codegraphPlanTag(ctx.worktreePath)} · ` +
+      `hop budget ${ctx.options.hopBudget} · ` +
+      `${ctx.config.suspicion_priors.length} prior(s)`,
+    styles,
+  );
+  if (ctx.options.post) {
+    logRow(
+      "POST",
+      "✓ one marked PR comment — created, or updated in place (idempotent)",
+      styles,
+    );
+  }
+  printDecision(
+    {
+      sizeGate: ctx.sizeGate,
+      ...(ctx.sizeGateNote === undefined
+        ? {}
+        : { sizeGateNote: ctx.sizeGateNote }),
+      droppedPaths: ctx.droppedPaths,
+      force: ctx.options.force,
+      estimate: ctx.estimate,
+      hunterCount: ctx.hunterCount,
+    },
+    styles,
   );
 }
 
