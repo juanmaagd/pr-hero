@@ -40,7 +40,7 @@ been burned by a manual match that inflated a score by 50%.
 ## Commands
 
 ```bash
-bun test               # 873 tests, all offline (fake spawn/runner)
+bun test               # 883 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
 bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
 bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
@@ -74,6 +74,17 @@ with an explicit `bunx tsc` / `bunx biome check` over them.
 - `src/size-gate.ts` — pure: "this diff is too big, skip it". A COST/predictability gate, never a
   quality one (the size↔quality question is unmeasured — see `scripts/scope-probe.ts`). Wired into
   local review, PR review and the watcher, always BEFORE the cost-band confirm.
+- `src/ui.ts` — the terminal surface's shared primitives: ANSI paint, `row()`/`box()`, path/sha
+  shorteners, `labelColumnWidth`. Plus the shells' one impure pair, `styleEnabled()`/`terminalWidth()`.
+- `src/ui-select.ts` — `confirmReview`: the keyboard confirm menu (raw-mode stdin, arrow/shortcut keys).
+- `src/ui-result.ts` — `renderResult`: the end-of-run block — counts, the findings themselves, links.
+- `src/ui-tree.ts` — `renderTree`: the ├─/└─ tree the findings and comparison lists are drawn with.
+- Three acceptance criteria hold across all four, and any renderer added beside them: every renderer
+  returns `string[]` and never calls `log()`; **styles AND width arrive as parameters** (nothing sniffs
+  the TTY — that is the shells' job, and `row()`/`box()` require a width so tsc enforces it); every
+  renderer has tests over its lines, one of them asserting zero `\x1b` bytes with styles off; and
+  nothing is exported without a real consumer (a module or a test — biome does not flag unused
+  *exported* symbols, so an `export` for a hypothetical consumer is how dead code hides).
 - `src/ledger.ts` — B4 pure half (`pr-hero ledger`): comparison.json read-back, one-vote-per-PR
   aggregation, as-is verdict tally, markdown ledger with the pending-triage list.
 - `fixtures/` + `scripts/` — the planted-bug eval and live micro-eval.
