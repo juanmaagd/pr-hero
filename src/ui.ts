@@ -129,6 +129,9 @@ interface RowOptions {
 // The indent of the value column: two spaces of margin plus the label field.
 const DEFAULT_INDENT = 2;
 const DEFAULT_LABEL_WIDTH = 11;
+// The gap a label is entitled to keep between itself and its value. One space
+// is the minimum that still reads as two columns.
+const LABEL_GAP = 1;
 // Below this the value column would leave nothing to wrap into, so a very
 // narrow terminal gets an overlong line instead of a one-word-per-line
 // column.
@@ -155,6 +158,20 @@ export function row(label: string, value: string, opts: RowOptions): string[] {
   const chunks =
     value.length <= available ? [value] : wrapText(value, available);
   return chunks.map((chunk, i) => (i === 0 ? head + chunk : pad + chunk));
+}
+
+// A label column DERIVED from the labels it has to hold, for callers whose
+// label set is not fixed at design time.
+//
+// WHY it exists: `row()`'s DEFAULT_LABEL_WIDTH is 11 and the details views
+// carry an 11-character label ("permissions"). padEnd(11) pads an 11-character
+// string by nothing at all, so the row printed
+// `permissionssteps run with --permission-mode…` — the label and the value
+// welded together — and every shorter label in the same view was fine, which is
+// why it survived review. A caller that asks for the width its own labels need
+// cannot regress that when a longer label is added later.
+export function labelColumnWidth(labels: readonly string[]): number {
+  return Math.max(0, ...labels.map((label) => label.length)) + LABEL_GAP;
 }
 
 interface BoxOptions {

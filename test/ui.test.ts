@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   box,
+  labelColumnWidth,
   row,
   section,
   severityLabel,
@@ -99,6 +100,44 @@ describe("row", () => {
     const plain = row("base", "main", { width: 80, styles: false });
     expect(styled[0]).toContain("\x1b[2m");
     expect(stripAnsi(styled[0] ?? "")).toBe(plain[0]);
+  });
+
+  test("row's own default collides with a label as wide as it is", () => {
+    // Not a wish, a RECORD of the bug labelColumnWidth exists to end: the
+    // default label field is 11 wide and "permissions" is 11 characters, so
+    // padEnd() adds nothing and the two columns weld together. Callers whose
+    // label set is not fixed must derive their width instead of relying on
+    // this default — see the labelColumnWidth block below.
+    const [line] = row("permissions", "steps run", { width: 80 });
+    expect(line).toBe("  permissionssteps run");
+  });
+});
+
+describe("labelColumnWidth", () => {
+  test("the longest label always keeps its gap", () => {
+    const labels = ["repo", "hop budget", "permissions"];
+    const width = labelColumnWidth(labels);
+    for (const label of labels) {
+      const [line] = row(label, "value", { width: 80, labelWidth: width });
+      expect(line).toBe(`  ${label.padEnd(width)}value`);
+      // The gap is the assertion, not the number: whatever the widest label
+      // is, every row separates its two columns.
+      expect(line).toMatch(/[^ ] +value$/);
+    }
+  });
+
+  test("a longer label widens the column instead of colliding with it", () => {
+    const narrow = labelColumnWidth(["repo", "permissions"]);
+    const wider = labelColumnWidth(["repo", "permissions", "authorisations"]);
+    expect(wider).toBeGreaterThan(narrow);
+    const [line] = row("authorisations", "v", { width: 80, labelWidth: wider });
+    expect(line).toBe("  authorisations v");
+  });
+
+  test("no labels asks for no column", () => {
+    // Math.max() over an empty list is -Infinity, so the 0 seed is
+    // load-bearing rather than defensive noise.
+    expect(labelColumnWidth([])).toBe(1);
   });
 });
 

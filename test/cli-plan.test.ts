@@ -37,6 +37,26 @@ const PINNED_WIDTH = 80;
 // width used to produce inside a split pane.
 const NARROW_WIDTH = 40;
 
+// The gap between the label column and the value column, checked WITHOUT
+// hard-coding either width — a pin on "11" or "12" would have to be edited by
+// whoever adds a longer label, which is precisely the person it exists to
+// stop. The value column is read off the wrapped continuation lines (row()
+// indents them to exactly it), and every label-bearing line must then have a
+// space in the position just before it.
+function expectEveryLabelKeepsItsGap(lines: string[]): void {
+  const indents = lines
+    .filter((line) => /^ {3,}\S/.test(line))
+    .map((line) => line.match(/^ +/)?.[0].length ?? 0);
+  expect(indents.length).toBeGreaterThan(0);
+  const valueCol = Math.min(...indents);
+  for (const line of lines) {
+    if (!/^ {2}\S/.test(line)) continue;
+    expect(line.length).toBeGreaterThan(valueCol);
+    expect(line[valueCol - 1]).toBe(" ");
+    expect(line[valueCol]).not.toBe(" ");
+  }
+}
+
 const options = (over: Partial<CliOptions> = {}): CliOptions => ({
   repo: ".",
   head: "HEAD",
@@ -244,6 +264,17 @@ describe("planDetails", () => {
     expect(planDetails(planContext(), false).join("\n")).not.toContain(ESC);
     expect(planDetails(planContext(), true).join("\n")).toContain(ESC);
   });
+
+  test("the widest label keeps its gap — permissions did not", () => {
+    // The live run printed `permissionssteps run with --permission-mode…`:
+    // "permissions" is exactly as wide as row()'s default label field, so
+    // padEnd() gave it nothing and the two columns welded together.
+    const lines = planDetails(planContext(), false).map(stripAnsi);
+    expect(lines.some((l) => /^ {2}permissions +steps run with /.test(l))).toBe(
+      true,
+    );
+    expectEveryLabelKeepsItsGap(lines);
+  });
 });
 
 describe("renderPrPlan", () => {
@@ -359,6 +390,19 @@ describe("prPlanDetails", () => {
   test("styles off means not one escape byte", () => {
     expect(prPlanDetails(prPlanContext(), false).join("\n")).not.toContain(ESC);
     expect(prPlanDetails(prPlanContext(), true).join("\n")).toContain(ESC);
+  });
+
+  test("the widest label keeps its gap here too", () => {
+    // The same collision, in the view that actually printed it live (PR mode's
+    // details is what `review --pr 7` shows).
+    const lines = prPlanDetails(
+      prPlanContext({ options: options({ pr: 7, post: true }) }),
+      false,
+    ).map(stripAnsi);
+    expect(lines.some((l) => /^ {2}permissions +steps run with /.test(l))).toBe(
+      true,
+    );
+    expectEveryLabelKeepsItsGap(lines);
   });
 });
 

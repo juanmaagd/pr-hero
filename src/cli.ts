@@ -133,6 +133,7 @@ import {
   box,
   dim,
   green,
+  labelColumnWidth,
   log,
   red,
   row,
@@ -2437,6 +2438,25 @@ function decisionLines(
   return lines;
 }
 
+// Both details views' rows, with a label column DERIVED from their own labels
+// instead of inherited from row()'s fixed default.
+//
+// WHY: that default is 11 and "permissions" is 11 characters, so padEnd() gave
+// it no gap and the live run printed
+// `permissionssteps run with --permission-mode bypassPermissions…` — one word
+// welded out of two columns. Deriving the width means the next label longer
+// than any of today's cannot bring the collision back.
+function detailRows(
+  pairs: readonly [string, string][],
+  styles: boolean,
+  width: number,
+): string[] {
+  const labelWidth = labelColumnWidth(pairs.map(([label]) => label));
+  return pairs.flatMap(([label, value]) =>
+    row(label, value, { styles, width, labelWidth }),
+  );
+}
+
 // NOT printed by default: everything the plan card demoted lands here, and
 // the confirm menu's "Show details" option is the only thing that prints it.
 // Exported ONLY for test/cli-plan.test.ts — a test is a real consumer, and
@@ -2451,9 +2471,9 @@ function decisionLines(
 // asserted offline without a TTY.
 export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   const width = ctx.width ?? terminalWidth();
-  const lines = [section("details", styles)];
+  const pairs: [string, string][] = [];
   const push = (label: string, value: string): void => {
-    lines.push(...row(label, value, { styles, width }));
+    pairs.push([label, value]);
   };
   push("repo", ctx.repoRoot);
   push("base", `${ctx.baseRef.ref} → ${ctx.baseSha} (${baseSourceNote(ctx)})`);
@@ -2495,7 +2515,7 @@ export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   push("priors", `${ctx.config.suspicion_priors.length} suspicion prior(s)`);
   push("estimate", ctx.estimate.basis);
   push("permissions", PERMISSIONS_NOTE);
-  return lines;
+  return [section("details", styles), ...detailRows(pairs, styles, width)];
 }
 
 // The plan card as LINES, printed by the shell. Returning them rather than
@@ -2674,9 +2694,9 @@ function prWorktreePlanTag(worktreePath: string): string {
 // printed only when the confirm menu's "Show details" option asks for it.
 export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   const width = ctx.width ?? terminalWidth();
-  const lines = [section("details", styles)];
+  const pairs: [string, string][] = [];
   const push = (label: string, value: string): void => {
-    lines.push(...row(label, value, { styles, width }));
+    pairs.push([label, value]);
   };
   push("repo", `${ctx.operatorRoot} (operator checkout; gh and git run here)`);
   push("head", `${ctx.target.headSha} (the PR's head commit)`);
@@ -2733,7 +2753,7 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   push("priors", `${ctx.config.suspicion_priors.length} suspicion prior(s)`);
   push("estimate", ctx.estimate.basis);
   push("permissions", PERMISSIONS_NOTE);
-  return lines;
+  return [section("details", styles), ...detailRows(pairs, styles, width)];
 }
 
 export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
