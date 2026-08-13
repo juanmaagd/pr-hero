@@ -2836,7 +2836,9 @@ function startProgressRenderer(
 //     lines were impossible; a tree that collapses a finished branch shrinks,
 //     and without the erase-to-end the previous frame's tail stays on screen
 //     as orphaned rows.
-function startPanelRenderer(
+// Exported for its test, which is the only consumer outside this module: the
+// post-stop silence below is a CRITICAL invariant and an untested one regresses.
+export function startPanelRenderer(
   startedAtMs: number,
   subject: string,
   hunterKeys: string[],
@@ -2877,16 +2879,31 @@ function startPanelRenderer(
     draw();
   }, 250);
   draw();
+  // STOPPED IS LOAD-BEARING, and it is what makes \x1b[0J safe. The pipeline
+  // ceiling resolves the run while in-flight step promises are ABANDONED, not
+  // awaited (pipeline.ts: "abandoned, not awaited"), and their settle handlers
+  // emit unconditionally. So an event can arrive after stop() — after the
+  // result block has already printed below the final frame. Without this flag
+  // that late event redraws: the cursor walks back UP over the summary and
+  // \x1b[0J erases everything below it, deleting the findings of a paid run.
+  // Found live by pr-hero reviewing its own PR #7 (F002, CRITICAL,
+  // corroborated) — the erase-to-end-of-screen that fixed the shrinking-frame
+  // bug created this one.
+  let stopped = false;
   return {
     onProgress: (event: PipelineProgressEvent): void => {
+      if (stopped) return;
       applyProgressEvent(state, event, performance.now());
       draw();
     },
     stop: (): void => {
+      if (stopped) return;
       clearInterval(ticker);
       // One last draw so the completed states land; the frame then stays as
       // the static record, and the summary prints below it.
       draw();
+      // AFTER the final draw, so stop() itself is not a no-op.
+      stopped = true;
     },
   };
 }
