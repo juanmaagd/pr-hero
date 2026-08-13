@@ -35,6 +35,14 @@ export function styleEnabled(
 
 // Width from stdout first (that is the terminal the human sized), stderr as
 // the fallback for a piped-stdout run, 80 when neither knows.
+//
+// The ONE sniff, and it belongs to the SHELLS (cli.ts, watch.ts) and to a
+// renderer's own entry point (renderResult). Nothing inside row()/box() calls
+// it any more: an optional width with a sniffing fallback is exactly how
+// renderPlan/renderPrPlan violated this module's contract undetected for two
+// work units — every row they drew measured the terminal that happened to be
+// running the tests, so `bun test` in a ~40-column pane failed on wrap points
+// nobody could stub. Required width makes the contract a tsc fact.
 export function terminalWidth(): number {
   return process.stdout.columns ?? process.stderr.columns ?? 80;
 }
@@ -107,8 +115,12 @@ export function wrapText(text: string, width: number): string[] {
   return lines;
 }
 
+// `width` is REQUIRED, unlike everything else here: it is the one option whose
+// absence used to be filled by sniffing the real terminal (see
+// terminalWidth()'s note), and a required field is the only version of this
+// contract a compiler can hold.
 interface RowOptions {
-  width?: number;
+  width: number;
   styles?: boolean;
   indent?: number;
   labelWidth?: number;
@@ -131,14 +143,10 @@ const MIN_VALUE_WIDTH = 20;
 // A value that already fits is emitted VERBATIM, never re-joined: rows that
 // align sub-columns with runs of spaces (the agent list) depend on those runs
 // surviving, and the wrapper collapses whitespace by construction.
-export function row(
-  label: string,
-  value: string,
-  opts: RowOptions = {},
-): string[] {
+export function row(label: string, value: string, opts: RowOptions): string[] {
   const indent = opts.indent ?? DEFAULT_INDENT;
   const labelWidth = opts.labelWidth ?? DEFAULT_LABEL_WIDTH;
-  const width = opts.width ?? terminalWidth();
+  const width = opts.width;
   const styles = opts.styles ?? false;
   const valueCol = indent + labelWidth;
   const available = Math.max(width - valueCol, MIN_VALUE_WIDTH);
@@ -150,7 +158,8 @@ export function row(
 }
 
 interface BoxOptions {
-  width?: number;
+  // Required for the reason RowOptions.width is.
+  width: number;
   styles?: boolean;
 }
 
@@ -161,15 +170,8 @@ const MAX_BOX_WIDTH = 96;
 // lines are truncated to fit rather than wrapped — a card whose border does
 // not close reads as corruption, and the facts it summarises are all
 // repeated in the rows below it.
-export function box(
-  title: string,
-  body: string[],
-  opts: BoxOptions = {},
-): string[] {
-  const width = Math.max(
-    Math.min(opts.width ?? terminalWidth(), MAX_BOX_WIDTH),
-    MIN_BOX_WIDTH,
-  );
+export function box(title: string, body: string[], opts: BoxOptions): string[] {
+  const width = Math.max(Math.min(opts.width, MAX_BOX_WIDTH), MIN_BOX_WIDTH);
   const styles = opts.styles ?? false;
   const inner = width - 4;
   const shownTitle = truncate(title, width - 6);

@@ -29,6 +29,14 @@ const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 const stripAnsi = (text: string): string => text.replace(ANSI, "");
 const joined = (lines: string[]): string => stripAnsi(lines.join("\n"));
 
+// The width every case below renders at. Same value ui-result.test.ts pins,
+// so the two halves of the terminal surface are asserted against one grid.
+const PINNED_WIDTH = 80;
+// Narrow enough to move the wrap points: at 40 columns the decision block's
+// money line is two rows, not one, which is exactly the failure an unpinned
+// width used to produce inside a split pane.
+const NARROW_WIDTH = 40;
+
 const options = (over: Partial<CliOptions> = {}): CliOptions => ({
   repo: ".",
   head: "HEAD",
@@ -99,6 +107,12 @@ const planContext = (over: Partial<PlanContext> = {}): PlanContext => ({
   hunterCount: 2,
   sizeGate: okGate,
   droppedPaths: [],
+  // PINNED, on every case. Without it these renderers measured
+  // process.stdout.columns — the terminal that happened to be running the
+  // suite — so an assertion like "the money line is the last line" passed in
+  // an 80-column pane and failed in a 40-column one. See the determinism
+  // block at the bottom of this file.
+  width: PINNED_WIDTH,
   ...over,
 });
 
@@ -126,6 +140,8 @@ const prPlanContext = (over: Partial<PrPlanContext> = {}): PrPlanContext => ({
   hunterCount: 2,
   sizeGate: okGate,
   droppedPaths: [],
+  // Pinned for the reason PlanContext's is.
+  width: PINNED_WIDTH,
   ...over,
 });
 
@@ -343,5 +359,134 @@ describe("prPlanDetails", () => {
   test("styles off means not one escape byte", () => {
     expect(prPlanDetails(prPlanContext(), false).join("\n")).not.toContain(ESC);
     expect(prPlanDetails(prPlanContext(), true).join("\n")).toContain(ESC);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The regression these four renderers were written to have and did not: WIDTH
+// AS A PARAMETER. Before this block they passed no width at all, so every
+// row() and box() inside them — including the ones under decisionLines,
+// markerRowLines, planDetails and prPlanDetails — fell back to ui.ts's
+// terminalWidth() and measured whatever terminal ran `bun test`. The suite was
+// therefore green at 80 columns and red in a ~40-column pane, on assertions
+// about wrap points nobody could stub.
+//
+// `process.stdout.columns` is stubbed rather than COLUMNS= set: the env var
+// does not reach process.stdout.columns when stdout is a pipe, so it would
+// prove nothing. stderr is stubbed too, because terminalWidth() falls through
+// to it. Restored in a finally — bun runs a file's tests in one process, and a
+// leaked stub would poison every other suite.
+function stubColumns(columns: number): () => void {
+  const streams = [process.stdout, process.stderr];
+  const saved = streams.map((s) =>
+    Object.getOwnPropertyDescriptor(s, "columns"),
+  );
+  for (const stream of streams) {
+    Object.defineProperty(stream, "columns", {
+      value: columns,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return () => {
+    streams.forEach((stream, i) => {
+      const descriptor = saved[i];
+      if (descriptor === undefined) {
+        delete (stream as { columns?: number }).columns;
+        return;
+      }
+      Object.defineProperty(stream, "columns", descriptor);
+    });
+  };
+}
+
+// The same context with the width taken back off, to exercise the one
+// remaining fallback (the renderer's own entry point) on purpose.
+function unpinned<T extends { width?: number }>(ctx: T): T {
+  const copy = { ...ctx };
+  delete copy.width;
+  return copy;
+}
+
+describe("plan renderers are deterministic offline", () => {
+  test("the pinned width, not the terminal, decides the layout", () => {
+    const before = {
+      plan: renderPlan(planContext(), false),
+      planDetails: planDetails(planContext(), false),
+      prPlan: renderPrPlan(prPlanContext(), false),
+      prPlanDetails: prPlanDetails(prPlanContext(), false),
+    };
+    const restore = stubColumns(NARROW_WIDTH);
+    try {
+      expect(renderPlan(planContext(), false)).toEqual(before.plan);
+      expect(planDetails(planContext(), false)).toEqual(before.planDetails);
+      expect(renderPrPlan(prPlanContext(), false)).toEqual(before.prPlan);
+      expect(prPlanDetails(prPlanContext(), false)).toEqual(
+        before.prPlanDetails,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("a different width really does change the output", () => {
+    const wide = renderPlan(planContext(), false);
+    const narrow = renderPlan(planContext({ width: NARROW_WIDTH }), false);
+    expect(narrow).not.toEqual(wide);
+    expect(narrow.length).toBeGreaterThan(wide.length);
+    // The decision block is where the old flakiness lived: at 80 columns the
+    // money line is one row (and therefore the last line), at 40 it wraps to
+    // two — the exact assertion that used to fail for no reason but the pane.
+    const wideMoney = wide.filter((l) => l.includes("estimate $"));
+    expect(wideMoney).toHaveLength(1);
+    expect(wide.indexOf(wideMoney[0] ?? "")).toBe(wide.length - 1);
+    expect(narrow[narrow.length - 1]).not.toContain("estimate $");
+  });
+
+  test("every renderer threads the width all the way down", () => {
+    // No width in the context: the entry point's terminalWidth() fallback
+    // fires, and the result must be byte-identical to the same width pinned.
+    // Anything inside these renderers still reaching for its own width would
+    // break this, which is what makes it a threading test and not a restating
+    // of the fallback.
+    const restore = stubColumns(NARROW_WIDTH);
+    try {
+      expect(renderPlan(unpinned(planContext()), false)).toEqual(
+        renderPlan(planContext({ width: NARROW_WIDTH }), false),
+      );
+      expect(planDetails(unpinned(planContext()), false)).toEqual(
+        planDetails(planContext({ width: NARROW_WIDTH }), false),
+      );
+      expect(renderPrPlan(unpinned(prPlanContext()), false)).toEqual(
+        renderPrPlan(prPlanContext({ width: NARROW_WIDTH }), false),
+      );
+      expect(prPlanDetails(unpinned(prPlanContext()), false)).toEqual(
+        prPlanDetails(prPlanContext({ width: NARROW_WIDTH }), false),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("a failed gate with exclusions stays deterministic too", () => {
+    // The longest decision block there is: gate verdict, exclusion note,
+    // --force note, money. Every one of those four goes through
+    // markerRowLines, so this is the case that catches a missed width
+    // argument on any of them.
+    const ctx = planContext({
+      options: options({ force: true }),
+      sizeGate: failedGate,
+      droppedPaths: ["bun.lock", "dist/app.js"],
+    });
+    const pinned = renderPlan(ctx, false);
+    const restore = stubColumns(NARROW_WIDTH);
+    try {
+      expect(renderPlan(ctx, false)).toEqual(pinned);
+    } finally {
+      restore();
+    }
+    expect(renderPlan({ ...ctx, width: NARROW_WIDTH }, false)).not.toEqual(
+      pinned,
+    );
   });
 });

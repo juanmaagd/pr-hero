@@ -140,6 +140,7 @@ import {
   shortPath,
   shortSha,
   styleEnabled,
+  terminalWidth,
   yellow,
 } from "./ui";
 import { type ResultLinks, renderResult } from "./ui-result";
@@ -173,7 +174,11 @@ const EMPTY_MCP_CONFIG = { mcpServers: {} };
 // two more were dropped, and where the unfiltered bytes went. It sits in the
 // decision block because an exclusion is what the size gate's numbers were
 // computed after.
-function exclusionLines(droppedPaths: string[], styles = false): string[] {
+function exclusionLines(
+  droppedPaths: string[],
+  styles: boolean,
+  width: number,
+): string[] {
   if (droppedPaths.length === 0) return [];
   return markerRowLines(
     "!",
@@ -182,6 +187,7 @@ function exclusionLines(droppedPaths: string[], styles = false): string[] {
       "kept as diff.raw.patch",
     dim,
     styles,
+    width,
   );
 }
 
@@ -875,7 +881,17 @@ async function reviewPr(
   // here, immediately before dying.
   if (!sizeGate.ok && !options.force) {
     log(sizeGateLine(sizeGate));
-    for (const line of exclusionLines(effectiveDiff.droppedPaths)) log(line);
+    // The shell owns BOTH impure decisions here (style flag and width), the
+    // same way printDryRun does — this is the one exclusion line that is
+    // printed outside a plan renderer, so it cannot inherit a resolved width
+    // from one.
+    for (const line of exclusionLines(
+      effectiveDiff.droppedPaths,
+      styleEnabled(),
+      terminalWidth(),
+    )) {
+      log(line);
+    }
     throw new CliError(sizeGate.message);
   }
 
@@ -2295,6 +2311,12 @@ export interface PlanContext {
   // confirm() — this only moves where the line lands on screen.
   sizeGate: SizeGateVerdict;
   droppedPaths: string[];
+  // The terminal width every row and card below is laid out against, carried
+  // in exactly as ui-result.ts's ResultInput carries it. Optional so the shell
+  // may leave the one sniff to the renderer's entry point; the tests ALWAYS
+  // pin it, because these renderers were the reason `bun test` in a narrow
+  // pane could fail on a wrap point no test could stub.
+  width?: number;
 }
 
 // Where the base ref came from, because "main" chosen by fallback and "main"
@@ -2339,9 +2361,10 @@ function markerRowLines(
   value: string,
   paint: (text: string, styles: boolean) => string,
   styles: boolean,
+  width: number,
 ): string[] {
-  return row(marker, value, { ...MARKER_ROW, styles: false }).map((line) =>
-    paint(line, styles),
+  return row(marker, value, { ...MARKER_ROW, styles: false, width }).map(
+    (line) => paint(line, styles),
   );
 }
 
@@ -2370,7 +2393,11 @@ interface PlanDecision {
   hunterCount: number;
 }
 
-function decisionLines(d: PlanDecision, styles: boolean): string[] {
+function decisionLines(
+  d: PlanDecision,
+  styles: boolean,
+  width: number,
+): string[] {
   // sizeGateLine's wording is FIXED — size-gate.test.ts pins five substrings
   // of it, and the watcher's log parser reads the same phrasing. The ✓/✗ is
   // decoration in front of it, never a replacement for it.
@@ -2382,8 +2409,9 @@ function decisionLines(d: PlanDecision, styles: boolean): string[] {
       `${sizeGateLine(d.sizeGate)}${note}`,
       d.sizeGate.ok ? green : red,
       styles,
+      width,
     ),
-    ...exclusionLines(d.droppedPaths, styles),
+    ...exclusionLines(d.droppedPaths, styles, width),
   ];
   if (!d.sizeGate.ok && d.force) {
     lines.push(
@@ -2392,6 +2420,7 @@ function decisionLines(d: PlanDecision, styles: boolean): string[] {
         "--force given: reviewing anyway.",
         yellow,
         styles,
+        width,
       ),
     );
   }
@@ -2402,6 +2431,7 @@ function decisionLines(d: PlanDecision, styles: boolean): string[] {
         `$${d.estimate.high.toFixed(2)} (${d.hunterCount} hunter(s) + refuter)`,
       bold,
       styles,
+      width,
     ),
   );
   return lines;
@@ -2409,18 +2439,21 @@ function decisionLines(d: PlanDecision, styles: boolean): string[] {
 
 // NOT printed by default: everything the plan card demoted lands here, and
 // the confirm menu's "Show details" option is the only thing that prints it.
-// Exported ONLY for test/cli.test.ts — a test is a real consumer, and these
-// four renderers had zero coverage until WU4. Nothing else may import them:
+// Exported ONLY for test/cli-plan.test.ts — a test is a real consumer, and
+// these four renderers had zero coverage until WU4. Nothing else may import
+// them:
 // biome's unused-symbol rule does not flag exports, so an `export` for a
 // hypothetical consumer is how dead code hides through a clean `bun run check`
 // (which is exactly how this pair sat unread for two work units).
 //
-// `styles` ARRIVES AS A PARAMETER, never sniffed here: ui.ts's contract, and
-// the only reason the returned lines can be asserted offline without a TTY.
+// `styles` ARRIVES AS A PARAMETER and so does the WIDTH (`ctx.width`, resolved
+// once here): ui.ts's contract, and the only reason the returned lines can be
+// asserted offline without a TTY.
 export function planDetails(ctx: PlanContext, styles: boolean): string[] {
+  const width = ctx.width ?? terminalWidth();
   const lines = [section("details", styles)];
   const push = (label: string, value: string): void => {
-    lines.push(...row(label, value, { styles }));
+    lines.push(...row(label, value, { styles, width }));
   };
   push("repo", ctx.repoRoot);
   push("base", `${ctx.baseRef.ref} → ${ctx.baseSha} (${baseSourceNote(ctx)})`);
@@ -2469,6 +2502,7 @@ export function planDetails(ctx: PlanContext, styles: boolean): string[] {
 // logging them is what makes the composition — card, agent grid, endpoints,
 // decision block — assertable in one offline expectation.
 export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
+  const width = ctx.width ?? terminalWidth();
   const lines = [
     ...box(
       "pr-hero · review",
@@ -2477,7 +2511,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
         `${shortPath(ctx.repoRoot)} · ${ctx.diffStat.files} files  ` +
           `+${ctx.diffStat.insertions} −${ctx.diffStat.deletions}`,
       ],
-      { styles },
+      { styles, width },
     ),
     "",
   ];
@@ -2491,7 +2525,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
           : ctx.parityFires
             ? "triggered"
             : "✗ will not fire";
-    lines.push(...row(label, agentRow(ctx, agent, fires), { styles }));
+    lines.push(...row(label, agentRow(ctx, agent, fires), { styles, width }));
     label = "";
   }
   lines.push(
@@ -2499,7 +2533,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
     ...row(
       "BASE",
       `${ctx.baseRef.ref} → ${shortSha(ctx.baseSha)}  (${baseSourceTag(ctx)})`,
-      { styles },
+      { styles, width },
     ),
     // The second endpoint of the pair the details view explains: what the diff
     // is actually computed from, which is the merge base unless --two-dot moved
@@ -2508,7 +2542,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
       "RANGE",
       `${shortSha(ctx.diffFromSha)} → ${shortSha(ctx.headSha)}  ` +
         (ctx.options.twoDot ? "(--two-dot, two-point range)" : "(merge base)"),
-      { styles },
+      { styles, width },
     ),
     ...row(
       "RUN",
@@ -2516,7 +2550,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
         (ctx.codegraphAvailable ? "codegraph live" : "codegraph NOT FOUND") +
         ` · hop budget ${ctx.options.hopBudget}` +
         ` · ${ctx.config.suspicion_priors.length} prior(s)`,
-      { styles },
+      { styles, width },
     ),
     ...decisionLines(
       {
@@ -2527,6 +2561,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
         hunterCount: ctx.hunterCount,
       },
       styles,
+      width,
     ),
   );
   return lines;
@@ -2558,6 +2593,8 @@ export interface PrPlanContext {
     diffPath: string;
     parityFires: boolean;
   };
+  // Same contract, same reason as PlanContext.width.
+  width?: number;
 }
 
 function prBaseSourceNote(target: PrTarget): string {
@@ -2636,9 +2673,10 @@ function prWorktreePlanTag(worktreePath: string): string {
 // PR mode's half of planDetails — same contract, same test-only export:
 // printed only when the confirm menu's "Show details" option asks for it.
 export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
+  const width = ctx.width ?? terminalWidth();
   const lines = [section("details", styles)];
   const push = (label: string, value: string): void => {
-    lines.push(...row(label, value, { styles }));
+    lines.push(...row(label, value, { styles, width }));
   };
   push("repo", `${ctx.operatorRoot} (operator checkout; gh and git run here)`);
   push("head", `${ctx.target.headSha} (the PR's head commit)`);
@@ -2699,6 +2737,7 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
 }
 
 export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
+  const width = ctx.width ?? terminalWidth();
   const lines = [
     ...box(
       `pr-hero · PR #${ctx.target.number}`,
@@ -2709,7 +2748,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
           `−${ctx.diffStat.deletions}` +
           (ctx.resolved ? "" : " (gh counters)"),
       ],
-      { styles },
+      { styles, width },
     ),
     "",
   ];
@@ -2725,7 +2764,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
             : ctx.resolved.parityFires
               ? "triggered"
               : "✗ will not fire";
-    lines.push(...row(label, agentRow(ctx, agent, fires), { styles }));
+    lines.push(...row(label, agentRow(ctx, agent, fires), { styles, width }));
     label = "";
   }
   lines.push(
@@ -2738,7 +2777,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
             `(${prBaseSourceTag(ctx.target)})`
         : `${shortRev(ctx.target.baseRef)}  (${prBaseSourceTag(ctx.target)}; ` +
             "resolved after fetch)",
-      { styles },
+      { styles, width },
     ),
     // The other endpoint. Pre-fetch there is no merge base yet, so the card
     // says so rather than showing the head alone — a single endpoint is the
@@ -2754,7 +2793,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
           // placeholder where a sha belongs.
           `merge base of ${shortRev(ctx.target.baseRef)} → ` +
             `${shortSha(ctx.target.headSha)}  (exact sha after fetch)`,
-      { styles },
+      { styles, width },
     ),
     ...row(
       "RUN",
@@ -2763,7 +2802,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
         `${codegraphPlanTag(ctx.worktreePath)} · ` +
         `hop budget ${ctx.options.hopBudget} · ` +
         `${ctx.config.suspicion_priors.length} prior(s)`,
-      { styles },
+      { styles, width },
     ),
   );
   if (ctx.options.post) {
@@ -2771,7 +2810,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
       ...row(
         "POST",
         "✓ one marked PR comment — created, or updated in place (idempotent)",
-        { styles },
+        { styles, width },
       ),
     );
   }
@@ -2788,6 +2827,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
         hunterCount: ctx.hunterCount,
       },
       styles,
+      width,
     ),
   );
   return lines;
