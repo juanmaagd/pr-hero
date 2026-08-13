@@ -35,6 +35,7 @@ import {
   shortPath,
   shortSha,
   styleEnabled,
+  terminalWidth,
 } from "./ui";
 import {
   countAttempts,
@@ -590,9 +591,14 @@ function printDryRun(
   decision: TickDecision,
   repos: WatchedRepoFacts[],
 ): void {
+  // Both impure decisions are made HERE, at the shell boundary, and handed
+  // down as values — ui.ts's contract. This printer is the shell, so it is
+  // allowed to sniff; row() and box() are not, which is why width is now a
+  // required option rather than one they fill in behind the caller's back.
   const styles = styleEnabled();
+  const width = terminalWidth();
   const emit = (label: string, value: string): void => {
-    for (const line of row(label, value, { styles })) log(line);
+    for (const line of row(label, value, { styles, width })) log(line);
   };
   for (const line of box(
     "pr-hero · watch",
@@ -601,7 +607,7 @@ function printDryRun(
       `${config.repos.length} repo(s) · ${launchedToday}/${config.dailyCap} ` +
         "launches used today",
     ],
-    { styles },
+    { styles, width },
   )) {
     log(line);
   }
