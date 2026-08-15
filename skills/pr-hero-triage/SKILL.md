@@ -4,7 +4,7 @@ description: "Triage pr-hero findings posted as PR comments — for each one, re
 license: MIT
 metadata:
   author: gentleman-programming
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## When to Use
@@ -32,7 +32,25 @@ The bottleneck of coding with AI is the review. If an agent writes the code and 
 answer a review, the human is the queue. This skill exists so the default actor answering a
 finding is an agent — **the human is the objector, never the gate**: free to weigh in with a
 reaction or a reply whenever they have context or an opinion, never required for the loop to
-close.
+close. That only works if the agent actually judges. Closing the loop means answering with a
+tag, not applying the review as a todo list.
+
+## You own the judgment
+
+Every pr-hero comment is a **claim to verify**, not an order and not a merge gate. You — the
+coding agent running this skill — have the authority and the duty to accept it **or reject
+it**. The four tags are peers. None is the default.
+
+- Read the cited code yourself before you pick a tag. The repository is the evidence; the
+  review is not.
+- Applying every finding is a failure of this skill, not compliance with it.
+- Do not pick `applied` because it skips the adjudicator and closes the thread faster. Pick
+  `applied` only after you independently confirmed the defect and fixed it in this PR.
+- "It is marked CRITICAL" / "the review said so" is not a reason to change code. Severity is
+  the hunter's claim, not a command.
+- If you cannot confirm the defect from the code, `dismissed` (with cited disproof) or
+  `deferred` (with a real scope argument) is the honest move. Rubber-stamping a fix you did
+  not verify is the failure this section exists to prevent.
 
 ## The loop, end to end
 
@@ -47,8 +65,9 @@ current head:
 2. **Read the marker's `head=`.** This IS the budget unit — see "One adjudication per finding per
    HEAD" below. If a triage reply already exists in this thread carrying the SAME head, skip it:
    it is already answered for this code.
-3. **Decide exactly one tag**: `applied`, `dismissed`, `deferred`, or `misclassified` (table
-   below).
+3. **Judge the finding against the repository, then pick exactly one tag**: `applied`,
+   `dismissed`, `deferred`, or `misclassified` (table below). The comment is a claim, not a
+   task. You may reject it.
 4. **For `dismissed`, `deferred`, and `misclassified`**: spawn the isolated adjudicator (see
    "The adjudicator spawn" below) and include its verdict in your reply. `applied` never spawns
    one.
@@ -79,13 +98,15 @@ current head:
 | `deferred` | The finding is right, but fixing it is out of this PR's scope. | Reasoning that says why, and what you are doing instead. A GitHub issue number is optional (`--issue`) — do not invent a tracking issue just to satisfy the tag. |
 | `misclassified` | The finding is real, but pr-hero typed it wrong (severity, tier, or `causal_disposition`). | Name which field is wrong and why. This is the highest-value signal the loop produces — it points at a hunter/refuter defect, not a repository one. |
 
-Pick exactly one. If you are tempted to pick two, the finding is `misclassified` (the label is
-wrong) rather than `dismissed` (the claim is wrong) — do not split the difference.
+Pick exactly one. There is no preferred tag. If you are tempted to pick two, the finding is
+`misclassified` (the label is wrong) rather than `dismissed` (the claim is wrong) — do not
+split the difference.
 
 ### `applied`
 
-Fix the code, then reply. Do not restate the diff; a one-line pointer (commit sha or file) is
-enough. No adjudicator.
+Only after you independently confirmed the defect in the repository and fixed it in this PR.
+Then reply. Do not restate the diff; a one-line pointer (commit sha or file) is enough. No
+adjudicator. If you have not confirmed it, this is the wrong tag.
 
 ### `dismissed`
 
@@ -216,6 +237,8 @@ this PR. The engine typed it wrong, not the code.
 
 ## Rules
 
+- You own the judgment. A pr-hero finding is a claim to verify, never an order. `applied` is
+  not the default tag.
 - One tag per finding, no exceptions.
 - `dismissed`, `deferred`, `misclassified` all require a spawned, isolated adjudicator; `applied`
   never does.
