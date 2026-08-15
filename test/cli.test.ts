@@ -8,8 +8,8 @@
 // CALLER wires them the way design D6 requires — ordering, the
 // `sessionFailed` guard, and the exit-1 rule are all decisions this file
 // makes, not pr.ts. Same fake-gh pattern as test/pr.test.ts, extended to
-// capture stdin (needed to tell a per-finding comment from the summary
-// comment — both hit the same `issues/<pr>/comments` endpoint).
+// capture stdin (needed to tell a leftover W1 finding issue comment from
+// the summary comment — both hit the same `issues/<pr>/comments` endpoint).
 
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -102,8 +102,8 @@ function makeFakeGh(script: ScriptEntry[]): {
     }
     if (scripted === undefined) {
       // Default: any unscripted --method POST/PATCH create succeeds with a
-      // fresh id — covers the per-finding issue comments and the summary
-      // create/patch without a script entry per call.
+      // fresh id — covers the summary create/patch without a script entry
+      // per call.
       scripted = { stdout: JSON.stringify({ id: nextId++ }), exitCode: 0 };
     }
     const stream = (text: string) =>
@@ -203,6 +203,20 @@ function doc(overrides: Partial<FindingsDocument> = {}): FindingsDocument {
   };
 }
 
+function findingIssueCommentPosts(calls: RecordedCall[]): RecordedCall[] {
+  return calls.filter(
+    (c) =>
+      c.argv.join(" ").includes("issues/42/comments") &&
+      c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
+  );
+}
+
+function summaryStdins(calls: RecordedCall[]): string[] {
+  return calls
+    .filter((c) => c.stdin?.startsWith("<!-- pr-hero-report "))
+    .map((c) => c.stdin ?? "");
+}
+
 describe("CLI summarizer activation", () => {
   test("default-on activation supplies the bundled prompt and model override", () => {
     const settings: SummarySettings = { enabled: true, model: "opus" };
@@ -233,7 +247,7 @@ describe("postInlineFindings — step-14 ordering", () => {
   // `issues/comments/<id>` — two distinct endpoints, so the test tells them
   // apart by argv shape, not just by stdin prefix (both carry the same
   // marker prefix).
-  test("summary created first, then review, then issue comments, then the summary PATCHed last", async () => {
+  test("summary created first, then review, then the summary PATCHed last", async () => {
     const findings = [
       finding({ id: "F001", path: "src/a.ts", line: 10 }), // anchorable
       finding({ id: "F002", path: "src/b.ts", line: 999 }), // un-anchorable
@@ -253,8 +267,10 @@ describe("postInlineFindings — step-14 ordering", () => {
     });
     expect(outcome.reviewOutcome).toBe("posted");
     expect(outcome.reviewFindingCount).toBe(1);
-    expect(outcome.issueCommentIds.length).toBe(1);
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(1);
     expect(outcome.droppedFindingIds).toEqual([]);
+    expect(findingIssueCommentPosts(calls)).toHaveLength(0);
 
     const createIndex = calls.findIndex(
       (c) =>
@@ -264,11 +280,6 @@ describe("postInlineFindings — step-14 ordering", () => {
     );
     const reviewIndex = calls.findIndex((c) =>
       c.argv.join(" ").includes("pulls/42/reviews"),
-    );
-    const issueIndex = calls.findIndex(
-      (c) =>
-        c.argv.join(" ").includes("issues/42/comments") &&
-        c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
     );
     const patchIndex = calls.findIndex(
       (c) =>
@@ -285,10 +296,16 @@ describe("postInlineFindings — step-14 ordering", () => {
     );
     expect(createIndex).toBe(firstMutatingIndex);
     expect(reviewIndex).toBeGreaterThan(createIndex);
-    expect(issueIndex).toBeGreaterThan(reviewIndex);
-    expect(patchIndex).toBeGreaterThan(issueIndex);
-    // The summary PATCH is the very LAST call this run makes.
+    expect(patchIndex).toBeGreaterThan(reviewIndex);
+    // The summary PATCH is the very LAST call this run makes. No finding
+    // issue-comment POSTs sit between review and PATCH (issues #16/#17).
     expect(patchIndex).toBe(calls.length - 1);
+    const createBody = calls[createIndex]?.stdin ?? "";
+    const patchBody = calls[patchIndex]?.stdin ?? "";
+    expect(createBody).toContain("### Comments Outside Diff (1)");
+    expect(createBody).toContain("src/b.ts");
+    expect(patchBody).toContain("### Comments Outside Diff (1)");
+    expect(patchBody).toContain("src/b.ts");
   });
 
   test("zero anchorable findings never reaches the reviews endpoint at all", async () => {
@@ -306,17 +323,25 @@ describe("postInlineFindings — step-14 ordering", () => {
     });
     expect(outcome.reviewOutcome).toBe("posted");
     expect(outcome.reviewFindingCount).toBe(0);
-    expect(outcome.issueCommentIds.length).toBe(1);
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(1);
+    expect(outcome.droppedFindingIds).toEqual([]);
     expect(calls.some((c) => c.argv.join(" ").includes("reviews"))).toBe(false);
+    expect(findingIssueCommentPosts(calls)).toHaveLength(0);
+    const bodies = summaryStdins(calls);
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(
+      bodies.every((b) => b.includes("### Comments Outside Diff (1)")),
+    ).toBe(true);
+    expect(bodies.some((b) => b.includes("src/never.ts"))).toBe(true);
   });
 
-  // CRIT-C (verify-report-pr3, #3305): spec R4 requires EXACTLY one issue
-  // comment per un-anchorable finding, never pooled. The prior suite only
-  // ever exercised one un-anchorable finding at a time, so a mutation that
-  // posts only the FIRST (`toIssuePost.slice(0, 1)`) left the suite green —
-  // "at least one" was pinned, "exactly N" was not. Two un-anchorable
-  // findings, two distinct marker bodies, closes it.
-  test("two un-anchorable findings post as two SEPARATE issue comments, never pooled (R4)", async () => {
+  // W2 (issues #16/#17): un-anchorable findings pool into ONE summary
+  // Comments Outside Diff section, never as standalone issue comments.
+  // The prior suite pinned R4's "exactly one issue comment each"; that
+  // channel is retired. Two un-anchorable findings, both in the summary
+  // bucket, zero finding-marker POSTs, closes the new contract.
+  test("two un-anchorable findings post in the summary Outside Diff section, never as issue comments", async () => {
     const findings = [
       finding({ id: "F001", path: "src/never-a.ts", line: 1 }),
       finding({ id: "F002", path: "src/never-b.ts", line: 1 }),
@@ -333,18 +358,20 @@ describe("postInlineFindings — step-14 ordering", () => {
       spawnFn,
     });
     expect(outcome.reviewFindingCount).toBe(0);
-    expect(outcome.issueCommentIds.length).toBe(2);
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(2);
     expect(outcome.droppedFindingIds).toEqual([]);
-    const findingComments = calls.filter(
-      (c) =>
-        c.argv.join(" ").includes("issues/42/comments") &&
-        c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
-    );
-    expect(findingComments).toHaveLength(2);
-    const bodies = findingComments.map((c) => c.stdin);
-    expect(bodies[0]).not.toEqual(bodies[1]);
-    expect(bodies.some((b) => b?.includes("path=src%2Fnever-a.ts"))).toBe(true);
-    expect(bodies.some((b) => b?.includes("path=src%2Fnever-b.ts"))).toBe(true);
+    expect(findingIssueCommentPosts(calls)).toHaveLength(0);
+    const bodies = summaryStdins(calls);
+    expect(bodies.length).toBe(2); // create + PATCH
+    for (const body of bodies) {
+      expect(body).toContain("### Comments Outside Diff (2)");
+      expect(body).toContain("src/never-a.ts");
+      expect(body).toContain("src/never-b.ts");
+      expect(body).toContain(
+        "the value is stored in seconds and read as milliseconds",
+      );
+    }
   });
 });
 
@@ -355,8 +382,8 @@ describe("postInlineFindings — the 422 recovery never drops a finding", () => 
   // the 422 recovery. Proven by mutation (Method, per the brief): with
   // `allFindings` narrowed back to just the review-submission subset
   // (`reviewFindings`) in postInlineFindings, this test's assertion on
-  // `issueCommentIds.length` fails (F002 disappears from both channels);
-  // reverted after observing the failure.
+  // `droppedFindingIds` / F002 in the summary Outside Diff fails (F002
+  // disappears from both channels); reverted after observing the failure.
   test("a claimed comment does not swallow a fresh finding on 422", async () => {
     const claimedMarker = findingMarker({
       path: "src/a.ts",
@@ -406,17 +433,24 @@ describe("postInlineFindings — the 422 recovery never drops a finding", () => 
       webUrl: undefined,
       spawnFn,
     });
-    // F001 already had a home (comment 7); F002 must land in the issue
-    // channel — never dropped.
+    // F001 already had a home (comment 7); F002 must surface in the
+    // summary Outside Diff bucket — never dropped, never an issue comment.
     expect(outcome.reviewOutcome).toBe("demoted");
     expect(outcome.droppedFindingIds).toEqual([]);
-    expect(outcome.issueCommentIds.length).toBe(1);
-    const issueCall = calls.find(
-      (c) =>
-        c.argv.join(" ").includes("issues/42/comments") &&
-        c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(1);
+    expect(findingIssueCommentPosts(calls)).toHaveLength(0);
+    const patchBody =
+      calls.find(
+        (c) =>
+          c.argv.join(" ").includes("PATCH") &&
+          c.stdin?.startsWith("<!-- pr-hero-report "),
+      )?.stdin ?? "";
+    expect(patchBody).toContain("### Comments Outside Diff (1)");
+    expect(patchBody).toContain("`src/a.ts:103`");
+    expect(patchBody).toContain(
+      "the value is stored in seconds and read as milliseconds",
     );
-    expect(issueCall?.stdin).toContain("line=103");
   });
 
   // CRIT-A (verify-report-pr3, #3305) — the verifier's exact tie-dissolution
@@ -510,23 +544,30 @@ describe("postInlineFindings — the 422 recovery never drops a finding", () => 
     // match) briefly looked like its sole remaining tie candidate.
     expect(outcome.droppedFindingIds).toEqual([]);
     expect(outcome.reviewOutcome).toBe("demoted");
-    expect(outcome.issueCommentIds.length).toBe(1);
-    const issueCall = calls.find(
-      (c) =>
-        c.argv.join(" ").includes("issues/42/comments") &&
-        c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(1);
+    expect(findingIssueCommentPosts(calls)).toHaveLength(0);
+    const patchBody =
+      calls.find(
+        (c) =>
+          c.argv.join(" ").includes("PATCH") &&
+          c.stdin?.startsWith("<!-- pr-hero-report "),
+      )?.stdin ?? "";
+    expect(patchBody).toContain("### Comments Outside Diff (1)");
+    expect(patchBody).toContain("`src/a.ts:102`");
+    expect(patchBody).toContain(
+      "a genuinely new finding, tied between R1 and R2",
     );
-    expect(issueCall?.stdin).toContain("line=102");
   });
 });
 
-// PR #4 live review, comment 3767088276: the issue-comment channel had no
-// re-fetch/re-match immediately before its mutating POST, unlike the review
-// channel's free 422 recovery. These two tests pin both halves of the fix:
-// the re-fetch HAPPENS and prevents a duplicate when something changed
-// underneath, and it is SKIPPED entirely when there is nothing to post.
-describe("postInlineFindings — re-fetch immediately before the issue-comment POST", () => {
-  test("a finding another process already posted between the plan snapshot and this POST is not duplicated", async () => {
+// The rematch-before-issue-comment-POST (live PR #4, comment 3767088276)
+// existed only to prevent duplicate finding issue comments. W2 retires that
+// POST, so the rematch is gone too — identity for the Outside Diff bucket
+// is the next slice. These tests pin the retirement: zero finding issue
+// comments, and a workless persist run still pays for no extra gh call.
+describe("postInlineFindings — no finding issue-comment POST (issues #16/#17)", () => {
+  test("a leftover concurrent issue comment does not recreate a finding issue comment; the finding reaches Outside Diff", async () => {
     const findings = [
       finding({
         id: "F001",
@@ -535,22 +576,12 @@ describe("postInlineFindings — re-fetch immediately before the issue-comment P
         claim: "an un-anchorable finding",
       }),
     ];
-    // The comment a CONCURRENT process posted for the SAME finding, same
-    // head, same claim — exactly what a second `--post` run would leave
-    // behind between this run's plan snapshot and its own re-fetch. An
-    // existing SUMMARY comment is also scripted (so `postPrComment`'s own
+    // An existing SUMMARY comment is scripted so `postPrComment`'s own
     // internal existing-comment check doesn't add a THIRD indistinguishable
-    // read to the same "issues/42/comments" endpoint before this fix's
-    // re-fetch even runs) — the call-counting assertion below only means
-    // anything if every "issues/42/comments" read in this run is accounted
-    // for.
+    // read. The concurrent leftover issue comment from another process is
+    // NOT re-fetched this slice (rematch retired); the finding still lands
+    // in the summary Outside Diff and is not dropped.
     const summaryMarker = `<!-- pr-hero-report head=${HEAD} -->`;
-    const concurrentMarker = findingMarker({
-      path: "src/never.ts",
-      line: 1,
-      headSha: HEAD,
-      claim: "an un-anchorable finding",
-    });
     const { spawnFn, calls } = makeFakeGh([
       {
         match: ["issues/42/comments", "--paginate"],
@@ -564,16 +595,7 @@ describe("postInlineFindings — re-fetch immediately before the issue-comment P
               },
             ]),
           }, // 1st fetch (resolveInlinePostPlan's own existingSummaryId read)
-          { stdout: "" }, // 2nd fetch (fetchPostedFindingComments, same plan snapshot): nothing posted yet
-          {
-            stdout: ndjson([
-              {
-                id: 55,
-                user: "pr-hero",
-                body: `${concurrentMarker}\nan un-anchorable finding`,
-              },
-            ]),
-          }, // 3rd fetch (this fix's re-fetch, immediately before the mutating POST): the concurrent post already landed
+          { stdout: "" }, // 2nd fetch (fetchPostedFindingComments, same plan snapshot)
         ],
       },
       { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
@@ -587,27 +609,24 @@ describe("postInlineFindings — re-fetch immediately before the issue-comment P
       webUrl: undefined,
       spawnFn,
     });
-    // No duplicate issue comment posted for F001.
-    expect(outcome.issueCommentIds.length).toBe(0);
-    // F001 is not misreported as dropped — it already has a home, just not
-    // one THIS run created.
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(1);
     expect(outcome.droppedFindingIds).toEqual([]);
-    const issuePostCalls = calls.filter(
-      (c) =>
-        c.argv.join(" ").includes("POST") &&
-        c.argv.join(" ").includes("issues/42/comments") &&
-        c.stdin?.startsWith(PR_FINDING_MARKER_PREFIX),
-    );
-    expect(issuePostCalls).toHaveLength(0);
-    // The re-fetch itself happened: THREE GET calls to the same endpoint —
-    // existingSummaryId, the plan's own posted-comments read, and this fix's
-    // pre-POST re-fetch — never just the first two.
+    expect(findingIssueCommentPosts(calls)).toHaveLength(0);
     const issueGetCalls = calls.filter(
       (c) =>
         c.argv.join(" ").includes("issues/42/comments") &&
         c.argv.join(" ").includes("--paginate"),
     );
-    expect(issueGetCalls.length).toBe(3);
+    expect(issueGetCalls.length).toBe(2);
+    const patchBody =
+      calls.find(
+        (c) =>
+          c.argv.join(" ").includes("PATCH") &&
+          c.stdin?.startsWith("<!-- pr-hero-report "),
+      )?.stdin ?? "";
+    expect(patchBody).toContain("### Comments Outside Diff (1)");
+    expect(patchBody).toContain("an un-anchorable finding");
   });
 
   test("nothing to post skips the re-fetch entirely — a workless run pays for no extra gh call", async () => {
@@ -675,8 +694,8 @@ describe("postInlineFindings — re-fetch immediately before the issue-comment P
     expect(outcome.reviewFindingCount).toBe(0);
     expect(outcome.droppedFindingIds).toEqual([]);
     // Exactly TWO reads of the issue endpoint (existingSummaryId + the
-    // plan's own posted-comments read) — the re-fetch never ran because
-    // there was nothing to post.
+    // plan's own posted-comments read) — no rematch re-fetch (retired with
+    // the issue-comment POST).
     const issueGetCalls = calls.filter(
       (c) =>
         c.argv.join(" ").includes("issues/42/comments") &&
@@ -798,7 +817,7 @@ describe("postInlineFindings — comment url map reaches the summary's index", (
         line: 20,
         claim: "a fresh anchorable finding",
       }),
-      // Fresh, un-anchorable — goes to its own issue comment.
+      // Fresh, un-anchorable — goes into the summary Outside Diff section.
       finding({
         id: "F003",
         path: "src/never.ts",
@@ -891,7 +910,9 @@ describe("postInlineFindings — comment url map reaches the summary's index", (
     });
 
     expect(outcome.reviewFindingCount).toBe(1); // F002
-    expect(outcome.issueCommentIds.length).toBe(1); // F003
+    expect(outcome.issueCommentIds).toEqual([]);
+    expect(outcome.outsideDiffCount).toBe(1); // F003
+    expect(outcome.droppedFindingIds).toEqual([]);
 
     const patchCall = calls.find(
       (c) =>
@@ -903,12 +924,12 @@ describe("postInlineFindings — comment url map reaches the summary's index", (
     // F002, freshly posted to the review, linked via the post-posting
     // re-fetch + marker match.
     expect(patchCall?.stdin).toContain(`${WEB_URL}/pull/42#discussion_r55`);
-    // F003, freshly posted as an issue comment, linked directly from
-    // postIssueComment's own return value.
-    const issueId = outcome.issueCommentIds[0];
-    expect(patchCall?.stdin).toContain(
-      `${WEB_URL}/pull/42#issuecomment-${issueId}`,
-    );
+    // F003 has no per-finding comment — unlinked in the index, full body
+    // in the Outside Diff bucket, never an #issuecomment- permalink.
+    expect(patchCall?.stdin).not.toContain("#issuecomment-");
+    expect(patchCall?.stdin).toContain("### Comments Outside Diff (1)");
+    expect(patchCall?.stdin).toContain("a fresh un-anchorable finding");
+    expect(patchCall?.stdin).toContain("`src/never.ts:1`");
   });
 });
 
@@ -1067,6 +1088,7 @@ describe("postingExitCode — design D6's exit-1 rule", () => {
       reviewOutcome: "posted",
       reviewFindingCount: 0,
       issueCommentIds: [],
+      outsideDiffCount: 0,
       summary: { action: "created", commentId: 1 },
       delta: { resolved: 0, new: 0, persist: 0 },
       droppedFindingIds: [],
@@ -1198,6 +1220,42 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
         expect(call.argv.join(" ")).not.toContain("reviews");
       }
     } finally {
+      await cleanup();
+    }
+  });
+
+  test("dry-run lists un-anchorable findings as outside, not issue", async () => {
+    const { dir, cleanup } = await writeRunDir({
+      findings: [finding({ id: "F001", path: "src/never.ts", line: 1 })],
+    });
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const exitCode = await runPostCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: true,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const logged = chunks.join("");
+      expect(logged).toContain("1 outside diff");
+      expect(logged).toContain("outside src/never.ts:1 F001");
+      expect(logged).not.toContain("issue comment(s)");
+      expect(logged).not.toContain("  issue   ");
+      for (const call of calls) {
+        expect(call.argv).not.toContain("--method");
+      }
+    } finally {
+      process.stderr.write = origWrite;
       await cleanup();
     }
   });
@@ -1816,6 +1874,46 @@ describe("runTriageReplyCommand", () => {
         }),
       ).rejects.toThrow(/reasoning prose only/);
       expect(calls.length).toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("live #34: resolve failure after a successful post says re-run, not gh", async () => {
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir();
+    try {
+      const script = greptileCollisionScript().map((entry) =>
+        entry.match.includes("reviewThreads")
+          ? {
+              ...entry,
+              response: {
+                stdout: "",
+                stderr: 'Expected NAME, actual: (none) ("") at [1, 202]',
+                exitCode: 1,
+              },
+            }
+          : entry,
+      );
+      const { spawnFn, calls } = makeFakeGh(script);
+      await expect(
+        runTriageReplyCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          findingId: "F001",
+          tag: "applied",
+          bodyFile,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/resolve failed after the reply was on GitHub/);
+      expect(
+        calls.some(
+          (call) =>
+            call.argv.includes("--method") &&
+            call.argv.join(" ").includes("pulls/42/comments"),
+        ),
+      ).toBe(true);
     } finally {
       await cleanup();
     }

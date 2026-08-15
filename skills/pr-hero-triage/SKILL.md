@@ -19,7 +19,12 @@ Use it when you see comments whose FIRST line matches:
 ```
 
 Do not use it for ordinary human review comments, or for pr-hero's own summary comment
-(`<!-- pr-hero-report head=<sha> -->`) — that one is a status roll-up, not a per-finding thread.
+(`<!-- pr-hero-report head=<sha> -->`). That comment is a status roll-up plus, since W2
+(issues #16/#17), a `### Comments Outside Diff` bucket for findings GitHub would not
+anchor. Those bucket findings have **no** `<!-- pr-hero-finding` marker and **no**
+review thread. Do not reply on the summary. Do not invent a `gh` comment for them.
+This skill only answers findings that already have their own `<!-- pr-hero-finding`
+comment — almost always an inline review comment on Files changed.
 
 ## The strategic why
 
@@ -35,7 +40,10 @@ For EVERY `<!-- pr-hero-finding ` comment on this PR that has not already been t
 current head:
 
 1. **Read the finding.** Fetch the comment body (the marker plus pr-hero's claim/severity/tier
-   text) and its GitHub comment id and type (inline review comment vs. top-level issue comment).
+   text) and its GitHub comment id. New posts put that marker on an **inline review
+   comment**. A leftover top-level issue comment with the same marker may still exist on
+   an old PR (pre-W2); the driver still binds those by marker. A finding that appears
+   only under `Comments Outside Diff` in the summary is not in this list — skip it.
 2. **Read the marker's `head=`.** This IS the budget unit — see "One adjudication per finding per
    HEAD" below. If a triage reply already exists in this thread carrying the SAME head, skip it:
    it is already answered for this code.
@@ -54,9 +62,12 @@ current head:
 
    The driver resolves the parent from the posted `<!-- pr-hero-finding`
    marker (never a comment id, never the nearest line), prepends the triage
-   marker and the visible badge, posts the reply, and resolves the inline
-   review thread. `applied` takes no `--verdict`. `dismissed` /
-   `deferred` / `misclassified` require `--verdict` from the adjudicator.
+   marker and the visible badge, posts the reply, and — when the parent is
+   an inline review comment — resolves that review thread. If the driver
+   says no posted marker matches this `F00N`, the finding lives in the
+   summary bucket (or was never posted): stop. Do not fall back to `gh`.
+   `applied` takes no `--verdict`. `dismissed` / `deferred` /
+   `misclassified` require `--verdict` from the adjudicator.
    `--issue` is optional and only valid with `--tag deferred`.
 
 ## The four tags
@@ -146,9 +157,10 @@ nothing else to consult.
 
 `--body-file` is **reasoning prose only**. Do not put a `<!-- pr-hero-triage` marker or a
 badge line in that file — the driver prepends both, picks the parent comment from the posted
-`<!-- pr-hero-finding` marker, and resolves the inline review thread. Passing a GitHub
-comment id, or posting with `gh api … in_reply_to`, is how replies landed under Greptile on
-Musive #1724. Do not do that.
+`<!-- pr-hero-finding` marker, and resolves the inline review thread when there is one.
+Passing a GitHub comment id, or posting with `gh api … in_reply_to`, is how replies landed
+under Greptile on Musive #1724. Do not do that. Do not reply on
+`<!-- pr-hero-report -->` either: that is the summary, including Outside Diff.
 
 `--from` is the pr-hero run directory that produced these findings (`findings.json`). `--finding`
 is the finding id (`F001`, …) from that file — never a comment id.
@@ -210,6 +222,11 @@ this PR. The engine typed it wrong, not the code.
 - The adjudicator never sees your reasoning context — only the finding, your argument, and the
   repo.
 - Never call `gh` to post or resolve a triage reply. Run `pr-hero triage reply`.
+  If that command posted the reply and then failed to resolve, re-run the
+  **same** command — same-head skip retries resolve only. Do not `gh`.
+- Never triage a finding that only exists under `### Comments Outside Diff` in the
+  summary. It has no thread this slice (W2). If `pr-hero triage reply` reports no
+  matching marker, stop.
 - `dismissed`, `deferred`, and `misclassified` without `--verdict` are malformed. `applied` WITH
   `--verdict` is equally malformed.
 - Never re-triage a finding whose head is unchanged since its last triage on this PR (the driver

@@ -291,33 +291,41 @@ function findingIndexLines(
 // linkless shape — the renderer stays offline-testable and a posted comment
 // stays re-renderable from the artifact alone.
 //
-// ROADMAP B6 reshape: this no longer lists findings by tier — that moved to
-// per-finding inline review comments and issue comments (renderInlineComment
-// / renderIssueFindingComment below), so the same claim is never duplicated
-// between the summary and the per-finding surface. `delta` may be absent —
-// a caller with no prior-state knowledge (or a same-run first post) still
-// gets a valid comment, just without the delta line — but the PARAMETER
-// itself is REQUIRED, not optional (PR2 verification WARN-3, same fix
-// shape as `consumedCommentIds` on `postPrReview`, a3b3d3a): an optional
-// third argument is one a PR3 wiring call can simply forget, and the
-// summary would then render silently without the delta line spec R13
-// requires. `delta: PrCommentDelta | undefined` forces every call site to
-// say so explicitly, so the type system — not a missed review comment —
-// catches the omission.
-// `commentUrlByFindingId` is the fourth, OPTIONAL parameter (ROADMAP B6
-// rework, Juanma's PR #2 feedback): a finding id → its own posted comment's
-// URL, so the index above can link straight to it. Absent on the summary's
-// FIRST creation (cli.ts creates the summary BEFORE any per-finding comment
-// exists, to fix its position in the PR timeline — see cli.ts's
-// postInlineFindings WHY) and present on the closing PATCH once posting
-// finished. A caller that omits it gets a correct, link-free index — never a
-// broken or empty one — so this stays additive, unlike `delta`'s forced-
-// explicit contract above (PR2 WARN-3): a missing link map degrades the
+// ROADMAP B6 reshape, W2 (issues #16/#17): the index stays one-liners;
+// anchorable findings live on the review; un-anchorable (and 422-demoted)
+// findings render their full body in this summary's Comments Outside Diff
+// section — Greptile-shaped, never as standalone issue comments. `delta`
+// may be absent — a caller with no prior-state knowledge (or a same-run
+// first post) still gets a valid comment, just without the delta line —
+// but the PARAMETER itself is REQUIRED, not optional (PR2 verification
+// WARN-3, same fix shape as `consumedCommentIds` on `postPrReview`,
+// a3b3d3a): an optional third argument is one a PR3 wiring call can
+// simply forget, and the summary would then render silently without the
+// delta line spec R13 requires. `delta: PrCommentDelta | undefined`
+// forces every call site to say so explicitly, so the type system — not a
+// missed review comment — catches the omission.
+// `outsideDiffFindings` is the same WARN-3 shape: REQUIRED, not optional.
+// An optional fourth argument is one a caller can forget, and the summary
+// would then silently omit the Outside Diff bucket those findings reached.
+// Pass `[]` when there are none — the section is omitted only when the
+// array is empty, never because a call site skipped the argument.
+// `commentUrlByFindingId` stays the last, OPTIONAL parameter (ROADMAP B6
+// rework, Juanma's PR #2 feedback): a finding id → its own posted
+// review-comment URL, so the index above can link straight to it. Absent
+// on the summary's FIRST creation (cli.ts creates the summary BEFORE any
+// per-finding comment exists, to fix its position in the PR timeline —
+// see cli.ts's postInlineFindings WHY) and present on the closing PATCH
+// once posting finished. Un-anchorable findings have no review-comment
+// URL; their index line stays unlinked and the bucket below has the full
+// body. A caller that omits the map gets a correct, link-free index —
+// never a broken or empty one — so this stays additive, unlike `delta`
+// and `outsideDiffFindings` above: a missing link map degrades the
 // index's usefulness, it does not make the comment lie.
 export function renderPrComment(
   doc: FindingsDocument,
   repoWebUrl: string | undefined,
   delta: PrCommentDelta | undefined,
+  outsideDiffFindings: readonly Finding[],
   commentUrlByFindingId?: ReadonlyMap<string, string>,
 ): string {
   // Normalize away one trailing slash so `gh repo view` output and a
@@ -360,6 +368,10 @@ export function renderPrComment(
     out.push(...findingIndexLines(doc.findings, commentUrlByFindingId));
     out.push("");
   }
+  if (outsideDiffFindings.length > 0) {
+    out.push(...outsideDiffSection(outsideDiffFindings, doc.head_sha, webUrl));
+    out.push("");
+  }
   // Omit the "since <sha>" clause when the previous head equals the current
   // one (Juanma's PR #2 feedback: "Δ since f933fda8" printed on head
   // f933fda8 is noise) — a re-run on an unchanged head, not a genuinely
@@ -391,6 +403,26 @@ function deltaLine(delta: PrCommentDelta): string {
       ? "Δ"
       : `Δ since ${code(delta.previousHeadSha.slice(0, 8))}`;
   return `${since}: ${delta.resolved} resolved · ${delta.new} new · ${delta.persist} persist`;
+}
+
+// Greptile-shaped bucket (issues #16/#17): un-anchorable and 422-demoted
+// findings live HERE, inside the one summary, never as `POST .../issues/<n>/comments`.
+// Rendered only when N>0. Full per-finding body (header, blob-linked location,
+// claim, tier explanation, evidence, prompt-to-fix) — the same shape as
+// renderIssueFindingComment minus the finding marker (that marker would make
+// fetchPostedFindingComments treat this summary as a finding comment) and
+// minus the "Posted as a standalone comment" footer (#17's smell).
+function outsideDiffSection(
+  findings: readonly Finding[],
+  headSha: string,
+  webUrl: string | undefined,
+): string[] {
+  const out: string[] = [`### Comments Outside Diff (${findings.length})`, ""];
+  for (const [i, finding] of findings.entries()) {
+    if (i > 0) out.push("");
+    out.push(...findingBodyLines(finding, headSha, webUrl, true));
+  }
+  return out;
 }
 
 // Per-finding comment bodies (ROADMAP B6, reworked per Juanma's PR #2
@@ -486,6 +518,28 @@ function promptToFixBlock(finding: Finding): string[] {
   ];
 }
 
+function findingBodyLines(
+  finding: Finding,
+  headSha: string,
+  webUrl: string | undefined,
+  linkLocation: boolean,
+): string[] {
+  const out: string[] = [
+    findingHeaderLine(finding),
+    findingLocationLine(finding, headSha, webUrl, linkLocation),
+    "",
+    oneLine(finding.claim),
+  ];
+  const tierLines = tierExplanationLines(finding);
+  if (tierLines.length > 0) {
+    out.push("");
+    out.push(...tierLines);
+  }
+  out.push(...evidenceBlock(finding, headSha, webUrl));
+  out.push(...promptToFixBlock(finding));
+  return out;
+}
+
 export function renderInlineComment(
   finding: Finding,
   headSha: string,
@@ -499,27 +553,19 @@ export function renderInlineComment(
       claim: finding.claim,
     }),
     "",
-    findingHeaderLine(finding),
     // No link on the location line: GitHub already anchors this comment to
     // the diff line itself, so a self-referential link would be redundant —
     // unlike the un-anchorable twin below, which has no anchor to point at.
-    findingLocationLine(finding, headSha, webUrl, false),
-    "",
-    oneLine(finding.claim),
+    ...findingBodyLines(finding, headSha, webUrl, false),
   ];
-  const tierLines = tierExplanationLines(finding);
-  if (tierLines.length > 0) {
-    out.push("");
-    out.push(...tierLines);
-  }
-  out.push(...evidenceBlock(finding, headSha, webUrl));
-  out.push(...promptToFixBlock(finding));
   return `${out.join("\n").trimEnd()}\n`;
 }
 
-// The un-anchorable twin of renderInlineComment: posted as a standalone
-// issue comment (never anchored to a diff line by GitHub), so its location
-// line links to the blob — the only way a reader gets to the actual code.
+// Kept for postIssueComment (src/pr.ts) and its tests: leftover W1 orphans
+// from old runs still have this body shape. New posting (W2, issues #16/#17)
+// does not call this — un-anchorable findings go into the summary Outside
+// Diff section, which reuses findingBodyLines without the marker or this
+// standalone-comment footer (#17's smell).
 export function renderIssueFindingComment(
   finding: Finding,
   headSha: string,
@@ -533,23 +579,11 @@ export function renderIssueFindingComment(
       claim: finding.claim,
     }),
     "",
-    findingHeaderLine(finding),
-    findingLocationLine(finding, headSha, webUrl, true),
+    ...findingBodyLines(finding, headSha, webUrl, true),
     "",
-    oneLine(finding.claim),
-  ];
-  const tierLines = tierExplanationLines(finding);
-  if (tierLines.length > 0) {
-    out.push("");
-    out.push(...tierLines);
-  }
-  out.push(...evidenceBlock(finding, headSha, webUrl));
-  out.push(...promptToFixBlock(finding));
-  out.push("");
-  out.push(
     "<sub>Posted as a standalone comment: pr-hero could not anchor this " +
       "finding to a line in the current diff.</sub>",
-  );
+  ];
   return `${out.join("\n").trimEnd()}\n`;
 }
 

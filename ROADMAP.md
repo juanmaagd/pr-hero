@@ -572,6 +572,13 @@ What is still manual, in the order it should be closed:
    zero: tidiness is a human preference, and the primary reader is an agent. Muting a subset of findings
    is not.
 
+   **Retracted 2026-08-15 (Juanma, issues #16/#17, W2).** The "own top-level issue comment" rule above
+   is the Conversation split that looked like a second review (Musive #1711 F001 `:958` vs F002 inline).
+   First-review posting now matches Greptile: un-anchorable and 422-demoted findings live in the
+   summary `Comments Outside Diff` bucket; inline review comments stay the only resolvable threads
+   (W1 reply + Resolve). Do not rebuild R4. The remaining hole is cross-run identity for that bucket —
+   parked on item 7, not redesigned in W2.
+
    **Live protocol, and it differs from the issue-comment one.** The WRITE path stays unexecuted until
    an authorized live post; `--dry-run` is the $0 gate, always first. Where the single marked comment
    needed two posts to prove create-then-update, this slice's idempotency proof is: **first run posts K
@@ -743,6 +750,23 @@ What is still manual, in the order it should be closed:
 7. **A re-review is not a review — and today we run it as one. NOT BUILT.** Raised by Juanma
    2026-08-12, immediately after item 6 shipped and its own live runs made the gap visible. He is right,
    and it is worse than a matter of efficiency.
+
+   **Parked from W2 (Juanma, 2026-08-15) — read this before building this item.** Issues #16/#17 closed
+   the *first* review's posting surface and explicitly left re-review for this slice. Do not reopen
+   that product call; carry the hole:
+
+   - Un-anchorable and 422-demoted findings now live only in the summary `Comments Outside Diff`
+     bucket (`renderPrComment` / `postInlineFindings`). Zero `POST .../issues/<n>/comments` for
+     findings. Inline comments stay the W1 reply+Resolve channel.
+   - The bucket has **no** `<!-- pr-hero-finding -->` markers on purpose: a marker on the summary
+     would make `fetchPostedFindingComments` treat the summary as a finding comment. Cross-run
+     identity for those findings is therefore missing — a second `--post` can classify them as
+     `fresh` even though they already sit in the bucket. `plan.issueComments` is still the
+     classifier name; it no longer posts.
+   - The rematch-before-issue-comment-POST block died with R4. Overlapping `--post` runs can both
+     PATCH the same summary. True exactly-once is still Phase E.
+   - Do not snap to a nearby hunk line. Do not bring R4 back to "make the bucket matchable".
+     Identity for Outside Diff is this item's design work, next to verification vs discovery below.
 
    **We infer "fixed" from absence.** `MatchResult.resolved` is literally "a prior comment with nothing
    matched to it this run", so the deterministic-looking `Δ N resolved` line is deducing repair from

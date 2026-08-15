@@ -436,7 +436,8 @@ export async function writeComparison(input: {
 // decides what a failed one means.
 // ROADMAP B6 addition: `spawnFn`, same invisible-to-production seam as the
 // other B6 functions (see gh()'s WHY). Needed so test/cli.test.ts can drive
-// the WHOLE step-14 sequence — review, issue comments, summary PATCH LAST —
+// the WHOLE step-14 sequence — review, Outside Diff in the summary, summary
+// PATCH LAST —
 // through one shared fake gh, the same way test/pr.test.ts already does for
 // the per-finding functions; a summary PATCH the caller-level test could not
 // see would leave the "PATCHed last" ordering unpinned.
@@ -678,7 +679,8 @@ export interface ReviewSubmissionOutcome {
   // "posted": every finding in `findings` is now in the one review.
   // "demoted": the review was rejected (422); `findings` is the subset of
   //   the ORIGINAL submission still classified fresh after a FULL re-match —
-  //   the caller posts these as individual issue comments instead.
+  //   the caller puts these in the summary Outside Diff bucket (issues
+  //   #16/#17) instead of posting them as issue comments.
   //
   // WHY a full re-match, not a re-match over `findings` alone (CRIT-A,
   // verify-report-pr3 #3305 — the bug the previous `consumedCommentIds`
@@ -724,8 +726,9 @@ export interface ReviewSubmissionOutcome {
 // — the SAME function an ordinary second run already uses for cross-run
 // identity — means the recovery is not a special code path at all: whatever
 // the live PR already carries is `persist`, whatever it does not is
-// `fresh`, and only `fresh` gets posted, this time as an issue comment. The
-// matcher doubles as the recovery mechanism.
+// `fresh`, and only `fresh` reaches the caller, this time for the summary
+// Outside Diff bucket (issues #16/#17) rather than a second review attempt.
+// The matcher doubles as the recovery mechanism.
 export async function postPrReview(input: {
   operatorRoot: string;
   pr: number;
@@ -930,15 +933,36 @@ export type ResolveThreadOutcome =
   | "already-resolved"
   | "not-found";
 
+// One more `}` than the first live query: 7 opens (query / repository /
+// pullRequest / reviewThreads / nodes / comments / nodes) need 7 closes.
+// Live W1 triage on pr-hero #34 failed with
+// `Expected NAME, actual: (none) ("") at [1, 202]` — GraphQL reaching EOF
+// on the last brace, which was one short. Variable names are `repoOwner` /
+// `repoName` so they cannot collide with `gh -f name=` interpolating `$name`
+// inside the query document.
 const REVIEW_THREADS_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!){" +
-  "repository(owner:$owner,name:$name){pullRequest(number:$number){" +
+  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
   "reviewThreads(first:100){nodes{id isResolved comments(first:1){" +
-  "nodes{fullDatabaseId}}}}}}";
+  "nodes{fullDatabaseId}}}}}}}";
 
 const RESOLVE_THREAD_MUTATION =
   "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){" +
   "thread{isResolved}}}";
+
+// Fake-gh tests never send the document to GitHub, so they cannot catch a
+// truncated query. Live W1 on #34 failed with GraphQL EOF
+// (`Expected NAME, actual: (none) ("")`) because REVIEW_THREADS_QUERY was
+// one `}` short. Count here, before spawn.
+function assertBalancedGraphql(document: string, what: string): void {
+  const opens = (document.match(/{/g) ?? []).length;
+  const closes = (document.match(/}/g) ?? []).length;
+  if (opens !== closes) {
+    throw new CliError(
+      `gh api graphql (${what}) query is unbalanced: ${opens} { vs ${closes} }`,
+    );
+  }
+}
 
 interface RepoOwnerName {
   owner: string;
@@ -1034,6 +1058,8 @@ export async function resolveReviewThreadForComment(input: {
   commentId: number;
   spawnFn?: typeof Bun.spawn;
 }): Promise<ResolveThreadOutcome> {
+  assertBalancedGraphql(REVIEW_THREADS_QUERY, "reviewThreads");
+  assertBalancedGraphql(RESOLVE_THREAD_MUTATION, "resolveReviewThread");
   const repo = await ghRepoOwnerName(input.operatorRoot, input.spawnFn);
   const listed = await gh(
     input.operatorRoot,
@@ -1043,9 +1069,9 @@ export async function resolveReviewThreadForComment(input: {
       "-f",
       `query=${REVIEW_THREADS_QUERY}`,
       "-f",
-      `owner=${repo.owner}`,
+      `repoOwner=${repo.owner}`,
       "-f",
-      `name=${repo.name}`,
+      `repoName=${repo.name}`,
       "-F",
       `number=${input.pr}`,
     ],

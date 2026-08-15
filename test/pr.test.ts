@@ -823,6 +823,29 @@ describe("resolveReviewThreadForComment", () => {
     expect(
       calls.some((call) => call.argv.join(" ").includes("resolveReviewThread")),
     ).toBe(true);
+    // Live #34: GraphQL EOF (`Expected NAME, actual: (none) ("")`) was a
+    // missing `}` — fake-gh never parsed the document. Variable names
+    // `repoOwner`/`repoName` stay so `gh -f name=` cannot collide with `$name`.
+    const listCall = calls.find(
+      (call) =>
+        call.argv.includes("graphql") &&
+        call.argv.some((arg) => arg.includes("reviewThreads")),
+    );
+    expect(listCall?.argv.some((arg) => arg.startsWith("name="))).toBe(false);
+    expect(listCall?.argv).toContain("repoOwner=MusiveTech");
+    expect(listCall?.argv).toContain("repoName=musive");
+    const mutateCall = calls.find((call) =>
+      call.argv.join(" ").includes("resolveReviewThread"),
+    );
+    for (const call of [listCall, mutateCall]) {
+      const document = (
+        call?.argv.find((arg) => arg.startsWith("query=")) ?? ""
+      ).slice("query=".length);
+      const opens = (document.match(/{/g) ?? []).length;
+      const closes = (document.match(/}/g) ?? []).length;
+      expect(opens).toBe(closes);
+      expect(opens).toBeGreaterThan(0);
+    }
   });
 
   test("skips an already-resolved thread without mutating", async () => {
