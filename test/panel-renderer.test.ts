@@ -19,9 +19,11 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { startPanelRenderer } from "../src/cli";
+import { createPanelState, renderPanelLines } from "../src/progress";
 
 const realWrite = process.stderr.write.bind(process.stderr);
 const realIsTty = process.stderr.isTTY;
+const realNoColor = process.env.NO_COLOR;
 let written: string[] = [];
 
 beforeEach(() => {
@@ -44,9 +46,18 @@ afterEach(() => {
     value: realIsTty,
     configurable: true,
   });
+  if (realNoColor === undefined) delete process.env.NO_COLOR;
+  else process.env.NO_COLOR = realNoColor;
 });
 
-const panel = () => startPanelRenderer(performance.now(), "PR #7", ["a", "b"]);
+const panel = (hasSummarizer = false) =>
+  startPanelRenderer(
+    performance.now(),
+    "PR #7",
+    ["a", "b"],
+    true,
+    hasSummarizer,
+  );
 
 describe("startPanelRenderer post-stop silence", () => {
   test("a progress event after stop() writes NOTHING", () => {
@@ -105,5 +116,45 @@ describe("startPanelRenderer post-stop silence", () => {
       durationMs: 1000,
     });
     expect(written.length).toBeGreaterThan(0);
+  });
+
+  test("the summarizer is seeded in the first frame", () => {
+    const p = panel(true);
+    expect(written.join("")).toContain("⠋ summarizer");
+    p.stop();
+  });
+
+  test("the summarizer completion and failure are cosmetic panel transitions", () => {
+    const complete = panel(true);
+    written = [];
+    complete.onProgress({
+      kind: "summarizer-finished",
+      ok: true,
+      durationMs: 2_000,
+    });
+    expect(written.join("")).toContain("✓ summarizer");
+    expect(written.join("")).toContain("2s");
+    complete.stop();
+
+    const failed = panel(true);
+    written = [];
+    failed.onProgress({
+      kind: "summarizer-finished",
+      ok: false,
+      durationMs: 3_000,
+    });
+    expect(written.join("")).toContain(
+      "✗ summarizer  failed — the run continues",
+    );
+    failed.stop();
+  });
+
+  test("the summarizer panel output can be rendered with zero ANSI", () => {
+    const state = createPanelState("PR #7", 0, ["a", "b"], {
+      summarizer: true,
+    });
+    const rendered = renderPanelLines(state, 0, 0, false);
+    expect(rendered.join("\n")).toContain("⠋ summarizer");
+    expect(rendered.join("\n")).not.toContain("\x1b[");
   });
 });

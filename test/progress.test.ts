@@ -59,6 +59,52 @@ describe("panel state transitions", () => {
     );
   });
 
+  test("an enabled summarizer is present from the first frame", () => {
+    const state = createPanelState("PR #1682", 0, ["reliability"], {
+      refuter: false,
+      summarizer: true,
+    });
+    expect(state.summarizer).toEqual({ status: "running" });
+    expect(lines(state, 0)).toEqual([
+      `${SPIN} reviewing PR #1682 · 1 hunter — 0s`,
+      "├─ · reliability  waiting",
+      `└─ ${SPIN} summarizer   0s`,
+    ]);
+  });
+
+  test("summarizer completion and failure only change its cosmetic row", () => {
+    const completed = createPanelState("PR #1682", 0, ["reliability"], {
+      refuter: false,
+      summarizer: true,
+    });
+    applyProgressEvent(
+      completed,
+      { kind: "summarizer-finished", ok: true, durationMs: 2_000 },
+      2_000,
+    );
+    expect(lines(completed, 2_000)).toEqual([
+      `${SPIN} reviewing PR #1682 · 1 hunter — 2s`,
+      "├─ · reliability  waiting",
+      "└─ ✓ summarizer   2s",
+    ]);
+
+    const failed = createPanelState("PR #1682", 0, ["reliability"], {
+      refuter: false,
+      summarizer: true,
+    });
+    applyProgressEvent(
+      failed,
+      { kind: "summarizer-finished", ok: false, durationMs: 3_000 },
+      3_000,
+    );
+    expect(lines(failed, 3_000).at(-1)).toBe(
+      "└─ ✗ summarizer   failed — the run continues",
+    );
+    expect(failed.hunters[0]?.status).toBe("waiting");
+    expect(failed.dedupe).toBeUndefined();
+    expect(failed.refuter).toBeUndefined();
+  });
+
   test("seeded rows wait as pending leaves of the header", () => {
     const rendered = lines(freshState(), 0);
     expect(rendered[1]).toBe("├─ · reliability  waiting");
