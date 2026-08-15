@@ -905,6 +905,54 @@ Convoy-inspired ops the engine still lacks, in value order:
   runs, per-run SUMMARY; today a killed multi-tree run restarts from zero.
 - **C4. Runtime-safety preamble** — a non-overridable engine-owned preamble (instruction hierarchy,
   read-only report contract "your final message IS the report") replacing per-prompt repetition.
+- **C5. Global config with per-repo override** (Juanma, 2026-08-13). NOT BUILT. Today `config.json` is
+  per-repo only: `<repo>/.prhero/config.json`, four keys (`agents_dir`, `default_base`,
+  `parity_trigger_paths`, `suspicion_priors`), parsed by `parseLocalConfig` (`preflight.ts:999`), with no
+  global fallback anywhere. `~/.prhero/` exists but belongs entirely to the watcher (`watch.json`, log,
+  lock, plist — `watch-preflight.ts:31`).
+
+  **The pain is concrete:** `agents_dir` is the same absolute path to the sibling prompt-set repo in every
+  repo, retyped per `init`. A user preference (see B-summary's `summary.enabled`) is likewise a property
+  of the person, not the repo. The rest — `default_base`, `parity_trigger_paths`, `suspicion_priors`,
+  gotchas — is irreducibly per-repo and must stay there.
+
+  **The rule that must survive the merge, and it is the whole reason this is not a trivial file read:**
+  `watch-preflight.ts:50` records that *nothing in a repo's own `.prhero/` can subscribe it to automatic
+  spend*. Precedence therefore is NOT uniformly "repo wins". A key that can only cost the operator more
+  money or widen trust must be global-only or global-capped; the ergonomic keys are global-default with
+  repo override. Each key gets its direction declared explicitly, in the parser, next to the key — an
+  undeclared key is a bug, not a default.
+
+  Kept OUT of the summary slice deliberately (one variable per experiment): the summary is one more key in
+  a mechanism that already exists; this is a new mechanism.
+- **C6. The learned-knowledge file — pr-hero's own memory of a repo** (Juanma, 2026-08-13). NOT BUILT.
+  A file at the repo root that the ENGINE writes: what it learns about this repo across reviews —
+  conventions confirmed, false-positive patterns it already burned a refuter step on, invariants it
+  discovered, corrections a human made to a finding. Read back into hunter prompts on the next run, so
+  each review starts smarter than the last. Greptile ships something in this family; measure it before
+  copying it (the same discipline that re-scoped B6).
+
+  **It is NOT `gotchas.md`, and the split is the design.** Gotchas are HUMAN-signed, required, and
+  fail-loud on empty (`pipeline.ts:379`) precisely because they carry what a hunter *cannot infer*. This
+  file carries what the engine *did* infer. Merging them would destroy the one property that makes the
+  gotchas gate meaningful.
+
+  Four hard problems, none optional:
+  1. **Contamination has no gate.** A wrong lesson written once is injected into every future run and
+     re-confirms itself. Needs provenance per line (which run, which finding, corroborated or human-
+     confirmed) and a rule for what may be written unattended — the strong candidate being: only lessons
+     a HUMAN adjudicated (the B6b triage loop already produces exactly that signal) get written
+     automatically; everything else is proposed, not persisted.
+  2. **It is a prompt-injection surface.** The file lives at the repo root, so on a PR review the head
+     worktree contains the PR author's version of it. It MUST be read from the operator root, never the
+     review root — the boundary `pr-preflight.ts:9-11` already draws for config. Otherwise a PR writes
+     its own reviewer's system prompt.
+  3. **It perturbs every measurement.** It changes hunter input, so any before/after comparison across a
+     write is invalid unless the file is pinned. Benchmark arms must pin it the way prompt sets are
+     frozen.
+  4. **It grows without bound.** No eviction rule means the file eventually IS the context. Needs
+     consolidation (merge duplicates, drop what the code no longer contains) and a size ceiling that
+     fails loud rather than silently truncating.
 
 ## Phase D — Multi-runtime + multi-model (Stage 2)
 
