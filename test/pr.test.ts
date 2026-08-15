@@ -29,6 +29,7 @@ import {
   postIssueTriageComment,
   postPrReview,
   postReviewCommentReply,
+  resolveReviewThreadForComment,
 } from "../src/pr";
 import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
 import { renderIssueFindingComment } from "../src/report";
@@ -764,5 +765,129 @@ describe("postIssueTriageComment", () => {
     });
     expect(id).toBe(88);
     expect(calls[0]?.stdin).toBe("triage issue reply");
+  });
+});
+
+describe("resolveReviewThreadForComment", () => {
+  const repoView = {
+    match: ["repo", "view", "--json", "owner,name"],
+    response: {
+      stdout: JSON.stringify({
+        name: "musive",
+        owner: { login: "MusiveTech" },
+      }),
+    },
+  };
+
+  test("resolves an unresolved thread whose first comment matches the REST id", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "PRRT_family",
+                        isResolved: false,
+                        comments: { nodes: [{ fullDatabaseId: 22 }] },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+      {
+        match: ["graphql", "resolveReviewThread"],
+        response: {
+          stdout: JSON.stringify({
+            data: { resolveReviewThread: { thread: { isResolved: true } } },
+          }),
+        },
+      },
+    ]);
+    const outcome = await resolveReviewThreadForComment({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      commentId: 22,
+      spawnFn,
+    });
+    expect(outcome).toBe("resolved");
+    expect(
+      calls.some((call) => call.argv.join(" ").includes("resolveReviewThread")),
+    ).toBe(true);
+  });
+
+  test("skips an already-resolved thread without mutating", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "PRRT_family",
+                        isResolved: true,
+                        comments: { nodes: [{ fullDatabaseId: "22" }] },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    const outcome = await resolveReviewThreadForComment({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      commentId: 22,
+      spawnFn,
+    });
+    expect(outcome).toBe("already-resolved");
+    expect(
+      calls.some((call) => call.argv.join(" ").includes("resolveReviewThread")),
+    ).toBe(false);
+  });
+
+  test("returns not-found when no thread's first comment matches", async () => {
+    const { spawnFn } = makeFakeGh([
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: { nodes: [] },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    await expect(
+      resolveReviewThreadForComment({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        commentId: 22,
+        spawnFn,
+      }),
+    ).resolves.toBe("not-found");
   });
 });

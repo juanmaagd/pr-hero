@@ -924,3 +924,162 @@ export async function postIssueTriageComment(input: {
   }
   return parsePostedCommentId(result.stdout, "triage issue comment");
 }
+
+export type ResolveThreadOutcome =
+  | "resolved"
+  | "already-resolved"
+  | "not-found";
+
+const REVIEW_THREADS_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){" +
+  "repository(owner:$owner,name:$name){pullRequest(number:$number){" +
+  "reviewThreads(first:100){nodes{id isResolved comments(first:1){" +
+  "nodes{fullDatabaseId}}}}}}";
+
+const RESOLVE_THREAD_MUTATION =
+  "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){" +
+  "thread{isResolved}}}";
+
+interface RepoOwnerName {
+  owner: string;
+  name: string;
+}
+
+async function ghRepoOwnerName(
+  operatorRoot: string,
+  spawnFn?: typeof Bun.spawn,
+): Promise<RepoOwnerName> {
+  const result = await gh(
+    operatorRoot,
+    ["repo", "view", "--json", "owner,name"],
+    undefined,
+    spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(`gh repo view failed: ${result.stderr.trim()}`);
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    parsed = null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new CliError(
+      "gh repo view --json owner,name returned invalid JSON: " +
+        result.stdout.slice(0, 120),
+    );
+  }
+  const record = parsed as { name?: unknown; owner?: unknown };
+  const name = record.name;
+  const owner =
+    typeof record.owner === "object" && record.owner !== null
+      ? (record.owner as { login?: unknown }).login
+      : undefined;
+  if (typeof name !== "string" || name.length === 0) {
+    throw new CliError("gh repo view returned no repository name");
+  }
+  if (typeof owner !== "string" || owner.length === 0) {
+    throw new CliError("gh repo view returned no repository owner");
+  }
+  return { owner, name };
+}
+
+function graphqlDatabaseId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return null;
+}
+
+interface GraphQlThread {
+  id: string;
+  isResolved: boolean;
+  comments: { nodes: { fullDatabaseId: unknown }[] };
+}
+
+function parseReviewThreads(stdout: string): GraphQlThread[] {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      "gh api graphql (reviewThreads) returned invalid JSON: " +
+        stdout.slice(0, 120),
+    );
+  }
+  const nodes = (
+    parsed as {
+      data?: {
+        repository?: {
+          pullRequest?: { reviewThreads?: { nodes?: unknown } };
+        };
+      };
+    } | null
+  )?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new CliError(
+      "gh api graphql (reviewThreads) returned no thread list",
+    );
+  }
+  return nodes as GraphQlThread[];
+}
+
+// Map a REST review-comment id to its GraphQL review thread and resolve it.
+// Idempotent: an already-resolved thread is a skip, not an error. A comment
+// with no thread (deleted, or outside the first 100 threads) is not-found
+// — the caller logs and still treats the reply post as success.
+export async function resolveReviewThreadForComment(input: {
+  operatorRoot: string;
+  pr: number;
+  commentId: number;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<ResolveThreadOutcome> {
+  const repo = await ghRepoOwnerName(input.operatorRoot, input.spawnFn);
+  const listed = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=${REVIEW_THREADS_QUERY}`,
+      "-f",
+      `owner=${repo.owner}`,
+      "-f",
+      `name=${repo.name}`,
+      "-F",
+      `number=${input.pr}`,
+    ],
+    undefined,
+    input.spawnFn,
+  );
+  if (!listed.ok) {
+    throw new CliError(
+      `gh api graphql (reviewThreads) failed: ${listed.stderr.trim()}`,
+    );
+  }
+  const thread = parseReviewThreads(listed.stdout).find((candidate) => {
+    const first = candidate.comments?.nodes?.[0]?.fullDatabaseId;
+    return graphqlDatabaseId(first) === input.commentId;
+  });
+  if (thread === undefined) return "not-found";
+  if (thread.isResolved) return "already-resolved";
+  const mutated = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=${RESOLVE_THREAD_MUTATION}`,
+      "-f",
+      `id=${thread.id}`,
+    ],
+    undefined,
+    input.spawnFn,
+  );
+  if (!mutated.ok) {
+    throw new CliError(
+      `gh api graphql (resolveReviewThread) failed: ${mutated.stderr.trim()}`,
+    );
+  }
+  return "resolved";
+}
