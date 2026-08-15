@@ -9,6 +9,13 @@ import { validateFinding } from "../src/findings";
 import { runPipeline } from "../src/pipeline";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
+const SUMMARIZER_PROMPT_PATH = path.join(
+  import.meta.dir,
+  "..",
+  "prompts",
+  "summarizer.md",
+);
+
 const fixture = await buildPlantedFixture();
 
 // Empty MCP registry + the runner's --strict-mcp-config: the fixture repo has
@@ -35,6 +42,7 @@ const result = await runPipeline(
     hopBudget: 4,
     // No `model` override: the fixture frontmatter's haiku wins (plumbing
     // proof, not recall quality — see fixtures/setup.ts).
+    summarizer: { promptPath: SUMMARIZER_PROMPT_PATH },
     parityTriggerPaths: [], // parity never fires — 2 hunters, cheapest run
     suspicionPriors: [
       {
