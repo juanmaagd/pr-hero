@@ -51,7 +51,7 @@ export interface RetryInfo {
   // The transient budget. Meaningless for `reason: "format"` — that retry has
   // its own cap of exactly one, so a renderer must not print "N of M" there.
   maxAttempts: number;
-  reason: FailureClass;
+  reason: RetryFailureClass;
 }
 
 export interface StepResult {
@@ -122,7 +122,18 @@ export function isTransientSessionFailure(result: {
   );
 }
 
-export type FailureClass = "transient" | "format";
+// Authentication is an operator-actionable terminal condition. Retrying with
+// either the format reminder or the transient budget cannot create a login.
+export function isTerminalSessionFailure(result: {
+  stderrTail: string;
+  resultText: string;
+}): boolean {
+  const witness = `${result.stderrTail}\n${result.resultText}`;
+  return /Not logged in\s*[·.]\s*Please run \/login/i.test(witness);
+}
+
+export type FailureClass = "transient" | "terminal" | "format";
+export type RetryFailureClass = Exclude<FailureClass, "terminal">;
 
 export function classifyFailure(outcome: {
   stderrTail: string;
@@ -132,6 +143,7 @@ export function classifyFailure(outcome: {
   // A watchdog kill is infrastructure, not a formatting mistake: the session
   // hung, it did not chat.
   if (outcome.timedOut) return "transient";
+  if (isTerminalSessionFailure(outcome)) return "terminal";
   return isTransientSessionFailure(outcome) ? "transient" : "format";
 }
 
@@ -274,6 +286,7 @@ export class ClaudeCodeRunner implements StepRunner {
         }
         continue; // exhausting maxAttempts falls through to "failed"
       }
+      if (failure === "terminal") break;
       // Non-transient parse failure: the model delivered SOMETHING, just not
       // the mandated shape — one format-retry (cap 1, see the rationale on
       // FORMAT_RETRY_REMINDER), then the step fails visibly.
@@ -296,7 +309,7 @@ export class ClaudeCodeRunner implements StepRunner {
         attempts,
         "format-retry",
         retry,
-        retried.delivered ? "ok" : "format",
+        retried.delivered ? "ok" : classifyFailure(retry),
       );
       if (retried.delivered) {
         return this.succeed(step, retried.output, usage, attempts, retry);
