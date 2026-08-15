@@ -55,8 +55,11 @@ import {
   ghRepoWebUrl,
   initCodegraphIndex,
   postIssueComment,
+  postIssueTriageComment,
   postPrComment,
   postPrReview,
+  postReviewCommentReply,
+  resolveReviewThreadForComment,
   writeComparison,
 } from "./pr";
 import {
@@ -130,6 +133,18 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
+import {
+  renderTriageReplyBody,
+  TRIAGE_MARKER_PREFIX,
+  type TriageMarkerFields,
+  type TriageTag,
+  type TriageVerdict,
+} from "./triage";
+import {
+  decideThreadResolve,
+  existingTriageAtHead,
+  matchPostedFindingExact,
+} from "./triage-reply";
 import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
 import {
   bold,
@@ -1933,9 +1948,26 @@ async function triageCommand(options: CliOptions): Promise<number> {
       ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
       : options.pr;
   if (options.triage === "reply") {
-    throw new CliUsageError(
-      "triage reply is parsed but not wired — the follow-up slice posts it",
-    );
+    if (options.finding === undefined) {
+      throw new CliUsageError("triage reply requires --finding <id>");
+    }
+    if (options.tag === undefined) {
+      throw new CliUsageError("triage reply requires --tag <tag>");
+    }
+    if (options.bodyFile === undefined) {
+      throw new CliUsageError("triage reply requires --body-file <path>");
+    }
+    return runTriageReplyCommand({
+      operatorRoot,
+      pr: prNumber,
+      from: options.from,
+      findingId: options.finding,
+      tag: options.tag,
+      bodyFile: options.bodyFile,
+      verdict: options.verdict,
+      issue: options.issue,
+      dryRun: options.dryRun,
+    });
   }
   return runTriageCommand({
     operatorRoot,
@@ -2018,6 +2050,159 @@ export async function runTriageCommand(input: {
     `triaged: ${outcome.bound} row(s) written to ${comparisonPath}, ` +
       `${outcome.ignored} reply(ies) ignored`,
   );
+  return 0;
+}
+
+export async function runTriageReplyCommand(input: {
+  operatorRoot: string;
+  pr: number;
+  from: string;
+  findingId: string;
+  tag: TriageTag;
+  bodyFile: string;
+  verdict?: TriageVerdict;
+  issue?: number;
+  dryRun: boolean;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const { operatorRoot, pr: prNumber, dryRun, spawnFn } = input;
+  const runDir = path.resolve(input.from);
+  const findingsPath = path.join(runDir, "findings.json");
+  if (!existsSync(findingsPath)) {
+    throw new CliUsageError(
+      `${runDir} is missing findings.json — point --from at a completed ` +
+        'PR-mode run directory ("pr-hero review --pr <n>" writes it)',
+    );
+  }
+  const doc = validateFindingsDocument(
+    JSON.parse(await Bun.file(findingsPath).text()),
+  );
+  assertRunMatchesPr(doc, prNumber, runDir);
+  const finding = doc.findings.find((row) => row.id === input.findingId);
+  if (finding === undefined) {
+    throw new CliUsageError(
+      `${findingsPath} has no finding ${input.findingId}`,
+    );
+  }
+  const bodyPath = path.resolve(input.bodyFile);
+  if (!existsSync(bodyPath)) {
+    throw new CliUsageError(`--body-file not found: ${bodyPath}`);
+  }
+  const reasoning = await Bun.file(bodyPath).text();
+  if (reasoning.startsWith(TRIAGE_MARKER_PREFIX)) {
+    throw new CliUsageError(
+      "--body-file must be reasoning prose only — the driver prepends the " +
+        "triage marker and badge (do not start the file with " +
+        "`<!-- pr-hero-triage`)",
+    );
+  }
+  const fields: TriageMarkerFields = {
+    tag: input.tag,
+    headSha: doc.head_sha,
+    actor: "agent",
+    verdict: input.verdict,
+    issue: input.issue,
+  };
+  const body = renderTriageReplyBody(fields, reasoning);
+  const posted = await fetchPostedFindingComments(operatorRoot, prNumber, {
+    spawnFn,
+  });
+  const match = matchPostedFindingExact({
+    finding,
+    headSha: doc.head_sha,
+    posted,
+  });
+  if (match.kind === "none") {
+    throw new CliError(
+      `no posted <!-- pr-hero-finding marker matches ${input.findingId} ` +
+        `on PR #${prNumber} (path ${finding.path}:${finding.line}, ` +
+        "this head). Bind by marker, never by a GitHub comment id or " +
+        "the nearest line",
+    );
+  }
+  if (match.kind === "ambiguous") {
+    throw new CliError(
+      `multiple posted finding comments match ${input.findingId} ` +
+        `(ids ${match.ids.join(", ")}) — will not pick by proximity`,
+    );
+  }
+  const parent = match.posted;
+  const reviewComments = await fetchPrReviewComments(operatorRoot, prNumber, {
+    spawnFn,
+  });
+  const already = existingTriageAtHead({
+    parentId: parent.id,
+    headSha: doc.head_sha,
+    replies: reviewComments,
+  });
+  const resolveDecision = decideThreadResolve({
+    channel: parent.channel,
+    verdict: input.verdict,
+  });
+  if (dryRun) {
+    log(
+      `plan: reply to ${parent.channel} comment ${parent.id} ` +
+        `(${input.findingId}, marker match) as ${input.tag}` +
+        (already ? " — already triaged at this head, would skip post" : ""),
+    );
+    if (resolveDecision === "resolve") {
+      log("plan: would resolve the review thread after posting");
+    } else if (resolveDecision === "skip-inconclusive") {
+      log("plan: would leave the thread open (adjudicator inconclusive)");
+    } else {
+      log("plan: no review thread to resolve (issue-comment finding)");
+    }
+    log("dry run: nothing was posted.");
+    return 0;
+  }
+  if (!already) {
+    if (parent.channel === "review") {
+      await postReviewCommentReply({
+        operatorRoot,
+        pr: prNumber,
+        inReplyTo: parent.id,
+        body,
+        spawnFn,
+      });
+    } else {
+      const webUrl = await ghRepoWebUrl(operatorRoot, { spawnFn });
+      const withLink =
+        webUrl === undefined
+          ? body
+          : `${body.trimEnd()}\n\nIn reply to: ${webUrl}/pull/${prNumber}#issuecomment-${parent.id}\n`;
+      await postIssueTriageComment({
+        operatorRoot,
+        pr: prNumber,
+        body: withLink,
+        spawnFn,
+      });
+    }
+    log(
+      `posted: ${input.tag} on ${input.findingId} ` +
+        `(${parent.channel} comment ${parent.id})`,
+    );
+  } else {
+    log(
+      `skip post: ${input.findingId} already triaged at this head ` +
+        `(${parent.channel} comment ${parent.id})`,
+    );
+  }
+  if (resolveDecision !== "resolve") {
+    return 0;
+  }
+  const resolveOutcome = await resolveReviewThreadForComment({
+    operatorRoot,
+    pr: prNumber,
+    commentId: parent.id,
+    spawnFn,
+  });
+  if (resolveOutcome === "resolved") {
+    log(`resolved: review thread for ${input.findingId}`);
+  } else if (resolveOutcome === "already-resolved") {
+    log(`resolved: thread already closed for ${input.findingId}`);
+  } else {
+    log(`resolve skipped: no review thread found for comment ${parent.id}`);
+  }
   return 0;
 }
 

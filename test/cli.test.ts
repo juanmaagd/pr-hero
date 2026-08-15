@@ -25,6 +25,7 @@ import {
   postingExitCode,
   runPostCommand,
   runTriageCommand,
+  runTriageReplyCommand,
 } from "../src/cli";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
@@ -1616,6 +1617,234 @@ describe("runTriageCommand", () => {
       expect(calls.length).toBe(0);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+const F001_CLAIM = "the latch never resets";
+const F001_PATH = "docs/runbook.md";
+
+function greptileCollisionScript(): ScriptEntry[] {
+  return [
+    {
+      match: ["issues/42/comments", "--paginate"],
+      response: { stdout: "" },
+    },
+    {
+      match: ["pulls/42/comments", "--paginate"],
+      response: {
+        stdout: ndjson([
+          {
+            id: 11,
+            user: "greptile-apps",
+            body: "same line, not ours",
+            path: F001_PATH,
+            line: 144,
+            original_line: 144,
+            in_reply_to_id: null,
+          },
+          {
+            id: 22,
+            user: "pr-hero",
+            body: `${findingMarker({
+              path: F001_PATH,
+              line: 144,
+              headSha: RUN_HEAD,
+              claim: F001_CLAIM,
+            })}\n${F001_CLAIM}`,
+            path: F001_PATH,
+            line: 144,
+            original_line: 144,
+            in_reply_to_id: null,
+          },
+        ]),
+      },
+    },
+    {
+      match: ["repo", "view", "--json", "owner,name"],
+      response: {
+        stdout: JSON.stringify({
+          name: "musive",
+          owner: { login: "MusiveTech" },
+        }),
+      },
+    },
+    {
+      match: ["graphql", "reviewThreads"],
+      response: {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: "PRRT_f001",
+                      isResolved: false,
+                      comments: { nodes: [{ fullDatabaseId: 22 }] },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      },
+    },
+    {
+      match: ["graphql", "resolveReviewThread"],
+      response: {
+        stdout: JSON.stringify({
+          data: { resolveReviewThread: { thread: { isResolved: true } } },
+        }),
+      },
+    },
+  ];
+}
+
+async function writeReplyRunDir(): Promise<{
+  dir: string;
+  bodyFile: string;
+  cleanup: () => Promise<void>;
+}> {
+  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-reply-test-"));
+  const runDoc = doc({
+    head_sha: RUN_HEAD,
+    findings: [
+      finding({
+        id: "F001",
+        path: F001_PATH,
+        line: 144,
+        claim: F001_CLAIM,
+      }),
+    ],
+  });
+  await Bun.write(
+    path.join(dir, "findings.json"),
+    JSON.stringify(runDoc, null, 2),
+  );
+  const bodyFile = path.join(dir, "reason.md");
+  await Bun.write(bodyFile, "Fixed by resetting the latch on unmount.");
+  return {
+    dir,
+    bodyFile,
+    cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
+}
+
+describe("runTriageReplyCommand", () => {
+  test("dry-run fetches but does not POST or resolve", async () => {
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir();
+    try {
+      const { spawnFn, calls } = makeFakeGh(greptileCollisionScript());
+      const exitCode = await runTriageReplyCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        findingId: "F001",
+        tag: "applied",
+        bodyFile,
+        dryRun: true,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.argv).not.toContain("--method");
+        expect(call.argv.join(" ")).not.toContain("resolveReviewThread");
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("#20: replies to the pr-hero marker, not Greptile at the same line", async () => {
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir();
+    try {
+      const { spawnFn, calls } = makeFakeGh(greptileCollisionScript());
+      const exitCode = await runTriageReplyCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        findingId: "F001",
+        tag: "applied",
+        bodyFile,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const post = calls.find(
+        (call) =>
+          call.argv.includes("--method") &&
+          call.argv.join(" ").includes("pulls/42/comments"),
+      );
+      expect(post).toBeDefined();
+      expect(post?.argv.join(" ")).toContain("in_reply_to=22");
+      expect(post?.argv.join(" ")).not.toContain("in_reply_to=11");
+      expect(post?.stdin).toContain("<!-- pr-hero-triage tag=applied");
+      expect(post?.stdin).toContain("✅ **APPLIED**");
+      expect(post?.stdin).toContain("Fixed by resetting the latch on unmount.");
+      expect(
+        calls.some((call) =>
+          call.argv.join(" ").includes("resolveReviewThread"),
+        ),
+      ).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("refuses a --body-file that already starts with the triage marker", async () => {
+    const { dir, cleanup } = await writeReplyRunDir();
+    const bodyFile = path.join(dir, "bad.md");
+    await Bun.write(
+      bodyFile,
+      `${triageMarker({ tag: "applied", headSha: RUN_HEAD, actor: "agent" })}\nnope`,
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh([]);
+      await expect(
+        runTriageReplyCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          findingId: "F001",
+          tag: "applied",
+          bodyFile,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/reasoning prose only/);
+      expect(calls.length).toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("skips resolve when the adjudicator is inconclusive", async () => {
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir();
+    try {
+      const { spawnFn, calls } = makeFakeGh(greptileCollisionScript());
+      await runTriageReplyCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        findingId: "F001",
+        tag: "dismissed",
+        verdict: "inconclusive",
+        bodyFile,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(
+        calls.some((call) =>
+          call.argv.join(" ").includes("resolveReviewThread"),
+        ),
+      ).toBe(false);
+      const post = calls.find((call) => call.argv.includes("--method"));
+      expect(post?.stdin).toContain("verdict=inconclusive");
+    } finally {
+      await cleanup();
     }
   });
 });
