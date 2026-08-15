@@ -11,6 +11,7 @@ import type { SuspicionPrior } from "./prompt-set";
 // dependency on this module.
 import { DEFAULT_SIZE_GATE, unquotePath } from "./size-gate";
 import type { ReviewSpec } from "./spec";
+import { ADJUDICATED_TAGS, type TriageTag, type TriageVerdict } from "./triage";
 
 // The lab's production value. Also the single biggest per-hunter cost lever
 // in the whole engine: every hop is another round of tool calls against the
@@ -122,6 +123,15 @@ export interface CliOptions {
   // distinct value that DISABLES the limit, so these cannot default to 0.
   maxChangedLines?: number;
   maxChangedFiles?: number;
+  // `triage reply` sub-word (W1). Unset means the existing bind-ledger
+  // `triage` verb. Same pattern as watch's sub-words: `reply` is not its
+  // own command, so `pr-hero reply` still fails as unknown.
+  triage?: "reply";
+  finding?: string;
+  tag?: TriageTag;
+  bodyFile?: string;
+  verdict?: TriageVerdict;
+  issue?: number;
 }
 
 export interface ParsedCli {
@@ -153,6 +163,14 @@ Usage:
                              null columns, filled from the loop instead of by
                              hand. --dry-run reports what would be bound and
                              writes nothing
+  pr-hero triage reply --pr <n> --from <run-dir> --finding <id> --tag <tag>
+                   --body-file <path> [--verdict <v>] [--issue <n>] [--dry-run]
+                             Post one triage reply. The driver resolves the
+                             parent from the posted <!-- pr-hero-finding
+                             marker (never path/line), renders the marker +
+                             badge, posts, and resolves the inline review
+                             thread. --body-file is reasoning prose only.
+                             --dry-run prints the parent and posts nothing
   pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
@@ -198,7 +216,22 @@ Options:
                       files (default: <repo-parent>/<repo>-prhero-runs)
   --from <dir>        post/triage only: the run dir to read findings.json and
                       diff.patch (post) or comparison.json (triage) from
-                      (required)
+                      (required). triage reply also reads findings.json from
+                      it, to map --finding F00N onto the posted marker
+  --finding <id>      triage reply only: the finding id in that run's
+                      findings.json (F001, …). The driver maps it to the
+                      posted comment; do not pass a GitHub comment id
+  --tag <tag>         triage reply only: applied, dismissed, deferred, or
+                      misclassified
+  --body-file <path>  triage reply only: reasoning prose. The driver prepends
+                      the triage marker and the visible badge
+  --verdict <word>    triage reply only: upheld, rejected, or inconclusive.
+                      Required for dismissed/deferred/misclassified;
+                      forbidden for applied
+  --issue <n>         triage reply only: optional GitHub issue number on
+                      deferred. Not required — deferred is a tag plus
+                      reasoning; the coding agent decides whether an issue
+                      exists
   --gotchas <file>    Repo gotchas file (default: <repo>/.prhero/gotchas.md);
                       supply it from outside to review a tree you cannot dirty
   --config <file>     Local config (default: <repo>/.prhero/config.json) with
@@ -264,6 +297,11 @@ const VALUE_FLAGS = new Set([
   "--interval",
   "--max-changed-lines",
   "--max-changed-files",
+  "--finding",
+  "--tag",
+  "--body-file",
+  "--verdict",
+  "--issue",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -388,6 +426,14 @@ export function parseArgs(argv: string[]): ParsedCli {
         arg === "status")
     ) {
       options.watch = arg;
+      continue;
+    }
+    if (
+      command === "triage" &&
+      options.triage === undefined &&
+      arg === "reply"
+    ) {
+      options.triage = "reply";
       continue;
     }
     if (command !== undefined) {
@@ -516,6 +562,50 @@ export function parseArgs(argv: string[]): ParsedCli {
       throw new CliUsageError('--on-push only applies to "watch add"');
     }
   }
+  if (options.triage === "reply") {
+    if (options.finding === undefined) {
+      throw new CliUsageError("triage reply requires --finding <id>");
+    }
+    if (options.tag === undefined) {
+      throw new CliUsageError("triage reply requires --tag <tag>");
+    }
+    if (options.bodyFile === undefined) {
+      throw new CliUsageError("triage reply requires --body-file <path>");
+    }
+    if (ADJUDICATED_TAGS.has(options.tag) && options.verdict === undefined) {
+      throw new CliUsageError(
+        `triage reply --tag ${options.tag} requires --verdict ` +
+          "(upheld, rejected, or inconclusive)",
+      );
+    }
+    if (options.tag === "applied" && options.verdict !== undefined) {
+      throw new CliUsageError(
+        "triage reply --tag applied cannot take --verdict " +
+          "(applied pays no adjudicator)",
+      );
+    }
+    if (options.issue !== undefined && options.tag !== "deferred") {
+      throw new CliUsageError(
+        "triage reply --issue only applies to --tag deferred",
+      );
+    }
+  } else {
+    if (options.finding !== undefined) {
+      throw new CliUsageError("--finding only applies to triage reply");
+    }
+    if (options.tag !== undefined) {
+      throw new CliUsageError("--tag only applies to triage reply");
+    }
+    if (options.bodyFile !== undefined) {
+      throw new CliUsageError("--body-file only applies to triage reply");
+    }
+    if (options.verdict !== undefined) {
+      throw new CliUsageError("--verdict only applies to triage reply");
+    }
+    if (options.issue !== undefined) {
+      throw new CliUsageError("--issue only applies to triage reply");
+    }
+  }
   return { command, options };
 }
 
@@ -573,6 +663,50 @@ function applyValueFlag(
     case "--max-changed-files":
       options.maxChangedFiles = parseLimit(flag, value);
       return;
+    case "--finding":
+      options.finding = value;
+      return;
+    case "--tag": {
+      if (
+        value !== "applied" &&
+        value !== "dismissed" &&
+        value !== "deferred" &&
+        value !== "misclassified"
+      ) {
+        throw new CliUsageError(
+          `--tag must be applied, dismissed, deferred or misclassified, ` +
+            `got: ${value}`,
+        );
+      }
+      options.tag = value;
+      return;
+    }
+    case "--body-file":
+      options.bodyFile = value;
+      return;
+    case "--verdict": {
+      if (
+        value !== "upheld" &&
+        value !== "rejected" &&
+        value !== "inconclusive"
+      ) {
+        throw new CliUsageError(
+          `--verdict must be upheld, rejected or inconclusive, got: ${value}`,
+        );
+      }
+      options.verdict = value;
+      return;
+    }
+    case "--issue": {
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new CliUsageError(
+          `--issue must be a positive integer, got: ${value}`,
+        );
+      }
+      options.issue = parsed;
+      return;
+    }
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {

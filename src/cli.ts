@@ -1932,6 +1932,11 @@ async function triageCommand(options: CliOptions): Promise<number> {
     options.pr === "current"
       ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
       : options.pr;
+  if (options.triage === "reply") {
+    throw new CliUsageError(
+      "triage reply is parsed but not wired — the follow-up slice posts it",
+    );
+  }
   return runTriageCommand({
     operatorRoot,
     pr: prNumber,
