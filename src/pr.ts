@@ -576,10 +576,10 @@ export async function fetchPrComments(
 // read two different comment streams the same way, so a bug in one parsing
 // discipline is not a bug the other could hide.
 //
-// `in_reply_to_id` is unused by this change (6b/6c, not yet built) but costs
-// nothing to project alongside the fields inline.ts's matcher actually
-// needs (`path`, `line`) and the ones a human reading a raw fetch would
-// expect (`original_line`, GitHub's own "where this used to point" field).
+// `in_reply_to_id` is what `pr-hero triage reply` uses to bind a triage
+// response to its finding thread (W1). The finder still only needs
+// `path`/`line` plus the marker; projecting the reply-to id here costs
+// nothing and means the bind path does not make a second fetch shape.
 export interface PrReviewComment {
   id: number;
   user: string;
@@ -841,4 +841,86 @@ export async function postIssueComment(
     );
   }
   return commentId;
+}
+
+function parsePostedCommentId(stdout: string, what: string): number {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    parsed = null;
+  }
+  const commentId = (parsed as { id?: unknown } | null)?.id;
+  if (typeof commentId !== "number") {
+    throw new CliError(
+      `gh api posted a ${what} but returned no comment id: ` +
+        stdout.slice(0, 120),
+    );
+  }
+  return commentId;
+}
+
+// Inline triage reply: POST pulls/<n>/comments with in_reply_to set to the
+// finding's own review-comment id. The parent id is resolved by the caller
+// from fetchPostedFindingComments + matchPostedFindingExact — this function
+// never looks at path/line. Body on stdin (ARG_MAX / no-shell, same as
+// postIssueComment).
+export async function postReviewCommentReply(input: {
+  operatorRoot: string;
+  pr: number;
+  inReplyTo: number;
+  body: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const result = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/pulls/${input.pr}/comments`,
+      "-F",
+      "body=@-",
+      "-F",
+      `in_reply_to=${input.inReplyTo}`,
+    ],
+    input.body,
+    input.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api (post triage review reply) failed: ${result.stderr.trim()}`,
+    );
+  }
+  return parsePostedCommentId(result.stdout, "triage review reply");
+}
+
+// Un-anchorable finding (#17 channel): GitHub issue comments have no
+// native thread, so the reply is another top-level issue comment. The
+// caller puts the permalink in the body; this function does not guess one.
+export async function postIssueTriageComment(input: {
+  operatorRoot: string;
+  pr: number;
+  body: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const result = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/issues/${input.pr}/comments`,
+      "-F",
+      "body=@-",
+    ],
+    input.body,
+    input.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api (post triage issue comment) failed: ${result.stderr.trim()}`,
+    );
+  }
+  return parsePostedCommentId(result.stdout, "triage issue comment");
 }
