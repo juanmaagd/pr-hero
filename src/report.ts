@@ -134,12 +134,28 @@ function agentRows(doc: FindingsDocument): AgentRow[] {
   });
 }
 
+type RenderableSummary = NonNullable<FindingsDocument["summary"]>;
+
+function summaryLines(summary: RenderableSummary): string[] {
+  return [
+    "### Summary",
+    "",
+    oneLine(summary.prose),
+    "",
+    `**Confidence: ${summary.score}/5** — ${oneLine(summary.score_reason)}`,
+  ];
+}
+
 export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
   const summary = doc.debug.root_causes ?? clusterByRootCause(doc.findings);
   const out: string[] = [];
   out.push(`# Review — ${meta.repo} ${meta.base}..${meta.head}`);
   out.push("");
   out.push(...runLines(doc, meta));
+  if (doc.summary !== undefined) {
+    out.push("");
+    out.push(...summaryLines(doc.summary));
+  }
   out.push("");
   out.push(...section("Blocking", doc, "blocking", summary));
   out.push("");
@@ -331,6 +347,10 @@ export function renderPrComment(
       `diff from ${code(doc.base_sha.slice(0, 8))}`,
   );
   out.push("");
+  if (doc.summary !== undefined) {
+    out.push(...summaryLines(doc.summary));
+    out.push("");
+  }
   if (doc.findings.length === 0) {
     out.push("✅ pr-hero reviewed this PR and found nothing to report.");
     out.push("");
