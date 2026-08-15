@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
 import { parseComparisonJson } from "./ledger";
 import { fetchPrComments, ghPrFiles, ghPrList } from "./pr";
@@ -214,6 +215,9 @@ async function watchOnce(dryRun: boolean): Promise<number> {
   }
 
   try {
+    if (!dryRun) {
+      await runGc({ home: os.homedir(), dryRun: false });
+    }
     const repos = await gatherRepoFacts(config, os.homedir());
     const decision = decideTick({ ...gateInput, repos });
     if (dryRun) {

@@ -59,6 +59,12 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["initialise"])).toThrow(CliUsageError);
   });
 
+  test("gc is a command, and --dry-run applies", () => {
+    expect(parseArgs(["gc"]).command).toBe("gc");
+    expect(parseArgs(["gc", "--dry-run"]).options.dryRun).toBe(true);
+    expect(parseArgs(["gc", "--repo", "/tmp/x"]).options.repo).toBe("/tmp/x");
+  });
+
   // Both exist so a tree you cannot add a file to is still reviewable: an
   // in-tree-only gotchas file dirties the checkout (which the clean-tree gate
   // then rightly refuses), and an in-tree-only config silently disables the

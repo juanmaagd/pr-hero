@@ -25,6 +25,7 @@ import {
   validateFindingsDocument,
   writeFindings,
 } from "./findings";
+import { gcCommand, runGc } from "./gc";
 import {
   acquirePidLock,
   releasePidLock,
@@ -335,7 +336,9 @@ async function main(argv: string[]): Promise<number> {
             ? await postCommand(parsed.options)
             : parsed.command === "triage"
               ? await triageCommand(parsed.options)
-              : await review(parsed.options);
+              : parsed.command === "gc"
+                ? await gcCommand(parsed.options)
+                : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -885,6 +888,12 @@ async function reviewPr(
   const lockPath = worktreeLockPath(home, repoHome.repoId, prNumber);
   await acquirePidLock(lockPath);
   try {
+    await runGc({
+      home,
+      repoId: repoHome.repoId,
+      dryRun: false,
+      silent: true,
+    });
     // 4 — fetch, then canonicalize. See fetchPrRefs for why that refspec pair.
     // Object-db git runs against the git-dir OWNER, not the operator cwd: the
     // worktree is registered there (W3).

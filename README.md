@@ -88,7 +88,8 @@ Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `
 an open one from the recorded base tip. The review runs in a worktree at
 `~/.prhero/repos/<origin>/worktrees/pr-<n>` — your checkout, your index and your uncommitted work are
 never touched, and reviews run while you keep working. Two checkouts of the same GitHub repo share
-one worktree. Worktrees are kept and reused across re-runs; each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
+one worktree. Worktrees are kept and reused across re-runs until GC (`pr-hero gc`: merged/closed or
+72h idle); each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
 codegraph daemon holds a socket in there).
 
 ## When to run it

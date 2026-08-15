@@ -135,7 +135,15 @@ export interface CliOptions {
 }
 
 export interface ParsedCli {
-  command: "review" | "init" | "ledger" | "watch" | "post" | "triage" | "help";
+  command:
+    | "review"
+    | "init"
+    | "ledger"
+    | "watch"
+    | "post"
+    | "triage"
+    | "gc"
+    | "help";
   options: CliOptions;
 }
 
@@ -188,6 +196,11 @@ Usage:
   pr-hero watch install      Install the macOS launchd agent that runs
                              "watch --once" every --interval minutes
   pr-hero watch uninstall    Unload and remove that launchd agent
+  pr-hero gc [--dry-run] [--repo <dir>]
+                             Collect review worktrees under ~/.prhero/repos
+                             that are merged/closed or idle >72h. --dry-run
+                             prints the table and removes nothing. --repo
+                             scopes to one origin; default is the whole home
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
@@ -323,6 +336,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "watch"
     | "post"
     | "triage"
+    | "gc"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -445,11 +459,12 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "ledger" &&
       arg !== "watch" &&
       arg !== "post" &&
-      arg !== "triage"
+      arg !== "triage" &&
+      arg !== "gc"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger", "watch", "post" and "triage")',
+          '"ledger", "watch", "post", "triage" and "gc")',
       );
     }
     command = arg;
