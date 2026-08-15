@@ -193,7 +193,9 @@ export interface PrCommentDelta {
 // mapping everywhere, or the emoji becomes noise instead of a scan aid.
 // BLOCKER and CRITICAL share one glyph on purpose: both are the severities
 // that can ever reach `tier: "blocking"` (deriveTier, findings.ts), so this
-// is the same grouping the engine's own gate already makes.
+// is the same grouping the engine's own gate already makes. Used by the
+// summary HEADLINE, which still counts by hunter severity (PR #2: a
+// tier-based "0 blocking" hid that both findings were genuinely CRITICAL).
 export function severityEmoji(severity: Severity): string {
   switch (severity) {
     case "BLOCKER":
@@ -204,6 +206,20 @@ export function severityEmoji(severity: Severity): string {
     case "SUGGESTION":
       return "🔵";
   }
+}
+
+// GitHub #19 W0: the posted scan aid follows `tier`, not hunter severity.
+// A BLOCKER/CRITICAL that deriveTier already made advisory must not scream
+// 🔴 — that glyph is reserved for findings that can still block. SUGGESTION
+// keeps its own 🔵 so hygiene stays distinct from a real-but-not-blocking
+// WARNING (or a demoted CRITICAL). Does not change what was found; the
+// hunter's severity word still sits in the header after the tier.
+export function scanAidEmoji(
+  finding: Pick<Finding, "severity" | "tier">,
+): string {
+  if (finding.tier === "blocking") return "🔴";
+  if (finding.severity === "SUGGESTION") return "🔵";
+  return "🟡";
 }
 
 // Priority order for the summary's compact index (Juanma: "priority ordering
@@ -263,7 +279,7 @@ function findingIndexLines(
     const loc = code(`${f.path}:${f.line}`);
     const url = commentUrlByFindingId?.get(f.id);
     const locRef = url === undefined ? loc : `[${loc}](${url})`;
-    return `${severityEmoji(f.severity)} ${locRef} — ${leadIn(f.claim)}`;
+    return `${scanAidEmoji(f)} ${locRef} — ${leadIn(f.claim)}`;
   });
 }
 
@@ -437,7 +453,7 @@ function outsideDiffSection(
 // see below):
 //   <marker>
 //
-//   🔴 CRITICAL · introduced · lifecycle
+//   🔴 blocking · CRITICAL · introduced · lifecycle
 //   `path:line` — symbol()
 //
 //   <claim, as a single unbroken-but-readable paragraph — item 5: "es solo
@@ -450,7 +466,7 @@ function outsideDiffSection(
 //   <details>Prompt to fix with AI</details>
 function findingHeaderLine(finding: Finding): string {
   return (
-    `${severityEmoji(finding.severity)} ${finding.severity} · ` +
+    `${scanAidEmoji(finding)} ${finding.tier} · ${finding.severity} · ` +
     `${finding.causal_disposition} · ${finding.hunter}`
   );
 }

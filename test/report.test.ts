@@ -13,6 +13,7 @@ import {
   renderIssueFindingComment,
   renderPrComment,
   renderReport,
+  scanAidEmoji,
   severityEmoji,
 } from "../src/report";
 import { clusterByRootCause } from "../src/root-cause";
@@ -88,6 +89,22 @@ const SUMMARY = {
   score: 4,
   score_reason: "The diff is focused and the behavior is covered.",
 };
+
+describe("scanAidEmoji", () => {
+  test("blocking findings scan as red whatever the hunter severity", () => {
+    expect(scanAidEmoji({ severity: "BLOCKER", tier: "blocking" })).toBe("🔴");
+    expect(scanAidEmoji({ severity: "CRITICAL", tier: "blocking" })).toBe("🔴");
+  });
+
+  test("advisory BLOCKER/CRITICAL/WARNING scan as yellow, SUGGESTION stays blue", () => {
+    expect(scanAidEmoji({ severity: "CRITICAL", tier: "advisory" })).toBe("🟡");
+    expect(scanAidEmoji({ severity: "BLOCKER", tier: "advisory" })).toBe("🟡");
+    expect(scanAidEmoji({ severity: "WARNING", tier: "advisory" })).toBe("🟡");
+    expect(scanAidEmoji({ severity: "SUGGESTION", tier: "advisory" })).toBe(
+      "🔵",
+    );
+  });
+});
 
 describe("renderReport", () => {
   // The reason this whole module exists: one systemic defect reported at K
@@ -411,6 +428,27 @@ describe("renderPrComment", () => {
     ];
     const body = renderPrComment(doc({ findings }), undefined, undefined, []);
     expect(body).toContain("🔴 2 critical · 🟡 0 warning");
+  });
+
+  // #19 W0: the headline above still counts hunter severity, but the
+  // per-finding index must not scream 🔴 next to a finding the engine
+  // already made advisory.
+  test("a downgraded CRITICAL index line uses the advisory scan aid, not 🔴", () => {
+    const findings = [
+      finding({
+        id: "F001",
+        path: "src/a.ts",
+        line: 10,
+        severity: "CRITICAL",
+        refuter_verdict: "downgraded-latent",
+        tier: "advisory",
+      }),
+    ];
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    expect(body).toContain(
+      `${scanAidEmoji({ severity: "CRITICAL", tier: "advisory" })} \`src/a.ts:10\` — the value is stored`,
+    );
+    expect(body).not.toContain("🔴 `src/a.ts:10`");
   });
 
   // ROADMAP B6 rework (Juanma's PR #2 feedback item 1): the earlier "one
@@ -786,10 +824,10 @@ describe("renderInlineComment", () => {
     );
   });
 
-  // Header line (Juanma's PR #2 feedback item 3/4): severity, causal
-  // disposition, and hunter, all on one scannable line — none of these three
-  // was visible anywhere before this rework.
-  test("the header line carries severity, causal disposition, and hunter", () => {
+  // Header line (GitHub #19 W0 + PR #2 items 3/4): the scan aid is tier
+  // (emoji + word), then hunter severity, causal disposition, and hunter.
+  // Leading with severity made an advisory CRITICAL scream 🔴 CRITICAL.
+  test("the header line leads with tier, then severity, causal disposition, and hunter", () => {
     const body = renderInlineComment(
       finding({
         id: "F001",
@@ -799,8 +837,26 @@ describe("renderInlineComment", () => {
       HEAD,
     );
     expect(body).toContain(
-      `${severityEmoji("BLOCKER")} BLOCKER · introduced · lifecycle`,
+      `${scanAidEmoji({ severity: "BLOCKER", tier: "blocking" })} blocking · BLOCKER · introduced · lifecycle`,
     );
+  });
+
+  test("an advisory CRITICAL header scans as advisory, and still names CRITICAL", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F001",
+        severity: "CRITICAL",
+        refuter_verdict: "downgraded-latent",
+        tier: "advisory",
+        hunter: "lifecycle",
+      }),
+      HEAD,
+    );
+    expect(body).toContain(
+      `${scanAidEmoji({ severity: "CRITICAL", tier: "advisory" })} advisory · CRITICAL · introduced · lifecycle`,
+    );
+    expect(body).not.toContain("🔴 CRITICAL");
+    expect(body).not.toContain("🔴 blocking");
   });
 
   test("the location line carries path:line and the symbol when present", () => {
@@ -986,7 +1042,7 @@ describe("renderIssueFindingComment", () => {
       HEAD,
     );
     expect(body).toContain(
-      `${severityEmoji("BLOCKER")} BLOCKER · introduced · reliability`,
+      `${scanAidEmoji({ severity: "BLOCKER", tier: "blocking" })} blocking · BLOCKER · introduced · reliability`,
     );
     expect(body).toContain("`src/a.ts:10`");
     expect(body).toContain("could not anchor this");
