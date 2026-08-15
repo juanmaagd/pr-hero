@@ -7,6 +7,7 @@ import {
   ClaudeCodeRunner,
   classifyFailure,
   FORMAT_RETRY_REMINDER,
+  isTerminalSessionFailure,
   isTransientSessionFailure,
   type RetryInfo,
   type StepSpec,
@@ -345,6 +346,23 @@ describe("ClaudeCodeRunner format-retry", () => {
   });
 });
 
+describe("ClaudeCodeRunner terminal failure", () => {
+  const authEnvelope = envelope("Not logged in · Please run /login");
+
+  test("fails authentication once without notifying or spawning a retry", async () => {
+    const { spawnFn, calls } = makeFakeSpawn([{ stdout: authEnvelope }]);
+    const seen: RetryInfo[] = [];
+    const spec = await makeSpec({ onRetry: (info) => seen.push(info) });
+    const stepResult = await new ClaudeCodeRunner({ spawnFn }).run(spec);
+
+    expect(stepResult.status).toBe("failed");
+    expect(stepResult.attempts).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(seen).toEqual([]);
+    expect(calls[0]?.argv[2]).toBe(spec.prompt);
+  });
+});
+
 describe("ClaudeCodeRunner watchdog", () => {
   test("kills a hung attempt and recovers on the retry", async () => {
     const { spawnFn, calls } = makeFakeSpawn([
@@ -407,6 +425,15 @@ describe("ClaudeCodeRunner attempt logs", () => {
 });
 
 describe("failure classification", () => {
+  test("classifies the observed Claude login witness as terminal", () => {
+    const outcome = {
+      stderrTail: "",
+      resultText: "Not logged in · Please run /login",
+    };
+    expect(isTerminalSessionFailure(outcome)).toBe(true);
+    expect(classifyFailure({ ...outcome, timedOut: false })).toBe("terminal");
+  });
+
   test("isTransientSessionFailure matches the v1 witness regexes", () => {
     const witnesses = [
       "API Error: Connection closed mid-response",
