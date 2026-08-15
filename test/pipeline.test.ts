@@ -5,6 +5,7 @@ import path from "node:path";
 import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
 import {
   mergeRunEnvelope,
+  type RunSummary,
   type SkillOutput,
   type Telemetry,
   validateFindingsDocument,
@@ -105,6 +106,24 @@ function draft(overrides: Partial<DraftFinding> = {}): DraftFinding {
 function emptyDraft(): HunterDraft {
   return { findings: [] };
 }
+
+function summary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    prose:
+      "The change updates the review pipeline and keeps the existing finding flow intact.",
+    score: 4,
+    score_reason:
+      "The diff is coherent and the requested behavior is explicit.",
+    ...overrides,
+  };
+}
+
+const BUNDLED_SUMMARIZER_PROMPT = path.join(
+  import.meta.dir,
+  "..",
+  "prompts",
+  "summarizer.md",
+);
 
 // ---------------------------------------------------------------------------
 // Fixture builders: a minimal temp agents dir (real frontmatter format,
@@ -435,6 +454,130 @@ describe("hunter fan-out", () => {
     expect(result.sessionFailed).toBe(true);
     expect(result.skillOutput.run_status).toBe("partial");
     expect(result.skillOutput.findings).toEqual([]);
+  });
+});
+
+describe("engine-owned summarizer", () => {
+  test("a failing summarizer is cosmetic and leaves the run complete", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => failed(spec),
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("complete");
+    expect(result.sessionFailed).toBe(false);
+    expect(result.skillOutput.summary).toBeUndefined();
+    expect(result.perAgent.summary?.status).toBe("failed");
+    const plan = JSON.parse(
+      await Bun.file(path.join(input.runDir, "pipeline.json")).text(),
+    ) as { steps: Array<{ name: string; status?: string }> };
+    expect(plan.steps.find((step) => step.name === "summarizer")?.status).toBe(
+      "failed",
+    );
+  });
+
+  test("a summarizer rejection is observed without an orphaned rejection", async () => {
+    const events: PipelineProgressEvent[] = [];
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    let summarizerCalls = 0;
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name === "summarizer") {
+          summarizerCalls++;
+          throw new Error("summarizer process rejected");
+        }
+        return spec.name === "hunter-reliability"
+          ? ok(spec, { findings: [draft()] })
+          : ok(spec, emptyDraft());
+      },
+    };
+
+    const result = await runPipeline(input, {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+
+    expect(summarizerCalls).toBe(1);
+    expect(result.skillOutput.run_status).toBe("complete");
+    expect(result.perAgent.summary?.status).toBe("failed");
+    expect(events).toContainEqual({
+      kind: "summarizer-finished",
+      ok: false,
+      durationMs: expect.any(Number),
+    });
+  });
+
+  test("a malformed bundled prompt does not kill the run", async () => {
+    const input = await makeInput();
+    const malformedPrompt = path.join(input.runDir, "malformed-summarizer.md");
+    await Bun.write(malformedPrompt, "not frontmatter");
+    input.summarizer = { promptPath: malformedPrompt };
+    const runner = new FakeStepRunner(HUNTERS_OK);
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("complete");
+    expect(result.skillOutput.summary).toBeUndefined();
+    expect(result.perAgent.summary?.status).toBe("failed");
+    expect(runner.specs.map((spec) => spec.name)).not.toContain("summarizer");
+  });
+
+  test("summarizer usage is included in the run total", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const summarizerUsage = usage({
+      wall_ms: 2_500,
+      tokens_in: 700,
+      tokens_out: 80,
+      tokens_total: 780,
+      cost_usd_est: 0.07,
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ok(spec, summary(), summarizerUsage),
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.summary).toEqual(summary());
+    expect(result.perAgent.summary).toMatchObject({
+      tokens_total: 780,
+      tokens_in: 700,
+      tokens_out: 80,
+      cost_usd_est: 0.07,
+      status: "ok",
+    });
+    expect(result.usage.tokens_total).toBe(1_000);
+    expect(result.usage.cost_usd_est).toBeCloseTo(0.09);
+  });
+
+  test("the bundled prompt has exactly Read, Grep, Glob tools and a model", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ok(spec, summary()),
+    });
+
+    await runPipeline(input, { runner });
+
+    const summarizerSpec = runner.specs.find(
+      (spec) => spec.name === "summarizer",
+    );
+    expect(summarizerSpec?.tools).toEqual(["Read", "Grep", "Glob"]);
+    expect(summarizerSpec?.model).toBe("haiku");
+    expect(summarizerSpec?.mcpConfigPath).toBe(input.mcpConfigPath);
+    expect(summarizerSpec?.timeoutMs).toBe(5 * 60 * 1000);
+    expect(summarizerSpec?.maxAttempts).toBe(1);
   });
 });
 

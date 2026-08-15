@@ -18,6 +18,7 @@ import {
   type RefuterResult,
   validateHunterDraft,
   validateRefuterResult,
+  validateSummary,
 } from "./drafts";
 import {
   type DebugRefutedFinding,
@@ -25,6 +26,7 @@ import {
   type Finding,
   type Hunter,
   type RefuterVerdict,
+  type RunSummary,
   type SkillOutput,
 } from "./findings";
 import {
@@ -80,6 +82,9 @@ export interface PipelineInput {
   stepTimeoutMs?: number;
   // Whole-pipeline ceiling; defaults to DEFAULT_PIPELINE_TIMEOUT_MS.
   pipelineTimeoutMs?: number;
+  // Optional engine-owned summary step. It is deliberately outside ReviewSpec:
+  // this prompt is bundled with pr-hero, not part of the benchmarked agent set.
+  summarizer?: { promptPath: string; model?: string };
   // Pipeline-as-data: which agents run and how they're wired. Defaults to
   // defaultReviewSpec() — EXACTLY the wiring that used to be hard-coded here,
   // so callers that pass nothing see byte-identical step names, per_agent
@@ -134,6 +139,11 @@ export type PipelineProgressEvent =
       kind: "refuter-step-finished";
       findingId: string;
       verdict: string;
+      durationMs: number;
+    }
+  | {
+      kind: "summarizer-finished";
+      ok: boolean;
       durationMs: number;
     }
   // A step about to be retried. Until this existed a retrying hunter looked
@@ -256,6 +266,14 @@ const REFUTER_OUTPUT_CONTRACT = [
   "implied, never extra.",
 ].join("\n");
 
+const SUMMARY_OUTPUT_CONTRACT = [
+  "Your final message must be exactly one JSON object — no prose, no code",
+  'fences — of the shape {"prose":"...","score":1,"score_reason":"..."}.',
+  "The prose is 2-4 general sentences about the change, not a finding list.",
+  "The score is an integer from 1 through 5 and is advisory prose only.",
+  "The score_reason is 1-2 sentences explaining that advisory score.",
+].join("\n");
+
 function hunterPrompt(patch: string, hopBudget: number): string {
   return [
     patch,
@@ -269,6 +287,10 @@ function hunterPrompt(patch: string, hopBudget: number): string {
     "",
     HUNTER_OUTPUT_CONTRACT,
   ].join("\n");
+}
+
+function summarizerPrompt(patch: string): string {
+  return [patch, "", SUMMARY_OUTPUT_CONTRACT].join("\n");
 }
 
 function refuterPrompt(batchJson: string): string {
@@ -314,6 +336,7 @@ interface StepMeta {
   tools: string[];
   systemPromptPath: string;
   outPath: string;
+  status?: "ok" | "failed";
 }
 
 // Mutated as steps complete so the pipeline-ceiling path can assemble
@@ -327,6 +350,7 @@ interface RunState {
   deduped?: DedupeLoser[];
   verdicts: Map<string, RefuterOutcome>;
   partial: boolean;
+  summary?: RunSummary;
   perAgent: Record<string, PerAgentUsage>;
   usageTotal: SessionUsage;
   steps: StepMeta[];
@@ -462,6 +486,61 @@ async function execute(
     hunterSpecs.push({ key: hunter.key as Hunter, spec });
     state.steps.push(stepMeta(spec));
   }
+
+  let summarizerSpec: StepSpec | undefined;
+  let summarizerMeta: StepMeta | undefined;
+  let summarizerConstructionFailed = false;
+  if (input.summarizer) {
+    const name = "summarizer";
+    const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
+    const outPath = path.join(stepsDir, `${name}.summary.json`);
+    summarizerMeta = {
+      name,
+      model: input.summarizer.model ?? input.model ?? "unresolved",
+      tools: [],
+      systemPromptPath,
+      outPath,
+    };
+    try {
+      const agent = await parseAgentFile(input.summarizer.promptPath);
+      await Bun.write(systemPromptPath, agent.body);
+      summarizerMeta.model = resolveModel(
+        input,
+        input.summarizer.model,
+        agent.model,
+        input.summarizer.promptPath,
+      );
+      summarizerMeta.tools = agent.tools;
+      summarizerSpec = {
+        name,
+        systemPromptPath,
+        prompt: summarizerPrompt(patch),
+        tools: agent.tools,
+        mcpConfigPath: input.mcpConfigPath,
+        model: summarizerMeta.model,
+        cwd: input.worktree,
+        outPath,
+        // The summary is a cosmetic barrier ahead of dedupe/refutation. It
+        // must not inherit the 30-minute hunter watchdog or its retry budget.
+        timeoutMs: 5 * 60 * 1000,
+        maxAttempts: 1,
+        parse: (finalText) => {
+          const extracted = extractJsonObject(finalText);
+          if (extracted === undefined) {
+            throw new Error("summarizer final message has no JSON object");
+          }
+          return validateSummary(extracted);
+        },
+        onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
+      };
+      state.steps.push(summarizerMeta);
+    } catch {
+      summarizerMeta.status = "failed";
+      state.steps.push(summarizerMeta);
+      state.perAgent.summary = failedAgentEntry();
+      summarizerConstructionFailed = true;
+    }
+  }
   state.hunterCount = hunterSpecs.length;
   emit(deps, {
     kind: "hunters-started",
@@ -470,11 +549,52 @@ async function execute(
       hunterSpecs.map(({ key, spec }) => [key, spec.model]),
     ),
   });
+  if (summarizerConstructionFailed) {
+    emit(deps, {
+      kind: "summarizer-finished",
+      ok: false,
+      durationMs: 0,
+    });
+  }
   // hunter-finished is attached PER PROMISE, before the join. The handlers
   // are attached to each step's promise ahead of allSettled's own, so each
   // event fires as ITS step settles — while the others are still running.
-  const settled = await Promise.allSettled(
-    hunterSpecs.map(({ key, spec }) => {
+  const startSummarizer = (): Promise<StepResult> => {
+    if (!summarizerSpec) {
+      throw new Error("summarizer step was not constructed");
+    }
+    const startedAt = Date.now();
+    const promise = deps.runner.run(summarizerSpec);
+    promise.then(
+      (result) => {
+        state.perAgent.summary = perAgentEntry(result);
+        state.usageTotal = sumUsage(state.usageTotal, result.usage);
+        if (result.status === "ok") {
+          state.summary = result.output as RunSummary;
+          if (summarizerMeta) summarizerMeta.status = "ok";
+        } else {
+          if (summarizerMeta) summarizerMeta.status = "failed";
+        }
+        emit(deps, {
+          kind: "summarizer-finished",
+          ok: result.status === "ok",
+          durationMs: Date.now() - startedAt,
+        });
+      },
+      () => {
+        state.perAgent.summary = failedAgentEntry();
+        if (summarizerMeta) summarizerMeta.status = "failed";
+        emit(deps, {
+          kind: "summarizer-finished",
+          ok: false,
+          durationMs: Date.now() - startedAt,
+        });
+      },
+    );
+    return promise;
+  };
+  const settled = await Promise.allSettled([
+    ...hunterSpecs.map(({ key, spec }) => {
       const startedAt = Date.now();
       const promise = deps.runner.run(spec);
       promise.then(
@@ -504,7 +624,8 @@ async function execute(
       );
       return promise;
     }),
-  );
+    ...(summarizerSpec === undefined ? [] : [startSummarizer()]),
+  ]);
   for (const [i, entry] of hunterSpecs.entries()) {
     const outcome = settled[i];
     if (!outcome || outcome.status === "rejected") {
@@ -824,6 +945,7 @@ async function finish(
     },
     parity_hunter_fired: state.parityFired,
     run_status: state.partial ? "partial" : "complete",
+    ...(state.summary === undefined ? {} : { summary: state.summary }),
   };
   await writePipelinePlan(input, state);
   return {
