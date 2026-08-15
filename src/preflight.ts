@@ -31,6 +31,11 @@ export const DEFAULT_WATCH_INTERVAL_MIN = 15;
 export const DEFAULT_BASE_REF = "main";
 export const DEFAULT_HEAD_REF = "HEAD";
 
+// Keep this in sync with prompts/summarizer.md. The prompt remains the source
+// of truth for execution when no model override is configured; this value is
+// only the honest model label shown in a preflight plan.
+export const DEFAULT_SUMMARY_MODEL = "haiku";
+
 // The clean 5-file set at the time of writing. Named in the error text so a
 // first-time user is one copy-paste from a working run instead of guessing.
 export const SUGGESTED_AGENTS_DIR =
@@ -64,6 +69,9 @@ export interface CliOptions {
   gotchas?: string;
   config?: string;
   model?: string;
+  // Summary activation is tri-state at parse time: undefined means no flag,
+  // so review can apply flag > config > the default-on setting.
+  summary?: boolean;
   hopBudget: number;
   dryRun: boolean;
   yes: boolean;
@@ -195,8 +203,10 @@ Options:
                       supply it from outside to review a tree you cannot dirty
   --config <file>     Local config (default: <repo>/.prhero/config.json) with
                       agents_dir, default_base, parity_trigger_paths and
-                      suspicion_priors
+                      suspicion_priors, and optional summary settings
   --model <model>     Override every agent's model
+  --summary           Enable the engine-owned PR summary (default)
+  --no-summary        Disable the engine-owned PR summary
   --hop-budget <n>    Hops per hunter (default: ${DEFAULT_HOP_BUDGET}); the biggest
                       per-hunter cost lever there is
   --two-dot           Diff the literal <base>..<head> two-point range instead
@@ -325,6 +335,14 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--dry-run") {
       options.dryRun = true;
+      continue;
+    }
+    if (arg === "--summary") {
+      options.summary = true;
+      continue;
+    }
+    if (arg === "--no-summary") {
+      options.summary = false;
       continue;
     }
     if (arg === "--yes" || arg === "-y") {
@@ -984,6 +1002,17 @@ export interface LocalConfig {
   // a property of THIS repo that no constant can know.
   agents_dir?: string;
   default_base?: string;
+  summary?: SummaryConfig;
+}
+
+export interface SummaryConfig {
+  enabled?: boolean;
+  model?: string;
+}
+
+export interface SummarySettings {
+  enabled: boolean;
+  model?: string;
 }
 
 export const EMPTY_LOCAL_CONFIG: LocalConfig = {
@@ -991,11 +1020,15 @@ export const EMPTY_LOCAL_CONFIG: LocalConfig = {
   suspicion_priors: [],
 };
 
-// `.prhero/config.json` is optional and both keys are optional inside it — an
-// absent config is a legal, complete configuration (parity simply never
-// fires). What is NOT tolerated is a malformed one: a typo'd key silently
+// `.prhero/config.json` is optional and every setting inside it is optional —
+// an absent config is a legal, complete configuration (parity simply never
+// fires, while summary activation is resolved by resolveSummary). What is NOT
+// tolerated is a malformed one: a typo'd key silently
 // read as "no triggers" is exactly how the parity hunter stops firing without
 // anyone noticing, so shape violations throw.
+// WHY summary defaults on: it is the first defaulted setting that spends
+// money, and a silent opt-out would make a normal review's bill differ from
+// the plan. `--no-summary` and `summary.enabled: false` are the explicit exits.
 export function parseLocalConfig(raw: string): LocalConfig {
   let parsed: unknown;
   try {
@@ -1009,6 +1042,18 @@ export function parseLocalConfig(raw: string): LocalConfig {
     throw new CliUsageError(".prhero/config.json must be a JSON object");
   }
   const config = parsed as Record<string, unknown>;
+  const knownKeys = new Set([
+    "agents_dir",
+    "default_base",
+    "parity_trigger_paths",
+    "suspicion_priors",
+    "summary",
+  ]);
+  for (const key of Object.keys(config)) {
+    if (!knownKeys.has(key)) {
+      throw new CliUsageError(`.prhero/config.json unknown key: ${key}`);
+    }
+  }
   const triggers = config.parity_trigger_paths ?? [];
   if (
     !Array.isArray(triggers) ||
@@ -1042,11 +1087,56 @@ export function parseLocalConfig(raw: string): LocalConfig {
       throw new CliUsageError(`suspicion_priors[${i}].reason required`);
     }
   }
+  const summary = parseSummaryConfig(config.summary);
   return {
     parity_trigger_paths: triggers as string[],
     suspicion_priors: priors as SuspicionPrior[],
     ...optionalString(config, "agents_dir"),
     ...optionalString(config, "default_base"),
+    ...(summary === undefined ? {} : { summary }),
+  };
+}
+
+function parseSummaryConfig(value: unknown): SummaryConfig | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CliUsageError(".prhero/config.json summary must be an object");
+  }
+  const config = value as Record<string, unknown>;
+  for (const key of Object.keys(config)) {
+    if (key !== "enabled" && key !== "model") {
+      throw new CliUsageError(
+        `.prhero/config.json summary unknown key: ${key}`,
+      );
+    }
+  }
+  if (config.enabled !== undefined && typeof config.enabled !== "boolean") {
+    throw new CliUsageError(
+      ".prhero/config.json summary.enabled must be a boolean",
+    );
+  }
+  if (
+    config.model !== undefined &&
+    (typeof config.model !== "string" || config.model.trim().length === 0)
+  ) {
+    throw new CliUsageError(
+      ".prhero/config.json summary.model must be a non-empty string",
+    );
+  }
+  return {
+    ...(config.enabled === undefined ? {} : { enabled: config.enabled }),
+    ...(config.model === undefined ? {} : { model: config.model as string }),
+  };
+}
+
+export function resolveSummary(
+  options: Pick<CliOptions, "summary" | "model">,
+  config: LocalConfig,
+): SummarySettings {
+  const model = options.model ?? config.summary?.model;
+  return {
+    enabled: options.summary ?? config.summary?.enabled ?? true,
+    ...(model === undefined ? {} : { model }),
   };
 }
 
@@ -1079,6 +1169,7 @@ export function initConfigTemplate(input: {
     {
       agents_dir: input.agentsDir,
       default_base: input.defaultBase,
+      summary: { enabled: true, model: DEFAULT_SUMMARY_MODEL },
       parity_trigger_paths: [],
       suspicion_priors: [],
     },

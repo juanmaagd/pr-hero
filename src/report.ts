@@ -75,6 +75,7 @@ const BAND_HIGH = 1.4;
 export function estimateCost(
   diffStat: DiffStat,
   hunterCount: number,
+  summarizerEnabled = false,
 ): CostEstimate {
   const files = Math.max(0, diffStat.files);
   const lines =
@@ -82,7 +83,7 @@ export function estimateCost(
   // A validated ReviewSpec always carries at least one hunter, so a zero here
   // means a caller asked hypothetically. Clamping keeps the band from
   // collapsing to $0–$0, which would read as "this is free".
-  const agents = Math.max(1, hunterCount);
+  const agents = Math.max(1, hunterCount + (summarizerEnabled ? 1 : 0));
   const mid =
     agents *
     (USD_PER_AGENT_BASE + USD_PER_CHANGED_LINE * lines + USD_PER_FILE * files);
@@ -93,7 +94,8 @@ export function estimateCost(
       "coarse band from measured runs (a 7-file / +21 −8 tree with 3 " +
       "hunters + refuter, $3.92–$4.74 across two runs; a 45-file / " +
       "+2775 −1237 tree with 5 hunters + refuter, ~$11–$14.78): a " +
-      "per-hunter floor plus changed lines and files. An order-of-magnitude " +
+      `per-agent floor for hunters + refuter${summarizerEnabled ? " + summarizer" : ""} ` +
+      "plus changed lines and files. An order-of-magnitude " +
       "guide, not a quote — the same tree has billed 34% apart across runs.",
   };
 }

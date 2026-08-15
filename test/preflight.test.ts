@@ -7,6 +7,7 @@ import {
   CliUsageError,
   DEFAULT_BASE_REF,
   DEFAULT_HOP_BUDGET,
+  DEFAULT_SUMMARY_MODEL,
   defaultRunRoot,
   emptyDiffMessage,
   headContainedInBaseMessage,
@@ -22,6 +23,7 @@ import {
   repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
+  resolveSummary,
   runDirCandidate,
 } from "../src/preflight";
 import { validateReviewSpec } from "../src/spec";
@@ -99,6 +101,7 @@ describe("parseArgs", () => {
       "4",
       "--two-dot",
       "--dry-run",
+      "--summary",
       "--yes",
     ]);
     expect(options.twoDot).toBe(true);
@@ -110,7 +113,16 @@ describe("parseArgs", () => {
     expect(options.model).toBe("opus");
     expect(options.hopBudget).toBe(4);
     expect(options.dryRun).toBe(true);
+    expect(options.summary).toBe(true);
     expect(options.yes).toBe(true);
+  });
+
+  test("summary flags are explicit and last flag wins", () => {
+    expect(parseArgs(["review", "--summary"]).options.summary).toBe(true);
+    expect(parseArgs(["review", "--no-summary"]).options.summary).toBe(false);
+    expect(
+      parseArgs(["review", "--no-summary", "--summary"]).options.summary,
+    ).toBe(true);
   });
 
   test("--help wins wherever it appears", () => {
@@ -698,6 +710,51 @@ describe("parseLocalConfig", () => {
       parseLocalConfig('{"suspicion_priors": [{"path":"a","weight":1}]}'),
     ).toThrow(CliUsageError);
   });
+
+  test("summary settings are optional and preserve supplied values", () => {
+    expect(parseLocalConfig('{"summary": {}}').summary).toEqual({});
+    expect(
+      parseLocalConfig(
+        JSON.stringify({ summary: { enabled: false, model: "opus" } }),
+      ).summary,
+    ).toEqual({ enabled: false, model: "opus" });
+  });
+
+  test("summary validation is strict, including typos", () => {
+    for (const raw of [
+      '{"summary": null}',
+      '{"summary": []}',
+      '{"summary": {"enabled": "false"}}',
+      '{"summary": {"model": "  "}}',
+      '{"summry": {"enabled": false}}',
+      '{"summary": {"enabeld": false}}',
+    ]) {
+      expect(() => parseLocalConfig(raw)).toThrow(CliUsageError);
+    }
+  });
+
+  test("summary activation resolves flag over config over default-on", () => {
+    const config = parseLocalConfig(
+      JSON.stringify({ summary: { enabled: false, model: "opus" } }),
+    );
+    expect(resolveSummary({}, parseLocalConfig("{}")).enabled).toBe(true);
+    expect(resolveSummary({}, config)).toEqual({
+      enabled: false,
+      model: "opus",
+    });
+    expect(resolveSummary({ summary: true }, config)).toEqual({
+      enabled: true,
+      model: "opus",
+    });
+    expect(resolveSummary({ summary: false }, config)).toEqual({
+      enabled: false,
+      model: "opus",
+    });
+    expect(resolveSummary({ model: "sonnet" }, config)).toEqual({
+      enabled: false,
+      model: "sonnet",
+    });
+  });
 });
 
 describe("initConfigTemplate", () => {
@@ -712,6 +769,7 @@ describe("initConfigTemplate", () => {
     expect(config).toEqual({
       agents_dir: "/Users/x/Desktop/deep-review/agents/clean",
       default_base: "dev",
+      summary: { enabled: true, model: DEFAULT_SUMMARY_MODEL },
       parity_trigger_paths: [],
       suspicion_priors: [],
     });

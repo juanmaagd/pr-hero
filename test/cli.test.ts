@@ -19,6 +19,7 @@ import {
   assertRunMatchesPr,
   computeDroppedFindingIds,
   type InlinePostOutcome,
+  pipelineSummarizerInput,
   postInlineFindings,
   postInlineIfEligible,
   postingExitCode,
@@ -29,6 +30,7 @@ import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import type { StoredComparison } from "../src/ledger";
 import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+import type { SummarySettings } from "../src/preflight";
 import { CliUsageError } from "../src/preflight";
 import { triageMarker } from "../src/triage";
 
@@ -199,6 +201,27 @@ function doc(overrides: Partial<FindingsDocument> = {}): FindingsDocument {
     ...overrides,
   };
 }
+
+describe("CLI summarizer activation", () => {
+  test("default-on activation supplies the bundled prompt and model override", () => {
+    const settings: SummarySettings = { enabled: true, model: "opus" };
+    expect(pipelineSummarizerInput(settings)).toEqual({
+      summarizer: {
+        promptPath: path.join(
+          import.meta.dir,
+          "..",
+          "prompts",
+          "summarizer.md",
+        ),
+        model: "opus",
+      },
+    });
+  });
+
+  test("--no-summary's resolved setting preserves WU2 optional absence", () => {
+    expect(pipelineSummarizerInput({ enabled: false })).toEqual({});
+  });
+});
 
 describe("postInlineFindings — step-14 ordering", () => {
   // Design rework (Juanma's PR #2 feedback item 2): the summary is CREATED
