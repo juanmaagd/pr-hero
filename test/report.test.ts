@@ -341,14 +341,15 @@ describe("renderPrComment", () => {
   // and since B3 it declares the document's own head sha, so the watch
   // guard can read WHICH head this comment covers.
   test("the first line is the marker declaring doc.head_sha", () => {
-    expect(renderPrComment(doc(), undefined, undefined).split("\n")[0]).toBe(
-      prCommentMarker(HEAD),
-    );
+    expect(
+      renderPrComment(doc(), undefined, undefined, []).split("\n")[0],
+    ).toBe(prCommentMarker(HEAD));
     expect(
       renderPrComment(
         doc({ findings: [finding({ id: "F001" })] }),
         undefined,
         undefined,
+        [],
       ).split("\n")[0],
     ).toBe(prCommentMarker(HEAD));
   });
@@ -357,7 +358,7 @@ describe("renderPrComment", () => {
   // stopped starting with it would orphan its own update path.
   test("the rendered body starts with the matcher's prefix", () => {
     expect(
-      renderPrComment(doc(), undefined, undefined).startsWith(
+      renderPrComment(doc(), undefined, undefined, []).startsWith(
         PR_COMMENT_MARKER_PREFIX,
       ),
     ).toBe(true);
@@ -380,7 +381,7 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
     expect(body).toContain("## pr-hero review");
     expect(body).toContain(
       "🔴 2 critical · 🟡 1 warning — `bbbbbbbb`, diff from `aaaaaaaa`",
@@ -408,7 +409,7 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
     expect(body).toContain("🔴 2 critical · 🟡 0 warning");
   });
 
@@ -435,7 +436,7 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
     expect(body).not.toContain("### 🔴 Blocking");
     expect(body).not.toContain("### 🟡 Advisory");
     expect(body).not.toContain("#### `src/a.ts:10`");
@@ -485,7 +486,7 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
     const lines = body
       .split("\n")
       .filter(
@@ -507,6 +508,7 @@ describe("renderPrComment", () => {
       doc({ findings }),
       undefined,
       undefined,
+      [],
       new Map([
         ["F001", "https://github.com/musivetech/musive/pull/1#discussion_r5"],
       ]),
@@ -518,13 +520,13 @@ describe("renderPrComment", () => {
 
   test("an index line without a url map entry renders plain, unlinked text", () => {
     const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
-    const body = renderPrComment(doc({ findings }), undefined, undefined);
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
     expect(body).toContain("🔴 `src/a.ts:10` — the value");
     expect(body).not.toContain("[`src/a.ts:10`]");
   });
 
   test("zero findings render the explicit clean bill", () => {
-    const body = renderPrComment(doc(), undefined, undefined);
+    const body = renderPrComment(doc(), undefined, undefined, []);
     expect(body).toContain("🔴 0 critical · 🟡 0 warning");
     expect(body).toContain(
       "✅ pr-hero reviewed this PR and found nothing to report.",
@@ -533,7 +535,7 @@ describe("renderPrComment", () => {
   });
 
   test("the footer is the sub line with run status and engine", () => {
-    const body = renderPrComment(doc(), undefined, undefined);
+    const body = renderPrComment(doc(), undefined, undefined, []);
     expect(body).toContain(
       "<sub>run complete · pr-hero 0.1.0 · Assistant report, not a merge " +
         "gate: every line above is a claim to verify.</sub>",
@@ -545,6 +547,7 @@ describe("renderPrComment", () => {
       doc({ engine: undefined }),
       undefined,
       undefined,
+      [],
     );
     expect(body).toContain("pr-hero (version not recorded)");
   });
@@ -554,11 +557,12 @@ describe("renderPrComment", () => {
   // "$" anywhere in the body means the contract broke.
   test("no cost and no token counts anywhere", () => {
     const bodies = [
-      renderPrComment(doc(), undefined, undefined),
+      renderPrComment(doc(), undefined, undefined, []),
       renderPrComment(
         doc({ findings: [finding({ id: "F001" })] }),
         WEB_URL,
         undefined,
+        [],
       ),
     ];
     for (const body of bodies) {
@@ -568,24 +572,24 @@ describe("renderPrComment", () => {
   });
 
   test("the summary head sha links to the commit only with a url", () => {
-    const linked = renderPrComment(doc(), WEB_URL, undefined);
+    const linked = renderPrComment(doc(), WEB_URL, undefined, []);
     expect(linked).toContain(`[\`bbbbbbbb\`](${WEB_URL}/commit/${HEAD})`);
-    expect(renderPrComment(doc(), undefined, undefined)).not.toContain(
+    expect(renderPrComment(doc(), undefined, undefined, [])).not.toContain(
       "/commit/",
     );
   });
 
   test("a trailing slash on the url is normalized away", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
-    const withSlash = renderPrComment(d, `${WEB_URL}/`, undefined);
-    expect(withSlash).toBe(renderPrComment(d, WEB_URL, undefined));
+    const withSlash = renderPrComment(d, `${WEB_URL}/`, undefined, []);
+    expect(withSlash).toBe(renderPrComment(d, WEB_URL, undefined, []));
     expect(withSlash).not.toContain("musive//");
   });
 
   test("an absent url renders byte-identical to the plain shape", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
-    expect(renderPrComment(d, undefined, undefined)).toBe(
-      renderPrComment(d, undefined, undefined),
+    expect(renderPrComment(d, undefined, undefined, [])).toBe(
+      renderPrComment(d, undefined, undefined, []),
     );
   });
 
@@ -593,7 +597,7 @@ describe("renderPrComment", () => {
   // no delta at all — every test above exercises exactly that path, so this
   // is the one asserting the negative explicitly.
   test("no delta argument renders no delta line", () => {
-    const body = renderPrComment(doc(), undefined, undefined);
+    const body = renderPrComment(doc(), undefined, undefined, []);
     expect(body).not.toContain("Δ");
   });
 
@@ -609,6 +613,7 @@ describe("renderPrComment", () => {
         new: 1,
         persist: 0,
       },
+      [],
     );
     expect(body).toContain("Δ: 0 resolved · 1 new · 0 persist");
     expect(body).not.toContain("since");
@@ -617,12 +622,17 @@ describe("renderPrComment", () => {
   // Spec "Mixed run": a since-sha clause appears once a previous head is
   // known (the prior summary marker's own head=, per design D5).
   test("a second run renders the delta with a since-sha clause", () => {
-    const body = renderPrComment(doc(), undefined, {
-      resolved: 1,
-      new: 1,
-      persist: 2,
-      previousHeadSha: "c".repeat(40),
-    });
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 1,
+        new: 1,
+        persist: 2,
+        previousHeadSha: "c".repeat(40),
+      },
+      [],
+    );
     expect(body).toContain(
       "Δ since `cccccccc`: 1 resolved · 1 new · 2 persist",
     );
@@ -632,12 +642,17 @@ describe("renderPrComment", () => {
   // noise — a re-run on an UNCHANGED head, not a genuinely absent prior
   // state, which the "first run" test above already covers separately.
   test("the since-sha clause is omitted when the previous head equals the current head", () => {
-    const body = renderPrComment(doc(), undefined, {
-      resolved: 0,
-      new: 0,
-      persist: 2,
-      previousHeadSha: "b".repeat(40), // same as doc().head_sha
-    });
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 2,
+        previousHeadSha: "b".repeat(40), // same as doc().head_sha
+      },
+      [],
+    );
     expect(body).toContain("Δ: 0 resolved · 0 new · 2 persist");
     expect(body).not.toContain("since");
   });
@@ -650,6 +665,7 @@ describe("renderPrComment", () => {
       }),
       undefined,
       undefined,
+      [],
     );
     const block =
       "### Summary\n\n" +
@@ -664,7 +680,7 @@ describe("renderPrComment", () => {
   });
 
   test("an absent summary preserves the comment output byte-for-byte", () => {
-    const body = renderPrComment(doc(), undefined, undefined);
+    const body = renderPrComment(doc(), undefined, undefined, []);
     expect(body).toBe(
       "<!-- pr-hero-report head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->\n" +
         "## pr-hero review\n\n" +
@@ -673,6 +689,78 @@ describe("renderPrComment", () => {
         "---\n\n" +
         "<sub>run complete · pr-hero 0.1.0 · Assistant report, not a merge " +
         "gate: every line above is a claim to verify.</sub>\n",
+    );
+  });
+
+  // W2 (issues #16/#17): un-anchorable findings live in a Greptile-shaped
+  // Comments Outside Diff section inside THIS summary. Empty/absent (the
+  // caller must still pass `[]` — WARN-3) means no section at all.
+  test("an empty outside-diff list renders no Comments Outside Diff section", () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    expect(body).not.toContain("Comments Outside Diff");
+  });
+
+  test("two outside-diff findings render one section with both full bodies", () => {
+    const a = finding({
+      id: "F001",
+      path: "src/never-a.ts",
+      line: 1,
+      claim: "first un-anchorable claim",
+    });
+    const b = finding({
+      id: "F002",
+      path: "src/never-b.ts",
+      line: 2,
+      claim: "second un-anchorable claim",
+    });
+    const body = renderPrComment(
+      doc({ findings: [a, b] }),
+      WEB_URL,
+      undefined,
+      [a, b],
+    );
+    expect(body).toContain("### Comments Outside Diff (2)");
+    expect(body).toContain("first un-anchorable claim");
+    expect(body).toContain("second un-anchorable claim");
+    expect(body).toContain(
+      `[\`src/never-a.ts:1\`](${WEB_URL}/blob/${HEAD}/src/never-a.ts#L1)`,
+    );
+    expect(body).toContain(
+      `[\`src/never-b.ts:2\`](${WEB_URL}/blob/${HEAD}/src/never-b.ts#L2)`,
+    );
+    expect(body).toContain("Prompt to fix with AI");
+    expect(body).not.toContain("Posted as a standalone comment");
+    expect(body).not.toContain("$");
+    expect(body).not.toContain("token");
+    // Index stays one-liners (lead-in); the bucket has the full body. Both
+    // may mention the claim — Greptile does similar — but the index line is
+    // not the full finding block.
+    const indexLine = body
+      .split("\n")
+      .find((l) => l.startsWith("🔴 `src/never-a.ts:1`"));
+    expect(indexLine).toBeDefined();
+    expect(indexLine).not.toContain("Prompt to fix");
+  });
+
+  test("outside-diff findings without a url map stay unlinked in the index", () => {
+    const f = finding({
+      id: "F001",
+      path: "src/never.ts",
+      line: 1,
+      claim: "could not anchor this finding",
+    });
+    const body = renderPrComment(doc({ findings: [f] }), WEB_URL, undefined, [
+      f,
+    ]);
+    expect(body).toContain(
+      "🔴 `src/never.ts:1` — could not anchor this finding",
+    );
+    expect(body).not.toContain("#discussion_r");
+    expect(body).not.toContain("#issuecomment-");
+    expect(body).toContain("### Comments Outside Diff (1)");
+    expect(body).toContain(
+      `[\`src/never.ts:1\`](${WEB_URL}/blob/${HEAD}/src/never.ts#L1)`,
     );
   });
 });

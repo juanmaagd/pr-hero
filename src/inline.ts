@@ -280,8 +280,8 @@ export interface PostPlan {
   // (`comments[]`), never one review per finding (spec "One review
   // submission for anchorable findings").
   reviewComments: PrHeroFindingRef[];
-  // Un-anchorable, unmatched findings — one issue comment each (spec "One
-  // issue comment per un-anchorable finding").
+  // Un-anchorable, unmatched findings — go into the summary Outside Diff
+  // section (issues #16/#17, Greptile-shaped), not one issue comment each.
   issueComments: PrHeroFindingRef[];
   persisting: FindingMatch[];
   resolved: PostedFindingComment[];

@@ -436,7 +436,8 @@ export async function writeComparison(input: {
 // decides what a failed one means.
 // ROADMAP B6 addition: `spawnFn`, same invisible-to-production seam as the
 // other B6 functions (see gh()'s WHY). Needed so test/cli.test.ts can drive
-// the WHOLE step-14 sequence — review, issue comments, summary PATCH LAST —
+// the WHOLE step-14 sequence — review, Outside Diff in the summary, summary
+// PATCH LAST —
 // through one shared fake gh, the same way test/pr.test.ts already does for
 // the per-finding functions; a summary PATCH the caller-level test could not
 // see would leave the "PATCHed last" ordering unpinned.
@@ -678,7 +679,8 @@ export interface ReviewSubmissionOutcome {
   // "posted": every finding in `findings` is now in the one review.
   // "demoted": the review was rejected (422); `findings` is the subset of
   //   the ORIGINAL submission still classified fresh after a FULL re-match —
-  //   the caller posts these as individual issue comments instead.
+  //   the caller puts these in the summary Outside Diff bucket (issues
+  //   #16/#17) instead of posting them as issue comments.
   //
   // WHY a full re-match, not a re-match over `findings` alone (CRIT-A,
   // verify-report-pr3 #3305 — the bug the previous `consumedCommentIds`
@@ -724,8 +726,9 @@ export interface ReviewSubmissionOutcome {
 // — the SAME function an ordinary second run already uses for cross-run
 // identity — means the recovery is not a special code path at all: whatever
 // the live PR already carries is `persist`, whatever it does not is
-// `fresh`, and only `fresh` gets posted, this time as an issue comment. The
-// matcher doubles as the recovery mechanism.
+// `fresh`, and only `fresh` reaches the caller, this time for the summary
+// Outside Diff bucket (issues #16/#17) rather than a second review attempt.
+// The matcher doubles as the recovery mechanism.
 export async function postPrReview(input: {
   operatorRoot: string;
   pr: number;

@@ -24,12 +24,7 @@ import {
   validateFindingsDocument,
   writeFindings,
 } from "./findings";
-import {
-  buildPostPlan,
-  matchPostedFindings,
-  type PostPlan,
-  parseHunkAnchors,
-} from "./inline";
+import { buildPostPlan, type PostPlan, parseHunkAnchors } from "./inline";
 import {
   aggregateLedger,
   parseComparisonJson,
@@ -54,7 +49,6 @@ import {
   ghPrView,
   ghRepoWebUrl,
   initCodegraphIndex,
-  postIssueComment,
   postIssueTriageComment,
   postPrComment,
   postPrReview,
@@ -1188,11 +1182,13 @@ async function reviewPr(
   // 14 — the posting, only when asked. AFTER the comparison on purpose: a
   // posting failure must never cost the comparison artifact. And unlike the
   // comparison, posting does NOT degrade to a warning — it was explicitly
-  // requested. ROADMAP B6 rewire: posting now goes through the inline
-  // surface — anchorability, cross-run matching, the one review submission
-  // (with its 422 recovery), per-finding issue comments, and ONLY THEN the
-  // summary, PATCHed LAST so its delta line describes what this run actually
-  // posted, not what it planned to. `postInlineIfEligible` carries the
+  // requested. ROADMAP B6 rewire, W2 (issues #16/#17): posting now goes
+  // through the inline surface — anchorability, cross-run matching, the one
+  // review submission (with its 422 recovery into the summary Outside Diff
+  // bucket), and the summary PATCHed LAST so its delta line and Outside Diff
+  // section describe what this run actually posted, not what it planned to.
+  // Un-anchorable findings never get a `POST .../issues/<n>/comments`.
+  // `postInlineIfEligible` carries the
   // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
   // posting"): a clean-bill comment set from a review that never ran would
   // be a public lie, same reasoning as the comparison guard above.
@@ -1222,13 +1218,15 @@ async function reviewPr(
       await writePostReceipt(runDir, prNumber, headSha, posted);
       log(
         `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
-          `finding(s)), ${posted.issueCommentIds.length} issue comment(s), ` +
+          `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
+          `${posted.issueCommentIds.length} issue comment(s), ` +
           `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
       );
       if (posted.reviewOutcome === "demoted") {
         log(
           "warning: the review submission was rejected (422) and recovered " +
-            "via issue comments — see the run's post.json for detail",
+            "into the summary Outside Diff bucket — see the run's post.json " +
+            "for detail",
         );
       }
     }
@@ -1327,13 +1325,21 @@ export function computeDroppedFindingIds(
 export interface InlinePostOutcome {
   reviewOutcome: "posted" | "demoted";
   reviewFindingCount: number;
+  // Always [] this slice (issues #16/#17): findings no longer POST as
+  // standalone issue comments. Kept on the outcome so the receipt's
+  // `issue_comment_ids` shape stays unchanged.
   issueCommentIds: number[];
+  // Un-anchorable findings plus any 422-demoted review findings that landed
+  // in the summary Outside Diff section. Counted separately from
+  // issueCommentIds so the posted: log can name the bucket without lying
+  // that those findings became issue comments.
+  outsideDiffCount: number;
   summary: { action: "created" | "updated"; commentId: number };
   delta: PostPlan["delta"];
   // Finding ids the plan classified as fresh (reviewComments + issueComments)
-  // that, after every posting attempt below completed WITHOUT throwing, still
-  // have no comment anywhere on the PR — the exact shape of the bug CRIT-1
-  // (verify-report-pr2, #3296) found: a claimed comment swallowing a
+  // that, after posting completed WITHOUT throwing, reached NEITHER the
+  // review NOR the summary Outside Diff bucket — the exact shape of the bug
+  // CRIT-1 (verify-report-pr2, #3296) found: a claimed comment swallowing a
   // genuinely new finding. Computed independently of postPrReview's own
   // return value on purpose — this is the caller's OWN check, not a re-read
   // of the primitive's opinion, because trusting the primitive's opinion is
@@ -1427,24 +1433,28 @@ function findingCommentUrl(
 }
 
 // The actual post sequence (design D6, reordered per Juanma's PR #2
-// feedback item 2): summary CREATED FIRST when none exists yet → review
-// submission (with 422 recovery) → per-finding issue comments → summary
-// PATCHED LAST with the final delta and comment links. NO `sessionFailed`
-// awareness here — same contract as pr.ts's own primitives (see
-// postPrReview's own WHY): the guard belongs to the caller that decides
-// whether to invoke this at all (postInlineIfEligible, below).
+// feedback item 2; W2 issues #16/#17 retire the issue-comment loop):
+// summary CREATED FIRST when none exists yet → review submission (with
+// 422 recovery into the summary Outside Diff bucket) → summary PATCHED
+// LAST with the final delta, comment links, and the Outside Diff union.
+// NO `sessionFailed` awareness here — same contract as pr.ts's own
+// primitives (see postPrReview's own WHY): the guard belongs to the
+// caller that decides whether to invoke this at all (postInlineIfEligible,
+// below).
 //
 // WHY create-first: the summary was landing BELOW every finding in the
 // Conversation timeline (real posted evidence: review comments 13:12:43,
 // summary 13:12:45) because it was created LAST. Creation order fixes a
 // comment's position; a PATCH never moves it. So on a PR with no summary
-// yet, this posts a placeholder summary — the full index and the PLANNED
-// delta, computed from `plan` before any write, just without per-finding
-// links (they do not exist yet) — as the FIRST write of the run, then
-// patches it again at the end with the ACTUAL delta and the links. On a
-// re-run (a summary already exists), the early create is skipped entirely:
-// that comment's position was already fixed by a PREVIOUS run, and creating
-// again would either duplicate it or waste an API call patching it twice.
+// yet, this posts a placeholder summary — the full index, the PLANNED
+// Outside Diff bucket (known before any write), and the PLANNED delta,
+// just without per-finding review-comment links (they do not exist yet)
+// — as the FIRST write of the run, then patches it again at the end with
+// the ACTUAL delta, the links, and any 422-demoted findings that joined
+// the bucket. On a re-run (a summary already exists), the early create is
+// skipped entirely: that comment's position was already fixed by a
+// PREVIOUS run, and creating again would either duplicate it or waste an
+// API call patching it twice.
 // The final PATCH's delta-must-describe-what-was-posted invariant (PR2
 // verification, WARN-3) is unchanged — the placeholder is provisional, the
 // closing PATCH is authoritative, same as before this rework.
@@ -1461,6 +1471,18 @@ export async function postInlineFindings(input: {
   const { plan, previousHeadSha, existingSummaryId, findingRefs } =
     await resolveInlinePostPlan(input);
 
+  const byId = new Map(doc.findings.map((f) => [f.id, f]));
+  const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
+    refs
+      .map((ref) => byId.get(ref.id))
+      .filter((f): f is Finding => f !== undefined);
+
+  // Initial Outside Diff set: plan.issueComments stays the un-anchorable
+  // bucket (field name unchanged this slice). Known before any write, so
+  // the create-first POST already includes it — after the review, the
+  // closing PATCH may grow it with 422-demoted findings.
+  const plannedOutsideDiff = findingsFor(plan.issueComments);
+
   // The id this run's own creation just returned, if any — threaded to the
   // closing PATCH below so it updates THIS comment directly rather than
   // re-discovering it by marker (postPrComment's `knownCommentId`; see its
@@ -1471,17 +1493,11 @@ export async function postInlineFindings(input: {
     const created = await postPrComment(
       operatorRoot,
       pr,
-      renderPrComment(doc, webUrl, plannedDelta),
+      renderPrComment(doc, webUrl, plannedDelta, plannedOutsideDiff),
       spawnFn,
     );
     summaryCommentId = created.commentId;
   }
-
-  const byId = new Map(doc.findings.map((f) => [f.id, f]));
-  const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
-    refs
-      .map((ref) => byId.get(ref.id))
-      .filter((f): f is Finding => f !== undefined);
 
   const reviewFindings = findingsFor(plan.reviewComments);
   const reachedIds = new Set<string>();
@@ -1500,7 +1516,10 @@ export async function postInlineFindings(input: {
     webUrl,
     spawnFn,
   });
-  let toIssuePost = findingsFor(plan.issueComments);
+  // On 422, reviewResult.findings JOIN the Outside Diff set instead of
+  // posting as issue comments (issues #16/#17). Dedupe by id so a finding
+  // cannot appear twice if it somehow sat in both buckets.
+  let outsideDiff = plannedOutsideDiff;
   if (reviewResult.outcome === "posted") {
     for (const finding of reviewFindings) reachedIds.add(finding.id);
   } else {
@@ -1510,71 +1529,21 @@ export async function postInlineFindings(input: {
     for (const finding of reviewFindings) {
       if (!stillUnmatched.has(finding.id)) reachedIds.add(finding.id);
     }
-    toIssuePost = [...toIssuePost, ...reviewResult.findings];
+    const already = new Set(outsideDiff.map((finding) => finding.id));
+    outsideDiff = [
+      ...outsideDiff,
+      ...reviewResult.findings.filter((finding) => !already.has(finding.id)),
+    ];
   }
 
-  // Re-fetch + re-match immediately before the mutating issue-comment POSTs
-  // (live PR #4 review, comment 3767088276): `toIssuePost` above still comes
-  // ONLY from the snapshot `resolveInlinePostPlan` read at the top of this
-  // function. `postPrReview` gets a re-fetch-and-re-match for free from its
-  // 422 recovery; this channel had no equivalent, so two overlapping
-  // invocations against the same PR — a manual `pr-hero post --from <dir>`
-  // racing a `watch --once` tick's spawned `--post` subprocess (watch.ts's
-  // lockfile only serializes overlapping TICKS, never this path or the
-  // standalone `post` verb — see watch.ts:~194-204), or simply two manual
-  // `--post` runs — both read the same stale plan, both classify the same
-  // un-anchorable finding as fresh, and both post a duplicate issue comment.
-  // Reusing `matchPostedFindings` here (rather than inventing a second
-  // reconciliation mechanism) means the matcher IS the fix: whatever the PR
-  // carries by the time we are about to write is `persist`, whatever it does
-  // not is still `fresh`. This NARROWS the race window; it does not CLOSE
-  // it — two processes can both re-fetch, both see nothing yet, and both
-  // still post. True exactly-once needs central coordination, deferred to
-  // ROADMAP Phase E's GitHub Action (see the B3 entry's "two watchers
-  // racing" note). Skipped when there is nothing to post: a workless run
-  // must not pay for a `gh` call it does not need.
-  if (toIssuePost.length > 0) {
-    const justPosted = await fetchPostedFindingComments(operatorRoot, pr, {
-      spawnFn,
-    });
-    const rematch = matchPostedFindings({
-      findings: findingRefs,
-      posted: justPosted,
-      headSha,
-    });
-    const stillFreshIds = new Set(rematch.fresh.map((f) => f.id));
-    // A finding the re-match now resolves to a prior comment already has a
-    // home — reached by the OTHER process, not by this run's own loop below.
-    // Marking it here (not just filtering it out of `toIssuePost`) keeps
-    // `droppedFindingIds` honest: without this, a finding this run correctly
-    // declines to duplicate would look identical to one that reached NEITHER
-    // channel, and design D6's exit-1 rule would fire on a false positive.
-    for (const finding of toIssuePost) {
-      if (!stillFreshIds.has(finding.id)) reachedIds.add(finding.id);
-    }
-    toIssuePost = toIssuePost.filter((finding) =>
-      stillFreshIds.has(finding.id),
-    );
-  }
+  // Outside Diff findings reached the summary — they must not fire
+  // droppedFindingIds. No rematch-before-POST: that block existed only to
+  // prevent duplicate issue comments, and this slice posts none. Re-review
+  // identity for the bucket is the next slice.
+  for (const finding of outsideDiff) reachedIds.add(finding.id);
 
+  // Receipt shape unchanged this slice: issue_comment_ids stays [].
   const issueCommentIds: number[] = [];
-  // findingId -> its own comment's id, per channel — the summary's index
-  // links (Juanma's PR #2 feedback) need exactly this map, built as posting
-  // actually happens rather than re-derived from the plan afterward.
-  const issueIdByFindingId = new Map<string, number>();
-  for (const finding of toIssuePost) {
-    const commentId = await postIssueComment(
-      operatorRoot,
-      pr,
-      finding,
-      headSha,
-      webUrl,
-      spawnFn,
-    );
-    issueCommentIds.push(commentId);
-    issueIdByFindingId.set(finding.id, commentId);
-    reachedIds.add(finding.id);
-  }
 
   const droppedFindingIds = computeDroppedFindingIds(
     [...plan.reviewComments, ...plan.issueComments],
@@ -1588,7 +1557,7 @@ export async function postInlineFindings(input: {
     webUrl,
     spawnFn,
     persisting: plan.persisting,
-    issueIdByFindingId,
+    issueIdByFindingId: new Map(),
     freshlyPostedReview:
       reviewResult.outcome === "posted" ? reviewFindings : [],
   });
@@ -1597,7 +1566,7 @@ export async function postInlineFindings(input: {
   const patched = await postPrComment(
     operatorRoot,
     pr,
-    renderPrComment(doc, webUrl, delta, commentUrlByFindingId),
+    renderPrComment(doc, webUrl, delta, outsideDiff, commentUrlByFindingId),
     spawnFn,
     summaryCommentId ?? undefined,
   );
@@ -1616,6 +1585,7 @@ export async function postInlineFindings(input: {
     reviewOutcome: reviewResult.outcome,
     reviewFindingCount: reviewFindings.length,
     issueCommentIds,
+    outsideDiffCount: outsideDiff.length,
     summary,
     delta: plan.delta,
     droppedFindingIds,
@@ -1626,11 +1596,11 @@ export async function postInlineFindings(input: {
 // Maps every CURRENTLY-live finding (persisting from a prior run, or
 // freshly posted this run) to its own comment's URL, for the summary's
 // closing PATCH (Juanma's PR #2 feedback: each index line links to its own
-// comment). Three sources, none of which can be read off the plan alone:
+// comment). Two sources, none of which can be read off the plan alone:
 //   - persisting matches already carry the prior comment's id/channel
 //     (`plan.persisting`, from inline.ts's matcher) — free, no extra fetch;
-//   - fresh issue comments' ids are known directly from postIssueComment's
-//     own return value (`issueIdByFindingId`, built in the loop above);
+//     leftover W1 issue-comment orphans still resolve here via channel
+//     "issue";
 //   - fresh REVIEW comments' ids are NOT returned by `POST .../reviews` at
 //     all (GitHub's response is the review object, not its comments[]), so
 //     the only way to learn them is a follow-up read-only fetch, matched
@@ -1638,6 +1608,11 @@ export async function postInlineFindings(input: {
 //     already uses (path, line, this run's headSha, and the claim
 //     fingerprint) — deterministic here because this run posted them
 //     moments ago with exactly those fields.
+// Fresh un-anchorable findings have no per-finding comment (issues #16/#17:
+// they land in the summary Outside Diff section), so they contribute no
+// url; the index line stays unlinked. `issueIdByFindingId` is kept so a
+// leftover caller can still hand ids through; postInlineFindings passes
+// an empty map.
 // `webUrl === undefined` skips all of it: no repo web url means no comment
 // URL is buildable, and renderPrComment already degrades to plain text when
 // a finding's id is absent from the map, never a broken link.
@@ -1870,7 +1845,7 @@ export async function runPostCommand(input: {
     });
     log(
       `plan: ${plan.reviewComments.length} review comment(s), ` +
-        `${plan.issueComments.length} issue comment(s), ` +
+        `${plan.issueComments.length} outside diff, ` +
         `${plan.persisting.length} already posted (skipped), ` +
         `${plan.resolved.length} resolved`,
     );
@@ -1883,7 +1858,7 @@ export async function runPostCommand(input: {
       log(`  review  ${finding.path}:${finding.line} ${finding.id}`);
     }
     for (const finding of plan.issueComments) {
-      log(`  issue   ${finding.path}:${finding.line} ${finding.id}`);
+      log(`  outside ${finding.path}:${finding.line} ${finding.id}`);
     }
     log("dry run: nothing was fetched-for-mutation or posted.");
     return 0;
@@ -1905,7 +1880,8 @@ export async function runPostCommand(input: {
   await writePostReceipt(runDir, prNumber, doc.head_sha, outcome);
   log(
     `posted: review ${outcome.reviewOutcome} (${outcome.reviewFindingCount} ` +
-      `finding(s)), ${outcome.issueCommentIds.length} issue comment(s), ` +
+      `finding(s)), ${outcome.outsideDiffCount} outside diff, ` +
+      `${outcome.issueCommentIds.length} issue comment(s), ` +
       `summary ${outcome.summary.action} comment ${outcome.summary.commentId}`,
   );
   if (outcome.droppedFindingIds.length > 0) {
@@ -1916,7 +1892,7 @@ export async function runPostCommand(input: {
   } else if (outcome.reviewOutcome === "demoted") {
     log(
       "warning: the review submission was rejected (422) and recovered " +
-        "via issue comments",
+        "into the summary Outside Diff bucket",
     );
   }
   return postingExitCode(outcome);
