@@ -63,7 +63,7 @@ const FULL_SHA = /^[0-9a-f]{40}$/;
 // its verdict on the marker. `applied` pays no adjudicator and is excluded
 // on purpose — see the builder/parser below for what that means in both
 // directions.
-const ADJUDICATED_TAGS: ReadonlySet<TriageTag> = new Set<TriageTag>([
+export const ADJUDICATED_TAGS: ReadonlySet<TriageTag> = new Set<TriageTag>([
   "dismissed",
   "deferred",
   "misclassified",
@@ -73,11 +73,12 @@ export interface TriageMarkerFields {
   tag: TriageTag;
   headSha: string;
   actor: TriageActor;
-  // The GitHub issue number carrying a deferred finding's real destination.
-  // REQUIRED when tag is "deferred" (ROADMAP B6b: "without it, defer is a
-  // dismiss with a better name") — triageMarker throws rather than emit a
-  // marker that would decay into an un-tracked dismiss. Meaningless for
-  // every other tag and ignored if supplied.
+  // Optional destination when tag is "deferred". W1 (issue #21/#22): a
+  // deferred finding is a TAG plus reasoning, not a mandate to create a
+  // GitHub issue — some agents run on providers that are not GitHub, and
+  // the coding agent decides whether an issue exists. When supplied it
+  // must be a positive integer; meaningless for every other tag and
+  // ignored if supplied there.
   issue?: number;
   // The isolated adjudicator's ruling (ROADMAP B6b "the label is the
   // verdict and it closes the row"). REQUIRED for `dismissed`, `deferred`,
@@ -93,17 +94,53 @@ export interface TriageMarkerFields {
   verdict?: TriageVerdict;
 }
 
-// Builds the marker. Throws on a `deferred` fields object with no `issue`
-// rather than silently omitting it — the whole point of the field is that a
-// deferred finding without a real destination is a bug, not a valid state,
-// and a pure function that accepted one anyway would let that bug reach
-// GitHub before anyone could catch it. The same two-way discipline now
-// applies to `verdict`: required for the three adjudicated tags, forbidden
-// for `applied`.
+const TRIAGE_BADGE: Record<TriageTag, { emoji: string; label: string }> = {
+  applied: { emoji: "✅", label: "APPLIED" },
+  dismissed: { emoji: "❌", label: "DISMISSED" },
+  deferred: { emoji: "📋", label: "DEFERRED" },
+  misclassified: { emoji: "🏷️", label: "MISCLASSIFIED" },
+};
+
+// Visible second line of a triage reply. The marker is an HTML comment, so
+// GitHub renders it invisible — a body that is only the marker tells the
+// ledger everything and the human nothing (found on pr-hero PR #6). The
+// driver owns this string so a skill cannot omit it the way the 1724
+// Greptile-thread replies did.
+export function triageBadge(fields: TriageMarkerFields): string {
+  const badge = TRIAGE_BADGE[fields.tag];
+  const parts = [`${badge.emoji} **${badge.label}**`, fields.actor];
+  if (fields.verdict !== undefined) {
+    parts.push(`adjudicator: ${fields.verdict}`);
+  }
+  if (fields.tag === "deferred" && fields.issue !== undefined) {
+    parts.push(`#${fields.issue}`);
+  }
+  return parts.join(" · ");
+}
+
+// Marker + badge + reasoning, in that order. The driver prepends the wire
+// format; `--body-file` is reasoning prose only. A blank reasoning still
+// emits marker and badge — applied can be a one-line pointer, and an empty
+// file must not drop the human-visible tag.
+export function renderTriageReplyBody(
+  fields: TriageMarkerFields,
+  reasoning: string,
+): string {
+  const head = `${triageMarker(fields)}\n\n${triageBadge(fields)}`;
+  const prose = reasoning.trim();
+  return prose.length === 0 ? `${head}\n` : `${head}\n\n${prose}\n`;
+}
+
+// Builds the marker. `verdict` is required for the three adjudicated tags
+// and forbidden for `applied`. `issue` on `deferred` is optional.
 export function triageMarker(fields: TriageMarkerFields): string {
-  if (fields.tag === "deferred" && fields.issue === undefined) {
+  if (
+    fields.tag === "deferred" &&
+    fields.issue !== undefined &&
+    (!Number.isInteger(fields.issue) || fields.issue <= 0)
+  ) {
     throw new Error(
-      "triageMarker: tag=deferred requires an issue number (ROADMAP B6b)",
+      "triageMarker: tag=deferred issue must be a positive integer",
     );
   }
   if (ADJUDICATED_TAGS.has(fields.tag) && fields.verdict === undefined) {
@@ -118,7 +155,10 @@ export function triageMarker(fields: TriageMarkerFields): string {
         "no adjudicator (ROADMAP B6b)",
     );
   }
-  const issuePart = fields.tag === "deferred" ? ` issue=${fields.issue}` : "";
+  const issuePart =
+    fields.tag === "deferred" && fields.issue !== undefined
+      ? ` issue=${fields.issue}`
+      : "";
   const verdictPart =
     fields.verdict !== undefined ? ` verdict=${fields.verdict}` : "";
   return (
@@ -131,9 +171,8 @@ export interface ParsedTriageMarker {
   tag: TriageTag;
   headSha: string;
   actor: TriageActor;
-  // Present only when tag is "deferred" (parseTriageMarker enforces this —
-  // a deferred marker with no issue never reaches this type, it returns
-  // null instead).
+  // Present only when tag is "deferred" AND the marker carried a valid
+  // `issue=` field. Absent is a valid deferred (reasoning-only).
   issue?: number;
   // Present only when tag is "dismissed", "deferred", or "misclassified"
   // (parseTriageMarker enforces this the same way it enforces `issue`) —
@@ -197,14 +236,15 @@ export function parseTriageMarker(body: string): ParsedTriageMarker | null {
   }
   const verdict = rawVerdict as TriageVerdict;
 
-  // `deferred` MUST carry a valid issue number — the ROADMAP B6b rule this
-  // parser exists to enforce, not just record. A deferred marker with no
-  // issue, or a non-numeric one, is malformed: returning null here (rather
-  // than a marker with `issue: undefined`) is what stops a defer from being
-  // silently counted as a dismiss downstream.
+  // `deferred` MAY carry a valid issue number. A missing `issue=` is a
+  // valid reasoning-only defer (W1). A present but non-positive / NaN
+  // value is still malformed — that is a broken destination, not "no
+  // destination".
   if (tag === "deferred") {
     const rawIssue = parts.get("issue");
-    if (rawIssue === undefined) return null;
+    if (rawIssue === undefined) {
+      return { tag, headSha, actor, verdict };
+    }
     const issue = Number.parseInt(rawIssue, 10);
     if (!Number.isInteger(issue) || issue <= 0) return null;
     return { tag, headSha, actor, issue, verdict };
