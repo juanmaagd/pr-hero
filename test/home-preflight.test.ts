@@ -34,7 +34,14 @@ describe("prheroLayout", () => {
       logPath: "/Users/x/.prhero/watch.log",
       lockPath: "/Users/x/.prhero/watch.lock",
       launchdLogPath: "/Users/x/.prhero/launchd.log",
+      metricsDbPath: "/Users/x/.prhero/metrics.db",
     });
+  });
+
+  test("the metrics db is a sibling of the repos tree, not nested under it", () => {
+    expect(prheroLayout(HOME).metricsDbPath).toBe(
+      "/Users/x/.prhero/metrics.db",
+    );
   });
 });
 

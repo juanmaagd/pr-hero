@@ -18,7 +18,10 @@ import path from "node:path";
 import {
   assertRunMatchesPr,
   computeDroppedFindingIds,
+  createRunDir,
   type InlinePostOutcome,
+  ingestReviewMetrics,
+  originUsageScope,
   pipelineSummarizerInput,
   postInlineFindings,
   postInlineIfEligible,
@@ -29,10 +32,11 @@ import {
 } from "../src/cli";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
+import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import type { StoredComparison } from "../src/ledger";
 import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
-import type { SummarySettings } from "../src/preflight";
-import { CliUsageError } from "../src/preflight";
+import type { CliOptions, SummarySettings } from "../src/preflight";
+import { CliError, CliUsageError } from "../src/preflight";
 import { triageMarker } from "../src/triage";
 
 // ---------------------------------------------------------------------------
@@ -1943,6 +1947,168 @@ describe("runTriageReplyCommand", () => {
       expect(post?.stdin).toContain("verdict=inconclusive");
     } finally {
       await cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W4 Phase 6 remediation (sdd-verify option D): four offline tests closing
+// the PARTIAL scenarios the verify report flagged, plus the --out product
+// fix. `runGit`/`tmpGitRepo` spawn a REAL git binary against a throwaway tmp
+// dir — the only way to exercise gitOriginUrl/resolveRepoHome's actual
+// decision (present vs. absent origin) without faking git itself.
+
+async function runGit(cwd: string, args: string[]): Promise<void> {
+  const proc = Bun.spawn(["git", "-C", cwd, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+  }
+}
+
+async function tmpGitRepo(
+  originUrl: string | null,
+): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-git-"));
+  await runGit(dir, ["init", "-q"]);
+  await runGit(dir, ["config", "user.email", "test@example.com"]);
+  await runGit(dir, ["config", "user.name", "Test"]);
+  if (originUrl !== null) {
+    await runGit(dir, ["remote", "add", "origin", originUrl]);
+  }
+  return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
+}
+
+describe("ingestReviewMetrics — the review()/reviewPr() caller seam (W4 Phase 6)", () => {
+  test("a throwing ingest seam never throws and warns with the exact prefix", () => {
+    const warnings: string[] = [];
+    expect(() =>
+      ingestReviewMetrics({
+        dbPath: "/tmp/does-not-matter.db",
+        repoId: "github.com/acme/widgets",
+        runDir: "/runs/local-1",
+        checkoutPath: OPERATOR_ROOT,
+        doc: doc({ pr: 0 }),
+        perAgent: {},
+        comparison: null,
+        log: (line) => warnings.push(line),
+        ingest: () => {
+          throw new Error("disk full");
+        },
+      }),
+    ).not.toThrow();
+    expect(warnings).toEqual([
+      "warning: metrics ingest failed — the review itself is intact: disk full",
+    ]);
+  });
+
+  test("a successful ingest logs nothing and reaches the seam with the given runDir", () => {
+    const warnings: string[] = [];
+    const seenRunDirs: string[] = [];
+    ingestReviewMetrics({
+      dbPath: "/tmp/does-not-matter.db",
+      repoId: "github.com/acme/widgets",
+      runDir: "/runs/pr-42-1",
+      checkoutPath: OPERATOR_ROOT,
+      doc: doc({ pr: 42 }),
+      perAgent: {},
+      comparison: null,
+      log: (line) => warnings.push(line),
+      ingest: (input) => {
+        seenRunDirs.push(input.runDir);
+      },
+    });
+    expect(warnings).toEqual([]);
+    expect(seenRunDirs).toEqual(["/runs/pr-42-1"]);
+  });
+});
+
+describe("originUsageScope — usage's scoped-mode resolver (W4 Phase 6)", () => {
+  test("a checkout with no resolvable origin throws the exact missingOriginMessage", async () => {
+    const repo = await tmpGitRepo(null);
+    const home = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-home-"));
+    try {
+      let caught: unknown;
+      try {
+        await originUsageScope(home, repo.dir);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CliError);
+      expect((caught as Error).message).toBe(missingOriginMessage(repo.dir));
+    } finally {
+      await repo.cleanup();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a checkout with a resolvable origin resolves repoId from canonicalRemoteId", async () => {
+    const originUrl = "https://github.com/acme/widgets.git";
+    const repo = await tmpGitRepo(originUrl);
+    const home = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-home-"));
+    try {
+      const scope = await originUsageScope(home, repo.dir);
+      expect(scope).toEqual({ repoId: canonicalRemoteId(originUrl) });
+    } finally {
+      await repo.cleanup();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
+
+function runDirOptions(over: Partial<CliOptions> = {}): CliOptions {
+  return {
+    repo: ".",
+    head: "HEAD",
+    hopBudget: 3,
+    dryRun: false,
+    yes: false,
+    post: false,
+    twoDot: false,
+    onPush: false,
+    force: false,
+    all: false,
+    ...over,
+  };
+}
+
+describe("createRunDir — --out product fix D (W4 Phase 6)", () => {
+  test("--out on a checkout WITH origin still ingests: repoId is the canonical origin", async () => {
+    const originUrl = "https://github.com/acme/widgets.git";
+    const repo = await tmpGitRepo(originUrl);
+    const outDir = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-out-"));
+    try {
+      const { runDir, repoId } = await createRunDir(
+        runDirOptions({ out: outDir }),
+        repo.dir,
+        "c".repeat(40),
+      );
+      expect(runDir).toBe(path.resolve(outDir));
+      expect(repoId).toBe(canonicalRemoteId(originUrl));
+    } finally {
+      await repo.cleanup();
+      await rm(outDir, { recursive: true, force: true });
+    }
+  });
+
+  test("--out on a checkout WITHOUT origin stays the escape hatch: repoId is null, no throw", async () => {
+    const repo = await tmpGitRepo(null);
+    const outDir = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-out-"));
+    try {
+      const { runDir, repoId } = await createRunDir(
+        runDirOptions({ out: outDir }),
+        repo.dir,
+        "c".repeat(40),
+      );
+      expect(runDir).toBe(path.resolve(outDir));
+      expect(repoId).toBeNull();
+    } finally {
+      await repo.cleanup();
+      await rm(outDir, { recursive: true, force: true });
     }
   });
 });

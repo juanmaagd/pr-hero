@@ -23,6 +23,10 @@ export interface PrheroLayout {
   logPath: string;
   lockPath: string;
   launchdLogPath: string;
+  // W4 (#23): ONE global sqlite db, siblings with reposDir rather than
+  // nested under it, so GC's `glob.scan({ cwd: reposDir })` (gc.ts)
+  // structurally cannot enumerate or delete it.
+  metricsDbPath: string;
 }
 
 export function prheroLayout(home: string): PrheroLayout {
@@ -34,6 +38,7 @@ export function prheroLayout(home: string): PrheroLayout {
     logPath: path.join(dir, "watch.log"),
     lockPath: path.join(dir, "watch.lock"),
     launchdLogPath: path.join(dir, "launchd.log"),
+    metricsDbPath: path.join(dir, "metrics.db"),
   };
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import path from "node:path";
 import {
   decideGc,
   GC_LAUNCHD_LABEL,
@@ -11,7 +12,7 @@ import {
   renderGcStatus,
   worktreeRemoveArgs,
 } from "../src/gc-preflight";
-import { GC_TTL_HOURS } from "../src/home-preflight";
+import { GC_TTL_HOURS, prheroLayout } from "../src/home-preflight";
 import { parsePlistInterval } from "../src/watch-preflight";
 
 const NOW = Date.parse("2026-08-15T12:00:00Z");
@@ -214,6 +215,27 @@ describe("renderGcPlist", () => {
       pathEnv: "/a&b:/c<d>:/usr/bin",
     });
     expect(plist).toContain("<string>/a&amp;b:/c&lt;d&gt;:/usr/bin</string>");
+  });
+});
+
+// W4 (#23): GC (gc.ts) walks ONLY `glob.scan({ cwd: reposDir })` — it never
+// lists ~/.prhero itself. metrics.db (W4) must stay a SIBLING of reposDir,
+// never a descendant, or a future "collect everything idle under the home"
+// sweep could delete run history GC has no business touching. No prod
+// change: prheroLayout already places metricsDbPath outside reposDir
+// (Phase 1); this test locks that invariant down so a future edit to
+// prheroLayout cannot regress it silently.
+describe("metrics db is outside the GC scan root", () => {
+  test("metricsDbPath sits beside reposDir, not inside it", () => {
+    const layout = prheroLayout("/Users/x");
+    expect(layout.metricsDbPath.startsWith(`${layout.reposDir}/`)).toBe(false);
+    expect(layout.metricsDbPath).not.toBe(layout.reposDir);
+  });
+
+  test("metricsDbPath is a direct child of the same dir reposDir hangs off, one level above the GC scan root", () => {
+    const layout = prheroLayout("/Users/x");
+    expect(path.dirname(layout.metricsDbPath)).toBe(layout.dir);
+    expect(path.dirname(layout.reposDir)).toBe(layout.dir);
   });
 });
 

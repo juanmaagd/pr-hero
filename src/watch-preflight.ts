@@ -9,7 +9,7 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
-import { prheroLayout } from "./home-preflight";
+import { type PrheroLayout, prheroLayout } from "./home-preflight";
 import { PR_COMMENT_MARKER_PREFIX } from "./pr-preflight";
 import { CliUsageError, isFullCommitId, type NumstatFile } from "./preflight";
 import { DEFAULT_SIZE_GATE } from "./size-gate";
@@ -18,16 +18,11 @@ import { DEFAULT_SIZE_GATE } from "./size-gate";
 // ~/.prhero/ layout — one source for every path the watcher owns, so the
 // shell, the plist and the docs cannot drift apart on where things live.
 
-export interface PrheroHomePaths {
-  dir: string;
-  reposDir: string;
-  configPath: string;
-  // The structured event log. It is also the daily-cap COUNTER (see
-  // countLaunchedToday), which is why launchd's process stdout goes to the
-  // separate launchdLogPath and never here.
-  logPath: string;
-  lockPath: string;
-  launchdLogPath: string;
+// Extends PrheroLayout (never redeclares its fields) so a new field there —
+// metricsDbPath (W4 / #23) was the first — cannot silently drift out of
+// this spread; tsc rejects an object literal missing a field the moment
+// PrheroLayout grows one.
+export interface PrheroHomePaths extends PrheroLayout {
   plistPath: string;
 }
 

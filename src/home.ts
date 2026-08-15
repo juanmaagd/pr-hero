@@ -55,6 +55,26 @@ export async function gitOriginUrl(repoRoot: string): Promise<string> {
   return url;
 }
 
+// The `--out` escape hatch (W4 Phase 6 remediation, GitHub #23 option D)
+// needs to know whether origin is resolvable WITHOUT the no-origin case
+// being an error: gitOriginUrl throws CliError precisely for "no remote" /
+// "empty remote", and that is the only failure this function should ever
+// swallow. Anything else (a spawn failure, a permissions error) propagates —
+// resolving origin quietly failing open on unexpected errors would ingest
+// runs under a wrong-looking blank slate instead of surfacing the fault.
+export async function tryOriginRepoId(
+  repoRoot: string,
+): Promise<string | null> {
+  let url: string;
+  try {
+    url = await gitOriginUrl(repoRoot);
+  } catch (error) {
+    if (error instanceof CliError) return null;
+    throw error;
+  }
+  return canonicalRemoteId(url);
+}
+
 export function ownerPresent(ownerPath: string): boolean {
   return existsSync(ownerPath) && existsSync(path.join(ownerPath, ".git"));
 }

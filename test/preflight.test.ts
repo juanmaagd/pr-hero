@@ -45,6 +45,7 @@ describe("parseArgs", () => {
       twoDot: false,
       onPush: false,
       force: false,
+      all: false,
     });
     expect(options.base).toBeUndefined();
     // Unset, never 0: 0 DISABLES a size limit, so it cannot double as
@@ -77,6 +78,17 @@ describe("parseArgs", () => {
       CliUsageError,
     );
     expect(() => parseArgs(["install"])).toThrow(CliUsageError);
+  });
+
+  // W4 / #23: usage is origin-scoped by default (spec "Origin-Scoped Usage
+  // By Default"); --all is the operator-wide escape hatch and is valid on
+  // NO other command (spec "--all misused on another command").
+  test("usage is a command; --all applies only to usage", () => {
+    expect(parseArgs(["usage"]).command).toBe("usage");
+    expect(parseArgs(["usage"]).options.all).toBe(false);
+    expect(parseArgs(["usage", "--all"]).options.all).toBe(true);
+    expect(() => parseArgs(["gc", "--all"])).toThrow(CliUsageError);
+    expect(() => parseArgs(["review", "--all"])).toThrow(CliUsageError);
   });
 
   // Both exist so a tree you cannot add a file to is still reviewable: an

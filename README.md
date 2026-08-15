@@ -76,9 +76,15 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero watch --once` | Run ONE watcher tick: scan the watched repos, pick the next unreviewed open PR, review it. `--dry-run` shows the whole decision for $0. |
 | `pr-hero watch install` | Install the macOS launchd agent that runs a tick every `--interval` minutes (default 15). **This is the opt-in to automatic spend.** |
 | `pr-hero watch uninstall` | Unload and remove that agent. |
+| `pr-hero gc` | Collect worktrees under `~/.prhero` that are merged/closed or idle >72h. `--dry-run` prints the table and removes nothing. `--repo <clone>` scopes to one origin; default is the whole home. |
+| `pr-hero gc install` | Install the macOS launchd agent that runs `pr-hero gc` every `--interval` minutes (default 360 = 6h). No reviews, no `watch.json`, no daily cap — the $0 sweeper so trees do not wait for a review or the watcher. |
+| `pr-hero gc uninstall` | Unload and remove that GC agent. |
+| `pr-hero gc status` | Read-only, $0: whether the GC agent is installed, its interval, plist, and tick log. |
+| `pr-hero usage [--all]` | Read-only, $0: print the observability store's per-run rows (cost, tokens, findings) — every completed review, local and PR, auto-ingests into one global `~/.prhero/metrics.db`. Scoped to the current checkout's origin by default; `--all` shows every origin instead. |
 
 Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `--model <m>`,
-`--out <dir>` (run dir for `review`, output file for `ledger`), `--runs <dir>` (ledger's runs root).
+`--out <dir>` (run dir for `review`, output file for `ledger`), `--runs <dir>` (ledger's runs root),
+`--all` (`usage` only: every origin instead of just this checkout's).
 `pr-hero --help` lists everything.
 
 ### PR mode, in one paragraph

@@ -31,10 +31,12 @@ import {
   releasePidLock,
   resolveRepoHome,
   stampWorktree,
+  tryOriginRepoId,
 } from "./home";
 import {
   legacyMigrationHint,
   legacyWorktreePath,
+  prheroLayout,
   prWorktreePath,
   worktreeLockPath,
 } from "./home-preflight";
@@ -45,6 +47,12 @@ import {
   renderLedger,
   type StoredComparison,
 } from "./ledger";
+import {
+  type FailSoftIngestInput,
+  failSoftIngest,
+  queryUsage,
+} from "./metrics";
+import { renderUsage } from "./metrics-preflight";
 import {
   changedPathsFromDiff,
   type PipelineProgressEvent,
@@ -338,7 +346,9 @@ async function main(argv: string[]): Promise<number> {
               ? await triageCommand(parsed.options)
               : parsed.command === "gc"
                 ? await gcCommand(parsed.options)
-                : await review(parsed.options);
+                : parsed.command === "usage"
+                  ? await usageCommand(parsed.options)
+                  : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -346,6 +356,19 @@ async function main(argv: string[]): Promise<number> {
     }
     throw error;
   }
+}
+
+// The ONE caller-layer seam review() and reviewPr() both call after writing
+// their artifact (W4 Phase 6 remediation, GitHub #23 option D — spec
+// "Fail-Soft Ingest": "WHEN a review finishes THEN the review still exits
+// successfully"). A thin wrapper around failSoftIngest is deliberate: the
+// verify report flagged that the fail-soft proof lived one layer BELOW this
+// call (failSoftIngest's own unit tests), never at the layer review()/
+// reviewPr() actually invoke — this function IS that layer, so a test
+// against it proves the same seam the two real callers use, not a sibling
+// one.
+export function ingestReviewMetrics(input: FailSoftIngestInput): void {
+  failSoftIngest(input);
 }
 
 async function review(options: CliOptions): Promise<number> {
@@ -458,7 +481,7 @@ async function review(options: CliOptions): Promise<number> {
   }
 
   // 8 — run dir + diff.
-  const runDir = await createRunDir(options, repoRoot, headSha);
+  const { runDir, repoId } = await createRunDir(options, repoRoot, headSha);
   const diffPath = path.join(runDir, "diff.patch");
   // diffFromSha, never baseSha: see resolveDiffFrom. The numstat below uses
   // the same endpoint on purpose — a cost estimate computed over a wider range
@@ -690,6 +713,20 @@ async function review(options: CliOptions): Promise<number> {
   });
   const findingsPath = path.join(runDir, "findings.json");
   await writeFindings(findingsPath, doc);
+
+  // 16b — the observability store (W4 / #23). AFTER the artifact the review
+  // exists to produce, and fail-soft: an ingest failure must never turn a
+  // successful review into a failed one, only into a printed warning.
+  ingestReviewMetrics({
+    dbPath: prheroLayout(os.homedir()).metricsDbPath,
+    repoId,
+    runDir,
+    checkoutPath: repoRoot,
+    doc,
+    perAgent: result.perAgent,
+    comparison: null,
+    log,
+  });
 
   // 17 — the report.
   const reportPath = path.join(runDir, "report.md");
@@ -1231,6 +1268,34 @@ async function reviewPr(
         );
       }
     }
+
+    // 13b — the observability store (W4 / #23). AFTER the comparison write,
+    // BEFORE posting: reuses repoHome.repoId from step 2 (no second origin
+    // lookup) and reads comparison.json back off disk — the artifact IS the
+    // source of truth, so ingest never re-derives the bucketing itself.
+    // Fail-soft, same contract as local mode: never turns a successful
+    // review into a failed one.
+    let storedComparison: StoredComparison | null = null;
+    if (comparison) {
+      try {
+        storedComparison = parseComparisonJson(
+          await Bun.file(comparison.jsonPath).text(),
+        );
+      } catch {
+        // Degrades to a run row without comparison children; ingestRun
+        // itself throwing is handled (and warned on) by failSoftIngest.
+      }
+    }
+    ingestReviewMetrics({
+      dbPath: prheroLayout(home).metricsDbPath,
+      repoId: repoHome.repoId,
+      runDir,
+      checkoutPath: operatorRoot,
+      doc,
+      perAgent: result.perAgent,
+      comparison: storedComparison,
+      log,
+    });
 
     // 14 — the posting, only when asked. AFTER the comparison on purpose: a
     // posting failure must never cost the comparison artifact. And unlike the
@@ -2482,6 +2547,58 @@ async function ledgerCommand(options: CliOptions): Promise<number> {
   return 0;
 }
 
+// `pr-hero usage` (W4 / #23) — the thin read side of the observability
+// store every completed review auto-ingests into. Origin-scoped by default
+// (spec "Origin-Scoped Usage By Default"); `--all` is the operator-wide
+// escape hatch and DELIBERATELY skips resolveRepoHome entirely — it must
+// run from anywhere, including outside a git repo (design "usage render").
+// A checkout with no resolvable origin fails/warns via the SAME CliError
+// gitOriginUrl already throws (spec "No-origin checkout"): resolveRepoRoot
+// still needs the cwd to be a git repo, resolveRepoHome still needs an
+// origin, and neither is bypassed in scoped mode.
+// The scoped-mode half of `usage`'s origin resolution, pulled out on its own
+// (W4 Phase 6 remediation, GitHub #23 option D) so a no-origin checkout's
+// failure path — the pre-existing CliError/missingOriginMessage that
+// resolveRepoHome's gitOriginUrl call already throws — is exercisable
+// directly, without needing `usageCommand`'s whole `--all`/parseArgs
+// surface around it. persist:false: `usage` must never write a registry.
+export async function originUsageScope(
+  home: string,
+  operatorRoot: string,
+): Promise<{ repoId: string }> {
+  const repoHome = await resolveRepoHome({
+    home,
+    operatorRoot,
+    persist: false,
+  });
+  return { repoId: repoHome.repoId };
+}
+
+async function usageCommand(options: CliOptions): Promise<number> {
+  const dbPath = prheroLayout(os.homedir()).metricsDbPath;
+  const scope = options.all
+    ? ({ all: true } as const)
+    : await originUsageScope(os.homedir(), await resolveRepoRoot(options.repo));
+  const rows = queryUsage(dbPath, scope);
+  // An empty store is a valid state of the world (no review has ingested
+  // yet, or none matches this scope), not an error — same split as
+  // ledgerCommand: a human note on stderr, stdout left clean, exit 0.
+  if (rows.length === 0) {
+    log(
+      `no usage rows found in ${dbPath} — run \`pr-hero review\` or ` +
+        "`pr-hero review --pr <n>` first",
+    );
+    return 0;
+  }
+  // The report IS this command's product, same stdout/stderr split as
+  // ledgerCommand: everything human-facing above went to stderr via log(),
+  // so stdout stays pipeable.
+  process.stdout.write(
+    `${renderUsage(rows, { styles: styleEnabled() }).join("\n")}\n`,
+  );
+  return 0;
+}
+
 async function preflightAgentsDir(
   agentsDir: string,
   specFiles: string[],
@@ -2501,16 +2618,26 @@ async function preflightAgentsDir(
   }
 }
 
-async function createRunDir(
+// repoId rides along with the run dir so the caller's fail-soft metrics
+// ingest (W4 / #23) can reuse the SAME resolveRepoHome call below instead of
+// paying for a second gitOriginUrl lookup. --out still skips resolveRepoHome
+// itself (an explicit dir needs no ~/.prhero/repos/<id> registry, and must
+// never gain the side effect of creating one just to learn an id — W4 Phase
+// 6 remediation, GitHub #23 option D) — but it now tries origin via
+// tryOriginRepoId (persist:false semantics) so a --out run on a checkout
+// WITH a resolvable origin still ingests. repoId is null only when that
+// origin lookup itself fails — the same no-origin escape hatch every other
+// global-state path already has, never a throw.
+export async function createRunDir(
   options: CliOptions,
   repoRoot: string,
   headSha: string,
-): Promise<string> {
+): Promise<{ runDir: string; repoId: string | null }> {
   if (options.out) {
     const explicit = path.resolve(options.out);
     assertOutsideRepo(explicit, repoRoot);
     await mkdir(explicit, { recursive: true });
-    return explicit;
+    return { runDir: explicit, repoId: await tryOriginRepoId(repoRoot) };
   }
   const repoHome = await resolveRepoHome({
     home: os.homedir(),
@@ -2525,7 +2652,7 @@ async function createRunDir(
     if (existsSync(candidate)) continue;
     assertOutsideRepo(candidate, repoRoot);
     await mkdir(candidate, { recursive: true });
-    return candidate;
+    return { runDir: candidate, repoId: repoHome.repoId };
   }
 }
 

@@ -67,6 +67,7 @@ const options = (over: Partial<CliOptions> = {}): CliOptions => ({
   twoDot: false,
   onPush: false,
   force: false,
+  all: false,
   ...over,
 });
 

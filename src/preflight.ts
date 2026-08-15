@@ -128,6 +128,11 @@ export interface CliOptions {
   // cost", and the cost band's own confirmation answers "do you want to
   // spend this" — collapsing them would let one flag skip two gates.
   force: boolean;
+  // usage only (W4 / #23): show every repo_id instead of the current
+  // checkout's origin-scoped view (spec "Operator-Wide View Via --all").
+  // Valid on no other command — a size-gate-style boolean, not a value
+  // flag, so `usage --all` and `usage` are the whole surface.
+  all: boolean;
   // Size-gate overrides. UNSET means "use DEFAULT_SIZE_GATE"; 0 is a real,
   // distinct value that DISABLES the limit, so these cannot default to 0.
   maxChangedLines?: number;
@@ -152,6 +157,7 @@ export interface ParsedCli {
     | "post"
     | "triage"
     | "gc"
+    | "usage"
     | "help";
   options: CliOptions;
 }
@@ -217,6 +223,11 @@ Usage:
                              wait for a review or the watcher
   pr-hero gc uninstall       Unload and remove that launchd agent
   pr-hero gc status          Read-only: whether the GC agent is installed
+  pr-hero usage [--all]      Print the observability store's per-run rows
+                             (cost, tokens, findings) for the current
+                             checkout's origin — every review, local and
+                             PR, auto-ingests into it. --all shows every
+                             origin instead of just this one. Read-only, $0
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
@@ -298,6 +309,8 @@ Options:
                       Default ${DEFAULT_SIZE_GATE.maxChangedFiles}; 0 disables the limit
   --force             Review the diff even when the size gate would skip it.
                       Does NOT imply --yes — the cost band still asks
+  --all               usage only: show every origin's rows instead of just
+                      the current checkout's
   --yes               Skip the confirmation prompt
   --help              Show this text
 
@@ -345,6 +358,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     twoDot: false,
     onPush: false,
     force: false,
+    all: false,
   };
   let command:
     | "review"
@@ -354,6 +368,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "post"
     | "triage"
     | "gc"
+    | "usage"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -440,6 +455,10 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.force = true;
       continue;
     }
+    if (arg === "--all") {
+      options.all = true;
+      continue;
+    }
     if (arg.startsWith("-")) {
       throw new CliUsageError(`unknown option: ${arg}`);
     }
@@ -485,11 +504,12 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "watch" &&
       arg !== "post" &&
       arg !== "triage" &&
-      arg !== "gc"
+      arg !== "gc" &&
+      arg !== "usage"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger", "watch", "post", "triage" and "gc")',
+          '"ledger", "watch", "post", "triage", "gc" and "usage")',
       );
     }
     command = arg;
@@ -555,6 +575,11 @@ export function parseArgs(argv: string[]): ParsedCli {
     throw new CliUsageError(
       "--from only applies to the post and triage commands",
     );
+  }
+  // spec "--all misused on another command": --all is usage's own
+  // operator-wide escape hatch, and valid on nothing else.
+  if (options.all && command !== "usage") {
+    throw new CliUsageError("--all only applies to usage");
   }
   // The watch surface, validated after the loop for the same order-blindness.
   if (command === "watch") {

@@ -1248,6 +1248,7 @@ describe("prheroHomePaths", () => {
       logPath: "/Users/x/.prhero/watch.log",
       lockPath: "/Users/x/.prhero/watch.lock",
       launchdLogPath: "/Users/x/.prhero/launchd.log",
+      metricsDbPath: "/Users/x/.prhero/metrics.db",
       plistPath: `/Users/x/Library/LaunchAgents/${WATCH_LAUNCHD_LABEL}.plist`,
     });
   });
