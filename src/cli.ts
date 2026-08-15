@@ -888,12 +888,6 @@ async function reviewPr(
   const lockPath = worktreeLockPath(home, repoHome.repoId, prNumber);
   await acquirePidLock(lockPath);
   try {
-    await runGc({
-      home,
-      repoId: repoHome.repoId,
-      dryRun: false,
-      silent: true,
-    });
     // 4 — fetch, then canonicalize. See fetchPrRefs for why that refspec pair.
     // Object-db git runs against the git-dir OWNER, not the operator cwd: the
     // worktree is registered there (W3).
@@ -1349,6 +1343,12 @@ async function reviewPr(
     return postingExitCode(posted);
   } finally {
     await releasePidLock(lockPath);
+    await runGc({
+      home,
+      repoId: repoHome.repoId,
+      dryRun: false,
+      silent: true,
+    });
   }
 }
 

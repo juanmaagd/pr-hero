@@ -12,12 +12,18 @@ import os from "node:os";
 import path from "node:path";
 import {
   decideGc,
+  GH_PR_VIEW_TIMEOUT_MS,
   type PrLifecycle,
   parseGhPrState,
   parseWorktreePr,
   worktreeRemoveArgs,
 } from "./gc-preflight";
-import { resolveRepoHome, worktreeInFlight } from "./home";
+import {
+  acquirePidLock,
+  releasePidLock,
+  resolveRepoHome,
+  worktreeInFlight,
+} from "./home";
 import {
   parseRepoRegistry,
   prheroLayout,
@@ -49,6 +55,7 @@ async function ghPrStateJson(cwd: string, pr: number): Promise<string | null> {
     cwd,
     stdout: "pipe",
     stderr: "pipe",
+    timeout: GH_PR_VIEW_TIMEOUT_MS,
   });
   const [stdout, , exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -167,21 +174,43 @@ export async function runGc(input: {
       collected++;
       continue;
     }
-    const removed = await git(
-      tree.registry.git_dir_owner,
-      worktreeRemoveArgs(tree.worktreePath),
-    );
-    if (!removed.ok) {
-      failed++;
-      if (!input.silent) {
-        log(
-          `gc: git worktree remove --force ${tree.worktreePath} failed: ` +
-            removed.stderr.trim(),
-        );
+    // Collect is check-then-act unless we hold this PR's lock across the
+    // remove: a review can acquirePidLock in the gap and then have its
+    // tree yanked. A live holder fails loud — treat that as in-flight.
+    try {
+      await acquirePidLock(tree.lockPath);
+    } catch (error) {
+      if (
+        error instanceof CliError &&
+        error.message.startsWith("lock held by pid")
+      ) {
+        kept++;
+        if (!input.silent) {
+          log(`keep     pr-${tree.pr}  ${tree.repoId}  in-flight (live lock)`);
+        }
+        continue;
       }
-      continue;
+      throw error;
     }
-    collected++;
+    try {
+      const removed = await git(
+        tree.registry.git_dir_owner,
+        worktreeRemoveArgs(tree.worktreePath),
+      );
+      if (!removed.ok) {
+        failed++;
+        if (!input.silent) {
+          log(
+            `gc: git worktree remove --force ${tree.worktreePath} failed: ` +
+              removed.stderr.trim(),
+          );
+        }
+        continue;
+      }
+      collected++;
+    } finally {
+      await releasePidLock(tree.lockPath);
+    }
   }
   return { collected, kept, failed };
 }

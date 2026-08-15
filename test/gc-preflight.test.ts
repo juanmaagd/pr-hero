@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   decideGc,
+  GH_PR_VIEW_TIMEOUT_MS,
   parseGhPrState,
   parseWorktreePr,
   worktreeRemoveArgs,
@@ -156,5 +157,12 @@ describe("parseGhPrState", () => {
     expect(parseGhPrState(`{"state":"CLOSED"}`)).toBe("closed");
     expect(parseGhPrState("not json")).toBe("unknown");
     expect(parseGhPrState(`{"state":"DRAFT"}`)).toBe("unknown");
+  });
+});
+
+describe("GH_PR_VIEW_TIMEOUT_MS", () => {
+  test("is a positive bound so a stalled gh cannot pin a lock forever", () => {
+    expect(GH_PR_VIEW_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(GH_PR_VIEW_TIMEOUT_MS).toBe(15_000);
   });
 });

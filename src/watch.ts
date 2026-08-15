@@ -216,6 +216,8 @@ async function watchOnce(dryRun: boolean): Promise<number> {
 
   try {
     if (!dryRun) {
+      // Each `gh pr view` is bounded (GH_PR_VIEW_TIMEOUT_MS) so a stall
+      // cannot pin watch.lock and silence every later tick.
       await runGc({ home: os.homedir(), dryRun: false });
     }
     const repos = await gatherRepoFacts(config, os.homedir());

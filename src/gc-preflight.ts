@@ -30,6 +30,11 @@ export interface GcDecision {
 
 const HOUR_MS = 60 * 60 * 1000;
 
+// Bound every `gh pr view` so a stalled GitHub cannot pin a review lock
+// or watch.lock forever. Timed-out views become `unknown` and still
+// apply TTL (same as a failed gh).
+export const GH_PR_VIEW_TIMEOUT_MS = 15_000;
+
 export function decideGc(input: GcInput): GcDecision {
   if (input.inFlight) {
     return { action: "keep", reason: "in-flight (live lock)" };

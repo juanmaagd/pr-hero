@@ -344,11 +344,12 @@ What is still manual, in the order it should be closed:
    (Juanma's call, 2026-08-10): reuse requires HEAD == PR head AND a clean porcelain ignoring the
    always-untracked `.codegraph/`; head-moved or dirtied trees are recreated via
    `git worktree remove --force` (verified: plain remove refuses on the untracked index). W3 / #18:
-   unbounded keep is forbidden — `pr-hero gc` (and the watcher tick / review start) collects a tree
+   unbounded keep is forbidden — `pr-hero gc` (and the watcher tick / the end of `review --pr`) collects a tree
    when the PR is merged/closed OR it has sat idle >72h, whichever first; teardown is still
-   `--force`, never `rm -rf`. Remaining home hardening (owner-gone recovery, GC `gh`-cost, runs
+   `--force`, never `rm -rf`. Remaining home hardening (owner-gone recovery, runs
    TTL, I/O tests) is parked as GitHub #35 — live with W3 until a witness; do not fold it into
-   W4. Exclusive worktree/registry locks landed with #24's follow-up on PR #36. The Greptile
+   W4. Exclusive worktree/registry locks landed with #24's follow-up on PR #36; GC's
+   `gh pr view` is bounded so a stall cannot pin a review or watch lock. The Greptile
    comparison runs in-process and emits `comparison.md` + `comparison.json` — B4's seed, rows carrying
    `verdict: null, reasoning: null` (the A3 lesson) and the run's `run_status`; a run where every hunter
    died writes NO comparison at all, because "pr-hero 0" from a review that never happened would land in
