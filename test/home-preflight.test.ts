@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   canonicalRemoteId,
+  decidePidLock,
   decideRegistryUpsert,
   defaultRunRoot,
   legacyMigrationHint,
@@ -56,12 +57,21 @@ describe("canonicalRemoteId", () => {
     );
   });
 
-  test("host and path are lowercased so case cannot split a repo", () => {
+  test("host and path are lowercased so case cannot split a GitHub repo", () => {
     expect(canonicalRemoteId("git@GitHub.com:Juanmaagd/Musive.git")).toBe(
       REPO_ID,
     );
     expect(canonicalRemoteId("https://GitHub.com/Juanmaagd/Musive")).toBe(
       REPO_ID,
+    );
+  });
+
+  test("a non-GitHub host keeps path case so distinct remotes cannot collide", () => {
+    expect(canonicalRemoteId("https://gitlab.example/Org/Repo.git")).toBe(
+      "gitlab.example/Org/Repo",
+    );
+    expect(canonicalRemoteId("https://gitlab.example/org/repo.git")).toBe(
+      "gitlab.example/org/repo",
     );
   });
 
@@ -101,6 +111,37 @@ describe("repo home paths", () => {
     expect(worktreeLockPath(HOME, REPO_ID, 1724)).toBe(
       `${prWorktreePath(HOME, REPO_ID, 1724)}.lock`,
     );
+  });
+
+  test("a live pid holds the lock; a dead or missing one is stealable", () => {
+    expect(
+      decidePidLock({
+        fileExists: false,
+        existingPid: null,
+        holderAlive: false,
+      }),
+    ).toEqual({ action: "create" });
+    expect(
+      decidePidLock({
+        fileExists: true,
+        existingPid: 4242,
+        holderAlive: true,
+      }),
+    ).toEqual({ action: "held", pid: 4242 });
+    expect(
+      decidePidLock({
+        fileExists: true,
+        existingPid: 4242,
+        holderAlive: false,
+      }),
+    ).toEqual({ action: "steal", deadPid: 4242 });
+    expect(
+      decidePidLock({
+        fileExists: true,
+        existingPid: null,
+        holderAlive: false,
+      }),
+    ).toEqual({ action: "steal", deadPid: null });
   });
 
   test("legacy sibling formulas are unchanged, for detection only", () => {

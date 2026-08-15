@@ -97,13 +97,40 @@ export function worktreeLockPath(
   return `${prWorktreePath(home, repoId, pr)}.lock`;
 }
 
+export function registryLockPath(registryPath: string): string {
+  return `${registryPath}.lock`;
+}
+
+// Exclusive pid-file lock (O_EXCL create, steal a dead holder, fail loud
+// on a live one). The I/O shell in home.ts enacts this; GC asks
+// worktreeInFlight, which is the same "live pid" predicate.
+export type PidLockDecision =
+  | { action: "create" }
+  | { action: "steal"; deadPid: number | null }
+  | { action: "held"; pid: number };
+
+export function decidePidLock(input: {
+  fileExists: boolean;
+  existingPid: number | null;
+  holderAlive: boolean;
+}): PidLockDecision {
+  if (!input.fileExists) return { action: "create" };
+  if (input.existingPid === null || !input.holderAlive) {
+    return { action: "steal", deadPid: input.existingPid };
+  }
+  return { action: "held", pid: input.existingPid };
+}
+
 // ---------------------------------------------------------------------------
 // Repo identity: origin URL → a filesystem-safe id.
 //
 // origin only (extra remotes ignored). SSH and HTTPS of the same GitHub
 // repo must collide. The id is nested (`github.com/org/repo`) so a human
 // can find it; `..` and empty segments are rejected so a weird remote
-// cannot escape ~/.prhero/repos/.
+// cannot escape ~/.prhero/repos/. GitHub's namespace is case-insensitive,
+// so the path is folded there; other hosts may treat Org/Repo and org/repo
+// as distinct, and folding them would share one git-dir owner across two
+// remotes.
 
 export function canonicalRemoteId(originUrl: string): string {
   const trimmed = originUrl.trim();
@@ -142,10 +169,10 @@ export function canonicalRemoteId(originUrl: string): string {
   }
   host = host.toLowerCase();
   repoPath = repoPath.replaceAll("\\", "/").replace(/^\/+/, "");
-  repoPath = repoPath
-    .replace(/\.git$/i, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
+  repoPath = repoPath.replace(/\.git$/i, "").replace(/\/+$/, "");
+  if (host === "github.com" || host.endsWith(".github.com")) {
+    repoPath = repoPath.toLowerCase();
+  }
   if (host.length === 0 || repoPath.length === 0) {
     throw new CliUsageError(
       `origin URL is missing a host or path: ${JSON.stringify(originUrl)}`,
