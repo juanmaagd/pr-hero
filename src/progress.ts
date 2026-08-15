@@ -34,6 +34,7 @@ export const SPINNER_FRAMES = [
 ];
 
 type PanelHunterStatus = "waiting" | "running" | "done" | "failed";
+type PanelSummarizerStatus = "running" | "done" | "failed";
 
 interface PanelHunter {
   key: string;
@@ -48,6 +49,13 @@ interface PanelHunter {
   // Latest only: a step retries at most twice (one transient, one format), and
   // what an operator needs is "it is retrying now", not a history.
   retry?: { attempt: number; maxAttempts: number; reason: string };
+}
+
+interface PanelSummarizer {
+  // The summarizer starts with the pipeline, but it has no separate started
+  // event. Seeding it as running keeps the first frame truthful.
+  status: PanelSummarizerStatus;
+  durationMs?: number;
 }
 
 // One refuter leaf: a finding submitted to the gate. Every leaf is running
@@ -71,6 +79,9 @@ export interface PanelState {
   // own elapsed, not the panel's.
   huntersStartedAtMs?: number;
   hunters: PanelHunter[];
+  // Cosmetic only: the pipeline owns summary semantics and run status.
+  // Absent means the summary step was disabled for this run.
+  summarizer?: PanelSummarizer;
   dedupe?: { drafts: number; findings: number };
   refuter?: {
     total: number;
@@ -88,13 +99,16 @@ export function createPanelState(
   subject: string,
   startedAtMs: number,
   hunterKeys: string[],
-  opts: { refuter?: boolean } = {},
+  opts: { refuter?: boolean; summarizer?: boolean } = {},
 ): PanelState {
   return {
     subject,
     startedAtMs,
     hasRefuter: opts.refuter ?? true,
     hunters: hunterKeys.map((key) => ({ key, status: "waiting" as const })),
+    ...(opts.summarizer === true
+      ? { summarizer: { status: "running" as const } }
+      : {}),
   };
 }
 
@@ -168,6 +182,12 @@ export function applyProgressEvent(
       if (state.refuter.judged >= state.refuter.total) {
         state.refuter.done = true;
       }
+      return;
+    }
+    case "summarizer-finished": {
+      if (!state.summarizer) return;
+      state.summarizer.status = event.ok ? "done" : "failed";
+      state.summarizer.durationMs = event.durationMs;
       return;
     }
     case "step-retry": {
@@ -289,6 +309,30 @@ function refuterNode(
   };
 }
 
+function summarizerNode(
+  summarizer: PanelSummarizer,
+  state: PanelState,
+  nowMs: number,
+  labelWidth: number,
+): TreeNode {
+  const detail =
+    summarizer.status === "running"
+      ? formatElapsed(nowMs - state.startedAtMs)
+      : summarizer.status === "done"
+        ? formatElapsed(summarizer.durationMs ?? 0)
+        : "failed — the run continues";
+  return {
+    label: pad("summarizer", labelWidth),
+    status:
+      summarizer.status === "running"
+        ? "running"
+        : summarizer.status === "done"
+          ? "done"
+          : "failed",
+    detail,
+  };
+}
+
 // One frame of the panel as plain lines — no cursor movement, no clearing;
 // the shell owns positioning. `frame` indexes SPINNER_FRAMES (the shell's
 // tick advances it). `maxLines` bounds the WHOLE panel, header included,
@@ -312,6 +356,7 @@ export function renderPanelLines(
     ...state.hunters.map((h) => h.key.length),
     "dedupe".length,
     "refuter".length,
+    state.summarizer === undefined ? 0 : "summarizer".length,
   );
   const modelWidth = Math.max(
     0,
@@ -320,6 +365,9 @@ export function renderPanelLines(
   const nodes: TreeNode[] = state.hunters.map((hunter) =>
     hunterNode(hunter, state, nowMs, labelWidth, modelWidth),
   );
+  if (state.summarizer) {
+    nodes.push(summarizerNode(state.summarizer, state, nowMs, labelWidth));
+  }
   if (state.dedupe) {
     nodes.push({
       label: pad("dedupe", labelWidth),

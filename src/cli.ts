@@ -599,6 +599,7 @@ async function review(options: CliOptions): Promise<number> {
     `${baseRef.ref}..${options.head}`,
     activeHunters.map((a) => a.key),
     spec.agents.some((a) => a.role === "refuter"),
+    summary.enabled,
   );
   let result: PipelineResult;
   try {
@@ -1052,6 +1053,7 @@ async function reviewPr(
     `PR #${prNumber}`,
     activeHunters.map((a) => a.key),
     spec.agents.some((a) => a.role === "refuter"),
+    summary.enabled,
   );
   let result: PipelineResult;
   try {
@@ -2938,9 +2940,16 @@ function startProgressRenderer(
   subject: string,
   hunterKeys: string[],
   hasRefuter = true,
+  hasSummarizer = false,
 ): ProgressRenderer {
   return process.stderr.isTTY
-    ? startPanelRenderer(startedAtMs, subject, hunterKeys, hasRefuter)
+    ? startPanelRenderer(
+        startedAtMs,
+        subject,
+        hunterKeys,
+        hasRefuter,
+        hasSummarizer,
+      )
     : startLineRenderer(startedAtMs);
 }
 
@@ -2966,12 +2975,14 @@ export function startPanelRenderer(
   subject: string,
   hunterKeys: string[],
   hasRefuter = true,
+  hasSummarizer = false,
 ): ProgressRenderer {
   // The NO_COLOR convention: any value disables color; a TTY alone is not
   // consent.
   const colors = process.env.NO_COLOR === undefined;
   const state = createPanelState(subject, startedAtMs, hunterKeys, {
     refuter: hasRefuter,
+    summarizer: hasSummarizer,
   });
   let frame = 0;
   let drawnLines = 0;
@@ -3065,6 +3076,11 @@ function startLineRenderer(startedAtMs: number): ProgressRenderer {
           return;
         case "refuter-step-finished":
           line(`refuter ${event.findingId}: ${event.verdict}`);
+          return;
+        case "summarizer-finished":
+          line(
+            `summarizer: ${event.ok ? "done" : "failed (the run continues)"}`,
+          );
           return;
         case "step-retry":
           // EVERY step, hunters and refuter alike — this is the launchd log,
