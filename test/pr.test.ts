@@ -823,6 +823,15 @@ describe("resolveReviewThreadForComment", () => {
     expect(
       calls.some((call) => call.argv.join(" ").includes("resolveReviewThread")),
     ).toBe(true);
+    // Live #34: `gh -f name=` interpolates `$name` in the query to empty.
+    const listCall = calls.find(
+      (call) =>
+        call.argv.includes("graphql") &&
+        call.argv.some((arg) => arg.includes("reviewThreads")),
+    );
+    expect(listCall?.argv.some((arg) => arg.startsWith("name="))).toBe(false);
+    expect(listCall?.argv).toContain("repoOwner=MusiveTech");
+    expect(listCall?.argv).toContain("repoName=musive");
   });
 
   test("skips an already-resolved thread without mutating", async () => {

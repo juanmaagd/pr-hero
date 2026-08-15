@@ -933,9 +933,15 @@ export type ResolveThreadOutcome =
   | "already-resolved"
   | "not-found";
 
+// Variable names MUST NOT be `name` (or a `-f` key gh interpolates into
+// the query document). Live W1 triage on pr-hero #34:
+// `gh api graphql -f query=... -f name=pr-hero` interpolates `$name` to
+// empty, and GitHub returns `Expected NAME, actual: (none) ("") at [1, 202]`.
+// `repoOwner` / `repoName` do not collide. Do not rename them back to
+// look like the GraphQL fields they bind.
 const REVIEW_THREADS_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!){" +
-  "repository(owner:$owner,name:$name){pullRequest(number:$number){" +
+  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
   "reviewThreads(first:100){nodes{id isResolved comments(first:1){" +
   "nodes{fullDatabaseId}}}}}}";
 
@@ -1046,9 +1052,9 @@ export async function resolveReviewThreadForComment(input: {
       "-f",
       `query=${REVIEW_THREADS_QUERY}`,
       "-f",
-      `owner=${repo.owner}`,
+      `repoOwner=${repo.owner}`,
       "-f",
-      `name=${repo.name}`,
+      `repoName=${repo.name}`,
       "-F",
       `number=${input.pr}`,
     ],
