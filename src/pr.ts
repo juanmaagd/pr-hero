@@ -933,17 +933,18 @@ export type ResolveThreadOutcome =
   | "already-resolved"
   | "not-found";
 
-// Variable names MUST NOT be `name` (or a `-f` key gh interpolates into
-// the query document). Live W1 triage on pr-hero #34:
-// `gh api graphql -f query=... -f name=pr-hero` interpolates `$name` to
-// empty, and GitHub returns `Expected NAME, actual: (none) ("") at [1, 202]`.
-// `repoOwner` / `repoName` do not collide. Do not rename them back to
-// look like the GraphQL fields they bind.
+// One more `}` than the first live query: 7 opens (query / repository /
+// pullRequest / reviewThreads / nodes / comments / nodes) need 7 closes.
+// Live W1 triage on pr-hero #34 failed with
+// `Expected NAME, actual: (none) ("") at [1, 202]` — GraphQL reaching EOF
+// on the last brace, which was one short. Variable names are `repoOwner` /
+// `repoName` so they cannot collide with `gh -f name=` interpolating `$name`
+// inside the query document.
 const REVIEW_THREADS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
   "reviewThreads(first:100){nodes{id isResolved comments(first:1){" +
-  "nodes{fullDatabaseId}}}}}}";
+  "nodes{fullDatabaseId}}}}}}}";
 
 const RESOLVE_THREAD_MUTATION =
   "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){" +
