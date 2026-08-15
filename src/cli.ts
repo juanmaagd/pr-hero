@@ -79,6 +79,7 @@ import {
   CliError,
   type CliOptions,
   CliUsageError,
+  DEFAULT_SUMMARY_MODEL,
   defaultRunRoot,
   EMPTY_LOCAL_CONFIG,
   emptyDiffMessage,
@@ -99,8 +100,10 @@ import {
   repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
+  resolveSummary,
   runDirCandidate,
   SUGGESTED_AGENTS_DIR,
+  type SummarySettings,
 } from "./preflight";
 import {
   applyProgressEvent,
@@ -167,6 +170,28 @@ const CODEGRAPH_ONLY_MCP_CONFIG = {
     },
   },
 };
+
+const SUMMARIZER_PROMPT_PATH = path.join(
+  import.meta.dir,
+  "..",
+  "prompts",
+  "summarizer.md",
+);
+
+export function pipelineSummarizerInput(
+  summary: SummarySettings,
+):
+  | { summarizer: { promptPath: string; model?: string } }
+  | Record<string, never> {
+  return summary.enabled
+    ? {
+        summarizer: {
+          promptPath: SUMMARIZER_PROMPT_PATH,
+          ...(summary.model === undefined ? {} : { model: summary.model }),
+        },
+      }
+    : {};
+}
 
 const EMPTY_MCP_CONFIG = { mcpServers: {} };
 
@@ -326,6 +351,7 @@ async function review(options: CliOptions): Promise<number> {
   const config: LocalConfig = existsSync(configPath)
     ? parseLocalConfig(await Bun.file(configPath).text())
     : EMPTY_LOCAL_CONFIG;
+  const summary = resolveSummary(options, config);
 
   // 3 — the base ref, then the canonical refs and the range.
   const baseRef = await resolveBase(repoRoot, options, config);
@@ -497,7 +523,7 @@ async function review(options: CliOptions): Promise<number> {
     (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
   );
   const hunterCount = activeHunters.length;
-  const estimate = estimateCost(diffStat, hunterCount);
+  const estimate = estimateCost(diffStat, hunterCount, summary.enabled);
   // Named rather than inlined into renderPlan: the same context is what the
   // confirm menu's "Show details" renders, and building it twice would risk
   // the card and the details view disagreeing about the run they describe.
@@ -515,6 +541,7 @@ async function review(options: CliOptions): Promise<number> {
     spec,
     runDir,
     config,
+    summary,
     parityFires,
     codegraphAvailable,
     estimate,
@@ -563,7 +590,8 @@ async function review(options: CliOptions): Promise<number> {
   // stderr line per pipeline event (plus a TTY heartbeat between them).
   log(
     `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-      "refuter; comparable trees have taken 8–25 minutes",
+      `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
+      "8–25 minutes",
   );
   const started = performance.now();
   const progress = startProgressRenderer(
@@ -596,6 +624,7 @@ async function review(options: CliOptions): Promise<number> {
         ...(options.model ? { model: options.model } : {}),
         parityTriggerPaths: config.parity_trigger_paths,
         suspicionPriors: config.suspicion_priors,
+        ...pipelineSummarizerInput(summary),
         spec,
       },
       { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
@@ -716,6 +745,7 @@ async function reviewPr(
   const config: LocalConfig = existsSync(configPath)
     ? parseLocalConfig(await Bun.file(configPath).text())
     : EMPTY_LOCAL_CONFIG;
+  const summary = resolveSummary(options, config);
   const agentsDir = resolveAgentsDir(options, config, configPath);
   const spec = validateReviewSpec(localReviewSpec());
   spec.agents.forEach((agent, i) => {
@@ -754,7 +784,11 @@ async function reviewPr(
   // own counters instead of a local numstat.
   if (options.dryRun) {
     const hunterCount = dryRunHunterCount(spec, config);
-    const estimate = estimateCost(target.ghDiffStat, hunterCount);
+    const estimate = estimateCost(
+      target.ghDiffStat,
+      hunterCount,
+      summary.enabled,
+    );
     // The gate, ESTIMATED. A PR dry run creates nothing and fetches nothing,
     // so the only size facts on hand are GitHub's own aggregate counters —
     // no per-file paths, therefore no exclusions. Fetching `gh pr view
@@ -786,6 +820,7 @@ async function reviewPr(
       agentFiles,
       spec,
       config,
+      summary,
       estimate,
       hunterCount,
       sizeGate: estimated,
@@ -924,7 +959,7 @@ async function reviewPr(
     (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
   );
   const hunterCount = activeHunters.length;
-  const estimate = estimateCost(diffStat, hunterCount);
+  const estimate = estimateCost(diffStat, hunterCount, summary.enabled);
   // Same reason as local mode's planContext: the card and the confirm menu's
   // details view must describe one and the same planned run.
   const planContext: PrPlanContext = {
@@ -938,6 +973,7 @@ async function reviewPr(
     agentFiles,
     spec,
     config,
+    summary,
     estimate,
     hunterCount,
     sizeGate,
@@ -1007,7 +1043,8 @@ async function reviewPr(
   // as its cwd and the PR's real number for the envelope.
   log(
     `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-      "refuter; comparable trees have taken 8–25 minutes",
+      `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
+      "8–25 minutes",
   );
   const started = performance.now();
   const progress = startProgressRenderer(
@@ -1037,6 +1074,7 @@ async function reviewPr(
         ...(options.model ? { model: options.model } : {}),
         parityTriggerPaths: config.parity_trigger_paths,
         suspicionPriors: config.suspicion_priors,
+        ...pipelineSummarizerInput(summary),
         spec,
       },
       { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
@@ -2303,6 +2341,7 @@ export interface PlanContext {
   spec: ReviewSpec;
   runDir: string;
   config: LocalConfig;
+  summary: SummarySettings;
   parityFires: boolean;
   codegraphAvailable: boolean;
   estimate: ReturnType<typeof estimateCost>;
@@ -2379,6 +2418,19 @@ function agentRow(
   return `${agent.key.padEnd(12)} ${model.padEnd(8)} ${fires}`;
 }
 
+function summarizerRow(summary: SummarySettings): string {
+  const model = summary.model ?? DEFAULT_SUMMARY_MODEL;
+  return (
+    `summarizer`.padEnd(12) +
+    `${model}`.padEnd(8) +
+    (summary.enabled ? "always" : "disabled")
+  );
+}
+
+function summarizerLabel(summary: SummarySettings): string {
+  return summary.enabled ? "+ summarizer" : "+ summarizer disabled";
+}
+
 // The last block on screen and the only one an operator must read: the gate
 // verdict, then the money. Both used to sit mid-list, where the eye that had
 // already given up on the plan never reached them.
@@ -2392,6 +2444,7 @@ interface PlanDecision {
   force: boolean;
   estimate: ReturnType<typeof estimateCost>;
   hunterCount: number;
+  summarizer: boolean;
 }
 
 function decisionLines(
@@ -2429,7 +2482,8 @@ function decisionLines(
     ...markerRowLines(
       "$",
       `estimate $${d.estimate.low.toFixed(2)} – ` +
-        `$${d.estimate.high.toFixed(2)} (${d.hunterCount} hunter(s) + refuter)`,
+        `$${d.estimate.high.toFixed(2)} (${d.hunterCount} hunter(s) + refuter ` +
+        `${d.summarizer ? "+ summarizer" : "+ summarizer disabled"})`,
       bold,
       styles,
       width,
@@ -2497,6 +2551,7 @@ export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   push("agents dir", ctx.agentsDir);
   push("run dir", ctx.runDir);
   push("hop budget", String(ctx.options.hopBudget));
+  push("summarizer", summarizerRow(ctx.summary));
   push(
     "parity",
     ctx.config.parity_trigger_paths.length === 0
@@ -2548,6 +2603,8 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
     lines.push(...row(label, agentRow(ctx, agent, fires), { styles, width }));
     label = "";
   }
+  lines.push(...row(label, summarizerRow(ctx.summary), { styles, width }));
+  label = "";
   lines.push(
     "",
     ...row(
@@ -2579,6 +2636,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
         force: ctx.options.force,
         estimate: ctx.estimate,
         hunterCount: ctx.hunterCount,
+        summarizer: ctx.summary.enabled,
       },
       styles,
       width,
@@ -2598,6 +2656,7 @@ export interface PrPlanContext {
   agentFiles: Map<string, ParsedAgent>;
   spec: ReviewSpec;
   config: LocalConfig;
+  summary: SummarySettings;
   estimate: ReturnType<typeof estimateCost>;
   hunterCount: number;
   // Same contract as PlanContext: the verdict is decided by the shell (and
@@ -2731,6 +2790,7 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   push("agents dir", ctx.agentsDir);
   push("run dir", ctx.runDir);
   push("hop budget", String(ctx.options.hopBudget));
+  push("summarizer", summarizerRow(ctx.summary));
   if (ctx.options.post) {
     push(
       "post",
@@ -2787,6 +2847,8 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
     lines.push(...row(label, agentRow(ctx, agent, fires), { styles, width }));
     label = "";
   }
+  lines.push(...row(label, summarizerRow(ctx.summary), { styles, width }));
+  label = "";
   lines.push(
     "",
     ...row(
@@ -2845,6 +2907,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
         force: ctx.options.force,
         estimate: ctx.estimate,
         hunterCount: ctx.hunterCount,
+        summarizer: ctx.summary.enabled,
       },
       styles,
       width,

@@ -121,9 +121,10 @@ const planContext = (over: Partial<PlanContext> = {}): PlanContext => ({
   spec,
   runDir: "/tmp/pr-hero-fake-repo/.prhero/runs/local-abcdef",
   config: { parity_trigger_paths: ["packages/**"], suspicion_priors: [] },
+  summary: { enabled: true, model: "haiku" },
   parityFires: true,
   codegraphAvailable: true,
-  estimate: estimateCost(diffStat, 2),
+  estimate: estimateCost(diffStat, 2, true),
   hunterCount: 2,
   sizeGate: okGate,
   droppedPaths: [],
@@ -156,7 +157,8 @@ const prPlanContext = (over: Partial<PrPlanContext> = {}): PrPlanContext => ({
   agentFiles,
   spec,
   config: { parity_trigger_paths: [], suspicion_priors: [] },
-  estimate: estimateCost(diffStat, 2),
+  summary: { enabled: true, model: "haiku" },
+  estimate: estimateCost(diffStat, 2, true),
   hunterCount: 2,
   sizeGate: okGate,
   droppedPaths: [],
@@ -181,6 +183,9 @@ describe("renderPlan", () => {
     // Every spec agent, with the refuter's fixed trigger phrasing.
     expect(text).toContain("reliability");
     expect(text).toContain("per severe finding");
+    expect(text).toContain("summarizer");
+    expect(text).toContain("haiku");
+    expect(text).toContain("+ summarizer");
     // BOTH endpoints, short-sha'd — the rule the details view spells out.
     expect(text).toContain("main → 1111111111  (--base)");
     expect(text).toContain("2222222222 → 3333333333  (merge base)");
@@ -196,6 +201,22 @@ describe("renderPlan", () => {
   test("a non-firing conditional hunter says so", () => {
     const text = joined(renderPlan(planContext({ parityFires: false }), false));
     expect(text).toContain("✗ will not fire");
+  });
+
+  test("a disabled summarizer is visible and not billed", () => {
+    const text = joined(
+      renderPlan(
+        planContext({
+          summary: { enabled: false, model: "opus" },
+          estimate: estimateCost(diffStat, 2, false),
+        }),
+        false,
+      ),
+    );
+    expect(text).toContain("summarizer");
+    expect(text).toContain("opus");
+    expect(text).toContain("disabled");
+    expect(text).toContain("+ summarizer disabled");
   });
 
   test("--two-dot renames the range, and --force annotates a failed gate", () => {
@@ -297,6 +318,9 @@ describe("renderPrPlan", () => {
     expect(text).toContain("main → 1111111111  (PR base tip)");
     expect(text).toContain("2222222222 → 3333333333  (merge base)");
     expect(text).toContain("worktree will be created");
+    expect(text).toContain("summarizer");
+    expect(text).toContain("haiku");
+    expect(text).toContain("+ summarizer");
     expect(joined([lines[lines.length - 1] ?? ""])).toContain("estimate $");
   });
 
@@ -310,6 +334,8 @@ describe("renderPrPlan", () => {
     );
     expect(text).not.toContain("?");
     expect(text).toContain("decided by the diff after fetch");
+    expect(text).toContain("summarizer");
+    expect(text).toContain("haiku");
   });
 
   test("gh counters are labelled as such", () => {

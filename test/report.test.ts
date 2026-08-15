@@ -990,6 +990,14 @@ describe("estimateCost", () => {
     );
   });
 
+  test("accounts for the optional summarizer without changing legacy callers", () => {
+    const without = estimateCost(SMALL, 4);
+    const withSummary = estimateCost(SMALL, 4, true);
+    expect(withSummary.high).toBeGreaterThan(without.high);
+    expect(withSummary.low).toBeGreaterThan(without.low);
+    expect(withSummary.basis).toContain("summarizer");
+  });
+
   test("a zero diff is non-negative and still a band", () => {
     const estimate = estimateCost({ files: 0, insertions: 0, deletions: 0 }, 4);
     expect(estimate.low).toBeGreaterThanOrEqual(0);
