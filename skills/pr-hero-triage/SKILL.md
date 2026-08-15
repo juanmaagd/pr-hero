@@ -44,8 +44,20 @@ current head:
 4. **For `dismissed`, `deferred`, and `misclassified`**: spawn the isolated adjudicator (see
    "The adjudicator spawn" below) and include its verdict in your reply. `applied` never spawns
    one.
-5. **Reply in that finding's own thread**, opening with the triage marker (see "The reply format"
-   below).
+5. **Reply through the driver**, not with `gh`. Write reasoning prose to a
+   file and run:
+
+   ```bash
+   pr-hero triage reply --pr <n> --from <run-dir> --finding F00N \
+     --tag <tag> --body-file <reasoning.md> [--verdict <v>] [--issue <n>]
+   ```
+
+   The driver resolves the parent from the posted `<!-- pr-hero-finding`
+   marker (never a comment id, never the nearest line), prepends the triage
+   marker and the visible badge, posts the reply, and resolves the inline
+   review thread. `applied` takes no `--verdict`. `dismissed` /
+   `deferred` / `misclassified` require `--verdict` from the adjudicator.
+   `--issue` is optional and only valid with `--tag deferred`.
 
 ## The four tags
 
@@ -53,7 +65,7 @@ current head:
 |---|---|---|
 | `applied` | Fixed in this PR. | Nothing else — the re-review verifies it independently, so it pays no adjudicator. |
 | `dismissed` | The finding is wrong. | POSITIVE DISPROOF WITH CITED CODE. "I did it on purpose" is not evidence; "this line already covers it, here" is. |
-| `deferred` | The finding is right, but fixing it is out of this PR's scope. | A REAL destination: create a GitHub issue and put its number in the reply and the marker. Without an issue, `deferred` is a `dismissed` with a better name, and the ledger counts it as agreement. |
+| `deferred` | The finding is right, but fixing it is out of this PR's scope. | Reasoning that says why, and what you are doing instead. A GitHub issue number is optional (`--issue`) — do not invent a tracking issue just to satisfy the tag. |
 | `misclassified` | The finding is real, but pr-hero typed it wrong (severity, tier, or `causal_disposition`). | Name which field is wrong and why. This is the highest-value signal the loop produces — it points at a hunter/refuter defect, not a repository one. |
 
 Pick exactly one. If you are tempted to pick two, the finding is `misclassified` (the label is
@@ -72,11 +84,11 @@ rule is the same one you must meet, and it is the disinterested check on your ow
 
 ### `deferred`
 
-Before replying, create the tracking issue (`gh issue create` or the platform equivalent) with
-enough of the finding's substance that it stands alone. Put the issue number in the triage
-marker's `issue=` field AND in the reply prose. A `deferred` finding is suppressed only inside the
-PR that deferred it — it will surface again in a different PR's review, and citing the issue
-there is a one-line answer, not a re-litigation.
+Reply with why this is out of scope and what you are doing instead. If you
+already have a tracking issue, pass `--issue <n>`; if you do not, omit it.
+Do not create a GitHub issue just to fill the marker — some agents run on
+providers that are not GitHub, and the coding agent decides whether an issue
+belongs anywhere.
 
 ### `misclassified`
 
@@ -99,10 +111,10 @@ scratch notes, not "why I believe this". Its entire value is having nothing to d
 adjudicator that inherited your context would simply agree with itself.
 
 The adjudicator returns exactly one of `upheld`, `rejected`, or `inconclusive` — see
-`adjudicator.md` for what each means and the burden-of-proof rule behind them. Include the exact
-verdict word in your reply prose AND in the triage marker's `verdict=` field (see "The reply
-format" below) — the marker is what makes the verdict machine-readable for the ledger and for the
-escalation rule.
+`adjudicator.md` for what each means and the burden-of-proof rule behind them. Pass that
+exact word as `--verdict` on `pr-hero triage reply` (and mention it in the reasoning
+prose). The driver writes it on the marker; the ledger and the escalation rule read it
+back from there.
 
 ## One adjudication per finding per HEAD
 
@@ -130,49 +142,20 @@ see "One adjudication per finding per HEAD" above), this round is the escalation
 adjudicator spawn. This is what makes the rule checkable: the markers ARE the state, there is
 nothing else to consult.
 
-## The reply format
+## What you write vs what the driver posts
 
-The reply MUST open with this marker as its first line, exactly:
+`--body-file` is **reasoning prose only**. Do not put a `<!-- pr-hero-triage` marker or a
+badge line in that file — the driver prepends both, picks the parent comment from the posted
+`<!-- pr-hero-finding` marker, and resolves the inline review thread. Passing a GitHub
+comment id, or posting with `gh api … in_reply_to`, is how replies landed under Greptile on
+Musive #1724. Do not do that.
 
-```
-<!-- pr-hero-triage tag=<tag> head=<40-hex> actor=agent verdict=<verdict> -->
-```
+`--from` is the pr-hero run directory that produced these findings (`findings.json`). `--finding`
+is the finding id (`F001`, …) from that file — never a comment id.
 
-`verdict=` is the adjudicator's exact word (`upheld`, `rejected`, or `inconclusive`) and is
-REQUIRED for `dismissed`, `deferred`, and `misclassified` — the three tags that spawn one — and
-MUST NOT appear on `applied`, which spawns no adjudicator and therefore has no verdict to record.
-`deferred` additionally carries `issue=<n>` on the same line. `head=` is this PR's CURRENT head
-sha — the same one the finding's own marker was evaluated against for this triage round.
+The posted body looks like this (driver-owned; shown so you know what a human will see):
 
-### The badge line is REQUIRED, and it is not decoration
-
-The marker is an HTML comment, so **GitHub renders it invisible**. A reply carrying only the
-marker tells the machine everything and the reader nothing — which breaks the rule this whole
-loop rests on: the human is the objector, and **a human cannot object to what they cannot see**.
-This was found on pr-hero's own PR #6, where an `applied` reply displayed as bare prose with no
-sign of the tag anywhere.
-
-So the SECOND line of every reply is a visible badge, mirroring how the finding itself renders
-its severity:
-
-```
-<tag emoji> **<TAG>** · <actor>[ · adjudicator: <verdict>][ · #<issue>]
-```
-
-| tag | emoji | what the badge must also show |
-|---|---|---|
-| `applied` | ✅ | nothing more — no adjudicator ran |
-| `dismissed` | ❌ | `adjudicator: <verdict>` |
-| `deferred` | 📋 | `adjudicator: <verdict>` and the issue as `#<n>` |
-| `misclassified` | 🏷️ | `adjudicator: <verdict>` |
-
-The badge duplicates what the marker already says, on purpose. The marker is for the ledger; the
-badge is for the person scrolling the thread. Neither substitutes for the other, and the reply is
-malformed without both.
-
-### Example reply — `applied`
-
-No adjudicator; the fix speaks for itself. No `verdict=` field.
+### `applied`
 
 ```
 <!-- pr-hero-triage tag=applied head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent -->
@@ -182,7 +165,9 @@ No adjudicator; the fix speaks for itself. No `verdict=` field.
 Fixed in this PR — see 3f9a2c1: `parseConfig` now validates `retries` before use.
 ```
 
-### Example reply — `dismissed`
+`--body-file` for that reply is only the last paragraph.
+
+### `dismissed` (needs `--verdict`)
 
 ```
 <!-- pr-hero-triage tag=dismissed head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
@@ -194,19 +179,18 @@ The finding claims `parseConfig` can throw when `raw.retries` is undefined. It c
 this PR. The isolated adjudicator confirmed the citation independently and returned `upheld`.
 ```
 
-### Example reply — `deferred`
+### `deferred` (needs `--verdict`; `--issue` optional)
 
 ```
-<!-- pr-hero-triage tag=deferred head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent issue=482 verdict=upheld -->
+<!-- pr-hero-triage tag=deferred head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
 
-📋 **DEFERRED** · agent · adjudicator: upheld · #482
+📋 **DEFERRED** · agent · adjudicator: upheld
 
 The finding is correct — `retryQueue.ts` has no backoff cap — but fixing it means redesigning the
-retry policy, which is out of scope for this PR. Filed as #482 to track it. The adjudicator
-confirmed the finding is real and that scope, not correctness, is the actual issue.
+retry policy, which is out of scope for this PR.
 ```
 
-### Example reply — `misclassified`
+### `misclassified` (needs `--verdict`)
 
 ```
 <!-- pr-hero-triage tag=misclassified head=e3ab386a63020c6f5c21d814d176ff33849eef8d actor=agent verdict=upheld -->
@@ -218,19 +202,6 @@ pre-existing — `ghPrList` (watch.ts:243) has carried this exact unbounded `gh`
 this PR. The engine typed it wrong, not the code.
 ```
 
-## Posting the reply — GitHub's native threading
-
-Bind the reply to its finding using GitHub's own reply mechanism, never an id in the body or a
-heuristic parse:
-
-- **Inline review comment** (anchorable finding): create a new PR review comment with
-  `in_reply_to` set to the original comment's id, e.g.
-  `gh api repos/<owner>/<repo>/pulls/<pr>/comments -f body='<reply>' -F in_reply_to=<comment_id>`.
-- **Top-level issue comment** (un-anchorable finding): GitHub issue comments have no native
-  threading. Post a new issue comment on the PR that opens with the same triage marker and links
-  the original comment's permalink, so the marker plus the link together make the binding
-  unambiguous.
-
 ## Rules
 
 - One tag per finding, no exceptions.
@@ -238,10 +209,10 @@ heuristic parse:
   never does.
 - The adjudicator never sees your reasoning context — only the finding, your argument, and the
   repo.
-- `deferred` without a real issue number is malformed — do not post it.
-- `dismissed`, `deferred`, and `misclassified` without a `verdict=` field are malformed — do not
-  post them. `applied` WITH a `verdict=` field is equally malformed — it claims a ruling that
-  never happened.
-- Never re-triage a finding whose head is unchanged since its last triage on this PR.
+- Never call `gh` to post or resolve a triage reply. Run `pr-hero triage reply`.
+- `dismissed`, `deferred`, and `misclassified` without `--verdict` are malformed. `applied` WITH
+  `--verdict` is equally malformed.
+- Never re-triage a finding whose head is unchanged since its last triage on this PR (the driver
+  skips a same-head re-post).
 - After 2 consecutive `inconclusive` heads — read off the finding's own prior triage markers, not
   memory — stop and hand the finding to a human.
