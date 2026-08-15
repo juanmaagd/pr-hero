@@ -80,7 +80,7 @@ path:line citations you personally checked — that led you there. If your verdi
 show it.
 
 The caller (the PR's coding agent, running `pr-hero-triage`) copies your exact verdict word
-verbatim into its reply's triage marker (`verdict=<your word>`, see SKILL.md "The reply format")
+verbatim into its reply's triage marker (`verdict=<your word>`, see SKILL.md "What you write vs what the driver posts")
 and into its reply prose — it never paraphrases or softens it. That marker is the only durable
 record of this ruling: it is what lets a later run tell a settled finding from an unsettled one,
 and what the escalation rule (2 consecutive `inconclusive` heads) counts.

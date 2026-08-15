@@ -950,6 +950,20 @@ const RESOLVE_THREAD_MUTATION =
   "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){" +
   "thread{isResolved}}}";
 
+// Fake-gh tests never send the document to GitHub, so they cannot catch a
+// truncated query. Live W1 on #34 failed with GraphQL EOF
+// (`Expected NAME, actual: (none) ("")`) because REVIEW_THREADS_QUERY was
+// one `}` short. Count here, before spawn.
+function assertBalancedGraphql(document: string, what: string): void {
+  const opens = (document.match(/{/g) ?? []).length;
+  const closes = (document.match(/}/g) ?? []).length;
+  if (opens !== closes) {
+    throw new CliError(
+      `gh api graphql (${what}) query is unbalanced: ${opens} { vs ${closes} }`,
+    );
+  }
+}
+
 interface RepoOwnerName {
   owner: string;
   name: string;
@@ -1044,6 +1058,8 @@ export async function resolveReviewThreadForComment(input: {
   commentId: number;
   spawnFn?: typeof Bun.spawn;
 }): Promise<ResolveThreadOutcome> {
+  assertBalancedGraphql(REVIEW_THREADS_QUERY, "reviewThreads");
+  assertBalancedGraphql(RESOLVE_THREAD_MUTATION, "resolveReviewThread");
   const repo = await ghRepoOwnerName(input.operatorRoot, input.spawnFn);
   const listed = await gh(
     input.operatorRoot,

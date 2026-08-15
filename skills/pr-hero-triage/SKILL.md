@@ -222,6 +222,8 @@ this PR. The engine typed it wrong, not the code.
 - The adjudicator never sees your reasoning context — only the finding, your argument, and the
   repo.
 - Never call `gh` to post or resolve a triage reply. Run `pr-hero triage reply`.
+  If that command posted the reply and then failed to resolve, re-run the
+  **same** command — same-head skip retries resolve only. Do not `gh`.
 - Never triage a finding that only exists under `### Comments Outside Diff` in the
   summary. It has no thread this slice (W2). If `pr-hero triage reply` reports no
   matching marker, stop.

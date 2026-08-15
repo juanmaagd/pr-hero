@@ -1879,6 +1879,46 @@ describe("runTriageReplyCommand", () => {
     }
   });
 
+  test("live #34: resolve failure after a successful post says re-run, not gh", async () => {
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir();
+    try {
+      const script = greptileCollisionScript().map((entry) =>
+        entry.match.includes("reviewThreads")
+          ? {
+              ...entry,
+              response: {
+                stdout: "",
+                stderr: 'Expected NAME, actual: (none) ("") at [1, 202]',
+                exitCode: 1,
+              },
+            }
+          : entry,
+      );
+      const { spawnFn, calls } = makeFakeGh(script);
+      await expect(
+        runTriageReplyCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          findingId: "F001",
+          tag: "applied",
+          bodyFile,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/resolve failed after the reply was on GitHub/);
+      expect(
+        calls.some(
+          (call) =>
+            call.argv.includes("--method") &&
+            call.argv.join(" ").includes("pulls/42/comments"),
+        ),
+      ).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("skips resolve when the adjudicator is inconclusive", async () => {
     const { dir, bodyFile, cleanup } = await writeReplyRunDir();
     try {

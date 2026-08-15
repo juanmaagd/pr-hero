@@ -1219,7 +1219,6 @@ async function reviewPr(
       log(
         `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
           `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
-          `${posted.issueCommentIds.length} issue comment(s), ` +
           `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
       );
       if (posted.reviewOutcome === "demoted") {
@@ -1881,7 +1880,6 @@ export async function runPostCommand(input: {
   log(
     `posted: review ${outcome.reviewOutcome} (${outcome.reviewFindingCount} ` +
       `finding(s)), ${outcome.outsideDiffCount} outside diff, ` +
-      `${outcome.issueCommentIds.length} issue comment(s), ` +
       `summary ${outcome.summary.action} comment ${outcome.summary.commentId}`,
   );
   if (outcome.droppedFindingIds.length > 0) {
@@ -2166,18 +2164,32 @@ export async function runTriageReplyCommand(input: {
   if (resolveDecision !== "resolve") {
     return 0;
   }
-  const resolveOutcome = await resolveReviewThreadForComment({
-    operatorRoot,
-    pr: prNumber,
-    commentId: parent.id,
-    spawnFn,
-  });
-  if (resolveOutcome === "resolved") {
-    log(`resolved: review thread for ${input.findingId}`);
-  } else if (resolveOutcome === "already-resolved") {
-    log(`resolved: thread already closed for ${input.findingId}`);
-  } else {
-    log(`resolve skipped: no review thread found for comment ${parent.id}`);
+  // Live #34: the reply POST succeeded, then GraphQL resolve threw and the
+  // process exited 1. The skill's rule is never `gh` — say the reply is
+  // already on GitHub and the same command retries resolve only.
+  try {
+    const resolveOutcome = await resolveReviewThreadForComment({
+      operatorRoot,
+      pr: prNumber,
+      commentId: parent.id,
+      spawnFn,
+    });
+    if (resolveOutcome === "resolved") {
+      log(`resolved: review thread for ${input.findingId}`);
+    } else if (resolveOutcome === "already-resolved") {
+      log(`resolved: thread already closed for ${input.findingId}`);
+    } else {
+      log(`resolve skipped: no review thread found for comment ${parent.id}`);
+    }
+  } catch (error) {
+    if (error instanceof CliError) {
+      throw new CliError(
+        `resolve failed after the reply was on GitHub (${error.message}). ` +
+          "Re-run the same `pr-hero triage reply` command to retry resolve " +
+          "only — same-head skip will not double-post.",
+      );
+    }
+    throw error;
   }
   return 0;
 }
