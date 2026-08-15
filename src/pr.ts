@@ -12,9 +12,12 @@
 // internal `gh()` helper — the 422 recovery path is exactly the kind of
 // branch that must never rest on "we'll catch it live".
 //
-// Every git and gh call here runs with the OPERATOR root as cwd — the
-// worktree shares its object db — except the two read-only inspections of
-// the worktree itself in ensureWorktree.
+// Every git and gh call here runs with the OPERATOR root as cwd — gh talks
+// to GitHub, and the operator checkout is the trust anchor — EXCEPT the
+// object-db git that owns the review worktree (fetchPrRefs, ensureWorktree)
+// and the two read-only inspections of the worktree itself. W3: `git
+// worktree add` is bound to one git dir, the registered owner for that
+// origin, which may not be the operator cwd.
 
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -240,11 +243,11 @@ export async function ghRepoWebUrl(
 // commit and the baseRefOid ancestry along, so every rev the flow
 // canonicalizes afterwards resolves against a single fetch.
 export async function fetchPrRefs(
-  operatorRoot: string,
+  gitDirOwner: string,
   pr: number,
   baseRefName: string,
 ): Promise<void> {
-  const result = await git(operatorRoot, [
+  const result = await git(gitDirOwner, [
     "fetch",
     "origin",
     `refs/pull/${pr}/head`,
@@ -262,13 +265,13 @@ export async function fetchPrRefs(
 // decision itself is pure (decideWorktree); this runs the inspections that
 // feed it and the git plumbing that enacts it.
 export async function ensureWorktree(
-  operatorRoot: string,
+  gitDirOwner: string,
   worktreePath: string,
   headSha: string,
 ): Promise<WorktreeDecision> {
   // Prune first: a worktree deleted by hand leaves a stale registration
   // behind, and a stale registration makes the add below refuse.
-  const pruned = await git(operatorRoot, ["worktree", "prune"]);
+  const pruned = await git(gitDirOwner, ["worktree", "prune"]);
   if (!pruned.ok) {
     throw new CliError(`git worktree prune failed: ${pruned.stderr.trim()}`);
   }
@@ -299,7 +302,7 @@ export async function ensureWorktree(
     // `worktree remove` exits 128 on the untracked .codegraph/, and rm -rf
     // would yank .codegraph/daemon.sock out from under a live codegraph
     // daemon instead of letting git detach the tree cleanly.
-    const removed = await git(operatorRoot, [
+    const removed = await git(gitDirOwner, [
       "worktree",
       "remove",
       "--force",
@@ -311,13 +314,13 @@ export async function ensureWorktree(
           removed.stderr.trim(),
       );
     }
-    const reprune = await git(operatorRoot, ["worktree", "prune"]);
+    const reprune = await git(gitDirOwner, ["worktree", "prune"]);
     if (!reprune.ok) {
       throw new CliError(`git worktree prune failed: ${reprune.stderr.trim()}`);
     }
   }
   if (decision.action !== "reuse") {
-    const added = await git(operatorRoot, [
+    const added = await git(gitDirOwner, [
       "worktree",
       "add",
       "--detach",

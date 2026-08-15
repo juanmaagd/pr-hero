@@ -8,7 +8,6 @@ import {
   DEFAULT_BASE_REF,
   DEFAULT_HOP_BUDGET,
   DEFAULT_SUMMARY_MODEL,
-  defaultRunRoot,
   emptyDiffMessage,
   headContainedInBaseMessage,
   initConfigTemplate,
@@ -58,6 +57,12 @@ describe("parseArgs", () => {
     expect(parseArgs(["init"]).command).toBe("init");
     expect(parseArgs(["init", "--repo", "/tmp/x"]).options.repo).toBe("/tmp/x");
     expect(() => parseArgs(["initialise"])).toThrow(CliUsageError);
+  });
+
+  test("gc is a command, and --dry-run applies", () => {
+    expect(parseArgs(["gc"]).command).toBe("gc");
+    expect(parseArgs(["gc", "--dry-run"]).options.dryRun).toBe(true);
+    expect(parseArgs(["gc", "--repo", "/tmp/x"]).options.repo).toBe("/tmp/x");
   });
 
   // Both exist so a tree you cannot add a file to is still reviewable: an
@@ -527,12 +532,6 @@ describe("parseNumstatFiles", () => {
 });
 
 describe("run dir naming", () => {
-  test("the default root is a sibling of the repo", () => {
-    expect(defaultRunRoot("/Users/x/Desktop/musive")).toBe(
-      "/Users/x/Desktop/musive-prhero-runs",
-    );
-  });
-
   test("candidates are numbered from the short sha", () => {
     const root = "/Users/x/Desktop/musive-prhero-runs";
     expect(runDirCandidate(root, "a".repeat(40), 1)).toBe(`${root}/aaaaaaaa-1`);

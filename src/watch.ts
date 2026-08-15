@@ -13,6 +13,8 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { runGc } from "./gc";
+import { resolveRepoHome } from "./home";
 import { parseComparisonJson } from "./ledger";
 import { fetchPrComments, ghPrFiles, ghPrList } from "./pr";
 import {
@@ -20,7 +22,6 @@ import {
   type CliOptions,
   CliUsageError,
   DEFAULT_WATCH_INTERVAL_MIN,
-  defaultRunRoot,
 } from "./preflight";
 import {
   DEFAULT_SIZE_GATE,
@@ -214,6 +215,11 @@ async function watchOnce(dryRun: boolean): Promise<number> {
   }
 
   try {
+    if (!dryRun) {
+      // Each `gh pr view` is bounded (GH_PR_VIEW_TIMEOUT_MS) so a stall
+      // cannot pin watch.lock and silence every later tick.
+      await runGc({ home: os.homedir(), dryRun: false });
+    }
     const repos = await gatherRepoFacts(config, os.homedir());
     const decision = decideTick({ ...gateInput, repos });
     if (dryRun) {
@@ -244,7 +250,12 @@ async function gatherRepoFacts(
       );
     }
     const repoRoot = toplevel.stdout.trim();
-    const runsRoot = defaultRunRoot(repoRoot);
+    const repoHome = await resolveRepoHome({
+      home,
+      operatorRoot: repoRoot,
+      persist: false,
+    });
+    const runsRoot = repoHome.paths.runs;
     const runDirs = await scanRunDirs(runsRoot);
     const prs = parsePrList(await ghPrList(repoRoot));
 
@@ -776,6 +787,11 @@ async function watchAdd(options: CliOptions): Promise<number> {
       `max_changed_files=${options.maxChangedFiles ?? DEFAULT_SIZE_GATE.maxChangedFiles}` +
       `) in ${paths.configPath}`,
   );
+  await resolveRepoHome({
+    home,
+    operatorRoot: repoRoot,
+    persist: true,
+  });
   // The same hint install prints in reverse: config without a schedule is
   // as inert as a schedule without config — but only when the plist is
   // genuinely absent, an installed watcher needs no reminder.

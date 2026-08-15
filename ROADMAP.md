@@ -333,15 +333,23 @@ What is still manual, in the order it should be closed:
    **BUILT 2026-08-10** (`src/pr.ts` I/O + `src/pr-preflight.ts` pure decisions). The design's spine is
    two roots, deliberately assigned: the OPERATOR checkout (gh + git cwd, `.prhero/` trust anchor, run-dir
    anchor; its dirtiness is irrelevant and both local gates are skipped there on purpose) and the REVIEW
-   worktree (`<repo-parent>/<basename>-worktrees/pr-<n>`, pipeline cwd, owns its codegraph index — the
-   availability check runs against IT, or hunters would ride another checkout's index). MERGED resolves
+   worktree (`~/.prhero/repos/<origin>/worktrees/pr-<n>`, pipeline cwd, owns its codegraph index — the
+   availability check runs against IT, or hunters would ride another checkout's index). Two operator
+   checkouts of the same origin share that tree; `git worktree add` runs against the registered
+   git-dir owner (W3 / #24). MERGED resolves
    base to `mergeCommit^1` (base as it was when the PR landed — squash/rebase/merge all converge at the
    fork point via the existing merge-base default); OPEN/CLOSED use `baseRefOid`. The fetch rides
    `refs/pull/<n>/head` because a merged PR's branch is usually deleted. `--dry-run` is fetch-free and
    creates nothing: the cost band rides GitHub's own diff counters. Worktrees are KEPT AND REUSED
    (Juanma's call, 2026-08-10): reuse requires HEAD == PR head AND a clean porcelain ignoring the
    always-untracked `.codegraph/`; head-moved or dirtied trees are recreated via
-   `git worktree remove --force` (verified: plain remove refuses on the untracked index). The Greptile
+   `git worktree remove --force` (verified: plain remove refuses on the untracked index). W3 / #18:
+   unbounded keep is forbidden — `pr-hero gc` (and the watcher tick / the end of `review --pr`) collects a tree
+   when the PR is merged/closed OR it has sat idle >72h, whichever first; teardown is still
+   `--force`, never `rm -rf`. Remaining home hardening (owner-gone recovery, runs
+   TTL, I/O tests) is parked as GitHub #35 — live with W3 until a witness; do not fold it into
+   W4. Exclusive worktree/registry locks landed with #24's follow-up on PR #36; GC's
+   `gh pr view` is bounded so a stall cannot pin a review or watch lock. The Greptile
    comparison runs in-process and emits `comparison.md` + `comparison.json` — B4's seed, rows carrying
    `verdict: null, reasoning: null` (the A3 lesson) and the run's `run_status`; a run where every hunter
    died writes NO comparison at all, because "pr-hero 0" from a review that never happened would land in

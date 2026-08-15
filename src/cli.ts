@@ -14,6 +14,7 @@
 
 import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { PrHeroFindingRef } from "./compare";
 import {
@@ -24,6 +25,19 @@ import {
   validateFindingsDocument,
   writeFindings,
 } from "./findings";
+import { gcCommand, runGc } from "./gc";
+import {
+  acquirePidLock,
+  releasePidLock,
+  resolveRepoHome,
+  stampWorktree,
+} from "./home";
+import {
+  legacyMigrationHint,
+  legacyWorktreePath,
+  prWorktreePath,
+  worktreeLockPath,
+} from "./home-preflight";
 import { buildPostPlan, type PostPlan, parseHunkAnchors } from "./inline";
 import {
   aggregateLedger,
@@ -62,7 +76,6 @@ import {
   type PrTarget,
   parseFindingMarker,
   prRunDirCandidate,
-  prWorktreePath,
   resolveCurrentPrNumber,
   resolvePrTarget,
 } from "./pr-preflight";
@@ -77,7 +90,6 @@ import {
   type CliOptions,
   CliUsageError,
   DEFAULT_SUMMARY_MODEL,
-  defaultRunRoot,
   EMPTY_LOCAL_CONFIG,
   emptyDiffMessage,
   GOTCHAS_TEMPLATE,
@@ -324,7 +336,9 @@ async function main(argv: string[]): Promise<number> {
             ? await postCommand(parsed.options)
             : parsed.command === "triage"
               ? await triageCommand(parsed.options)
-              : await review(parsed.options);
+              : parsed.command === "gc"
+                ? await gcCommand(parsed.options)
+                : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -720,15 +734,18 @@ async function review(options: CliOptions): Promise<number> {
 //
 // Two roots run through everything below, and confusing them is the failure
 // this design exists to prevent:
-//   - the OPERATOR root: --repo's toplevel. cwd for every gh and git call
-//     (the fetch, rev-parse, merge-base and diff all share its object db),
-//     home of .prhero/ config+gotchas resolution, anchor of the run-dir
-//     default. Config is NEVER read from the worktree — the operator
+//   - the OPERATOR root: --repo's toplevel. cwd for gh and for .prhero/
+//     config+gotchas. Config is NEVER read from the worktree — the operator
 //     checkout is the trust anchor, and a reviewed PR's tree must not
-//     influence engine config.
-//   - the REVIEW root: the worktree, detached at the PR's head. The
-//     pipeline's cwd, the tree the codegraph checks run against, and the
-//     second root the run dir must stay outside of.
+//     influence engine config. Dirtiness here is irrelevant.
+//   - the GIT-DIR OWNER: the clone registered for this origin under
+//     ~/.prhero/repos/<id>/registry.json. Fetch, worktree add/prune/remove
+//     and the object-db git (rev-parse, diff) run against it, because
+//     `git worktree add` is bound to one git dir (W3 / #24).
+//   - the REVIEW root: the worktree, detached at the PR's head, living
+//     under ~/.prhero/repos/<id>/worktrees/pr-<n>. The pipeline's cwd, the
+//     tree the codegraph checks run against, and a root the run dir must
+//     stay outside of.
 async function reviewPr(
   options: CliOptions,
   prArg: number | "current",
@@ -785,9 +802,28 @@ async function reviewPr(
   // worktree satisfies the HEAD gate by construction (created detached at
   // the PR's own head).
 
-  // 2 — the PR record, and the review root's name derived from it.
+  // 2 — the global home (origin → repo-id → worktree/runs paths), then the
+  // PR record. persist is false on --dry-run so the free exit creates
+  // nothing, including registry.json.
+  const home = os.homedir();
+  const repoHome = await resolveRepoHome({
+    home,
+    operatorRoot,
+    persist: !options.dryRun,
+  });
+  const gitDirOwner = repoHome.gitDirOwner;
   const target = resolvePrTarget(await ghPrView(operatorRoot, prNumber));
-  const worktreePath = prWorktreePath(operatorRoot, prNumber);
+  const worktreePath = prWorktreePath(home, repoHome.repoId, prNumber);
+  const leftover = legacyWorktreePath(operatorRoot, prNumber);
+  if (existsSync(leftover)) {
+    for (const line of legacyMigrationHint({
+      operatorRoot,
+      legacyWorktree: leftover,
+      newWorktree: worktreePath,
+    })) {
+      log(line);
+    }
+  }
 
   // 3 — the free exit, BEFORE the fetch: a PR-mode dry run creates NOTHING —
   // no fetch, no run dir, no worktree — so the cost band rides on GitHub's
@@ -822,6 +858,7 @@ async function reviewPr(
         options,
         operatorRoot,
         worktreePath,
+        repoHome.paths.runs,
         prNumber,
         target.headSha,
       ),
@@ -848,446 +885,471 @@ async function reviewPr(
     return 0;
   }
 
-  // 4 — fetch, then canonicalize. See fetchPrRefs for why that refspec pair.
-  await fetchPrRefs(operatorRoot, prNumber, target.baseRefName);
-  const headSha = await resolveCommit(operatorRoot, target.headSha);
-  // baseRef may be a `<sha>^1` expression (merged PR); rev-parse settles it.
-  const baseSha = await resolveCommit(operatorRoot, target.baseRef);
-  if (baseSha === headSha) {
-    throw new CliError(
-      `base and head resolve to the same commit (${headSha}); there is ` +
-        "nothing to review",
+  const lockPath = worktreeLockPath(home, repoHome.repoId, prNumber);
+  await acquirePidLock(lockPath);
+  try {
+    // 4 — fetch, then canonicalize. See fetchPrRefs for why that refspec pair.
+    // Object-db git runs against the git-dir OWNER, not the operator cwd: the
+    // worktree is registered there (W3).
+    await fetchPrRefs(gitDirOwner, prNumber, target.baseRefName);
+    const headSha = await resolveCommit(gitDirOwner, target.headSha);
+    // baseRef may be a `<sha>^1` expression (merged PR); rev-parse settles it.
+    const baseSha = await resolveCommit(gitDirOwner, target.baseRef);
+    if (baseSha === headSha) {
+      throw new CliError(
+        `base and head resolve to the same commit (${headSha}); there is ` +
+          "nothing to review",
+      );
+    }
+    const headLabel = `PR #${prNumber} head`;
+    const diffFromSha = await resolveDiffFrom(
+      gitDirOwner,
+      false,
+      target.baseRef,
+      headLabel,
+      baseSha,
+      headSha,
     );
-  }
-  const headLabel = `PR #${prNumber} head`;
-  const diffFromSha = await resolveDiffFrom(
-    operatorRoot,
-    false,
-    target.baseRef,
-    headLabel,
-    baseSha,
-    headSha,
-  );
 
-  // 5 — the diff and its true size, computed in the operator root (the
-  // worktree shares its object db) and BEFORE anything is created on disk.
-  const diff = await git(operatorRoot, ["diff", `${diffFromSha}..${headSha}`]);
-  if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
-  if (diff.stdout.trim().length === 0) {
-    throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
-  }
-  // The effective diff, and the empty check on it, BOTH before the run dir
-  // exists — same rule as the gate below: a PR that cannot be reviewed leaves
-  // nothing behind.
-  const gateConfig = sizeGateConfig(options);
-  const effectiveDiff = filterDiffByGlobs(diff.stdout, gateConfig.excludeGlobs);
-  if (effectiveDiff.patch.trim().length === 0) {
-    throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
-  }
-  // Two numstats, for the reason spelled out in local mode: the gate counts
-  // whitespace-blind so a formatter sweep cannot eat the budget, the cost
-  // band counts the bytes the hunters are actually handed.
-  const numstat = await git(operatorRoot, [
-    "diff",
-    "--numstat",
-    `${diffFromSha}..${headSha}`,
-  ]);
-  if (!numstat.ok) {
-    throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
-  }
-  const gateNumstat = await git(operatorRoot, [
-    "diff",
-    "-w",
-    "--ignore-blank-lines",
-    "--numstat",
-    `${diffFromSha}..${headSha}`,
-  ]);
-  if (!gateNumstat.ok) {
-    throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
-  }
-  const diffStat: DiffStat = effectiveDiffStat(
-    parseNumstatFiles(numstat.stdout),
-    gateConfig.excludeGlobs,
-  );
-
-  // 5b — the size gate, on the REAL per-file numstat and placed here on
-  // purpose: before createPrRunDir, so a skipped PR leaves no run dir
-  // behind. That matters beyond tidiness — the watcher counts attempts from
-  // run artifacts, so a gate skip cannot consume a poison-PR attempt even
-  // when the watcher was the one that launched this review. And, exactly as
-  // in local mode, this sits BEFORE the cost band's confirm(): the watcher
-  // passes --yes, so a gate behind the prompt would never fire unattended.
-  const sizeGate = evaluateSizeGate(
-    parseNumstatFiles(gateNumstat.stdout),
-    gateConfig,
-  );
-  // On every surviving path the plan's decision block prints the verdict
-  // (and the --force note). A SKIP is the one case that never reaches the
-  // plan — the throw is above the run dir on purpose — so it states itself
-  // here, immediately before dying.
-  if (!sizeGate.ok && !options.force) {
-    log(sizeGateLine(sizeGate));
-    // The shell owns BOTH impure decisions here (style flag and width), the
-    // same way printDryRun does — this is the one exclusion line that is
-    // printed outside a plan renderer, so it cannot inherit a resolved width
-    // from one.
-    for (const line of exclusionLines(
-      effectiveDiff.droppedPaths,
-      styleEnabled(),
-      terminalWidth(),
-    )) {
-      log(line);
+    // 5 — the diff and its true size, computed in the git-dir owner (the
+    // worktree shares ITS object db) and BEFORE anything is created on disk.
+    const diff = await git(gitDirOwner, ["diff", `${diffFromSha}..${headSha}`]);
+    if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
+    if (diff.stdout.trim().length === 0) {
+      throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
     }
-    throw new CliError(sizeGate.message);
-  }
-
-  // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
-  const runDir = await createPrRunDir(
-    options,
-    operatorRoot,
-    worktreePath,
-    prNumber,
-    headSha,
-  );
-  // diff.patch is the EFFECTIVE diff — exactly what the hunters read (see
-  // filterDiffByGlobs); diff.raw.patch preserves the unfiltered bytes, and
-  // only when the filter actually dropped something.
-  const diffPath = path.join(runDir, "diff.patch");
-  await Bun.write(diffPath, effectiveDiff.patch);
-  if (effectiveDiff.droppedPaths.length > 0) {
-    await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
-  }
-
-  // 7 — the plan and the paid gate, exactly like local mode but with the
-  // real numstat replacing GitHub's counters.
-  const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
-  const parityFires = parityTriggered(
-    changedPaths,
-    config.parity_trigger_paths,
-  );
-  const activeHunters = spec.agents.filter(
-    (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-  );
-  const hunterCount = activeHunters.length;
-  const estimate = estimateCost(diffStat, hunterCount, summary.enabled);
-  // Same reason as local mode's planContext: the card and the confirm menu's
-  // details view must describe one and the same planned run.
-  const planContext: PrPlanContext = {
-    options,
-    operatorRoot,
-    target,
-    worktreePath,
-    runDir,
-    diffStat,
-    agentsDir,
-    agentFiles,
-    spec,
-    config,
-    summary,
-    estimate,
-    hunterCount,
-    sizeGate,
-    droppedPaths: effectiveDiff.droppedPaths,
-    resolved: { baseSha, diffFromSha, diffPath, parityFires },
-  };
-  for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
-  // What this run will actually publish. `options` is never mutated: the plan
-  // card and the details view print what was ASKED FOR, and only the run
-  // itself follows the answer given here.
-  let postEnabled = options.post;
-  if (!options.yes) {
-    const choice = await confirm(
-      estimate.low,
-      estimate.high,
-      options.post,
-      () => prPlanDetails(planContext, styleEnabled()),
+    // The effective diff, and the empty check on it, BOTH before the run dir
+    // exists — same rule as the gate below: a PR that cannot be reviewed leaves
+    // nothing behind.
+    const gateConfig = sizeGateConfig(options);
+    const effectiveDiff = filterDiffByGlobs(
+      diff.stdout,
+      gateConfig.excludeGlobs,
     );
-    if (choice.kind === "cancel") {
-      log("aborted; nothing was spent.");
-      return 1;
+    if (effectiveDiff.patch.trim().length === 0) {
+      throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
     }
-    postEnabled = choice.post;
-    if (options.post && !postEnabled) {
-      log("posting disabled for this run; the review still runs.");
+    // Two numstats, for the reason spelled out in local mode: the gate counts
+    // whitespace-blind so a formatter sweep cannot eat the budget, the cost
+    // band counts the bytes the hunters are actually handed.
+    const numstat = await git(gitDirOwner, [
+      "diff",
+      "--numstat",
+      `${diffFromSha}..${headSha}`,
+    ]);
+    if (!numstat.ok) {
+      throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
     }
-  }
+    const gateNumstat = await git(gitDirOwner, [
+      "diff",
+      "-w",
+      "--ignore-blank-lines",
+      "--numstat",
+      `${diffFromSha}..${headSha}`,
+    ]);
+    if (!gateNumstat.ok) {
+      throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
+    }
+    const diffStat: DiffStat = effectiveDiffStat(
+      parseNumstatFiles(numstat.stdout),
+      gateConfig.excludeGlobs,
+    );
 
-  // 8 — the review root.
-  const worktree = await ensureWorktree(operatorRoot, worktreePath, headSha);
-  log();
-  log(`worktree ${worktree.action}: ${worktreePath} (${worktree.reason})`);
+    // 5b — the size gate, on the REAL per-file numstat and placed here on
+    // purpose: before createPrRunDir, so a skipped PR leaves no run dir
+    // behind. That matters beyond tidiness — the watcher counts attempts from
+    // run artifacts, so a gate skip cannot consume a poison-PR attempt even
+    // when the watcher was the one that launched this review. And, exactly as
+    // in local mode, this sits BEFORE the cost band's confirm(): the watcher
+    // passes --yes, so a gate behind the prompt would never fire unattended.
+    const sizeGate = evaluateSizeGate(
+      parseNumstatFiles(gateNumstat.stdout),
+      gateConfig,
+    );
+    // On every surviving path the plan's decision block prints the verdict
+    // (and the --force note). A SKIP is the one case that never reaches the
+    // plan — the throw is above the run dir on purpose — so it states itself
+    // here, immediately before dying.
+    if (!sizeGate.ok && !options.force) {
+      log(sizeGateLine(sizeGate));
+      // The shell owns BOTH impure decisions here (style flag and width), the
+      // same way printDryRun does — this is the one exclusion line that is
+      // printed outside a plan renderer, so it cannot inherit a resolved width
+      // from one.
+      for (const line of exclusionLines(
+        effectiveDiff.droppedPaths,
+        styleEnabled(),
+        terminalWidth(),
+      )) {
+        log(line);
+      }
+      throw new CliError(sizeGate.message);
+    }
 
-  // 9 — the worktree's own index. Never another checkout's: the ROADMAP
-  // forbids riding a sibling's index, because its bytes may differ.
-  let indexMs = 0;
-  if (!existsSync(path.join(worktreePath, ".codegraph"))) {
-    if (Bun.which("codegraph") === null) {
+    // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
+    const runDir = await createPrRunDir(
+      options,
+      operatorRoot,
+      worktreePath,
+      repoHome.paths.runs,
+      prNumber,
+      headSha,
+    );
+    // diff.patch is the EFFECTIVE diff — exactly what the hunters read (see
+    // filterDiffByGlobs); diff.raw.patch preserves the unfiltered bytes, and
+    // only when the filter actually dropped something.
+    const diffPath = path.join(runDir, "diff.patch");
+    await Bun.write(diffPath, effectiveDiff.patch);
+    if (effectiveDiff.droppedPaths.length > 0) {
+      await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
+    }
+
+    // 7 — the plan and the paid gate, exactly like local mode but with the
+    // real numstat replacing GitHub's counters.
+    const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
+    const parityFires = parityTriggered(
+      changedPaths,
+      config.parity_trigger_paths,
+    );
+    const activeHunters = spec.agents.filter(
+      (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
+    );
+    const hunterCount = activeHunters.length;
+    const estimate = estimateCost(diffStat, hunterCount, summary.enabled);
+    // Same reason as local mode's planContext: the card and the confirm menu's
+    // details view must describe one and the same planned run.
+    const planContext: PrPlanContext = {
+      options,
+      operatorRoot,
+      target,
+      worktreePath,
+      runDir,
+      diffStat,
+      agentsDir,
+      agentFiles,
+      spec,
+      config,
+      summary,
+      estimate,
+      hunterCount,
+      sizeGate,
+      droppedPaths: effectiveDiff.droppedPaths,
+      resolved: { baseSha, diffFromSha, diffPath, parityFires },
+    };
+    for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
+    // What this run will actually publish. `options` is never mutated: the plan
+    // card and the details view print what was ASKED FOR, and only the run
+    // itself follows the answer given here.
+    let postEnabled = options.post;
+    if (!options.yes) {
+      const choice = await confirm(
+        estimate.low,
+        estimate.high,
+        options.post,
+        () => prPlanDetails(planContext, styleEnabled()),
+      );
+      if (choice.kind === "cancel") {
+        log("aborted; nothing was spent.");
+        return 1;
+      }
+      postEnabled = choice.post;
+      if (options.post && !postEnabled) {
+        log("posting disabled for this run; the review still runs.");
+      }
+    }
+
+    // 8 — the review root.
+    const worktree = await ensureWorktree(gitDirOwner, worktreePath, headSha);
+    log();
+    log(`worktree ${worktree.action}: ${worktreePath} (${worktree.reason})`);
+    await stampWorktree(
+      repoHome.paths.registry,
+      prNumber,
+      new Date().toISOString(),
+    );
+
+    // 9 — the worktree's own index. Never another checkout's: the ROADMAP
+    // forbids riding a sibling's index, because its bytes may differ.
+    let indexMs = 0;
+    if (!existsSync(path.join(worktreePath, ".codegraph"))) {
+      if (Bun.which("codegraph") === null) {
+        log(
+          "codegraph CLI not found — no index will be built; hunters run on " +
+            "Read/Grep/Glob alone",
+        );
+      } else {
+        indexMs = await initCodegraphIndex(worktreePath);
+        log(`codegraph init: ${Math.round(indexMs / 1000)}s`);
+      }
+    }
+
+    // 10 — MCP registry, checked against the WORKTREE. Local mode checks the
+    // repo root because the repo root is what its hunters read; here the
+    // hunters' tree is the worktree, and an index found in the operator
+    // checkout would be exactly the other-checkout's index the step above
+    // refuses to ride.
+    const mcpConfigPath = path.join(runDir, "mcp.json");
+    const codegraphAvailable = existsSync(
+      path.join(worktreePath, ".codegraph"),
+    );
+    await Bun.write(
+      mcpConfigPath,
+      `${JSON.stringify(
+        codegraphAvailable ? CODEGRAPH_ONLY_MCP_CONFIG : EMPTY_MCP_CONFIG,
+        null,
+        2,
+      )}\n`,
+    );
+
+    // 11 — run, with live progress (same shape as local mode's leg). The
+    // pipeline is untouched beyond the observational tap: it gets the worktree
+    // as its cwd and the PR's real number for the envelope.
+    log(
+      `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+        `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
+        "8–25 minutes",
+    );
+    const started = performance.now();
+    const progress = startProgressRenderer(
+      started,
+      `PR #${prNumber}`,
+      activeHunters.map((a) => a.key),
+      spec.agents.some((a) => a.role === "refuter"),
+      summary.enabled,
+    );
+    let result: PipelineResult;
+    try {
+      result = await runPipeline(
+        {
+          pr: prNumber,
+          // Same rule as local mode: record the commit the diff was actually
+          // computed against, or nothing downstream can reproduce the range.
+          baseSha: diffFromSha,
+          headSha,
+          worktree: worktreePath,
+          diffPath,
+          excludedPaths: effectiveDiff.droppedPaths,
+          gotchasPath,
+          agentsDir,
+          runDir,
+          outPath: path.join(runDir, "findings.json"),
+          mcpConfigPath,
+          hopBudget: options.hopBudget,
+          ...(options.model ? { model: options.model } : {}),
+          parityTriggerPaths: config.parity_trigger_paths,
+          suspicionPriors: config.suspicion_priors,
+          ...pipelineSummarizerInput(summary),
+          spec,
+        },
+        { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+      );
+    } finally {
+      // try/finally, never success-only: a leaked interval keeps the event
+      // loop alive and hangs process exit on the error path.
+      progress.stop();
+    }
+    const wallMs = Math.round(performance.now() - started);
+
+    // 12 — the artifact and the report, exactly as local mode writes them.
+    const telemetry: Telemetry = {
+      // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
+      // when it is missing, so the init cost is real and measured. Disk stays
+      // unreported, and the mode is the same synchronous build.
+      index_ms: indexMs,
+      index_mode: "sync",
+      index_disk_mb: 0,
+      // Driver-MEASURED elapsed time, never the sum of the parallel steps —
+      // same rule as local mode.
+      wall_ms: wallMs,
+      tokens_in: result.usage.tokens_in,
+      tokens_out: result.usage.tokens_out,
+      tokens_total: result.usage.tokens_total,
+      cost_usd_est: result.usage.cost_usd_est,
+      per_agent: result.perAgent,
+    };
+    const doc = mergeRunEnvelope({
+      skillOutput: result.skillOutput,
+      pr: prNumber,
+      base_sha: diffFromSha,
+      head_sha: headSha,
+      model: envelopeModel(options, agentFiles),
+      iteration: 0,
+      engine: await engineIdentity(),
+      sessionFailed: result.sessionFailed,
+      telemetry,
+    });
+    const findingsPath = path.join(runDir, "findings.json");
+    await writeFindings(findingsPath, doc);
+    const reportPath = path.join(runDir, "report.md");
+    await Bun.write(
+      reportPath,
+      renderReport(doc, {
+        repo: path.basename(operatorRoot),
+        base: target.baseRef,
+        head: `PR #${prNumber}`,
+        diffStat,
+        excludedPaths: effectiveDiff.droppedPaths,
+        costUsd: result.usage.cost_usd_est,
+        wallMs,
+      }),
+    );
+
+    // 13 — the head-to-head, in-process. A failure here must NOT fail the run:
+    // the review artifacts above are already on disk and are the product, so a
+    // gh hiccup degrades to a warning, never to an exit code. A run where
+    // EVERY hunter died writes no comparison at all — "pr-hero 0" from a
+    // review that never happened would land in B4's ledger as a measured
+    // miss, and the ledger's honesty outranks the artifact's completeness.
+    let comparison: ComparisonOutcome | null = null;
+    if (result.sessionFailed) {
       log(
-        "codegraph CLI not found — no index will be built; hunters run on " +
-          "Read/Grep/Glob alone",
+        "comparison skipped: every hunter failed, so there is no review to compare",
       );
     } else {
-      indexMs = await initCodegraphIndex(worktreePath);
-      log(`codegraph init: ${Math.round(indexMs / 1000)}s`);
-    }
-  }
-
-  // 10 — MCP registry, checked against the WORKTREE. Local mode checks the
-  // repo root because the repo root is what its hunters read; here the
-  // hunters' tree is the worktree, and an index found in the operator
-  // checkout would be exactly the other-checkout's index the step above
-  // refuses to ride.
-  const mcpConfigPath = path.join(runDir, "mcp.json");
-  const codegraphAvailable = existsSync(path.join(worktreePath, ".codegraph"));
-  await Bun.write(
-    mcpConfigPath,
-    `${JSON.stringify(
-      codegraphAvailable ? CODEGRAPH_ONLY_MCP_CONFIG : EMPTY_MCP_CONFIG,
-      null,
-      2,
-    )}\n`,
-  );
-
-  // 11 — run, with live progress (same shape as local mode's leg). The
-  // pipeline is untouched beyond the observational tap: it gets the worktree
-  // as its cwd and the PR's real number for the envelope.
-  log(
-    `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-      `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
-      "8–25 minutes",
-  );
-  const started = performance.now();
-  const progress = startProgressRenderer(
-    started,
-    `PR #${prNumber}`,
-    activeHunters.map((a) => a.key),
-    spec.agents.some((a) => a.role === "refuter"),
-    summary.enabled,
-  );
-  let result: PipelineResult;
-  try {
-    result = await runPipeline(
-      {
-        pr: prNumber,
-        // Same rule as local mode: record the commit the diff was actually
-        // computed against, or nothing downstream can reproduce the range.
-        baseSha: diffFromSha,
-        headSha,
-        worktree: worktreePath,
-        diffPath,
-        excludedPaths: effectiveDiff.droppedPaths,
-        gotchasPath,
-        agentsDir,
-        runDir,
-        outPath: path.join(runDir, "findings.json"),
-        mcpConfigPath,
-        hopBudget: options.hopBudget,
-        ...(options.model ? { model: options.model } : {}),
-        parityTriggerPaths: config.parity_trigger_paths,
-        suspicionPriors: config.suspicion_priors,
-        ...pipelineSummarizerInput(summary),
-        spec,
-      },
-      { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
-    );
-  } finally {
-    // try/finally, never success-only: a leaked interval keeps the event
-    // loop alive and hangs process exit on the error path.
-    progress.stop();
-  }
-  const wallMs = Math.round(performance.now() - started);
-
-  // 12 — the artifact and the report, exactly as local mode writes them.
-  const telemetry: Telemetry = {
-    // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
-    // when it is missing, so the init cost is real and measured. Disk stays
-    // unreported, and the mode is the same synchronous build.
-    index_ms: indexMs,
-    index_mode: "sync",
-    index_disk_mb: 0,
-    // Driver-MEASURED elapsed time, never the sum of the parallel steps —
-    // same rule as local mode.
-    wall_ms: wallMs,
-    tokens_in: result.usage.tokens_in,
-    tokens_out: result.usage.tokens_out,
-    tokens_total: result.usage.tokens_total,
-    cost_usd_est: result.usage.cost_usd_est,
-    per_agent: result.perAgent,
-  };
-  const doc = mergeRunEnvelope({
-    skillOutput: result.skillOutput,
-    pr: prNumber,
-    base_sha: diffFromSha,
-    head_sha: headSha,
-    model: envelopeModel(options, agentFiles),
-    iteration: 0,
-    engine: await engineIdentity(),
-    sessionFailed: result.sessionFailed,
-    telemetry,
-  });
-  const findingsPath = path.join(runDir, "findings.json");
-  await writeFindings(findingsPath, doc);
-  const reportPath = path.join(runDir, "report.md");
-  await Bun.write(
-    reportPath,
-    renderReport(doc, {
-      repo: path.basename(operatorRoot),
-      base: target.baseRef,
-      head: `PR #${prNumber}`,
-      diffStat,
-      excludedPaths: effectiveDiff.droppedPaths,
-      costUsd: result.usage.cost_usd_est,
-      wallMs,
-    }),
-  );
-
-  // 13 — the head-to-head, in-process. A failure here must NOT fail the run:
-  // the review artifacts above are already on disk and are the product, so a
-  // gh hiccup degrades to a warning, never to an exit code. A run where
-  // EVERY hunter died writes no comparison at all — "pr-hero 0" from a
-  // review that never happened would land in B4's ledger as a measured
-  // miss, and the ledger's honesty outranks the artifact's completeness.
-  let comparison: ComparisonOutcome | null = null;
-  if (result.sessionFailed) {
-    log(
-      "comparison skipped: every hunter failed, so there is no review to compare",
-    );
-  } else {
-    try {
-      comparison = await writeComparison({
-        operatorRoot,
-        pr: prNumber,
-        headSha,
-        diffFromSha,
-        runDir,
-        // The I/O shell owns the clock; the pure builder just records it.
-        generatedAt: new Date().toISOString(),
-        runStatus: doc.run_status,
-        findings: doc.findings.map((f) => ({
-          id: f.id,
-          path: f.path,
-          line: f.line,
-          claim: f.claim,
-          tier: f.tier,
-        })),
-      });
-    } catch (error) {
-      log(
-        "warning: comparison against Greptile failed — the review itself is " +
-          `intact: ${(error as Error).message}`,
-      );
-    }
-  }
-
-  // 14 — the posting, only when asked. AFTER the comparison on purpose: a
-  // posting failure must never cost the comparison artifact. And unlike the
-  // comparison, posting does NOT degrade to a warning — it was explicitly
-  // requested. ROADMAP B6 rewire, W2 (issues #16/#17): posting now goes
-  // through the inline surface — anchorability, cross-run matching, the one
-  // review submission (with its 422 recovery into the summary Outside Diff
-  // bucket), and the summary PATCHed LAST so its delta line and Outside Diff
-  // section describe what this run actually posted, not what it planned to.
-  // Un-anchorable findings never get a `POST .../issues/<n>/comments`.
-  // `postInlineIfEligible` carries the
-  // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
-  // posting"): a clean-bill comment set from a review that never ran would
-  // be a public lie, same reasoning as the comparison guard above.
-  let posted: InlinePostOutcome | null = null;
-  // Hoisted out of the branch below ONLY so step 15 can reuse it: when posting
-  // ran, the terminal's links must be built from the SAME web url the comments
-  // were published against, or a finding's comment fragment could hang off a
-  // different host than the comment itself.
-  let postedWebUrl: string | undefined;
-  if (postEnabled) {
-    postedWebUrl = await ghRepoWebUrl(operatorRoot);
-    if (postedWebUrl === undefined) {
-      log("repo web url unavailable: posting plain locations");
-    }
-    posted = await postInlineIfEligible({
-      sessionFailed: result.sessionFailed,
-      skippedReason:
-        "post skipped: every hunter failed, so there is no review to publish",
-      operatorRoot,
-      pr: prNumber,
-      headSha,
-      doc,
-      diffPatch: effectiveDiff.patch,
-      webUrl: postedWebUrl,
-    });
-    if (posted) {
-      await writePostReceipt(runDir, prNumber, headSha, posted);
-      log(
-        `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
-          `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
-          `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
-      );
-      if (posted.reviewOutcome === "demoted") {
+      try {
+        comparison = await writeComparison({
+          operatorRoot,
+          pr: prNumber,
+          headSha,
+          diffFromSha,
+          runDir,
+          // The I/O shell owns the clock; the pure builder just records it.
+          generatedAt: new Date().toISOString(),
+          runStatus: doc.run_status,
+          findings: doc.findings.map((f) => ({
+            id: f.id,
+            path: f.path,
+            line: f.line,
+            claim: f.claim,
+            tier: f.tier,
+          })),
+        });
+      } catch (error) {
         log(
-          "warning: the review submission was rejected (422) and recovered " +
-            "into the summary Outside Diff bucket — see the run's post.json " +
-            "for detail",
+          "warning: comparison against Greptile failed — the review itself is " +
+            `intact: ${(error as Error).message}`,
         );
       }
     }
-  }
 
-  // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
-  // the worktree hint) ride in as optional inputs. The `posted:` line that
-  // used to sit here is GONE on purpose: step 14 already printed a richer one
-  // at the moment it happened, and two differently-worded reports of the same
-  // POST read as two postings. What this block keeps is the durable trace —
-  // post.json in the artifact list below.
-  //
-  // The links, in the order that keeps them honest: `gh`'s answer when posting
-  // already paid for it, otherwise the free git-remote derivation — so a run
-  // WITHOUT --post still prints a clickable url for every finding, which is
-  // the whole reason repoWebUrlFromRemote exists. No pushed-ness check here
-  // (unlike local mode): a PR head came out of `refs/pull/<n>/head`, so origin
-  // has it by construction.
-  const webUrl = postedWebUrl ?? (await gitRemoteWebUrl(operatorRoot));
-  const links: ResultLinks | undefined =
-    webUrl === undefined
-      ? undefined
-      : {
-          webUrl,
-          headSha,
-          pr: prNumber,
-          // Only when this run actually posted: a comment url for a comment
-          // that does not exist is the dead link the whole degradation rule
-          // exists to prevent. Absent ids fall through to a blob link.
-          ...(posted ? { commentUrls: posted.commentUrls } : {}),
-        };
-  for (const line of renderResult({
-    doc,
-    costUsd: result.usage.cost_usd_est,
-    wallMs,
-    estimate: { low: estimate.low, high: estimate.high },
-    runDir,
-    artifacts: [
-      path.basename(reportPath),
-      path.basename(findingsPath),
-      ...(comparison ? [path.basename(comparison.markdownPath)] : []),
-      ...(posted ? ["post.json"] : []),
-    ],
-    ...(comparison
-      ? {
-          comparison: {
-            greptileFound: comparison.greptileFound,
-            // The buckets themselves, not their counts: writeComparison's
-            // widened outcome is what lets the block name a recall miss.
-            result: comparison.result,
-          },
+    // 14 — the posting, only when asked. AFTER the comparison on purpose: a
+    // posting failure must never cost the comparison artifact. And unlike the
+    // comparison, posting does NOT degrade to a warning — it was explicitly
+    // requested. ROADMAP B6 rewire, W2 (issues #16/#17): posting now goes
+    // through the inline surface — anchorability, cross-run matching, the one
+    // review submission (with its 422 recovery into the summary Outside Diff
+    // bucket), and the summary PATCHed LAST so its delta line and Outside Diff
+    // section describe what this run actually posted, not what it planned to.
+    // Un-anchorable findings never get a `POST .../issues/<n>/comments`.
+    // `postInlineIfEligible` carries the
+    // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
+    // posting"): a clean-bill comment set from a review that never ran would
+    // be a public lie, same reasoning as the comparison guard above.
+    let posted: InlinePostOutcome | null = null;
+    // Hoisted out of the branch below ONLY so step 15 can reuse it: when posting
+    // ran, the terminal's links must be built from the SAME web url the comments
+    // were published against, or a finding's comment fragment could hang off a
+    // different host than the comment itself.
+    let postedWebUrl: string | undefined;
+    if (postEnabled) {
+      postedWebUrl = await ghRepoWebUrl(operatorRoot);
+      if (postedWebUrl === undefined) {
+        log("repo web url unavailable: posting plain locations");
+      }
+      posted = await postInlineIfEligible({
+        sessionFailed: result.sessionFailed,
+        skippedReason:
+          "post skipped: every hunter failed, so there is no review to publish",
+        operatorRoot,
+        pr: prNumber,
+        headSha,
+        doc,
+        diffPatch: effectiveDiff.patch,
+        webUrl: postedWebUrl,
+      });
+      if (posted) {
+        await writePostReceipt(runDir, prNumber, headSha, posted);
+        log(
+          `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
+            `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
+            `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
+        );
+        if (posted.reviewOutcome === "demoted") {
+          log(
+            "warning: the review submission was rejected (422) and recovered " +
+              "into the summary Outside Diff bucket — see the run's post.json " +
+              "for detail",
+          );
         }
-      : {}),
-    worktree: { operatorRoot, worktreePath },
-    ...(links === undefined ? {} : { links }),
-    sessionFailed: result.sessionFailed,
-    styles: styleEnabled(),
-  })) {
-    log(line);
+      }
+    }
+
+    // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
+    // the worktree hint) ride in as optional inputs. The `posted:` line that
+    // used to sit here is GONE on purpose: step 14 already printed a richer one
+    // at the moment it happened, and two differently-worded reports of the same
+    // POST read as two postings. What this block keeps is the durable trace —
+    // post.json in the artifact list below.
+    //
+    // The links, in the order that keeps them honest: `gh`'s answer when posting
+    // already paid for it, otherwise the free git-remote derivation — so a run
+    // WITHOUT --post still prints a clickable url for every finding, which is
+    // the whole reason repoWebUrlFromRemote exists. No pushed-ness check here
+    // (unlike local mode): a PR head came out of `refs/pull/<n>/head`, so origin
+    // has it by construction.
+    const webUrl = postedWebUrl ?? (await gitRemoteWebUrl(operatorRoot));
+    const links: ResultLinks | undefined =
+      webUrl === undefined
+        ? undefined
+        : {
+            webUrl,
+            headSha,
+            pr: prNumber,
+            // Only when this run actually posted: a comment url for a comment
+            // that does not exist is the dead link the whole degradation rule
+            // exists to prevent. Absent ids fall through to a blob link.
+            ...(posted ? { commentUrls: posted.commentUrls } : {}),
+          };
+    for (const line of renderResult({
+      doc,
+      costUsd: result.usage.cost_usd_est,
+      wallMs,
+      estimate: { low: estimate.low, high: estimate.high },
+      runDir,
+      artifacts: [
+        path.basename(reportPath),
+        path.basename(findingsPath),
+        ...(comparison ? [path.basename(comparison.markdownPath)] : []),
+        ...(posted ? ["post.json"] : []),
+      ],
+      ...(comparison
+        ? {
+            comparison: {
+              greptileFound: comparison.greptileFound,
+              // The buckets themselves, not their counts: writeComparison's
+              // widened outcome is what lets the block name a recall miss.
+              result: comparison.result,
+            },
+          }
+        : {}),
+      worktree: { gitDirOwner, worktreePath },
+      ...(links === undefined ? {} : { links }),
+      sessionFailed: result.sessionFailed,
+      styles: styleEnabled(),
+    })) {
+      log(line);
+    }
+    if (result.sessionFailed) return 1;
+    return postingExitCode(posted);
+  } finally {
+    await releasePidLock(lockPath);
+    await runGc({
+      home,
+      repoId: repoHome.repoId,
+      dryRun: false,
+      silent: true,
+    });
   }
-  if (result.sessionFailed) return 1;
-  return postingExitCode(posted);
 }
 
 // ---------------------------------------------------------------------------
@@ -2359,7 +2421,13 @@ async function ledgerCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveRepoRoot(options.repo);
   const runsRoot = options.runs
     ? path.resolve(options.runs)
-    : defaultRunRoot(repoRoot);
+    : (
+        await resolveRepoHome({
+          home: os.homedir(),
+          operatorRoot: repoRoot,
+          persist: false,
+        })
+      ).paths.runs;
   // One level deep on purpose: run dirs are flat children of the root, and
   // a recursive glob would pick up anything a run itself wrote deeper down.
   const files: string[] = [];
@@ -2444,7 +2512,12 @@ async function createRunDir(
     await mkdir(explicit, { recursive: true });
     return explicit;
   }
-  const root = defaultRunRoot(repoRoot);
+  const repoHome = await resolveRepoHome({
+    home: os.homedir(),
+    operatorRoot: repoRoot,
+    persist: true,
+  });
+  const root = repoHome.paths.runs;
   // Smallest unused integer, so a second review of the same commit never
   // overwrites the first one's artifacts — a run that cost money is evidence.
   for (let n = 1; ; n++) {
@@ -2463,6 +2536,7 @@ async function createPrRunDir(
   options: CliOptions,
   operatorRoot: string,
   worktreePath: string,
+  runsRoot: string,
   prNumber: number,
   headSha: string,
 ): Promise<string> {
@@ -2470,6 +2544,7 @@ async function createPrRunDir(
     options,
     operatorRoot,
     worktreePath,
+    runsRoot,
     prNumber,
     headSha,
   );
@@ -2486,6 +2561,7 @@ function predictPrRunDir(
   options: CliOptions,
   operatorRoot: string,
   worktreePath: string,
+  runsRoot: string,
   prNumber: number,
   headSha: string,
 ): string {
@@ -2495,7 +2571,7 @@ function predictPrRunDir(
     assertOutsideRepo(explicit, worktreePath);
     return explicit;
   }
-  const root = defaultRunRoot(operatorRoot);
+  const root = runsRoot;
   // Smallest unused integer, same reason as createRunDir: a run that cost
   // money is evidence and must never be overwritten.
   for (let n = 1; ; n++) {
