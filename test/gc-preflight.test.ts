@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
   decideGc,
+  GC_LAUNCHD_LABEL,
   GH_PR_VIEW_TIMEOUT_MS,
+  gcLaunchdLogPath,
+  gcPlistPath,
   parseGhPrState,
   parseWorktreePr,
+  renderGcPlist,
+  renderGcStatus,
   worktreeRemoveArgs,
 } from "../src/gc-preflight";
 import { GC_TTL_HOURS } from "../src/home-preflight";
+import { parsePlistInterval } from "../src/watch-preflight";
 
 const NOW = Date.parse("2026-08-15T12:00:00Z");
 const HOUR = 60 * 60 * 1000;
@@ -164,5 +170,77 @@ describe("GH_PR_VIEW_TIMEOUT_MS", () => {
   test("is a positive bound so a stalled gh cannot pin a lock forever", () => {
     expect(GH_PR_VIEW_TIMEOUT_MS).toBeGreaterThan(0);
     expect(GH_PR_VIEW_TIMEOUT_MS).toBe(15_000);
+  });
+});
+
+describe("gc launchd paths", () => {
+  test("the plist sits in LaunchAgents, the log under ~/.prhero", () => {
+    expect(gcPlistPath("/Users/x")).toBe(
+      `/Users/x/Library/LaunchAgents/${GC_LAUNCHD_LABEL}.plist`,
+    );
+    expect(gcLaunchdLogPath("/Users/x")).toBe(
+      "/Users/x/.prhero/gc-launchd.log",
+    );
+  });
+});
+
+describe("renderGcPlist", () => {
+  const input = {
+    runtimePath: "/Users/x/.bun/bin/bun",
+    entryPath: "/Users/x/Desktop/pr-hero/src/cli.ts",
+    intervalSeconds: 21600,
+    logPath: "/Users/x/.prhero/gc-launchd.log",
+    pathEnv: "/opt/homebrew/bin:/usr/bin:/bin",
+  };
+
+  test("program arguments are absolute runtime + entry + gc, not watch --once", () => {
+    const plist = renderGcPlist(input);
+    expect(plist).toContain(`<string>${GC_LAUNCHD_LABEL}</string>`);
+    expect(plist).toContain(
+      "    <string>/Users/x/.bun/bin/bun</string>\n" +
+        "    <string>/Users/x/Desktop/pr-hero/src/cli.ts</string>\n" +
+        "    <string>gc</string>",
+    );
+    expect(plist).not.toContain("watch");
+    expect(plist).not.toContain("--once");
+    expect(plist).toContain("<integer>21600</integer>");
+    expect(parsePlistInterval(plist)).toBe(21600);
+    expect(plist.endsWith("\n")).toBe(true);
+  });
+
+  test("XML-hostile characters in PATH are escaped", () => {
+    const plist = renderGcPlist({
+      ...input,
+      pathEnv: "/a&b:/c<d>:/usr/bin",
+    });
+    expect(plist).toContain("<string>/a&amp;b:/c&lt;d&gt;:/usr/bin</string>");
+  });
+});
+
+describe("renderGcStatus", () => {
+  const plistPath = `/Users/x/Library/LaunchAgents/${GC_LAUNCHD_LABEL}.plist`;
+  const logPath = "/Users/x/.prhero/gc-launchd.log";
+
+  test("names the install command when nothing is loaded", () => {
+    const text = renderGcStatus({
+      plistPath,
+      logPath,
+      installed: false,
+      intervalSeconds: null,
+    }).join("\n");
+    expect(text).toContain('not installed — run "pr-hero gc install"');
+    expect(text).not.toContain("watch install");
+  });
+
+  test("reports the interval when installed", () => {
+    const text = renderGcStatus({
+      plistPath,
+      logPath,
+      installed: true,
+      intervalSeconds: 21600,
+    }).join("\n");
+    expect(text).toContain("installed — one tick every 360 min");
+    expect(text).toContain(plistPath);
+    expect(text).toContain(logPath);
   });
 });

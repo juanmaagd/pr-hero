@@ -24,6 +24,11 @@ export const DEFAULT_HOP_BUDGET = 12;
 // (a tick is one `pr list` per repo plus a comments read per candidate).
 export const DEFAULT_WATCH_INTERVAL_MIN = 15;
 
+// gc install's default StartInterval, in minutes. The 72h TTL only
+// evaluates when GC actually runs; 6h is frequent enough that a merged PR
+// does not sit until tomorrow, and cheap (gh view per tree, no LLM).
+export const DEFAULT_GC_INTERVAL_MIN = 360;
+
 // The LAST resort only. WHY it is not simply "the default": a hardcoded
 // default branch silently reviews the wrong range on every repo that does not
 // use `main` — musive's default branch is `dev`, so "main" there is not a
@@ -108,7 +113,11 @@ export interface CliOptions {
   // hand-edits JSON. Required for `watch` — a bare `pr-hero watch` has no
   // daemon mode to fall into, so it fails loud instead of hanging.
   watch?: "once" | "install" | "uninstall" | "add" | "remove" | "status";
-  // watch install only: launchd StartInterval, in minutes.
+  // gc install/uninstall/status manage a SEPARATE launchd agent from the
+  // watcher: it runs `pr-hero gc` (no reviews, no watch.json, no window/cap).
+  // Unset means the collector itself.
+  gc?: "install" | "uninstall" | "status";
+  // watch install and gc install: launchd StartInterval, in minutes.
   interval?: number;
   // watch add only: record on_push: true for the repo, so every new push
   // re-arms its PRs. The default (false) reviews each PR once — see the
@@ -201,6 +210,13 @@ Usage:
                              that are merged/closed or idle >72h. --dry-run
                              prints the table and removes nothing. --repo
                              scopes to one origin; default is the whole home
+  pr-hero gc install         Install the macOS launchd agent that runs
+                             "pr-hero gc" every --interval minutes (default
+                             ${DEFAULT_GC_INTERVAL_MIN} = 6h). No reviews,
+                             no watch.json — the $0 sweeper so trees do not
+                             wait for a review or the watcher
+  pr-hero gc uninstall       Unload and remove that launchd agent
+  pr-hero gc status          Read-only: whether the GC agent is installed
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
@@ -264,8 +280,9 @@ Options:
   --on-push           watch add only: re-review the repo's PRs on every new
                       push. Default: each PR is reviewed ONCE — a push does
                       not re-bill; re-review manually with review --pr <n>
-  --interval <min>    watch install only: minutes between launchd ticks
-                      (default: ${DEFAULT_WATCH_INTERVAL_MIN})
+  --interval <min>    watch install and gc install: minutes between launchd
+                      ticks (watch default: ${DEFAULT_WATCH_INTERVAL_MIN};
+                      gc default: ${DEFAULT_GC_INTERVAL_MIN})
   --dry-run           Resolve, preflight, print the plan and the cost band,
                       then exit without spawning anything. For watch --once:
                       print what would be skipped/launched and why, touching
@@ -443,6 +460,14 @@ export function parseArgs(argv: string[]): ParsedCli {
       continue;
     }
     if (
+      command === "gc" &&
+      options.gc === undefined &&
+      (arg === "install" || arg === "uninstall" || arg === "status")
+    ) {
+      options.gc = arg;
+      continue;
+    }
+    if (
       command === "triage" &&
       options.triage === undefined &&
       arg === "reply"
@@ -550,9 +575,6 @@ export function parseArgs(argv: string[]): ParsedCli {
         `--dry-run only applies to watch --once, not "${options.watch}"`,
       );
     }
-    if (options.interval !== undefined && options.watch !== "install") {
-      throw new CliUsageError("--interval only applies to watch install");
-    }
     // On watch, --post configures the repo being added — anywhere else in
     // the watch surface it would be a silently dropped intention.
     if (options.post && options.watch !== "add") {
@@ -570,12 +592,24 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (once) {
       throw new CliUsageError("--once only applies to the watch command");
     }
-    if (options.interval !== undefined) {
-      throw new CliUsageError("--interval only applies to watch install");
-    }
     if (options.onPush) {
       throw new CliUsageError('--on-push only applies to "watch add"');
     }
+  }
+  if (options.interval !== undefined) {
+    const allowed =
+      (command === "watch" && options.watch === "install") ||
+      (command === "gc" && options.gc === "install");
+    if (!allowed) {
+      throw new CliUsageError(
+        "--interval only applies to watch install and gc install",
+      );
+    }
+  }
+  if (command === "gc" && options.gc !== undefined && options.dryRun) {
+    throw new CliUsageError(
+      `--dry-run only applies to bare gc, not "gc ${options.gc}"`,
+    );
   }
   if (options.triage === "reply") {
     if (options.finding === undefined) {

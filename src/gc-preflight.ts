@@ -6,7 +6,8 @@
 // closed, OR when the tree has sat idle longer than 72h, whichever first.
 // Skip an in-flight tree (a live pid on the sibling lock). Never rm -rf.
 
-import { GC_TTL_HOURS } from "./home-preflight";
+import path from "node:path";
+import { GC_TTL_HOURS, prheroLayout } from "./home-preflight";
 
 export type PrLifecycle = "open" | "merged" | "closed" | "unknown";
 export type GcAction = "keep" | "collect";
@@ -96,4 +97,98 @@ export function parseGhPrState(raw: string): PrLifecycle {
 // interpolated into a shell string.
 export function worktreeRemoveArgs(worktreePath: string): string[] {
   return ["worktree", "remove", "--force", worktreePath];
+}
+
+// ---------------------------------------------------------------------------
+// launchd agent (macOS). Rendering is pure string-out so a test can pin
+// the exact plist; loading it is gc.ts's job. Separate label and log from
+// the watcher: this agent runs `pr-hero gc` (no reviews, no watch.json).
+
+export const GC_LAUNCHD_LABEL = "io.prhero.gc";
+
+export function gcPlistPath(home: string): string {
+  return path.join(
+    home,
+    "Library",
+    "LaunchAgents",
+    `${GC_LAUNCHD_LABEL}.plist`,
+  );
+}
+
+export function gcLaunchdLogPath(home: string): string {
+  return path.join(prheroLayout(home).dir, "gc-launchd.log");
+}
+
+export interface GcPlistInput {
+  runtimePath: string;
+  entryPath: string;
+  intervalSeconds: number;
+  logPath: string;
+  pathEnv: string;
+}
+
+export function renderGcPlist(input: GcPlistInput): string {
+  const lines = [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`,
+    `<plist version="1.0">`,
+    `<dict>`,
+    `  <key>Label</key>`,
+    `  <string>${GC_LAUNCHD_LABEL}</string>`,
+    `  <key>ProgramArguments</key>`,
+    `  <array>`,
+    `    <string>${xmlEscape(input.runtimePath)}</string>`,
+    `    <string>${xmlEscape(input.entryPath)}</string>`,
+    `    <string>gc</string>`,
+    `  </array>`,
+    `  <key>StartInterval</key>`,
+    `  <integer>${input.intervalSeconds}</integer>`,
+    `  <key>StandardOutPath</key>`,
+    `  <string>${xmlEscape(input.logPath)}</string>`,
+    `  <key>StandardErrorPath</key>`,
+    `  <string>${xmlEscape(input.logPath)}</string>`,
+    `  <key>EnvironmentVariables</key>`,
+    `  <dict>`,
+    `    <key>PATH</key>`,
+    `    <string>${xmlEscape(input.pathEnv)}</string>`,
+    `  </dict>`,
+    `</dict>`,
+    `</plist>`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function xmlEscape(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+export interface GcStatusFacts {
+  plistPath: string;
+  logPath: string;
+  installed: boolean;
+  intervalSeconds: number | null;
+}
+
+export function renderGcStatus(facts: GcStatusFacts): string[] {
+  const row = (label: string, value: string): string =>
+    `  ${label.padEnd(13)}${value}`;
+  const launchd = facts.installed
+    ? facts.intervalSeconds === null
+      ? `installed (${facts.plistPath}, interval unreadable)`
+      : `installed — one tick every ${formatGcInterval(facts.intervalSeconds)}`
+    : 'not installed — run "pr-hero gc install" to start sweeping';
+  return [
+    "pr-hero gc — status",
+    "",
+    row("launchd", launchd),
+    row("plist", facts.plistPath),
+    row("tick output", facts.logPath),
+  ];
+}
+
+function formatGcInterval(seconds: number): string {
+  return seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds}s`;
 }

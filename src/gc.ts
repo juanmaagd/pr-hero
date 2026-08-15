@@ -7,15 +7,20 @@
 // .codegraph/daemon.sock.
 
 import { existsSync } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
   decideGc,
+  GC_LAUNCHD_LABEL,
   GH_PR_VIEW_TIMEOUT_MS,
+  gcLaunchdLogPath,
+  gcPlistPath,
   type PrLifecycle,
   parseGhPrState,
   parseWorktreePr,
+  renderGcPlist,
+  renderGcStatus,
   worktreeRemoveArgs,
 } from "./gc-preflight";
 import {
@@ -31,8 +36,13 @@ import {
   repoHomePaths,
   worktreeLockPath,
 } from "./home-preflight";
-import { CliError, type CliOptions } from "./preflight";
+import {
+  CliError,
+  type CliOptions,
+  DEFAULT_GC_INTERVAL_MIN,
+} from "./preflight";
 import { log } from "./ui";
+import { parsePlistInterval } from "./watch-preflight";
 
 async function git(
   repo: string,
@@ -216,6 +226,12 @@ export async function runGc(input: {
 }
 
 export async function gcCommand(options: CliOptions): Promise<number> {
+  if (options.gc === "install") {
+    return gcInstall(options.interval ?? DEFAULT_GC_INTERVAL_MIN);
+  }
+  if (options.gc === "uninstall") return gcUninstall();
+  if (options.gc === "status") return gcStatus();
+
   const home = os.homedir();
   // parseArgs defaults --repo to ".". For gc that means "the whole home",
   // not "the current checkout" — scoping takes an explicit path.
@@ -243,5 +259,100 @@ export async function gcCommand(options: CliOptions): Promise<number> {
       `gc failed to remove ${result.failed} worktree(s); see stderr`,
     );
   }
+  return 0;
+}
+
+async function run(
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { ok: exitCode === 0, stdout, stderr };
+}
+
+function cliEntryPath(): string {
+  return path.join(import.meta.dir, "cli.ts");
+}
+
+async function gcInstall(intervalMin: number): Promise<number> {
+  if (process.platform !== "darwin") {
+    throw new CliError(
+      "gc install renders a macOS launchd agent. On other systems run " +
+        "`pr-hero gc` from cron.",
+    );
+  }
+  const home = os.homedir();
+  const plistPath = gcPlistPath(home);
+  const logPath = gcLaunchdLogPath(home);
+  await mkdir(prheroLayout(home).dir, { recursive: true });
+  await mkdir(path.dirname(plistPath), { recursive: true });
+  const plist = renderGcPlist({
+    runtimePath: process.execPath,
+    entryPath: cliEntryPath(),
+    intervalSeconds: intervalMin * 60,
+    logPath,
+    pathEnv: process.env.PATH ?? "",
+  });
+  if (existsSync(plistPath)) {
+    const unloaded = await run(["launchctl", "unload", "-w", plistPath]);
+    log(
+      unloaded.ok
+        ? `unloaded previous ${GC_LAUNCHD_LABEL}`
+        : "previous plist present but not loaded (fine, replacing it)",
+    );
+  }
+  await Bun.write(plistPath, plist);
+  const loaded = await run(["launchctl", "load", "-w", plistPath]);
+  if (!loaded.ok) {
+    throw new CliError(
+      `launchctl load -w ${plistPath} failed: ${loaded.stderr.trim()}`,
+    );
+  }
+  log(`wrote  ${plistPath}`);
+  log(`loaded ${GC_LAUNCHD_LABEL} — one tick every ${intervalMin} min`);
+  log(`tick output: ${logPath}`);
+  return 0;
+}
+
+async function gcUninstall(): Promise<number> {
+  if (process.platform !== "darwin") {
+    throw new CliError(
+      "gc uninstall manages a macOS launchd agent; there is nothing to " +
+        "uninstall on this system.",
+    );
+  }
+  const plistPath = gcPlistPath(os.homedir());
+  if (!existsSync(plistPath)) {
+    log(`nothing installed (no ${plistPath})`);
+    return 0;
+  }
+  const unloaded = await run(["launchctl", "unload", "-w", plistPath]);
+  log(
+    unloaded.ok
+      ? `unloaded ${GC_LAUNCHD_LABEL}`
+      : `plist present but not loaded: ${unloaded.stderr.trim() || "(no detail)"}`,
+  );
+  await rm(plistPath, { force: true });
+  log(`removed ${plistPath}`);
+  return 0;
+}
+
+async function gcStatus(): Promise<number> {
+  const home = os.homedir();
+  const plistPath = gcPlistPath(home);
+  const installed = existsSync(plistPath);
+  const lines = renderGcStatus({
+    plistPath,
+    logPath: gcLaunchdLogPath(home),
+    installed,
+    intervalSeconds: installed
+      ? parsePlistInterval(await Bun.file(plistPath).text())
+      : null,
+  });
+  for (const line of lines) log(line);
   return 0;
 }

@@ -114,6 +114,9 @@ describe("parseArgs watch", () => {
     expect(() => parseArgs(["review", "--interval", "5", "--yes"])).toThrow(
       CliUsageError,
     );
+    expect(
+      parseArgs(["gc", "install", "--interval", "60"]).options.interval,
+    ).toBe(60);
   });
 
   test("--interval must be a positive integer", () => {

@@ -65,6 +65,20 @@ describe("parseArgs", () => {
     expect(parseArgs(["gc", "--repo", "/tmp/x"]).options.repo).toBe("/tmp/x");
   });
 
+  test("gc install, uninstall and status parse; --interval is install-only", () => {
+    expect(parseArgs(["gc", "install"]).options.gc).toBe("install");
+    expect(
+      parseArgs(["gc", "install", "--interval", "60"]).options.interval,
+    ).toBe(60);
+    expect(parseArgs(["gc", "uninstall"]).options.gc).toBe("uninstall");
+    expect(parseArgs(["gc", "status"]).options.gc).toBe("status");
+    expect(() => parseArgs(["gc", "--interval", "60"])).toThrow(CliUsageError);
+    expect(() => parseArgs(["gc", "install", "--dry-run"])).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseArgs(["install"])).toThrow(CliUsageError);
+  });
+
   // Both exist so a tree you cannot add a file to is still reviewable: an
   // in-tree-only gotchas file dirties the checkout (which the clean-tree gate
   // then rightly refuses), and an in-tree-only config silently disables the

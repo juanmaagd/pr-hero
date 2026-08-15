@@ -89,7 +89,9 @@ an open one from the recorded base tip. The review runs in a worktree at
 `~/.prhero/repos/<origin>/worktrees/pr-<n>` — your checkout, your index and your uncommitted work are
 never touched, and reviews run while you keep working. Two checkouts of the same GitHub repo share
 one worktree. Worktrees are kept and reused across re-runs until GC (`pr-hero gc`: merged/closed or
-72h idle); each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
+72h idle). That collector is not a background timer — it runs when you invoke it, at the end of
+`review --pr`, on a watcher tick, or on a schedule via `pr-hero gc install` (macOS launchd, default
+every 6h, no reviews, no `watch.json`). Each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
 codegraph daemon holds a socket in there).
 
 ## When to run it
@@ -145,6 +147,10 @@ attempts / cap / window), and the one (pr, head) a real tick would launch. `inst
 `--interval <min>` (default 15) and captures your current `PATH` (launchd's own PATH knows nothing
 of `bun`, `gh`, `claude` or `codegraph`) — re-run `install` after moving tools around;
 `watch uninstall` stops the schedule.
+
+Worktree GC is a **separate** agent: `pr-hero gc install` (default every 6 hours, `--interval` in
+minutes). It runs `pr-hero gc` — no reviews, no `watch.json`, no daily cap. Preview with
+`pr-hero gc --dry-run`; `gc status` / `gc uninstall` match the watcher verbs.
 
 ### The underlying file — `~/.prhero/watch.json`
 
