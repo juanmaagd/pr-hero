@@ -66,7 +66,9 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero review` | Review the checked-out branch against the merge base with `--base`. Requires a clean tree sitting on `--head` (default `HEAD`). |
 | `pr-hero review --pr [n]` | Review a GitHub PR: by number, or — bare, no number — the PR that belongs to the current branch (errors loudly if it has none). Resolves the range through `gh`, runs in a detached worktree with its own codegraph index, then compares the result against Greptile's comment on that PR. |
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
-| `pr-hero ledger` | Accumulate every run's `comparison.json` into one markdown ledger — the head-to-head buckets as a rate. One PR, one vote (only its latest run counts). |
+| `pr-hero post --pr <n> --from <run-dir>` | Replay-publish a previous run's findings onto the PR (same plan as `--pr --post`). `--dry-run` previews at $0. |
+| `pr-hero triage --pr <n> --from <run-dir>` | Read reply threads and bind triage markers onto that run's `comparison.json` ledger rows. |
+| `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N --tag <tag> --body-file <path>` | Post one triage reply. The driver picks the parent from the posted `<!-- pr-hero-finding` marker (never path/line), renders the marker + badge, posts, and resolves the inline review thread. `--body-file` is reasoning only. |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. |
 | `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
 | `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |

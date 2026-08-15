@@ -9,7 +9,9 @@ import {
 } from "../src/pr-preflight";
 import {
   parseTriageMarker,
+  renderTriageReplyBody,
   TRIAGE_MARKER_PREFIX,
+  triageBadge,
   triageMarker,
 } from "../src/triage";
 
@@ -118,13 +120,32 @@ describe("triageMarker + parseTriageMarker", () => {
     expect(parseTriageMarker(inconclusive)?.verdict).toBe("inconclusive");
   });
 
-  // The rule that stops defer from decaying into a dismiss with a better
-  // name (ROADMAP B6b): the builder refuses to emit a deferred marker with
-  // no destination at all.
-  test("triageMarker throws for deferred with no issue number", () => {
+  test("round-trips deferred without an issue number", () => {
+    const marker = triageMarker({
+      tag: "deferred",
+      headSha: HEAD,
+      actor: "agent",
+      verdict: "upheld",
+    });
+    expect(parseTriageMarker(marker)).toEqual({
+      tag: "deferred",
+      headSha: HEAD,
+      actor: "agent",
+      verdict: "upheld",
+    });
+    expect(marker).not.toContain("issue=");
+  });
+
+  test("triageMarker throws for deferred with a non-positive issue", () => {
     expect(() =>
-      triageMarker({ tag: "deferred", headSha: HEAD, actor: "agent" }),
-    ).toThrow(/deferred requires an issue/);
+      triageMarker({
+        tag: "deferred",
+        headSha: HEAD,
+        actor: "agent",
+        issue: 0,
+        verdict: "upheld",
+      }),
+    ).toThrow(/positive integer/);
   });
 
   // The same two-way guard, now for `verdict`: dismissed, deferred, and
@@ -139,7 +160,6 @@ describe("triageMarker + parseTriageMarker", () => {
         tag: "deferred",
         headSha: HEAD,
         actor: "agent",
-        issue: 482,
       }),
     ).toThrow(/deferred requires a verdict/);
     expect(() =>
@@ -195,15 +215,14 @@ describe("triageMarker + parseTriageMarker", () => {
     expect(parseTriageMarker(malformed)).toBeNull();
   });
 
-  // The parser's half of the same rule: even a hand-written or corrupted
-  // deferred marker with no `issue=` field must fail to parse rather than
-  // be accepted as some other tag's shape.
-  // `verdict=upheld` is present in each of these so the null result is
-  // attributable to the issue guard being tested, not the verdict guard
-  // above (which would also fail these markers for an unrelated reason).
-  test("a deferred marker with no issue field does not parse", () => {
-    const malformed = `${TRIAGE_MARKER_PREFIX}tag=deferred head=${HEAD} actor=agent verdict=upheld -->`;
-    expect(parseTriageMarker(malformed)).toBeNull();
+  test("a deferred marker with no issue field parses as reasoning-only", () => {
+    const marker = `${TRIAGE_MARKER_PREFIX}tag=deferred head=${HEAD} actor=agent verdict=upheld -->`;
+    expect(parseTriageMarker(marker)).toEqual({
+      tag: "deferred",
+      headSha: HEAD,
+      actor: "agent",
+      verdict: "upheld",
+    });
   });
 
   test("a deferred marker with a non-numeric issue does not parse", () => {
@@ -271,5 +290,72 @@ describe("triageMarker + parseTriageMarker", () => {
     });
     expect(parseTriageMarker(`see above:\n${marker}`)).toBeNull();
     expect(parseTriageMarker(` ${marker} leading space`)).toBeNull();
+  });
+});
+
+describe("triageBadge + renderTriageReplyBody", () => {
+  test("applied badge has no adjudicator clause", () => {
+    expect(triageBadge({ tag: "applied", headSha: HEAD, actor: "agent" })).toBe(
+      "✅ **APPLIED** · agent",
+    );
+  });
+
+  test("dismissed badge names the adjudicator verdict", () => {
+    expect(
+      triageBadge({
+        tag: "dismissed",
+        headSha: HEAD,
+        actor: "agent",
+        verdict: "upheld",
+      }),
+    ).toBe("❌ **DISMISSED** · agent · adjudicator: upheld");
+  });
+
+  test("deferred badge omits the issue when none was supplied", () => {
+    expect(
+      triageBadge({
+        tag: "deferred",
+        headSha: HEAD,
+        actor: "agent",
+        verdict: "upheld",
+      }),
+    ).toBe("📋 **DEFERRED** · agent · adjudicator: upheld");
+  });
+
+  test("deferred badge appends the issue when supplied", () => {
+    expect(
+      triageBadge({
+        tag: "deferred",
+        headSha: HEAD,
+        actor: "agent",
+        issue: 482,
+        verdict: "upheld",
+      }),
+    ).toBe("📋 **DEFERRED** · agent · adjudicator: upheld · #482");
+  });
+
+  test("renderTriageReplyBody puts marker, badge, then reasoning", () => {
+    const body = renderTriageReplyBody(
+      { tag: "applied", headSha: HEAD, actor: "agent" },
+      "Fixed in 3f9a2c1.",
+    );
+    const marker = triageMarker({
+      tag: "applied",
+      headSha: HEAD,
+      actor: "agent",
+    });
+    expect(body.startsWith(`${marker}\n`)).toBe(true);
+    expect(body).toContain("✅ **APPLIED** · agent");
+    expect(body).toContain("Fixed in 3f9a2c1.");
+    expect(parseTriageMarker(body)?.tag).toBe("applied");
+  });
+
+  test("blank reasoning still emits marker and badge", () => {
+    const body = renderTriageReplyBody(
+      { tag: "applied", headSha: HEAD, actor: "agent" },
+      "   \n",
+    );
+    expect(body).toContain("✅ **APPLIED** · agent");
+    expect(body.endsWith("\n")).toBe(true);
   });
 });

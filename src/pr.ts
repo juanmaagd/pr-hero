@@ -576,10 +576,10 @@ export async function fetchPrComments(
 // read two different comment streams the same way, so a bug in one parsing
 // discipline is not a bug the other could hide.
 //
-// `in_reply_to_id` is unused by this change (6b/6c, not yet built) but costs
-// nothing to project alongside the fields inline.ts's matcher actually
-// needs (`path`, `line`) and the ones a human reading a raw fetch would
-// expect (`original_line`, GitHub's own "where this used to point" field).
+// `in_reply_to_id` is what `pr-hero triage reply` uses to bind a triage
+// response to its finding thread (W1). The finder still only needs
+// `path`/`line` plus the marker; projecting the reply-to id here costs
+// nothing and means the bind path does not make a second fetch shape.
 export interface PrReviewComment {
   id: number;
   user: string;
@@ -841,4 +841,245 @@ export async function postIssueComment(
     );
   }
   return commentId;
+}
+
+function parsePostedCommentId(stdout: string, what: string): number {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    parsed = null;
+  }
+  const commentId = (parsed as { id?: unknown } | null)?.id;
+  if (typeof commentId !== "number") {
+    throw new CliError(
+      `gh api posted a ${what} but returned no comment id: ` +
+        stdout.slice(0, 120),
+    );
+  }
+  return commentId;
+}
+
+// Inline triage reply: POST pulls/<n>/comments with in_reply_to set to the
+// finding's own review-comment id. The parent id is resolved by the caller
+// from fetchPostedFindingComments + matchPostedFindingExact — this function
+// never looks at path/line. Body on stdin (ARG_MAX / no-shell, same as
+// postIssueComment).
+export async function postReviewCommentReply(input: {
+  operatorRoot: string;
+  pr: number;
+  inReplyTo: number;
+  body: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const result = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/pulls/${input.pr}/comments`,
+      "-F",
+      "body=@-",
+      "-F",
+      `in_reply_to=${input.inReplyTo}`,
+    ],
+    input.body,
+    input.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api (post triage review reply) failed: ${result.stderr.trim()}`,
+    );
+  }
+  return parsePostedCommentId(result.stdout, "triage review reply");
+}
+
+// Un-anchorable finding (#17 channel): GitHub issue comments have no
+// native thread, so the reply is another top-level issue comment. The
+// caller puts the permalink in the body; this function does not guess one.
+export async function postIssueTriageComment(input: {
+  operatorRoot: string;
+  pr: number;
+  body: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<number> {
+  const result = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "--method",
+      "POST",
+      `repos/{owner}/{repo}/issues/${input.pr}/comments`,
+      "-F",
+      "body=@-",
+    ],
+    input.body,
+    input.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(
+      `gh api (post triage issue comment) failed: ${result.stderr.trim()}`,
+    );
+  }
+  return parsePostedCommentId(result.stdout, "triage issue comment");
+}
+
+export type ResolveThreadOutcome =
+  | "resolved"
+  | "already-resolved"
+  | "not-found";
+
+const REVIEW_THREADS_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){" +
+  "repository(owner:$owner,name:$name){pullRequest(number:$number){" +
+  "reviewThreads(first:100){nodes{id isResolved comments(first:1){" +
+  "nodes{fullDatabaseId}}}}}}";
+
+const RESOLVE_THREAD_MUTATION =
+  "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){" +
+  "thread{isResolved}}}";
+
+interface RepoOwnerName {
+  owner: string;
+  name: string;
+}
+
+async function ghRepoOwnerName(
+  operatorRoot: string,
+  spawnFn?: typeof Bun.spawn,
+): Promise<RepoOwnerName> {
+  const result = await gh(
+    operatorRoot,
+    ["repo", "view", "--json", "owner,name"],
+    undefined,
+    spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(`gh repo view failed: ${result.stderr.trim()}`);
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    parsed = null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new CliError(
+      "gh repo view --json owner,name returned invalid JSON: " +
+        result.stdout.slice(0, 120),
+    );
+  }
+  const record = parsed as { name?: unknown; owner?: unknown };
+  const name = record.name;
+  const owner =
+    typeof record.owner === "object" && record.owner !== null
+      ? (record.owner as { login?: unknown }).login
+      : undefined;
+  if (typeof name !== "string" || name.length === 0) {
+    throw new CliError("gh repo view returned no repository name");
+  }
+  if (typeof owner !== "string" || owner.length === 0) {
+    throw new CliError("gh repo view returned no repository owner");
+  }
+  return { owner, name };
+}
+
+function graphqlDatabaseId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return null;
+}
+
+interface GraphQlThread {
+  id: string;
+  isResolved: boolean;
+  comments: { nodes: { fullDatabaseId: unknown }[] };
+}
+
+function parseReviewThreads(stdout: string): GraphQlThread[] {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      "gh api graphql (reviewThreads) returned invalid JSON: " +
+        stdout.slice(0, 120),
+    );
+  }
+  const nodes = (
+    parsed as {
+      data?: {
+        repository?: {
+          pullRequest?: { reviewThreads?: { nodes?: unknown } };
+        };
+      };
+    } | null
+  )?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new CliError(
+      "gh api graphql (reviewThreads) returned no thread list",
+    );
+  }
+  return nodes as GraphQlThread[];
+}
+
+// Map a REST review-comment id to its GraphQL review thread and resolve it.
+// Idempotent: an already-resolved thread is a skip, not an error. A comment
+// with no thread (deleted, or outside the first 100 threads) is not-found
+// — the caller logs and still treats the reply post as success.
+export async function resolveReviewThreadForComment(input: {
+  operatorRoot: string;
+  pr: number;
+  commentId: number;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<ResolveThreadOutcome> {
+  const repo = await ghRepoOwnerName(input.operatorRoot, input.spawnFn);
+  const listed = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=${REVIEW_THREADS_QUERY}`,
+      "-f",
+      `owner=${repo.owner}`,
+      "-f",
+      `name=${repo.name}`,
+      "-F",
+      `number=${input.pr}`,
+    ],
+    undefined,
+    input.spawnFn,
+  );
+  if (!listed.ok) {
+    throw new CliError(
+      `gh api graphql (reviewThreads) failed: ${listed.stderr.trim()}`,
+    );
+  }
+  const thread = parseReviewThreads(listed.stdout).find((candidate) => {
+    const first = candidate.comments?.nodes?.[0]?.fullDatabaseId;
+    return graphqlDatabaseId(first) === input.commentId;
+  });
+  if (thread === undefined) return "not-found";
+  if (thread.isResolved) return "already-resolved";
+  const mutated = await gh(
+    input.operatorRoot,
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=${RESOLVE_THREAD_MUTATION}`,
+      "-f",
+      `id=${thread.id}`,
+    ],
+    undefined,
+    input.spawnFn,
+  );
+  if (!mutated.ok) {
+    throw new CliError(
+      `gh api graphql (resolveReviewThread) failed: ${mutated.stderr.trim()}`,
+    );
+  }
+  return "resolved";
 }

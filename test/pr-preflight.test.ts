@@ -362,6 +362,147 @@ describe("parseArgs triage command", () => {
   });
 });
 
+describe("parseArgs triage reply", () => {
+  const required = [
+    "triage",
+    "reply",
+    "--pr",
+    "5",
+    "--from",
+    "/runs/x",
+    "--finding",
+    "F001",
+    "--tag",
+    "applied",
+    "--body-file",
+    "/tmp/reason.md",
+  ];
+
+  test("parses the reply sub-word and its flags", () => {
+    const { command, options } = parseArgs(required);
+    expect(command).toBe("triage");
+    expect(options.triage).toBe("reply");
+    expect(options.finding).toBe("F001");
+    expect(options.tag).toBe("applied");
+    expect(options.bodyFile).toBe("/tmp/reason.md");
+  });
+
+  test("requires --finding, --tag and --body-file", () => {
+    expect(() =>
+      parseArgs(["triage", "reply", "--pr", "5", "--from", "/runs/x"]),
+    ).toThrow(/--finding/);
+    expect(() =>
+      parseArgs([
+        "triage",
+        "reply",
+        "--pr",
+        "5",
+        "--from",
+        "/runs/x",
+        "--finding",
+        "F001",
+      ]),
+    ).toThrow(/--tag/);
+    expect(() =>
+      parseArgs([
+        "triage",
+        "reply",
+        "--pr",
+        "5",
+        "--from",
+        "/runs/x",
+        "--finding",
+        "F001",
+        "--tag",
+        "applied",
+      ]),
+    ).toThrow(/--body-file/);
+  });
+
+  test("dismissed requires --verdict; applied forbids it", () => {
+    expect(() =>
+      parseArgs([
+        "triage",
+        "reply",
+        "--pr",
+        "5",
+        "--from",
+        "/runs/x",
+        "--finding",
+        "F001",
+        "--tag",
+        "dismissed",
+        "--body-file",
+        "/tmp/r.md",
+      ]),
+    ).toThrow(/--verdict/);
+    expect(() => parseArgs([...required, "--verdict", "upheld"])).toThrow(
+      /applied cannot take --verdict/,
+    );
+  });
+
+  test("deferred does not require --issue", () => {
+    const { options } = parseArgs([
+      "triage",
+      "reply",
+      "--pr",
+      "5",
+      "--from",
+      "/runs/x",
+      "--finding",
+      "F001",
+      "--tag",
+      "deferred",
+      "--verdict",
+      "upheld",
+      "--body-file",
+      "/tmp/r.md",
+    ]);
+    expect(options.tag).toBe("deferred");
+    expect(options.issue).toBeUndefined();
+    expect(options.verdict).toBe("upheld");
+  });
+
+  test("--issue is rejected on non-deferred tags", () => {
+    expect(() => parseArgs([...required, "--issue", "12"])).toThrow(
+      /--issue only applies to --tag deferred/,
+    );
+  });
+
+  test("reply flags are rejected on the bind-only triage verb", () => {
+    expect(() =>
+      parseArgs([
+        "triage",
+        "--pr",
+        "5",
+        "--from",
+        "/runs/x",
+        "--finding",
+        "F001",
+      ]),
+    ).toThrow(/--finding only applies to triage reply/);
+  });
+
+  test("an unknown tag fails loud", () => {
+    expect(() =>
+      parseArgs([
+        "triage",
+        "reply",
+        "--pr",
+        "5",
+        "--from",
+        "/runs/x",
+        "--finding",
+        "F001",
+        "--tag",
+        "wontfix",
+        "--body-file",
+        "/tmp/r.md",
+      ]),
+    ).toThrow(/--tag must be/);
+  });
+});
+
 describe("prCommentMarker", () => {
   const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
 

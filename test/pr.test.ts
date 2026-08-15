@@ -26,7 +26,10 @@ import {
   fetchPostedFindingComments,
   fetchPrReviewComments,
   postIssueComment,
+  postIssueTriageComment,
   postPrReview,
+  postReviewCommentReply,
+  resolveReviewThreadForComment,
 } from "../src/pr";
 import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
 import { renderIssueFindingComment } from "../src/report";
@@ -54,6 +57,7 @@ interface ScriptEntry {
 interface RecordedCall {
   argv: string[];
   cwd: string | undefined;
+  stdin: string | undefined;
 }
 
 function argvContains(argv: string[], tokens: string[]): boolean {
@@ -67,8 +71,14 @@ function makeFakeGh(script: ScriptEntry[]): {
 } {
   const calls: RecordedCall[] = [];
   const encoder = new TextEncoder();
-  const spawnFn = ((argv: string[], opts?: { cwd?: string }) => {
-    calls.push({ argv, cwd: opts?.cwd });
+  const decoder = new TextDecoder();
+  const spawnFn = ((
+    argv: string[],
+    opts?: { cwd?: string; stdin?: Uint8Array },
+  ) => {
+    const stdin =
+      opts?.stdin === undefined ? undefined : decoder.decode(opts.stdin);
+    calls.push({ argv, cwd: opts?.cwd, stdin });
     const entry = script.find((s) => argvContains(argv, s.match));
     const scripted = entry?.response ?? { stdout: "", exitCode: 0 };
     const stream = (text: string) =>
@@ -712,5 +722,172 @@ describe("postIssueComment", () => {
         spawnFn,
       ),
     ).rejects.toThrow(/post finding issue comment/);
+  });
+});
+
+describe("postReviewCommentReply", () => {
+  test("POSTs in_reply_to as a field and the body on stdin", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["--method", "POST", "pulls/42/comments"],
+        response: { stdout: JSON.stringify({ id: 77 }) },
+      },
+    ]);
+    const id = await postReviewCommentReply({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      inReplyTo: 22,
+      body: "marker\n\nbadge\n\nfixed",
+      spawnFn,
+    });
+    expect(id).toBe(77);
+    const call = calls[0];
+    expect(call?.argv.join(" ")).toContain("in_reply_to=22");
+    expect(call?.argv.join(" ")).toContain("body=@-");
+    expect(call?.stdin).toBe("marker\n\nbadge\n\nfixed");
+    expect(call?.argv.join(" ")).not.toContain("fixed");
+  });
+});
+
+describe("postIssueTriageComment", () => {
+  test("POSTs the body on stdin to the issue-comments endpoint", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["--method", "POST", "issues/42/comments"],
+        response: { stdout: JSON.stringify({ id: 88 }) },
+      },
+    ]);
+    const id = await postIssueTriageComment({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      body: "triage issue reply",
+      spawnFn,
+    });
+    expect(id).toBe(88);
+    expect(calls[0]?.stdin).toBe("triage issue reply");
+  });
+});
+
+describe("resolveReviewThreadForComment", () => {
+  const repoView = {
+    match: ["repo", "view", "--json", "owner,name"],
+    response: {
+      stdout: JSON.stringify({
+        name: "musive",
+        owner: { login: "MusiveTech" },
+      }),
+    },
+  };
+
+  test("resolves an unresolved thread whose first comment matches the REST id", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "PRRT_family",
+                        isResolved: false,
+                        comments: { nodes: [{ fullDatabaseId: 22 }] },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+      {
+        match: ["graphql", "resolveReviewThread"],
+        response: {
+          stdout: JSON.stringify({
+            data: { resolveReviewThread: { thread: { isResolved: true } } },
+          }),
+        },
+      },
+    ]);
+    const outcome = await resolveReviewThreadForComment({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      commentId: 22,
+      spawnFn,
+    });
+    expect(outcome).toBe("resolved");
+    expect(
+      calls.some((call) => call.argv.join(" ").includes("resolveReviewThread")),
+    ).toBe(true);
+  });
+
+  test("skips an already-resolved thread without mutating", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        id: "PRRT_family",
+                        isResolved: true,
+                        comments: { nodes: [{ fullDatabaseId: "22" }] },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    const outcome = await resolveReviewThreadForComment({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      commentId: 22,
+      spawnFn,
+    });
+    expect(outcome).toBe("already-resolved");
+    expect(
+      calls.some((call) => call.argv.join(" ").includes("resolveReviewThread")),
+    ).toBe(false);
+  });
+
+  test("returns not-found when no thread's first comment matches", async () => {
+    const { spawnFn } = makeFakeGh([
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: { nodes: [] },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    await expect(
+      resolveReviewThreadForComment({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        commentId: 22,
+        spawnFn,
+      }),
+    ).resolves.toBe("not-found");
   });
 });
