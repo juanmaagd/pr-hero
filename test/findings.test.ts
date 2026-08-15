@@ -6,6 +6,7 @@ import {
   type Finding,
   type FindingsDocument,
   mergeRunEnvelope,
+  type RunSummary,
   SCHEMA_VERSION,
   validateFindingsDocument,
 } from "../src/findings";
@@ -55,6 +56,12 @@ function baseDocument(findings: Finding[] = [baseFinding()]): FindingsDocument {
     debug: { refuted: [] },
   };
 }
+
+const summary: RunSummary = {
+  prose: "This change improves upload state handling.",
+  score: 4,
+  score_reason: "The change is focused and the main behavior is covered.",
+};
 
 describe("findings schema round-trip", () => {
   test("validates a well-formed document unchanged", () => {
@@ -111,6 +118,16 @@ describe("findings schema round-trip", () => {
     const doc = { ...baseDocument(), sessionFailed: "true" };
     expect(() => validateFindingsDocument(doc)).toThrow();
   });
+
+  test("accepts an optional summary and validates it", () => {
+    const doc = { ...baseDocument(), summary };
+    expect(validateFindingsDocument(doc)).toEqual(doc);
+  });
+
+  test("rejects an invalid optional summary", () => {
+    const doc = { ...baseDocument(), summary: { ...summary, score: 6 } };
+    expect(() => validateFindingsDocument(doc)).toThrow();
+  });
 });
 
 describe("mergeRunEnvelope — sessionFailed persistence", () => {
@@ -131,12 +148,13 @@ describe("mergeRunEnvelope — sessionFailed persistence", () => {
       cost_usd_est: 0.5,
     },
   };
-  function skillOutput(runStatus: "complete" | "partial") {
+  function skillOutput(runStatus: "complete" | "partial", withSummary = false) {
     return {
       findings: [],
       debug: { refuted: [] },
       parity_hunter_fired: false,
       run_status: runStatus,
+      ...(withSummary ? { summary } : {}),
     };
   }
 
@@ -170,6 +188,17 @@ describe("mergeRunEnvelope — sessionFailed persistence", () => {
     });
     expect(() => validateFindingsDocument(doc)).not.toThrow();
     expect(doc.sessionFailed).toBe(false);
+    expect("summary" in doc).toBe(false);
+  });
+
+  test("summary is copied from skill output without changing run status", () => {
+    const doc = mergeRunEnvelope({
+      ...envelopeArgs,
+      skillOutput: skillOutput("complete", true),
+      sessionFailed: false,
+    });
+    expect(doc.summary).toEqual(summary);
+    expect(doc.run_status).toBe("complete");
   });
 });
 

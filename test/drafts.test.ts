@@ -4,7 +4,9 @@ import {
   extractJsonObject,
   validateHunterDraft,
   validateRefuterResult,
+  validateSummary,
 } from "../src/drafts";
+import type { RunSummary } from "../src/findings";
 
 function draft(overrides: Partial<DraftFinding> = {}): DraftFinding {
   return {
@@ -21,6 +23,15 @@ function draft(overrides: Partial<DraftFinding> = {}): DraftFinding {
     hops_used: 1,
     hop_trail: [],
     dedupe_key: "src/upload.ts:abortUpload:1",
+    ...overrides,
+  };
+}
+
+function summary(overrides: Partial<RunSummary> = {}): RunSummary {
+  return {
+    prose: "This change improves upload state handling.",
+    score: 4,
+    score_reason: "The change is focused and the main behavior is covered.",
     ...overrides,
   };
 }
@@ -75,6 +86,57 @@ describe("validateHunterDraft", () => {
     const { dedupe_key: _key, ...withoutKey } = draft();
     expect(() => validateHunterDraft({ findings: [withoutKey] })).toThrow();
     expect(() => validateHunterDraft({})).toThrow();
+  });
+});
+
+describe("validateSummary", () => {
+  test("accepts a well-formed summary", () => {
+    expect(validateSummary(summary())).toEqual(summary());
+  });
+
+  test("accepts inclusive length limits and score endpoints", () => {
+    const candidate = summary({
+      prose: "x".repeat(1200),
+      score: 1,
+      score_reason: "x".repeat(400),
+    });
+    expect(validateSummary(candidate)).toEqual(candidate);
+    expect(validateSummary({ ...candidate, score: 5 })).toEqual({
+      ...candidate,
+      score: 5,
+    });
+  });
+
+  test("rejects empty prose and score reason", () => {
+    expect(() => validateSummary(summary({ prose: "" }))).toThrow();
+    expect(() => validateSummary(summary({ score_reason: "" }))).toThrow();
+  });
+
+  test("rejects prose over 1200 characters", () => {
+    expect(() =>
+      validateSummary(summary({ prose: "x".repeat(1201) })),
+    ).toThrow();
+  });
+
+  test("rejects score reasons over 400 characters", () => {
+    expect(() =>
+      validateSummary(summary({ score_reason: "x".repeat(401) })),
+    ).toThrow();
+  });
+
+  test("rejects non-integer and out-of-range scores", () => {
+    expect(() => validateSummary(summary({ score: 2.5 }))).toThrow();
+    expect(() => validateSummary(summary({ score: 0 }))).toThrow();
+    expect(() => validateSummary(summary({ score: 6 }))).toThrow();
+  });
+
+  test("rejects HTML comment markers in either string", () => {
+    expect(() =>
+      validateSummary(summary({ prose: "before <!-- after" })),
+    ).toThrow();
+    expect(() =>
+      validateSummary(summary({ score_reason: "before --> after" })),
+    ).toThrow();
   });
 });
 

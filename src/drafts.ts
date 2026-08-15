@@ -8,6 +8,7 @@ import type {
   EvidenceClass,
   Finding,
   Hunter,
+  RunSummary,
   Severity,
 } from "./findings";
 
@@ -96,6 +97,48 @@ const REFUTER_OUTCOMES: RefuterOutcome[] = [
   "inconclusive",
   "downgraded-latent",
 ];
+
+export function validateSummary(candidate: unknown): RunSummary {
+  must(
+    typeof candidate === "object" && candidate !== null,
+    "summary must be an object",
+  );
+  const summary = candidate as Record<string, unknown>;
+  must(
+    typeof summary.prose === "string" && summary.prose.length > 0,
+    "summary.prose required",
+  );
+  must(
+    typeof summary.prose === "string" && summary.prose.length <= 1200,
+    "summary.prose must be at most 1200 characters",
+  );
+  must(
+    typeof summary.score === "number" &&
+      Number.isInteger(summary.score) &&
+      summary.score >= 1 &&
+      summary.score <= 5,
+    "summary.score must be an integer 1-5",
+  );
+  must(
+    typeof summary.score_reason === "string" && summary.score_reason.length > 0,
+    "summary.score_reason required",
+  );
+  must(
+    typeof summary.score_reason === "string" &&
+      summary.score_reason.length <= 400,
+    "summary.score_reason must be at most 400 characters",
+  );
+  const prose = summary.prose as string;
+  const scoreReason = summary.score_reason as string;
+  must(
+    !prose.includes("<!--") &&
+      !prose.includes("-->") &&
+      !scoreReason.includes("<!--") &&
+      !scoreReason.includes("-->"),
+    "summary strings must not contain HTML comment markers",
+  );
+  return summary as unknown as RunSummary;
+}
 
 export function validateDraftFinding(
   candidate: unknown,
