@@ -107,6 +107,12 @@ export interface PromptSet {
   sha256: string; // fingerprint over the concatenated agent files
 }
 
+export interface RunSummary {
+  prose: string;
+  score: number;
+  score_reason: string;
+}
+
 export interface FindingsDocument {
   schema_version: string;
   pr: number;
@@ -140,6 +146,7 @@ export interface FindingsDocument {
   // "unknown", never "false" — see `runPostCommand`'s guard in cli.ts for
   // the back-compat fallback this enables.
   sessionFailed?: boolean;
+  summary?: RunSummary;
   telemetry: Telemetry;
   findings: Finding[];
   debug: {
@@ -161,6 +168,7 @@ export interface SkillOutput {
   };
   parity_hunter_fired: boolean;
   run_status: RunStatus;
+  summary?: RunSummary;
 }
 
 const SEVERITIES: Severity[] = ["BLOCKER", "CRITICAL", "WARNING", "SUGGESTION"];
@@ -293,6 +301,47 @@ export function validateFindingsDocument(candidate: unknown): FindingsDocument {
     d.sessionFailed === undefined || typeof d.sessionFailed === "boolean",
     "sessionFailed must be a boolean when present",
   );
+  if (d.summary !== undefined) {
+    must(
+      typeof d.summary === "object" && d.summary !== null,
+      "summary must be an object when present",
+    );
+    const summary = d.summary as Record<string, unknown>;
+    must(
+      typeof summary.prose === "string" && summary.prose.length > 0,
+      "summary.prose required",
+    );
+    must(
+      typeof summary.prose === "string" && summary.prose.length <= 1200,
+      "summary.prose must be at most 1200 characters",
+    );
+    must(
+      typeof summary.score === "number" &&
+        Number.isInteger(summary.score) &&
+        summary.score >= 1 &&
+        summary.score <= 5,
+      "summary.score must be an integer 1-5",
+    );
+    must(
+      typeof summary.score_reason === "string" &&
+        summary.score_reason.length > 0,
+      "summary.score_reason required",
+    );
+    must(
+      typeof summary.score_reason === "string" &&
+        summary.score_reason.length <= 400,
+      "summary.score_reason must be at most 400 characters",
+    );
+    const prose = summary.prose as string;
+    const scoreReason = summary.score_reason as string;
+    must(
+      !prose.includes("<!--") &&
+        !prose.includes("-->") &&
+        !scoreReason.includes("<!--") &&
+        !scoreReason.includes("-->"),
+      "summary strings must not contain HTML comment markers",
+    );
+  }
   must(
     typeof d.telemetry === "object" && d.telemetry !== null,
     "telemetry required",
@@ -361,6 +410,9 @@ export function mergeRunEnvelope(params: {
     parity_hunter_fired: params.skillOutput.parity_hunter_fired,
     run_status,
     sessionFailed: params.sessionFailed,
+    ...(params.skillOutput.summary === undefined
+      ? {}
+      : { summary: params.skillOutput.summary }),
     telemetry: params.telemetry,
     findings: params.skillOutput.findings,
     debug: params.skillOutput.debug,
