@@ -333,8 +333,10 @@ What is still manual, in the order it should be closed:
    **BUILT 2026-08-10** (`src/pr.ts` I/O + `src/pr-preflight.ts` pure decisions). The design's spine is
    two roots, deliberately assigned: the OPERATOR checkout (gh + git cwd, `.prhero/` trust anchor, run-dir
    anchor; its dirtiness is irrelevant and both local gates are skipped there on purpose) and the REVIEW
-   worktree (`<repo-parent>/<basename>-worktrees/pr-<n>`, pipeline cwd, owns its codegraph index — the
-   availability check runs against IT, or hunters would ride another checkout's index). MERGED resolves
+   worktree (`~/.prhero/repos/<origin>/worktrees/pr-<n>`, pipeline cwd, owns its codegraph index — the
+   availability check runs against IT, or hunters would ride another checkout's index). Two operator
+   checkouts of the same origin share that tree; `git worktree add` runs against the registered
+   git-dir owner (W3 / #24). MERGED resolves
    base to `mergeCommit^1` (base as it was when the PR landed — squash/rebase/merge all converge at the
    fork point via the existing merge-base default); OPEN/CLOSED use `baseRefOid`. The fetch rides
    `refs/pull/<n>/head` because a merged PR's branch is usually deleted. `--dry-run` is fetch-free and

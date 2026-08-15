@@ -9,6 +9,7 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
+import { prheroLayout } from "./home-preflight";
 import { PR_COMMENT_MARKER_PREFIX } from "./pr-preflight";
 import { CliUsageError, isFullCommitId, type NumstatFile } from "./preflight";
 import { DEFAULT_SIZE_GATE } from "./size-gate";
@@ -19,6 +20,7 @@ import { DEFAULT_SIZE_GATE } from "./size-gate";
 
 export interface PrheroHomePaths {
   dir: string;
+  reposDir: string;
   configPath: string;
   // The structured event log. It is also the daily-cap COUNTER (see
   // countLaunchedToday), which is why launchd's process stdout goes to the
@@ -30,13 +32,9 @@ export interface PrheroHomePaths {
 }
 
 export function prheroHomePaths(home: string): PrheroHomePaths {
-  const dir = path.join(home, ".prhero");
+  const layout = prheroLayout(home);
   return {
-    dir,
-    configPath: path.join(dir, "watch.json"),
-    logPath: path.join(dir, "watch.log"),
-    lockPath: path.join(dir, "watch.lock"),
-    launchdLogPath: path.join(dir, "launchd.log"),
+    ...layout,
     plistPath: path.join(
       home,
       "Library",

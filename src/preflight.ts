@@ -89,8 +89,8 @@ export interface CliOptions {
   // enforces it): a comment needs a PR to land on.
   post: boolean;
   // ledger only (ROADMAP B4): the runs root to scan for comparison.json
-  // files. Unset means defaultRunRoot(repoRoot) — the shell resolves it,
-  // because the default needs the repo toplevel and parseArgs stays pure.
+  // files. Unset means defaultRunRoot(home, repoId) — the shell resolves it,
+  // because the default needs origin + ~/.prhero and parseArgs stays pure.
   runs?: string;
   // post/triage only (ROADMAP B6/B6c): the run dir to read findings.json +
   // diff.patch (post) or comparison.json (triage) from, instead of
@@ -210,10 +210,10 @@ Options:
                       agents_dir (relative paths resolve against the config
                       file), then PRHERO_AGENTS_DIR
   --out <dir>         Run directory; must live OUTSIDE the reviewed repo
-                      (default: <repo-parent>/<repo>-prhero-runs/<sha>-<n>).
+                      (default: ~/.prhero/repos/<origin>/runs/<sha>-<n>).
                       For ledger: the file to write instead of stdout
   --runs <dir>        ledger only: the runs root to scan for comparison.json
-                      files (default: <repo-parent>/<repo>-prhero-runs)
+                      files (default: ~/.prhero/repos/<origin>/runs)
   --from <dir>        post/triage only: the run dir to read findings.json and
                       diff.patch (post) or comparison.json (triage) from
                       (required). triage reply also reads findings.json from
@@ -1015,15 +1015,6 @@ export function parseNumstat(raw: string): NumstatDiffStat {
 function countField(field: string | undefined): number {
   const parsed = Number(field);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-// Run artifacts NEVER live inside the reviewed tree. The system prompts, the
-// diff, and every draft would otherwise show up in the hunters' own Grep and
-// Glob results — a review that reads its own prompts is contaminated, and the
-// contamination is invisible in the output.
-export function defaultRunRoot(repoRoot: string): string {
-  const parent = path.dirname(repoRoot);
-  return path.join(parent, `${path.basename(repoRoot)}-prhero-runs`);
 }
 
 export function runDirCandidate(

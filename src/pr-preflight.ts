@@ -5,8 +5,10 @@
 //
 // PR mode splits "the repo" into two roots, and every decision below names
 // the one it serves:
-//   - the OPERATOR root: the --repo checkout. Runs every git and gh call,
-//     owns .prhero/ resolution, anchors the run-dir default. Never reviewed.
+//   - the OPERATOR root: the --repo checkout. Owns .prhero/ trust
+//     (config+gotchas) and gh. Never reviewed. Worktree add/fetch and the
+//     default run dir now hang off the global ~/.prhero/ home (W3 / #24),
+//     keyed by origin, with one git-dir owner per remote.
 //   - the REVIEW root: a detached worktree at the PR's head. The pipeline's
 //     cwd, the tree the codegraph index describes. Never trusted for config.
 
@@ -203,19 +205,6 @@ function readMergeCommitOid(record: Record<string, unknown>): string | null {
     );
   }
   return oid;
-}
-
-// The worktree is a SIBLING of the operator checkout, mirroring
-// defaultRunRoot's naming: review trees, like run artifacts, live next to
-// the repo and never inside it. One directory per PR, reused across
-// re-reviews (the ensure step in pr.ts recreates it when the head moved).
-export function prWorktreePath(operatorRoot: string, pr: number): string {
-  const parent = path.dirname(operatorRoot);
-  return path.join(
-    parent,
-    `${path.basename(operatorRoot)}-worktrees`,
-    `pr-${pr}`,
-  );
 }
 
 // PR-mode variant of runDirCandidate: the PR number leads so runs of the

@@ -1240,6 +1240,7 @@ describe("prheroHomePaths", () => {
     const paths = prheroHomePaths("/Users/x");
     expect(paths).toEqual({
       dir: "/Users/x/.prhero",
+      reposDir: "/Users/x/.prhero/repos",
       configPath: "/Users/x/.prhero/watch.json",
       logPath: "/Users/x/.prhero/watch.log",
       lockPath: "/Users/x/.prhero/watch.lock",

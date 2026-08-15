@@ -86,9 +86,9 @@ Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `
 `--pr` resolves the range from the PR itself: a merged PR diffs from its merge commit's first parent
 (the base as it was when the PR landed — merge, squash and rebase all converge at the fork point),
 an open one from the recorded base tip. The review runs in a worktree at
-`<repo-parent>/<repo>-worktrees/pr-<n>` — your checkout, your index and your uncommitted work are
-never touched, and reviews run while you keep working. Worktrees are kept and reused across re-runs;
-each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
+`~/.prhero/repos/<origin>/worktrees/pr-<n>` — your checkout, your index and your uncommitted work are
+never touched, and reviews run while you keep working. Two checkouts of the same GitHub repo share
+one worktree. Worktrees are kept and reused across re-runs; each run prints the cleanup command (`git worktree remove --force …` — never `rm -rf`, a live
 codegraph daemon holds a socket in there).
 
 ## When to run it
@@ -201,7 +201,7 @@ the PID lockfile keeps overlapping ticks from doubling up. Logs: structured even
 
 ## What a run produces
 
-Run artifacts land **outside** the repo, in `<repo-parent>/<repo>-prhero-runs/<run>/`:
+Run artifacts land **outside** the repo, in `~/.prhero/repos/<origin>/runs/<run>/`:
 
 | File | What it is |
 | --- | --- |

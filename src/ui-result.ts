@@ -43,7 +43,7 @@ interface ResultComparison {
 }
 
 interface ResultWorktree {
-  operatorRoot: string;
+  gitDirOwner: string;
   worktreePath: string;
 }
 
@@ -423,7 +423,7 @@ export function renderResult(input: ResultInput): string[] {
       // and a command broken across two indented lines is not copyable.
       PROSE_INDENT +
         dim(
-          `git -C ${input.worktree.operatorRoot} worktree remove --force ` +
+          `git -C ${input.worktree.gitDirOwner} worktree remove --force ` +
             input.worktree.worktreePath,
           styles,
         ),

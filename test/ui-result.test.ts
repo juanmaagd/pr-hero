@@ -478,7 +478,7 @@ describe("renderResult footer", () => {
     const text = joined(
       renderResult(
         input({
-          worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+          worktree: { gitDirOwner: "/repo", worktreePath: "/wt/pr-6" },
         }),
       ),
     );
@@ -677,7 +677,7 @@ describe("renderResult styling", () => {
           greptileFound: true,
           result: buckets({ greptileOnly: [greptile()] }),
         },
-        worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+        worktree: { gitDirOwner: "/repo", worktreePath: "/wt/pr-6" },
         sessionFailed: true,
       }).join("\n"),
     ).toContain(ESC);
@@ -689,7 +689,7 @@ describe("renderResult styling", () => {
         greptileFound: true,
         result: buckets({ greptileOnly: [greptile()] }),
       },
-      worktree: { operatorRoot: "/repo", worktreePath: "/wt/pr-6" },
+      worktree: { gitDirOwner: "/repo", worktreePath: "/wt/pr-6" },
     };
     expect(joined(styled(over))).toBe(joined(renderResult(input(over))));
   });

@@ -22,7 +22,6 @@ import {
   parseFindingMarker,
   prCommentMarker,
   prRunDirCandidate,
-  prWorktreePath,
   resolveCurrentPrNumber,
   resolvePrTarget,
   worktreeDirty,
@@ -774,12 +773,6 @@ describe("resolvePrTarget", () => {
 });
 
 describe("PR naming", () => {
-  test("the worktree is a sibling <repo>-worktrees/pr-<n>", () => {
-    expect(prWorktreePath("/Users/x/Desktop/musive", 1682)).toBe(
-      "/Users/x/Desktop/musive-worktrees/pr-1682",
-    );
-  });
-
   test("run dirs lead with the PR and pin the head sha", () => {
     const root = "/Users/x/Desktop/musive-prhero-runs";
     const head = "e3ab386a63020c6f5c21d814d176ff33849eef8d";

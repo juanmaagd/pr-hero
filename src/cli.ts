@@ -14,6 +14,7 @@
 
 import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { PrHeroFindingRef } from "./compare";
 import {
@@ -24,6 +25,13 @@ import {
   validateFindingsDocument,
   writeFindings,
 } from "./findings";
+import { resolveRepoHome, writeRepoRegistry } from "./home";
+import {
+  legacyMigrationHint,
+  legacyWorktreePath,
+  prWorktreePath,
+  touchWorktreeStamp,
+} from "./home-preflight";
 import { buildPostPlan, type PostPlan, parseHunkAnchors } from "./inline";
 import {
   aggregateLedger,
@@ -62,7 +70,6 @@ import {
   type PrTarget,
   parseFindingMarker,
   prRunDirCandidate,
-  prWorktreePath,
   resolveCurrentPrNumber,
   resolvePrTarget,
 } from "./pr-preflight";
@@ -77,7 +84,6 @@ import {
   type CliOptions,
   CliUsageError,
   DEFAULT_SUMMARY_MODEL,
-  defaultRunRoot,
   EMPTY_LOCAL_CONFIG,
   emptyDiffMessage,
   GOTCHAS_TEMPLATE,
@@ -720,15 +726,18 @@ async function review(options: CliOptions): Promise<number> {
 //
 // Two roots run through everything below, and confusing them is the failure
 // this design exists to prevent:
-//   - the OPERATOR root: --repo's toplevel. cwd for every gh and git call
-//     (the fetch, rev-parse, merge-base and diff all share its object db),
-//     home of .prhero/ config+gotchas resolution, anchor of the run-dir
-//     default. Config is NEVER read from the worktree — the operator
+//   - the OPERATOR root: --repo's toplevel. cwd for gh and for .prhero/
+//     config+gotchas. Config is NEVER read from the worktree — the operator
 //     checkout is the trust anchor, and a reviewed PR's tree must not
-//     influence engine config.
-//   - the REVIEW root: the worktree, detached at the PR's head. The
-//     pipeline's cwd, the tree the codegraph checks run against, and the
-//     second root the run dir must stay outside of.
+//     influence engine config. Dirtiness here is irrelevant.
+//   - the GIT-DIR OWNER: the clone registered for this origin under
+//     ~/.prhero/repos/<id>/registry.json. Fetch, worktree add/prune/remove
+//     and the object-db git (rev-parse, diff) run against it, because
+//     `git worktree add` is bound to one git dir (W3 / #24).
+//   - the REVIEW root: the worktree, detached at the PR's head, living
+//     under ~/.prhero/repos/<id>/worktrees/pr-<n>. The pipeline's cwd, the
+//     tree the codegraph checks run against, and a root the run dir must
+//     stay outside of.
 async function reviewPr(
   options: CliOptions,
   prArg: number | "current",
@@ -785,9 +794,28 @@ async function reviewPr(
   // worktree satisfies the HEAD gate by construction (created detached at
   // the PR's own head).
 
-  // 2 — the PR record, and the review root's name derived from it.
+  // 2 — the global home (origin → repo-id → worktree/runs paths), then the
+  // PR record. persist is false on --dry-run so the free exit creates
+  // nothing, including registry.json.
+  const home = os.homedir();
+  const repoHome = await resolveRepoHome({
+    home,
+    operatorRoot,
+    persist: !options.dryRun,
+  });
+  const gitDirOwner = repoHome.gitDirOwner;
   const target = resolvePrTarget(await ghPrView(operatorRoot, prNumber));
-  const worktreePath = prWorktreePath(operatorRoot, prNumber);
+  const worktreePath = prWorktreePath(home, repoHome.repoId, prNumber);
+  const leftover = legacyWorktreePath(operatorRoot, prNumber);
+  if (existsSync(leftover)) {
+    for (const line of legacyMigrationHint({
+      operatorRoot,
+      legacyWorktree: leftover,
+      newWorktree: worktreePath,
+    })) {
+      log(line);
+    }
+  }
 
   // 3 — the free exit, BEFORE the fetch: a PR-mode dry run creates NOTHING —
   // no fetch, no run dir, no worktree — so the cost band rides on GitHub's
@@ -822,6 +850,7 @@ async function reviewPr(
         options,
         operatorRoot,
         worktreePath,
+        repoHome.paths.runs,
         prNumber,
         target.headSha,
       ),
@@ -849,10 +878,12 @@ async function reviewPr(
   }
 
   // 4 — fetch, then canonicalize. See fetchPrRefs for why that refspec pair.
-  await fetchPrRefs(operatorRoot, prNumber, target.baseRefName);
-  const headSha = await resolveCommit(operatorRoot, target.headSha);
+  // Object-db git runs against the git-dir OWNER, not the operator cwd: the
+  // worktree is registered there (W3).
+  await fetchPrRefs(gitDirOwner, prNumber, target.baseRefName);
+  const headSha = await resolveCommit(gitDirOwner, target.headSha);
   // baseRef may be a `<sha>^1` expression (merged PR); rev-parse settles it.
-  const baseSha = await resolveCommit(operatorRoot, target.baseRef);
+  const baseSha = await resolveCommit(gitDirOwner, target.baseRef);
   if (baseSha === headSha) {
     throw new CliError(
       `base and head resolve to the same commit (${headSha}); there is ` +
@@ -861,7 +892,7 @@ async function reviewPr(
   }
   const headLabel = `PR #${prNumber} head`;
   const diffFromSha = await resolveDiffFrom(
-    operatorRoot,
+    gitDirOwner,
     false,
     target.baseRef,
     headLabel,
@@ -869,9 +900,9 @@ async function reviewPr(
     headSha,
   );
 
-  // 5 — the diff and its true size, computed in the operator root (the
-  // worktree shares its object db) and BEFORE anything is created on disk.
-  const diff = await git(operatorRoot, ["diff", `${diffFromSha}..${headSha}`]);
+  // 5 — the diff and its true size, computed in the git-dir owner (the
+  // worktree shares ITS object db) and BEFORE anything is created on disk.
+  const diff = await git(gitDirOwner, ["diff", `${diffFromSha}..${headSha}`]);
   if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
   if (diff.stdout.trim().length === 0) {
     throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
@@ -887,7 +918,7 @@ async function reviewPr(
   // Two numstats, for the reason spelled out in local mode: the gate counts
   // whitespace-blind so a formatter sweep cannot eat the budget, the cost
   // band counts the bytes the hunters are actually handed.
-  const numstat = await git(operatorRoot, [
+  const numstat = await git(gitDirOwner, [
     "diff",
     "--numstat",
     `${diffFromSha}..${headSha}`,
@@ -895,7 +926,7 @@ async function reviewPr(
   if (!numstat.ok) {
     throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
   }
-  const gateNumstat = await git(operatorRoot, [
+  const gateNumstat = await git(gitDirOwner, [
     "diff",
     "-w",
     "--ignore-blank-lines",
@@ -946,6 +977,7 @@ async function reviewPr(
     options,
     operatorRoot,
     worktreePath,
+    repoHome.paths.runs,
     prNumber,
     headSha,
   );
@@ -1013,9 +1045,13 @@ async function reviewPr(
   }
 
   // 8 — the review root.
-  const worktree = await ensureWorktree(operatorRoot, worktreePath, headSha);
+  const worktree = await ensureWorktree(gitDirOwner, worktreePath, headSha);
   log();
   log(`worktree ${worktree.action}: ${worktreePath} (${worktree.reason})`);
+  await writeRepoRegistry(
+    repoHome.paths.registry,
+    touchWorktreeStamp(repoHome.registry, prNumber, new Date().toISOString()),
+  );
 
   // 9 — the worktree's own index. Never another checkout's: the ROADMAP
   // forbids riding a sibling's index, because its bytes may differ.
@@ -1279,7 +1315,7 @@ async function reviewPr(
           },
         }
       : {}),
-    worktree: { operatorRoot, worktreePath },
+    worktree: { gitDirOwner, worktreePath },
     ...(links === undefined ? {} : { links }),
     sessionFailed: result.sessionFailed,
     styles: styleEnabled(),
@@ -2359,7 +2395,13 @@ async function ledgerCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveRepoRoot(options.repo);
   const runsRoot = options.runs
     ? path.resolve(options.runs)
-    : defaultRunRoot(repoRoot);
+    : (
+        await resolveRepoHome({
+          home: os.homedir(),
+          operatorRoot: repoRoot,
+          persist: false,
+        })
+      ).paths.runs;
   // One level deep on purpose: run dirs are flat children of the root, and
   // a recursive glob would pick up anything a run itself wrote deeper down.
   const files: string[] = [];
@@ -2444,7 +2486,12 @@ async function createRunDir(
     await mkdir(explicit, { recursive: true });
     return explicit;
   }
-  const root = defaultRunRoot(repoRoot);
+  const repoHome = await resolveRepoHome({
+    home: os.homedir(),
+    operatorRoot: repoRoot,
+    persist: true,
+  });
+  const root = repoHome.paths.runs;
   // Smallest unused integer, so a second review of the same commit never
   // overwrites the first one's artifacts — a run that cost money is evidence.
   for (let n = 1; ; n++) {
@@ -2463,6 +2510,7 @@ async function createPrRunDir(
   options: CliOptions,
   operatorRoot: string,
   worktreePath: string,
+  runsRoot: string,
   prNumber: number,
   headSha: string,
 ): Promise<string> {
@@ -2470,6 +2518,7 @@ async function createPrRunDir(
     options,
     operatorRoot,
     worktreePath,
+    runsRoot,
     prNumber,
     headSha,
   );
@@ -2486,6 +2535,7 @@ function predictPrRunDir(
   options: CliOptions,
   operatorRoot: string,
   worktreePath: string,
+  runsRoot: string,
   prNumber: number,
   headSha: string,
 ): string {
@@ -2495,7 +2545,7 @@ function predictPrRunDir(
     assertOutsideRepo(explicit, worktreePath);
     return explicit;
   }
-  const root = defaultRunRoot(operatorRoot);
+  const root = runsRoot;
   // Smallest unused integer, same reason as createRunDir: a run that cost
   // money is evidence and must never be overwritten.
   for (let n = 1; ; n++) {
