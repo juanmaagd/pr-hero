@@ -19,7 +19,7 @@
 
 import type { ComparisonResult } from "./compare";
 import type { Finding, FindingsDocument } from "./findings";
-import { blobUrl, formatElapsed } from "./report";
+import { blobUrl, coverageSentence, formatElapsed } from "./report";
 import {
   cyan,
   dim,
@@ -279,6 +279,40 @@ function findingsSection(
   return lines;
 }
 
+// The terminal half of GitHub #42, and the same argument as the summary
+// comment's: `partial · ` in the header rule says the run was incomplete in
+// two words, but two words next to five counts is a footnote wearing a
+// header's clothes, and the green all-clear below it read as a clean bill
+// anyway. So a partial run gets a line of its own that NAMES what was lost,
+// and the green line is withdrawn (see renderResult).
+//
+// Suppressed when `sessionFailed`: a dead session prints "every hunter failed
+// — this run reviewed nothing." last, which is the whole message there, and
+// listing the same corpses one paragraph earlier only softens it.
+function incompleteLines(
+  doc: FindingsDocument,
+  width: number,
+  styles: boolean,
+): string[] {
+  // Wrapped, never truncated, for findingLines' reason: the one thing this
+  // block must not do is drop the half of a sentence that says what is
+  // missing.
+  const headWidth = Math.max(width - MARKER_INDENT.length, 20);
+  const proseWidth = Math.max(width - PROSE_INDENT.length, 20);
+  return [
+    "",
+    ...wrapText(
+      "incomplete review — at least one agent did not finish, so the " +
+        "counts above are a floor, not a verdict",
+      headWidth,
+    ).map((line) => MARKER_INDENT + yellow(line, styles)),
+    ...wrapText(
+      coverageSentence(doc, (key) => key),
+      proseWidth,
+    ).map((line) => PROSE_INDENT + dim(line, styles)),
+  ];
+}
+
 function greptileLines(
   comparison: ResultComparison,
   doc: FindingsDocument,
@@ -358,12 +392,16 @@ export function renderResult(input: ResultInput): string[] {
     input.links?.pr === undefined
       ? undefined
       : `${input.links.webUrl}/pull/${input.links.pr}`;
+  // GitHub #42: an incomplete run says so above its own payload, naming the
+  // agents that were lost, so nothing below is read as full coverage.
+  const incomplete = doc.run_status === "partial" && !input.sessionFailed;
   const lines = [
     "",
     header.line,
     ...(prUrl === undefined
       ? []
       : [MARKER_INDENT + dim("↗ ", styles) + cyan(prUrl, styles)]),
+    ...(incomplete ? incompleteLines(doc, width, styles) : []),
     ...findingsSection(doc, width, styles, input.links),
   ];
   // A green all-clear is only allowed when the review actually RAN. A dead
@@ -371,7 +409,13 @@ export function renderResult(input: ResultInput): string[] {
   // review that never happened is the same lie the comparison and posting
   // guards exist to prevent (cli.ts steps 13/14) — the red line below is the
   // whole message in that case.
-  if (doc.findings.length === 0 && !input.sessionFailed) {
+  //
+  // `partial` joined that exclusion for GitHub #42: a run where some agents
+  // died and the survivors found nothing is not a clean bill either, and
+  // green is the strongest clean-bill signal this block has. The yellow
+  // notice above already carries the count and the names, so the branch is
+  // simply withdrawn rather than restated.
+  if (doc.findings.length === 0 && !input.sessionFailed && !incomplete) {
     lines.push(
       "",
       MARKER_INDENT +

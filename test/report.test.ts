@@ -572,6 +572,112 @@ describe("renderPrComment", () => {
     expect(body).not.toContain("### ");
   });
 
+  // GitHub #42. The defect these pin: a `partial` run with zero findings used
+  // to print the ✅ clean bill, and the ONLY disclosure that some agents never
+  // finished was the word `partial` inside the <sub> footer. The decision
+  // (ROADMAP-DOORDASH M1) is that such a run still posts — visible noise
+  // beats invisible loss — so every assertion here is about what the body
+  // SAYS, never about whether it exists.
+  const PARTIAL_TELEMETRY: Telemetry = {
+    ...TELEMETRY,
+    per_agent: {
+      reliability: { tokens_total: 60, duration_ms: 1000, status: "ok" },
+      resilience: { tokens_total: 0, duration_ms: 0, status: "failed" },
+      refuter: { tokens_total: 10, duration_ms: 100, status: "ok" },
+    } as Telemetry["per_agent"],
+  };
+
+  test("a partial run with zero findings never prints the clean bill", () => {
+    const body = renderPrComment(
+      doc({ run_status: "partial", telemetry: PARTIAL_TELEMETRY }),
+      undefined,
+      undefined,
+      [],
+    );
+    expect(body).not.toContain("✅");
+    expect(body).not.toContain("found nothing to report");
+    expect(body).toContain(
+      "The agents that completed reported nothing. That is not a clean " +
+        "bill: read it against the coverage above.",
+    );
+  });
+
+  test("the incompleteness notice sits above the finding count, not in the footer", () => {
+    const body = renderPrComment(
+      doc({ run_status: "partial", telemetry: PARTIAL_TELEMETRY }),
+      undefined,
+      undefined,
+      [],
+    );
+    expect(body).toContain("⚠️ **This review is incomplete.**");
+    expect(body.indexOf("This review is incomplete")).toBeLessThan(
+      body.indexOf("🔴 0 critical"),
+    );
+    // The footer disclosure that used to be the only one still stands; it is
+    // no longer load-bearing.
+    expect(body).toContain("<sub>run partial · ");
+  });
+
+  test("the notice names who completed and who did not, with the status verbatim", () => {
+    const body = renderPrComment(
+      doc({ run_status: "partial", telemetry: PARTIAL_TELEMETRY }),
+      undefined,
+      undefined,
+      [],
+    );
+    expect(body).toContain(
+      "Completed: `reliability`, `refuter`. Did not complete: " +
+        "`resilience` (failed).",
+    );
+  });
+
+  // Every path that can produce a partial run with nothing to name: the
+  // gotchas early-return writes an EMPTY per_agent map, a timeout abandons
+  // steps whose rows were never written, and a pre-v2 artifact has no
+  // per_agent at all. The notice must still print on all of them.
+  test("a partial run that names nobody still says so, and says why it cannot", () => {
+    for (const per_agent of [{}, undefined]) {
+      const body = renderPrComment(
+        doc({
+          run_status: "partial",
+          telemetry: { ...TELEMETRY, per_agent },
+        }),
+        undefined,
+        undefined,
+        [],
+      );
+      expect(body).toContain("⚠️ **This review is incomplete.**");
+      expect(body).toContain(
+        "No agent is recorded as completed. The run record does not name " +
+          "which agents were lost.",
+      );
+      expect(body).not.toContain("✅");
+    }
+  });
+
+  test("a partial run WITH findings is qualified too — the notice is not a zero-findings branch", () => {
+    const body = renderPrComment(
+      doc({
+        run_status: "partial",
+        telemetry: PARTIAL_TELEMETRY,
+        findings: [finding({ id: "F001" })],
+      }),
+      undefined,
+      undefined,
+      [],
+    );
+    expect(body).toContain("⚠️ **This review is incomplete.**");
+    expect(body).toContain("`resilience` (failed)");
+  });
+
+  test("a complete run keeps its clean bill and grows no notice", () => {
+    const body = renderPrComment(doc(), undefined, undefined, []);
+    expect(body).toContain(
+      "✅ pr-hero reviewed this PR and found nothing to report.",
+    );
+    expect(body).not.toContain("This review is incomplete");
+  });
+
   test("the footer is the sub line with run status and engine", () => {
     const body = renderPrComment(doc(), undefined, undefined, []);
     expect(body).toContain(

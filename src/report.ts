@@ -136,6 +136,53 @@ function agentRows(doc: FindingsDocument): AgentRow[] {
   });
 }
 
+// The coverage sentence behind every incompleteness notice (GitHub #42,
+// ROADMAP-DOORDASH M1). Shared with ui-result.ts — exported for the same
+// reason blobUrl below is: the public comment and the terminal must name the
+// SAME agents from the SAME bytes, and two derivations of "who did not
+// finish" is exactly how one surface starts under-reporting the other.
+// `quote` is the only difference between them (backticks in markdown, bare
+// text on a terminal), so the prose itself is written once.
+//
+// WHY "agents" and not "hunters", which is the word the issue uses: the
+// document does not record roles. `telemetry.per_agent` is keyed by
+// AgentSpec.key and carries a status, but nothing in it says which key was a
+// hunter — the refuter and the summarizer sit in the same map (pipeline.ts
+// writes `refuter` and `summary` rows there). Excluding those two keys by
+// name would be a hardcoded list that (a) breaks the moment a spec renames
+// the refuter and (b) would print "all hunters completed" on a run that went
+// partial BECAUSE the refuter died, which is the under-disclosure this whole
+// notice exists to prevent. So every agent is named, and the prose says
+// agent. Over-naming costs a word; under-naming costs the guarantee.
+//
+// Statuses are printed VERBATIM rather than bucketed into failed/ok: an old
+// lab artifact whose rows predate the `status` field reads as "ran"
+// (agentRows' fallback), and bucketing that into "failed" would invent a
+// failure the run never recorded.
+export function coverageSentence(
+  doc: FindingsDocument,
+  quote: (key: string) => string,
+): string {
+  const rows = agentRows(doc);
+  const completed = rows.filter((r) => r.status === "ok").map((r) => r.key);
+  const lost = rows.filter((r) => r.status !== "ok");
+  // A partial run can name nobody at all, and the notice still has to be
+  // honest about that instead of printing an empty list: the gotchas
+  // early-return produces `run_status: "partial"` with an EMPTY per_agent map
+  // (pipeline.ts), a pipeline timeout abandons in-flight steps whose rows are
+  // never written, and a pre-v2 artifact has no per_agent at all. "Did not
+  // complete: (none)" on any of those would read as "everything ran".
+  const done =
+    completed.length === 0
+      ? "No agent is recorded as completed."
+      : `Completed: ${completed.map(quote).join(", ")}.`;
+  if (lost.length === 0) {
+    return `${done} The run record does not name which agents were lost.`;
+  }
+  const missing = lost.map((r) => `${quote(r.key)} (${r.status})`).join(", ");
+  return `${done} Did not complete: ${missing}.`;
+}
+
 type RenderableSummary = NonNullable<FindingsDocument["summary"]>;
 
 function summaryLines(summary: RenderableSummary): string[] {
@@ -368,6 +415,39 @@ export function renderPrComment(
   const out: string[] = [prCommentMarker(doc.head_sha)];
   out.push("## pr-hero review");
   out.push("");
+  // GitHub #42. The defect: a run where SOME agents died and the survivors
+  // found nothing posted "🔴 0 critical · 🟡 0 warning" followed by a ✅ clean
+  // bill, and the only trace of the incompleteness was the word `partial`
+  // inside the <sub> footer at the very bottom. A reader takes a green check
+  // at face value; nobody audits a footer.
+  //
+  // So the notice goes ABOVE the counts, not below them and not in the
+  // footer: the counts are the thing being qualified, and a qualifier a
+  // reader meets after the number it qualifies has already done its damage.
+  //
+  // The decision the issue left open — should such a run post at all — is
+  // POST (Juanma, ROADMAP-DOORDASH M1): "post, stating the incompleteness and
+  // naming the hunters that did not run — visible noise beats invisible
+  // loss". Direction of error: posting nothing hides that a review was even
+  // attempted, and an invisible loss is the failure this project's own rule
+  // ranks worst; a loud incomplete notice is merely noisy, and noise can be
+  // read and dismissed. The two extremes stay where they were — every agent
+  // dead is `sessionFailed` and never posts (cli.ts), a complete run keeps
+  // its ✅ untouched. This is the middle case only.
+  //
+  // Unconditional on `partial`, NOT gated on zero findings: a partial run
+  // that found three things is also reporting a floor, not a verdict. The
+  // zero-findings branch below is only where the ✅ has to be replaced.
+  if (doc.run_status === "partial") {
+    out.push(
+      "⚠️ **This review is incomplete.** At least one agent did not finish, " +
+        "so the counts below are a floor, not a verdict: whatever the " +
+        "missing agents would have found is missing with them.",
+    );
+    out.push("");
+    out.push(coverageSentence(doc, code));
+    out.push("");
+  }
   out.push(
     `🔴 ${critical} critical · 🟡 ${warning} warning — ${headRef}, ` +
       `diff from ${code(doc.base_sha.slice(0, 8))}`,
@@ -378,7 +458,17 @@ export function renderPrComment(
     out.push("");
   }
   if (doc.findings.length === 0) {
-    out.push("✅ pr-hero reviewed this PR and found nothing to report.");
+    // The ✅ is a statement about COVERAGE, not about the findings array: it
+    // claims every hunter looked and nobody found anything. On a partial run
+    // that claim is false, so the glyph is withdrawn and the line points back
+    // at the notice above rather than leaving the body to jump from a zero
+    // count straight to the footer (GitHub #42).
+    out.push(
+      doc.run_status === "partial"
+        ? "The agents that completed reported nothing. That is not a clean " +
+            "bill: read it against the coverage above."
+        : "✅ pr-hero reviewed this PR and found nothing to report.",
+    );
     out.push("");
   } else {
     out.push(...findingIndexLines(doc.findings, commentUrlByFindingId));

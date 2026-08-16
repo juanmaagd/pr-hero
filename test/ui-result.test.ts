@@ -517,6 +517,93 @@ describe("renderResult footer", () => {
   });
 });
 
+// GitHub #42, the terminal half. A run where some agents died and the
+// survivors found nothing used to print a GREEN "no findings survived to this
+// point" under a header whose only trace of the loss was the word `partial`.
+// Green is the strongest clean-bill signal this block has, and it was being
+// spent on a review that never finished looking.
+describe("renderResult incomplete runs", () => {
+  const partialTelemetry: Telemetry = {
+    ...telemetry,
+    per_agent: {
+      reliability: { tokens_total: 60, duration_ms: 1000, status: "ok" },
+      parity: { tokens_total: 0, duration_ms: 0, status: "failed" },
+    } as Telemetry["per_agent"],
+  };
+  const partial = (over: Partial<FindingsDocument> = {}): FindingsDocument =>
+    doc({ run_status: "partial", telemetry: partialTelemetry, ...over });
+
+  test("a partial run with zero findings gets NO green all-clear", () => {
+    const text = joined(
+      renderResult(input({ doc: partial({ findings: [] }) })),
+    );
+    expect(text).not.toContain("no findings survived");
+    expect(text).toContain("incomplete review — at least one agent did not");
+  });
+
+  test("the notice names who completed and who did not", () => {
+    const text = joined(
+      renderResult(input({ doc: partial({ findings: [] }) })),
+    );
+    expect(text).toContain("Completed: reliability. Did not complete: parity");
+    expect(text).toContain("(failed)");
+  });
+
+  test("the notice sits above the findings, not after them", () => {
+    const text = joined(renderResult(input({ doc: partial() })));
+    expect(text.indexOf("incomplete review")).toBeLessThan(
+      text.indexOf("src/triage-write.ts:70"),
+    );
+  });
+
+  test("a partial run that names nobody still says the record is silent", () => {
+    const text = joined(
+      renderResult(
+        input({
+          doc: partial({
+            findings: [],
+            telemetry: { ...telemetry, per_agent: undefined },
+          }),
+        }),
+      ),
+    );
+    expect(text).toContain("incomplete review");
+    expect(text).toContain("The run record does not name which");
+  });
+
+  // The dead-session line is the whole message when every hunter failed
+  // (its own WHY says so), so this notice stands down rather than listing the
+  // same corpses one paragraph earlier.
+  test("a dead session gets the red line only, not the incomplete notice", () => {
+    const text = joined(
+      renderResult(
+        input({ doc: partial({ findings: [] }), sessionFailed: true }),
+      ),
+    );
+    expect(text).not.toContain("incomplete review");
+    expect(text).toContain("every hunter failed");
+  });
+
+  test("a complete run keeps its green all-clear and grows no notice", () => {
+    const text = joined(renderResult(input({ doc: doc({ findings: [] }) })));
+    expect(text).toContain("no findings survived to this point");
+    expect(text).not.toContain("incomplete review");
+  });
+
+  // The renderer contract's own acceptance criterion (CLAUDE.md): styles off
+  // means not one escape byte, on EVERY branch — including this one, whose
+  // two new paints (yellow headline, dim coverage line) are the newest place
+  // an unconditional colour could hide.
+  test("styles off emits zero ANSI bytes on the partial branch", () => {
+    for (const lines of [
+      renderResult(input({ doc: partial({ findings: [] }), styles: false })),
+      renderResult(input({ doc: partial(), styles: false })),
+    ]) {
+      expect(lines.join("\n")).not.toContain(ESC);
+    }
+  });
+});
+
 // The work unit that replaced a planned interactive findings browser with
 // printed urls, and the reason it is the better trade: a url persists in
 // scrollback and can be opened whenever, while an interactive view forces a
