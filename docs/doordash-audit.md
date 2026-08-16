@@ -10,6 +10,13 @@ in one place — the May post's headline is a 60.2% acceptance rate; the July po
 product telemetry because it fills two of four confusion-matrix cells. Every row below is read under that
 rule.
 
+**Second pass, same day — two more sources, and a different rule for them.** §7 absorbs
+`cloudflare-ai-code-review.md` (Cloudflare, 2026-04-20) and `salesforce-prizm.md` (Salesforce Prizm,
+2026-01-29). They are different organisations, so "later wins" does not apply across them: they
+**triangulate**. Where three orgs agree, the claim hardens; where they differ, evidence is weighed, not
+dated. Juanma's brief for this pass: *no sumar ruido* — extract what is useful to keep in mind. So §7 is
+rows, and only three of them earned a roadmap amendment (item 5, item 7, C4).
+
 ## What "pivoting toward DoorDash" means, and what it does not
 
 Juanma's call, 2026-08-16: *"vamos a pivotar hacia esa dirección"* — and, the day before, *"primero vamos
@@ -124,20 +131,65 @@ does not re-narrate. Two views of the same argument drift, and the one that drif
 Constraint on all three: scored prompt sets are immutable — a new set, `refuter-probe` first, one variable
 per arm (CLAUDE.md rules 5 and 7).
 
+## 7. Cloudflare and Salesforce — triangulation (added 2026-08-16, second pass)
+
+Read with the header's rule: these are witnesses, not precedents. The state they were checked against is
+the one after `ROADMAP-DOORDASH.md` M0–M2 (`git log` up to `b486a9b`), not the state §1–§6 describe.
+
+**Where the topology sits, said once so it is not re-derived.** Cloudflare's system is pr-hero's shape —
+specialist fan-out plus a judge pass — running at 131,246 reviews in 30 days, median $0.98 and 3m39s, 1.2
+findings per review, 0.6% break-glass. Its "limitations we're honest about" (architectural awareness,
+cross-system impact, subtle concurrency) are DoorDash's v1 diagnosis restated by a second, independent
+team. So the fan-out has both a **floor** (it is a production-grade baseline, and ours is one) and a
+**ceiling** (the class of miss both name), and the scout — `docs/scout-design.md`, awaiting ratification
+— is aimed at the ceiling. **Nothing in either post contradicts the written M3 design**: bias-not-replace,
+diff-only with `tools: []`, recall-first and fail-open, engine-owned prompt, 12-lead cap, led-vs-unled
+computed — checked line by line, no conflict.
+
+| Source and claim | pr-hero today | Status | Disposition |
+|---|---|---|---|
+| **CF: "What NOT to flag" sections** — "telling an LLM what not to do is where the actual prompt engineering value resides"; 1.2 findings/review is credited to them | Already there: `## Out of scope for this slot — do NOT emit these` in `deep-review-reliability.md:81` and `deep-review-lifecycle.md:260` of the production set; the refuter's scope is bounded the same way (`review-refuter.md:14`) | `built` | none. For the **scout prompt** (engine-owned, `prompts/scout.md`) it is the lever M4 reaches for if the restraint gate fails — a "what NOT to lead on" block. Not a design change: the design is recall-first on purpose; this is M4's iteration tool |
+| **CF: risk tiers** — trivial ≤10 lines/≤20 files → 2 agents and a cheaper coordinator; lite ≤100 → 4; full otherwise or any security-sensitive path; costs $0.20 / $0.67 / $1.68 | The size gate (`size-gate.ts`) has ONE direction — too big → skip. Every PR that passes gets all five hunters, the refuter leg and the summarizer at full price; a three-line PR costs what a 1,400-line one does. `parity_trigger_paths` is the only path→behaviour routing | `partial` | **item 5 amended** (one paragraph). It changes what runs, therefore what is found → measured, and it must not land inside M6's window. DoorDash said the same ("skip expensive passes on low-risk PRs") without a mechanism; Cloudflare supplies one |
+| **CF: three-level timeouts + inactivity detection** — per-task 5 min (10 for the heaviest), overall 25, retry budget ≥2; **60s with no output → kill**; heartbeat "model is thinking (Ns)" every 30s | Hard watchdog only (`step-runner.ts:361-367`, 30 min per step, 75 overall). The TTY heartbeat exists (`cli.ts:640`, `progress.ts`). Inactivity detection does not | `partial` | **#40**, comment: an output-inactivity kill is the mechanical half of "a turn counter is not a progress detector" and needs no prompt; DoorDash's soft wrap-up is the other half. Design them as one |
+| **CF: error classification** — only retryable API errors trigger failback; auth, context overflow, abort, structured-output errors do not; `reason: "length"` → retry | `classifyFailure` = `transient | terminal | format`, format-retry capped at 1, truncated-draft guard (`step-runner.ts:135-147`, `:290-317`) | `built` | none — arrived at independently, same shape |
+| **CF: failback chains per model family, circuit breakers, remote routing config with a provider kill switch (5s)** | One runner, one model per agent, no failback | `missing` | Phase D (D2 model routing) — audit row only; the mechanism is exactly D2's scope |
+| **CF: shared context on disk; per-file patches; sub-reviewers read only their files; 85.7% cache hit** | The full patch is inlined into every hunter's user prompt (`pipeline.ts:277-290`) — five copies per review; the summarizer gets a sixth. The runner already RECEIVES `cache_read_input_tokens` / `cache_creation_input_tokens` and folds them into `tokens_in` (`usage.ts:15-18`, `:43-45`) — so our cache rate is measurable today and unmeasured | `partial` | **#23**, comment: split cache tokens out before touching the prompt shape. Where the diff lives (prompt vs file) changes hunter input, so it is a measured change after M6 |
+| **CF: coordinator judge pass** — dedupe, re-categorise, reasonableness filter, verify with tools when unsure | Mechanical dedupe (`dedupe.ts`) + one detached refuter step per severe finding. Ours is stricter (per-finding, adversarial, cited disproof) and does not spread one session's attention over everything — the v2 risk DoorDash named, in the judge seat. **What ours lacks is re-categorisation**: the refuter rules on truth, never on class (the F003 case in 6b — `pre-existing` filed as `introduced`, corroborated without questioning the class) | `built` / `partial` | none now — the class question is a refuter-prompt change (lab set, immutable → new set, after M6). Already tracked as 6b's `misclassified` tag |
+| **CF: prompt-injection prevention** — user-controlled MR body/comments/previous findings are wrapped in XML boundary tags and the tags are stripped from user content | Hunter prompts carry the patch only; gotchas read from the operator root (`pr-preflight.ts:9-11`); the summarizer sees the patch. Nothing inlines PR body or comments yet — **item 7's re-review and 6b's adjudicator will** (previous findings, the author's replies) | `missing`, latent | **C4 amended** (one paragraph): the boundary-tag rule belongs in the runtime-safety preamble the day any user-authored text is inlined |
+| **CF: re-review rules** — fixed → omitted and thread auto-resolved; unfixed → re-emitted; user-resolved respected unless materially worsened; "won't fix"/"acknowledged" → resolved; "I disagree" → read the justification, resolve or **argue back**; 2.7 reviews per MR | Item 7 (design pending) + 6b (built): matcher keeps `persist` alive without reposting; tags `applied/dismissed/deferred/misclassified`; isolated adjudicator instead of the same reviewer arguing back | `partial` | **item 7 amended**: their rules as a second external reference, and a THIRD option for the open verify-vs-infer question — the coordinator judges "fixed" with the prior findings in context (between "pay a step per finding" and "trust absence"), with DashBench's caveat that one pass is still one sample |
+| **CF: approval rubric biased to approve; break glass 0.6%** | Not a gate by design (B0; the disclaimer on every summary) | `deliberately-different` | none — reference for Phase E if a gate is ever built |
+| **CF: AGENTS.md reviewer** — materiality tiers; penalises filler, >200 lines, tools without runnable commands | No staleness check on `.prhero/gotchas.md` / CLAUDE.md after material changes | `missing` | C6/C8 row only — the anti-pattern list is one more witness for DoorDash's "AGENTS.md is written for authors, not reviewers" |
+| **CF: local operation** — same agents and prompts on the laptop | `pr-hero review` (B0) is exactly that | `built` / `ahead` | none |
+| **CF: fire-and-forget telemetry that never blocks the pipeline** | `failSoftIngest` (`metrics.ts:8-11`) — a sqlite write must never fail a paid review | `built` | none |
+| **CF: diff filtering** — lockfiles, minified, maps, plus `// @generated` marker scan; **migrations exempted** | Glob list only (`size-gate.ts:62-70`): lockfiles, `*.min.*`, `*.snap`; no marker scan, so no exemption needed yet | `partial` | item 5 row only; if a marker scan is ever added, carry the migrations exemption with it |
+| **CF: ARG_MAX via stdin, JSONL streaming, per-attempt logs** | stdin bodies for `gh` (item 2), atomic tmp+rename artifacts, per-attempt logs | `built` | none — same scars, same fixes |
+| **SF: intent reconstruction** — token-aware chunking into logical units, semantic consolidation, graph-based merge over dependencies/file overlap; related changes across the codebase reviewed together; progressive disclosure | Large PRs are skipped, not chunked (item 5). Findings are clustered post hoc by root cause (C1a); changes are never grouped pre-review | `missing` | item 5 row (one line): the other answer to "too big" is regroup, not skip. Not a build; a note that the option exists |
+| **SF: context from work items, previous PRs, historical defects, codebase patterns** | Gotchas + priors; C6/C8 not built | `partial` | none new — a third witness (with DoorDash) that historical defects are the review-context source worth mining; C8 already says so |
+| **SF: production feedback loop** — monitor production defects and incidents, find the patterns that should have been caught, feed them back | #41 mines reverts and got 3 usable cases across two repos | `partial` | **#41**, comment: the corpus is production defects, of which reverts are the narrowest slice — widen the query (bugfix PRs linked to issues, hotfix branches, PRs citing incidents). This is the only thing in either post that touches the track's actual bottleneck: the M6 metric has no cheap recall source |
+| **SF: async analysis at PR creation, persisted, served instantly (≤5 min); left-shift into the IDE** | The watcher is async at PR open (B3); no IDE surface | `partial` | Phase E row only |
+| **SF: posts summaries and conceptual groupings in the PR description** | Our summarizer posts general prose + a score (§2's tension row) | reference | none — a data point on the summarizer question: Salesforce's summary is a *navigation aid* (groupings) for the human reviewer, DoorDash warns against *general* notes; ours is the general kind |
+
 ---
 
 ## The numbers, for reference and not as targets
 
-| | DoorDash production (scout + reviewer) | DoorDash no-scout baseline | pr-hero |
-|---|---|---|---|
-| Cost / PR | $3.91 | $0.65–0.75 | ~$3–4 |
-| Latency / PR | 725s | 113–170s | ~4 min run; end-to-end unmeasured |
-| Weighted precision / recall | 87.0% / 53.6% | 84–90% / 20–31% | not comparable — different metric, corpus, denominator |
-| Cost / real finding | $0.82 | $0.48–0.60 | not computed (#23) |
-| Acceptance (May post; telemetry only) | 60.2% settled high/critical, 59.0% webhook | — | `applied` rate is computable from `comparison_rows`; not a target |
+| | DoorDash production (scout + reviewer) | DoorDash no-scout baseline | Cloudflare (fan-out + judge) | pr-hero |
+|---|---|---|---|---|
+| Cost / PR | $3.91 | $0.65–0.75 | median $0.98, avg $1.19; full tier $1.68, trivial $0.20 | ~$3–4 |
+| Latency / PR | 725s | 113–170s | median 3m39s, P99 10m21s | ~4 min run; end-to-end unmeasured |
+| Weighted precision / recall | 87.0% / 53.6% | 84–90% / 20–31% | not reported — 1.2 findings/review and 0.6% break-glass are its quality signals (both two-cell) | not comparable — different metric, corpus, denominator |
+| Cost / real finding | $0.82 | $0.48–0.60 | not reported | not computed (#23) |
+| Acceptance (May post; telemetry only) | 60.2% settled high/critical, 59.0% webhook | — | — | `applied` rate is computable from `comparison_rows`; not a target |
 
-pr-hero's cost and run time already sit inside their staged band **without a scout**. That is the
+pr-hero's cost and run time already sit inside DoorDash's staged band **without a scout**. That is the
 plainest statement of where the money would go if C7 lands: coverage, at roughly their price.
+
+Two caveats on the Cloudflare column, so the 3–4× gap is not misread as inefficiency: their dollars are
+API dollars at 85.7% cache hit across 5,169 repos, ours are subscription dollars with ~$0 marginal (Phase
+D's economics note); and their sub-reviewers read per-domain patch files while ours hunt the whole repo
+through codegraph and pay a refuter step per severe finding. Different dollar, different job. What the
+column does say plainly: **risk tiering and shared context are the two levers behind their price**, and we
+have neither.
 
 ## Build order
 

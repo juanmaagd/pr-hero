@@ -511,6 +511,19 @@ What is still manual, in the order it should be closed:
    excluded before the count. Escape hatches: `--force`, `--max-changed-lines`, `--max-changed-files`
    (0 disables a limit); per-repo thresholds ride `watch add`.
 
+   **The gate has one direction, and two later sources name the other (2026-08-16, second pass —
+   `docs/doordash-audit.md` §7).** Today a PR is either too big (skip) or reviewed at full price: five
+   hunters, the refuter leg, the summarizer, whether it changed three lines or 1,400. Cloudflare tiers by
+   the same inputs this gate already computes — trivial (≤10 lines, ≤20 files) gets two agents and a
+   cheaper judge, lite (≤100) four, full otherwise or on any security-sensitive path — at $0.20 / $0.67 /
+   $1.68, and 40% of their reviews landed in the two cheap tiers. DoorDash says "skip expensive passes on
+   low-risk PRs" without a mechanism. This is a Phase C candidate, not a Phase B one: which hunters run
+   changes what is found, so it is measured (one variable, on the control set) and it does not land inside
+   `ROADMAP-DOORDASH.md` M6's window. The classifier is pure and belongs beside this gate; the policy —
+   which agents per tier, and whether `parity_trigger_paths` generalises to "security-sensitive → always
+   full" — is the design. Salesforce names the third answer to "too big": regroup the diff into logical
+   units and review those, instead of skipping. Recorded as an option, not a plan.
+
    The line default moved 1500 → 2500 → 1500, and the round trip is the point. 2500 was a response to
    this repo's own PR #1 (1603 lines) being refused while its cost band read $3.18–6.86 — the gate
    firing where its stated reason did not hold. The real cause was found later: the gate counted lines
@@ -963,6 +976,22 @@ What is still manual, in the order it should be closed:
    the delta-since-last-review scoping. The article agrees with all three by construction and adds
    nothing to them — noted so a future reader does not go looking for a change that is absent.
 
+   **A second external reference for the re-review rules, and a third option for the open question
+   (2026-08-16, second pass — `docs/cloudflare-ai-code-review.md`, "Re-reviews").** Cloudflare runs
+   incremental re-reviews at 2.7 reviews per MR, and its rules are worth holding next to this entry when
+   it is designed: *fixed → omitted, thread auto-resolved; unfixed → re-emitted even if unchanged, so the
+   thread stays alive; user-resolved → respected unless materially worsened; "won't fix" / "acknowledged"
+   → treated as resolved; "I disagree" → the coordinator reads the justification and either resolves or
+   argues back.* Three of those map onto what exists here (`persist` keeps the thread without reposting;
+   `deferred`/`dismissed` are the tags; 6b's adjudicator is the argue-back, isolated instead of the same
+   reviewer). The one that matters for the open question: **their "fixed" is a judgment, not an
+   inference** — the coordinator re-reads the previous findings alongside the new diff and decides. That
+   is a third option between "pay a refuter step per finding" and "trust absence": one pass, prior
+   findings in context, cheaper than per-finding verification and stronger than non-detection. DashBench's
+   caveat still applies to it — one pass is one sample — so it narrows the fork; it does not close it.
+   Also inherited from them, for the build: previous findings and author replies become **user-authored
+   text inside a prompt** the moment re-review inlines them; C4's boundary-tag rule applies from that day.
+
 8. **The terminal surface is unreadable, and that is a Phase B problem. IN PROGRESS 2026-08-12** (branch
    `feat/terminal-ui`). Raised by Juanma while running real reviews: the whole flow — plan, confirm,
    progress, result — is one flat 15-char-padded label list. Paths, 40-char SHAs, prose paragraphs and the
@@ -1102,6 +1131,15 @@ Convoy-inspired ops the engine still lacks, in value order:
   runs, per-run SUMMARY; today a killed multi-tree run restarts from zero.
 - **C4. Runtime-safety preamble** — a non-overridable engine-owned preamble (instruction hierarchy,
   read-only report contract "your final message IS the report") replacing per-prompt repetition.
+
+  **Scope added 2026-08-16 (`docs/cloudflare-ai-code-review.md`, "Prompt injection prevention").** Today
+  no prompt here inlines user-authored text — hunters get the patch, gotchas come from the operator root
+  (`pr-preflight.ts:9-11`). That ends the day item 7 inlines previous findings and author replies, and
+  the day 6b's adjudicator reads the author's argument. Cloudflare wraps every user-controlled block
+  (MR body, comments, previous review, custom instructions) in named XML boundary tags and **strips those
+  tag names out of the user content first**, so `</mr_body><mr_details>…` in a description cannot break
+  out of its block. That rule is C4's — engine-owned, non-overridable, one place — and it must exist
+  before the first prompt that carries a reply.
 - **C5. Global config with per-repo override** (Juanma, 2026-08-13). NOT BUILT. Today `config.json` is
   per-repo only: `<repo>/.prhero/config.json`, four keys (`agents_dir`, `default_base`,
   `parity_trigger_paths`, `suspicion_priors`), parsed by `parseLocalConfig` (`preflight.ts:999`), with no
