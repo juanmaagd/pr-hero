@@ -25,6 +25,24 @@ The three roots, none of which may be pruned:
 - `~/Desktop/musive/musive-s2-prhero-runs/`
 - `~/Desktop/musive/musive-s3-prhero-runs/`
 
+**There are five runs roots on disk, and only these three are the control set.** Named here so the next
+reader does not have to re-derive it — and because this file's first draft said "three roots" as though
+that were all of them:
+
+| root | runs | Greptile | in the control set |
+| --- | --- | --- | --- |
+| `musive/musive-s1-prhero-runs` | 3 | yes | **yes** |
+| `musive/musive-s2-prhero-runs` | 8 | yes | **yes** |
+| `musive/musive-s3-prhero-runs` | 19 | yes | **yes** |
+| `supermarket-pro-prhero-runs` | 3 (PRs 107, 109, 110) | **no** — `greptile_found: false` | no |
+| `pr-hero-prhero-runs` + `~/.prhero/repos/.../pr-hero/runs` | 8 + 2 | **no** — `greptile_found: false` | no |
+
+The two excluded roots are excluded for one reason only: Greptile is not installed on those repositories,
+so every run there is `greptile_found: false` with **zero `greptile_only` rows** and no head-to-head to
+read. This is what keeps §2's claim exact — *all* 18 `greptile_only` rows that exist anywhere on disk are
+adjudicated, not merely all of them in the three roots above. Their 15 `prhero_only` rows are untriaged
+and are not part of any count in this file.
+
 ### 1.2 What is actually there
 
 **30 runs over 19 distinct PRs**, every one `run_status: complete` with `greptile.found: true`. All 30
@@ -171,6 +189,30 @@ Two of these deserve a note in M3, because they shape what the scout must be abl
 
 Every verdict's full reasoning, with the `file:line` evidence it was read from, is in the row itself
 (`reasoning` field of the matching `comparison.json`), never only here.
+
+### 2.4bis The revert corpus, measured — it is small, and that is the finding
+
+`pr-hero reverts` (#41) was built the same day and run over both repositories that have real history. The
+numbers matter more than the tool:
+
+| repository | window | commits scanned | candidates | body-linked | usable |
+| --- | --- | --- | --- | --- | --- |
+| `MusiveTech/musive` | 24 months | 4780 | 9 | 4 | **~3** |
+| `JuanchiiGomezZ/supermarket-pro` | 24 months (whole history: Jan–Aug 2026) | 1624 | **0** | 0 | 0 |
+
+The three usable musive cases are PRs **1160** (`fix: race condition restructure`, +25/−47 over 3 files,
+reverted after 19 minutes), **1276** (`Fix/no ref/public project control slider`, +134/−56 over 4 files,
+5 minutes) and **819** (`refactor: new uploading status card`, +569/−326 over 14 files, 4h25m). The fourth
+body-linked pair, PR 478 (`feat: username cannot change`), is almost certainly a product decision rather
+than a defect. The five pattern-only entries are hotfix merges whose reverted PR does not resolve.
+
+supermarket-pro contributes **nothing** on this axis: 1624 commits and not one revert or hotfix merge.
+Its history is seven months old, which is the likeliest explanation, and it will contribute later or
+never — either way it is not a source of ground truth today.
+
+**Three cases is not a benchmark.** That is the honest read, and it constrains the replacement metric
+directly: revert mining can serve as a FLOOR ("the scout must catch these three") but cannot carry M6's
+score on its own. Choosing what does is still open and is Juanma's call.
 
 ### 2.4 The restraint set for M4 — NOT yet established
 
