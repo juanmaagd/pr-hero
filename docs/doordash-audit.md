@@ -74,6 +74,7 @@ does not re-narrate. Two views of the same argument drift, and the one that drif
 | One idempotent summary, refreshed not stacked | `<!-- pr-hero-report head=<sha> -->` marker, PATCH in place (ROADMAP item 2) | `built` | none |
 | Trust preserved enough that teams enable it **without being mandated** | Opt-in is structural: `~/.prhero/watch.json` lists exactly the repos the watcher may spend on; `post` per repo, OFF by default | `built` | none |
 | Findings tell the author what to do next | Tier (blocking/advisory) is the scan aid since `ef41f3a`; the triage loop (6b) makes every finding answerable | `built` | none |
+| **"Broad summary notes … erode trust"** — one of the three named comment failure modes | A summarizer step is **on by default** (`preflight.ts:1228-1230`, `:1337`), spawned per review, producing "2-4 general sentences about the change" plus an advisory 1–5 score with a reason (`pipeline.ts:269-275`). The score is a Greptile-shaped element (item 6 measured Greptile's confidence score); the article argues against exactly this class of comment. Opt-out exists (`--no-summary`, `summary.enabled: false`) | **tension** — a product call, not a defect | Juanma decides: keep default-on, flip default-off, or keep the prose and drop the score. Whatever the call, it changes what is posted, not what is found — safe to land any time in `ROADMAP-DOORDASH.md`. Added by this audit's second pass 2026-08-16 |
 
 ## 3. Runtime lessons from production
 

@@ -5,6 +5,13 @@ pr-hero@0.1.0 is the engine). Ordering principle: **the benchmark bar funds ever
 first (it is what cancels Greptile), production wiring second, platform/multi-model third (each lever
 enters as a measured arm, never as faith), OSS productization last. One variable per experiment, always.
 
+**That opening principle is history, kept for the record (noted 2026-08-16).** Two later decisions replaced
+it and this file reads in their light: THE PIVOT (2026-08-10) retired the benchmark bar and made
+Greptile the oracle rather than the target — "cancel Greptile" is a malformed question at the measured
+overlap; and the DoorDash direction (2026-08-16, below) made **precision over recall the stated posture**
+and coverage something bought with a measured scout, not with "recall work first". What survives from the
+original ordering unchanged: every lever enters as a measured arm, one variable per experiment.
+
 Working agreement on validation speed: full smokes are SLOW and are reserved for milestone validation.
 Day-to-day iteration runs on offline gates (tests/typecheck/biome), the fixture eval, and surgical
 single-tree replays against the specific goldens a change targets.
@@ -297,6 +304,15 @@ At zero overlap that question is malformed — each covers what the other does n
 today loses 1677's duplicate keys; dropping pr-hero loses 1682's lying button. The decision is what each
 is FOR, and the head-to-head answers it per PR for the price of a coffee.
 
+**Update 2026-08-16 — the overlap is no longer zero, and the instrument has a named blind spot.** Over
+the 15 PRs that now carry a `comparison.json` (19 runs, 1682–1724): **11 `greptile_only` · 13 `both` ·
+28 `prhero_only`**, with only 12 of ~50 rows triaged. "Zero overlap" was true of the first eight and is
+history; do not quote it as the current profile. And whatever the buckets say, they are two of four
+confusion cells — they cannot see what BOTH reviewers missed, so "both passed it clean" is an unobserved
+cell, not a measured true negative (Phase C, C10). The head-to-head stays the instrument; it is read with
+that limit stated. `ROADMAP-DOORDASH.md` M0 triages the eleven `greptile_only` rows so the scout-probe
+has real targets.
+
 **Phase A is closed.** A8 (`slice3b-lifecycle-v7-cellproof`, lab `4da15bd`) was its last arm and it
 worked on both mechanism gates — `incoherent` cells fell 55%→37.5%, defect cells rose 2→5, and G2's own
 cell went from 0-of-3 to 2-of-3 adjudicated `defect`. It was deliberately NOT scored against the
@@ -410,6 +426,12 @@ What is still manual, in the order it should be closed:
    update, stdin body, response-id parse) has never executed and stays that way until an authorized
    live post. The live protocol is TWO posts: the first proves create, an immediate second must report
    `updated` with the SAME comment id — one post alone leaves the idempotency untested.
+
+   **Amended 2026-08-16 (`docs/doordash-audit.md` §2).** "A `sessionFailed` run never posts" guards the
+   extreme case only. A `partial` run — some hunters died, the survivors found nothing — still posts the
+   ✅ "found nothing to report" line with `partial` disclosed only in the `<sub>` footer. That is
+   DoorDash's "never post a false-clean review" one notch over, and it is **issue #42**, first milestone
+   of `ROADMAP-DOORDASH.md`.
 3. **Trigger** — `branch-pr` hook or a local watcher (launchd/cron) so a review happens rather than being
    remembered. Note this spends money per PR without asking, so it needs an explicit opt-in.
 
@@ -442,8 +464,15 @@ What is still manual, in the order it should be closed:
    `reviews_per_tick: K` config (needs per-PR locking and concurrent log-append discipline). True
    per-PR parallelism — one runner per PR, instantly — is what Phase E's GitHub Action gives for free,
    so measure whether the local knob is worth building before the Action makes it moot.
+
+   **The missing input for that revisit, named 2026-08-16:** DoorDash posts ~7 minutes after a PR opens
+   and argues that a comment arriving after a human already reviewed is acted on less — the change is no
+   longer fresh. We record run duration (`wall_ms`), not PR-opened → comment-posted latency, which spans
+   the tick interval plus the serial drain plus the run. Until that column exists (#23), "does the drain
+   rate cost us relevance" has no number. Add the column before deciding `reviews_per_tick`.
 4. **Accumulate the head-to-head** into a ledger across PRs, so the three buckets become a rate rather
-   than a snapshot. Six of the eight findings so far are unverified one by one; a verdict column with its
+   than a snapshot — a rate of *disagreement*, never a recall or precision figure: the buckets are two of
+   four confusion cells (see THE PIVOT's 2026-08-16 update and C10). Six of the eight findings so far are unverified one by one; a verdict column with its
    reasoning is required — the A3 lesson was that verdicts recorded without reasoning cannot be
    re-examined when new evidence arrives.
 
@@ -1022,6 +1051,15 @@ Convoy-inspired ops the engine still lacks, in value order:
   - **Review depth tiers.** Deep vs. normal vs. light is not only a UI knob (it currently appears ONLY as
     one, in the Phase E TUI scope note below). A deeper review means MORE hunters with new perspectives —
     `security`, `performance`, `api-contract` — and every one of those keys is rejected today.
+
+    **Corrected 2026-08-16.** "Deeper = more specialists" is exactly the topology DoorDash's v1 had and
+    abandoned: more narrow checklists catch more mechanical bugs and still miss the architectural ones,
+    because none of them looks at the whole change (`docs/doordash-ai-code-reviewer.md`, "How we got
+    here"; C7). Depth, on their measured evidence, comes from a **scout that aims attention plus
+    verification that goes deep on the leads** — not from widening the fan-out. C2 still unblocks new
+    keys (D3's model diversity needs them regardless); it should no longer be read as the depth lever.
+    If a "deep review" tier is ever built, it is scout-on plus a larger hop budget, and the tier is
+    measured, not assumed.
   - **Any new specialty at all**, independent of depth. The engine is key-agnostic; only this validator and
     the lab-shared schema are not.
 
@@ -1081,6 +1119,14 @@ Convoy-inspired ops the engine still lacks, in value order:
   4. **It grows without bound.** No eviction rule means the file eventually IS the context. Needs
      consolidation (merge duplicates, drop what the code no longer contains) and a size ceiling that
      fails loud rather than silently truncating.
+
+  **Cross-reference added 2026-08-16.** DoorDash's review-profile rules answer problems 1 and 4 with two
+  mechanisms worth borrowing here: every rule carries an `evidence` field naming the real PRs where the
+  pattern bit (provenance as a first-class field, which is problem 1's ask), and every candidate rule
+  passes the curation filter before it is kept — *CI would catch it → drop; the model already knows it →
+  drop; no concrete file:line → drop* — which is an eviction rule (problem 4). C6 and C8 feed the same
+  prompt slot; design them together, and run the filter over the existing gotchas first
+  (`ROADMAP-DOORDASH.md` M7, after the A/B).
 
 ### C7–C9 — from DoorDash's production system (added 2026-08-16)
 
@@ -1326,6 +1372,17 @@ like convoy uses its Codex quota. OpenRouter (paid per token) only for diversity
   baseline, same goldens, replicates. The Opus probe already showed tier doesn't move our misses;
   diversity must prove it buys recall (convoy's bet) before it costs a cent of routine spend.
 
+  **Corrected 2026-08-16.** "Same goldens" is stale: the golden dataset was retired at THE PIVOT and
+  stays sealed. D3's instrument is the live head-to-head on the frozen control set
+  (`ROADMAP-DOORDASH.md` M0/M6), same protocol as the scout A/B — both arms same day, N × R replicates,
+  read with C10's blind spot stated. And the bet is no longer only convoy's: DashBench's model-mix table
+  (`docs/doordash-dashbench-trust.md`, Appendix C) is direct external evidence — no configuration
+  dominated every axis, a Kimi K2.6 scout beat a Sonnet 4.6 scout in front of the same reviewer, and the
+  cheapest single-pass configs held precision while giving up half the recall. Two constraints it adds to
+  D3's design: **the scout tier and the reviewer tier are independent knobs** (if C7 lands, D3 has two
+  model dimensions, not one), and **cost per real finding**, not cost per PR, is the column that decides
+  a mix (#23).
+
 ## Phase E — OSS productization (pr-hero as a product)
 
 From the productization vision + convoy's operational layer: `.prhero/` project config (pipelines as
@@ -1389,5 +1446,14 @@ release process) is deliberately NOT decided now; revisit when Phase E is actual
   the gate and the paid replay is confirmation, not discovery.
 - The lab's `dataset/test.jsonl` stays sealed until A4.
 - Cost is a first-class metric; every live run lands in the ledger with its engine identity.
+- **No two-cell metric is a success condition** (added 2026-08-16, `docs/doordash-dashbench-trust.md`).
+  Acceptance rate, `applied` rate, and the head-to-head buckets each see what was FOUND and what a human
+  did with it — never what was missed, never where silence was correct. They are telemetry, recorded
+  always, optimised against never. A change is judged on adjudicated real-vs-not-real findings, split by
+  severity, with cost and latency beside them; and a recall figure from a single run is a sample, not a
+  measurement — aggregate over replicates or do not quote it.
+- **Correct findings can still be bad comments** (added 2026-08-16, `docs/doordash-ai-code-reviewer.md`).
+  Anything posted names a file and line, the concrete behaviour at risk, and where to start; if no action
+  point can be named, it is not posted inline. Precision is spent on the reader, not only on the claim.
 - Convoy clone at `~/Desktop/convoy` + study notes at `../deep-review/intel/convoy.md` are the reference
   library.
