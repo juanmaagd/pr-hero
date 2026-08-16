@@ -169,9 +169,17 @@ many are a well-argued concern with nowhere to start. That number decides:
 
 Exit: the number is in #19; the shape is decided; if gate-shaped, it is built and merged.
 
-### M3–M6 — PARKED 2026-08-16, and why
+### M3–M6 — parked and UNPARKED the same day, 2026-08-16
 
-Juanma's call, taken once the measurement problem was priced honestly rather than designed around.
+**Unparked.** The park was a mistake in routing, not in reasoning, and the reasoning below is kept because
+every number in it still holds. The error: the measurement problem was treated as a blocker sitting
+OUTSIDE the roadmap, when M3 item 6 already owns it by name — *"the A/B protocol (M6): which PRs, how many
+replicates, what 'moved' means, in numbers, before any run."* Parking M3 to go solve M3's own deliverable
+first is a loop, and worse, it deadlocked the main roadmap: `ROADMAP.md` item 7 gates on M6's numbers
+being in the ledger, so parking M6 blocked item 7 on an experiment we had decided never to run.
+
+The correct route is the one that was already written: **do M3.** It costs $0, Juanma ratifies it at the
+end, and nothing is spent before that. What follows is the evidence M3 must design against.
 
 The amendment above killed the bucket metric. The obvious replacement — adjudicating each arm's new
 findings — was rejected for a good reason: **it is a toll, not a metric.** Every time you want to measure
@@ -192,12 +200,13 @@ So the decomposition, stated so the next session does not re-derive it:
 - **Recall is expensive and has no cheap source.** Greptile is 61% noise, reverts are 3, the lab's golden
   dataset is retired. There is no oracle to buy, and inventing one is the loop.
 
-M3–M6 resume when the corpus decides it is worth it. The watcher is live and musive keeps producing runs
-and reverts for free, so waiting costs nothing and the evidence accumulates on its own. Nothing built for
-the scout is lost: M0's control set and adjudicated targets, `pr-hero reverts`, and the variance
-measurement all stand.
+**These four facts are M3's input, not a reason to stop:** the bucket metric is dead, per-experiment
+adjudication is a toll rather than a metric, the revert corpus is 3 cases and can only be a floor, and
+precision has a cheap one-time corpus (56 untriaged rows) while recall has no cheap source at all.
+M3 item 6 must produce a metric that survives all four. If it cannot, THAT is the finding, and it is worth
+a $0 session to reach it honestly rather than assuming it from outside.
 
-### M3 — The scout, designed (1 session, $0) — `docs/scout-design.md` — PARKED, see above
+### M3 — The scout, designed (1 session, $0) — `docs/scout-design.md` §3
 
 Rule 1 in full: nothing spawns until this document answers ROADMAP C7's four open questions with the
 real code in view. The design must settle, at minimum:

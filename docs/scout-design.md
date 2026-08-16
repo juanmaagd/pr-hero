@@ -257,13 +257,100 @@ Neither is fixed here; both are recorded so they are not rediscovered.
 
 ---
 
-## 3. The design (M3) — NOT WRITTEN
+## 3. The design (M3) — PARTIAL, stopped deliberately 2026-08-16
 
-To be filled in the M3 session, answering ROADMAP C7's four open questions plus the six items listed in
-`ROADMAP-DOORDASH.md` M3, with the real code in view. Nothing in M4–M6 starts before Juanma ratifies it.
+The M3 session was started and stopped early by Juanma, on the correct observation that **the DoorDash
+track does not have to be finished for the main roadmap to continue** — only `ROADMAP.md` item 7 gates on
+it, and the rest of Phase C does not.
 
-Two constraints this M0 section hands the design, on top of that list:
+What follows is what M3 actually established before stopping. It is recorded because the measurements
+below were the expensive part and would otherwise have to be re-derived. **The scout design proper — C7's
+four open questions, and M3 items 1 through 5 and 7 — is NOT written.** Do not treat this section as a
+ratified design; nothing in M4–M6 may start from it.
 
-- Score against the adjudicated `true-positive` subset (§2.3), never against `greptile_only` volume (§2.2).
-- Size the replicates against the measured variance (§1.3), not against the roadmap's provisional
-  `N=8, R=2`.
+### 3.1 M3 item 6, the metric — this part IS answered, and the answer is uncomfortable
+
+**Run-to-run variance, measured over the eight same-head replicate pairs in §1.3, counted in pr-hero
+findings per run rather than in buckets:**
+
+| measure | value |
+|---|---|
+| findings per run, mean | **1.87** |
+| findings per run, standard deviation | **1.36** |
+| mean absolute delta between same-head replicates | **1.38** |
+| max delta | **5** — PR 1724 produced 5 findings in one run and **0** in the other, at the same commit |
+
+**The noise is 74% of the signal.** Any scout effect smaller than roughly 1.4 findings per PR is
+indistinguishable from re-running the engine unchanged.
+
+**What that costs, paired by PR, at ~80% power and α=.05 (δ ≈ 2.8 × SE, SE = σ√(2/NR)):**
+
+| N PRs | R replicates | runs total | detectable δ | as % of the 1.87 mean | ~cost at $4/run |
+|---|---|---|---|---|---|
+| 8 | 2 | 32 | 1.35 | **72%** | ~$128 |
+| 8 | 3 | 48 | 1.10 | 59% | ~$192 |
+| 15 | 2 | 60 | 0.98 | 53% | ~$240 |
+| 15 | 3 | 90 | 0.80 | 43% | ~$360 |
+| 19 | 3 | 114 | 0.71 | 38% | ~$456 |
+
+So the roadmap's provisional `N=8, R=2` can detect **only a ~+72% effect** — that is, only if this scout
+reproduces DoorDash's own +75% weighted-recall result almost exactly. **If the real effect here is +30%,
+this corpus cannot see it at any affordable N.** That is the honest read, and it must be stated in the
+forecast before any arm runs, not discovered afterwards.
+
+**The metric shape that follows, two tiers, because one of them needs no statistics at all:**
+
+1. **Floor test — deterministic, cheap, interpretable.** Eight known defects with known sites already
+   exist: the 5 adjudicated `true-positive` misses (§2.3) and the 3 usable revert cases (§2.4bis). Does
+   the scout arm catch what the control arm misses, case by case? Binary per case, no power calculation,
+   and it fails loudly rather than ambiguously.
+2. **Effect test — statistical, expensive, and honestly underpowered.** Paired per-PR count of
+   **refuter-corroborated** findings (not raw volume — C1's lesson), with the refuted/downgraded rate as
+   the precision guard. Sized from the table above with the detectable effect declared up front.
+
+Counting corroborated findings rather than raw ones is safe here for a measured reason: precision is
+already high and stable — 53/53 postable (§2.2 of the M2 write-up in #19) and 35 of 36 musive 🔴 findings
+`corroborated` by the refuter. The refuter is doing its job, so surviving it is a usable proxy for "real".
+
+**The caveat that does not go away:** neither tier sees what BOTH arms missed. That is C10's blind spot,
+and no metric in this section closes it.
+
+### 3.2 Engine facts the design must obey — mapped 2026-08-16, not yet turned into decisions
+
+Recorded because they were read out of the real code and they constrain M3 items 1–5 and 7 hard:
+
+- **`role` is `"hunter" | "refuter"` and nothing else** (`src/spec.ts:18-31`), hunter keys are sealed to
+  the schema enum, and `agentsDirProblems` is **bidirectional** — a prompt file in the agents dir that no
+  spec entry names is a hard `CliError`. A scout therefore cannot simply be dropped into a prompt set.
+  **The precedent to copy is the summarizer**, which sits deliberately OUTSIDE `ReviewSpec` as an
+  engine-owned stage (`src/pipeline.ts:85-87`). Keeping the scout there is also what keeps the prompt-set
+  fingerprint untouched, which is what makes M6 one-variable.
+- **The delivery channel for leads is the USER prompt, not a new `{{LEADS}}` anchor.** `hunterPrompt`
+  (`src/pipeline.ts:277-290`) already assembles engine-owned text beside `HUNTER_OUTPUT_CONTRACT`, whose
+  own comment says it is *"driver source: covered by the engine version, NOT by the prompt-set
+  fingerprint"* (`pipeline.ts:246-247`). A `{{LEADS}}` anchor would instead require editing every agent
+  file — a prompt-set change that kills the one-variable property — and templating has **no unknown-token
+  check**: an unresolved `{{...}}` ships verbatim into the model with no error, no warning and no test.
+- **A pre-hunter stage attaches between `pipeline.ts:427` and `pipeline.ts:443`**, after the diff and
+  changed paths are known and strictly before the loop that composes hunter prompt bytes. There is no
+  existing sequential pre-hunter precedent — the summarizer runs *concurrently* and feeds nothing.
+- **"Diff-only, no tools" is only partly expressible today.** `tools: []` emits `--tools ""`, which **no
+  test covers**; `mcpConfigPath` is required and `--mcp-config` is emitted unconditionally; and `cwd` is
+  always the worktree, so "no repo access" is enforced by the tool allow-list, never by a sandbox.
+- **Provenance is worse than assumed and cheaper to fix than assumed.** `pipeline.json` records no engine
+  version, no prompt-set identity, not even a timestamp. But `findings.ts` already **declares**
+  `prompt_set?: {name, sha256}` and `driver_sha?` and no CLI path ever populates them — the schema seat
+  exists, unused.
+- **Two wiring hazards for any new stage:** a stage that omits `sumUsage(state.usageTotal, …)` is
+  invisible in the run's cost total; and `estimateCost(diffStat, hunterCount, summarizerEnabled)`
+  (`report.ts:75-102`) counts hunters and a summarizer boolean only, so a scout needs its own explicit
+  parameter, copying the summarizer's precedent.
+- **DashBench constrains the model choice:** the cheap scout won — Kimi scouting for Fable beat Sonnet
+  scouting for Opus on every quality axis at lower cost. Scout tier and hunter tier are independent knobs.
+
+### 3.3 What is still unwritten
+
+C7's four open questions and M3 items 1–5 and 7. Chiefly: whether leads bias or replace the hunters' own
+scan, what structurally stops the scout from becoming DoorDash's failed v2, the recall-first/precision-first
+split, the lead size ceiling, and how a finding is traced back to "led" or "found unled" without a schema
+change. Juanma ratifies the completed design before M4 begins.
