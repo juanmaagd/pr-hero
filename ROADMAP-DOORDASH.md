@@ -17,34 +17,80 @@ run in a ledger, `--dry-run` first. Two of them are load-bearing enough for this
 - **Time is the binding constraint, not money** (THE PIVOT). Milestones are sized in sessions. Where a
   choice trades money for sessions, spend the money.
 
-## The state this track starts from (verified 2026-08-16)
+## The state this track starts from
+
+> **Corrected 2026-08-16 by M0.** The figures first written here were taken from `musive-s3` alone and
+> were wrong on every count they stated. What follows is what M0 verified against disk. The full frozen
+> control set — every run dir, both bucket views, the variance pairs — lives in `docs/scout-design.md` §1
+> and that file, not this one, is the reference M6 reads against.
 
 - The watcher is LIVE on musive-s3: `io.prhero.watch` + `io.prhero.gc` in launchd, `post: true`,
   `daily_cap: 5`. **12 auto-launched reviews** so far; the last on 2026-08-14. PR 1722 already had a
   push-triggered second run — item 7's problem is real but rare (1 in 12).
-- **15 distinct PRs carry a `comparison.json`** in `~/Desktop/musive/musive-s3-prhero-runs/` (19 runs:
-  1682, 1698, 1700, 1703, 1705, 1707, 1708, 1711, 1714, 1715, 1716, 1717, 1718, 1722, 1724). Across
-  them: **11 `greptile_only` rows, 13 `both`, 28 `prhero_only`, and only 12 of ~50 rows triaged.** The
-  overlap is no longer zero — that changed since THE PIVOT's first eight PRs and it is worth knowing before
-  designing anything. These 15 PRs are the free control arm for the scout A/B.
+- The corpus is **three runs roots, not one**: `musive-s1-prhero-runs` (3 runs), `musive-s2-prhero-runs`
+  (8 runs) and `musive-s3-prhero-runs` (19 runs) — **30 complete runs over 19 distinct PRs**, all on
+  `model: sonnet`. s1 and s2 carry PRs 1710, 1719, 1720 and 1721 that appear nowhere in s3. Summed
+  buckets: **18 `greptile_only`, 17 `both`, 39 `prhero_only`** over 74 rows (the earlier 11/13/28 was
+  neither the summed nor the one-vote-per-PR view of any root).
+- **Every `greptile_only` row is now adjudicated (18 of 18)** — and only **5 are real misses**
+  (`true-positive`); 10 are `out-of-scope`, 2 `latent`, 1 `false-positive`. See M0 below.
+- **Eight PRs were reviewed twice at the same head with the same configuration, and six moved their
+  buckets.** That is M6's variance control, already paid for, and it says `R ≥ 2` replicates is very
+  likely too few. Numbers in `docs/scout-design.md` §1.3.
 - Production prompt set: `deep-review/agents/slice3b-lifecycle-v6-clean` (immutable — scored).
-- `bun test`: 883 offline tests. The gate before every milestone below is that number, green.
+- `bun test`: 1026 offline tests, of which 1 fails before this track touched anything
+  (`test/panel-renderer.test.ts`, ANSI bytes in a styles assertion). The gate before every milestone
+  below is that count, with no NEW failure.
+
+## Amendment 2026-08-16 — Greptile stops being the score
+
+Juanma's call, taken on M0's evidence: **stop measuring this engine against Greptile.** The head-to-head
+fails as an instrument on three independent counts, all three measured above — 61% of the `greptile_only`
+bucket is not a defect, the buckets move on replay alone in 6 of 8 same-head pairs, and they are
+structurally blind to what both reviewers missed (C10's note, now the method's ceiling rather than a
+footnote).
+
+What this changes, and what it does not:
+
+- **Greptile dies as the SCORE, not as a SOURCE.** The watcher stays live, `comparison.json` keeps being
+  produced for free, and it keeps surfacing real defects — 5 of them here, one a data-loss regression in
+  PR 1722. It becomes one input among several instead of the marker.
+- **M6's success criterion as written below is dead.** "The scout arm should shrink `greptile_only`, grow
+  `both`/`prhero_only`" would reward a scout that learned to imitate a house style. M6 must score the
+  adjudicated `true-positive` subset. The replacement metric is not chosen yet.
+- **#41 is promoted out of M7 and runs BEFORE M3**, because M3's design says "the scout is scored against
+  X" and M4's probe thresholds come from that X. Designing the instrument before knowing what it measures
+  is the wrong order.
+- **M0 and M4 survive untouched.** The 5 `true-positive` rows are adjudicated defects with `file:line`
+  evidence; they remain valid probe targets whether or not Greptile exists tomorrow. The control set
+  remains the control arm — what changes is what it is read against.
 
 ## Milestones
 
-### M0 — Pin the ground before moving anything (½ session, $0)
+### M0 — Pin the ground before moving anything — **DONE 2026-08-16**
 
 The two things every later milestone leans on, done first so nobody rediscovers them mid-build:
 
-1. **Triage the 11 `greptile_only` rows.** Human, `$0`, through the existing `pr-hero triage` path so the
-   verdict and reasoning land in `comparison.json` and the ledger, not in a chat. The question per row is
-   only "real defect, or style/convention/out of scope?" — because the scout-probe (M4) plants targets,
-   and a target must be a real miss. Today we do not know which of the 11 are.
-2. **Freeze the control set.** Write the 15 PR numbers, their run dirs and their bucket counts into
-   `docs/scout-design.md` (created empty here, filled in M3). Those run dirs must survive until M6 — no
-   runs TTL exists yet (#35 parked), so this is a note, not a mechanism; make it a loud one.
+1. **Triage the `greptile_only` rows.** Done: **18 of 18** adjudicated (16 written, 2 pre-existing),
+   covering 16 distinct findings. Each judged by an isolated agent reading musive at that exact head,
+   never from the claim's prose, with `file:line` evidence in the row's own `reasoning`. Result: 5
+   `true-positive`, 10 `out-of-scope`, 2 `latent`, 1 `false-positive`.
+   **The path had to change:** `pr-hero triage` cannot reach these rows — `applyTriageReplies` binds only
+   rows with a non-null `prhero` side (`src/triage-write.ts:78-83`) and resolves the parent from a posted
+   `<!-- pr-hero-finding` marker, and a `greptile_only` row has neither. The verdicts are direct writes to
+   `comparison.json`, which is how PRs 1700 and 1705 were already triaged. A `pr-hero triage row` write
+   path is a candidate M7 fill-in, not a blocker.
+2. **Freeze the control set.** Done in `docs/scout-design.md` §1 — 30 runs, 19 PRs, three roots, both
+   bucket views, the eight same-head variance pairs, and the loud survive-until-M6 warning. Verified while
+   writing it: `pr-hero gc` collects worktrees only and never touches a runs root, so nothing deletes
+   these — and nothing protects them either. They are not under version control.
 
-Exit: every `greptile_only` row has a verdict; the control set is written down.
+Two defects in our own tooling surfaced and are recorded (not fixed) in `docs/scout-design.md` §2.6:
+writing a `comparison.json` bumps its mtime and can flip the ledger's latest-run pick for artifacts that
+predate `generated_at` (observed live, mtimes restored); and `pipeline.json` records no engine version or
+prompt-set identity, so **M3 item 7 has to build the provenance record rather than extend one.**
+
+Exit met: every `greptile_only` row has a verdict; the control set is written down.
 
 ### M1 — Public honesty: the tool is in production and must not lie (1 session)
 
@@ -148,10 +194,12 @@ The only paid experiment in this track. Protocol fixed in M3; the shape it must 
   number of clean ones (from M0); R ≥ 2 (DashBench: a single run understates coverage — and rule 7). At
   ~$4/run plus the scout stage, N=8, R=2 is 32 runs, ~$150–200. Serial through the CLI at ~4 min/run is
   the actual constraint: budget the wall clock, not the dollars.
-- **What "moved" means, in the buckets:** the scout arm should shrink `greptile_only` (found what Greptile
-  found and we missed), grow `both`/`prhero_only`, and hold precision — measured as the refuter's
-  refuted/downgraded rate and the triage's dismissed rate on the new findings, not as raw volume (C1's
-  lesson: report distinct root causes, never counts). Latency and cost per arm recorded beside them.
+- **What "moved" means — SUPERSEDED, see the amendment above.** This bullet used to read "the scout arm
+  should shrink `greptile_only`, grow `both`/`prhero_only`". M0 killed it: 61% of that bucket is not a
+  defect, so shrinking it rewards style imitation. The replacement metric is not chosen yet and is
+  #41's + M3's job. What survives from the original bullet: precision is held, measured as the refuter's
+  refuted/downgraded rate and the triage's dismissed rate on the NEW findings, never as raw volume (C1's
+  lesson: report distinct root causes, never counts); latency and cost per arm recorded beside them.
 - **Then decide — Juanma's call, three outcomes:** adopt (flag becomes default, watcher included), keep
   as opt-in flag (positive but not worth the cost/latency on every PR), or drop (record why in this file
   and in C7). Whatever the outcome, C10's honesty applies to the read: the buckets cannot see what both
@@ -166,8 +214,9 @@ starts consuming them:
 
 - **#23 columns** — `trigger` (watch | manual), retry reason breakdown into `run_agents`, model per
   agent, PR-opened → posted latency, cost per real finding. All additive.
-- **#41** — reverted/hotfixed PR mining, `gh` only, $0. Output goes beside the control set: it is the
-  first corpus the head-to-head cannot produce.
+- **#41 — PROMOTED OUT OF M7 (2026-08-16).** It now runs before M3 as the replacement measurement track,
+  for the reason in the amendment above. Still `gh` + `git log` and still $0; what changed is its position
+  and its weight, not its scope — it builds the candidate list and stops, exactly as the issue says.
 - **C8's curation filter** over musive's existing `.prhero/gotchas.md` and priors, $0: *CI would catch it →
   drop; the model already knows it → drop; no file:line evidence → drop*. Do it AFTER M6, not before — it
   changes what hunters read.
@@ -198,7 +247,9 @@ Phase C work with their own designs.
 
 | Milestone | Sessions | Money | Juanma decides |
 |---|---|---|---|
-| M0 pin the ground | ½ | $0 | verdicts on 11 rows |
+| M0 pin the ground — **DONE** | ½ | $0 | ~~verdicts on 11 rows~~ → 18 rows adjudicated |
+| **#41 revert mining (promoted, runs next)** | ½–1 | $0 | which candidates are real |
+| **The replacement metric** | 1 | $0 | **what M6 scores against** |
 | M1 public honesty | 1 | $0 | post-or-not on partial+zero |
 | M2 #19's shape | ½ | $0 | — (the number decides) |
 | M3 scout design | 1 | $0 | ratify the design |
@@ -206,7 +257,11 @@ Phase C work with their own designs.
 | M5 scout behind flag | 1–2 | ~$0.10 | — |
 | M6 the A/B | 1 (+ wall clock) | ~$150–250 | adopt / opt-in / drop |
 | M7 fill-ins | ride along | $0 | — |
-| **Total** | **~6–7 sessions** | **~$200–300** | |
+| **Total** | **~7–9 sessions** | **~$200–300** | |
+
+The two new rows are the cost of the amendment. Neither spends money; both spend the scarce thing, which
+is sessions. The A/B's own estimate may move again once the variance in `docs/scout-design.md` §1.3 is
+turned into a replicate count — `R ≥ 2` is very likely too few, and R scales the dollars linearly.
 
 Then item 7. If M6 says drop, the track still delivered M1, M2, #40, #23's columns, #41 and the first
 real corpus — the pivot's principles land either way; only the flagship mechanism would not.
