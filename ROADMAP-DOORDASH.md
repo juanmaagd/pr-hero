@@ -126,7 +126,34 @@ first, each its own commit/PR:
 Exit: tests pin both behaviours; the next auto-launched review on musive is checked by hand against them.
 The watcher stays live throughout — it is producing the control arm's data.
 
-### M2 — #19's shape, decided by the corpus not by taste (½ session, $0)
+### M2 — #19's shape, decided by the corpus not by taste — **DONE 2026-08-16**
+
+Measured, not argued. Population: every 🔴 finding on disk (`severity` CRITICAL or BLOCKER) — 36 in musive
+(reproducing #19's own table exactly) plus 17 from pr-hero's self-reviews, judged as a separate batch.
+Three independent judges, identical rubric, over the finding TEXT and never the repository, because
+postability is a property of how a claim is written.
+
+**53 of 53 postable. Zero concern-only. Zero borderline.** All 53 carry populated `path`, `line`, `symbol`
+and `proof_refs`. A 100% rate is a leniency smell, so the three shortest claims — the likeliest
+counter-examples — were re-judged by hand and all three held.
+
+The rate is 100% because postability is not an accident: the hunter output contract already requires
+`proof_refs` and a traced mechanism, so anything reaching the artifact has been forced to name a site and
+a consequence. **The DoorDash postability rule was never the lever on this engine — it is satisfied by
+construction.**
+
+So by M2's own rule, **#19 is criteria-shaped, and a postability gate would filter 0 of 53 — dead code.**
+It stays parked with M3–M6.
+
+A second number closes off the display option: over musive's 36 🔴 findings the refuter returned 35
+`corroborated` and 1 `downgraded-latent`, so the resulting tier is 35 blocking / 1 advisory. `ef41f3a`
+(post `tier` as the scan aid) is correct and stays, but it can only ever soften **1 of 36**. The wall is
+not noise, not a refuter failure and not a display failure — every finding in it is anchored, actionable
+and corroborated. The scale collapsed to one usable value because the rubric makes CRITICAL the only
+honest label for a traced user-visible defect, which is what #19 section 1 argued from the prompt text and
+this measures. Full write-up in the issue.
+
+The original entry, kept for its reasoning:
 
 The postability rule (anchored file+line, concrete behaviour at risk, where to start; no action point →
 not posted) is the cheapest lever the first post offers, and it is orthogonal to severity. Before building
