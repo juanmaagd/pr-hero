@@ -138,24 +138,13 @@ per arm (CLAUDE.md rules 5 and 7).
 pr-hero's cost and run time already sit inside their staged band **without a scout**. That is the
 plainest statement of where the money would go if C7 lands: coverage, at roughly their price.
 
-## Recommended build order for the next session
+## Build order
 
-Flows from Juanma's two statements — stabilise the built surface, then build in this direction. Each step
-is one variable or zero variables; nothing here reopens Phase A.
-
-1. **Defects in the built surface, hours each, no experiment:** #39 (`commit_id` pinning), #42 (partial-run
-   honesty), #40 (soft timeout).
-2. **#19 postability, criteria not temperature** — the $0 corpus check over the 30 CRITICAL findings first;
-   the rule after.
-3. **Item 7, re-review**, with the three amendments; the verify-vs-infer decision is Juanma's at design
-   time and the second post has narrowed it to "verify" vs "say unconfirmed honestly".
-4. **#23 columns**, cheap and additive: `trigger`, retry-reason breakdown, model per agent, PR-opened →
-   posted latency, cost per real finding.
-5. **#41** reverted-PR mining and the **C8 curation filter** over the existing gotchas — both $0, both
-   sharpen what every later experiment is measured against.
-6. **C7, the scout** — the pivot's flagship build. Designed first (rule 1), measured on the head-to-head
-   with C10's honesty about what that instrument cannot see, one variable (rule 7).
-7. C9 (deletions first), C10's shape decision, then Phase D/E as already ordered.
+**Superseded the same day by `ROADMAP-DOORDASH.md`** — roadmap 2, the authoritative sequence (M0–M7, then
+the splice into `ROADMAP.md` item 7). Juanma's decision after this audit: all DoorDash-derived changes
+first, as their own track, with the scout designed, probed and A/B-tested BEFORE item 7 — because item 7's
+discovery half must be built for the pipeline we will actually have. This file stays the index of WHAT and
+WHERE; that file owns WHEN. One view of the order, on purpose.
 
 ## Index of dispositions created or amended by this absorption
 

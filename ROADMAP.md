@@ -31,6 +31,11 @@ any single source as ground truth. What the pivot does NOT adopt is spelled out 
 their numbers as targets, their scale, and any reordering of the stabilise-first sequence. Phase A stays
 closed; time stays the binding constraint.
 
+**The sequence lives in `ROADMAP-DOORDASH.md` — roadmap 2.** Decided the same day: every DoorDash-derived
+change runs first as its own track (M0–M7: honesty fixes, #19's shape, scout design → probe → flag → A/B,
+fill-ins), and this roadmap resumes at **Phase B item 7** when that track's splice conditions hold. Two
+roadmaps, one order: that file governs until the splice; this file governs after.
+
 **Precedence rule (Juanma, 2026-08-16): where the two disagree, the LATER post wins.** They disagree in
 exactly one place and it is load-bearing — the May post's headline is a 60.2% acceptance rate; the July
 post shows acceptance populates only two of the four confusion-matrix cells and demotes it to product
@@ -787,6 +792,11 @@ What is still manual, in the order it should be closed:
 7. **A re-review is not a review — and today we run it as one. NOT BUILT.** Raised by Juanma
    2026-08-12, immediately after item 6 shipped and its own live runs made the gap visible. He is right,
    and it is worse than a matter of efficiency.
+
+   **PRECEDED BY `ROADMAP-DOORDASH.md` (Juanma, 2026-08-16).** This item does not start until that
+   track's splice conditions hold — M1 (#42, #39) merged and seen live, M2 (#19's shape) decided, and
+   M6 (the scout A/B) decided, because this item's discovery half must be designed for the pipeline we
+   will actually have. Read the splice section there before touching this entry.
 
    **Parked from W2 (Juanma, 2026-08-15) — read this before building this item.** Issues #16/#17 closed
    the *first* review's posting surface and explicitly left re-review for this slice. Do not reopen
