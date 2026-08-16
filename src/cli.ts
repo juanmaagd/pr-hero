@@ -136,6 +136,7 @@ import {
   renderPrComment,
   renderReport,
 } from "./report";
+import { revertsCommand } from "./reverts";
 import {
   effectiveDiffStat,
   evaluateSizeGate,
@@ -348,7 +349,9 @@ async function main(argv: string[]): Promise<number> {
                 ? await gcCommand(parsed.options)
                 : parsed.command === "usage"
                   ? await usageCommand(parsed.options)
-                  : await review(parsed.options);
+                  : parsed.command === "reverts"
+                    ? await revertsCommand(parsed.options)
+                    : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);

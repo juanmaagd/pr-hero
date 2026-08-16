@@ -146,6 +146,13 @@ export interface CliOptions {
   bodyFile?: string;
   verdict?: TriageVerdict;
   issue?: number;
+  // reverts only (GitHub #41): the `git log --since=` window to mine for
+  // reverted/hotfixed PRs. A string, not a date, because git's own date
+  // parser accepts "24 months ago" as readily as "2025-01-01" and reusing it
+  // beats re-implementing it here. Unset means DEFAULT_REVERTS_SINCE — the
+  // shell applies it, so parseArgs stays pure and "the operator asked for a
+  // window" stays distinguishable from "nobody said".
+  since?: string;
 }
 
 export interface ParsedCli {
@@ -158,6 +165,7 @@ export interface ParsedCli {
     | "triage"
     | "gc"
     | "usage"
+    | "reverts"
     | "help";
   options: CliOptions;
 }
@@ -194,6 +202,11 @@ Usage:
                              badge, posts, and resolves the inline review
                              thread. --body-file is reasoning prose only.
                              --dry-run prints the parent and posts nothing
+  pr-hero reverts [options]  Mine the repo's default branch for PRs that were
+                             later reverted or hotfixed, and write them as
+                             markdown CANDIDATES for human confirmation. Runs
+                             git log + gh api only: no review, no scoring, no
+                             labelling of what the defect was, $0
   pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
@@ -251,7 +264,11 @@ Options:
                       file), then PRHERO_AGENTS_DIR
   --out <dir>         Run directory; must live OUTSIDE the reviewed repo
                       (default: ~/.prhero/repos/<origin>/runs/<sha>-<n>).
-                      For ledger: the file to write instead of stdout
+                      For ledger and reverts: the file to write instead of
+                      stdout
+  --since <git-date>  reverts only: how far back to scan the default branch,
+                      in any form git's --since accepts ("6 months ago",
+                      "2025-01-01"). Default: 24 months ago
   --runs <dir>        ledger only: the runs root to scan for comparison.json
                       files (default: ~/.prhero/repos/<origin>/runs)
   --from <dir>        post/triage only: the run dir to read findings.json and
@@ -345,6 +362,7 @@ const VALUE_FLAGS = new Set([
   "--body-file",
   "--verdict",
   "--issue",
+  "--since",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -369,6 +387,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "triage"
     | "gc"
     | "usage"
+    | "reverts"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -505,11 +524,12 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "post" &&
       arg !== "triage" &&
       arg !== "gc" &&
-      arg !== "usage"
+      arg !== "usage" &&
+      arg !== "reverts"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger", "watch", "post", "triage", "gc" and "usage")',
+          '"ledger", "watch", "post", "triage", "gc", "usage" and "reverts")',
       );
     }
     command = arg;
@@ -575,6 +595,13 @@ export function parseArgs(argv: string[]): ParsedCli {
     throw new CliUsageError(
       "--from only applies to the post and triage commands",
     );
+  }
+  // --since names the `git log` window `reverts` mines, and nothing else
+  // reads it. Rejected elsewhere rather than ignored: a flag that parses and
+  // then does nothing is an operator believing they scoped a command they
+  // did not — the same reasoning as the --from guard above.
+  if (options.since !== undefined && command !== "reverts") {
+    throw new CliUsageError("--since only applies to the reverts command");
   }
   // spec "--all misused on another command": --all is usage's own
   // operator-wide escape hatch, and valid on nothing else.
@@ -771,6 +798,15 @@ function applyValueFlag(
       options.verdict = value;
       return;
     }
+    // Kept as a raw string and handed to `git log --since=` verbatim: git's
+    // date parser is the authority on what "24 months ago" means, and a
+    // validator here could only be a worse second opinion. It MUST have its
+    // own case — the switch's `default:` is --hop-budget's integer parser,
+    // so a missing case would reject a perfectly good date with an error
+    // naming a flag the operator never typed.
+    case "--since":
+      options.since = value;
+      return;
     case "--issue": {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {
