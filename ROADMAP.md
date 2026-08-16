@@ -984,13 +984,20 @@ What is still manual, in the order it should be closed:
    → treated as resolved; "I disagree" → the coordinator reads the justification and either resolves or
    argues back.* Three of those map onto what exists here (`persist` keeps the thread without reposting;
    `deferred`/`dismissed` are the tags; 6b's adjudicator is the argue-back, isolated instead of the same
-   reviewer). The one that matters for the open question: **their "fixed" is a judgment, not an
-   inference** — the coordinator re-reads the previous findings alongside the new diff and decides. That
-   is a third option between "pay a refuter step per finding" and "trust absence": one pass, prior
-   findings in context, cheaper than per-finding verification and stronger than non-detection. DashBench's
-   caveat still applies to it — one pass is one sample — so it narrows the fork; it does not close it.
-   Also inherited from them, for the build: previous findings and author replies become **user-authored
-   text inside a prompt** the moment re-review inlines them; C4's boundary-tag rule applies from that day.
+   reviewer). **Mapping is not adoption — three of 6b's rules stay exactly as written:** `deferred` still
+   needs a real destination (an issue number; a bare "acknowledged" has no analog here and is not being
+   added), `dismissed` still needs positive disproof with cited code, and the party arguing back is never
+   the same agent that wrote the code. Cloudflare's looser semantics are the reference, not the rule.
+   The one that matters for the open question: **their "fixed" is a judgment, not an inference** — the
+   coordinator re-reads the previous findings alongside the new diff and decides. That is a third option
+   between "pay a refuter step per finding" and "trust absence": one pass, prior findings in context,
+   cheaper than per-finding verification and stronger than non-detection. Two caveats travel with it, both
+   already on the record: DashBench's — one pass is one sample — and DoorDash's v2 — one session judging
+   every finding is attention spread thin, the failure the per-finding refuter shape was chosen to avoid.
+   So it narrows the fork; it does not close it, and it does not displace the refuter-shaped verification
+   this entry already argues for. Also inherited from them, for the build: previous findings and author
+   replies become **user-authored text inside a prompt** the moment re-review inlines them; C4's
+   boundary-tag rule applies from that day.
 
 8. **The terminal surface is unreadable, and that is a Phase B problem. IN PROGRESS 2026-08-12** (branch
    `feat/terminal-ui`). Raised by Juanma while running real reviews: the whole flow — plan, confirm,
