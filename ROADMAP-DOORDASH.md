@@ -92,7 +92,21 @@ prompt-set identity, so **M3 item 7 has to build the provenance record rather th
 
 Exit met: every `greptile_only` row has a verdict; the control set is written down.
 
-### M1 — Public honesty: the tool is in production and must not lie (1 session)
+### M1 — Public honesty: the tool is in production and must not lie — **#42 and #39 DONE 2026-08-16**
+
+Both merged. `#42`: a `partial` run no longer prints the ✅ — it states the incompleteness above the
+counts and names which agents completed and which did not, on the comment and the terminal alike. It
+posts, per the direction-of-error argument below, now written at the branch point itself. One thing the
+issue asked for that the code could not honestly give: `telemetry.per_agent` records no role, so the
+notice names AGENTS, not hunters — filtering the refuter out by name would print "all hunters completed"
+on a run that went partial precisely because the refuter died.
+`#39`: the review submission carries `commit_id: headSha`, the head is re-read before the anchoring call,
+and a moved head is loud on both surfaces. The 422 recovery is unchanged and better pinned.
+
+**`#40` is now orphaned** — it was to ride M5, and M5 is parked (see the scout-parked note below). It
+remains open and unblocking; pick it up on its own merits, not as part of a milestone.
+
+The original entry, kept for its reasoning:
 
 Reporting-side defects, offline-testable, no experiment, no prompt touched. In this order — smallest
 first, each its own commit/PR:
@@ -128,7 +142,35 @@ many are a well-argued concern with nowhere to start. That number decides:
 
 Exit: the number is in #19; the shape is decided; if gate-shaped, it is built and merged.
 
-### M3 — The scout, designed (1 session, $0) — `docs/scout-design.md`
+### M3–M6 — PARKED 2026-08-16, and why
+
+Juanma's call, taken once the measurement problem was priced honestly rather than designed around.
+
+The amendment above killed the bucket metric. The obvious replacement — adjudicating each arm's new
+findings — was rejected for a good reason: **it is a toll, not a metric.** Every time you want to measure
+you pay again, and that is a loop with no end. A corpus is adjudicated ONCE and replayed; a per-experiment
+adjudication never amortises.
+
+Then the corpus was measured and came up short. `pr-hero reverts` over both repositories with real history
+returns **3 usable cases** — musive gives 9 candidates over 4780 commits (4 body-linked, one of which
+reads as a product decision) and supermarket-pro gives **zero** over its entire 1624-commit history. Three
+cases is a floor the scout must clear, not a score it can be ranked by.
+
+So the decomposition, stated so the next session does not re-derive it:
+
+- **Precision is cheap and the corpus is already on disk.** 39 `prhero_only` + 17 `both` rows sit
+  untriaged. Adjudicating them once, with the machinery M0 proved works, measures how much of what we say
+  is real — and then any future engine change is scored by replay against a fixed set, with no new
+  judging.
+- **Recall is expensive and has no cheap source.** Greptile is 61% noise, reverts are 3, the lab's golden
+  dataset is retired. There is no oracle to buy, and inventing one is the loop.
+
+M3–M6 resume when the corpus decides it is worth it. The watcher is live and musive keeps producing runs
+and reverts for free, so waiting costs nothing and the evidence accumulates on its own. Nothing built for
+the scout is lost: M0's control set and adjudicated targets, `pr-hero reverts`, and the variance
+measurement all stand.
+
+### M3 — The scout, designed (1 session, $0) — `docs/scout-design.md` — PARKED, see above
 
 Rule 1 in full: nothing spawns until this document answers ROADMAP C7's four open questions with the
 real code in view. The design must settle, at minimum:
