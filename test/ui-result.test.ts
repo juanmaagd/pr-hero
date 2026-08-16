@@ -602,6 +602,65 @@ describe("renderResult incomplete runs", () => {
       expect(lines.join("\n")).not.toContain(ESC);
     }
   });
+
+  // GitHub #39, the terminal half of the moved-head disclosure. The comment
+  // says it on the PR; this says it to the operator watching the run, and
+  // both derive the sentence from movedHeadSentence so they cannot drift.
+  const MOVED = "d".repeat(40);
+
+  test("a moved head prints the notice with both shas in full", () => {
+    const text = joined(renderResult(input({ movedHeadSha: MOVED })));
+    expect(text).toContain(
+      "the PR head moved while this review ran — the comments are pinned",
+    );
+    // Wrap-tolerant: the sentence is wrapped, never truncated, and each sha
+    // survives whole on whichever line it lands on — a 40-char sha cut in
+    // half would be worse than no sha at all.
+    expect(text).toContain(`Reviewed ${"b".repeat(40)};`);
+    expect(text).toContain("the PR head is now");
+    expect(text).toContain(MOVED);
+    expect(text).toContain("Everything below describes the");
+  });
+
+  test("the moved-head notice sits above the findings, not after them", () => {
+    const text = joined(renderResult(input({ movedHeadSha: MOVED })));
+    expect(text.indexOf("the PR head moved")).toBeLessThan(
+      text.indexOf("src/triage-write.ts:70"),
+    );
+  });
+
+  // The same composition the summary comment pins: which code the block is
+  // about, THEN how much of it was looked at, then the payload.
+  test("partial AND moved prints both notices, moved first", () => {
+    const text = joined(
+      renderResult(input({ doc: partial(), movedHeadSha: MOVED })),
+    );
+    const moved = text.indexOf("the PR head moved");
+    const incomplete = text.indexOf("incomplete review");
+    expect(moved).toBeGreaterThan(-1);
+    expect(moved).toBeLessThan(incomplete);
+    expect(incomplete).toBeLessThan(text.indexOf("src/triage-write.ts:70"));
+    expect(text).toContain("Did not complete: parity");
+  });
+
+  test("an unmoved head prints nothing about a head at all", () => {
+    const text = joined(renderResult(input()));
+    expect(text).not.toContain("the PR head moved");
+    expect(text).not.toContain("Reviewed ");
+  });
+
+  // The renderer contract again: two more paints (yellow headline, dim
+  // sentence) that must vanish entirely with styles off.
+  test("styles off emits zero ANSI bytes on the moved-head branch", () => {
+    for (const lines of [
+      renderResult(input({ movedHeadSha: MOVED, styles: false })),
+      renderResult(
+        input({ doc: partial(), movedHeadSha: MOVED, styles: false }),
+      ),
+    ]) {
+      expect(lines.join("\n")).not.toContain(ESC);
+    }
+  });
 });
 
 // The work unit that replaced a planned interactive findings browser with

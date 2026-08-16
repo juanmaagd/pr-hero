@@ -68,6 +68,7 @@ import {
   fetchPrRefs,
   fetchPrReviewComments,
   ghCurrentBranchPr,
+  ghPrHeadSha,
   ghPrView,
   ghRepoWebUrl,
   initCodegraphIndex,
@@ -1342,6 +1343,17 @@ async function reviewPr(
             `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
             `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
         );
+        // GitHub #39: said at the MOMENT it happened, not only in the result
+        // block minutes of scrollback later — the same reason the 422
+        // demotion below gets its own line here. The two can co-occur: a
+        // force-push both moves the head and 422s the pinned submission.
+        if (posted.movedHeadSha) {
+          log(
+            `warning: the PR head moved while the review ran — reviewed ` +
+              `${headSha}, head is now ${posted.movedHeadSha}; the comments ` +
+              "are pinned to the reviewed commit",
+          );
+        }
         if (posted.reviewOutcome === "demoted") {
           log(
             "warning: the review submission was rejected (422) and recovered " +
@@ -1402,6 +1414,13 @@ async function reviewPr(
         : {}),
       worktree: { gitDirOwner, worktreePath },
       ...(links === undefined ? {} : { links }),
+      // GitHub #39. Only a run that actually POSTED can know this — the
+      // re-read lives in the posting sequence — so a run without --post
+      // never claims the head moved, which is correct: it published nothing
+      // that could go stale.
+      ...(posted?.movedHeadSha === undefined
+        ? {}
+        : { movedHeadSha: posted.movedHeadSha }),
       sessionFailed: result.sessionFailed,
       styles: styleEnabled(),
     })) {
@@ -1482,6 +1501,15 @@ export interface InlinePostOutcome {
   // its fields one by one, so the receipt's shape is unchanged, and a Map
   // would JSON.stringify to `{}` anyway.
   commentUrls: ReadonlyMap<string, string>;
+  // GitHub #39: the PR's head as GitHub reported it immediately before the
+  // review submission, when it was NOT the head this run reviewed. Undefined
+  // on an unmoved head AND on a re-read that could not be made — the two are
+  // deliberately indistinguishable here, because the only thing this field
+  // authorizes is a notice, and a notice needs a confirmed mismatch. Handed
+  // out so the terminal block can print the same disclosure the summary
+  // comment carries, and so the caller can say it in the run log at the
+  // moment it happened.
+  movedHeadSha: string | undefined;
 }
 
 // Fetch + anchor + plan, with NO posting — the exact subset `post --dry-run`
@@ -1622,7 +1650,12 @@ export async function postInlineFindings(input: {
     const created = await postPrComment(
       operatorRoot,
       pr,
-      renderPrComment(doc, webUrl, plannedDelta, plannedOutsideDiff),
+      // `movedHeadSha: undefined` — the re-read has not happened yet, and it
+      // deliberately does not happen before this write. Same shape as the
+      // absent link map above: the placeholder is provisional, the closing
+      // PATCH is authoritative, and the re-read belongs as close to the
+      // ANCHOR-BEARING call as it can get, not one write earlier.
+      renderPrComment(doc, webUrl, plannedDelta, plannedOutsideDiff, undefined),
       spawnFn,
     );
     summaryCommentId = created.commentId;
@@ -1630,6 +1663,34 @@ export async function postInlineFindings(input: {
 
   const reviewFindings = findingsFor(plan.reviewComments);
   const reachedIds = new Set<string>();
+
+  // GitHub #39 — the head re-read, HERE and not inside postPrReview, for one
+  // reason that is not stylistic: postPrReview returns early on zero
+  // anchorable findings without touching gh at all (spec "Zero anchorable
+  // findings"), and a run with nothing to anchor STILL publishes a summary
+  // comment — the ✅ clean bill included. That summary read against a head
+  // the PR has since moved past is the same undisclosed staleness the issue
+  // is about, so the check belongs to the sequence owner, which posts on
+  // every path, rather than to the primitive that sometimes does not.
+  //
+  // Immediately before the review submission: this is the tightest window
+  // available around the anchor-bearing call, and the window is the whole
+  // point — a check run minutes earlier would answer a question about a
+  // different moment. The comparison happens exactly ONCE, here, and both
+  // surfaces render the same answer; deriving it twice is how two surfaces
+  // start disagreeing about whether the PR moved.
+  //
+  // Never aborts, never filters, never re-runs anything. What a re-review
+  // should DO about findings computed on a stale head is ROADMAP item 7's
+  // design work, and with `commit_id` pinned (pr.ts) the answer here
+  // collapses to a sentence: post, pinned, and say which commit this is
+  // about. Silently dropping the post would be the invisible loss this
+  // project's direction-of-error rule ranks worst.
+  const liveHeadSha = await ghPrHeadSha(operatorRoot, pr, { spawnFn });
+  const movedHeadSha =
+    liveHeadSha !== undefined && liveHeadSha !== headSha
+      ? liveHeadSha
+      : undefined;
 
   const reviewResult = await postPrReview({
     operatorRoot,
@@ -1695,7 +1756,14 @@ export async function postInlineFindings(input: {
   const patched = await postPrComment(
     operatorRoot,
     pr,
-    renderPrComment(doc, webUrl, delta, outsideDiff, commentUrlByFindingId),
+    renderPrComment(
+      doc,
+      webUrl,
+      delta,
+      outsideDiff,
+      movedHeadSha,
+      commentUrlByFindingId,
+    ),
     spawnFn,
     summaryCommentId ?? undefined,
   );
@@ -1719,6 +1787,7 @@ export async function postInlineFindings(input: {
     delta: plan.delta,
     droppedFindingIds,
     commentUrls: commentUrlByFindingId,
+    movedHeadSha,
   };
 }
 
@@ -2012,6 +2081,17 @@ export async function runPostCommand(input: {
       `finding(s)), ${outcome.outsideDiffCount} outside diff, ` +
       `summary ${outcome.summary.action} comment ${outcome.summary.commentId}`,
   );
+  // GitHub #39: `post --from` publishes through the same sequence, so it
+  // gets the same disclosure. Unconditional, not chained into the else-if
+  // below — a moved head is orthogonal to both a dropped finding and a 422,
+  // and can happen alongside either.
+  if (outcome.movedHeadSha) {
+    log(
+      `warning: the PR head moved while the review ran — reviewed ` +
+        `${doc.head_sha}, head is now ${outcome.movedHeadSha}; the comments ` +
+        "are pinned to the reviewed commit",
+    );
+  }
   if (outcome.droppedFindingIds.length > 0) {
     log(
       `error: ${outcome.droppedFindingIds.length} finding(s) reached ` +

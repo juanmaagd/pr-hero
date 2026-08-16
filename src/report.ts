@@ -183,6 +183,34 @@ export function coverageSentence(
   return `${done} Did not complete: ${missing}.`;
 }
 
+// The one sentence behind every moved-head notice (GitHub #39,
+// ROADMAP-DOORDASH M1), shared with ui-result.ts for coverageSentence's
+// reason: the public comment and the terminal must name the SAME two shas
+// from the SAME bytes, and `quote` is the only difference between them
+// (backticks in markdown, bare text on a terminal).
+//
+// The wording is M1's own, kept recognizable on purpose — "reviewed `X`;
+// head is now `Y`" is the whole reconciliation POLICY this slice owes. What
+// a re-review should DO about findings computed on a stale head (re-verify,
+// demote, discard) is ROADMAP item 7's design work and is deliberately NOT
+// decided here; with `commit_id` pinned, GitHub anchors the comments to X
+// and marks them outdated itself, so the only thing left to say is which
+// commit the reader is looking at.
+//
+// Full 40-char shas, not the 8-char short form the headline uses: this is
+// the line a reader takes to `git log` to see what landed in between, and a
+// short sha is one paste-and-fail away from being useless.
+export function movedHeadSentence(
+  reviewedSha: string,
+  currentSha: string,
+  quote: (text: string) => string,
+): string {
+  return (
+    `Reviewed ${quote(reviewedSha)}; the PR head is now ` +
+    `${quote(currentSha)}. Everything below describes the reviewed commit.`
+  );
+}
+
 type RenderableSummary = NonNullable<FindingsDocument["summary"]>;
 
 function summaryLines(summary: RenderableSummary): string[] {
@@ -384,11 +412,24 @@ function findingIndexLines(
 // never a broken or empty one — so this stays additive, unlike `delta`
 // and `outsideDiffFindings` above: a missing link map degrades the
 // index's usefulness, it does not make the comment lie.
+//
+// `movedHeadSha` (GitHub #39) is REQUIRED `string | undefined`, on `delta`'s
+// side of that dividing line rather than `commentUrlByFindingId`'s, and it
+// sits BEFORE the link map so the type system says so. It is the PR's head
+// as GitHub reported it moments before posting, and it is set ONLY on a
+// confirmed mismatch with `doc.head_sha` — the caller does the comparison
+// once (cli.ts's postInlineFindings) so two surfaces cannot derive two
+// different answers from it, and this renderer is dumb: present means moved,
+// absent means unmoved OR unverifiable. An issue-mandated element whose
+// omission is SILENT is exactly the argument that made `delta` required; a
+// caller that forgot this one would publish a comment about code the PR no
+// longer has, with nothing on the page saying so.
 export function renderPrComment(
   doc: FindingsDocument,
   repoWebUrl: string | undefined,
   delta: PrCommentDelta | undefined,
   outsideDiffFindings: readonly Finding[],
+  movedHeadSha: string | undefined,
   commentUrlByFindingId?: ReadonlyMap<string, string>,
 ): string {
   // Normalize away one trailing slash so `gh repo view` output and a
@@ -412,9 +453,39 @@ export function renderPrComment(
     webUrl === undefined
       ? headSha8
       : `[${headSha8}](${webUrl}/commit/${doc.head_sha})`;
+  // The marker keeps carrying the REVIEWED head, never `movedHeadSha`
+  // (GitHub #39): the watch guard (B3) reads this marker to learn which head
+  // a posted comment covers, and writing the CURRENT head here would tell the
+  // watcher that the new head was reviewed — the same silent lie the pin and
+  // the notice below exist to kill, just relocated into the machine-readable
+  // half of the comment.
   const out: string[] = [prCommentMarker(doc.head_sha)];
   out.push("## pr-hero review");
   out.push("");
+  // GitHub #39, and it goes FIRST — above the #42 incompleteness notice and
+  // therefore above everything. The two notices qualify different things and
+  // the order follows the scope of what they qualify: this one says WHICH
+  // CODE the whole comment describes (the coverage sentence below included),
+  // #42's says how much of that code was actually looked at. A reader who
+  // learns on line 9 that the counts are a floor, and only on line 12 that
+  // they were computed against a commit the PR no longer points at, has read
+  // the two in the wrong order.
+  //
+  // Set only on a CONFIRMED mismatch (cli.ts re-reads the head immediately
+  // before posting and compares once). Unmoved and unverifiable both render
+  // nothing, and neither is a lie: the headline below names the reviewed sha
+  // outright and never claims it is current, so silence here says "nothing
+  // to add", not "this is the head".
+  if (movedHeadSha !== undefined) {
+    out.push(
+      "⚠️ **The PR moved while this review ran.** The comments are pinned to " +
+        "the commit that was reviewed, so GitHub will mark them outdated as " +
+        "the lines move; they are not a statement about the current head.",
+    );
+    out.push("");
+    out.push(movedHeadSentence(doc.head_sha, movedHeadSha, code));
+    out.push("");
+  }
   // GitHub #42. The defect: a run where SOME agents died and the survivors
   // found nothing posted "🔴 0 critical · 🟡 0 warning" followed by a ✅ clean
   // bill, and the only trace of the incompleteness was the word `partial`

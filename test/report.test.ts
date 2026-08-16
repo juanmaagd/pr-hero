@@ -359,7 +359,9 @@ describe("renderPrComment", () => {
   // guard can read WHICH head this comment covers.
   test("the first line is the marker declaring doc.head_sha", () => {
     expect(
-      renderPrComment(doc(), undefined, undefined, []).split("\n")[0],
+      renderPrComment(doc(), undefined, undefined, [], undefined).split(
+        "\n",
+      )[0],
     ).toBe(prCommentMarker(HEAD));
     expect(
       renderPrComment(
@@ -367,6 +369,7 @@ describe("renderPrComment", () => {
         undefined,
         undefined,
         [],
+        undefined,
       ).split("\n")[0],
     ).toBe(prCommentMarker(HEAD));
   });
@@ -375,7 +378,7 @@ describe("renderPrComment", () => {
   // stopped starting with it would orphan its own update path.
   test("the rendered body starts with the matcher's prefix", () => {
     expect(
-      renderPrComment(doc(), undefined, undefined, []).startsWith(
+      renderPrComment(doc(), undefined, undefined, [], undefined).startsWith(
         PR_COMMENT_MARKER_PREFIX,
       ),
     ).toBe(true);
@@ -398,7 +401,13 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     expect(body).toContain("## pr-hero review");
     expect(body).toContain(
       "🔴 2 critical · 🟡 1 warning — `bbbbbbbb`, diff from `aaaaaaaa`",
@@ -426,7 +435,13 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     expect(body).toContain("🔴 2 critical · 🟡 0 warning");
   });
 
@@ -444,7 +459,13 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     expect(body).toContain(
       `${scanAidEmoji({ severity: "CRITICAL", tier: "advisory" })} \`src/a.ts:10\` — the value is stored`,
     );
@@ -474,7 +495,13 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     expect(body).not.toContain("### 🔴 Blocking");
     expect(body).not.toContain("### 🟡 Advisory");
     expect(body).not.toContain("#### `src/a.ts:10`");
@@ -524,7 +551,13 @@ describe("renderPrComment", () => {
         tier: "advisory",
       }),
     ];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     const lines = body
       .split("\n")
       .filter(
@@ -547,6 +580,7 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
       new Map([
         ["F001", "https://github.com/musivetech/musive/pull/1#discussion_r5"],
       ]),
@@ -558,13 +592,19 @@ describe("renderPrComment", () => {
 
   test("an index line without a url map entry renders plain, unlinked text", () => {
     const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     expect(body).toContain("🔴 `src/a.ts:10` — the value");
     expect(body).not.toContain("[`src/a.ts:10`]");
   });
 
   test("zero findings render the explicit clean bill", () => {
-    const body = renderPrComment(doc(), undefined, undefined, []);
+    const body = renderPrComment(doc(), undefined, undefined, [], undefined);
     expect(body).toContain("🔴 0 critical · 🟡 0 warning");
     expect(body).toContain(
       "✅ pr-hero reviewed this PR and found nothing to report.",
@@ -593,6 +633,7 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
     );
     expect(body).not.toContain("✅");
     expect(body).not.toContain("found nothing to report");
@@ -608,6 +649,7 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
     );
     expect(body).toContain("⚠️ **This review is incomplete.**");
     expect(body.indexOf("This review is incomplete")).toBeLessThan(
@@ -624,6 +666,7 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
     );
     expect(body).toContain(
       "Completed: `reliability`, `refuter`. Did not complete: " +
@@ -645,6 +688,7 @@ describe("renderPrComment", () => {
         undefined,
         undefined,
         [],
+        undefined,
       );
       expect(body).toContain("⚠️ **This review is incomplete.**");
       expect(body).toContain(
@@ -665,21 +709,94 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
     );
     expect(body).toContain("⚠️ **This review is incomplete.**");
     expect(body).toContain("`resilience` (failed)");
   });
 
   test("a complete run keeps its clean bill and grows no notice", () => {
-    const body = renderPrComment(doc(), undefined, undefined, []);
+    const body = renderPrComment(doc(), undefined, undefined, [], undefined);
     expect(body).toContain(
       "✅ pr-hero reviewed this PR and found nothing to report.",
     );
     expect(body).not.toContain("This review is incomplete");
   });
 
+  // GitHub #39. The defect these pin: the review POST carried no commit_id,
+  // so a push landing mid-review re-anchored every comment against a newer
+  // diff — silently, whenever the line still existed and now meant something
+  // else. The pin lives in pr.ts; this is the half the READER sees.
+  const MOVED_HEAD = "d".repeat(40);
+
+  test("a moved head is disclosed above everything, naming both shas in full", () => {
+    const body = renderPrComment(doc(), undefined, undefined, [], MOVED_HEAD);
+    expect(body).toContain("⚠️ **The PR moved while this review ran.**");
+    expect(body).toContain(
+      `Reviewed \`${"b".repeat(40)}\`; the PR head is now \`${MOVED_HEAD}\`. ` +
+        "Everything below describes the reviewed commit.",
+    );
+    // Above the counts it qualifies — a reader who meets the number first has
+    // already read it as a statement about the current head.
+    expect(body.indexOf("The PR moved while this review ran")).toBeLessThan(
+      body.indexOf("🔴 0 critical"),
+    );
+  });
+
+  // The marker is the machine-readable half, and the watch guard (B3) reads
+  // it to decide which head a posted comment covers. Writing the CURRENT head
+  // there would tell the watcher the new head was reviewed — the same silent
+  // lie, relocated.
+  test("a moved head never reaches the marker, which still names the reviewed head", () => {
+    const body = renderPrComment(doc(), undefined, undefined, [], MOVED_HEAD);
+    expect(body.split("\n")[0]).toBe(prCommentMarker("b".repeat(40)));
+    expect(body.split("\n")[0]).not.toContain(MOVED_HEAD);
+  });
+
+  // A run can be BOTH partial and posted against a moved head, and the two
+  // notices compose in one fixed order: which code the comment is about
+  // first, how much of it was looked at second. Reversing them makes the
+  // coverage sentence read as a statement about the current head.
+  test("partial AND moved renders both notices, moved first, counts last", () => {
+    const body = renderPrComment(
+      doc({ run_status: "partial", telemetry: PARTIAL_TELEMETRY }),
+      undefined,
+      undefined,
+      [],
+      MOVED_HEAD,
+    );
+    const moved = body.indexOf("The PR moved while this review ran");
+    const incomplete = body.indexOf("This review is incomplete");
+    const counts = body.indexOf("🔴 0 critical");
+    expect(moved).toBeGreaterThan(-1);
+    expect(moved).toBeLessThan(incomplete);
+    expect(incomplete).toBeLessThan(counts);
+    // Both bodies survive intact — neither notice swallows the other.
+    expect(body).toContain(`the PR head is now \`${MOVED_HEAD}\``);
+    expect(body).toContain("`resilience` (failed)");
+  });
+
+  // Absent means "unmoved, or the re-read could not be made", and the two are
+  // deliberately indistinguishable: the headline names the reviewed sha and
+  // never claims it is current, so silence adds nothing rather than lying.
+  test("an unmoved head inserts nothing — the counts still follow the heading", () => {
+    const lines = renderPrComment(
+      doc(),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    ).split("\n");
+    expect(lines.slice(0, 4)).toEqual([
+      prCommentMarker("b".repeat(40)),
+      "## pr-hero review",
+      "",
+      "🔴 0 critical · 🟡 0 warning — `bbbbbbbb`, diff from `aaaaaaaa`",
+    ]);
+  });
+
   test("the footer is the sub line with run status and engine", () => {
-    const body = renderPrComment(doc(), undefined, undefined, []);
+    const body = renderPrComment(doc(), undefined, undefined, [], undefined);
     expect(body).toContain(
       "<sub>run complete · pr-hero 0.1.0 · Assistant report, not a merge " +
         "gate: every line above is a claim to verify.</sub>",
@@ -692,6 +809,7 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
     );
     expect(body).toContain("pr-hero (version not recorded)");
   });
@@ -701,12 +819,13 @@ describe("renderPrComment", () => {
   // "$" anywhere in the body means the contract broke.
   test("no cost and no token counts anywhere", () => {
     const bodies = [
-      renderPrComment(doc(), undefined, undefined, []),
+      renderPrComment(doc(), undefined, undefined, [], undefined),
       renderPrComment(
         doc({ findings: [finding({ id: "F001" })] }),
         WEB_URL,
         undefined,
         [],
+        undefined,
       ),
     ];
     for (const body of bodies) {
@@ -716,24 +835,32 @@ describe("renderPrComment", () => {
   });
 
   test("the summary head sha links to the commit only with a url", () => {
-    const linked = renderPrComment(doc(), WEB_URL, undefined, []);
+    const linked = renderPrComment(doc(), WEB_URL, undefined, [], undefined);
     expect(linked).toContain(`[\`bbbbbbbb\`](${WEB_URL}/commit/${HEAD})`);
-    expect(renderPrComment(doc(), undefined, undefined, [])).not.toContain(
-      "/commit/",
-    );
+    expect(
+      renderPrComment(doc(), undefined, undefined, [], undefined),
+    ).not.toContain("/commit/");
   });
 
   test("a trailing slash on the url is normalized away", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
-    const withSlash = renderPrComment(d, `${WEB_URL}/`, undefined, []);
-    expect(withSlash).toBe(renderPrComment(d, WEB_URL, undefined, []));
+    const withSlash = renderPrComment(
+      d,
+      `${WEB_URL}/`,
+      undefined,
+      [],
+      undefined,
+    );
+    expect(withSlash).toBe(
+      renderPrComment(d, WEB_URL, undefined, [], undefined),
+    );
     expect(withSlash).not.toContain("musive//");
   });
 
   test("an absent url renders byte-identical to the plain shape", () => {
     const d = doc({ findings: [finding({ id: "F001" })] });
-    expect(renderPrComment(d, undefined, undefined, [])).toBe(
-      renderPrComment(d, undefined, undefined, []),
+    expect(renderPrComment(d, undefined, undefined, [], undefined)).toBe(
+      renderPrComment(d, undefined, undefined, [], undefined),
     );
   });
 
@@ -741,7 +868,7 @@ describe("renderPrComment", () => {
   // no delta at all — every test above exercises exactly that path, so this
   // is the one asserting the negative explicitly.
   test("no delta argument renders no delta line", () => {
-    const body = renderPrComment(doc(), undefined, undefined, []);
+    const body = renderPrComment(doc(), undefined, undefined, [], undefined);
     expect(body).not.toContain("Δ");
   });
 
@@ -758,6 +885,7 @@ describe("renderPrComment", () => {
         persist: 0,
       },
       [],
+      undefined,
     );
     expect(body).toContain("Δ: 0 resolved · 1 new · 0 persist");
     expect(body).not.toContain("since");
@@ -776,6 +904,7 @@ describe("renderPrComment", () => {
         previousHeadSha: "c".repeat(40),
       },
       [],
+      undefined,
     );
     expect(body).toContain(
       "Δ since `cccccccc`: 1 resolved · 1 new · 2 persist",
@@ -796,6 +925,7 @@ describe("renderPrComment", () => {
         previousHeadSha: "b".repeat(40), // same as doc().head_sha
       },
       [],
+      undefined,
     );
     expect(body).toContain("Δ: 0 resolved · 0 new · 2 persist");
     expect(body).not.toContain("since");
@@ -810,6 +940,7 @@ describe("renderPrComment", () => {
       undefined,
       undefined,
       [],
+      undefined,
     );
     const block =
       "### Summary\n\n" +
@@ -824,7 +955,7 @@ describe("renderPrComment", () => {
   });
 
   test("an absent summary preserves the comment output byte-for-byte", () => {
-    const body = renderPrComment(doc(), undefined, undefined, []);
+    const body = renderPrComment(doc(), undefined, undefined, [], undefined);
     expect(body).toBe(
       "<!-- pr-hero-report head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->\n" +
         "## pr-hero review\n\n" +
@@ -841,7 +972,13 @@ describe("renderPrComment", () => {
   // caller must still pass `[]` — WARN-3) means no section at all.
   test("an empty outside-diff list renders no Comments Outside Diff section", () => {
     const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
-    const body = renderPrComment(doc({ findings }), undefined, undefined, []);
+    const body = renderPrComment(
+      doc({ findings }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
     expect(body).not.toContain("Comments Outside Diff");
   });
 
@@ -863,6 +1000,7 @@ describe("renderPrComment", () => {
       WEB_URL,
       undefined,
       [a, b],
+      undefined,
     );
     expect(body).toContain("### Comments Outside Diff (2)");
     expect(body).toContain("first un-anchorable claim");
@@ -894,9 +1032,13 @@ describe("renderPrComment", () => {
       line: 1,
       claim: "could not anchor this finding",
     });
-    const body = renderPrComment(doc({ findings: [f] }), WEB_URL, undefined, [
-      f,
-    ]);
+    const body = renderPrComment(
+      doc({ findings: [f] }),
+      WEB_URL,
+      undefined,
+      [f],
+      undefined,
+    );
     expect(body).toContain(
       "🔴 `src/never.ts:1` — could not anchor this finding",
     );

@@ -218,6 +218,43 @@ export async function ghPrFiles(
   return result.stdout;
 }
 
+// The PR's head AS GITHUB SEES IT RIGHT NOW — the re-read behind the
+// moved-head disclosure (GitHub #39, ROADMAP-DOORDASH M1). Deliberately a
+// separate, narrow call rather than reusing ghPrView: this runs in the
+// posting sequence, milliseconds before a mutating POST, and the one field
+// it needs is the one field it asks for.
+//
+// NON-THROWING, same cosmetic-degradation contract as ghRepoWebUrl above,
+// and the WHY is the load-bearing part: `commit_id` on the review submission
+// is the CORRECTNESS mechanism — with it, GitHub anchors every comment to
+// the reviewed commit whatever the branch has done since. This re-read is
+// only the DISCLOSURE on top of it. A disclosure that cannot be made must
+// never cost the post that the pin already protects, so a gh failure (rate
+// limit, transient 5xx, a repo the token lost access to) degrades to "we do
+// not know", never to a thrown run. Empty stdout is treated as failure for
+// the same reason `-q` on a deleted PR prints nothing: an empty string is
+// not a sha, and comparing it against the reviewed head would manufacture a
+// mismatch out of a missing answer.
+export async function ghPrHeadSha(
+  operatorRoot: string,
+  pr: number,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<string | undefined> {
+  try {
+    const result = await gh(
+      operatorRoot,
+      ["pr", "view", String(pr), "--json", "headRefOid", "-q", ".headRefOid"],
+      undefined,
+      options?.spawnFn,
+    );
+    if (!result.ok) return undefined;
+    const sha = result.stdout.trim();
+    return sha === "" ? undefined : sha;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function ghRepoWebUrl(
   operatorRoot: string,
   options?: { spawnFn?: typeof Bun.spawn },
@@ -750,6 +787,27 @@ export async function postPrReview(input: {
     return { outcome: "posted", findings: [] };
   }
   const body = {
+    // GitHub #39 (ROADMAP-DOORDASH M1). WITHOUT this, `POST
+    // .../pulls/<n>/reviews` resolves every `line` against the PR's LATEST
+    // commit at post time — not the commit the lines were computed on. A
+    // review takes minutes; an author who pushes while it runs gets one of
+    // two outcomes, and the silent one is the reason this line exists: a
+    // finding's line that still EXISTS in the newer diff but now means
+    // something else anchors cleanly to code the finding was never about.
+    // No error, no signal, nothing a reader could tell apart from a real
+    // finding. Pinned, GitHub anchors to the reviewed commit and marks the
+    // comment outdated ITSELF once the lines move — the reconciliation the
+    // engine would otherwise have to invent.
+    //
+    // The pin also creates a NEW 422 class, and that is the pin working
+    // rather than a regression: if `headSha` is rewritten out of the PR
+    // mid-run (a force-push), GitHub rejects the whole submission because
+    // the commit is no longer part of it, where the unpinned code would
+    // have silently posted against whatever replaced it. The recovery below
+    // is exactly right for that — re-fetch, re-match, demote the survivors
+    // into the summary's Comments Outside Diff bucket. Degraded, honest,
+    // and never a hard failure.
+    commit_id: input.headSha,
     event: "COMMENT",
     comments: input.findings.map((finding) => ({
       path: finding.path,

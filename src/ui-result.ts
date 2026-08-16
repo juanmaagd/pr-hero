@@ -19,7 +19,12 @@
 
 import type { ComparisonResult } from "./compare";
 import type { Finding, FindingsDocument } from "./findings";
-import { blobUrl, coverageSentence, formatElapsed } from "./report";
+import {
+  blobUrl,
+  coverageSentence,
+  formatElapsed,
+  movedHeadSentence,
+} from "./report";
 import {
   cyan,
   dim,
@@ -91,6 +96,14 @@ export interface ResultInput {
   // a live codegraph daemon holds .codegraph/daemon.sock.
   worktree?: ResultWorktree;
   links?: ResultLinks;
+  // PR mode only, and only on a CONFIRMED mismatch (GitHub #39): the PR's
+  // head as GitHub reported it immediately before posting, when it is not
+  // the head this run reviewed. Optional, matching this interface's own
+  // style for mode-specific inputs (`comparison`, `links`, `worktree`) —
+  // unlike renderPrComment's required parameter, there is exactly ONE
+  // production call site for this block and its test pins it, so an
+  // omission cannot hide in a second caller.
+  movedHeadSha?: string;
   sessionFailed: boolean;
   styles: boolean;
   width?: number;
@@ -279,6 +292,41 @@ function findingsSection(
   return lines;
 }
 
+// The terminal half of GitHub #39, and the summary comment's twin — same
+// sentence, same order relative to the incompleteness notice, different
+// paint. It sits ABOVE incompleteLines for the reason spelled out in
+// renderPrComment: this one says WHICH CODE everything below describes, the
+// #42 one says how much of it was looked at, and reading them the other way
+// round is reading them wrong.
+//
+// NOT suppressed on `sessionFailed`, unlike incompleteLines: a dead session
+// posts nothing, so the moved head can only reach here from a run that
+// really did post — and if a caller ever does hand it in on a failed
+// session, "the PR moved" is still true and still worth the two lines.
+function movedHeadLines(
+  reviewedSha: string,
+  currentSha: string,
+  width: number,
+  styles: boolean,
+): string[] {
+  const headWidth = Math.max(width - MARKER_INDENT.length, 20);
+  const proseWidth = Math.max(width - PROSE_INDENT.length, 20);
+  return [
+    "",
+    ...wrapText(
+      "the PR head moved while this review ran — the comments are pinned " +
+        "to the commit that was reviewed",
+      headWidth,
+    ).map((line) => MARKER_INDENT + yellow(line, styles)),
+    // Wrapped, never truncated, for findingLines' reason: a 40-char sha cut
+    // in half is worse than no sha at all.
+    ...wrapText(
+      movedHeadSentence(reviewedSha, currentSha, (text) => text),
+      proseWidth,
+    ).map((line) => PROSE_INDENT + dim(line, styles)),
+  ];
+}
+
 // The terminal half of GitHub #42, and the same argument as the summary
 // comment's: `partial · ` in the header rule says the run was incomplete in
 // two words, but two words next to five counts is a footnote wearing a
@@ -401,6 +449,10 @@ export function renderResult(input: ResultInput): string[] {
     ...(prUrl === undefined
       ? []
       : [MARKER_INDENT + dim("↗ ", styles) + cyan(prUrl, styles)]),
+    // GitHub #39, above the #42 block on purpose — see movedHeadLines.
+    ...(input.movedHeadSha === undefined
+      ? []
+      : movedHeadLines(doc.head_sha, input.movedHeadSha, width, styles)),
     ...(incomplete ? incompleteLines(doc, width, styles) : []),
     ...findingsSection(doc, width, styles, input.links),
   ];

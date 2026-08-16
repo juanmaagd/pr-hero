@@ -108,7 +108,19 @@ function makeFakeGh(script: ScriptEntry[]): {
       // Default: any unscripted --method POST/PATCH create succeeds with a
       // fresh id — covers the summary create/patch without a script entry
       // per call.
-      scripted = { stdout: JSON.stringify({ id: nextId++ }), exitCode: 0 };
+      //
+      // GATED on --method since GitHub #39, and the gate is the point: an
+      // unscripted READ used to get `{"id":N}` too, which was harmless only
+      // as long as nothing read a scalar. `ghPrHeadSha` reads one (`gh pr
+      // view --json headRefOid -q .headRefOid`), and a fabricated `{"id":102}`
+      // is not the reviewed sha, so every unscripted post test started
+      // reporting a moved head. An unscripted read now answers with NOTHING,
+      // which ghPrHeadSha reads as "could not verify" and renders as silence
+      // — the honest default for a question the script never answered. Tests
+      // that need a definite answer script `headRefOid` explicitly.
+      scripted = argv.includes("--method")
+        ? { stdout: JSON.stringify({ id: nextId++ }), exitCode: 0 }
+        : { stdout: "", exitCode: 0 };
     }
     const stream = (text: string) =>
       new ReadableStream<Uint8Array>({
@@ -133,8 +145,20 @@ function ndjson(rows: unknown[]): string {
 
 // Empty issue/review comment streams — the common "nothing posted yet"
 // baseline every scripted PR extends.
-function emptyCommentScript(): ScriptEntry[] {
+//
+// GitHub #39: the head re-read joins the baseline, answering with the head
+// the caller says it reviewed, because "the PR did not move" is the ordinary
+// state every one of these tests is about. Entry order matters — `script.find`
+// takes the FIRST match, and `headRefOid` is specific enough that no other
+// entry can swallow it, but a broad `["pr", "view"]` entry added later would,
+// so this one goes first.
+function headRefOidScript(headSha: string): ScriptEntry {
+  return { match: ["headRefOid"], response: { stdout: `${headSha}\n` } };
+}
+
+function emptyCommentScript(headSha: string = HEAD): ScriptEntry[] {
   return [
+    headRefOidScript(headSha),
     { match: ["issues/42/comments", "--paginate"], response: { stdout: "" } },
     { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
   ];
@@ -310,6 +334,200 @@ describe("postInlineFindings — step-14 ordering", () => {
     expect(createBody).toContain("src/b.ts");
     expect(patchBody).toContain("### Comments Outside Diff (1)");
     expect(patchBody).toContain("src/b.ts");
+  });
+
+  // GitHub #39, the sequence half. The pin (pr.ts) makes the comments
+  // correct; these pin the DISCLOSURE — that a head which moved under the
+  // run is said out loud on the PR and handed back to the caller, instead of
+  // the run publishing as though nothing happened.
+  const MOVED_HEAD = "e".repeat(40);
+
+  test("a moved head is disclosed in the closing summary and on the outcome", async () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const { spawnFn, calls } = makeFakeGh([
+      headRefOidScript(MOVED_HEAD),
+      ...emptyCommentScript(),
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(outcome.movedHeadSha).toBe(MOVED_HEAD);
+    // Posted, pinned, disclosed — never aborted and never filtered. What a
+    // re-review should DO about findings computed on a stale head is ROADMAP
+    // item 7's design work; dropping the post here would be the invisible
+    // loss the direction-of-error rule ranks worst.
+    expect(outcome.reviewOutcome).toBe("posted");
+    expect(outcome.reviewFindingCount).toBe(1);
+    const patch = calls
+      .filter(
+        (c) =>
+          c.argv.join(" ").includes("PATCH") &&
+          c.stdin?.startsWith("<!-- pr-hero-report "),
+      )
+      .at(-1);
+    expect(patch?.stdin).toContain("⚠️ **The PR moved while this review ran.**");
+    expect(patch?.stdin).toContain(`the PR head is now \`${MOVED_HEAD}\``);
+    // The placeholder create predates the re-read on purpose (it is the
+    // FIRST write of the run, and the check belongs next to the
+    // anchor-bearing call); the closing PATCH is the authoritative body.
+    const create = calls.find(
+      (c) =>
+        c.argv.join(" ").includes("POST") &&
+        c.argv.join(" ").includes("issues/42/comments") &&
+        c.stdin?.startsWith("<!-- pr-hero-report "),
+    );
+    expect(create?.stdin).not.toContain("The PR moved");
+  });
+
+  test("the head is re-read BEFORE the review submission, not after it", async () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const { spawnFn, calls } = makeFakeGh([
+      headRefOidScript(MOVED_HEAD),
+      ...emptyCommentScript(),
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ]);
+    await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    const readIndex = calls.findIndex((c) => c.argv.includes("headRefOid"));
+    const reviewIndex = calls.findIndex((c) =>
+      c.argv.join(" ").includes("pulls/42/reviews"),
+    );
+    expect(readIndex).toBeGreaterThanOrEqual(0);
+    // The window is the whole point: a check run earlier answers a question
+    // about a different moment.
+    expect(readIndex).toBe(reviewIndex - 1);
+  });
+
+  // The reason the re-read lives in the sequence owner and not inside
+  // postPrReview: postPrReview returns early on zero anchorable findings
+  // without touching gh, and a run with nothing to anchor STILL publishes a
+  // summary — the ✅ clean bill included.
+  test("a run with nothing to anchor still re-reads the head and still discloses", async () => {
+    const findings = [finding({ id: "F001", path: "src/never.ts", line: 1 })];
+    const { spawnFn, calls } = makeFakeGh([
+      headRefOidScript(MOVED_HEAD),
+      ...emptyCommentScript(),
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/other.ts", 5),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(calls.some((c) => c.argv.join(" ").includes("reviews"))).toBe(false);
+    expect(calls.some((c) => c.argv.includes("headRefOid"))).toBe(true);
+    expect(outcome.movedHeadSha).toBe(MOVED_HEAD);
+    expect(summaryStdins(calls).at(-1)).toContain(
+      "⚠️ **The PR moved while this review ran.**",
+    );
+  });
+
+  test("an unmoved head says nothing, and the submission still pins the reviewed head", async () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const { spawnFn, calls } = makeFakeGh([
+      ...emptyCommentScript(),
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(outcome.movedHeadSha).toBeUndefined();
+    expect(summaryStdins(calls).every((b) => !b.includes("The PR moved"))).toBe(
+      true,
+    );
+    const submission = calls.find((c) =>
+      c.argv.join(" ").includes("pulls/42/reviews"),
+    );
+    expect(JSON.parse(submission?.stdin ?? "{}").commit_id).toBe(HEAD);
+  });
+
+  // The pin is the correctness mechanism; the re-read is only the
+  // disclosure. A disclosure that cannot be made must not cost the post the
+  // pin already protects — so a failed re-read publishes exactly the
+  // unmoved body, and the run neither throws nor invents a mismatch.
+  test("a re-read that fails posts anyway, claiming nothing about the head", async () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["headRefOid"],
+        response: { stderr: "gh: rate limited (HTTP 403)", exitCode: 1 },
+      },
+      ...emptyCommentScript(),
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(outcome.movedHeadSha).toBeUndefined();
+    expect(outcome.reviewOutcome).toBe("posted");
+    expect(summaryStdins(calls).every((b) => !b.includes("The PR moved"))).toBe(
+      true,
+    );
+  });
+
+  // Acceptance criterion 4, at the sequence level: pinning must not turn a
+  // recoverable demotion into a hard failure. A force-push does BOTH — it
+  // moves the head AND rewrites the reviewed commit out of the PR, so the
+  // pinned submission 422s. The findings must still land, in the summary's
+  // Outside Diff bucket, alongside the moved-head notice.
+  test("a moved head plus a 422 still demotes into the Outside Diff bucket", async () => {
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    const { spawnFn, calls } = makeFakeGh([
+      headRefOidScript(MOVED_HEAD),
+      ...emptyCommentScript(),
+      {
+        match: ["pulls/42/reviews"],
+        response: {
+          stderr: "gh: Unprocessable Entity (HTTP 422)",
+          exitCode: 1,
+        },
+      },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(outcome.reviewOutcome).toBe("demoted");
+    expect(outcome.outsideDiffCount).toBe(1);
+    expect(outcome.droppedFindingIds).toEqual([]);
+    expect(outcome.movedHeadSha).toBe(MOVED_HEAD);
+    const patch = summaryStdins(calls).at(-1) ?? "";
+    expect(patch).toContain("### Comments Outside Diff (1)");
+    expect(patch).toContain("⚠️ **The PR moved while this review ran.**");
   });
 
   test("zero anchorable findings never reaches the reviews endpoint at all", async () => {
@@ -1097,6 +1315,7 @@ describe("postingExitCode — design D6's exit-1 rule", () => {
       delta: { resolved: 0, new: 0, persist: 0 },
       droppedFindingIds: [],
       commentUrls: new Map(),
+      movedHeadSha: undefined,
       ...overrides,
     };
   }
@@ -1207,7 +1426,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
       findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
     });
     try {
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       const exitCode = await runPostCommand({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
@@ -1241,7 +1460,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
       return true;
     }) as typeof process.stderr.write;
     try {
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       const exitCode = await runPostCommand({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
@@ -1270,7 +1489,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
     });
     try {
       const { spawnFn, calls } = makeFakeGh([
-        ...emptyCommentScript(),
+        ...emptyCommentScript(RUN_HEAD),
         { match: ["pulls/42/reviews"], response: { stdout: "" } },
       ]);
       const exitCode = await runPostCommand({
@@ -1313,7 +1532,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
   test("a run-dir for a DIFFERENT pr is rejected before any gh call — assertRunMatchesPr's call site", async () => {
     const { dir, cleanup } = await writeRunDir({ pr: 17 });
     try {
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       await expect(
         runPostCommand({
           operatorRoot: OPERATOR_ROOT,
@@ -1335,7 +1554,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
   test("the run-status guard refuses a partial run on a live post: exit 1, zero gh calls", async () => {
     const { dir, cleanup } = await writeRunDir({ run_status: "partial" });
     try {
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       const exitCode = await runPostCommand({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
@@ -1353,7 +1572,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
   test("the run-status guard on a dry-run of a partial run: exit 0, zero gh calls, no plan printed", async () => {
     const { dir, cleanup } = await writeRunDir({ run_status: "partial" });
     try {
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       const exitCode = await runPostCommand({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
@@ -1380,7 +1599,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
     });
     try {
       const { spawnFn, calls } = makeFakeGh([
-        ...emptyCommentScript(),
+        ...emptyCommentScript(RUN_HEAD),
         { match: ["pulls/42/reviews"], response: { stdout: "" } },
       ]);
       const exitCode = await runPostCommand({
@@ -1408,7 +1627,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
       sessionFailed: true,
     });
     try {
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       const exitCode = await runPostCommand({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
@@ -1456,7 +1675,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
         path.join(dir, "diff.patch"),
         diffAddingLines("src/a.ts", 200),
       );
-      const { spawnFn, calls } = makeFakeGh(emptyCommentScript());
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
       const exitCode = await runPostCommand({
         operatorRoot: OPERATOR_ROOT,
         pr: 42,
@@ -1496,7 +1715,7 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
         diffAddingLines("src/a.ts", 200),
       );
       const { spawnFn, calls } = makeFakeGh([
-        ...emptyCommentScript(),
+        ...emptyCommentScript(RUN_HEAD),
         { match: ["pulls/42/reviews"], response: { stdout: "" } },
       ]);
       const exitCode = await runPostCommand({

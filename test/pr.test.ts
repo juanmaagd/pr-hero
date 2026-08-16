@@ -25,6 +25,7 @@ import type { Finding } from "../src/findings";
 import {
   fetchPostedFindingComments,
   fetchPrReviewComments,
+  ghPrHeadSha,
   postIssueComment,
   postIssueTriageComment,
   postPrReview,
@@ -301,6 +302,49 @@ function toRef(f: Finding): PrHeroFindingRef {
   return { id: f.id, path: f.path, line: f.line, claim: f.claim, tier: f.tier };
 }
 
+// GitHub #39: the re-read behind the moved-head disclosure. Its whole
+// contract is that it never throws and never guesses — the pin is what makes
+// the comments correct, this call only decides whether there is anything to
+// SAY about it, so an unanswerable question must cost nothing.
+describe("ghPrHeadSha", () => {
+  test("asks for exactly one field and returns the trimmed sha", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      { match: ["headRefOid"], response: { stdout: `${HEAD}\n` } },
+    ]);
+    expect(await ghPrHeadSha(OPERATOR_ROOT, 42, { spawnFn })).toBe(HEAD);
+    expect(calls[0]?.argv).toEqual([
+      "gh",
+      "pr",
+      "view",
+      "42",
+      "--json",
+      "headRefOid",
+      "-q",
+      ".headRefOid",
+    ]);
+  });
+
+  test("a gh failure is undefined, never a throw — the post outlives it", async () => {
+    const { spawnFn } = makeFakeGh([
+      {
+        match: ["headRefOid"],
+        response: { stderr: "gh: rate limited (HTTP 403)", exitCode: 1 },
+      },
+    ]);
+    expect(await ghPrHeadSha(OPERATOR_ROOT, 42, { spawnFn })).toBeUndefined();
+  });
+
+  // An empty answer is NOT a sha, and comparing "" against the reviewed head
+  // would manufacture a mismatch out of a missing answer — a false "the PR
+  // moved" notice on a PR that never moved.
+  test("empty stdout is undefined, not an empty-string sha", async () => {
+    const { spawnFn } = makeFakeGh([
+      { match: ["headRefOid"], response: { stdout: "\n" } },
+    ]);
+    expect(await ghPrHeadSha(OPERATOR_ROOT, 42, { spawnFn })).toBeUndefined();
+  });
+});
+
 describe("postPrReview", () => {
   test("zero anchorable findings never reaches gh at all", async () => {
     const { spawnFn, calls } = makeFakeGh([]);
@@ -388,6 +432,34 @@ describe("postPrReview", () => {
     expect(typeof body.comments[0].body).toBe("string");
   });
 
+  // GitHub #39, the defect itself. WITHOUT commit_id, GitHub resolves every
+  // `line` against the PR's latest commit AT POST TIME, so a push mid-review
+  // re-anchors the comments to code the findings were never about. The pin
+  // travels on STDIN (`--input -`), never argv, so this asserts the recorded
+  // stdin — argv would pass while the body carried nothing.
+  test("the review submission is pinned to the reviewed head via commit_id", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      { match: ["pulls/42/reviews"], response: { stdout: "{}", exitCode: 0 } },
+    ]);
+    const findings = [finding({ id: "F001", path: "src/a.ts", line: 10 })];
+    await postPrReview({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      findings,
+      allFindings: findings.map(toRef),
+      spawnFn,
+    });
+    const call = calls.find((c) => c.argv.join(" ").includes("reviews"));
+    expect(call?.stdin).toBeDefined();
+    const body = JSON.parse(call?.stdin ?? "{}");
+    expect(body.commit_id).toBe(HEAD);
+    // Not smuggled into argv on the way: the whole body is one stdin
+    // document, and a commit_id on the command line would be a different
+    // (shell-quoted) surface.
+    expect(call?.argv.join(" ")).not.toContain(HEAD);
+  });
+
   // The 422 recovery (spec "GitHub is the anchor authority", design D1):
   // the atomic submission is rejected, and every finding still reaches a
   // channel — none are silently dropped.
@@ -434,6 +506,17 @@ describe("postPrReview", () => {
     expect(
       calls.filter((c) => c.argv.join(" ").includes("reviews")),
     ).toHaveLength(1);
+    // GitHub #39's acceptance criterion that is most likely to break in
+    // silence: the pin must not turn this recoverable demotion into a hard
+    // failure. The rejected submission carried commit_id, and the recovery
+    // ran anyway — which is also the shape of the NEW 422 class the pin
+    // introduces (a force-push that rewrites the reviewed commit out of the
+    // PR makes GitHub reject the submission outright, where the unpinned
+    // code would have silently posted against whatever replaced it).
+    const submission = calls.find((c) =>
+      c.argv.join(" ").includes("pulls/42/reviews"),
+    );
+    expect(JSON.parse(submission?.stdin ?? "{}").commit_id).toBe(HEAD);
   });
 
   // The matcher doubles as the recovery mechanism: a finding that the
