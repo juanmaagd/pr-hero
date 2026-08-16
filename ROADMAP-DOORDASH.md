@@ -206,7 +206,25 @@ precision has a cheap one-time corpus (56 untriaged rows) while recall has no ch
 M3 item 6 must produce a metric that survives all four. If it cannot, THAT is the finding, and it is worth
 a $0 session to reach it honestly rather than assuming it from outside.
 
-### M3 — The scout, designed (1 session, $0) — `docs/scout-design.md` §3
+### M3 — The scout, designed (1 session, $0) — **WRITTEN 2026-08-16, AWAITING RATIFICATION**
+
+The design is `docs/scout-design.md` §3.3–§3.14: all four C7 questions and items 1–5 and 7 answered,
+against verified file:line code (a verification pass re-checked §3.2's claims and confirmed 10 of 10, with
+two refinements now recorded there). The shape, in one line each: leads **bias**, never replace, and
+DoorDash's filter half is deliberately not taken; the scout is diff-only with `tools: []` and no MCP, which
+is what structurally stops it from becoming their v2; it is recall-first and **fails open** (hunters run
+unled, run stays `complete`, and M6 excludes that run from the scout arm); its prompt is engine-owned at
+`prompts/scout.md` beside the summarizer's, so the prompt set is untouched by construction; leads reach
+hunters through the user prompt with a hard 12-lead cap and an anti-anchoring paragraph; and led-vs-unled
+is **computed** at analysis time (path + ±25, `compare.ts`'s window), never self-reported, so no schema
+bumps. M4's gates and M6's protocol are in numbers.
+
+**The one open decision is §3.11's fork**, and it is money-versus-power: the effect test cannot see an
+effect smaller than ~72% at $128 or ~59% at $192, so the recommendation is the **floor test alone** — 8
+known defects with known sites over 7 PRs, binary per case, plus 2 clean PRs so pipeline-level restraint is
+not left unmeasured (~$144). §3.14 lists the four decisions Juanma ratifies.
+
+The original entry, kept for its reasoning:
 
 Rule 1 in full: nothing spawns until this document answers ROADMAP C7's four open questions with the
 real code in view. The design must settle, at minimum:
@@ -330,10 +348,10 @@ Phase C work with their own designs.
 | **The replacement metric** | 1 | $0 | **what M6 scores against** |
 | M1 public honesty | 1 | $0 | post-or-not on partial+zero |
 | M2 #19's shape | ½ | $0 | — (the number decides) |
-| M3 scout design | 1 | $0 | ratify the design |
-| M4 scout-probe | 1 | ~$5–15 | thresholds (in M3) |
+| M3 scout design — **WRITTEN, awaiting ratification** | 1 | $0 | ratify §3.14's four; **§3.11's fork** |
+| M4 scout-probe | 1 | ~$5–15 | thresholds — now set in §3.10 |
 | M5 scout behind flag | 1–2 | ~$0.10 | — |
-| M6 the A/B | 1 (+ wall clock) | ~$150–250 | adopt / opt-in / drop |
+| M6 the A/B | 1 (+ wall clock) | **~$144 (a) / ~$192 (b) / ~$360 (c)** | adopt / opt-in / drop |
 | M7 fill-ins | ride along | $0 | — |
 | **Total** | **~7–9 sessions** | **~$200–300** | |
 

@@ -1,7 +1,7 @@
 # The scout — design (ROADMAP-DOORDASH M3) and its frozen control set (M0)
 
-Status: **M0 section filled 2026-08-16. The design itself (M3) is not written yet.** Nothing in M4–M6
-starts before Juanma ratifies the design in the section left empty at the bottom of this file.
+Status: **M0 section filled 2026-08-16. The design (M3) written 2026-08-16, AWAITING RATIFICATION.**
+Nothing in M4–M6 starts before Juanma ratifies §3.14.
 
 This file has two jobs. The first, done here, is to freeze what the paid A/B in M6 will be read against —
 the runs already on disk, the buckets they produced, and the adjudicated verdict on every finding Greptile
@@ -325,6 +325,13 @@ Recorded because they were read out of the real code and they constrain M3 items
   **The precedent to copy is the summarizer**, which sits deliberately OUTSIDE `ReviewSpec` as an
   engine-owned stage (`src/pipeline.ts:85-87`). Keeping the scout there is also what keeps the prompt-set
   fingerprint untouched, which is what makes M6 one-variable.
+  > **Refined 2026-08-16 (verification pass):** the bidirectional check is real (`agentsDirProblems`,
+  > `src/preflight.ts:1181-1204`, thrown as a `CliError` by `preflightAgentsDir`, `src/cli.ts:2685-2702`,
+  > wired on both the local and PR paths) but it only sees files matching `AGENT_FILE_PATTERNS =
+  > ["deep-review-*.md", "review-*.md"]` (`src/preflight.ts:1173`). So the trap is narrower and sharper
+  > than stated: a scout file named `review-scout.md` inside the agents dir is a hard failure, while the
+  > summarizer's own home — `<repo>/prompts/summarizer.md`, outside the agents dir entirely
+  > (`src/cli.ts:205-210`) — is invisible to it by construction. §3.7 takes that seat.
 - **The delivery channel for leads is the USER prompt, not a new `{{LEADS}}` anchor.** `hunterPrompt`
   (`src/pipeline.ts:277-290`) already assembles engine-owned text beside `HUNTER_OUTPUT_CONTRACT`, whose
   own comment says it is *"driver source: covered by the engine version, NOT by the prompt-set
@@ -341,6 +348,11 @@ Recorded because they were read out of the real code and they constrain M3 items
   version, no prompt-set identity, not even a timestamp. But `findings.ts` already **declares**
   `prompt_set?: {name, sha256}` and `driver_sha?` and no CLI path ever populates them — the schema seat
   exists, unused.
+  > **Corrected 2026-08-16 while writing §3.3–§3.14**, after re-reading the code rather than this bullet:
+  > the *findings* artifact is not provenance-free. Both `writeFindings` call sites pass
+  > `engine: await engineIdentity()` (`src/cli.ts:707-717`, `:1211-1221`), so engine identity IS recorded
+  > there; what is missing from `findings.json` is only `prompt_set` and `driver_sha`. The claim holds
+  > exactly and only for `pipeline.json`, which records none of the three.
 - **Two wiring hazards for any new stage:** a stage that omits `sumUsage(state.usageTotal, …)` is
   invisible in the run's cost total; and `estimateCost(diffStat, hunterCount, summarizerEnabled)`
   (`report.ts:75-102`) counts hunters and a summarizer boolean only, so a scout needs its own explicit
@@ -348,9 +360,358 @@ Recorded because they were read out of the real code and they constrain M3 items
 - **DashBench constrains the model choice:** the cheap scout won — Kimi scouting for Fable beat Sonnet
   scouting for Opus on every quality axis at lower cost. Scout tier and hunter tier are independent knobs.
 
-### 3.3 What is still unwritten
+### 3.3 The scout in one paragraph
 
-C7's four open questions and M3 items 1–5 and 7. Chiefly: whether leads bias or replace the hunters' own
-scan, what structurally stops the scout from becoming DoorDash's failed v2, the recall-first/precision-first
-split, the lead size ceiling, and how a finding is traced back to "led" or "found unled" without a schema
-change. Juanma ratifies the completed design before M4 begins.
+**A single diff-only step that runs before the hunter fan-out, reads the patch and nothing else, and emits
+a capped list of unverified suspicions — `{path, line, why}` — which are appended to every hunter's user
+prompt as a "look here first" block. It has no repository access, no MCP, no tools, no priors and no
+gotchas. It produces no findings, and there is no code path from a lead to the findings array. If it fails,
+the run continues unled.** Everything below is the argument for each of those words, against the code in
+§3.2 and the numbers in §1–§2.
+
+### 3.4 C7 Q1 / M3 item 1 — leads BIAS the hunters' scan, they never replace it
+
+**Decision: bias.** The hunter's own mandate is unchanged by one byte; the leads arrive as additional
+input, explicitly labelled unverified, and the prompt says in as many words that the absence of a lead is
+not evidence of absence.
+
+The argument is not the roadmap's a-priori one ("replacing makes one stage a single point of failure").
+That is true but it is taste. The measured argument is §1.3: **recall on a single run is already unstable —
+mean absolute delta 1.38 findings between same-head replicates, max delta 5, and at `1724@bda807b3` one run
+found five things the other did not.** A replace-topology makes total recall the product of two unstable
+stages instead of the union of four semi-independent ones. We would be multiplying the noise we just
+measured, in the direction of the invisible-miss failure mode this project ranks worst.
+
+**The corollary, and it is the load-bearing half of this decision: we take DoorDash's leads half and
+explicitly DO NOT take their filter half.** Their own framing calls filtering the less obvious job — *"what
+it filters out: the parts of the change that don't need scrutiny"* — and for them it is where the cost
+saving lives. Here it is refused in v1 for two reasons, both of which are ours and not theirs:
+
+1. A filter converts a scout miss from "a hunter had to find it unaided" into "no hunter ever looked". That
+   is an invisible miss created by construction, and §1.3 says the scout will miss things.
+2. It cannot be measured with the instruments we have. C10's blind spot means neither arm can see what both
+   missed; a filter's whole cost lands in exactly that blind spot.
+
+A filtering arm is therefore a **separate, later experiment** with its own control, not a knob inside M6.
+Recorded in §3.13.
+
+### 3.5 C7 Q2 / M3 item 2 — what structurally stops the scout from becoming DoorDash's v2
+
+Their v2 failed because one agent read the whole diff, applied every rule, traced callers, checked siblings
+and verified every concern in one session — *"attention spread thin"*. The answer here is not a prompt that
+asks the scout to be brief. It is that **the scout is not capable of verification**, enforced by four
+mechanisms, three of them in code:
+
+| # | Mechanism | Enforced by |
+|---|---|---|
+| 1 | No repository access — it cannot open a file, grep, or walk a call graph | `tools: []` and no codegraph MCP tool in the allow-list (`step-runner.ts:193-194`, `:174-176`) |
+| 2 | No hop budget, no `hops_used`, no `hop_trail` — the vocabulary of investigation is absent from its contract | its own output contract (§3.7) |
+| 3 | Its output type is not `DraftFinding` and never reaches `state.drafts`, dedupe, the refuter or `SkillOutput.findings` | the pipeline wiring (§3.9); a lead has no `severity`, no `evidence_class`, no `proof_refs`, no `dedupe_key` |
+| 4 | One attempt, a 5-minute watchdog and a hard lead cap | its `StepSpec` (§3.8), copying the summarizer's non-hunter budgets (`pipeline.ts:525-526`) |
+
+The honest caveat, straight from §3.2 and re-verified: **`cwd` is still the worktree and `--mcp-config` is
+still emitted unconditionally**, so "no repo access" is enforced by the tool allow-list, never by a sandbox.
+`tools: []` emitting `--tools ""` is real (`step-runner.ts:193-194`, no empty-array branch) and **no test
+covers it** — the only `tools: []` in the repo today is the summarizer's `StepMeta` placeholder, overwritten
+before any spawn. That is an M5 test obligation, listed in §3.12, and it is the single mechanism this whole
+section rests on.
+
+### 3.6 C7 Q3 / M3 item 3 — direction of error: recall-first scout, precision-first everything else
+
+**The scout is prompted for recall within its cap; hunters and the refuter are untouched and stay
+precision-first.** A spurious lead costs one hunter some attention on a diff it was going to read anyway; a
+missed lead costs nothing that the unled pipeline would not also have cost. The asymmetry is not symmetric,
+and DashBench's own line — *scouts improve breadth when the reviewer can verify aggressively* — describes
+this engine, whose refuter corroborated 35 of 36 musive 🔴 findings (§3.1).
+
+**The fail-open rule, which follows from the same asymmetry:** if the scout step fails, times out, or
+returns unparseable output, **the hunters run unled and `run_status` stays `complete`.** This does not
+contradict #42. #42 is about a review that lost a hunter or the refuter — a genuinely incomplete review. A
+run without a scout is the *control pipeline*, which is by definition complete; it cannot have lost a
+finding it was never going to produce. But it must never be silent:
+
+- `pipeline.json` carries `scout.status: "failed"` (§3.9), and the run log emits a `scout-finished` event
+  with `ok: false`.
+- **M6 protocol rule:** a scout-arm run whose scout failed is EXCLUDED from the scout arm and re-run.
+  Counting it would silently dilute the arm with control-arm runs — the exact way an A/B lies quietly.
+
+### 3.7 M3 item 4 — where the scout prompt lives: `prompts/scout.md`, engine-owned
+
+**Decision: `<repo>/prompts/scout.md`, bundled with the engine, passed in as `input.scout.promptPath`.
+Byte-identical to the summarizer's arrangement (`src/cli.ts:205-210`, `pipeline.ts:85-87`, "deliberately
+outside ReviewSpec"). The prompt set is not touched, not forked, and not re-fingerprinted.**
+
+Why not a new prompt-set directory with byte-identical hunter files, the roadmap's other option: because a
+new set is a new fingerprint, and rule 5 plus M6's one-variable requirement then have to be argued rather
+than being true by construction. Engine-owned text is *"covered by the engine version, NOT by the
+prompt-set fingerprint"* — the comment the engine already carries over `HUNTER_OUTPUT_CONTRACT`
+(`pipeline.ts:245-247`). The scout is that kind of text.
+
+Why not the agents dir: `ReviewSpec.role` is `"hunter" | "refuter"` with a runtime guard
+(`spec.ts:24`, `:82-85`), so a scout cannot be a spec entry without widening the union — and a
+`review-scout.md` dropped in the agents dir without a spec entry is a hard `CliError`
+(`preflight.ts:1181-1204`). Both doors are closed on purpose. `prompts/` is open, and the summarizer walked
+through it first.
+
+**The scout's output contract is engine source too**, beside the other three
+(`SCOUT_OUTPUT_CONTRACT`, next to `HUNTER_OUTPUT_CONTRACT` in `pipeline.ts`):
+
+```
+{"leads":[{"path":"...","line":123,"why":"one sentence"}]}
+```
+
+No severity, no evidence class, no proof refs, no hop trail. `{"leads":[]}` is a valid, expected result —
+the same sentence the hunter contract already carries, for the same reason.
+
+**Model: independent knob, defaulting to the run's model.** `--scout-model` exists from day one (the
+summarizer's precedent, `pipeline.ts:507-512`) and DashBench says the cheap scout won. But it is **not
+exercised in M6**: the whole control corpus is `model: sonnet` (§1.2), so the scout runs sonnet in the A/B
+and the cheap-scout question becomes its own later experiment. Ratifying `--scout-model` is ratifying a
+flag, not a second variable. The bundled `prompts/summarizer.md` frontmatter (`model: haiku`) shows the
+seat works.
+
+### 3.8 M3 item 5 — how leads reach the hunters, and the ceiling
+
+**Delivery: appended to the hunter USER prompt, inside `hunterPrompt()`. Not `{{PRIORS}}`, not a new
+`{{LEADS}}` anchor.** A `{{LEADS}}` anchor would require editing every agent file — a prompt-set change
+that kills the one-variable property — and templating has no unknown-token check (`prompt-set.ts:78-88`,
+two `replaceAll`s and nothing else), so a set whose files lack the anchor would ship `{{LEADS}}` verbatim
+to the model with no error, no warning and no test. That failure is silent, which is the only kind this
+project treats as unacceptable.
+
+New signature: `hunterPrompt(patch, hopBudget, leads?)`. Block order, extending the verified order at
+`pipeline.ts:277-290`: `patch` → hop budget → the self-reported-hops line → **the leads block** → 
+`HUNTER_OUTPUT_CONTRACT`. Leads sit last before the contract so the diff is still what the hunter reads
+first.
+
+**The block, verbatim shape:**
+
+```
+Scout leads — UNVERIFIED suspicions from a diff-only pass that read no
+code. They are not findings, they carry no evidence, and confirming one
+still requires your own proof_refs. Their absence is not evidence of
+absence: your own scan of the whole diff is unchanged.
+
+- path:line — why
+```
+
+That paragraph is the anti-anchoring guard, and it is what keeps §3.4's "bias" from decaying into
+"replace" in practice.
+
+**Ceiling — hard, enforced by the driver, never by the prompt alone:**
+
+| limit | value | why |
+|---|---|---|
+| leads per run | **12** | above this it is a filter of nothing; §3.10's restraint gate bites first |
+| chars per `why` | **240** | one sentence; a paragraph is a finding in disguise |
+| total block | **3000 chars** | bounded prompt growth per hunter, ×4 hunters |
+| leads per path | **3** | stops one interesting file absorbing the whole budget |
+
+Over-cap leads are truncated deterministically (input order, no re-ranking) and the drop is recorded as
+`leads_truncated: n` in `pipeline.json`. A truncation that fires routinely is a prompt defect to fix in M4,
+not a cap to raise.
+
+**Every hunter gets the identical block.** Per-hunter filtering would require the scout to know the hunter
+taxonomy, which drags it toward specialisation — the v1 topology C7 exists to correct — and it adds a
+second variable to M6. Recorded as a lever in §3.13.
+
+**No priors, no gotchas, no PR title or body.** Feeding the scout the same `{{PRIORS}}`/`{{GOTCHAS}}` the
+hunters read would correlate its attention with theirs, and the independence of its pass is the entire
+reason it can add coverage. "Diff-only" is meant literally.
+
+### 3.9 M3 item 7 — provenance, and how a finding is traced to "led" or "unled"
+
+**Attribution is computed, never self-reported.** The engine already distrusts self-reported hop counts in
+its own prompt text (*"`hops_used` and `hop_trail` are self-reported and may be cross-checked against this
+run's telemetry"*); asking a hunter to declare "I found this because of lead 3" repeats the mistake that
+line was written to warn about, and it cannot be audited.
+
+**The rule, applied at analysis time from the two artifacts:** a finding is `led` when some lead shares its
+`path` and `|lead.line − finding.line| ≤ 25`; otherwise `unled`. The ±25 window is `compare.ts`'s existing
+precedent, reused so the head-to-head and the attribution agree on what "the same place" means. It is
+deliberately a proximity heuristic and will over-count — a lead and an independent finding in the same
+function count as `led`. That biases *against* the scout looking useless, so it must be reported with the
+window stated, and M6 reads the floor test (§3.11) as primary precisely because the floor test needs no
+attribution at all.
+
+**Nothing on the finding changes. No schema bump. Rule 5 untouched.**
+
+**Artifacts:**
+
+- `steps/scout.leads.json` — the raw validated leads, beside every other step's output.
+- `pipeline.json` gains one key: `scout: {enabled, model, status, leads_count, leads_truncated,
+  prompt_sha256, duration_ms}`. Additive; `watch-preflight.ts:553-577` is the only reader and reads named
+  keys.
+- **And, while `pipeline.json` is open, the three fields §3.2 found missing:** `engine`, `prompt_set:
+  {name, sha256}`, `generated_at`. This is not scope creep — without a prompt-set identity in the artifact,
+  M6's central claim ("both arms ran the same prompt set") is believed rather than recorded, and §2.6
+  already shows what an artifact with no `generated_at` does to the ledger. `findings.ts` declares
+  `prompt_set` and `driver_sha` and populates neither, so the same computation fills both seats.
+- **Usage:** the scout stage MUST call `sumUsage(state.usageTotal, result.usage)` and write a `per_agent`
+  row keyed `scout` — the summarizer's exact pattern (`pipeline.ts:571`), and the omission §3.2 names as a
+  wiring hazard. `test/pipeline.test.ts:532` is the test to copy.
+- **Cost band:** `estimateCost(diffStat, hunterCount, summarizerEnabled, scoutEnabled = false)`. Verified
+  shape: `agents = max(1, hunterCount + (summarizerEnabled ? 1 : 0))` (`report.ts:75-101`), so the scout
+  needs its own term or the pre-run band under-quotes every scout run. Three call sites
+  (`cli.ts:576`, `:874-878`, `:1059`).
+
+**Where the stage attaches:** `pipeline.ts` lines **436–442** — after `patch` and `changedPaths` exist and
+after trigger evaluation, strictly before the hunter composition loop at `:443`. It is `await`ed, unlike
+the summarizer, which is the first sequential pre-hunter stage in the engine. That has a cost this design
+does not hide: **the scout is on the critical path and adds its full latency to every run.** DoorDash paid
+~4× wall clock for staging; our scout is diff-only and one attempt, so the expected add is one short step,
+and M6 records latency per arm as a first-class number (§3.11).
+
+### 3.10 M3 item 6a — the M4 scout-probe protocol, in numbers
+
+Same discipline as `refuter-probe`: the prompt earns its A/B offline before anything expensive runs.
+`scripts/scout-probe.ts`, **3 replicates**, diff-only spawns.
+
+**Assertion 1 — coverage.** Targets: the five adjudicated `true-positive` misses (§2.3), over four distinct
+PRs. A hit = a lead whose `path` matches and whose `line` is within ±25 of the site.
+
+| PR | site | note |
+|---|---|---|
+| 1717 | `PaywallUpgrade/index.tsx:119` | ordering bug, visible in the diff |
+| 1719 | `SongSourceResolver.ts:296` | missing lower bound — the hardest of the five for a diff-only pass |
+| 1722 | `m4aRemux.ts:181` | the diff itself swaps a whole-file check for an mdat one; author-confirmed regression |
+| 1724 | `mus-638-song-bucket-rollout.md:144` | markdown runbook, shell under `set -u` |
+| 1724 | `mus-638-song-bucket-rollout.md:140-142` | markdown runbook, unbounded poll |
+
+**Gate: each of the five cases hit in at least 2 of 3 replicates.**
+
+**The exclusion rule, because a gate with no escape hatch gets quietly lowered instead:** if a case is hit
+0 of 3 across two separate prompt iterations, it may be reclassified as *not diff-visible* and moved out of
+the gate — with the reason written in this file. **At most one case may be excluded. A second exclusion is
+not a threshold problem, it is evidence that diff-only is the wrong call, and the design returns to Juanma
+before M5.** Two of the five live in a markdown runbook, so a scout prompt that implicitly assumes
+TypeScript fails 40% of this list; that is a prompt defect to fix in M4, never an exclusion.
+
+**Assertion 2 — restraint. §2.4's gap is closed by re-defining what restraint measures, not by paying for a
+triage.** The six bucket-clean candidates (1698, 1703, 1708, 1715, 1720, 1721) carry untriaged
+`prhero_only` rows, so "this PR is clean" is not a claim we own. But the failure mode DashBench names is
+not "flagged a clean PR" — it is *filtering nothing*, being loud everywhere. That is measurable without
+knowing the defect count:
+
+- **`lead_coverage` = fraction of the diff's changed hunks carrying ≥1 lead.** Gate: **mean ≤ 33% over the
+  six PRs × 3 replicates, and no single run above 50%.**
+- **Mean leads per PR ≤ 6** over the same set (the hard cap of 12 is the engine's floor, not the gate).
+
+Stated as what it is: a proxy. It measures selectivity, which is a property of the scout, instead of
+cleanliness, which is a property of a PR we have not triaged.
+
+**Prerequisite, $0, done in M4's session:** extract the defect site from each of the three usable revert
+cases (PRs 1160, 1276, 819 — §2.4bis) out of the revert diff, so M6's floor test has eight cases with
+sites rather than five. `pr-hero reverts` gives the pairs; the sites are a read of what the revert undid.
+
+**Exit:** the gates pass at 3 replicates, and the numbers — including every excluded case and its reason —
+land in the commit description.
+
+### 3.11 M3 item 6b — the M6 protocol, and the fork only Juanma can settle
+
+§3.1 established the metric shape and the uncomfortable arithmetic behind it. What follows is the protocol
+that shape implies.
+
+**Tier 1 — the floor test. Deterministic, per-case, no statistics, and it is the primary instrument.**
+**Eight known defects with known sites over SEVEN distinct PRs** — five adjudicated misses over four PRs
+(§2.3; PR 1724 carries two of them) plus three revert cases (§2.4bis, sites extracted in M4). Both arms run
+each PR. The question is binary per case: *did this arm produce a refuter-corroborated finding at the site?*
+No power calculation, no adjudication toll, and it fails loudly. Its weakness is stated up front: **8 cases
+cannot rank two arms that both score well.**
+
+**Plus 2 clean PRs, and they are not optional garnish.** The original M6 entry ran "an equal number of
+clean ones" for a reason the floor test alone cannot cover: M4's restraint gate measures the SCOUT's lead
+volume, not the downstream effect — hunters chasing spurious leads into junk findings. The precision guard
+in Tier 2 runs only on known-bad PRs, so it cannot see it either. Two clean PRs from §2.4's six, both arms,
+same replicates, reading one number: **does the scout arm produce MORE findings than the control on a PR
+where the control produces few?** Without them, option (a) leaves pipeline-level restraint unmeasured, and
+that is the one thing a "bias, never filter" design is most likely to get wrong.
+
+**Tier 2 — the effect test. Paired per-PR count of refuter-corroborated findings.** Precision guard: the
+refuter's refuted + downgraded rate per arm, which must not rise — never raw volume (C1). Latency and cost
+per arm recorded beside them. Sizing, from §3.1's table:
+
+| N | R | runs | detectable δ | % of the 1.87 mean | ~cost |
+|---|---|---|---|---|---|
+| 8 | 2 | 32 | 1.35 | **72%** | ~$128 |
+| 8 | 3 | 48 | 1.10 | 59% | ~$192 |
+| 15 | 3 | 90 | 0.80 | 43% | ~$360 |
+
+**The fork, and it is a money-versus-power call, not a technical one.** Tier 2 at any affordable size can
+only see an effect roughly the size of DoorDash's own +75%. If this scout delivers +30%, we pay $200–360 to
+learn nothing, and the honest write-up of that outcome is "underpowered, no conclusion" — which is not the
+same as "no effect" and will read like one anyway. Three options:
+
+- **(a) Floor test only.** 7 known-bad PRs + 2 clean, R=2, both arms = **36 runs, ~$144**. Adopt/drop
+  decided on the 8 cases, the restraint read on the clean pair, and the latency/cost numbers. No claim of
+  statistical effect is made or implied.
+- **(b) Floor test + Tier 2 at N=8, R=3** (48 runs, ~$192 — the 8 PRs are the 7 above plus one clean),
+  with the detectable-effect number printed in the write-up before the result.
+- **(c) Floor test + Tier 2 at N=15, R=3** (90 runs, ~$360, and the wall clock is the real cost at ~4
+  min/run serial).
+
+**Recommendation: (a).** The floor test answers the question that actually decides adoption — *does the
+scout catch things the control misses?* — case by case, at the lowest cost, with no instrument we cannot
+trust. Tier 2 buys a number we would have to caveat into uselessness. If the floor test comes out
+ambiguous (say 4–5 of 8 in both arms), (b) becomes worth its money, and the corpus is still there.
+
+**Protocol invariants for whichever option is chosen:**
+
+- Both arms run the same day, same engine build, same prompt set; the control arm is RE-RUN rather than
+  read off the on-disk baselines, which serve as the third point (variance-only).
+- A scout-arm run whose scout failed is excluded and re-run (§3.6).
+- The cross-root ledger problem (§1.2) is real: `pr-hero ledger` takes one `--runs` root. M6 either teaches
+  it several or aggregates by hand and says so in the write-up.
+- C10's blind spot applies to the read of every number: neither tier sees what both arms missed.
+
+**Exit:** the decision (adopt / opt-in / drop), the numbers, and the ledger entry.
+
+### 3.12 What M5 owes, created by the decisions above
+
+Test obligations, all offline, none optional:
+
+1. **`tools: []` emits `--tools ""` and the spawned step really has no tools** — §3.5's mechanism 1 rests
+   on it and nothing covers it today (`step-runner.ts:193-194`).
+2. The leads block appears in the hunter user prompt in the documented order, and **is absent — byte for
+   byte — when the scout is off**, which is what makes the control arm the control arm.
+3. Cap enforcement: 12 leads, 240 chars, 3000 total, 3 per path, deterministic truncation, `leads_truncated`
+   recorded.
+4. Scout failure ⇒ hunters run unled, `run_status` stays `complete`, `scout.status: "failed"` is written,
+   the event fires.
+5. Scout usage lands in `state.usageTotal` and in `per_agent.scout` (copy `test/pipeline.test.ts:532`).
+6. `estimateCost` with `scoutEnabled` raises the band; all three call sites pass it.
+7. `pipeline.json` carries the new `scout`, `engine`, `prompt_set`, `generated_at` keys, and the existing
+   reader still parses it.
+8. `fixture-eval` passes with the flag on AND off (the planted bug still found, the band still honest); one
+   `live-micro-eval` with the flag on.
+9. **`prompts/scout.md` must not be named `review-*.md` or `deep-review-*.md`, and must not live in the
+   agents dir** — a test that pins this, because the failure it prevents is a hard `CliError` on every run.
+
+### 3.13 Levers deliberately NOT pulled in v1, so M6 stays one variable
+
+Each is a real idea, deferred on purpose, with the reason recorded so it is not re-litigated:
+
+- **The filter half** (scout marks parts of the diff as not needing scrutiny) — §3.4. Its cost lands
+  entirely in C10's blind spot. Its own experiment, its own control.
+- **Per-hunter lead filtering** — §3.8. Requires the scout to know the taxonomy; drags it toward v1.
+- **A cheap scout tier** (`--scout-model haiku` and DashBench's Kimi result) — §3.7. The flag ships, the
+  variable does not.
+- **Priors / gotchas / PR body fed to the scout** — §3.8. Correlates its attention with the hunters'.
+- **Repo access via codegraph for cross-file drift** — the roadmap's own escape hatch in C7 item 2. Not
+  taken: it reopens the isolation question, costs money per run, and §3.5's mechanism 1 is what keeps the
+  scout from becoming v2. If M6 says the scout's misses are all cross-file, THAT is the evidence that buys
+  this lever, and not before.
+
+### 3.14 Ratification
+
+Juanma ratifies this design before M4 begins. The decisions above that are his to overturn, in the order
+they would cost the most to change later:
+
+1. **§3.11's fork — (a) floor test only, (b) +Tier 2 at ~$192, or (c) +Tier 2 at ~$360.** This is the only
+   one that spends money, and the recommendation is (a).
+2. **§3.4 — bias, and the filter half deferred.** The largest architectural commitment here.
+3. **§3.7 — `prompts/scout.md`, engine-owned, prompt set untouched.**
+4. **§3.10's exclusion rule** — at most one target case may be dropped from the coverage gate, and a second
+   returns the diff-only decision to him.
+
+Ratified: _pending_.
