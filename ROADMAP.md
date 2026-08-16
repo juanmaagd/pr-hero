@@ -362,7 +362,20 @@ find it in the source.
 
 Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it and does not pretend to.
 
-## Phase B — Production wiring — THE NEXT SESSION STARTS HERE
+## Phase B — Production wiring
+
+> **🔒 Item 7 is BLOCKED on `ROADMAP-DOORDASH.md` and item 8 is DONE — so the next session does NOT start
+> here.** Item 7 waits on that track's M6 (the scout A/B), which has not started; the full condition table
+> is on the entry itself. Everything else in this roadmap is free: Phase C's C1–C6, C8, C9 and C10 touch
+> the DoorDash track nowhere. Only C7 is the scout.
+>
+> Recommended next: **C5** (global config with per-repo override) — concrete daily pain, $0, offline
+> testable, and its precedence rule is already written down.
+>
+> Before anything: item 8's entry below still says `IN PROGRESS 2026-08-12 (branch feat/terminal-ui)`.
+> All three claims are false — the four `ui-*` modules are on `main`, `renderResult` is wired at
+> `cli.ts:756` and `cli.ts:1393`, and that branch does not exist. Verify and close the entry first, or the
+> next plan is built on something already shipped.
 
 Gate removed 2026-08-10: this no longer waits on the bar. See THE PIVOT above.
 
@@ -822,10 +835,28 @@ What is still manual, in the order it should be closed:
    2026-08-12, immediately after item 6 shipped and its own live runs made the gap visible. He is right,
    and it is worse than a matter of efficiency.
 
-   **PRECEDED BY `ROADMAP-DOORDASH.md` (Juanma, 2026-08-16).** This item does not start until that
-   track's splice conditions hold — M1 (#42, #39) merged and seen live, M2 (#19's shape) decided, and
-   M6 (the scout A/B) decided, because this item's discovery half must be designed for the pipeline we
-   will actually have. Read the splice section there before touching this entry.
+   **🔒 BLOCKED — DO NOT START. Preceded by `ROADMAP-DOORDASH.md` (Juanma, 2026-08-16).** This item does
+   not start until that track's splice conditions hold. State as of 2026-08-16, end of session:
+
+   | # | condition | state |
+   |---|---|---|
+   | 1 | M1 (#42, #39) merged **and seen live** | merged and pushed; **NOT yet seen live** — no auto-launched review has been checked by hand against them |
+   | 2 | M2 — #19's shape decided | ✅ done. 53/53 findings postable → #19 is criteria-shaped, not a gate |
+   | 3 | M6 — the scout A/B decided | ❌ **not started.** M3 (the design) is partial; M4, M5, M6 have not begun |
+   | 4 | M0's control set and M6's numbers in the ledger | control set ✅ (`docs/scout-design.md` §1); M6's numbers do not exist |
+
+   **Condition 3 is the real gate and it is not negotiable by convenience.** This item's discovery half
+   runs "over what changed since the last review", so it must be designed for the pipeline we will
+   actually have — and whether that pipeline has a scout stage is exactly what M6 decides. Designing it
+   against today's pipeline and re-doing it after M6 is the waste this ordering exists to prevent.
+
+   Do NOT unblock this item by rewriting the conditions. That was proposed once, on 2026-08-16, and
+   rejected: the gate is not the obstacle, the unfinished experiment is.
+
+   **What is NOT blocked, so this entry does not stall the whole roadmap (Juanma, 2026-08-16):** only
+   item 7 gates on the DoorDash track. Item 8 is done, and every Phase C entry except C7 — C1 through C6,
+   C8, C9, C10 — is available now and touches none of it. Read the splice section in
+   `ROADMAP-DOORDASH.md` before touching this entry.
 
    **Parked from W2 (Juanma, 2026-08-15) — read this before building this item.** Issues #16/#17 closed
    the *first* review's posting surface and explicitly left re-review for this slice. Do not reopen
