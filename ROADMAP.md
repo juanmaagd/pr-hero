@@ -9,6 +9,34 @@ Working agreement on validation speed: full smokes are SLOW and are reserved for
 Day-to-day iteration runs on offline gates (tests/typecheck/biome), the fixture eval, and surgical
 single-tree replays against the specific goldens a change targets.
 
+External references live in `docs/`, archived rather than linked because the sources go behind paywalls
+and CDN walls. DoorDash engineering is the second reference implementation this roadmap reasons against,
+after convoy — a production code-review agent at ~10,000 PRs/week over 56 repos, with published numbers.
+Both posts absorbed 2026-08-16; between them they touch Phase B item 7, issues #19/#23/#39/#40/#41/#42,
+Phase C's C7–C10, and Phase E's fixer loop.
+
+- `docs/doordash-ai-code-reviewer.md` (2026-05-11) — product and architecture: the lead scout, focused
+  context, precision over recall, the production lessons.
+- `docs/doordash-dashbench-trust.md` (2026-07-06) — DashBench, the measurement layer: why acceptance
+  rate is not ground truth, how they label without trusting any single source, and the measured
+  scout-vs-no-scout tradeoff.
+- `docs/doordash-audit.md` — **the closing artifact**: every DoorDash mechanism against pr-hero's code
+  as of 2026-08-16, status per row (`built / partial / missing / ahead / deliberately-different`), file:line
+  evidence, and the disposition each gap landed in. Also the recommended build order for the next
+  session. Read it before starting any of C7–C10.
+
+**The direction (Juanma, 2026-08-16): pr-hero pivots toward DoorDash's mechanisms and postures** —
+staged noticing/verifying, focused routed context, reporting guardrails, a measurement layer that refuses
+any single source as ground truth. What the pivot does NOT adopt is spelled out in the audit's header:
+their numbers as targets, their scale, and any reordering of the stabilise-first sequence. Phase A stays
+closed; time stays the binding constraint.
+
+**Precedence rule (Juanma, 2026-08-16): where the two disagree, the LATER post wins.** They disagree in
+exactly one place and it is load-bearing — the May post's headline is a 60.2% acceptance rate; the July
+post shows acceptance populates only two of the four confusion-matrix cells and demotes it to product
+telemetry. Anything in this roadmap or in the issue tracker that reads acceptance as a success condition
+predates that correction and is wrong.
+
 ## Phase A — Graduate Phase 0 (the bar: ≥80% catch, ≤20% FP)
 
 The two known capability gaps, in attack order:
@@ -808,6 +836,63 @@ What is still manual, in the order it should be closed:
    "it did not come back" good enough? 6b's `applied` currently assumes the second and calls it the
    first.
 
+   **Amended 2026-08-16 from an external production system, and the amendment is small on purpose.**
+   Source: DoorDash engineering, *How DoorDash built an AI code reviewer engineers actually listen to*
+   (2026-05-11) — ~10,000 PRs/week over 56 repos. Juanma paused this slice to absorb it. Three inputs
+   land here; everything else the article contributes went to issues #39/#40, to #19/#23, or to Phase C.
+
+   Their entire re-review guidance is one paragraph, under "Reporting needs its own guardrails":
+
+   > We added checks that prevent the reporter from posting a false-clean review if the analysis found
+   > issues, reconcile stale findings when a PR changes during review, and collapse old comments during
+   > re-review so the author sees the current state, not an accumulating pile of outdated bot feedback.
+
+   1. **"Collapse old comments" is an acceptance criterion this entry does not state.** The matcher
+      already gives it mechanically — a `persist` finding is not reposted — but the criterion the build
+      must be checked against is the reader's: **after N pushes, the author sees the current state, not
+      an archaeology of every round.** Written down because the matcher satisfying it is a claim, not a
+      guarantee, and nothing tests it today.
+
+   2. **"Reconcile stale findings when a PR changes DURING review" is a hazard this entry missed —
+      the head moving mid-run, not between runs.** The *pinning* half is a defect in the already-built
+      posting surface and left this slice as **issue #39**: `postPrReview` (`pr.ts:735-801`) sends no
+      `commit_id`, so GitHub anchors to the head at post time while the lines were computed on the head
+      the worktree was created at. The *policy* half stays here and is design work: when the head moved
+      under a review, what does a re-review DO with findings computed on the stale tree — re-verify
+      them, demote them to the outside-diff bucket, or discard them? The 422 path
+      (`pr.ts:781-800`) only covers the case where the line vanished; a line that still exists and now
+      means something else posts cleanly and lies.
+
+   3. **The open question above stays open, and the article does not close it.** It corroborates that
+      reporting is its own failure surface, and its precision-over-recall ethos *leans* toward verifying
+      rather than inferring — but it never says whether they verify a claimed fix. Recording the lean so
+      nobody later reads this entry as settled by an outside source. The decision is still ours.
+
+      **Updated hours later, from the second DoorDash post** (`docs/doordash-dashbench-trust.md`,
+      2026-07-06). It does not decide the cost question either, but it removes the last excuse for
+      treating absence as evidence, and it does so as a general property rather than as our local
+      variance problem:
+
+      > **Variance is a feature, not a bug.** LLMs are non-deterministic, so multiple runs of the same
+      > agent surface additional valid findings, meaning **a single run understates an agent's real
+      > coverage**, and you have to run repeatedly and aggregate to score it honestly.
+
+      This entry already argues that from our own data (a golden the lifecycle hunter catches in 3 of 6
+      runs on the same tree). What the second post adds is that the effect is structural, not a defect of
+      our prompts that a better set would fix — which kills the "our variance will improve, so absence
+      will get more trustworthy" line of hope. **A re-review that infers repair from non-detection is
+      reading a single stochastic sample as a measurement**, and no amount of tuning makes one sample
+      into an aggregate.
+
+      So: still Juanma's call whether `applied` pays a verification step per finding. But the two options
+      are no longer "verify" versus "trust absence" — they are "verify" versus "state the delta honestly
+      as unconfirmed". A `Δ N resolved` line computed from absence should not use the word *resolved*
+      unless something checked.
+
+   Deliberately NOT amended: the verification/discovery split, the refuter-shaped verification half, and
+   the delta-since-last-review scoping. The article agrees with all three by construction and adds
+   nothing to them — noted so a future reader does not go looking for a change that is absent.
+
 8. **The terminal surface is unreadable, and that is a Phase B problem. IN PROGRESS 2026-08-12** (branch
    `feat/terminal-ui`). Raised by Juanma while running real reviews: the whole flow — plan, confirm,
    progress, result — is one flat 15-char-padded label list. Paths, 40-char SHAs, prose paragraphs and the
@@ -987,6 +1072,229 @@ Convoy-inspired ops the engine still lacks, in value order:
      consolidation (merge duplicates, drop what the code no longer contains) and a size ceiling that
      fails loud rather than silently truncating.
 
+### C7–C9 — from DoorDash's production system (added 2026-08-16)
+
+Source for all three: DoorDash engineering, *How DoorDash built an AI code reviewer engineers actually
+listen to* (2026-05-11), archived at `docs/doordash-ai-code-reviewer.md`. ~10,000 PRs/week over 56
+repos, three architecture generations, published numbers. **Placement decided by Juanma the same day:
+Phase C, not a Phase B blocker** — *"primero vamos a estabilizar y resolver toda la bola que tenemos y
+aprendimos"*. That is the pivot's own logic: time is the binding constraint, the head-to-head is the
+instrument, and an unmeasured architectural change is exactly what the pivot ended.
+
+- **C7. The lead scout — split NOTICING from VERIFYING. The single highest-value idea in the article,
+  and the one that indicts our current topology.** NOT BUILT, not designed.
+
+  **Why it is aimed at us specifically.** Their v1 was a fan-out of focused specialist agents — security,
+  tests, performance, code quality, each with a narrow scope and a checklist. That is *this engine*:
+  `reliability`, `resilience`, `parity`, `lifecycle`. They abandoned it, and the diagnosis is verbatim:
+
+  > This was good at catching mechanical bugs like missing nil checks, unhandled errors, and obvious test
+  > gaps. But it kept missing the architectural issues: a refactor that quietly changed a contract, a new
+  > abstraction that didn't fit, a deletion that broke something three repos away. **Specialist agents
+  > don't see the bigger picture, because none of them are looking at it.**
+
+  **Our own measurement corroborates it, which is the only reason this entry exists.** THE PIVOT's first
+  head-to-head recorded **zero overlap with Greptile across eight PRs** and the profile "high precision,
+  narrow coverage". PR 1677's duplicate React keys — Greptile-only, a measured miss — is exactly the
+  class their v1 kept dropping. Two independent systems reaching the same conclusion about the same
+  topology is stronger evidence than either alone.
+
+  **Their v2 is worth recording because it is the obvious fix and it FAILED.** Two parallel
+  general-purpose reviewers, each seeing the whole change. Better on architecture, worse overall: each
+  reviewer had to read the full diff, apply every rule, trace callers, check siblings and verify every
+  concern in one session. *"Attention spread thin across the change, and real findings sometimes got
+  lost."* Do not propose "one hunter that sees everything" as a shortcut past C7 — it has been tried.
+
+  **v3, the shape to steal.** A scout runs first. It verifies nothing; it reads the diff and emits
+  *investigation leads* — "this deletion looks suspicious", "this enum case isn't handled in the sibling
+  file", "this error path is silently swallowing failures". Deep reviewers then take the leads and dig,
+  keeping what holds up. Their framing of the second, less obvious job is the load-bearing part:
+
+  > The scout does two things at once. The obvious one is what it produces: a list of suspect spots in
+  > the diff. **The less obvious one is what it filters out**: the parts of the change that don't need
+  > scrutiny. By the time the deep reviewers run, they're not trying to evaluate every line.
+
+  **What this engine already has, so the delta is smaller than it looks.** The refuter IS their
+  "disprove-it pass" — an explicit falsify-your-own-finding step before anything is posted, arrived at
+  independently. C7 is the missing half at the OTHER end: we verify well and notice narrowly.
+
+  **Rule 5 does NOT block this, and an earlier reading of it said otherwise.** Rule 5 seals *hunter spec
+  keys* to `reliability|resilience|parity|lifecycle`. A scout is not a hunter: it emits leads, not
+  schema-bound findings, and its output can travel as prompt input through the existing
+  `{{PRIORS}}`/`{{GOTCHAS}}` templating (`prompt-set.ts`) with no schema change and no C2 dependency.
+  What genuinely constrains it is rule 1 (design before code — this entry is a seat, not a licence) and
+  rule 7 (one variable, measured in the head-to-head).
+
+  Open questions the design must answer, none of them cheap:
+  1. Do the leads REPLACE each hunter's own scan, or bias it? Replacing makes the scout a single point
+     of failure for recall — the exact fragility a fan-out exists to avoid. Biasing risks changing
+     nothing.
+  2. What stops the scout from becoming v2 (one agent doing everything, attention spread thin)? Their
+     answer is that it verifies nothing at all. Ours must be at least as strict.
+  3. Direction of error: a missed lead is an invisible miss, the worst failure mode this project
+     recognises. Does the scout get a recall-first prompt while the hunters stay precision-first?
+  4. How is it measured? Not against the sealed goldens — against the live head-to-head, one variable.
+     **Corrected the same day, after the second DoorDash post:** an earlier version of this line said
+     "with acceptance rate (see #23) as the success condition". It is not one. See C10 — acceptance
+     populates two of four confusion cells and can never see what we missed, which is the axis a scout
+     exists to move. A staging arm measured on acceptance would be measuring the one thing staging does
+     not primarily change.
+
+  **It is measured, and the numbers are the strongest argument in either post** (`docs/doordash-dashbench-trust.md`,
+  105 replayed PR cases, severity-weighted at critical=4 / high=2 / medium=1 / low=0.5):
+
+  | System | Real findings | W. precision | W. recall | Cost / PR | Latency / PR |
+  |---|---|---|---|---|---|
+  | Scout + reviewer (their production) | 504 | 87.0% | 53.6% | $3.91 | 725s |
+  | No scout, GPT 5.5 high | 164 | 84.1% | 30.7% | $0.75 | 170s |
+  | No scout, Claude Opus 4.8 high | 115 | 89.8% | 20.2% | $0.65 | 113s |
+
+  Staging bought **+75% relative weighted recall at flat precision**, for ~5x the money and ~4x the wall
+  clock. That is the shape of the bet C7 is: it buys COVERAGE, which is precisely the axis our zero-overlap
+  measurement says we are weak on, and it does not buy precision, which is the axis we are already strong
+  on. Read the price honestly before designing — this is not a free improvement, and their own framing is
+  *"not a trophy, but a measured tradeoff"*.
+
+  Two details from the model-mix table that constrain the design:
+
+  - **The scout does not have to be the expensive model, and the cheap scout won.** Kimi K2.6 scouting for
+    a Fable 5 reviewer beat Sonnet 4.6 scouting for Opus 4.8 on every quality axis (65.2% vs 53.6%
+    weighted recall, 89.2% vs 87.0% precision) at slightly lower cost. Scout tier and reviewer tier are
+    independent knobs. Do not assume the scout needs the strongest model available.
+  - **"Scouts improve breadth when the reviewer can verify aggressively."** That is their answer to open
+    question 1 above, and it is a coupling, not a hint: a recall-first scout is only safe in front of a
+    verifier willing to throw work away. We have that verifier — it is the refuter — which is an argument
+    for wiring the scout's leads to the existing hunter/refuter pair rather than to a new judge.
+
+  **Do not compare their 53.6% weighted recall to this project's 0.33 recall figure.** Different metric,
+  different denominator, different corpus. Recorded because the comparison is tempting and would be
+  meaningless.
+
+- **C8. Review profiles — per-domain doctrine, routed by what the PR touches.** NOT BUILT.
+
+  **The insight that makes this more than "better gotchas":**
+
+  > AGENTS.md and CLAUDE.md files are written for engineers **authoring** code, not engineers
+  > **reviewing** it. They mix architectural guidance, setup instructions, coding patterns, and style
+  > notes into a single document. Useful for writing. Noisy for reviewing.
+
+  Their profiles are mined from four sources — the review-relevant subset of AGENTS.md (boundaries,
+  anti-patterns, contract rules; never setup), historical PR review comments (what senior engineers flag
+  repeatedly), Slack decisions and post-mortems that never made it into docs, and incident history. Each
+  profile is a small YAML rule set where every rule carries a `severity` and, critically, an `evidence`
+  field naming the real PRs where the pattern bit.
+
+  **The curation filter is the part to steal first, and it costs nothing to apply to what we already
+  have.** Every candidate rule must survive: *if CI would already catch it, drop it. If the LLM knows it
+  from general training, drop it. If we can't point to a concrete file-and-line in the codebase as
+  evidence, drop it.* What survives is doctrine a senior engineer on that team would catch and nobody
+  else would. That filter is directly applicable to `.prhero/` gotchas and priors today, and it is the
+  cheapest experiment in this block.
+
+  **Then routing.** A PR touching the payment gateway loads the PSP rules, payment core rules and
+  monetary-security rules — *and nothing else*. A consumer-feed PR gets a different set entirely. Their
+  claim is that routing is why acceptance holds across 56 very different repos: the agent is not applying
+  one universal standard but the one that matters for that change.
+
+  **Where it lands here.** `parity_trigger_paths` (`config.json`) is already a path→behaviour router — it
+  decides whether the parity hunter spawns at all. C8 generalises that from "which agent runs" to "which
+  doctrine each agent reads". Interacts directly with **C6** (learned knowledge) and **C5** (global vs
+  per-repo config): C6 is what the engine infers, C8 is what humans and incidents encode, and both feed
+  the same prompt slot. Design them together or they will fight over it.
+
+- **C9. Hunt doctrine for the three classes the article says humans systematically miss.** NOT BUILT.
+
+  Their "what it's actually good at" section names three, and the mapping to our hunters is uneven —
+  which is the finding:
+
+  1. **Deletions.** *"Humans skim deleted code. Additions look dangerous; deletions look like cleanup."*
+     Removing a struct field, a config flag, a default behaviour or an interface method changes runtime
+     behaviour while the code compiles and the tests pass. Their agent treats every deletion as a prompt:
+     who depended on this, and what used to be true that is not anymore? **We do not hunt this as a
+     class.** Cheapest of the three to try and the one with no existing owner.
+  2. **Cross-boundary drift** — one side of a boundary updated, the sibling not: one brand's adapter, one
+     of two producers, one handler of an enum. CI stays green because each side compiles alone. This is
+     `parity`'s territory and it is conditional today (it spawns only on a trigger path), so the coverage
+     question is whether the trigger list is the right gate.
+  3. **Silent behaviour changes** — API changes that keep the signature, error handling that swallows
+     more cases than before, cache misses now treated as errors or errors as misses. Partly `lifecycle`,
+     partly `reliability`, owned as a named class by neither.
+
+  Constraint that shapes any attempt: a scored prompt set is immutable, so this is a NEW set plus a
+  `refuter-probe` gate plus a measured arm, never an edit in place. And rule 7 — deletions alone is one
+  variable; all three at once is not an experiment, it is a rewrite.
+
+- **C10. The measurement layer — and the blind spot the head-to-head shares with acceptance rate.**
+  NOT BUILT. Source: `docs/doordash-dashbench-trust.md` (2026-07-06). This entry exists because the
+  second post invalidated a claim this roadmap and two issues had accepted the same day, and the
+  invalidation generalises to our own instrument.
+
+  **Their argument, which is about confusion matrices and therefore not a matter of taste:** acceptance
+  rate populates exactly two of four cells. Accepted → true positive. Rejected → false positive. It can
+  never book a **false negative** (what the reviewer missed) or a **true negative** (clean code where
+  silence was correct). Worse, both bookings assume the author's call is ground truth, and authors
+  accept or reject *"for product and workflow reasons: timing, PR urgency, ownership context, how
+  invasive the fix is, or whether the issue was already handled another way."*
+
+  **Now turn that on THE PIVOT's instrument, because it has the identical shape.** The Greptile
+  head-to-head buckets each finding as Greptile-only, pr-hero-only, or both. Those are also two cells:
+  it can see what one reviewer found and the other did not, and it can see agreement. **It can never see
+  what BOTH missed.** The zero-overlap result recorded above is real and it was worth every dollar — but
+  "Greptile passed it clean and so did we" is not evidence the PR was clean, and five such PRs are not
+  zero false negatives. They are five unobserved cells. That sentence is the single most useful thing
+  the second post gives this project, and it costs nothing to accept.
+
+  **What it does NOT mean, stated because the inference is available and wrong: Phase A does not reopen.**
+  Juanma closed it on TIME, not on doubt about measurement — *"no me importa el gasto, me jode más el
+  tiempo que está llevando esto"* — and DashBench actually corroborates the complaint that closed it. The
+  lab's golden dataset turned out contaminated; DashBench's whole thesis is that single-source labels
+  quietly poison scores, and their answer is not "label harder" but **triangulate and refuse to trust any
+  one source**: the engineers who wrote the PRs annotate, the original findings are kept, an agentic judge
+  runs, and where the three disagree a human adjudicates — and *those resolved cases become the judge's
+  calibration data*. The judge is *"a calibrated signal, not ground truth."* Read as a critique of what
+  the lab had, this is agreement, not a rebuke.
+
+  **The cheap mechanisms, in ascending cost, and this is the actionable part:**
+
+  1. **Reverted or hotfixed PRs are free known-bad cases.** A PR later reverted contained something worth
+     catching, and nobody had to adjudicate anything to know it. Mining them is a `gh` search over history
+     — see issue #41, which is where this half went, since it is corpus construction and not an
+     experiment.
+  2. **Benign PRs are the other half, and we already have five.** *"A reviewer that's loud on clean code
+     is its own failure mode"* — their dataset deliberately includes PRs with close to zero real findings
+     to measure restraint. The five PRs Greptile passed clean where pr-hero also said nothing are exactly
+     that, and they are already on disk.
+  3. **Aggregate over replicates or do not quote a recall number at all.** Their variance lesson (see item
+     7's amendment) means a single run understates coverage by construction. Any future eval that reports
+     one run's recall is reporting a sample and calling it a measurement — the same error item 7's
+     "infer fixed from absence" makes, one layer up.
+  4. **Severity weighting, if a score is ever needed.** Theirs is critical=4, high=2, medium=1, low=0.5,
+     and its justification is the severity table: configurations that look close in aggregate miss very
+     different kinds of issue. Note the interaction with issue #19 — weighting only means anything once
+     severity is calibrated, so #19 comes first.
+  5. **An agentic jury rather than a single judge**, which is where they are heading, to mitigate
+     per-model bias. This project already owns both halves of that machinery: the refuter is a detached
+     adversarial judge, and judgment-day is a blind dual-review protocol.
+
+  **What must NOT be copied:** the scale. 1,000 raw candidates narrowed to 105 adjudicated cases with
+  per-PR author annotation is a team-months instrument, and the constraint that closed Phase A was time.
+  The shape is portable; the size is not.
+
+  **The open decision, and it grazes territory Juanma owns:** whether the eval corpus the head-to-head
+  already accumulates should be shaped DashBench-style from here on — triangulated labels, benign and
+  reverted cases alongside the found ones, aggregation over replicates — or stay a plain running tally of
+  the three buckets. The first article already put a continuous-eval future in this roadmap; this entry is
+  what that future should look like if it happens. Not decided.
+
+- **Per-stage model tiering** is a real lever the article documents (*"use cheaper models for simpler
+  steps, reserve stronger models for verification-heavy steps, skip expensive passes on low-risk PRs"*),
+  but it is not a Phase C entry: `AgentSpec` already carries `model`, so the mechanism exists and what is
+  missing is the **measurement** to decide with. Their unit is **cost per successful review**, not token
+  price — weak models on complex JSON schemas retry until they cost more than the strong model that got
+  it right first time. Tracked on issue #23 (the store must separate retries caused by invalid output
+  from transport retries; `attempts` alone cannot tell those apart) and exercised by Phase D's multi-model
+  legs.
+
 ## Phase D — Multi-runtime + multi-model (Stage 2)
 
 The economics (verified 2026-07-29): Anthropic prohibits Claude Pro/Max on OpenCode (plugins removed in
@@ -1032,6 +1340,24 @@ right; writing them should be easier), make the ignore choice actionable (offer 
 why), offer watcher enrollment with its post flag, and keep every step flag-addressable so the
 non-interactive path stays scriptable. The three-command onboarding is correct; it should also be
 one obvious command.
+
+**The fixer loop — close the gap between "the review found something" and "someone has to patch it"
+(added 2026-08-16 from `docs/doordash-ai-code-reviewer.md`).** NOT BUILT, deliberately parked in E rather
+than C: it is a product surface, not engine quality, and it presupposes the inline surface (B6) and the
+triage loop (B6b) that already exist. Their shape: anyone replies in the PR thread tagging the agent —
+*"can you handle the nil check here?"*, *"resolve the merge conflicts"* — and a fixer runs in a remote VM
+with a full checkout plus **the original review context** (the diff, the finding, the surrounding code,
+the suggested direction), makes the change and pushes it to the PR. No branch switching, no
+re-explaining, and the output is a normal commit subject to the same CI and human review as any other.
+Multiple comments on one PR are fixed concurrently, each in its own isolated worktree, merged back to the
+head branch in order.
+
+Why it fits here rather than being copied wholesale: their fixer runs on THEIR infrastructure, while
+pr-hero's equivalent already has a home — B6b put the triage on the CONSUMER's side (pr-hero ships the
+skill, the consumer's agent spawns the work) precisely so pr-hero stays a reviewer and its cost model
+stays unchanged. A fixer should inherit that split, and the worktree isolation it needs is machinery
+`src/pr.ts` already owns. Their own framing is the one to keep: *"this is not about removing engineer
+ownership. It's about removing the mechanical handoff."*
 
 **Distribution (added 2026-08-12 by Juanma):** pr-hero as a product means an install, not a clone.
 Package it for a real registry — npm and/or Homebrew are the obvious candidates — so `pr-hero` is a
