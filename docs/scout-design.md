@@ -214,6 +214,56 @@ never — either way it is not a source of ground truth today.
 directly: revert mining can serve as a FLOOR ("the scout must catch these three") but cannot carry M6's
 score on its own. Choosing what does is still open and is Juanma's call.
 
+### 2.4ter The WIDENED corpus, measured 2026-08-17 — reverts were the narrowest slice by two orders of magnitude
+
+`pr-hero corpus` (GitHub #43) run over both repositories with all four sources and the same 24-month
+window §2.4bis used. This is the measurement that issue's third acceptance criterion asks for.
+
+| | musive | supermarket-pro |
+| --- | --- | --- |
+| merged PRs scanned | 1417 | 84 |
+| `fix-subject` | 501 | 13 |
+| `incident-keyword` | 21 | 10 |
+| `bug-issue` | **0** | 1 |
+| `proximity` | 20 | 4 |
+| `review-thread` (caught in review) | 9 | 0 |
+| **tier `issue-linked`** | 0 | 1 |
+| **tier `blame-linked`** | **452** | 11 |
+| **tier `proximity`** | 20 | 4 |
+| **tier `keyword-only`** | 41 | 3 |
+| **tier `review-caught`** | 9 | 0 |
+| **total candidates** | **513** | **19** |
+
+**What these numbers are NOT.** They are candidates, not cases. The artifact's own warning is the honest
+read and it is repeated here because a 513 is exactly the kind of number that gets quoted without its
+caveat: *a bug-fix PR proves something was wrong, not that a review should have caught it*, and blame
+names the LAST toucher of the fixed lines, not necessarily the introducer. Turning any of these into a
+known-bad case still costs one adjudication — the same price M0 paid per `greptile_only` row. What
+changed is the SUPPLY, not the price.
+
+**Three findings that do change a decision:**
+
+1. **supermarket-pro goes from contributing nothing to contributing 19**, including one `issue-linked` —
+   the strongest tier the artifact has. §2.4bis's "not a source of ground truth today" was true of
+   reverts and false of the repository: it has known-bad history, reverts just could not see it.
+2. **`bug-issue` is 0 on musive, and that is structural, not a bug.** musive tracks in Jira — its fix
+   subjects read `fix(MUS-740):` — so there are no GitHub issues carrying a `bug` label to link to.
+   Source 1 of #43 simply does not apply to that repository, and no flag or label list will change it.
+3. **`proximity` produced 20 and 4 only because D1 was fixed the same day.** Before the fix the source
+   returned zero on both repositories, silently — both use merge commits (musive 200 of 200 sampled,
+   supermarket-pro 78 of 100), and `git log --numstat` emits no file lines for a merge without
+   `-m --first-parent`. Had this measurement run one hour earlier it would have recorded a false zero
+   for a whole source, in this file, as a finding.
+
+**Blame quality, measured rather than assumed:** over musive's 458 blame resolutions, **7 (1%) name an
+introducer whose PR number is HIGHER than the fix's**, of which **6 resolve a PR as its own introducer** —
+impossible, and a real defect (`joinProximity` guards `ref.pr === fix.fixPr`, `blameResolve` does not).
+At 1% it does not threaten the corpus, and it is recorded here rather than fixed.
+
+**What this does and does not do to §3.11.** It removes "there is no cheap source for recall" as a
+statement about the WORLD — there is one, and it is on disk. It does not remove the adjudication cost,
+so the floor test can grow beyond 8 cases only as fast as someone judges them. The fork stays a fork.
+
 ### 2.4 The restraint set for M4 — NOT yet established
 
 M4's second assertion needs PRs that are genuinely clean, so a loud scout can be caught. The candidates by
