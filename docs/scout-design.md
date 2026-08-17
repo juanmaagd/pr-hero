@@ -329,6 +329,76 @@ At 1% it does not threaten the corpus, and it is recorded here rather than fixed
 statement about the WORLD — there is one, and it is on disk. It does not remove the adjudication cost,
 so the floor test can grow beyond 8 cases only as fast as someone judges them. The fork stays a fork.
 
+### 2.4quater The first adjudication pass — 10 candidates in, 3 floor cases out
+
+Run 2026-08-17 against the `blame-linked` tier of a re-mined corpus (see the run-hygiene note below). Ten
+candidates, one isolated agent each, reading musive at the relevant commits and never the claim's prose.
+**Every verdict below was re-verified by the orchestrator with its own git commands** — the project's rule
+about load-bearing worker claims, applied because a wrong `usable` makes the benchmark assert something
+false.
+
+**Result: 3 usable, 7 not. A 30% conversion rate.**
+
+| fix ← introducer | verdict | site / reason |
+|---|---|---|
+| 1557 ← 1471 | **usable** | `.github/workflows/build-check.yml` — `bunx biome` unscoped; the repo's linter is `@biomejs/biome`, so bun fetched an unrelated abandoned package that ignores the flags, printed nothing and exited 0. **The gate was green for 18 days without checking a file**; real Biome over the same commit found 10 errors. `git log -S` shows exactly two commits on that line: the introduction and the fix. |
+| 1641 ← 853 | **usable** | `packages/app/hooks/useChangeCover.tsx:120` — `const previousProject` declared inside the `try` (93), dereferenced in the `catch` (225), no outer binding. Any upload throw yields `ReferenceError` before the rollback and before the error toast, so the optimistic cover stays applied silently. #853 added the file whole, so the whole mechanism is in its own diff. **The artifact's blamed line 135 is wrong; the site is 120.** |
+| 1413 ← 1307 | **usable** | `packages/web/src/store/FileUploaderStore.ts:405` — `refreshSelectedProject()` swapped for `fetchAndSetSelectedProjectByProjectId(projectId)`; on a version upload that id is the TRACK's, so `selectedProject` is overwritten. **The fix repaired two defects and only this one is #1307's** — the stuck-item half blames to `75f84c8b48`, twelve days earlier (verified: 9 of those lines are that commit's, 1 is #1307's). |
+| 1693 ← 1506 | rejected | code already present at the merge-base; #1506's hunk is a biome reflow, semantics identical |
+| 1639 ← 920 | rejected | #920 ported the structure verbatim from the context file it deleted; the defect predates it |
+| 1452 ← 1256 | rejected | #1256 touched 7 files, no driver; the buffering lives in `TigrisDriver.getSongStream` |
+| 1516 ← 1014 | rejected | not a defect — #1014's checkout path already emitted the event with `amount_total`/`currency`/`transactionId`; the fix enriches an id shape for a requirement that did not yet exist |
+| 1433 ← 639 | rejected | only two commits ever touched that allowlist and #639 is neither; #639 is a 644-file reformat |
+| 1460 ← 960 | rejected | blame landed on a signature retype; the authorization hole is ~15 months older |
+| 1458 ← 639 | rejected | **on a criterion the adjudication prompt did not state** — see below |
+
+**The criterion that was missing, and it is the orchestrator's omission rather than the adjudicators':
+the introducer PR must be REVIEWABLE BY THIS ENGINE.** 1458's defect is real (nested files' bytes never
+freed, so `storage_used` is never decremented and FREE-plan owners are blocked by quota they no longer
+occupy) and correctly attributed to #639, which created the storage ledger. But #639 is **65,725 changed
+lines over 644 files**, and `size-gate.ts` defaults to 1500 lines / 150 files — **43× the line limit**. The
+engine refuses the PR, both arms produce nothing, and the case cannot discriminate. A floor case needs a
+real defect, correct attribution, diff-visibility AND a reviewable introducer. The three kept cases pass
+the gate (282/10, 1125/23, 186/7 lines/files); 853 at 1125 lines is the closest to the limit.
+
+**What the rejections actually say — and it is not what the corpus's own caveat predicted.** The artifact
+warns that a bug-fix PR proves something was wrong, not that review should have caught it. That warning
+fired **once** (1516). **Five of the six other rejections are misattribution**: blame named a reformat, a
+port, a signature retype, or collateral hardening. The `blame-linked` tier is not polluted with non-defects.
+It is polluted with the wrong author — which matters, because misattribution is mechanically improvable and
+"this was not a defect" is not.
+
+**A generalisable rule one adjudication produced, worth more than its case:** any fix that hardens call
+sites as a consequence of a change one layer down will blame the call-site authors. That is systematic, not
+bad luck, and it will recur in every driver/adapter fix in this corpus.
+
+### 2.4quinquies `blameResolve` does not pass `-w -M -C`, and the effect is measured not assumed
+
+`src/corpus.ts:561` runs `blame --porcelain -L <range> <parentSha> -- <path>`. No `-w` (ignore whitespace),
+no `-M` (follow moves within a file), no `-C` (follow moves between files). Given §2.4quater's rejection
+profile, the obvious hypothesis is that these flags fix the tier. **They fix half of it. Both halves were
+tested rather than argued:**
+
+| case | blame today | blame with `-w -M -C` |
+|---|---|---|
+| **1433** (pure tabs→spaces reformat) | `feat(backend): files folder system` — the 644-file reformat, WRONG | **`fix: download song`** — which is exactly the commit the adjudicating agent independently identified as the true origin, by reading the line's history |
+| **1693** (biome reflow) | `chore: fix Biome CI on the merged branch` | **unchanged** — still wrong |
+
+The second row is why this is recorded as a partial improvement rather than a fix. `-w` compares lines
+ignoring whitespace; splitting a one-line arrow body into three lines produces genuinely new lines, and no
+blame flag recovers that. So the flags are worth adding — one row shows two independent methods converging
+on the same answer — and they will not by themselves make the tier trustworthy.
+
+**Run hygiene, recorded because it nearly corrupted this section.** The first re-mine of the corpus reported
+`blame-linked: 12` against §2.4ter's 452, which read as a catastrophic regression in `234a1ef`. It was not.
+A controlled A/B — clean worktrees at `139a2fd` and `8ca557c`, same window, same flags, same clone — returned
+**identical** results (340 scanned, 168 fix-subject, 153 blame-linked, 15 keyword-only), exonerating the
+commit. The real cause was a transient `gh: Bad credentials (HTTP 401)` mid-run, invisible because the run
+was captured with `tail`. A clean re-run gave **428 blame-linked**, consistent with §2.4ter. Two lessons,
+both cheap: capture whole logs rather than tails, and **the corpus artifact has no field recording how many
+introducer lookups failed**, so a degraded run is byte-indistinguishable from a complete one — the disease
+#42 named, in another command.
+
 ### 2.4 The restraint set for M4 — NOT yet established
 
 M4's second assertion needs PRs that are genuinely clean, so a loud scout can be caught. The candidates by
