@@ -70,6 +70,7 @@ const options = (over: Partial<CliOptions> = {}): CliOptions => ({
   all: false,
   fixes: false,
   incidents: false,
+  issues: false,
   proximity: false,
   threads: false,
   ...over,

@@ -153,13 +153,16 @@ export interface CliOptions {
   // shell applies it, so parseArgs stays pure and "the operator asked for a
   // window" stays distinguishable from "nobody said".
   since?: string;
-  // corpus only (GitHub #43): the four candidate sources. At least one is
+  // corpus only (GitHub #43/#44): the five candidate sources. At least one is
   // REQUIRED (enforced post-loop, where the whole set is visible) — a bare
   // `pr-hero corpus` would be a $0 no-op that looks like a scan. --proximity
   // IMPLIES --fixes (proximity suspects are computed over the fix set),
-  // applied here so the shell never re-derives the implication.
+  // applied here so the shell never re-derives the implication. --issues
+  // upgrades a classified set and does NOT imply --fixes; it requires
+  // --fixes and/or --incidents (--proximity already implies --fixes).
   fixes: boolean;
   incidents: boolean;
+  issues: boolean;
   proximity: boolean;
   threads: boolean;
   // corpus only: the proximity window in days, kept VERBATIM like --since —
@@ -168,7 +171,8 @@ export interface CliOptions {
   proximityDays?: string;
   // corpus only: csv of issue labels that mark a referenced issue as a bug.
   // Unset means DEFAULT_BUG_LABELS. GitHub labels are case-sensitive, so the
-  // split (splitBugLabels) never lowercases.
+  // split (splitBugLabels) never lowercases. Requires --issues — a value
+  // flag of a source that is not on would be a silently dropped intention.
   bugLabels?: string;
 }
 
@@ -226,16 +230,19 @@ Usage:
                              git log + gh api only: no review, no scoring, no
                              labelling of what the defect was, $0
   pr-hero corpus [options]   Widen the known-bad corpus beyond reverts with
-                             four candidate sources, gated by their flags:
+                             five candidate sources, gated by their flags:
                              --fixes (fix-shaped merged PRs, blame-resolved
                              to their likely introducer), --incidents
                              (incident/outage keywords in title/body),
-                             --proximity (prior PRs on the same files when
-                             the introducer did not resolve), --threads
-                             (defects review DID catch, from resolved review
-                             threads). At least one source is required; all
-                             output is CANDIDATES for human confirmation.
-                             git log + gh api only: no review, no scoring, $0
+                             --issues (upgrade classified PRs that reference
+                             a bug-labelled GitHub issue), --proximity
+                             (prior PRs on the same files when the introducer
+                             did not resolve), --threads (defects review DID
+                             catch, from resolved review threads). At least
+                             one source is required; --issues needs --fixes
+                             and/or --incidents. All output is CANDIDATES
+                             for human confirmation. git log + gh api only:
+                             no review, no scoring, $0
   pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
@@ -304,6 +311,9 @@ Options:
   --incidents         corpus only: mine merged PRs whose title or body carry
                       incident keywords (incident, outage, sentry,
                       crashlytics)
+  --issues            corpus only: upgrade classified PRs that reference a
+                      GitHub issue labelled as a bug. Requires --fixes
+                      and/or --incidents — issue refs do not enter alone
   --proximity         corpus only: for fix PRs whose introducer did not
                       resolve, list prior PRs on the same files within
                       --proximity-days. Implies --fixes — proximity is
@@ -313,8 +323,9 @@ Options:
   --proximity-days <n>
                       corpus only: the proximity window in days, an integer
                       between 1 and 90. Default: 7
-  --bug-labels <csv>  corpus only: issue labels that mark a referenced issue
-                      as a bug (comma-separated, case-sensitive). Default: bug
+  --bug-labels <csv>  corpus only: with --issues, issue labels that mark a
+                      referenced issue as a bug (comma-separated,
+                      case-sensitive). Default: bug
   --runs <dir>        ledger only: the runs root to scan for comparison.json
                       files (default: ~/.prhero/repos/<origin>/runs)
   --from <dir>        post/triage only: the run dir to read findings.json and
@@ -427,6 +438,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     all: false,
     fixes: false,
     incidents: false,
+    issues: false,
     proximity: false,
     threads: false,
   };
@@ -531,15 +543,19 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.all = true;
       continue;
     }
-    // The four corpus sources, size-gate-style booleans — no values, and the
+    // The five corpus sources, size-gate-style booleans — no values, and the
     // post-loop corpus block owns their cross-command rules (required-set,
-    // --proximity implies --fixes).
+    // --proximity implies --fixes, --issues needs a classified-set source).
     if (arg === "--fixes") {
       options.fixes = true;
       continue;
     }
     if (arg === "--incidents") {
       options.incidents = true;
+      continue;
+    }
+    if (arg === "--issues") {
+      options.issues = true;
       continue;
     }
     if (arg === "--proximity") {
@@ -693,6 +709,9 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (options.incidents) {
       throw new CliUsageError("--incidents only applies to the corpus command");
     }
+    if (options.issues) {
+      throw new CliUsageError("--issues only applies to the corpus command");
+    }
     if (options.proximity) {
       throw new CliUsageError("--proximity only applies to the corpus command");
     }
@@ -712,22 +731,36 @@ export function parseArgs(argv: string[]): ParsedCli {
   } else {
     // Checked after the loop, where the whole flag set is visible at once:
     // corpus with NO source would be a $0 no-op that looks like a scan, and
-    // the error names all four so the fix is one copy-paste away.
+    // the error names all five so the fix is one copy-paste away.
     if (
       !options.fixes &&
       !options.incidents &&
+      !options.issues &&
       !options.proximity &&
       !options.threads
     ) {
       throw new CliUsageError(
         "corpus needs at least one source: --fixes, --incidents, " +
-          "--proximity or --threads",
+          "--issues, --proximity or --threads",
       );
     }
     // Proximity suspects are computed over the fix set, so a --proximity run
     // IS a --fixes run. Applied here rather than in the shell so the
     // implication is one pure, tested rule instead of an I/O re-derivation.
     if (options.proximity) options.fixes = true;
+    // --bug-labels is the value flag of --issues. Passing it without the
+    // source would silently configure a walk that never consults the labels.
+    if (options.bugLabels !== undefined && !options.issues) {
+      throw new CliUsageError("--bug-labels requires --issues");
+    }
+    // Issue refs upgrade a classified set; they do not enter on their own.
+    // --proximity has already implied --fixes, so --issues --proximity is
+    // valid. --issues --threads is not: threads do not populate `working`.
+    if (options.issues && !options.fixes && !options.incidents) {
+      throw new CliUsageError(
+        "--issues upgrades classified PRs; pass --fixes and/or --incidents",
+      );
+    }
   }
   // spec "--all misused on another command": --all is usage's own
   // operator-wide escape hatch, and valid on nothing else.

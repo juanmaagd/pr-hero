@@ -22,6 +22,7 @@ import {
   type IssueLabels,
   isFixSubject,
   isIncidentText,
+  isSelfIntroducer,
   issueRefsFromBody,
   joinProximity,
   MAX_BLAMED_FILES,
@@ -31,9 +32,11 @@ import {
   matchBugLabels,
   type ProximityFix,
   type PullCommitRef,
+  parentBelongsToFix,
   parseBlamePorcelain,
   parseCommitDates,
   parseCommitIndex,
+  parseCommitParents,
   parseCutoffTimestamp,
   parseDiffHunks,
   parseIssueLabels,
@@ -295,7 +298,8 @@ async function ghPullCommits(
 ): Promise<PullCommitRef[]> {
   const result = await gh(repoRoot, [
     "api",
-    `repos/${slug}/pulls/${pr}/commits`,
+    "--paginate",
+    `repos/${slug}/pulls/${pr}/commits?per_page=100`,
   ]);
   if (!result.ok) {
     if (isNotFound(result.stderr)) return [];
@@ -321,6 +325,7 @@ async function ghPullFiles(
 ): Promise<string[]> {
   const result = await gh(repoRoot, [
     "api",
+    "--paginate",
     `repos/${slug}/pulls/${pr}/files?per_page=100`,
   ]);
   if (!result.ok) {
@@ -480,6 +485,52 @@ async function blameResolve(input: {
     return [];
   }
   const parentSha = parent.stdout.trim();
+  const listed = await git(input.repoRoot, [
+    "rev-list",
+    "--parents",
+    "-n",
+    "1",
+    "--end-of-options",
+    mergeSha,
+  ]);
+  if (!listed.ok) {
+    throw new CliError(
+      `git rev-list --parents ${mergeSha} failed: ${listed.stderr.trim()}`,
+    );
+  }
+  let parents: string[];
+  try {
+    parents = parseCommitParents(listed.stdout);
+  } catch (error) {
+    if (error instanceof CliUsageError) {
+      throw new CliError(
+        `git rev-list --parents ${mergeSha}: ${error.message}`,
+      );
+    }
+    throw error;
+  }
+  // One parent: squash OR rebase. Squash's parent is the previous
+  // default-branch tip (another PR, or a direct push). Rebase-and-merge
+  // of 2+ commits: the parent is still THIS PR, so mergeSha^..mergeSha
+  // is one commit of the PR instead of the whole thing — skip, same as
+  // a missing merge commit. A 1-commit rebase looks like squash and the
+  // one-commit diff IS the whole PR, so blame proceeds.
+  const soleParent = parents[0];
+  if (parents.length === 1 && soleParent !== undefined) {
+    const parentPulls = await ghCommitPulls(
+      input.repoRoot,
+      input.slug,
+      soleParent,
+    );
+    if (parentBelongsToFix(input.pr.number, parentPulls)) {
+      log(
+        `corpus: PR #${input.pr.number} — merge commit ${mergeSha.slice(0, 12)} ` +
+          "is a rebase (its parent still belongs to this PR); blame would " +
+          "cover one commit instead of the whole PR, skipping",
+      );
+      return [];
+    }
+  }
   const diff = await git(input.repoRoot, [
     "diff",
     "--no-color",
@@ -567,24 +618,32 @@ async function blameResolve(input: {
     if (pick !== null) {
       const pulls = await ghCommitPulls(input.repoRoot, input.slug, pick.sha);
       const primary = pickCommitPull(pulls);
-      const introducer: IntroducerInfo = {
-        pr: primary?.number ?? null,
-        title: primary?.title ?? null,
-        mergedAt: primary?.mergedAt ?? null,
-        blamedSha: pick.sha,
-        blamedFile: pick.file,
-        blamedRange: pick.range,
-        // No PR association ⇒ the bug was pushed straight to the branch.
-        directPush: primary === null,
-      };
-      input.entry.introducer = introducer;
-      input.entry.alsoBlamedCount = pick.alsoBlamedCount;
-      log(
-        `corpus: PR #${input.pr.number} — introducer ` +
-          (primary === null
-            ? `direct push ${pick.sha.slice(0, 12)}`
-            : `PR #${primary.number}`),
-      );
+      if (
+        primary !== null &&
+        isSelfIntroducer(input.pr.number, primary.number)
+      ) {
+        log(
+          `corpus: PR #${input.pr.number} — blame resolved to the fix itself; ` +
+            "introducer dropped (a PR cannot introduce what it fixed)",
+        );
+      } else {
+        const introducer: IntroducerInfo = {
+          pr: primary?.number ?? null,
+          title: primary?.title ?? null,
+          mergedAt: primary?.mergedAt ?? null,
+          blamedSha: pick.sha,
+          blamedFile: pick.file,
+          blamedRange: pick.range,
+        };
+        input.entry.introducer = introducer;
+        input.entry.alsoBlamedCount = pick.alsoBlamedCount;
+        log(
+          `corpus: PR #${input.pr.number} — introducer ` +
+            (primary === null
+              ? `direct push ${pick.sha.slice(0, 12)}`
+              : `PR #${primary.number}`),
+        );
+      }
     }
   }
   return files;
@@ -700,12 +759,15 @@ export async function corpusCommand(options: CliOptions): Promise<number> {
   const ref = await resolveDefaultBranchRef(repoRoot);
   const since = options.since ?? DEFAULT_REVERTS_SINCE;
   const proximityDays = validateProximityDays(options.proximityDays);
-  const bugLabels = new Set(splitBugLabels(options.bugLabels));
+  const bugLabels = options.issues
+    ? new Set(splitBugLabels(options.bugLabels))
+    : new Set<string>();
   // baseRefName is the SHORT branch name; ref is the remote-tracking path.
   const defaultBranch = ref.replace(/^origin\//, "");
   const sourcesRun = [
     ...(options.fixes ? ["--fixes"] : []),
     ...(options.incidents ? ["--incidents"] : []),
+    ...(options.issues ? ["--issues"] : []),
     ...(options.proximity ? ["--proximity"] : []),
     ...(options.threads ? ["--threads"] : []),
   ];
@@ -784,7 +846,10 @@ export async function corpusCommand(options: CliOptions): Promise<number> {
 
   // STEP D — bug-issue labels, over the classified set's refs. Cached per
   // issue number: one fix frequently references the same tracking issue.
-  if (working.size > 0) {
+  // Gated on --issues: the other four sources each have a flag, and running
+  // this whenever --fixes/--incidents classified anything billed a source
+  // the operator did not request (and made `sources run:` never list it).
+  if (options.issues && working.size > 0) {
     const uniqueRefs: number[] = [];
     for (const pr of mergedPrs) {
       const entry = working.get(pr.number);

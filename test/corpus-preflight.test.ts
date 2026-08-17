@@ -25,15 +25,18 @@ import {
   isFixSubject,
   isIncidentText,
   isLockfilePath,
+  isSelfIntroducer,
   issueRefsFromBody,
   joinProximity,
   MAX_PROXIMITY_SUSPECTS,
   type MergedPrNode,
   matchBugLabels,
   type ProximityFix,
+  parentBelongsToFix,
   parseBlamePorcelain,
   parseCommitDates,
   parseCommitIndex,
+  parseCommitParents,
   parseCutoffTimestamp,
   parseDiffHunks,
   parseIssueLabels,
@@ -94,7 +97,6 @@ function introducer(over: Partial<IntroducerInfo>): IntroducerInfo {
     blamedSha: SHA_A,
     blamedFile: "src/app.ts",
     blamedRange: "12,18",
-    directPush: false,
     ...over,
   };
 }
@@ -290,14 +292,12 @@ describe("parseDiffHunks", () => {
       { start: 30, end: 31 },
       { start: 50, end: 51 },
     ]);
-    expect(app?.pureAddition).toBe(false);
   });
 
   test("a pure-addition file has hunks but no pre-image lines", () => {
     const plan = parseDiffHunks(DIFF);
     const added = plan.files.find((file) => file.path === "src/new.ts");
     expect(added?.ranges).toEqual([]);
-    expect(added?.pureAddition).toBe(true);
   });
 
   test("a rename is skipped and counted, not blamed", () => {
@@ -430,6 +430,41 @@ describe("parseCommitDates / pickIntroducer", () => {
 
   test("no blame rows means no introducer", () => {
     expect(pickIntroducer([])).toBeNull();
+  });
+});
+
+describe("isSelfIntroducer / parentBelongsToFix / parseCommitParents", () => {
+  test("self is the same PR number; a different PR or a direct push is not", () => {
+    expect(isSelfIntroducer(490, 490)).toBe(true);
+    expect(isSelfIntroducer(490, 478)).toBe(false);
+    expect(isSelfIntroducer(490, null)).toBe(false);
+  });
+
+  test("parentBelongsToFix uses GitHub's primary association", () => {
+    expect(
+      parentBelongsToFix(490, [
+        { number: 490, title: null, mergedAt: null },
+        { number: 12, title: null, mergedAt: null },
+      ]),
+    ).toBe(true);
+    expect(
+      parentBelongsToFix(490, [{ number: 478, title: null, mergedAt: null }]),
+    ).toBe(false);
+    expect(parentBelongsToFix(490, [])).toBe(false);
+  });
+
+  test("parseCommitParents returns parents in git order; a root is empty", () => {
+    expect(parseCommitParents(`${SHA_A} ${SHA_B} ${SHA_C}\n`)).toEqual([
+      SHA_B,
+      SHA_C,
+    ]);
+    expect(parseCommitParents(`${SHA_A}\n`)).toEqual([]);
+  });
+
+  test("malformed parent records fail loud", () => {
+    expect(() => parseCommitParents("")).toThrow(CliUsageError);
+    expect(() => parseCommitParents("notasha\n")).toThrow(CliUsageError);
+    expect(() => parseCommitParents(`${SHA_A} zzz\n`)).toThrow(CliUsageError);
   });
 });
 
@@ -668,14 +703,14 @@ describe("selectCorpus", () => {
       }),
       working({
         fixPr: 103,
-        introducer: introducer({ pr: null, directPush: true }),
+        introducer: introducer({ pr: null }),
         proximitySuspects: [
           { pr: 470, title: null, mergedAt: null, sharedFiles: 2, gapDays: 3 },
         ],
       }),
       working({
         fixPr: 104,
-        introducer: introducer({ pr: null, directPush: true }),
+        introducer: introducer({ pr: null }),
       }),
     ]);
     expect(selected.map((c) => c.confidence)).toEqual([
@@ -725,6 +760,19 @@ describe("selectCorpus", () => {
     expect(selected[0]?.confidence).toBe("keyword-only");
   });
 
+  test("a self-nulled introducer with proximity suspects falls to proximity", () => {
+    const selected = selectCorpus([
+      working({
+        introducer: introducer({ pr: 490 }),
+        proximitySuspects: [
+          { pr: 470, title: null, mergedAt: null, sharedFiles: 2, gapDays: 3 },
+        ],
+      }),
+    ]);
+    expect(selected[0]?.introducer).toBeNull();
+    expect(selected[0]?.confidence).toBe("proximity");
+  });
+
   // The pin for the defect where the ladder and the renderer disagreed: the
   // ladder resolved proximity BEFORE keyword-only while TIER_ORDER printed
   // keyword-only first, under a header promising descending confidence.
@@ -751,13 +799,13 @@ describe("selectCorpus", () => {
       // Drop blame too.
       working({
         matchedSources: ["fix-subject"],
-        introducer: introducer({ pr: null, directPush: true }),
+        introducer: introducer({ pr: null }),
         proximitySuspects: suspects,
       }),
       // Nothing left but the keyword.
       working({
         matchedSources: ["fix-subject"],
-        introducer: introducer({ pr: null, directPush: true }),
+        introducer: introducer({ pr: null }),
         proximitySuspects: [],
       }),
     ];
@@ -843,6 +891,58 @@ describe("payload readers", () => {
         baseRefName: "dev",
       });
       expect(parsed.nodes[1]?.mergedAt).toBeNull();
+    });
+
+    test("the finished-walk page: hasNextPage false, endCursor null", () => {
+      const last = JSON.stringify({
+        data: {
+          repository: {
+            pullRequests: {
+              pageInfo: { endCursor: null, hasNextPage: false },
+              nodes: [
+                {
+                  number: 1,
+                  title: "fix: x",
+                  baseRefName: "dev",
+                },
+              ],
+            },
+          },
+        },
+      });
+      const parsed = parseMergedPrPage(last);
+      expect(parsed.hasNextPage).toBe(false);
+      expect(parsed.endCursor).toBeNull();
+      expect(parsed.nodes).toHaveLength(1);
+    });
+
+    test("null pageInfo fails loud as CliUsageError, not a TypeError", () => {
+      const payload = JSON.stringify({
+        data: {
+          repository: {
+            pullRequests: { pageInfo: null, nodes: [] },
+          },
+        },
+      });
+      expect(() => parseMergedPrPage(payload)).toThrow(CliUsageError);
+      expect(() => parseMergedPrPage(payload)).toThrow(
+        /pullRequests connection/,
+      );
+    });
+
+    test("hasNextPage true with no endCursor fails loud", () => {
+      const payload = JSON.stringify({
+        data: {
+          repository: {
+            pullRequests: {
+              pageInfo: { hasNextPage: true, endCursor: null },
+              nodes: [],
+            },
+          },
+        },
+      });
+      expect(() => parseMergedPrPage(payload)).toThrow(CliUsageError);
+      expect(() => parseMergedPrPage(payload)).toThrow(/endCursor/);
     });
 
     test("malformed responses fail loud naming the query", () => {
@@ -1138,14 +1238,31 @@ describe("payload readers", () => {
       expect(() => parsePullCommits("{}")).toThrow(CliUsageError);
       expect(() => parsePullFiles("nope")).toThrow(CliUsageError);
     });
+
+    test("a concatenated commits page longer than GitHub's default 30 still round-trips", () => {
+      const rows = Array.from({ length: 31 }, (_, i) => ({
+        sha: `${SHA_A.slice(0, 38)}${i.toString(16).padStart(2, "0")}`,
+        commit: { committer: { date: "2026-03-01T11:00:00Z" } },
+      }));
+      expect(parsePullCommits(JSON.stringify(rows))).toHaveLength(31);
+    });
+
+    test("a concatenated files page longer than per_page=100 still round-trips", () => {
+      const rows = Array.from({ length: 101 }, (_, i) => ({
+        filename: `f${i}.ts`,
+      }));
+      expect(parsePullFiles(JSON.stringify(rows))).toHaveLength(101);
+    });
   });
 
   describe("buildThreadBatchQuery / parseThreadBatch", () => {
-    test("the query aliases validated integers and caps threads at 50", () => {
+    test("the query aliases validated integers, caps threads at 50, and does not fetch login", () => {
       const query = buildThreadBatchQuery([512, 513]);
       expect(query).toContain("p0: pullRequest(number:512)");
       expect(query).toContain("p1: pullRequest(number:513)");
       expect(query).toContain(`reviewThreads(first:${THREAD_PAGE_SIZE})`);
+      expect(query).toContain("author{__typename}");
+      expect(query).not.toContain("login");
       const opens = (query.match(/{/g) ?? []).length;
       const closes = (query.match(/}/g) ?? []).length;
       expect(opens).toBe(closes);
@@ -1223,7 +1340,6 @@ describe("payload readers", () => {
         line: 132,
         firstCommentAt: "2026-03-07T09:00:00Z",
         excerpt: "stalls when offline",
-        authorLogin: "gabriel",
         authorType: "User",
       });
       // originalLine stands in when line is null.
@@ -1298,7 +1414,6 @@ describe("renderCorpusArtifact", () => {
           pr: null,
           title: null,
           mergedAt: null,
-          directPush: true,
           blamedSha: SHA_B,
           blamedFile: "src/push.ts",
           blamedRange: "40,44",
@@ -1444,19 +1559,21 @@ describe("renderCorpusArtifact", () => {
 });
 
 describe("parseArgs corpus", () => {
-  test("corpus is a command, and no source is a usage error naming all four", () => {
+  test("corpus is a command, and no source is a usage error naming all five", () => {
     expect(() => parseArgs(["corpus"])).toThrow(CliUsageError);
     expect(() => parseArgs(["corpus"])).toThrow(/--fixes/);
     expect(() => parseArgs(["corpus"])).toThrow(/--incidents/);
+    expect(() => parseArgs(["corpus"])).toThrow(/--issues/);
     expect(() => parseArgs(["corpus"])).toThrow(/--proximity/);
     expect(() => parseArgs(["corpus"])).toThrow(/--threads/);
   });
 
-  test("the four booleans and two value flags round-trip", () => {
+  test("the five booleans and two value flags round-trip", () => {
     const { command, options } = parseArgs([
       "corpus",
       "--fixes",
       "--incidents",
+      "--issues",
       "--proximity",
       "--threads",
       "--proximity-days",
@@ -1473,6 +1590,7 @@ describe("parseArgs corpus", () => {
     expect(command).toBe("corpus");
     expect(options.fixes).toBe(true);
     expect(options.incidents).toBe(true);
+    expect(options.issues).toBe(true);
     expect(options.proximity).toBe(true);
     expect(options.threads).toBe(true);
     expect(options.proximityDays).toBe("14");
@@ -1488,10 +1606,36 @@ describe("parseArgs corpus", () => {
     expect(options.proximity).toBe(true);
   });
 
+  test("--issues requires a classified-set source; --proximity satisfies it", () => {
+    expect(() => parseArgs(["corpus", "--issues"])).toThrow(
+      /upgrades classified PRs/,
+    );
+    expect(() => parseArgs(["corpus", "--issues", "--threads"])).toThrow(
+      /upgrades classified PRs/,
+    );
+    expect(parseArgs(["corpus", "--issues", "--fixes"]).options.issues).toBe(
+      true,
+    );
+    expect(parseArgs(["corpus", "--issues", "--proximity"]).options.fixes).toBe(
+      true,
+    );
+  });
+
+  test("--bug-labels requires --issues", () => {
+    expect(() =>
+      parseArgs(["corpus", "--fixes", "--bug-labels", "bug"]),
+    ).toThrow(/--bug-labels requires --issues/);
+    expect(
+      parseArgs(["corpus", "--fixes", "--issues", "--bug-labels", "bug"])
+        .options.bugLabels,
+    ).toBe("bug");
+  });
+
   test("each new flag is rejected on other commands", () => {
     for (const args of [
       ["review", "--fixes"],
       ["review", "--incidents"],
+      ["review", "--issues"],
       ["review", "--proximity"],
       ["review", "--threads"],
       ["review", "--proximity-days", "7"],
@@ -1528,6 +1672,7 @@ describe("parseArgs corpus", () => {
     expect(HELP_TEXT).toContain("pr-hero corpus");
     expect(HELP_TEXT).toContain("--fixes");
     expect(HELP_TEXT).toContain("--incidents");
+    expect(HELP_TEXT).toContain("--issues");
     expect(HELP_TEXT).toContain("--proximity");
     expect(HELP_TEXT).toContain("--threads");
     expect(HELP_TEXT).toContain("--proximity-days");

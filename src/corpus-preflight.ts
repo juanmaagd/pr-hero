@@ -19,7 +19,11 @@ import { CliUsageError } from "./preflight";
 // The byte-level git protocol constants live in ONE place: a second copy of
 // "\x1f means field separator" is a second place to be wrong about a delimiter
 // no author can type but every parser here trusts.
-import { GIT_LOG_FIELD_SEP } from "./reverts-preflight";
+import {
+  type CommitPullRef,
+  GIT_LOG_FIELD_SEP,
+  pickCommitPull,
+} from "./reverts-preflight";
 import { unquotePath } from "./size-gate";
 
 // ---------------------------------------------------------------------------
@@ -113,9 +117,6 @@ export interface IntroducerInfo {
   // `<file> <start>,<end>` form the `git blame -L` argument used.
   blamedFile: string;
   blamedRange: string;
-  // True when the blamed sha belongs to no PR — somebody pushed the bug
-  // straight to the branch. Still a candidate; just not a review miss.
-  directPush: boolean;
 }
 
 // A fix-shaped candidate: any PR the fixes/incidents/proximity sources
@@ -167,7 +168,7 @@ export interface ThreadCandidate {
     line: number | null;
     firstCommentAt: string;
     excerpt: string;
-    pushSha: string | null;
+    pushSha: string;
   }[];
   // True when reviewThreads(first:50) reported more threads than it
   // returned. The cap is a COST decision (a 500-thread PR is not 500 cases);
@@ -305,10 +306,9 @@ export interface DiffFilePlan {
   // Pre-image (`-a,b` side) line ranges: the lines the FIX changed are where
   // the bug lived, so they are what blame is pointed at. Sorted, with
   // overlapping or adjacent (±1 line) ranges merged to fewer blame calls.
-  ranges: PreImageRange[];
-  // True when the file has hunks but no pre-image lines at all — the fix
+  // Empty when the file has hunks but no pre-image lines at all — the fix
   // added code where none was, so there is nothing pre-existing to blame.
-  pureAddition: boolean;
+  ranges: PreImageRange[];
 }
 
 export interface DiffBlamePlan {
@@ -401,7 +401,6 @@ export function parseDiffHunks(diffText: string): DiffBlamePlan {
     plan.files.push({
       path: section.srcPath ?? section.dstPath ?? "(path unreadable)",
       ranges: merged,
-      pureAddition: merged.length === 0,
     });
   }
   return plan;
@@ -473,6 +472,33 @@ export function parseCommitDates(raw: string): Map<string, number> {
     dates.set(sha, seconds);
   }
   return dates;
+}
+
+// `git rev-list --parents -n 1 <sha>` → the parent SHAs, in the order git
+// printed them. First-parent is [0]. A root commit is a legal empty list.
+// Used by the shell to tell merge (2 parents) from squash/rebase (1 parent)
+// without asking GitHub for a merge_method it does not expose after merge.
+export function parseCommitParents(raw: string): string[] {
+  const line = raw.trim().split("\n")[0] ?? "";
+  const fields = line.split(/\s+/).filter((field) => field.length > 0);
+  if (fields.length === 0) {
+    throw new CliUsageError("commit parents record is empty");
+  }
+  const sha = fields[0] ?? "";
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw new CliUsageError(
+      `commit parents record has no full sha, got: ${sha}`,
+    );
+  }
+  const parents = fields.slice(1);
+  for (const parent of parents) {
+    if (!/^[0-9a-f]{40}$/.test(parent)) {
+      throw new CliUsageError(
+        `commit parents record has a non-sha parent: ${parent}`,
+      );
+    }
+  }
+  return parents;
 }
 
 export interface BlamedSha {
@@ -672,7 +698,7 @@ export function buildThreadBatchQuery(numbers: number[]): string {
       (n, i) =>
         `p${i}: pullRequest(number:${n}){reviewThreads(first:${THREAD_PAGE_SIZE})` +
         "{pageInfo{hasNextPage}nodes{isResolved comments(first:1){nodes{" +
-        "path line originalLine createdAt body author{login __typename}}}}}}",
+        "path line originalLine createdAt body author{__typename}}}}}}",
     )
     .join(" ");
   return (
@@ -687,11 +713,11 @@ export interface RawReviewThread {
   line: number | null;
   firstCommentAt: string | null;
   excerpt: string | null;
-  // The first comment's author. Measured on musive 2026-08-16: 96 of 109
-  // caught entries were Greptile-bot threads and only 13 had any human
-  // thread — #43's source is "HUMAN review comments", so bot-authored
-  // threads are excluded by resolvedThreadsWithPath, not by the query.
-  authorLogin: string | null;
+  // GraphQL `__typename` of the first comment's author. Measured on musive
+  // 2026-08-16: 96 of 109 caught entries were Greptile-bot threads and only
+  // 13 had any human thread — #43's source is "HUMAN review comments", so
+  // bot-authored threads are excluded by resolvedThreadsWithPath (`Bot`),
+  // not by the query.
   authorType: string | null;
 }
 
@@ -813,7 +839,6 @@ export function parseThreadBatch(
           typeof comment.body === "string"
             ? excerptLine(comment.body, 200)
             : null,
-        authorLogin: typeof author.login === "string" ? author.login : null,
         authorType:
           typeof author.__typename === "string" ? author.__typename : null,
       });
@@ -961,9 +986,18 @@ export function parseMergedPrPage(raw: string): MergedPrPage {
   if (
     typeof pullRequests !== "object" ||
     pullRequests === null ||
-    !Array.isArray((pullRequests as Record<string, unknown>).nodes) ||
-    typeof (pullRequests as Record<string, unknown>).pageInfo !== "object"
+    !Array.isArray((pullRequests as Record<string, unknown>).nodes)
   ) {
+    throw new CliUsageError(
+      "gh api graphql (merged PR walk) returned no pullRequests connection",
+    );
+  }
+  const pageInfo = (pullRequests as Record<string, unknown>).pageInfo;
+  // `typeof null === "object"`, so a null pageInfo used to pass the object
+  // check and then throw a raw TypeError on `.endCursor` — the shell only
+  // remaps CliUsageError, so that reached the operator mid-walk with no
+  // page named. Same shape as parseThreadBatch's pageInfo guard.
+  if (typeof pageInfo !== "object" || pageInfo === null) {
     throw new CliUsageError(
       "gh api graphql (merged PR walk) returned no pullRequests connection",
     );
@@ -972,7 +1006,18 @@ export function parseMergedPrPage(raw: string): MergedPrPage {
     nodes: unknown[];
     pageInfo: Record<string, unknown>;
   };
-  const endCursor = record.pageInfo.endCursor;
+  const hasNextPage = record.pageInfo.hasNextPage === true;
+  const endCursor =
+    typeof record.pageInfo.endCursor === "string"
+      ? record.pageInfo.endCursor
+      : null;
+  // A continuing page without a cursor would loop forever on the same
+  // request. Fail loud rather than hang.
+  if (hasNextPage && endCursor === null) {
+    throw new CliUsageError(
+      "gh api graphql (merged PR walk) hasNextPage is true but endCursor is missing",
+    );
+  }
   const nodes: MergedPrNode[] = [];
   for (const [i, entry] of record.nodes.entries()) {
     if (typeof entry !== "object" || entry === null) {
@@ -1013,8 +1058,8 @@ export function parseMergedPrPage(raw: string): MergedPrPage {
     });
   }
   return {
-    endCursor: typeof endCursor === "string" ? endCursor : null,
-    hasNextPage: record.pageInfo.hasNextPage === true,
+    endCursor,
+    hasNextPage,
     nodes,
   };
 }
@@ -1287,6 +1332,29 @@ function stampMs(stamp: string | null): number {
   return Date.parse(stamp);
 }
 
+// A PR cannot introduce what it itself fixed — circular blame evidence.
+// Shared by the shell (drop before proximity runs) and selectCorpus
+// (defense in depth). Direct pushes (`null`) are not self.
+export function isSelfIntroducer(
+  fixPr: number,
+  introducerPr: number | null,
+): boolean {
+  return introducerPr === fixPr;
+}
+
+// Rebase-and-merge detection: merge_commit_sha is the last rebased commit,
+// so its sole parent still belongs to THIS PR. Squash's parent is the
+// previous default-branch tip (another PR, or none). pickCommitPull is
+// GitHub's primary association — the same rule blameResolve uses for the
+// introducer itself.
+export function parentBelongsToFix(
+  fixPr: number,
+  pulls: CommitPullRef[],
+): boolean {
+  const primary = pickCommitPull(pulls);
+  return primary !== null && primary.number === fixPr;
+}
+
 // Tier resolution + dedupe + the artifact's deterministic order.
 export function selectCorpus(entries: CorpusWorking[]): CorpusCandidate[] {
   // One entry per fix PR, sources merged: the shell keys its map by PR, but
@@ -1329,7 +1397,8 @@ export function selectCorpus(entries: CorpusWorking[]): CorpusCandidate[] {
     // what it itself fixed — when blame resolves the introducer to the fix
     // PR itself, the evidence is circular and the introducer is nulled.
     const introducer =
-      entry.introducer !== null && entry.introducer.pr === entry.fixPr
+      entry.introducer !== null &&
+      isSelfIntroducer(entry.fixPr, entry.introducer.pr)
         ? null
         : entry.introducer;
     const sources = SOURCE_ORDER.filter((source) =>
@@ -1588,7 +1657,7 @@ function renderThreadSection(
         thread.line === null ? thread.path : `${thread.path}:${thread.line}`;
       out.push(
         `- thread: \`${at}\` · first comment ${thread.firstCommentAt} · ` +
-          `a commit landed after it: \`${thread.pushSha ?? "unknown"}\``,
+          `a commit landed after it: \`${thread.pushSha}\``,
       );
       if (thread.excerpt.length > 0) {
         out.push(`    excerpt: ${thread.excerpt}`);

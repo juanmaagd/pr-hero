@@ -48,6 +48,7 @@ describe("parseArgs", () => {
       all: false,
       fixes: false,
       incidents: false,
+      issues: false,
       proximity: false,
       threads: false,
     });
