@@ -260,6 +260,14 @@ introducer whose PR number is HIGHER than the fix's**, of which **6 resolve a PR
 impossible, and a real defect (`joinProximity` guards `ref.pr === fix.fixPr`, `blameResolve` does not).
 At 1% it does not threaten the corpus, and it is recorded here rather than fixed.
 
+> **Updated 2026-08-17.** `234a1ef` fixed it — `blameResolve` now drops a resolution landing on the fix PR
+> itself, before proximity runs, and #44 is closed. **The table above was NOT regenerated**, by that
+> commit's own decision ("no live re-run; the corpus on disk still stands"), so every count in this section
+> is still the pre-fix measurement and `blame-linked` 452/11 still carries the ~1%. Anything that consumes
+> these numbers as ground truth — growing M6's floor test being the case that matters — re-runs
+> `pr-hero corpus` first. The 1 non-self anomaly (a different PR numbered above the fix) was deliberately
+> left alone: two PRs merging out of order makes it legitimate.
+
 **What this does and does not do to §3.11.** It removes "there is no cheap source for recall" as a
 statement about the WORLD — there is one, and it is on disk. It does not remove the adjudication cost,
 so the floor test can grow beyond 8 cases only as fast as someone judges them. The fork stays a fork.
@@ -307,16 +315,19 @@ Neither is fixed here; both are recorded so they are not rediscovered.
 
 ---
 
-## 3. The design (M3) — PARTIAL, stopped deliberately 2026-08-16
+## 3. The design (M3) — WRITTEN, awaiting ratification
 
 The M3 session was started and stopped early by Juanma, on the correct observation that **the DoorDash
 track does not have to be finished for the main roadmap to continue** — only `ROADMAP.md` item 7 gates on
-it, and the rest of Phase C does not.
+it, and the rest of Phase C does not. §3.1 and §3.2 are what that first session established; the design
+proper was written in the session that followed.
 
-What follows is what M3 actually established before stopping. It is recorded because the measurements
-below were the expensive part and would otherwise have to be re-derived. **The scout design proper — C7's
-four open questions, and M3 items 1 through 5 and 7 — is NOT written.** Do not treat this section as a
-ratified design; nothing in M4–M6 may start from it.
+> **Header corrected 2026-08-17.** This section used to read "PARTIAL, stopped deliberately" and to state
+> that "the scout design proper — C7's four open questions, and M3 items 1 through 5 and 7 — is NOT
+> written". That was true when it was written and was falsified the next day by §3.3–§3.14, which answer
+> all four C7 questions and items 1–5 and 7. The clause it does NOT retract: **do not treat this section
+> as a ratified design.** §3.14 still reads `Ratified: _pending_`, and nothing in M4–M6 may start before
+> that line changes.
 
 ### 3.1 M3 item 6, the metric — this part IS answered, and the answer is uncomfortable
 
@@ -705,6 +716,19 @@ scout catch things the control misses?* — case by case, at the lowest cost, wi
 trust. Tier 2 buys a number we would have to caveat into uselessness. If the floor test comes out
 ambiguous (say 4–5 of 8 in both arms), (b) becomes worth its money, and the corpus is still there.
 
+> **DECIDED 2026-08-17: (a).** Ratified by Juanma — see §3.14. One refinement to the ambiguity fallback,
+> created by #43 closing the same day: the floor test is binary per case and paired per PR, so it
+> **extends incrementally at no methodological cost** — a case added later is its own self-contained pair
+> and invalidates nothing already run. So an ambiguous floor is grown from the widened corpus (§2.4ter) at
+> ~$16 per known-bad case at R=2, which buys deterministic cases instead of Tier 2's underpowered
+> statistic at comparable money. Tier 2 is not deleted; it is demoted below corpus growth in the fallback
+> order. Caveats on any such growth: `blame-linked` is the weakest tier, and while #44's self-blame defect
+> was FIXED the same day (`234a1ef`, `blameResolve` now drops a resolution landing on the fix PR itself),
+> **that commit did no live re-run — the 452/11 counts on disk predate it and still carry the ~1%**, so
+> growing the floor from `blame-linked` means re-running `pr-hero corpus` first or adjudicating past the
+> overstatement; musive's `issue-linked` is 0 structurally (Jira); and a supermarket-pro candidate would
+> put a second repository inside this protocol, so **v1 stays musive-only**.
+
 **Protocol invariants for whichever option is chosen:**
 
 - Both arms run the same day, same engine build, same prompt set; the control arm is RE-RUN rather than
@@ -764,4 +788,16 @@ they would cost the most to change later:
 4. **§3.10's exclusion rule** — at most one target case may be dropped from the coverage gate, and a second
    returns the diff-only decision to him.
 
-Ratified: _pending_.
+**Ratified 2026-08-17 by Juanma.** All four as recommended:
+
+1. **§3.11's fork → (a), the floor test alone.** 7 known-bad PRs + 2 clean, R=2, both arms — 36 runs,
+   **~$144**. No statistical effect is claimed or implied, and the write-up says so. If the floor comes out
+   ambiguous, it is GROWN from #43's widened corpus (§2.4ter) rather than backed by Tier 2 — the reasoning,
+   the ~$16/case arithmetic and the three tier caveats are in `ROADMAP-DOORDASH.md`'s M3 entry, and the
+   reason not to pre-pay that adjudication is THE PIVOT: sessions are the scarce resource and an 8-of-8 or
+   1-of-8 result makes it unnecessary.
+2. **§3.4 — bias, filter half deferred.** Stands.
+3. **§3.7 — `prompts/scout.md`, engine-owned, prompt set untouched by construction.** Stands.
+4. **§3.10's exclusion rule — at most one case, a second returns diff-only to Juanma.** Stands.
+
+M4 may begin. Nothing in M5 or M6 starts without its own gate passing first.

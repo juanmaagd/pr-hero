@@ -206,7 +206,19 @@ precision has a cheap one-time corpus (56 untriaged rows) while recall has no ch
 M3 item 6 must produce a metric that survives all four. If it cannot, THAT is the finding, and it is worth
 a $0 session to reach it honestly rather than assuming it from outside.
 
-### M3 — The scout, designed (1 session, $0) — **WRITTEN 2026-08-16, AWAITING RATIFICATION**
+> **Superseded in one clause, 2026-08-17 by #43.** "Recall has no cheap SOURCE" was a statement about
+> reverts, not about the world. `pr-hero corpus` (`19b9f00`) mines four further sources and returns **513
+> candidates on musive and 19 on supermarket-pro** — the repository that reverts said had nothing.
+> Everything else in this section stands: they are candidates, not cases, and each still costs one
+> adjudication at M0's price. **The supply changed, the price did not.** Numbers and their caveats in
+> `docs/scout-design.md` §2.4ter; the defects that first live run exposed are recorded in #44 and fix
+> nothing that is claimed above.
+
+### M3 — The scout, designed (1 session, $0) — **RATIFIED 2026-08-17**
+
+Juanma ratified all four of §3.14's decisions as recommended, including **§3.11's fork → (a), the floor
+test alone (~$144)**. M4 may begin. The ratification and its one refinement — an ambiguous floor is grown
+from #43's corpus before Tier 2 is bought — are recorded in `docs/scout-design.md` §3.11 and §3.14.
 
 The design is `docs/scout-design.md` §3.3–§3.14: all four C7 questions and items 1–5 and 7 answered,
 against verified file:line code (a verification pass re-checked §3.2's claims and confirmed 10 of 10, with
@@ -223,6 +235,26 @@ bumps. M4's gates and M6's protocol are in numbers.
 effect smaller than ~72% at $128 or ~59% at $192, so the recommendation is the **floor test alone** — 8
 known defects with known sites over 7 PRs, binary per case, plus 2 clean PRs so pipeline-level restraint is
 not left unmeasured (~$144). §3.14 lists the four decisions Juanma ratifies.
+
+**What #43 changes about that fork, 2026-08-17 — the fallback, not the recommendation.** §3.11 already
+carries the contingency: *"if the floor test comes out ambiguous (say 4–5 of 8 in both arms), (b) becomes
+worth its money, and the corpus is still there."* #43 gives that contingency a strictly better target.
+The floor test is binary per case and paired per PR, so it **extends incrementally at no methodological
+cost** — each case added later is its own self-contained pair, and nothing already run is invalidated.
+So when the floor is ambiguous, growing it from the widened corpus (~$16 per known-bad case at R=2, plus
+adjudication at M0's measured rate of ~18 rows per half session) buys deterministic cases instead of
+Tier 2's underpowered statistic, at comparable money. Three caveats travel with any such growth and must
+be read before, not after: `blame-linked` is the weakest of the tiers, and its self-blame defect is **fixed
+in code but not in the artifact** — `234a1ef` closed #44 and did no live re-run, so the 452/11 counts on
+disk are still the buggy version's and still overstate that tier by ~1%; musive's `issue-linked` count is
+0 for a structural reason (Jira, not GitHub issues); and any supermarket-pro candidate puts a **second
+repository inside M6's protocol** — no on-disk baselines, unconfirmed `.prhero` setup — so v1 stays
+musive-only unless Juanma decides otherwise. THE PIVOT argues against paying that half session up front:
+an 8-of-8 or 1-of-8 floor result makes it unnecessary, and sessions are the scarce thing.
+
+**M4 is untouched by #43.** Its coverage gate targets the five adjudicated misses (§3.10), and its $0
+prerequisite — extract the sites of the three revert cases — stands exactly as written. A wider candidate
+pool is supply for a LATER decision; it is not an input to the probe.
 
 The original entry, kept for its reasoning:
 
@@ -310,9 +342,20 @@ starts consuming them:
 
 - **#23 columns** — `trigger` (watch | manual), retry reason breakdown into `run_agents`, model per
   agent, PR-opened → posted latency, cost per real finding. All additive.
-- **#41 — PROMOTED OUT OF M7 (2026-08-16).** It now runs before M3 as the replacement measurement track,
-  for the reason in the amendment above. Still `gh` + `git log` and still $0; what changed is its position
-  and its weight, not its scope — it builds the candidate list and stops, exactly as the issue says.
+- **#41 — PROMOTED OUT OF M7 (2026-08-16), then DONE.** It ran before M3 as the replacement measurement
+  track, for the reason in the amendment above. Still `gh` + `git log` and still $0; what changed was its
+  position and its weight, not its scope — it built the candidate list and stopped, exactly as the issue
+  said. Shipped as `pr-hero reverts` in `3e212f3`; result 3 usable cases (`docs/scout-design.md` §2.4bis).
+- **#43 — DONE 2026-08-17, and it is #41's follow-up rather than a new milestone.** `pr-hero corpus`
+  (`19b9f00`, measured in `139a2fd`) widens the known-bad corpus past reverts: bug-fix subjects,
+  incident keywords, bug-labelled issues, same-day proximity, resolved review threads — 513 candidates on
+  musive, 19 on supermarket-pro, tiered by confidence. It touches no engine path, no prompt set and no
+  control set, so "one variable per experiment" is untouched and it was free to run at any time. **Its one
+  interaction with a pending decision is §3.11's fork** — see the amendment below. The six defects its
+  first live run exposed were recorded in #44 and **fixed the same day in `234a1ef`** (self-blame, null
+  `pageInfo`, unpaginated commits/files, `--issues` as its own flag, rebase-merge blame, dead fields).
+  That commit deliberately did no live re-run, so **the counts on disk are the pre-fix ones** — anything
+  that consumes the corpus as ground truth re-runs `pr-hero corpus` first.
 - **C8's curation filter** over musive's existing `.prhero/gotchas.md` and priors, $0: *CI would catch it →
   drop; the model already knows it → drop; no file:line evidence → drop*. Do it AFTER M6, not before — it
   changes what hunters read.
@@ -344,20 +387,24 @@ Phase C work with their own designs.
 | Milestone | Sessions | Money | Juanma decides |
 |---|---|---|---|
 | M0 pin the ground — **DONE** | ½ | $0 | ~~verdicts on 11 rows~~ → 18 rows adjudicated |
-| **#41 revert mining (promoted, runs next)** | ½–1 | $0 | which candidates are real |
-| **The replacement metric** | 1 | $0 | **what M6 scores against** |
+| #41 revert mining — **DONE** (`3e212f3`) | ½ | $0 | 3 usable cases (§2.4bis) |
+| #43 corpus past reverts — **DONE** (`19b9f00`) | ½ | $0 | 513 + 19 candidates (§2.4ter) |
+| The replacement metric — **ANSWERED in §3.1** | 1 | $0 | two tiers; which one is bought = §3.11 |
 | M1 public honesty | 1 | $0 | post-or-not on partial+zero |
 | M2 #19's shape | ½ | $0 | — (the number decides) |
-| M3 scout design — **WRITTEN, awaiting ratification** | 1 | $0 | ratify §3.14's four; **§3.11's fork** |
-| M4 scout-probe | 1 | ~$5–15 | thresholds — now set in §3.10 |
+| M3 scout design — **RATIFIED 2026-08-17** | 1 | $0 | all four as recommended; fork → **(a)** |
+| M4 scout-probe — **next** | 1 | ~$5–15 | thresholds — now set in §3.10 |
 | M5 scout behind flag | 1–2 | ~$0.10 | — |
-| M6 the A/B | 1 (+ wall clock) | **~$144 (a) / ~$192 (b) / ~$360 (c)** | adopt / opt-in / drop |
+| M6 the A/B | 1 (+ wall clock) | **~$144 — (a) ratified** | adopt / opt-in / drop |
 | M7 fill-ins | ride along | $0 | — |
 | **Total** | **~7–9 sessions** | **~$200–300** | |
 
-The two new rows are the cost of the amendment. Neither spends money; both spend the scarce thing, which
-is sessions. The A/B's own estimate may move again once the variance in `docs/scout-design.md` §1.3 is
-turned into a replicate count — `R ≥ 2` is very likely too few, and R scales the dollars linearly.
+Those rows were the cost of the amendment. None of them spent money; all of them spent the scarce thing,
+which is sessions — and as of 2026-08-17 all three are closed, one of them (the metric) by being answered
+inside M3 rather than by a session of its own. The A/B's own estimate may move again once the variance in
+`docs/scout-design.md` §1.3 is turned into a replicate count — `R ≥ 2` is very likely too few, and R
+scales the dollars linearly. It may also move if the floor test comes out ambiguous and is grown from
+#43's corpus rather than backed by Tier 2; that path is costed in the M3 entry above.
 
-Then item 7. If M6 says drop, the track still delivered M1, M2, #40, #23's columns, #41 and the first
+Then item 7. If M6 says drop, the track still delivered M1, M2, #40, #23's columns, #41, #43 and the first
 real corpus — the pivot's principles land either way; only the flagship mechanism would not.
