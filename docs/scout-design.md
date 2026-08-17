@@ -458,6 +458,58 @@ The funnel from the re-mined corpus is 507 fix-shaped → 424 `blame-linked` →
 **66 whose introducer the engine will actually review**. At 40%, those 66 hold roughly 26 more cases, and
 every one costs an adjudication.
 
+### 2.4septies THE FLOOR TEST CASE LIST — canonical, and the only one M6 reads
+
+Everything above is how these were found and why the rejected ones were rejected. This is the list itself.
+**Every line number here is in the coordinates of the PR THAT GETS REVIEWED**, verified by the orchestrator
+against that PR's own tree — not copied from the corpus artifact, for the reason in the note below.
+
+The two case types differ in what gets reviewed, and M6 must not blur them:
+
+- **Miss cases** — the PR under review IS the PR where our engine missed something Greptile found (§2.3).
+- **Corpus cases** — the PR under review is the INTRODUCER, and the fix PR is only provenance.
+
+| # | PR to review | site | type | what a reviewer must flag |
+|---|---|---|---|---|
+| 1 | **1717** | `PaywallUpgrade/index.tsx:119` | miss | ordering bug, visible in the diff |
+| 2 | **1719** | `SongSourceResolver.ts:296` | miss | missing lower bound |
+| 3 | **1722** | `m4aRemux.ts:181` | miss | whole-file check swapped for an mdat one; author-confirmed regression |
+| 4 | **1724** | `mus-638-song-bucket-rollout.md:144` | miss | shell under `set -u` in a markdown runbook |
+| 5 | **1724** | `mus-638-song-bucket-rollout.md:140-142` | miss | unbounded poll in the same runbook |
+| 6 | **1471** | `.github/workflows/build-check.yml:39` | corpus (fix 1557) | `bunx biome` unscoped — the gate checks nothing and exits 0 |
+| 7 | **853** | `packages/app/hooks/useChangeCover.tsx:120` | corpus (fix 1641) | `const` in the `try`, dereferenced in the `catch` |
+| 8 | **1307** | `packages/web/src/store/FileUploaderStore.ts:405` | corpus (fix 1413) | refreshes by the track's id, overwriting `selectedProject` |
+| 9 | **767** | `packages/web/src/Context/AudioPlayerContext.tsx:278` | corpus (fix 1434) | preload fast-path trusts an unverified cached element |
+| 10 | **965** | `packages/backend/src/Infrastructure/Cloudflare/CludflareDriver.ts:338` | corpus (fix 1124) | `attachment` with no `filename=`, beside a UUID key |
+| 11 | **1179** | `lambda/song-waveform/src/index.ts:145` | corpus (fix 1394) | sample-rate normalisation deleted, `16000` left hardcoded |
+| 12 | **1141** | `packages/backend/src/Infrastructure/Http/Controllers/PublicProject.ts:216` | corpus (fix 1215) | ms assigned to `totalSeconds`, then `/3600` |
+| 13 | **1248** | `packages/backend/src/Infrastructure/Tigris/TigrisDriver.ts:922` | corpus (fix 1376) | `Range: "bytes=0-15"` feeding a magic-byte sniffer |
+
+**13 cases over 12 PRs.** Case 4 and 5 share PR 1724, as cases 1–5 always did.
+
+**Why this table exists rather than a pointer at the corpus artifact — corrected 2026-08-17, and worse than
+§2.4sexies first stated.** That section said four of five batch-2 drifts were tolerable and one was
+categorical. Measuring all EIGHT corpus cases against `compare.ts`'s ±25 window says otherwise:
+
+| case | corpus said | truth | drift | would ±25 have matched? |
+|---|---|---|---|---|
+| 1557 | 143 | **39** | 104 | **no** |
+| 1376 | 982 | **922** | 60 | **no** |
+| 1434 | `store/AudioPlayerStore.ts:209` | `Context/AudioPlayerContext.tsx:278` | — | **no — the path did not exist yet** |
+| 1215 | 237 | 216 | 21 | yes, barely |
+| 1641 | 135 | 120 | 15 | yes |
+| 1124 | 346 | 338 | 8 | yes |
+| 1394 | 146 | 145 | 1 | yes |
+| 1413 | 405 | 405 | 0 | yes |
+
+**Three of eight would have failed to match, with any reviewer.** The drift is not noise around the true
+site — it is the distance a file grew between the introducer and the fix, which is unbounded and grows with
+the gap between them. A ±25 window cannot absorb it, and the two worst cases here are 60 and 104 lines. Had
+M6 run against the corpus artifact's own coordinates, it would have scored three of its eight corpus cases
+as misses by both arms and read that as evidence about the scout.
+
+The command is not fixed here; the defect is filed. This table is what M6 reads until it is.
+
 ### 2.4 The restraint set for M4 — NOT yet established
 
 M4's second assertion needs PRs that are genuinely clean, so a loud scout can be caught. The candidates by

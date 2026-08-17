@@ -304,6 +304,32 @@ real code in view. The design must settle, at minimum:
 
 Juanma ratifies the design at the end of the session. Nothing in M4–M6 starts before that.
 
+### The floor test, built — 2026-08-17, between M3 and M4
+
+Not a milestone of its own; it is §3.11's corpus growth executed after the revert corpus turned out to be
+zero. Recorded here because M6's input changed and the sequence must show it.
+
+**The floor test has 13 cases over 12 PRs — the canonical list is `docs/scout-design.md` §2.4septies, and
+that table is the only one M6 reads.** Five are the adjudicated `greptile_only` misses; eight came from
+adjudicating 20 corpus candidates, of which 8 survived (40%). Every verdict was re-verified by the
+orchestrator against git rather than taken from the agent that produced it.
+
+**M6's cost moves from ~$96 to ~$224** — 12 known-bad PRs + 2 clean, both arms, R=2 = 56 runs. That buys an
+instrument that can distinguish *adopt* from *opt-in*; the five-case floor could only have shouted *drop*.
+
+Three defects in our own tooling were found and two were fixed on the way:
+
+- **Fixed (`c6a4d6e`)**: `blameResolve` passed no `-w -M -C`, so every mass reformat became the "introducer";
+  and `ghCommitPulls` conflated a 404 with an empty response, so a degraded run read as a complete one.
+  Re-mining moved 34 of 466 candidates, 14 off a known churn PR and **zero onto one**.
+- **Filed, not fixed (#46)**: the corpus writes the defect site in the FIX's coordinates while the consumer
+  replays the INTRODUCER. **Three of the eight corpus cases were unmatchable by any reviewer** — drifts of
+  60 and 104 lines, and one path that did not exist yet. §2.4septies carries the corrected coordinates.
+- **Filed earlier (#45)**: `pr-hero reverts` never checks whether a reverted patch was re-landed.
+
+What did NOT change: M3's four ratified decisions, M4's two gates, and the restraint set. The scout design
+is untouched by all of this — only the corpus M6 scores against moved.
+
 ### M4 — The scout-probe: the prompt earns its A/B (1 session, ~$5–15)
 
 `refuter-probe` is the pattern (CLAUDE.md: "a prompt edit that cannot pass it does not deserve a $10
@@ -415,8 +441,8 @@ Phase C work with their own designs.
 | M3 scout design — **RATIFIED 2026-08-17** | 1 | $0 | all four as recommended; fork → **(a)** |
 | M4 scout-probe — **next** | 1 | ~$5–15 | thresholds — now set in §3.10 |
 | M5 scout behind flag | 1–2 | ~$0.10 | — |
-| **Adjudicate #43 candidates into floor cases** | 1 | $0 | which candidates are real |
-| M6 the A/B | 1 (+ wall clock) | **~$200 — (a), floor grown** | adopt / opt-in / drop |
+| Adjudicate #43 candidates — **DONE**, 13 cases | 1 | $0 | 8 of 20 usable; §2.4septies |
+| M6 the A/B | 1 (+ wall clock) | **~$224 — (a), floor at 13** | adopt / opt-in / drop |
 | M7 fill-ins | ride along | $0 | — |
 | **Total** | **~7–9 sessions** | **~$200–300** | |
 
