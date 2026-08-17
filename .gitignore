@@ -5,3 +5,5 @@ fixtures/.build/
 # per-checkout code index and browser-tool snapshots: never committed
 .codegraph/
 .playwright-mcp/
+# corpus mining artifacts: candidates for a human glance, not source
+corpus-artifacts/

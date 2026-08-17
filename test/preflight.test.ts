@@ -46,6 +46,10 @@ describe("parseArgs", () => {
       onPush: false,
       force: false,
       all: false,
+      fixes: false,
+      incidents: false,
+      proximity: false,
+      threads: false,
     });
     expect(options.base).toBeUndefined();
     // Unset, never 0: 0 DISABLES a size limit, so it cannot double as

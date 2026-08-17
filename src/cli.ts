@@ -17,6 +17,7 @@ import { mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { PrHeroFindingRef } from "./compare";
+import { corpusCommand } from "./corpus";
 import {
   type Finding,
   type FindingsDocument,
@@ -352,7 +353,9 @@ async function main(argv: string[]): Promise<number> {
                   ? await usageCommand(parsed.options)
                   : parsed.command === "reverts"
                     ? await revertsCommand(parsed.options)
-                    : await review(parsed.options);
+                    : parsed.command === "corpus"
+                      ? await corpusCommand(parsed.options)
+                      : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);

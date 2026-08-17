@@ -153,6 +153,23 @@ export interface CliOptions {
   // shell applies it, so parseArgs stays pure and "the operator asked for a
   // window" stays distinguishable from "nobody said".
   since?: string;
+  // corpus only (GitHub #43): the four candidate sources. At least one is
+  // REQUIRED (enforced post-loop, where the whole set is visible) — a bare
+  // `pr-hero corpus` would be a $0 no-op that looks like a scan. --proximity
+  // IMPLIES --fixes (proximity suspects are computed over the fix set),
+  // applied here so the shell never re-derives the implication.
+  fixes: boolean;
+  incidents: boolean;
+  proximity: boolean;
+  threads: boolean;
+  // corpus only: the proximity window in days, kept VERBATIM like --since —
+  // validateProximityDays in corpus-preflight.ts owns the 1..90 rule where
+  // the join that consumes it is tested. Unset means DEFAULT_PROXIMITY_DAYS.
+  proximityDays?: string;
+  // corpus only: csv of issue labels that mark a referenced issue as a bug.
+  // Unset means DEFAULT_BUG_LABELS. GitHub labels are case-sensitive, so the
+  // split (splitBugLabels) never lowercases.
+  bugLabels?: string;
 }
 
 export interface ParsedCli {
@@ -166,6 +183,7 @@ export interface ParsedCli {
     | "gc"
     | "usage"
     | "reverts"
+    | "corpus"
     | "help";
   options: CliOptions;
 }
@@ -207,6 +225,17 @@ Usage:
                              markdown CANDIDATES for human confirmation. Runs
                              git log + gh api only: no review, no scoring, no
                              labelling of what the defect was, $0
+  pr-hero corpus [options]   Widen the known-bad corpus beyond reverts with
+                             four candidate sources, gated by their flags:
+                             --fixes (fix-shaped merged PRs, blame-resolved
+                             to their likely introducer), --incidents
+                             (incident/outage keywords in title/body),
+                             --proximity (prior PRs on the same files when
+                             the introducer did not resolve), --threads
+                             (defects review DID catch, from resolved review
+                             threads). At least one source is required; all
+                             output is CANDIDATES for human confirmation.
+                             git log + gh api only: no review, no scoring, $0
   pr-hero watch --once       Run ONE watcher tick over ~/.prhero/watch.json:
                              pick the next unreviewed open PR across the
                              configured repos and review it. launchd (or cron)
@@ -264,11 +293,28 @@ Options:
                       file), then PRHERO_AGENTS_DIR
   --out <dir>         Run directory; must live OUTSIDE the reviewed repo
                       (default: ~/.prhero/repos/<origin>/runs/<sha>-<n>).
-                      For ledger and reverts: the file to write instead of
-                      stdout
-  --since <git-date>  reverts only: how far back to scan the default branch,
-                      in any form git's --since accepts ("6 months ago",
-                      "2025-01-01"). Default: 24 months ago
+                      For ledger, reverts and corpus: the file to write
+                      instead of stdout
+  --since <git-date>  reverts and corpus only: how far back to scan the
+                      default branch, in any form git's --since accepts
+                      ("6 months ago", "2025-01-01"). Default: 24 months ago
+  --fixes             corpus only: mine fix-shaped merged PRs (anchored
+                      conventional fix/bugfix subject) and blame-resolve each
+                      to the PR that last touched the fixed lines
+  --incidents         corpus only: mine merged PRs whose title or body carry
+                      incident keywords (incident, outage, sentry,
+                      crashlytics)
+  --proximity         corpus only: for fix PRs whose introducer did not
+                      resolve, list prior PRs on the same files within
+                      --proximity-days. Implies --fixes — proximity is
+                      computed over the fix set
+  --threads           corpus only: mine resolved review threads a later push
+                      plausibly addressed — the defects review DID catch
+  --proximity-days <n>
+                      corpus only: the proximity window in days, an integer
+                      between 1 and 90. Default: 7
+  --bug-labels <csv>  corpus only: issue labels that mark a referenced issue
+                      as a bug (comma-separated, case-sensitive). Default: bug
   --runs <dir>        ledger only: the runs root to scan for comparison.json
                       files (default: ~/.prhero/repos/<origin>/runs)
   --from <dir>        post/triage only: the run dir to read findings.json and
@@ -363,6 +409,8 @@ const VALUE_FLAGS = new Set([
   "--verdict",
   "--issue",
   "--since",
+  "--proximity-days",
+  "--bug-labels",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -377,6 +425,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     onPush: false,
     force: false,
     all: false,
+    fixes: false,
+    incidents: false,
+    proximity: false,
+    threads: false,
   };
   let command:
     | "review"
@@ -388,6 +440,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "gc"
     | "usage"
     | "reverts"
+    | "corpus"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -478,6 +531,25 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.all = true;
       continue;
     }
+    // The four corpus sources, size-gate-style booleans — no values, and the
+    // post-loop corpus block owns their cross-command rules (required-set,
+    // --proximity implies --fixes).
+    if (arg === "--fixes") {
+      options.fixes = true;
+      continue;
+    }
+    if (arg === "--incidents") {
+      options.incidents = true;
+      continue;
+    }
+    if (arg === "--proximity") {
+      options.proximity = true;
+      continue;
+    }
+    if (arg === "--threads") {
+      options.threads = true;
+      continue;
+    }
     if (arg.startsWith("-")) {
       throw new CliUsageError(`unknown option: ${arg}`);
     }
@@ -525,11 +597,13 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "triage" &&
       arg !== "gc" &&
       arg !== "usage" &&
-      arg !== "reverts"
+      arg !== "reverts" &&
+      arg !== "corpus"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger", "watch", "post", "triage", "gc", "usage" and "reverts")',
+          '"ledger", "watch", "post", "triage", "gc", "usage", "reverts" ' +
+          'and "corpus")',
       );
     }
     command = arg;
@@ -596,12 +670,64 @@ export function parseArgs(argv: string[]): ParsedCli {
       "--from only applies to the post and triage commands",
     );
   }
-  // --since names the `git log` window `reverts` mines, and nothing else
-  // reads it. Rejected elsewhere rather than ignored: a flag that parses and
-  // then does nothing is an operator believing they scoped a command they
-  // did not — the same reasoning as the --from guard above.
-  if (options.since !== undefined && command !== "reverts") {
-    throw new CliUsageError("--since only applies to the reverts command");
+  // --since names the `git log` window `reverts` and `corpus` mine, and
+  // nothing else reads it. Rejected elsewhere rather than ignored: a flag
+  // that parses and then does nothing is an operator believing they scoped a
+  // command they did not — the same reasoning as the --from guard above.
+  if (
+    options.since !== undefined &&
+    command !== "reverts" &&
+    command !== "corpus"
+  ) {
+    throw new CliUsageError(
+      "--since only applies to the reverts and corpus commands",
+    );
+  }
+  // The corpus source flags and their two value flags are corpus-only, same
+  // reasoning as the --since guard: each names the source it enables, and on
+  // any other command it would be a silently dropped intention.
+  if (command !== "corpus") {
+    if (options.fixes) {
+      throw new CliUsageError("--fixes only applies to the corpus command");
+    }
+    if (options.incidents) {
+      throw new CliUsageError("--incidents only applies to the corpus command");
+    }
+    if (options.proximity) {
+      throw new CliUsageError("--proximity only applies to the corpus command");
+    }
+    if (options.threads) {
+      throw new CliUsageError("--threads only applies to the corpus command");
+    }
+    if (options.proximityDays !== undefined) {
+      throw new CliUsageError(
+        "--proximity-days only applies to the corpus command",
+      );
+    }
+    if (options.bugLabels !== undefined) {
+      throw new CliUsageError(
+        "--bug-labels only applies to the corpus command",
+      );
+    }
+  } else {
+    // Checked after the loop, where the whole flag set is visible at once:
+    // corpus with NO source would be a $0 no-op that looks like a scan, and
+    // the error names all four so the fix is one copy-paste away.
+    if (
+      !options.fixes &&
+      !options.incidents &&
+      !options.proximity &&
+      !options.threads
+    ) {
+      throw new CliUsageError(
+        "corpus needs at least one source: --fixes, --incidents, " +
+          "--proximity or --threads",
+      );
+    }
+    // Proximity suspects are computed over the fix set, so a --proximity run
+    // IS a --fixes run. Applied here rather than in the shell so the
+    // implication is one pure, tested rule instead of an I/O re-derivation.
+    if (options.proximity) options.fixes = true;
   }
   // spec "--all misused on another command": --all is usage's own
   // operator-wide escape hatch, and valid on nothing else.
@@ -806,6 +932,19 @@ function applyValueFlag(
     // naming a flag the operator never typed.
     case "--since":
       options.since = value;
+      return;
+    // Kept verbatim, exactly like --since: the 1..90 range rule belongs to
+    // validateProximityDays in corpus-preflight.ts, next to the join that
+    // consumes the number — an integer parser HERE would be a second opinion
+    // the shell's validator contradicts. Same own-case reasoning as --since
+    // (the switch's `default:` is --hop-budget's integer parser).
+    case "--proximity-days":
+      options.proximityDays = value;
+      return;
+    // Also verbatim: splitBugLabels owns the trim/dedupe rules, and the csv
+    // must survive byte-for-byte so error messages can quote what was typed.
+    case "--bug-labels":
+      options.bugLabels = value;
       return;
     case "--issue": {
       const parsed = Number(value);

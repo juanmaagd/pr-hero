@@ -2291,6 +2291,10 @@ function runDirOptions(over: Partial<CliOptions> = {}): CliOptions {
     onPush: false,
     force: false,
     all: false,
+    fixes: false,
+    incidents: false,
+    proximity: false,
+    threads: false,
     ...over,
   };
 }
