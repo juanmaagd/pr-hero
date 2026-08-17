@@ -399,6 +399,65 @@ both cheap: capture whole logs rather than tails, and **the corpus artifact has 
 introducer lookups failed**, so a degraded run is byte-indistinguishable from a complete one — the disease
 #42 named, in another command.
 
+### 2.4sexies Batch 2, and the floor test reaches thirteen cases
+
+Ten more candidates, adjudicated against the RE-MINED corpus (post `c6a4d6e`) and with two changes to the
+method that batch 1 paid for:
+
+1. **The size gate is applied mechanically, before an agent is spent.** Batch 1 burned a full adjudication
+   on 1458 only to find its introducer was 65,725 lines against a 1500-line gate. One `gh` call per
+   introducer now settles that for free.
+2. **The adjudicators are given the TECHNIQUE for the dominant failure mode, not just a warning about it.**
+   Batch 1 was told "blame names the last toucher" and five of six rejections were still that. Batch 2's
+   prompt opens with the concrete checks: does the construct already exist at `<mergeSha>^1`; does the hunk
+   vanish under `git diff -w` (and the caveat that a one-line-to-three-line reflow survives `-w`); is the PR
+   a port or rename; is the fix's edit at this site collateral hardening.
+
+**Result: 5 usable of 10, against batch 1's 3 of 10.** Ten cases is far too few to call that difference
+real, and it is recorded as an observation rather than an effect.
+
+| fix ← introducer | verdict | site (in the INTRODUCER's coordinates) |
+|---|---|---|
+| 1434 ← 767 | **usable** | `packages/web/src/Context/AudioPlayerContext.tsx:278` — a preload fast-path promotes a cached `<audio>` element to the live player on `readyState >= 2`, but the element was cached fire-and-forget with no `error` listener; a partially decoded buffer is reused verbatim and plays as sustained static. The same hunk's fresh-load branch defends with a timeout, an error listener and a `loadedmetadata` wait — the asymmetry is entirely inside the diff. |
+| 1124 ← 965 | **usable** | `.../Cloudflare/CludflareDriver.ts:338` — `ResponseContentDisposition: "attachment"` with no `filename=`, while the same hunk shows the object key is a UUID. Every downloaded file landed named after its UUID. Verified: 0 occurrences of the construct before #965, 4 within it. |
+| 1394 ← 1179 | **usable** | `lambda/song-waveform/src/index.ts:145` — the `downsampleAudio(...)` normalisation is deleted while `PercivalBpmEstimator(..., 16000)` and `KeyExtractor(..., 16000, ...)` keep hardcoding the rate. Both halves are in the one diff. BPM and key were systematically wrong: 2 of 18 keys correct. |
+| 1215 ← 1141 | **usable** | `.../Controllers/PublicProject.ts:216` — `const totalSeconds = project.totalDuration;` then `/3600`, where `totalDuration` carries MILLISECONDS (a convention that predates the PR: `formatTrackCardDuration = (timeInMs) => timeInMs / 1000`). A 1000× error: a 10-minute project advertised `166h 40m` in every shared link preview. The contradiction is the variable name fighting the field name, inside the added hunk. |
+| 1376 ← 1248 | **usable** | `.../Tigris/TigrisDriver.ts:922` — `Range: "bytes=0-15"` feeding `fileType.fromBuffer(buf)` on adjacent ADDED lines. Sixteen bytes is below what `file-type@16.5.4` needs; its OGG branch throws on anything under 36, so every `.ogg`/`.opus` upload failed to complete. The fix widens exactly that line to `bytes=0-65535`. |
+| 1536 ← 806 | rejected | #806's whole contribution to that file is one added line; the defect could not exist until an overlay added five months later |
+| 1264 ← 1256 | rejected | the true author is **#1254, merged 29 minutes earlier** — verified: 15:17:43 vs 15:46:36 |
+| 1045 ← 701 | rejected | the blamed line is `PRIVACY_POLICY_URL`, pulled in by a constants-move refactor riding along inside the FIX PR |
+| 1109 ← 891 | rejected | **criterion 4** — real defect, correct attribution, but the consuming effect lives in a file the diff never touches |
+| 1429 ← 1003 | rejected | the flawed predicate is pure context in #1003's diff; #1003 only added the cover-edit feature beside it |
+
+**A third corpus defect, and this one would have made the benchmark unanswerable.** All five usable cases
+needed their site corrected, because **the artifact reports the defect site in the FIX's coordinates, not
+the INTRODUCER's** — the field is even labelled `replay range (defect site)`. Four are line drift (346→338,
+146→145, 237→216, 982→922), tolerable inside `compare.ts`'s ±25 window. The fifth is categorical: the corpus
+gives 1434's site as `packages/web/src/store/AudioPlayerStore.ts:209`, and **that file did not exist when
+#767 merged** — it was created later by a Context→Store move, which is also why blame named the mover.
+A benchmark replaying #767 against that path could never match, with any reviewer. Verified directly:
+`git show <#767 head>:packages/web/src/store/AudioPlayerStore.ts` does not resolve.
+
+**One limit no flag can fix, recorded so it is not chased.** 1264's true author merged 29 minutes before the
+PR blame named. There was no reformat and no move — two real authors touched the same line in succession.
+`-w -M -C` is irrelevant here; only reading the line's history separates them, which is what an adjudicator
+does and a heuristic cannot.
+
+**The floor test now has THIRTEEN cases over TWELVE PRs**, which is inside the 12–15 target §3.11 set when
+corpus growth was promoted to the main path:
+
+- **5** adjudicated `greptile_only` misses (§2.3) over PRs 1717, 1719, 1722, 1724 — 1724 carries two.
+- **8** corpus cases over introducer PRs 1471, 853, 1307 (batch 1) and 767, 965, 1179, 1141, 1248 (batch 2).
+
+At R=2 over 12 known-bad PRs plus 2 clean ones, both arms, M6 is **56 runs ≈ $224** — against the ~$96 a
+five-case floor would have cost, and buying an instrument that can actually distinguish *adopt* from
+*opt-in* rather than only shouting *drop*.
+
+**Conversion, stated for whoever needs more cases later:** 20 candidates adjudicated, 8 usable — **40%**.
+The funnel from the re-mined corpus is 507 fix-shaped → 424 `blame-linked` → 175 past the quality filter →
+**66 whose introducer the engine will actually review**. At 40%, those 66 hold roughly 26 more cases, and
+every one costs an adjudication.
+
 ### 2.4 The restraint set for M4 — NOT yet established
 
 M4's second assertion needs PRs that are genuinely clean, so a loud scout can be caught. The candidates by
