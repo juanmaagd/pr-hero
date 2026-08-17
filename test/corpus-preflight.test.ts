@@ -14,6 +14,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type BlamedSha,
+  blameArgv,
   buildThreadBatchQuery,
   type CommitIndexEntry,
   type CommitPrRef,
@@ -350,6 +351,34 @@ describe("parseDiffHunks", () => {
     const big = parseDiffHunks(hunks.join("\n"));
     expect(big.files[0]?.ranges).toHaveLength(20);
     expect(big.droppedRanges).toBe(5);
+  });
+});
+
+describe("blameArgv", () => {
+  // -w/-M/-C are the measured half of the introducer fix: without them a
+  // whitespace-only reformat is named as the introducer of code it never
+  // wrote. The whole argv is pinned so the `--` separator and the range/path
+  // order cannot drift either.
+  test("carries -w, -M and -C, and the range/path shape around them", () => {
+    expect(
+      blameArgv("a".repeat(40), "src/app.ts", { start: 12, end: 18 }),
+    ).toEqual([
+      "blame",
+      "--porcelain",
+      "-w",
+      "-M",
+      "-C",
+      "-L",
+      "12,18",
+      "a".repeat(40),
+      "--",
+      "src/app.ts",
+    ]);
+  });
+
+  test("a one-line range still renders as start,end", () => {
+    const argv = blameArgv(SHA_B, "src/push.ts", { start: 40, end: 40 });
+    expect(argv[argv.indexOf("-L") + 1]).toBe("40,40");
   });
 });
 
@@ -1387,6 +1416,11 @@ describe("renderCorpusArtifact", () => {
     since: "24 months ago",
     scannedPrs: 812,
     sourcesRun: ["--fixes", "--incidents", "--proximity", "--threads"],
+    lookupFailures: {
+      commitPrLookup404: 0,
+      mergeCommitAbsent: 0,
+      blameRangeSkipped: 0,
+    },
     candidates: selectCorpus([
       working({
         fixPr: 483,
@@ -1541,12 +1575,57 @@ describe("renderCorpusArtifact", () => {
       since: "24 months ago",
       scannedPrs: 0,
       sourcesRun: ["--fixes"],
+      lookupFailures: {
+        commitPrLookup404: 0,
+        mergeCommitAbsent: 0,
+        blameRangeSkipped: 0,
+      },
       candidates: [],
       threadCandidates: [],
     });
     expect(empty).toContain("## issue-linked (0)");
     expect(empty).toContain("_None in this window._");
     expect(empty).toContain("- sources run: --fixes");
+  });
+
+  // The defect these lines exist for: a run degraded by transient GitHub
+  // failures used to render byte-identically to a complete one.
+  test("a clean run still renders every failure count, at zero", () => {
+    expect(markdown).toContain("- failed lookups — commit→PR (404): 0");
+    expect(markdown).toContain(
+      "- failed lookups — merge commit absent from this clone (stale clone " +
+        "or rewritten history): 0",
+    );
+    expect(markdown).toContain("- failed lookups — blame range skipped: 0");
+    expect(markdown).not.toContain("DEGRADED");
+  });
+
+  test("any non-zero failure count says the run was DEGRADED, and why", () => {
+    for (const failures of [
+      { commitPrLookup404: 3, mergeCommitAbsent: 0, blameRangeSkipped: 0 },
+      { commitPrLookup404: 0, mergeCommitAbsent: 1, blameRangeSkipped: 0 },
+      { commitPrLookup404: 0, mergeCommitAbsent: 0, blameRangeSkipped: 7 },
+    ]) {
+      const degraded = renderCorpusArtifact({
+        ...artifact,
+        lookupFailures: failures,
+      });
+      expect(degraded).toContain("DEGRADED");
+      expect(degraded).toContain("WEAKER");
+      expect(degraded).toContain("tier than they deserve");
+      // The counts themselves stay readable beside the banner.
+      expect(degraded).toContain(
+        `- failed lookups — commit→PR (404): ${failures.commitPrLookup404}`,
+      );
+      expect(degraded).toContain(
+        `- failed lookups — blame range skipped: ${failures.blameRangeSkipped}`,
+      );
+      // Gaining header lines must not cost the artifact its existing ones.
+      expect(degraded).toContain("- sources run: --fixes, --incidents");
+      expect(degraded).toContain("812 merged PR(s)");
+      expect(degraded).toContain("tier issue-linked: 1");
+      expect(degraded).toContain("CANDIDATES REQUIRING HUMAN CONFIRMATION");
+    }
   });
 
   test("no ANSI bytes — it is a file, not a terminal surface", () => {

@@ -12,9 +12,11 @@
 
 import path from "node:path";
 import {
+  blameArgv,
   buildThreadBatchQuery,
   type CommitIndexEntry,
   type CommitPrRef,
+  type CorpusLookupFailures,
   type CorpusSource,
   type CorpusWorking,
   evidenceExcerpt,
@@ -240,24 +242,41 @@ function assertBalancedGraphql(document: string, what: string): void {
   }
 }
 
-async function ghCommitPulls(
+// A 404 and a 200 listing zero PRs are DIFFERENT answers and this result type
+// exists so a caller cannot confuse them: `{found:false}` is "GitHub did not
+// answer for this commit", `{found:true, pulls:[]}` is "GitHub answered, and
+// this commit belongs to no PR" — a direct push, which is real evidence. They
+// used to share the `[]` return, so a run degraded by 404s produced an artifact
+// byte-indistinguishable from a complete one (measured 2026-08-17: 12
+// blame-linked candidates where a clean re-run found 428).
+type CommitPullsLookup =
+  | { found: true; pulls: CommitPullRef[] }
+  | { found: false };
+
+// Exported for test/corpus.test.ts, which pins the two outcomes apart; the
+// `spawnFn` seam is reverts.ts's and pr.ts's, invisible to production callers.
+export async function ghCommitPulls(
   operatorRoot: string,
   slug: string,
   sha: string,
-): Promise<CommitPullRef[]> {
-  const result = await gh(operatorRoot, [
-    "api",
-    `repos/${slug}/commits/${sha}/pulls`,
-  ]);
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<CommitPullsLookup> {
+  const result = await gh(
+    operatorRoot,
+    ["api", `repos/${slug}/commits/${sha}/pulls`],
+    options?.spawnFn,
+  );
   if (!result.ok) {
-    if (isNotFound(result.stderr)) return [];
+    if (isNotFound(result.stderr)) return { found: false };
+    // Everything that is not a 404 still throws: fail-loud is correct for auth,
+    // rate limits and network, and must never become one more counter.
     throw new CliError(
       `gh api repos/${slug}/commits/${sha}/pulls failed: ` +
         result.stderr.trim(),
     );
   }
   try {
-    return parseCommitPulls(result.stdout);
+    return { found: true, pulls: parseCommitPulls(result.stdout) };
   } catch (error) {
     // The pure reader names the field; only the shell knows the endpoint.
     if (error instanceof CliUsageError) {
@@ -465,6 +484,9 @@ async function blameResolve(input: {
   slug: string;
   pr: MergedPrNode;
   entry: CorpusWorking;
+  // Run-level, mutated in place: every degradation this pass tolerates has to
+  // reach the artifact's header, or the run reads as a complete one.
+  failures: CorpusLookupFailures;
 }): Promise<string[]> {
   const mergeSha = input.pr.mergeCommitSha;
   if (mergeSha === null) return [];
@@ -477,6 +499,7 @@ async function blameResolve(input: {
     // divergence, not corruption: this PR keeps its detector evidence with
     // no introducer (the tier falls accordingly), said so on stderr, and the
     // scan continues.
+    input.failures.mergeCommitAbsent++;
     log(
       `corpus: PR #${input.pr.number} — merge commit ${mergeSha.slice(0, 12)} ` +
         "is not present in this clone (stale clone or rewritten history); " +
@@ -522,7 +545,13 @@ async function blameResolve(input: {
       input.slug,
       soleParent,
     );
-    if (parentBelongsToFix(input.pr.number, parentPulls)) {
+    // A 404 here cannot tell a rebase from a squash, so the pass continues as
+    // before (blame runs) — but the run is no longer clean and says so.
+    if (!parentPulls.found) input.failures.commitPrLookup404++;
+    if (
+      parentPulls.found &&
+      parentBelongsToFix(input.pr.number, parentPulls.pulls)
+    ) {
       log(
         `corpus: PR #${input.pr.number} — merge commit ${mergeSha.slice(0, 12)} ` +
           "is a rebase (its parent still belongs to this PR); blame would " +
@@ -557,16 +586,12 @@ async function blameResolve(input: {
   const blamed: { sha: string; file: string; range: string }[] = [];
   for (const file of plan.files) {
     for (const range of file.ranges) {
-      const blame = await git(input.repoRoot, [
-        "blame",
-        "--porcelain",
-        "-L",
-        `${range.start},${range.end}`,
-        parentSha,
-        "--",
-        file.path,
-      ]);
+      const blame = await git(
+        input.repoRoot,
+        blameArgv(parentSha, file.path, range),
+      );
       if (!blame.ok) {
+        input.failures.blameRangeSkipped++;
         // One undatable file must not kill a whole-repo scan: the range is
         // skipped, said so on stderr, and the candidate keeps its other
         // evidence. The blame evidence is simply missing from the entry, so
@@ -616,8 +641,14 @@ async function blameResolve(input: {
     }
     const pick = pickIntroducer(withDates);
     if (pick !== null) {
-      const pulls = await ghCommitPulls(input.repoRoot, input.slug, pick.sha);
-      const primary = pickCommitPull(pulls);
+      const lookup = await ghCommitPulls(input.repoRoot, input.slug, pick.sha);
+      // THE defect this counter exists for: without it, a 404 lands in the
+      // entry as `introducer.pr = null`, which the tier ladder reads as a
+      // direct push and demotes the candidate for. The entry still records
+      // exactly what it recorded before — only the run stops claiming to be
+      // clean.
+      if (!lookup.found) input.failures.commitPrLookup404++;
+      const primary = lookup.found ? pickCommitPull(lookup.pulls) : null;
       if (
         primary !== null &&
         isSelfIntroducer(input.pr.number, primary.number)
@@ -802,6 +833,11 @@ export async function corpusCommand(options: CliOptions): Promise<number> {
   // STEP D's label check.
   const working = new Map<number, CorpusWorking>();
   const blameFilesByPr = new Map<number, string[]>();
+  const failures: CorpusLookupFailures = {
+    commitPrLookup404: 0,
+    mergeCommitAbsent: 0,
+    blameRangeSkipped: 0,
+  };
   if (options.fixes || options.incidents) {
     for (const pr of mergedPrs) {
       const body = pr.body ?? "";
@@ -839,7 +875,7 @@ export async function corpusCommand(options: CliOptions): Promise<number> {
       log(`corpus: PR #${pr.number} classified (${matchedSources.join(", ")})`);
       blameFilesByPr.set(
         pr.number,
-        await blameResolve({ repoRoot, slug, pr, entry }),
+        await blameResolve({ repoRoot, slug, pr, entry, failures }),
       );
     }
   }
@@ -1071,6 +1107,7 @@ export async function corpusCommand(options: CliOptions): Promise<number> {
     since,
     scannedPrs: mergedPrs.length,
     sourcesRun,
+    lookupFailures: failures,
     candidates: selected,
     threadCandidates,
   });

@@ -427,6 +427,41 @@ function mergeRanges(ranges: PreImageRange[]): PreImageRange[] {
 // ---------------------------------------------------------------------------
 // Blame reading.
 
+// The blame argv, built here so the flags that decide WHICH commit gets named
+// are testable rather than buried in a spawn call.
+//
+// `-w -M -C` are load-bearing, and the measurement that bought them (2026-08-17,
+// MusiveTech/musive): on a pure tabs→spaces reformat, blame WITHOUT them named
+// `feat(backend): files folder system` — a 644-file, 42k-line reformat that did
+// not write a line of the logic; WITH them it named `fix: download song`, the
+// commit an independent forensic pass had separately identified as the true
+// origin. `-w` ignores whitespace-only changes, `-M` follows lines moved inside
+// a file, `-C` follows lines moved or copied in from other files.
+//
+// It is a PARTIAL fix and the tier is still not trustworthy: on a biome REFLOW
+// (a one-line arrow body split across three lines) the same measurement showed
+// the flags change nothing, because those really are new lines and blame is
+// right to say so. `blame-linked` keeps meaning "the last toucher of these
+// lines", which a human still has to check.
+export function blameArgv(
+  parentSha: string,
+  filePath: string,
+  range: PreImageRange,
+): string[] {
+  return [
+    "blame",
+    "--porcelain",
+    "-w",
+    "-M",
+    "-C",
+    "-L",
+    `${range.start},${range.end}`,
+    parentSha,
+    "--",
+    filePath,
+  ];
+}
+
 // `git blame --porcelain`: header lines are exactly
 // `<40-hex sha> <orig-line> <final-line>[ <count>]`; content lines open with
 // a TAB; everything else (author, boundary, previous, filename…) is metadata
@@ -1451,6 +1486,24 @@ export function selectCorpus(entries: CorpusWorking[]): CorpusCandidate[] {
 // ---------------------------------------------------------------------------
 // The artifact.
 
+// The lookups that did not answer during the scan, separated by CAUSE because
+// they mean different things: "GitHub said no" is not "this clone is stale" is
+// not "git could not blame that range". Each one silently costs a candidate its
+// evidence — a commit→PR lookup that 404s leaves `introducer.pr = null`, which
+// the tier ladder reads as a direct push and demotes accordingly. Measured
+// 2026-08-17: a degraded run reported 12 blame-linked where a clean re-run
+// reported 428, and the two artifacts were byte-indistinguishable.
+export interface CorpusLookupFailures {
+  // `repos/<slug>/commits/<sha>/pulls` answered 404. Distinct from the same
+  // call answering 200 with an empty list, which really does mean direct push.
+  commitPrLookup404: number;
+  // The merge commit GitHub named is not in this clone (stale clone or
+  // rewritten history) — the whole PR gets no blame evidence.
+  mergeCommitAbsent: number;
+  // `git blame` failed on one range; that range contributes nothing.
+  blameRangeSkipped: number;
+}
+
 export interface CorpusArtifact {
   repoSlug: string;
   ref: string;
@@ -1460,9 +1513,22 @@ export interface CorpusArtifact {
   // never ran reads exactly like "ran and found nothing", and that ambiguity
   // is a lie of omission the artifact must not carry.
   sourcesRun: string[];
+  // Rendered ALWAYS, zeros included, for the reason written on sourcesRun just
+  // above: an omitted count and a count of zero are the same bytes to a reader,
+  // and here that ambiguity is precisely the defect being fixed.
+  lookupFailures: CorpusLookupFailures;
   candidates: CorpusCandidate[];
   threadCandidates: ThreadCandidate[];
 }
+
+const DEGRADED_WARNING = [
+  "> **This run was DEGRADED — the counts above are not the counts a clean",
+  "> run would produce.** Some lookups never answered, so evidence this scan",
+  "> should have had is simply missing, and candidates may sit in a WEAKER",
+  "> tier than they deserve: an introducer that failed to resolve is recorded",
+  "> exactly like one that resolved to a direct push. Re-run before reading",
+  "> the tier counts, or any absent introducer, as a fact about the code.",
+];
 
 const CANDIDATE_WARNING = [
   "> **These are CANDIDATES REQUIRING HUMAN CONFIRMATION, not confirmed",
@@ -1520,6 +1586,15 @@ export function renderCorpusArtifact(artifact: CorpusArtifact): string {
   out.push(`- window: \`--since ${artifact.since}\``);
   out.push(`- scanned: ${artifact.scannedPrs} merged PR(s)`);
   out.push(`- sources run: ${artifact.sourcesRun.join(", ") || "(none)"}`);
+  const failures = artifact.lookupFailures;
+  out.push(`- failed lookups — commit→PR (404): ${failures.commitPrLookup404}`);
+  out.push(
+    "- failed lookups — merge commit absent from this clone (stale clone " +
+      `or rewritten history): ${failures.mergeCommitAbsent}`,
+  );
+  out.push(
+    `- failed lookups — blame range skipped: ${failures.blameRangeSkipped}`,
+  );
   for (const source of SOURCE_ORDER) {
     const count = artifact.candidates.filter((candidate) =>
       candidate.sources.includes(source),
@@ -1547,6 +1622,14 @@ export function renderCorpusArtifact(artifact: CorpusArtifact): string {
       "reverts.",
   );
   out.push("");
+  if (
+    failures.commitPrLookup404 > 0 ||
+    failures.mergeCommitAbsent > 0 ||
+    failures.blameRangeSkipped > 0
+  ) {
+    out.push(...DEGRADED_WARNING);
+    out.push("");
+  }
   out.push(...CANDIDATE_WARNING);
   out.push("");
   for (const tier of TIER_ORDER) {
