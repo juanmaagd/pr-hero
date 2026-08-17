@@ -256,6 +256,26 @@ an 8-of-8 or 1-of-8 floor result makes it unnecessary, and sessions are the scar
 prerequisite — extract the sites of the three revert cases — stands exactly as written. A wider candidate
 pool is supply for a LATER decision; it is not an input to the probe.
 
+> **The prerequisite ran the same day and came back negative — 2026-08-17.** There are no three revert
+> cases. PRs 1276 and 819 were re-landed **byte-identically** (2m23s and 5 days later; `git diff` empty and
+> `git patch-id --stable` equal, both re-verified by hand), which is positive proof no reviewer could have
+> flagged a defect in either patch. PR 1160 was never re-landed and is the only survivor, unconfirmed —
+> no recorded symptom, empty PR body, reverted 19 minutes into an afternoon of nine firefighting PRs.
+> Full evidence in `docs/scout-design.md` §2.4bis; the missing deterministic check in `pr-hero reverts`
+> is #45.
+>
+> **Consequence, and it lands on M6 rather than M4:** the floor test starts at **five cases over four PRs,
+> not eight over seven**. That makes M6 (a) cheaper — 24 runs, ~$96 — and the saving is the bad news, since
+> §3.11 already said 8 cases cannot rank two arms that both score well and 5 is strictly worse. So the
+> corpus growth written above as an ambiguity FALLBACK is **promoted to the main path on Juanma's call the
+> same day**: adjudicate §2.4ter candidates up to roughly 12–15 floor cases before M6 runs, ~$200 rather
+> than ~$96. The reasoning that argued for waiting no longer applies — it rested on an 8-of-8 result
+> making growth unnecessary, and a 5-case floor cannot produce that result.
+>
+> M4's own two gates are unaffected: assertion 1 targets the five adjudicated misses and assertion 2's
+> restraint set is untouched. **This is the $0 gate doing exactly its job** — it ran before the money and
+> caught a false premise inside an already-ratified design.
+
 The original entry, kept for its reasoning:
 
 Rule 1 in full: nothing spawns until this document answers ROADMAP C7's four open questions with the
@@ -395,7 +415,8 @@ Phase C work with their own designs.
 | M3 scout design — **RATIFIED 2026-08-17** | 1 | $0 | all four as recommended; fork → **(a)** |
 | M4 scout-probe — **next** | 1 | ~$5–15 | thresholds — now set in §3.10 |
 | M5 scout behind flag | 1–2 | ~$0.10 | — |
-| M6 the A/B | 1 (+ wall clock) | **~$144 — (a) ratified** | adopt / opt-in / drop |
+| **Adjudicate #43 candidates into floor cases** | 1 | $0 | which candidates are real |
+| M6 the A/B | 1 (+ wall clock) | **~$200 — (a), floor grown** | adopt / opt-in / drop |
 | M7 fill-ins | ride along | $0 | — |
 | **Total** | **~7–9 sessions** | **~$200–300** | |
 

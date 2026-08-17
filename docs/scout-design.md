@@ -25,6 +25,35 @@ The three roots, none of which may be pruned:
 - `~/Desktop/musive/musive-s2-prhero-runs/`
 - `~/Desktop/musive/musive-s3-prhero-runs/`
 
+> **THIS ALREADY HAPPENED — 2026-08-17, one day after the freeze.** All three roots were found in
+> `~/.Trash`, discovered by accident while M4 was looking for the probe's input diffs, not by any check
+> that exists. They were restored to the paths above with `cp -Rp`, and the restore was verified three
+> ways: the counts match this section exactly (3 / 8 / 19 `comparison.json`, plus s3's
+> `pr-1698-4ca9628a-1` with none, as §1.2 records); `diff -r` against the Trash copies is byte-identical
+> for all three; and the `pr-1682-e3ab386a` replicate pair kept its original mtimes (`-1` 2026-08-10
+> 21:55, `-2` 2026-08-11 16:37), which §2.6's defect 1 makes load-bearing — a plain `cp` would have
+> restamped them and silently flipped which run votes in the ledger. **Nothing was lost.** The Trash
+> copies were left in place as a second copy; emptying the Trash is now safe, and was not before.
+>
+> The warning above was correct and cost nothing to write. What it did not have was a mechanism. The
+> paragraph says "nothing will stop a hand from deleting them"; a hand did, within 24 hours. Until M6
+> consumes them, their presence is a precondition of every milestone that reads them: **M4 (probe input
+> diffs), M6 (the control arm, and the variance third point), and every M0 verdict, which exists nowhere
+> except inside these `comparison.json` files.**
+>
+> **The mechanism now exists: `docs/control-set-manifest.sha256`**, 635 files with their digests, paths
+> relative to `~/Desktop/musive/`, committed to this repository — which is the point, since the runs
+> themselves cannot be. It turns a future loss from accidental into loud. Verify with:
+>
+> ```
+> cd ~/Desktop/musive && shasum -a 256 -c ~/Desktop/pr-hero/docs/control-set-manifest.sha256
+> ```
+>
+> A failure means a file changed, moved or vanished. Note the one expected exception: **triaging a run
+> rewrites its `comparison.json`**, so a verdict written after this manifest was generated shows up as a
+> mismatch on that file and the manifest is regenerated deliberately, in the same commit as the verdict.
+> A mismatch nobody can explain that way is the alarm this section wanted.
+
 **There are five runs roots on disk, and only these three are the control set.** Named here so the next
 reader does not have to re-derive it — and because this file's first draft said "three roots" as though
 that were all of them:
@@ -213,6 +242,34 @@ never — either way it is not a source of ground truth today.
 **Three cases is not a benchmark.** That is the honest read, and it constrains the replacement metric
 directly: revert mining can serve as a FLOOR ("the scout must catch these three") but cannot carry M6's
 score on its own. Choosing what does is still open and is Juanma's call.
+
+> **FALSIFIED 2026-08-17, and it is worse than "not a benchmark": it is ZERO.** M4's $0 prerequisite —
+> extract each usable revert case's defect site — was run, and two of the three cases have positive
+> proof that **no defect existed in the reverted patch**, because the identical patch was re-landed:
+>
+> | PR | evidence | verdict |
+> |---|---|---|
+> | **1276** | `git diff 1cd18c556 e8e2055ce` is **empty** — the revert was re-landed byte-identically **2m23s later** as #1278 | unusable |
+> | **819** | `git patch-id --stable` is `143dbbf68237f07f474d398f4aa287d28a8a4c4d` for BOTH the PR head `ea0312631` and the re-land `dfb7555cc`, five days later | unusable |
+> | **1160** | never re-landed (`git log -S'restructureProjectLevels'` returns only the PR and its revert); candidate site `packages/backend/src/App/UseCase/Internal/HandleSongProcessed.ts:162` @ `0674b3adf` | **ambiguous** |
+>
+> Both re-land checks were re-run by the orchestrator rather than taken from the agent that found them,
+> per this project's own rule about load-bearing claims from workers.
+>
+> **A patch that comes back unchanged is positive proof that no reviewer could have flagged a defect in
+> it.** Scoring 1276 or 819 as known-bad would make the floor test assert something demonstrably false —
+> the exact failure the floor test exists to avoid. 1160 is the only survivor and it is unconfirmed: its
+> PR body is empty, no symptom is recorded anywhere, and "reverted because it did not fix the incident"
+> fits the 19-minute window and that afternoon's nine-PRs-of-firefighting as well as "reverted because it
+> broke something" does. A human who remembers that afternoon settles it; nothing on disk can.
+>
+> **The defect this exposes is ours.** `pr-hero reverts` (#41) qualifies a candidate on whether the revert
+> links back to the PR, and **never checks whether the reverted patch reappears afterwards**. The missing
+> check is cheap, deterministic and needs no model: take `git patch-id --stable` of the PR head and look
+> for it later in the history — if it returns, the revert was repository mechanics (a rollback to retry, a
+> merge-order round-trip, "not ready for what is shipping"), not a defect. That one check turns 3 into 1
+> at $0. Filed as its own issue; §2.4ter's wider sources need the same scepticism applied at adjudication
+> time, because blame naming the last toucher is the same class of error.
 
 ### 2.4ter The WIDENED corpus, measured 2026-08-17 — reverts were the narrowest slice by two orders of magnitude
 
@@ -665,6 +722,15 @@ cleanliness, which is a property of a PR we have not triaged.
 cases (PRs 1160, 1276, 819 — §2.4bis) out of the revert diff, so M6's floor test has eight cases with
 sites rather than five. `pr-hero reverts` gives the pairs; the sites are a read of what the revert undid.
 
+> **DONE 2026-08-17, and it returned a negative result.** There are no three usable revert cases: 1276 and
+> 819 were re-landed byte-identically and 1160 is unconfirmed (§2.4bis). **The floor test therefore starts
+> at five cases over four PRs, not eight over seven**, and this prerequisite is closed rather than
+> pending. The prerequisite did its job — it was $0, it ran before the money, and it caught a false
+> premise inside a design that had already been ratified. That is the pattern working, not failing.
+>
+> M4's own gates are UNAFFECTED: assertion 1 targets the five adjudicated misses, which are untouched, and
+> assertion 2's restraint set is untouched. What moved is M6's input, and it is handled in §3.11.
+
 **Exit:** the gates pass at 3 replicates, and the numbers — including every excluded case and its reason —
 land in the commit description.
 
@@ -679,6 +745,30 @@ that shape implies.
 each PR. The question is binary per case: *did this arm produce a refuter-corroborated finding at the site?*
 No power calculation, no adjudication toll, and it fails loudly. Its weakness is stated up front: **8 cases
 cannot rank two arms that both score well.**
+
+> **CORRECTED 2026-08-17: it is five cases over four PRs, not eight over seven.** The three revert cases
+> do not exist — two were re-landed byte-identically, one is unconfirmed (§2.4bis). What remains is the
+> five adjudicated `true-positive` misses over PRs 1717, 1719, 1722 and 1724.
+>
+> The arithmetic moves the wrong way, and the direction is the point: 4 known-bad + 2 clean × 2 arms × R=2
+> is **24 runs, ~$96** — cheaper than the ratified ~$144, and the saving is the bad news. This section
+> already warned that 8 cases cannot rank two arms that both score well; **5 is strictly worse at the same
+> job.** A floor test that only fires on gross differences is still worth running, but it is no longer
+> capable of the "adopt / opt-in / drop" three-way call M6 owes — it can say *drop* loudly and it cannot
+> distinguish *adopt* from *opt-in*.
+>
+> **So the corpus growth demoted to a fallback four paragraphs below is promoted to the main path**, on
+> Juanma's call 2026-08-17: adjudicate candidates out of §2.4ter's widened corpus BEFORE M6 rather than
+> after an ambiguous result, targeting a floor of roughly 12–15 cases. The cost is ~$16 per known-bad case
+> at R=2 (so ~$200 for M6 rather than ~$96) plus the adjudication sessions, and the reasoning that
+> previously argued for waiting — THE PIVOT, an 8-of-8 result makes it unnecessary — no longer applies,
+> because at 5 cases the result that would make it unnecessary cannot be produced.
+>
+> **The adjudication carries §2.4bis's lesson as a hard rule:** a candidate is usable only on positive
+> evidence that a reviewer could have caught it at the introducer's diff. Blame naming the last toucher
+> is not that evidence, and neither is a fix existing. Any candidate whose defect cannot be sited in a
+> reviewable diff is dropped, and the drop count is reported beside the kept count — a corpus that
+> converts 100% of candidates into cases is the same leniency smell M2 caught at 53/53.
 
 **Plus 2 clean PRs, and they are not optional garnish.** The original M6 entry ran "an equal number of
 clean ones" for a reason the floor test alone cannot cover: M4's restraint gate measures the SCOUT's lead
