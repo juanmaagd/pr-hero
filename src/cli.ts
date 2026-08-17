@@ -41,7 +41,12 @@ import {
   prWorktreePath,
   worktreeLockPath,
 } from "./home-preflight";
-import { buildPostPlan, type PostPlan, parseHunkAnchors } from "./inline";
+import {
+  buildPostPlan,
+  type PostPlan,
+  parseHunkAnchors,
+  resolvePostLine,
+} from "./inline";
 import {
   aggregateLedger,
   parseComparisonJson,
@@ -1559,13 +1564,24 @@ async function resolveInlinePostPlan(input: {
     { spawnFn: input.spawnFn },
   );
   const anchors = parseHunkAnchors(input.diffPatch);
-  const findingRefs: PrHeroFindingRef[] = input.doc.findings.map((f) => ({
-    id: f.id,
-    path: f.path,
-    line: f.line,
-    claim: f.claim,
-    tier: f.tier,
-  }));
+  const findingRefs: PrHeroFindingRef[] = input.doc.findings.map((f) => {
+    const ref = {
+      id: f.id,
+      path: f.path,
+      line: f.line,
+      claim: f.claim,
+      tier: f.tier,
+      proof_refs: f.proof_refs,
+    };
+    // Resolve here, not only inside buildPostPlan: postPrReview's 422
+    // rematch uses this same list as `allFindings`, and CRIT-A requires
+    // that rematch to see the SAME lines the plan matched against. A
+    // re-anchored 544→938 finding compared at 544 against a comment stored
+    // at 938 would miss the persist and duplicate. Original order is
+    // load-bearing (a persist-first reorder dissolves the CRIT-A tie).
+    const postLine = resolvePostLine(ref, anchors);
+    return postLine === undefined ? ref : { ...ref, line: postLine };
+  });
   const plan = buildPostPlan({
     findings: findingRefs,
     anchors,
@@ -1634,7 +1650,15 @@ export async function postInlineFindings(input: {
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
   const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
     refs
-      .map((ref) => byId.get(ref.id))
+      .map((ref) => {
+        const found = byId.get(ref.id);
+        if (found === undefined) return undefined;
+        // The planner may have moved `line` onto a hunter-cited in-diff
+        // proof_ref (Musive #1727). GitHub's `line` and the finding marker
+        // must share that post line or a re-run duplicates. findings.json
+        // keeps the original line; only the posted comment is overlaid.
+        return found.line === ref.line ? found : { ...found, line: ref.line };
+      })
       .filter((f): f is Finding => f !== undefined);
 
   // Initial Outside Diff set: plan.issueComments stays the un-anchorable

@@ -595,6 +595,49 @@ describe("postInlineFindings — step-14 ordering", () => {
       );
     }
   });
+
+  test("an off-hunk finding re-anchors to a hunter-cited in-diff proof_ref instead of Outside Diff (Musive #1727)", async () => {
+    const findings = [
+      finding({
+        id: "F001",
+        path: "src/a.ts",
+        line: 544,
+        proof_refs: ["src/a.ts:544", "src/a.ts:10 (the retry that causes it)"],
+      }),
+    ];
+    const { spawnFn, calls } = makeFakeGh([
+      ...emptyCommentScript(),
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ]);
+    const outcome = await postInlineFindings({
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({ findings }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+    });
+    expect(outcome.reviewOutcome).toBe("posted");
+    expect(outcome.reviewFindingCount).toBe(1);
+    expect(outcome.outsideDiffCount).toBe(0);
+    expect(outcome.issueCommentIds).toEqual([]);
+    const review = calls.find((c) =>
+      c.argv.join(" ").includes("pulls/42/reviews"),
+    );
+    const body = JSON.parse(review?.stdin ?? "null") as {
+      comments: { line: number; body: string }[];
+    };
+    expect(body.comments[0]?.line).toBe(10);
+    expect(body.comments[0]?.body).toContain("line=10");
+    // The summary still names the finding's original location — the claim
+    // is about 544; only the GitHub anchor moved.
+    const summaries = summaryStdins(calls);
+    expect(summaries.some((s) => s.includes("src/a.ts:544"))).toBe(true);
+    expect(summaries.every((s) => !s.includes("Comments Outside Diff"))).toBe(
+      true,
+    );
+  });
 });
 
 describe("postInlineFindings — the 422 recovery never drops a finding", () => {

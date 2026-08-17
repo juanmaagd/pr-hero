@@ -3,23 +3,24 @@
 // All offline — literal in → literal out, same discipline as size-gate.test.ts.
 
 import { describe, expect, test } from "bun:test";
-import type { PrHeroFindingRef } from "../src/compare";
 import {
   buildPostPlan,
   classifyAnchorability,
   FINDING_LINE_WINDOW,
   type HunkAnchors,
   matchPostedFindings,
+  type PostableFinding,
   type PostedFindingComment,
   parseHunkAnchors,
+  resolvePostLine,
 } from "../src/inline";
 import { claimFingerprint } from "../src/pr-preflight";
 
 function finding(
   path: string,
   line: number,
-  overrides: Partial<PrHeroFindingRef> = {},
-): PrHeroFindingRef {
+  overrides: Partial<PostableFinding> = {},
+): PostableFinding {
   return {
     id: `F${line}`,
     path,
@@ -187,6 +188,21 @@ describe("parseHunkAnchors + classifyAnchorability", () => {
     expect(anchors.get("f.txt")?.size).toBe(3);
   });
 });
+
+function diffHunkAt(path: string, start: number, count: number): string {
+  const body = Array.from(
+    { length: count },
+    (_, i) => `+line ${start + i}`,
+  ).join("\n");
+  return (
+    `diff --git a/${path} b/${path}\n` +
+    `index 0000000..1111111 100644\n` +
+    `--- a/${path}\n` +
+    `+++ b/${path}\n` +
+    `@@ -0,0 +${start},${count} @@\n` +
+    `${body}\n`
+  );
+}
 
 const HEAD = "aaaa000011112222333344445555666677778888";
 
@@ -466,5 +482,95 @@ describe("buildPostPlan", () => {
     expect(plan.issueComments.map((f) => f.path)).toEqual([
       "src/never-touched.ts",
     ]);
+  });
+
+  test("an off-hunk finding re-anchors onto a hunter-cited in-diff proof_ref (Musive #1727)", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    const plan = buildPostPlan({
+      findings: [
+        finding("src/a.ts", 544, {
+          proof_refs: ["src/a.ts:544", "src/a.ts:938 (the retry)"],
+        }),
+      ],
+      anchors,
+      posted: [],
+      headSha: HEAD,
+    });
+    expect(plan.reviewComments.map((f) => f.line)).toEqual([938]);
+    expect(plan.issueComments).toEqual([]);
+  });
+
+  test("re-anchoring does not snap to the hunk start when no cited line is in it", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    const plan = buildPostPlan({
+      findings: [finding("src/a.ts", 544, { proof_refs: ["src/a.ts:544"] })],
+      anchors,
+      posted: [],
+      headSha: HEAD,
+    });
+    expect(plan.reviewComments).toEqual([]);
+    expect(plan.issueComments.map((f) => f.line)).toEqual([544]);
+  });
+
+  test("a re-anchored finding persists against a prior comment at the post line", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    const plan = buildPostPlan({
+      findings: [
+        finding("src/a.ts", 544, {
+          proof_refs: ["src/a.ts:938"],
+        }),
+      ],
+      anchors,
+      posted: [posted("src/a.ts", 938)],
+      headSha: HEAD,
+    });
+    expect(plan.persisting).toHaveLength(1);
+    expect(plan.reviewComments).toEqual([]);
+    expect(plan.issueComments).toEqual([]);
+    expect(plan.delta).toEqual({ resolved: 0, new: 0, persist: 1 });
+  });
+});
+
+describe("resolvePostLine", () => {
+  test("own line in the hunk wins even when a proof_ref cites another in-hunk line", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    expect(
+      resolvePostLine(
+        finding("src/a.ts", 910, { proof_refs: ["src/a.ts:938"] }),
+        anchors,
+      ),
+    ).toBe(910);
+  });
+
+  test("a range proof_ref uses the first cited line that sits in the hunk", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    expect(
+      resolvePostLine(
+        finding("src/a.ts", 544, {
+          proof_refs: ["src/a.ts:935-946 (retry path)"],
+        }),
+        anchors,
+      ),
+    ).toBe(935);
+  });
+
+  test("a proof_ref on a different path is ignored", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    expect(
+      resolvePostLine(
+        finding("src/a.ts", 544, { proof_refs: ["src/other.ts:938"] }),
+        anchors,
+      ),
+    ).toBeUndefined();
+  });
+
+  test("a path absent from the diff is undefined, not a guessed line", () => {
+    const anchors = parseHunkAnchors(diffHunkAt("src/a.ts", 900, 50));
+    expect(
+      resolvePostLine(
+        finding("src/never.ts", 544, { proof_refs: ["src/never.ts:1"] }),
+        anchors,
+      ),
+    ).toBeUndefined();
   });
 });

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { type DedupeLoser, mergeAndDedupe } from "../src/dedupe";
+import {
+  DEDUPE_SYMBOL_LINE_WINDOW,
+  type DedupeLoser,
+  mergeAndDedupe,
+} from "../src/dedupe";
 import type { DraftFinding } from "../src/drafts";
 
 function draft(overrides: Partial<DraftFinding> = {}): DraftFinding {
@@ -96,6 +100,106 @@ describe("pass 2 — cross-category collapse on path:symbol", () => {
     const { survivors, deduped } = mergeAndDedupe([a, b]);
     expect(survivors).toHaveLength(2);
     expect(deduped).toHaveLength(0);
+  });
+
+  test("same path:symbol findings far apart stay distinct (Musive #1727)", () => {
+    const tap = draft({
+      id: "R1",
+      line: 544,
+      proof_refs: ["store.ts:544"],
+      dedupe_key: "src/upload.ts:abortUpload:1",
+    });
+    const leak = draft({
+      id: "S1",
+      line: 935,
+      hunter: "resilience",
+      category: 6,
+      proof_refs: ["store.ts:935"],
+      dedupe_key: "src/upload.ts:abortUpload:6",
+    });
+    const { survivors, deduped } = mergeAndDedupe([tap, leak]);
+    expect(survivors).toHaveLength(2);
+    expect(deduped).toHaveLength(0);
+    expect(survivors.map((s) => s.line)).toEqual([544, 935]);
+  });
+
+  test("same path:symbol findings within the line window still collapse", () => {
+    const leakA = draft({
+      id: "S1",
+      line: 935,
+      hunter: "resilience",
+      category: 6,
+      proof_refs: ["store.ts:935"],
+      dedupe_key: "src/upload.ts:abortUpload:6",
+    });
+    const leakB = draft({
+      id: "L1",
+      line: 978,
+      hunter: "lifecycle",
+      category: 2,
+      proof_refs: ["store.ts:978"],
+      dedupe_key: "src/upload.ts:abortUpload:2",
+    });
+    const { survivors, deduped } = mergeAndDedupe([leakA, leakB]);
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0]?.line).toBe(935);
+    expect(survivors[0]?.proof_refs).toEqual(["store.ts:935", "store.ts:978"]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]?.id).toBe("L1");
+  });
+
+  test("1727 shape: off-diff metric and in-diff leak stay two survivors; nearby leak drafts still fold", () => {
+    const tap = draft({
+      id: "R1",
+      line: 544,
+      proof_refs: ["store.ts:544", "store.ts:938"],
+      dedupe_key: "src/upload.ts:abortUpload:1",
+    });
+    const leakA = draft({
+      id: "S1",
+      line: 935,
+      hunter: "resilience",
+      category: 6,
+      proof_refs: ["store.ts:935"],
+      dedupe_key: "src/upload.ts:abortUpload:6",
+    });
+    const leakB = draft({
+      id: "L1",
+      line: 978,
+      hunter: "lifecycle",
+      category: 2,
+      proof_refs: ["store.ts:978"],
+      dedupe_key: "src/upload.ts:abortUpload:2",
+    });
+    const { survivors, deduped } = mergeAndDedupe([tap, leakA, leakB]);
+    expect(survivors).toHaveLength(2);
+    expect(survivors[0]?.line).toBe(544);
+    expect(survivors[1]?.line).toBe(935);
+    expect(survivors[1]?.proof_refs).toEqual(["store.ts:935", "store.ts:978"]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0]?.merged_into).toBe("F002");
+  });
+
+  test("the line window is inclusive at DEDUPE_SYMBOL_LINE_WINDOW and exclusive past it", () => {
+    const a = draft({
+      id: "R1",
+      line: 1,
+      dedupe_key: "src/upload.ts:abortUpload:1",
+    });
+    const atWindow = draft({
+      id: "R2",
+      line: 1 + DEDUPE_SYMBOL_LINE_WINDOW,
+      category: 5,
+      dedupe_key: "src/upload.ts:abortUpload:5",
+    });
+    expect(mergeAndDedupe([a, atWindow]).survivors).toHaveLength(1);
+    const past = draft({
+      id: "R3",
+      line: 1 + DEDUPE_SYMBOL_LINE_WINDOW + 1,
+      category: 5,
+      dedupe_key: "src/upload.ts:abortUpload:5",
+    });
+    expect(mergeAndDedupe([a, past]).survivors).toHaveLength(2);
   });
 });
 

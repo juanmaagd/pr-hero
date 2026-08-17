@@ -12,7 +12,16 @@
 
 import type { PrHeroFindingRef } from "./compare";
 import { claimFingerprint, type ParsedFindingMarker } from "./pr-preflight";
+import { extractAnchor } from "./root-cause";
 import { diffRecordPath, splitDiffRecords } from "./size-gate";
+
+// The comparison ref plus the proof_refs posting needs to re-anchor an
+// off-hunk finding onto a hunter-cited in-diff line (Musive #1727). Optional
+// so existing PrHeroFindingRef[] call sites stay assignable; absent refs
+// mean "this finding's own path:line is the only candidate".
+export type PostableFinding = PrHeroFindingRef & {
+  proof_refs?: readonly string[];
+};
 
 // ---------------------------------------------------------------------------
 // 1. Anchorability
@@ -97,6 +106,48 @@ export function classifyAnchorability(
   const lines = anchors.get(finding.path);
   if (lines === undefined) return "un-anchorable";
   return lines.has(finding.line) ? "anchorable" : "un-anchorable";
+}
+
+// The line GitHub will be asked to attach an inline comment to. Own line
+// first; if that is off-hunk, the first proof_ref on the SAME path whose
+// cited line (or any line of a `start-end` range) sits in a hunk.
+//
+// This is NOT snapping to the nearest hunk (#17 forbids that: 544 must
+// never become 802 just because 802 is where the hunk starts). A hunter
+// that named 938, and 938 is in the hunk, is using a line the hunter
+// actually cited. No cited in-hunk line → undefined, and the finding
+// stays in the summary Outside Diff bucket.
+export function resolvePostLine(
+  finding: PostableFinding,
+  anchors: HunkAnchors,
+): number | undefined {
+  const lines = anchors.get(finding.path);
+  if (lines === undefined) return undefined;
+  if (lines.has(finding.line)) return finding.line;
+  if (finding.proof_refs === undefined) return undefined;
+  for (const ref of finding.proof_refs) {
+    const parsed = parseProofRefLines(ref);
+    if (parsed === null || parsed.path !== finding.path) continue;
+    for (let n = parsed.start; n <= parsed.end; n++) {
+      if (lines.has(n)) return n;
+    }
+  }
+  return undefined;
+}
+
+function parseProofRefLines(
+  ref: string,
+): { path: string; start: number; end: number } | null {
+  const anchor = extractAnchor([ref]);
+  if (anchor === null) return null;
+  const colon = anchor.lastIndexOf(":");
+  const path = anchor.slice(0, colon);
+  const match = /^(\d+)(?:-(\d+))?$/.exec(anchor.slice(colon + 1));
+  if (path.length === 0 || match?.[1] === undefined) return null;
+  const start = Number(match[1]);
+  const end = match[2] === undefined ? start : Number(match[2]);
+  if (end < start) return null;
+  return { path, start, end };
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +330,10 @@ export interface PostPlan {
   // Anchorable, unmatched findings — go into ONE review submission
   // (`comments[]`), never one review per finding (spec "One review
   // submission for anchorable findings").
-  reviewComments: PrHeroFindingRef[];
+  reviewComments: PostableFinding[];
   // Un-anchorable, unmatched findings — go into the summary Outside Diff
   // section (issues #16/#17, Greptile-shaped), not one issue comment each.
-  issueComments: PrHeroFindingRef[];
+  issueComments: PostableFinding[];
   persisting: FindingMatch[];
   resolved: PostedFindingComment[];
   // From the matcher, not a stored count (design D5): persist = matched,
@@ -292,20 +343,30 @@ export interface PostPlan {
 }
 
 export function buildPostPlan(input: {
-  findings: PrHeroFindingRef[];
+  findings: PostableFinding[];
   anchors: HunkAnchors;
   posted: PostedFindingComment[];
   headSha: string;
   window?: number;
 }): PostPlan {
+  // Resolve post lines BEFORE matching: a re-anchored finding (544 → 938)
+  // has to compare against a prior comment stored at 938, or a re-run on
+  // the same head would miss the persist and duplicate. Own-line findings
+  // are a no-op here (resolvePostLine returns finding.line).
+  const findings = input.findings.map((finding) => {
+    const line = resolvePostLine(finding, input.anchors);
+    return line === undefined || line === finding.line
+      ? finding
+      : { ...finding, line };
+  });
   const match = matchPostedFindings({
-    findings: input.findings,
+    findings,
     posted: input.posted,
     headSha: input.headSha,
     window: input.window,
   });
-  const reviewComments: PrHeroFindingRef[] = [];
-  const issueComments: PrHeroFindingRef[] = [];
+  const reviewComments: PostableFinding[] = [];
+  const issueComments: PostableFinding[] = [];
   for (const finding of match.fresh) {
     const anchorability = classifyAnchorability(finding, input.anchors);
     if (anchorability === "anchorable") reviewComments.push(finding);
