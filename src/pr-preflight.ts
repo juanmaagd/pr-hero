@@ -581,3 +581,122 @@ function prheroClaim(finding: PrHeroFindingRef): ComparisonPrHeroClaim {
     tier: finding.tier,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Commit status (in-flight signal on the PR head). GitHub Check Runs need a
+// GitHub App; this CLI posts as the operator via `gh`, so the write path is
+// the Commit Statuses API. Same yellow/green dot in the merge box, no
+// Conversation comment. context is stable so the watcher can read the latest
+// `pr-hero` status back as the cross-machine in-flight lock.
+
+export const COMMIT_STATUS_CONTEXT = "pr-hero";
+
+// DEFAULT_PIPELINE_TIMEOUT_MS is 75 min (pipeline.ts). A TTL inside that
+// window would double-launch a slow live run still inside its watchdog.
+export const IN_FLIGHT_TTL_MS = 90 * 60 * 1000;
+
+// Same bound as GH_PR_VIEW_TIMEOUT_MS (gc-preflight.ts): a hung statuses
+// API must not pin watch.lock or delay a pipeline that already confirmed.
+export const COMMIT_STATUS_TIMEOUT_MS = 15_000;
+
+// GitHub's commit-status description is a short field (historically 140).
+export const COMMIT_STATUS_DESCRIPTION_MAX = 140;
+
+export type CommitStatusState = "pending" | "success" | "error";
+
+export interface CommitStatusFact {
+  state: string;
+  context: string;
+  created_at: string;
+}
+
+export interface CommitStatusRequest {
+  state: CommitStatusState;
+  context: string;
+  description: string;
+  targetUrl: string | undefined;
+}
+
+function clipStatusDescription(text: string): string {
+  if (text.length <= COMMIT_STATUS_DESCRIPTION_MAX) return text;
+  return text.slice(0, COMMIT_STATUS_DESCRIPTION_MAX);
+}
+
+// `posted` only changes the success description: "review posted" when this
+// run published a comment, "review complete" when it did not (--post off,
+// or posting never ran). Never `failure`: a blocking finding is a claim in
+// the report, not a red CI check, and this engine is not a merge gate.
+export function commitStatusRequest(input: {
+  phase: "pending" | "success" | "error";
+  posted: boolean;
+  targetUrl: string | undefined;
+}): CommitStatusRequest {
+  const description =
+    input.phase === "pending"
+      ? "pr-hero reviewing"
+      : input.phase === "error"
+        ? "review did not finish"
+        : input.posted
+          ? "review posted"
+          : "review complete";
+  return {
+    state: input.phase === "pending" ? "pending" : input.phase,
+    context: COMMIT_STATUS_CONTEXT,
+    description: clipStatusDescription(description),
+    targetUrl: input.targetUrl,
+  };
+}
+
+// The finally-block matrix: a finished pipeline that is not sessionFailed
+// is success even if --post threw (the review ran; the comment is a
+// separate write). Anything else — crash before pipeline return, or every
+// hunter dead — is error. Never inferred from findings.
+export function commitStatusCompletion(input: {
+  pipelineFinished: boolean;
+  sessionFailed: boolean;
+}): "success" | "error" {
+  return input.pipelineFinished && !input.sessionFailed ? "success" : "error";
+}
+
+export function prHtmlUrl(
+  repoUrl: string | undefined,
+  pr: number,
+): string | undefined {
+  if (repoUrl === undefined || repoUrl.trim() === "") return undefined;
+  if (!Number.isInteger(pr) || pr < 1) return undefined;
+  const url = `${repoUrl.replace(/\/$/, "")}/pull/${pr}`;
+  return URL.canParse(url) ? url : undefined;
+}
+
+export function latestPrHeroStatus(
+  statuses: readonly CommitStatusFact[],
+): CommitStatusFact | null {
+  let latest: CommitStatusFact | null = null;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const status of statuses) {
+    if (status.context !== COMMIT_STATUS_CONTEXT) continue;
+    const createdMs = Date.parse(status.created_at);
+    if (Number.isNaN(createdMs)) continue;
+    if (createdMs >= latestMs) {
+      latest = status;
+      latestMs = createdMs;
+    }
+  }
+  return latest;
+}
+
+// Latest status for our context, by created_at — GitHub's list is usually
+// newest-first, but the watcher must not depend on that. A pending older
+// than the TTL is NOT in-flight: the process likely died, and the next tick
+// must be allowed to launch.
+export function isInFlightCommitStatus(
+  statuses: readonly CommitStatusFact[],
+  nowMs: number,
+  ttlMs: number = IN_FLIGHT_TTL_MS,
+): boolean {
+  const latest = latestPrHeroStatus(statuses);
+  if (latest === null || latest.state !== "pending") return false;
+  const createdMs = Date.parse(latest.created_at);
+  if (Number.isNaN(createdMs)) return false;
+  return nowMs - createdMs < ttlMs;
+}

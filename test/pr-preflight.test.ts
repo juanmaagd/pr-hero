@@ -14,13 +14,19 @@ import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
 import type { GreptileFinding } from "../src/greptile";
 import {
   buildComparisonJson,
+  COMMIT_STATUS_CONTEXT,
+  commitStatusCompletion,
+  commitStatusRequest,
   decideWorktree,
   findingMarker,
   findMarkedCommentId,
+  IN_FLIGHT_TTL_MS,
+  isInFlightCommitStatus,
   PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
   parseFindingMarker,
   prCommentMarker,
+  prHtmlUrl,
   prRunDirCandidate,
   resolveCurrentPrNumber,
   resolvePrTarget,
@@ -1000,5 +1006,195 @@ describe("buildComparisonJson", () => {
     expect(json.rows).toHaveLength(1);
     expect(json.rows[0].bucket).toBe("prhero_only");
     expect(json.rows[0].greptile).toBeNull();
+  });
+});
+
+describe("commitStatusRequest", () => {
+  const targetUrl = "https://github.com/org/repo/pull/7";
+
+  test("pending is yellow, not a verdict", () => {
+    expect(
+      commitStatusRequest({
+        phase: "pending",
+        posted: true,
+        targetUrl,
+      }),
+    ).toEqual({
+      state: "pending",
+      context: COMMIT_STATUS_CONTEXT,
+      description: "pr-hero reviewing",
+      targetUrl,
+    });
+  });
+
+  test("a finished review is success whether or not it posted", () => {
+    expect(
+      commitStatusRequest({
+        phase: "success",
+        posted: true,
+        targetUrl,
+      }).description,
+    ).toBe("review posted");
+    expect(
+      commitStatusRequest({
+        phase: "success",
+        posted: false,
+        targetUrl: undefined,
+      }),
+    ).toEqual({
+      state: "success",
+      context: COMMIT_STATUS_CONTEXT,
+      description: "review complete",
+      targetUrl: undefined,
+    });
+  });
+
+  test("sessionFailed / crash is error, never failure", () => {
+    const request = commitStatusRequest({
+      phase: "error",
+      posted: false,
+      targetUrl,
+    });
+    expect(request.state).toBe("error");
+    expect(request.description).toBe("review did not finish");
+    expect(request.state).not.toBe("failure");
+  });
+});
+
+describe("commitStatusCompletion", () => {
+  test("a finished non-failed pipeline is success", () => {
+    expect(
+      commitStatusCompletion({
+        pipelineFinished: true,
+        sessionFailed: false,
+      }),
+    ).toBe("success");
+  });
+
+  test("sessionFailed and a crash before pipeline return are error", () => {
+    expect(
+      commitStatusCompletion({
+        pipelineFinished: true,
+        sessionFailed: true,
+      }),
+    ).toBe("error");
+    expect(
+      commitStatusCompletion({
+        pipelineFinished: false,
+        sessionFailed: false,
+      }),
+    ).toBe("error");
+  });
+});
+
+describe("prHtmlUrl", () => {
+  test("joins the repo url to the pull path", () => {
+    expect(prHtmlUrl("https://github.com/org/repo", 12)).toBe(
+      "https://github.com/org/repo/pull/12",
+    );
+    expect(prHtmlUrl("https://github.com/org/repo/", 12)).toBe(
+      "https://github.com/org/repo/pull/12",
+    );
+  });
+
+  test("absent or blank repo url yields undefined", () => {
+    expect(prHtmlUrl(undefined, 12)).toBeUndefined();
+    expect(prHtmlUrl("  ", 12)).toBeUndefined();
+  });
+
+  test("a non-integer PR or a non-URL repo is undefined", () => {
+    expect(prHtmlUrl("https://github.com/org/repo", 0)).toBeUndefined();
+    expect(prHtmlUrl("not a url", 12)).toBeUndefined();
+  });
+});
+
+describe("isInFlightCommitStatus", () => {
+  const now = Date.parse("2026-08-18T17:00:00.000Z");
+  const fresh = "2026-08-18T16:30:00.000Z";
+  const stale = "2026-08-18T15:00:00.000Z";
+
+  test("a fresh pending pr-hero status is in-flight", () => {
+    expect(
+      isInFlightCommitStatus(
+        [
+          {
+            state: "pending",
+            context: COMMIT_STATUS_CONTEXT,
+            created_at: fresh,
+          },
+        ],
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("a pending older than the TTL is not in-flight", () => {
+    expect(now - Date.parse(stale)).toBeGreaterThan(IN_FLIGHT_TTL_MS);
+    expect(
+      isInFlightCommitStatus(
+        [
+          {
+            state: "pending",
+            context: COMMIT_STATUS_CONTEXT,
+            created_at: stale,
+          },
+        ],
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("success, other contexts, and garbage dates never skip", () => {
+    expect(
+      isInFlightCommitStatus(
+        [
+          {
+            state: "success",
+            context: COMMIT_STATUS_CONTEXT,
+            created_at: fresh,
+          },
+        ],
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isInFlightCommitStatus(
+        [{ state: "pending", context: "ci", created_at: fresh }],
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isInFlightCommitStatus(
+        [
+          {
+            state: "pending",
+            context: COMMIT_STATUS_CONTEXT,
+            created_at: "not-a-date",
+          },
+        ],
+        now,
+      ),
+    ).toBe(false);
+    expect(isInFlightCommitStatus([], now)).toBe(false);
+  });
+
+  test("the newest pr-hero status wins, even if the list is oldest-first", () => {
+    expect(
+      isInFlightCommitStatus(
+        [
+          {
+            state: "pending",
+            context: COMMIT_STATUS_CONTEXT,
+            created_at: "2026-08-18T16:00:00.000Z",
+          },
+          {
+            state: "success",
+            context: COMMIT_STATUS_CONTEXT,
+            created_at: fresh,
+          },
+        ],
+        now,
+      ),
+    ).toBe(false);
   });
 });

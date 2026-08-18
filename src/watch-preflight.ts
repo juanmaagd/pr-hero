@@ -677,7 +677,8 @@ export type SkipReason =
   | "reviewed-prior-head"
   | "too-large"
   | "nothing-to-review"
-  | "attempts-exhausted";
+  | "attempts-exhausted"
+  | "in-flight";
 
 export interface TickRepoFacts {
   // Expanded absolute operator checkout — the spawn's cwd and the skip
@@ -711,6 +712,15 @@ export interface TickRepoFacts {
   // a run dir is where attempts are counted — so the watcher would re-spawn
   // the same PR every tick forever. Skipping it here is what stops that loop.
   nothingToReview: number[];
+  // Heads with a fresh pending `pr-hero` commit status. Shell-gathered
+  // (fetchCommitStatuses + isInFlightCommitStatus); a PR absent here is
+  // not in-flight, same unfetched-means-unguarded rule as remoteHeads.
+  inFlight: { pr: number; head: string }[];
+  // Latest pr-hero status is pending, any age. Distinct from inFlight: a
+  // stale pending on an already-reviewed PR is NOT in-flight (must not
+  // block a launch) but MUST be settled to success so the yellow dot does
+  // not stick after a crash between comment-post and status-complete.
+  pending: { pr: number; head: string }[];
 }
 
 export type TickGate = "open" | "window-closed" | "cap-reached";
@@ -800,11 +810,47 @@ export function decideTick(input: TickInput): TickDecision {
   };
 }
 
+const REVIEWED_SKIP_REASONS: ReadonlySet<SkipReason> = new Set([
+  "reviewed-local",
+  "reviewed-remote",
+  "reviewed-prior-head",
+]);
+
+// A pending status on a PR the tick will not launch again (already
+// reviewed) is an orphan yellow dot: the review finished, the complete
+// POST did not. Live ticks settle these to success; dry-run must not.
+export function pendingReviewsToSettle(
+  skips: readonly TickSkip[],
+  repos: readonly Pick<TickRepoFacts, "path" | "pending">[],
+): { repo: string; pr: number; head: string }[] {
+  const out: { repo: string; pr: number; head: string }[] = [];
+  const seen = new Set<string>();
+  for (const skip of skips) {
+    if (!REVIEWED_SKIP_REASONS.has(skip.reason)) continue;
+    const repo = repos.find((entry) => entry.path === skip.repo);
+    if (repo === undefined) continue;
+    if (
+      !repo.pending.some(
+        (entry) => entry.pr === skip.pr && entry.head === skip.head,
+      )
+    ) {
+      continue;
+    }
+    const key = `${skip.repo}:${skip.pr}:${skip.head}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ repo: skip.repo, pr: skip.pr, head: skip.head });
+  }
+  return out;
+}
+
 // The checks run in a FIXED order because the first hit is the reason a
 // human reads in the log: draft → reviewed-local → local prior head →
-// too-large → reviewed-remote → remote prior marker → attempts. The
-// same-head checks run BEFORE the prior-head ones so the more specific
-// reason always wins.
+// too-large → reviewed-remote → remote prior marker → in-flight → attempts.
+// The same-head checks run BEFORE the prior-head ones so the more specific
+// reason always wins. in-flight sits after "already reviewed" (a completed
+// review is more specific than a pending status) and before attempts, so a
+// live run is not launched a second time just because attempts is still 1.
 //
 // The re-arm policy: under on_push (the original behavior) a new push
 // changes the head, every (pr, head) key is fresh by construction, and an
@@ -861,6 +907,18 @@ function candidateSkipReason(
   }
   if (!repo.onPush && remote?.markerSeen === true) {
     return "reviewed-prior-head";
+  }
+  // Cross-machine in-flight lock: a pending `pr-hero` commit status on this
+  // head, younger than IN_FLIGHT_TTL_MS. Same three properties as too-large
+  // (no attempt consumed, no marker written, recomputed every tick) PLUS it
+  // is the thing that closes the accepted ~10-min dual-watcher race for as
+  // long as the first review is actually running.
+  if (
+    repo.inFlight.some(
+      (entry) => entry.pr === candidate.pr && entry.head === candidate.head,
+    )
+  ) {
+    return "in-flight";
   }
   const attempts =
     repo.attempts.find(

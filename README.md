@@ -149,7 +149,7 @@ pr-hero watch status     # anytime: config, cap usage, launchd, lock, last activ
 A repo is watched **only** if added (`--repo <path>` works from anywhere; `watch remove` takes it
 back out; both are idempotent). Preview any tick for $0 first: `pr-hero watch --once --dry-run`
 prints every candidate, every skip and its reason (draft / reviewed-local / reviewed-remote /
-attempts / cap / window), and the one (pr, head) a real tick would launch. `install` accepts
+in-flight / attempts / cap / window), and the one (pr, head) a real tick would launch. `install` accepts
 `--interval <min>` (default 15) and captures your current `PATH` (launchd's own PATH knows nothing
 of `bun`, `gh`, `claude` or `codegraph`) — re-run `install` after moving tools around;
 `watch uninstall` stops the schedule.
@@ -201,14 +201,16 @@ re-reviewing from scratch.
   a new push, instead of eating the cap every day.
 - **Cross-machine guard**: a posted pr-hero comment declares which head it reviewed; any watcher
   that sees the current head already declared skips the PR (and under the one-review-per-PR
-  default, any pr-hero comment at all is proof enough).
+  default, any pr-hero comment at all is proof enough). A fresh pending `pr-hero` commit status
+  on the head (the yellow dot while a review is running) skips as `in-flight`.
 
 ### Operating model and honest limits
 
-Run **one watcher per repo per team**. The cross-machine guard only protects repos with
-`post: true`, and only after the first comment lands — two watchers racing the same fresh PR is a
-known gap (tech debt, accepted): the worst case is one duplicated review, and with `post: true`
-the PR still converges to a single comment. Not macOS? `watch --once` from cron works the same —
+Run **one watcher per repo per team**. The comment-based cross-machine guard only protects repos
+with `post: true`, and only after the first comment lands. A pending `pr-hero` commit status
+closes the rest of the race once either review has started — two watchers can still duplicate
+if both launch before either posts `pending`. With `post: true` the PR still converges to a
+single comment. Not macOS? `watch --once` from cron works the same —
 the PID lockfile keeps overlapping ticks from doubling up. Logs: structured events in
 `~/.prhero/watch.log`, raw tick/review output in `~/.prhero/launchd.log`.
 

@@ -16,7 +16,20 @@ import path from "node:path";
 import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
 import { parseComparisonJson } from "./ledger";
-import { fetchPrComments, ghPrFiles, ghPrList } from "./pr";
+import {
+  fetchCommitStatuses,
+  fetchPrComments,
+  ghPrFiles,
+  ghPrList,
+  ghRepoWebUrl,
+  postCommitStatus,
+} from "./pr";
+import {
+  commitStatusRequest,
+  isInFlightCommitStatus,
+  latestPrHeroStatus,
+  prHtmlUrl,
+} from "./pr-preflight";
 import {
   CliError,
   type CliOptions,
@@ -61,6 +74,7 @@ import {
   parsePrFiles,
   parsePrList,
   parseWatchConfig,
+  pendingReviewsToSettle,
   prheroHomePaths,
   type ReviewOutcome,
   type RunDirFact,
@@ -275,6 +289,9 @@ async function gatherRepoFacts(
       [];
     const tooLarge: number[] = [];
     const nothingToReview: number[] = [];
+    const inFlight: { pr: number; head: string }[] = [];
+    const pending: { pr: number; head: string }[] = [];
+    const nowMs = Date.now();
     for (const candidate of prs) {
       if (candidate.isDraft) continue;
       const locallyBlocked = runDirs.localReviews.some(
@@ -340,6 +357,14 @@ async function gatherRepoFacts(
         heads: markerDeclaredHeads(comments),
         markerSeen: markerCommentSeen(comments),
       });
+      const statuses = await fetchCommitStatuses(repoRoot, candidate.head);
+      const latest = latestPrHeroStatus(statuses);
+      if (latest?.state === "pending") {
+        pending.push({ pr: candidate.pr, head: candidate.head });
+      }
+      if (isInFlightCommitStatus(statuses, nowMs)) {
+        inFlight.push({ pr: candidate.pr, head: candidate.head });
+      }
     }
 
     repos.push({
@@ -356,6 +381,8 @@ async function gatherRepoFacts(
       })),
       tooLarge,
       nothingToReview,
+      inFlight,
+      pending,
       runsRoot,
       maxChangedLines: entry.maxChangedLines,
       maxChangedFiles: entry.maxChangedFiles,
@@ -407,6 +434,31 @@ async function scanRunDirs(runsRoot: string): Promise<{
   return { facts, localReviews };
 }
 
+// Completes a leftover pending status on a PR this tick will not launch
+// again. Fail-soft: a yellow dot is worse than silence, a thrown tick is
+// worse than a yellow dot. Dry-run never calls this (runTick is live only).
+async function settleOrphanPendings(
+  repos: WatchedRepoFacts[],
+  skips: TickDecision["skips"],
+): Promise<void> {
+  for (const job of pendingReviewsToSettle(skips, repos)) {
+    try {
+      const targetUrl = prHtmlUrl(await ghRepoWebUrl(job.repo), job.pr);
+      await postCommitStatus(
+        job.repo,
+        job.head,
+        commitStatusRequest({
+          phase: "success",
+          posted: false,
+          targetUrl,
+        }),
+      );
+    } catch {
+      // Leave the pending in place; the next live tick will try again.
+    }
+  }
+}
+
 async function runTick(
   paths: PrheroHomePaths,
   decision: TickDecision,
@@ -428,6 +480,7 @@ async function runTick(
       ),
     );
   }
+  await settleOrphanPendings(repos, decision.skips);
   const launch = decision.launch;
   if (launch === null) {
     await appendLog(
