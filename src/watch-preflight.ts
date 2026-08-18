@@ -810,15 +810,19 @@ export function decideTick(input: TickInput): TickDecision {
   };
 }
 
-const REVIEWED_SKIP_REASONS: ReadonlySet<SkipReason> = new Set([
+const SETTLE_SKIP_REASONS: ReadonlySet<SkipReason> = new Set([
   "reviewed-local",
   "reviewed-remote",
-  "reviewed-prior-head",
+  "attempts-exhausted",
 ]);
 
-// A pending status on a PR the tick will not launch again (already
-// reviewed) is an orphan yellow dot: the review finished, the complete
-// POST did not. Live ticks settle these to success; dry-run must not.
+// A leftover pending on a head this tick will not launch again.
+// reviewed-local/remote: THIS head's review finished, the complete POST
+// did not. attempts-exhausted: the review died and will not retry, so the
+// yellow dot must not stick forever. NOT reviewed-prior-head: that only
+// proves an EARLIER head was reviewed; a pending on the current head is a
+// live review (manual re-review) and must not be overwritten with success.
+// Live ticks settle these; dry-run must not.
 export function pendingReviewsToSettle(
   skips: readonly TickSkip[],
   repos: readonly Pick<TickRepoFacts, "path" | "pending">[],
@@ -826,7 +830,7 @@ export function pendingReviewsToSettle(
   const out: { repo: string; pr: number; head: string }[] = [];
   const seen = new Set<string>();
   for (const skip of skips) {
-    if (!REVIEWED_SKIP_REASONS.has(skip.reason)) continue;
+    if (!SETTLE_SKIP_REASONS.has(skip.reason)) continue;
     const repo = repos.find((entry) => entry.path === skip.repo);
     if (repo === undefined) continue;
     if (

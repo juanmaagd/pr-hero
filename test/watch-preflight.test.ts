@@ -883,6 +883,31 @@ describe("decideTick", () => {
     ).toEqual([]);
   });
 
+  test("pendingReviewsToSettle clears a pending on attempts-exhausted", () => {
+    const facts = repo({
+      prs: [cand(4, HEAD_A)],
+      attempts: [{ pr: 4, head: HEAD_A, count: MAX_WATCH_ATTEMPTS }],
+      pending: [{ pr: 4, head: HEAD_A }],
+    });
+    const decision = decideTick(tick({ repos: [facts] }));
+    expect(decision.skips[0]?.reason).toBe("attempts-exhausted");
+    expect(pendingReviewsToSettle(decision.skips, [facts])).toEqual([
+      { repo: "/x/musive", pr: 4, head: HEAD_A },
+    ]);
+  });
+
+  test("pendingReviewsToSettle does not treat reviewed-prior-head as this head's orphan", () => {
+    const facts = repo({
+      prs: [cand(4, HEAD_B)],
+      remoteHeads: [{ pr: 4, heads: [HEAD_A], markerSeen: true }],
+      pending: [{ pr: 4, head: HEAD_B }],
+      inFlight: [{ pr: 4, head: HEAD_B }],
+    });
+    const decision = decideTick(tick({ repos: [facts] }));
+    expect(decision.skips[0]?.reason).toBe("reviewed-prior-head");
+    expect(pendingReviewsToSettle(decision.skips, [facts])).toEqual([]);
+  });
+
   // Ordering: an already-reviewed PR reads as reviewed, not as too-large —
   // the reason a human sees in the log must be the one that actually
   // settled it, and "reviewed" is the more informative of the two.
