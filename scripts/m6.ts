@@ -4,8 +4,16 @@
 // Three modes, and the first two are deliberately separate commands:
 //
 //   bun run scripts/m6.ts plan   [--clean 1720,1721]   # $0 — the go/no-go
+//   bun run scripts/m6.ts check                        # $0 — the argv, dry-run
 //   bun run scripts/m6.ts run    [--clean ...] [--replicates 2] [--only 1717]
 //   bun run scripts/m6.ts score  [--runs <root>]        # $0 — read artifacts
+//
+// RUN `check` BEFORE `run`, every time. It is the same loop with --dry-run
+// appended, so it spends nothing, touches nothing, and prints the exact run
+// dir each review would resolve. It exists because the first live pilot died
+// five minutes in on a defect `check` would have shown for free: `--out` in PR
+// mode is the EXACT run dir, not a runs root, so a harness passing one root
+// for every review had all twelve runs overwriting each other in place.
 //
 // `plan` spends nothing and exists because "~$224" was folklore: it prices
 // every PR from GitHub's own counters through the SAME `estimateCost` the CLI
@@ -73,8 +81,8 @@ function arg(name: string): string | undefined {
 }
 
 const mode = Bun.argv[2];
-if (mode !== "plan" && mode !== "run" && mode !== "score") {
-  fail("usage: bun run scripts/m6.ts plan|run|score [flags]");
+if (mode !== "plan" && mode !== "check" && mode !== "run" && mode !== "score") {
+  fail("usage: bun run scripts/m6.ts plan|check|run|score [flags]");
 }
 
 const repo = arg("repo") ?? DEFAULT_REPO;
@@ -217,7 +225,27 @@ if (mode === "plan") {
 // run — the paid one
 // ---------------------------------------------------------------------------
 
-async function review(pr: number, scout: boolean): Promise<number> {
+// `--out` in PR mode names the EXACT run dir (`predictPrRunDir`: an explicit
+// --out short-circuits the smallest-unused-integer loop and is returned as-is).
+// So every review needs its OWN, or each overwrites the last — and overwriting
+// a run that cost money is precisely what that integer loop exists to prevent.
+//
+// The arm is in the NAME for a human reading the directory; it is never what
+// `score` trusts, which reads `pipeline.json`'s `scout.enabled`. A name and an
+// artifact that disagree is a bug worth being able to see.
+function runDirFor(pr: number, scout: boolean, replicate: number): string {
+  return path.join(
+    runsRoot,
+    `pr-${pr}-${scout ? "scout" : "control"}-r${replicate}`,
+  );
+}
+
+async function review(
+  pr: number,
+  scout: boolean,
+  replicate: number,
+  dryRun = false,
+): Promise<number> {
   const argv = [
     process.execPath,
     path.join(import.meta.dir, "..", "src", "cli.ts"),
@@ -226,7 +254,8 @@ async function review(pr: number, scout: boolean): Promise<number> {
     String(pr),
     "--yes",
     "--out",
-    runsRoot,
+    runDirFor(pr, scout, replicate),
+    ...(dryRun ? ["--dry-run"] : []),
     // NO --force, and that is a measured choice rather than an omission: the
     // `plan` pass estimated the gate over all 14 PRs from GitHub's own
     // counters and none is refused. That estimate is wrong only in the
@@ -244,25 +273,86 @@ async function review(pr: number, scout: boolean): Promise<number> {
   return await proc.exited;
 }
 
+if (mode === "check") {
+  // $0. The same argv the paid loop builds, with --dry-run appended: a PR-mode
+  // dry run fetches nothing, creates nothing and spends nothing, but it does
+  // resolve the PR, the base, the gate and the run dir — and prints them. Every
+  // assumption the harness makes about the CLI is checked here or discovered
+  // four minutes at a time with money on the meter.
+  const seen = new Set<string>();
+  let clashes = 0;
+  for (let r = 1; r <= replicates; r++) {
+    for (const pr of prs) {
+      for (const scout of [false, true]) {
+        const dir = runDirFor(pr, scout, r);
+        if (seen.has(dir)) {
+          console.error(`COLLISION: two reviews would write ${dir}`);
+          clashes++;
+        }
+        seen.add(dir);
+      }
+    }
+  }
+  console.error(
+    `${seen.size} distinct run dir(s) for ${prs.length * 2 * replicates} reviews`,
+  );
+  // Only the first replicate is dry-run for real: the CLI's answer does not
+  // change per replicate, and a check that costs 56 gh round-trips is a check
+  // nobody runs before the session.
+  const failures: string[] = [];
+  for (const pr of prs) {
+    for (const scout of [false, true]) {
+      const label = `pr ${pr} ${scout ? "scout" : "control"}`;
+      console.error(`\n=== ${label} (dry run)`);
+      const code = await review(pr, scout, 1, true);
+      if (code !== 0) failures.push(`${label}: exit ${code}`);
+    }
+  }
+  console.error("");
+  if (clashes === 0 && failures.length === 0) {
+    console.error(
+      "m6 check: every review resolves, every run dir is distinct, $0 spent. " +
+        "Read the RUN line of each plan above and confirm it names a dir " +
+        "UNDER the runs root, not the root itself.",
+    );
+    process.exit(0);
+  }
+  for (const f of failures) console.error(`  ${f}`);
+  process.exit(1);
+}
+
 if (mode === "run") {
   console.error(
     `m6 run: ${prs.length} PRs x 2 arms x R=${replicates} = ` +
       `${prs.length * 2 * replicates} runs into ${runsRoot}`,
   );
   const failures: string[] = [];
+  let skipped = 0;
   for (let r = 1; r <= replicates; r++) {
     for (const pr of prs) {
       // INTERLEAVED per PR: two blocks would confound a four-hour session's
       // model drift with the arm under test.
       for (const scout of [false, true]) {
         const label = `pr ${pr} ${scout ? "scout" : "control"} r${r}`;
-        console.error(`\n=== ${label}`);
-        const code = await review(pr, scout);
+        const dir = runDirFor(pr, scout, r);
+        // Resumable, and loudly: a five-hour session that dies at run 40 must
+        // not re-bill the 39 that landed. An existing dir is evidence, never
+        // something to overwrite.
+        if (await Bun.file(path.join(dir, "findings.json")).exists()) {
+          console.error(`\n=== ${label} — SKIPPED, already on disk at ${dir}`);
+          skipped++;
+          continue;
+        }
+        console.error(`\n=== ${label} -> ${dir}`);
+        const code = await review(pr, scout, r);
         if (code !== 0) failures.push(`${label}: exit ${code}`);
       }
     }
   }
   console.error("");
+  if (skipped > 0) {
+    console.error(`m6 run: ${skipped} review(s) skipped — already on disk`);
+  }
   if (failures.length === 0) {
     console.error("m6 run: every review exited 0");
   } else {
