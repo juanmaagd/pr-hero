@@ -915,6 +915,201 @@ sites rather than five. `pr-hero reverts` gives the pairs; the sites are a read 
 **Exit:** the gates pass at 3 replicates, and the numbers — including every excluded case and its reason —
 land in the commit description.
 
+### 3.10bis M4 RAN — coverage passes, restraint fails, and the restraint metric is the thing that broke
+
+Executed 2026-08-17/18. **Coverage PASSES at the ratified threshold. Restraint FAILS two of its three
+sub-gates.** M4's exit condition is therefore NOT met, and this section does not declare it met. What
+follows is the measurement, the diagnosis, and an amendment offered for ratification — the thresholds
+above are untouched.
+
+**Final run: `prompts/scout.md` sha256 `68a81d26081e`, sonnet, R=3, 15-minute watchdog, all ten PRs in one
+pass, 30 spawns, ZERO failed runs, 90 minutes, $10.47.** One artifact, one prompt sha, both assertions on
+the same text and the same day: `.prhero/scout-probe/2026-08-18T08-01-49-028Z/scout-probe.json`.
+
+| assertion 1 — coverage | hits | gate |
+|---|---|---|
+| 1717 `PaywallUpgrade/index.tsx:119` | 3/3 | PASS |
+| 1719 `SongSourceResolver.ts:296` | 2/3 | PASS |
+| 1722 `m4aRemux.ts:181` | 3/3 | PASS |
+| 1724 `mus-638-song-bucket-rollout.md:144` | 3/3 | PASS |
+| 1724 `mus-638-song-bucket-rollout.md:140` | 3/3 | PASS |
+
+**Zero exclusions used; §3.10's exclusion-rule counter stays at zero.** The hits are semantic rather than
+positional — every 1719 hit names the missing lower bound, the future `verifiedAt` and the negative-age
+consequence in its own words.
+
+| assertion 2 — restraint | measured | gate | |
+|---|---|---|---|
+| mean `lead_coverage` | **0.339** | ≤ 0.33 | FAIL |
+| max single-run `lead_coverage` | **1.000** | ≤ 0.50 | FAIL |
+| mean leads per PR | **3.83** | ≤ 6 | PASS |
+
+**The diagnosis: `lead_coverage`'s denominator is hunk COUNT, which measures how git split the patch, not
+how much the patch changed.** Measured over the restraint set at $0:
+
+| PR | hunks | changed lines | lines/hunk | leads (final run) | cov |
+|---|---|---|---|---|---|
+| 1698 | 6 | 147 | 25 | 4 | 0.50 |
+| 1703 | 5 | 235 | 47 | 1 | 0.20 |
+| **1708** | **95** | **386** | **4** | 6 | **0.06** |
+| 1715 | 10 | 441 | 44 | 5 | 0.30 |
+| **1720** | **3** | **1011** | **337** | 6 | **1.00** |
+| 1721 | 8 | 1320 | 165 | 4 | 0.38 |
+
+PR 1720 changed **2.6× more lines than 1708 while carrying 1/32 of the hunks.** Two runs of the same prompt
+on the same day make the inversion concrete:
+
+- **1720 r3** — 6 leads over 1011 changed lines = **0.59 leads per 100 lines** → scores **1.00**, the worst
+  possible.
+- **1698 r3** — 4 leads over 147 changed lines = **2.72 leads per 100 lines** → scores **0.50**, passes.
+
+**The run that was 4.6× denser in leads per changed line scored better.** The metric orders the six PRs
+close to backwards. Two consequences follow arithmetically, neither of them about this prompt:
+
+1. On a 3-hunk PR the max-gate permits leads in **one hunk only** (2 of 3 = 0.67). Passing it on 1720 means
+   emitting at most one lead across 1011 changed lines. No prompt clears that without going mute on large
+   PRs, which is the §3.6 recall-first decision reversed by accident.
+2. Excluding 1720 alone, the mean over the other five is **0.251** — comfortably inside the gate. One PR
+   whose hunk structure is pathological carries the mean past the threshold by 0.009.
+
+**The absolute measure, which is also ratified, tells the opposite story and passes: 3.83 leads per PR
+against a ceiling of 6 and a hard cap of 12.** Across diffs from 147 to 1320 changed lines the scout emitted
+1-7 leads — it does not scale its noise with the diff at all.
+
+**The amendment offered for ratification.** Two shapes; the recommendation is (b).
+
+- **(a) Replace the denominator** — score leads per 100 changed lines instead of fraction-of-hunks. On the
+  final run the six PRs give 2.72 / 0.43 / 1.55 / 1.13 / 0.59 / 0.30, a 9× spread against `lead_coverage`'s
+  17×, and it no longer rewards a patch for being finely split. It needs a threshold nobody has ever set.
+- **(b) Drop the two ratio gates and keep the absolute one.** Restraint becomes "mean leads per PR ≤ 6",
+  which was ratified in the same sentence, measures the DashBench failure mode directly (*filtering
+  nothing, being loud everywhere*), and needs no new number. Simpler, and it removes an instrument rather
+  than replacing one broken instrument with an unvalidated one.
+
+**The circularity, stated openly because it cannot be removed:** any threshold ratified now is chosen with
+v5's numbers already on the table. That is exactly the "gate quietly lowered" failure this file warns about,
+and the only honest mitigations are to name it and to keep the downstream guard. **§3.11's two clean PRs in
+M6 are that guard** — they were written in as "not optional garnish" precisely because M4's restraint gate
+measures the SCOUT's lead volume and not the pipeline-level effect of hunters chasing spurious leads. A
+weakened M4 restraint gate therefore does not leave adoption unguarded; it moves the guard to where the
+design already put a second one.
+
+**Two open items this milestone produced and did not close:**
+
+1. **PR 1720's leads were adjudicated and they are NOISE — 0 corroborated, 9 refuted.** This item was
+   opened on the opposite hypothesis: that a test-only PR raising test-isolation concerns was correct
+   behaviour scored as failure, since test isolation and shared global state is a category our own
+   resilience hunter owns. **That hypothesis is dead.** The nine distinct concerns from three runs were
+   adjudicated against the real tree at `8888a69e` under refuter discipline (try to DISPROVE; default to
+   refuted when unverifiable), and the orchestrator re-verified the three load-bearing verdicts with `git
+   show` rather than accepting them:
+   - `ILogger.warn(content: LogInput)` takes exactly ONE argument, so the "if warn takes (message, meta)
+     this assertion can never match" concern rests on a false premise.
+   - `verifiedAt: nowSeconds` is written from the SAME `now()` call the freshness check compares against
+     (`SongSourceResolver.ts:294` and `:338`), so the ms-vs-seconds mismatch is structurally impossible
+     rather than merely untested.
+   - `env.ts:138` is `export const env = envSchema.parse(process.env)` at module-evaluation time, so an
+     incomplete ambient environment is a loud import crash, never the silent CI-dependent false pass the
+     concern described.
+
+   **The distribution of HOW they were refuted is the finding, and it is a scout defect, not a metric
+   artifact.** Five of the nine (the positional `mock.calls[1][0]` index, the unstubbed-key fixture, the
+   MUST-SURVIVE dependency, the `overwrite`-ignoring mock, the `overwrite:false` round-trip) are refuted
+   by text **inside the diff the scout was reading** — the stub's own docstring stating it throws by
+   design, sibling assertions checking `overwrite === true` four times in the same file, the adjacent
+   dedicated NX tests. The scout had that text in front of it and flagged anyway. Only ONE concern needed
+   a file outside the diff to refute, and it is precisely the one raised in all three runs: the
+   multiplicity was measuring the blind spot, not the defect.
+
+   **So there IS a prompt lever after all, and it costs no recall:** before emitting a lead, check whether
+   the rest of the supplied diff already answers it. That is not "be quieter" — it is "read what you were
+   given", and it removes claims the input itself refutes rather than removing suspicions. Tracked as the
+   v6 change; it also has no reason to cost coverage, but that must be re-measured rather than assumed.
+
+   **What this does NOT change: the metric inversion above stands on its own.** It is an arithmetic
+   property of hunk-count denominators, established from hunk/line counts and lead densities, and it
+   holds whether the leads are good or worthless. The two findings are independent, and the honest
+   reading of M4 needs both — the scout over-flags on 1720 AND the gate would misorder these six PRs even
+   if it did not.
+2. **`why` truncation is no longer anecdotal.** It fired in most of the final 30 runs, one run at 5 of 7
+   leads. §3.8 is explicit that routine truncation is a PROMPT defect to fix and never a cap to raise. Not
+   gate-blocking, not fixed here, recorded so it is not rediscovered.
+
+**The prompt lineage, because M6 must know what it is running and every change was bought by a
+measurement, never by taste:**
+
+| ver | sha256 | what changed, and what paid for it |
+|---|---|---|
+| v1 | `8226ba1fbe32` | written from this design doc alone. 1719 blind, 0 of 2. |
+| v2 | `5922ecab8962` | two ordered questions, "is this wrong on its own terms?" first — v1's central question was *"what would have to be true elsewhere"* and all 8 leads over two 1719 runs were cross-file uncertainty. Still 0 of 2. |
+| v3 | `db9e3f59e353` | written against the SOURCE research, which v1/v2 never used: DoorDash's three classes (deletions, one side of a boundary, silent behaviour changes), Cloudflare's *What NOT to Flag*, the three example lead phrasings, the anti-hedge rule, Salesforce's relate-the-fragments as a third question, consequence as the cap tiebreak. 1719 → 1 of 3. |
+| v4 | `618ef49ea1fc` | the one-sided-bound pattern became an ACTIVE sweep, and the scout was told the caps keep leads **in the order it writes them**. 1719 → 3 of 3; full coverage 15 of 15. |
+| v5 | `68a81d26081e` | one concern earns ONE lead across sibling files; "what is not tested" is not a lead, while a test asserting something FALSE still is. Restraint mean 0.377 → 0.315 at R=1 and 1721 halved; 1719 cost 3/3 → 2/3, inside the gate. |
+
+**Cost of M4: $25.78** against a ratified band of $5-15. The overrun was authorised explicitly
+(*"no te preocupes por el presupuesto, hagamos lo mejor y mas solido"*) to buy the full 30-spawn pass rather
+than a cheaper slice; the first $2.09 of it bought two defects in the probe itself (a relative
+`systemPromptPath` the spawned CLI resolved against its own cwd, killing four runs for $0, and a 5-minute
+watchdog that killed 17% of runs at 10 minutes before being raised to 15).
+
+**v6 was built, measured, and REVERTED — and the revert is the most useful thing M4 bought.**
+`b4e87a1275ed` added one rule, the only lever the 1720 adjudication justified: *before you write a lead,
+look for its answer in the diff*, written explicitly so it could not become a mute button (if the diff does
+NOT settle the suspicion, it stands, and the `why` must say nothing in the patch establishes it). Measured
+the same way as v5 — 30 spawns, R=3, 15-minute ceiling, zero failed runs, $11.22.
+
+| | v5 `68a81d26` | v6 `b4e87a12` |
+|---|---|---|
+| coverage | **5 of 5 PASS** | **FAIL** — 1719 at 1/3 |
+| restraint mean | 0.339 FAIL | **0.313 PASS** |
+| restraint max | 1.000 FAIL | 0.667 FAIL |
+| leads per PR | 3.83 | 3.28 |
+
+**And 1719's single v6 "hit" is positional, not semantic.** The lead sits at `:271` against a site at
+`:296` — exactly 25 lines, the last line the window admits — and it describes the changed return type and
+the new thrown error classes, naming neither the missing lower bound nor the future `verifiedAt` nor the
+negative age. Semantically v6 scored **0 of 3** on the case v4 had taken to 3 of 3. All three runs were
+dominated by contract-change observations, which is the question-3 behaviour v2 existed to correct.
+
+**The finding, and it is now measured rather than argued: "read what you were given" could not be separated
+from "stay quiet" as written.** A suppression-flavoured block placed after the not-a-lead list appears to
+dampen the ACTIVE arithmetic sweep v4 had bought. The rule may still be right; the way it was written is
+not, and rewriting it is not this milestone's work. **v5 is the M4 prompt.** Trading a result on the gate
+that decides whether the scout is worth anything, to buy a mean on a gate this section has just proven is
+inverted, is a bad trade at any price.
+
+**One more datum from the v6 run, and it closes the arithmetic case beyond argument:** on 1720 the scout
+emitted **2 leads in two of three runs** — over 1011 changed lines that is **0.20 leads per 100 lines, the
+quietest behaviour anywhere in M4's 60 measured runs** — and still scored **0.667, FAIL**. The max-gate is
+not merely hard to pass on that PR; with 3 hunks it is unreachable by any scout that says anything at all
+in more than one of them.
+
+**RATIFIED 2026-08-18 by Juanma: option (b).** The two `lead_coverage` ratio gates are struck; restraint is
+`mean leads per PR ≤ 6`, which v5 clears at **3.83**. Implemented the same day in `scripts/scout-probe.ts`
+— the ratio is still computed and still printed, now labelled a diagnostic, because deleting the
+measurement that proved the gate wrong would destroy the evidence along with the instrument.
+
+**What was NOT changed, and this matters as much as what was:** the coverage gate, its five target cases,
+its 2-of-3 threshold, its exclusion rule (counter still at zero), and §3.8's four caps. The amendment
+removes one broken instrument. It does not touch the assertion that decides whether the scout is worth
+anything.
+
+**Exit: MET, on an amended gate, and the amendment's circularity is recorded above rather than buried.**
+
+- **Coverage: PASS** — five of five cases, R=3, semantic hits verified case by case.
+- **Restraint: PASS** — 3.83 leads per PR against a ceiling of 6, over 18 runs.
+- **The M4 prompt is `prompts/scout.md` sha256 `68a81d26081e` (v5).**
+- Zero exclusions used; zero failed runs in the two final 30-spawn passes.
+- **Cost: $37.00**, against a $5-15 estimate. The overrun is not an accident to be excused: it bought two
+  probe defects found before they could corrupt a result, a watchdog raised on evidence from 10 to 15
+  minutes, six prompt versions, and one reverted experiment. The estimate was wrong because it assumed
+  the prompt would be right early, and §3.10 said this is where the prompt gets written and rewritten.
+
+**M5 may begin.** It inherits three things this milestone did not fix, all recorded above and none
+blocking: `why` truncation firing in most runs (§3.8 calls it a prompt defect), scout latency of 86-600s
+against §3.9's "one short step" expectation, and the v6 rule — *look for the answer in the diff before
+writing a lead* — which is probably right and was demonstrably written wrong.
+
 ### 3.11 M3 item 6b — the M6 protocol, and the fork only Juanma can settle
 
 §3.1 established the metric shape and the uncomfortable arithmetic behind it. What follows is the protocol

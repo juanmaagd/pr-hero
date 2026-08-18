@@ -330,7 +330,15 @@ Three defects in our own tooling were found and two were fixed on the way:
 What did NOT change: M3's four ratified decisions, M4's two gates, and the restraint set. The scout design
 is untouched by all of this — only the corpus M6 scores against moved.
 
-### M4 — The scout-probe: the prompt earns its A/B (1 session, ~$5–15)
+### M4 — The scout-probe: the prompt earns its A/B — **DONE 2026-08-18, $37.00**
+
+> **Result: both assertions pass, one of them on an amended gate.** Coverage 5 of 5 at R=3 with semantic
+> hits verified case by case; restraint 3.83 leads per PR against a ceiling of 6. The prompt is
+> `prompts/scout.md` sha256 `68a81d26081e`, reached over six versions where every change was bought by a
+> measurement. **`lead_coverage`'s two ratio gates were struck** — its denominator is hunk count, which
+> ordered the restraint set close to backwards, and its single-run ceiling was unreachable by any scout on
+> a 3-hunk/1011-line PR. Full record, evidence and the amendment's stated circularity:
+> `docs/scout-design.md` §3.10bis. Zero exclusions used; zero failed runs in 60 measured spawns.
 
 `refuter-probe` is the pattern (CLAUDE.md: "a prompt edit that cannot pass it does not deserve a $10
 replay"). `scripts/scout-probe.ts`, same discipline, two assertions:
@@ -439,7 +447,7 @@ Phase C work with their own designs.
 | M1 public honesty | 1 | $0 | post-or-not on partial+zero |
 | M2 #19's shape | ½ | $0 | — (the number decides) |
 | M3 scout design — **RATIFIED 2026-08-17** | 1 | $0 | all four as recommended; fork → **(a)** |
-| M4 scout-probe — **next** | 1 | ~$5–15 | thresholds — now set in §3.10 |
+| M4 scout-probe — **DONE 2026-08-18** | 1 | **$37.00** | restraint gate amended → (b); §3.10bis |
 | M5 scout behind flag | 1–2 | ~$0.10 | — |
 | Adjudicate #43 candidates — **DONE**, 13 cases | 1 | $0 | 8 of 20 usable; §2.4septies |
 | M6 the A/B | 1 (+ wall clock) | **~$224 — (a), floor at 13** | adopt / opt-in / drop |
