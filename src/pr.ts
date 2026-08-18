@@ -691,6 +691,13 @@ export async function fetchPrComments(
     options?.spawnFn,
   );
   if (!result.ok) {
+    // Live evidence on MusiveTech/musive 2026-08-17: REST GET on
+    // issues/<n>/comments can 404 while POST on the same path and GraphQL
+    // both succeed — posting dies at the pre-flight fetch with no review
+    // published. Fall back to GraphQL so listing tracks the write path.
+    if (is404(result.stderr)) {
+      return fetchPrCommentsGraphql(operatorRoot, pr, options?.spawnFn);
+    }
     throw new CliError(
       `gh api issues/${pr}/comments failed: ${result.stderr.trim()}`,
     );
@@ -757,6 +764,9 @@ export async function fetchPrReviewComments(
     options?.spawnFn,
   );
   if (!result.ok) {
+    if (is404(result.stderr)) {
+      return fetchPrReviewCommentsGraphql(operatorRoot, pr, options?.spawnFn);
+    }
     throw new CliError(
       `gh api pulls/${pr}/comments failed: ${result.stderr.trim()}`,
     );
@@ -819,6 +829,187 @@ export async function fetchPostedFindingComments(
 // not reliably name which comment failed.
 function is422(stderr: string): boolean {
   return /\(HTTP 422\)/.test(stderr);
+}
+
+function is404(stderr: string): boolean {
+  return /\(HTTP 404\)/.test(stderr);
+}
+
+// GraphQL fallback for fetchPrComments — same shape the REST --jq path
+// produces. Variable names are repoOwner/repoName so they cannot collide
+// with gh -f name= interpolating $name inside the query document.
+const PR_ISSUE_COMMENTS_QUERY =
+  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
+  "comments(first:100){nodes{databaseId body author{login}}}}}}";
+
+const PR_REVIEW_COMMENTS_QUERY =
+  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
+  "reviewThreads(first:100){nodes{comments(first:100){nodes{" +
+  "fullDatabaseId body author{login} path line originalLine " +
+  "replyTo{fullDatabaseId}}}}}}}}";
+
+async function ghGraphql(
+  operatorRoot: string,
+  query: string,
+  variables: Record<string, string | number>,
+  what: string,
+  spawnFn?: typeof Bun.spawn,
+): Promise<string> {
+  assertBalancedGraphql(query, what);
+  const args = ["api", "graphql", "-f", `query=${query}`];
+  for (const [key, value] of Object.entries(variables)) {
+    const flag = typeof value === "number" ? "-F" : "-f";
+    args.push(flag, `${key}=${value}`);
+  }
+  const result = await gh(operatorRoot, args, undefined, spawnFn);
+  if (!result.ok) {
+    throw new CliError(
+      `gh api graphql (${what}) failed: ${result.stderr.trim()}`,
+    );
+  }
+  return result.stdout;
+}
+
+function graphqlLogin(value: unknown): string {
+  if (typeof value !== "object" || value === null) return "";
+  const login = (value as { login?: unknown }).login;
+  return typeof login === "string" ? login : "";
+}
+
+async function fetchPrCommentsGraphql(
+  operatorRoot: string,
+  pr: number,
+  spawnFn?: typeof Bun.spawn,
+): Promise<{ id: number; user: string; body: string }[]> {
+  const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
+  const stdout = await ghGraphql(
+    operatorRoot,
+    PR_ISSUE_COMMENTS_QUERY,
+    { repoOwner: repo.owner, repoName: repo.name, number: pr },
+    "issueComments",
+    spawnFn,
+  );
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      "gh api graphql (issueComments) returned invalid JSON: " +
+        stdout.slice(0, 120),
+    );
+  }
+  const nodes = (
+    parsed as {
+      data?: {
+        repository?: {
+          pullRequest?: { comments?: { nodes?: unknown } };
+        };
+      };
+    } | null
+  )?.data?.repository?.pullRequest?.comments?.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new CliError(
+      "gh api graphql (issueComments) returned no comment list",
+    );
+  }
+  const comments: { id: number; user: string; body: string }[] = [];
+  for (const node of nodes) {
+    if (typeof node !== "object" || node === null) continue;
+    const record = node as {
+      databaseId?: unknown;
+      body?: unknown;
+      author?: unknown;
+    };
+    const id = graphqlDatabaseId(record.databaseId);
+    if (id === null) continue;
+    comments.push({
+      id,
+      user: graphqlLogin(record.author),
+      body: typeof record.body === "string" ? record.body : "",
+    });
+  }
+  return comments;
+}
+
+async function fetchPrReviewCommentsGraphql(
+  operatorRoot: string,
+  pr: number,
+  spawnFn?: typeof Bun.spawn,
+): Promise<PrReviewComment[]> {
+  const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
+  const stdout = await ghGraphql(
+    operatorRoot,
+    PR_REVIEW_COMMENTS_QUERY,
+    { repoOwner: repo.owner, repoName: repo.name, number: pr },
+    "reviewComments",
+    spawnFn,
+  );
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      "gh api graphql (reviewComments) returned invalid JSON: " +
+        stdout.slice(0, 120),
+    );
+  }
+  const threadNodes = (
+    parsed as {
+      data?: {
+        repository?: {
+          pullRequest?: { reviewThreads?: { nodes?: unknown } };
+        };
+      };
+    } | null
+  )?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(threadNodes)) {
+    throw new CliError(
+      "gh api graphql (reviewComments) returned no thread list",
+    );
+  }
+  const comments: PrReviewComment[] = [];
+  for (const thread of threadNodes) {
+    if (typeof thread !== "object" || thread === null) continue;
+    const commentNodes = (thread as { comments?: { nodes?: unknown } }).comments
+      ?.nodes;
+    if (!Array.isArray(commentNodes)) continue;
+    for (const node of commentNodes) {
+      if (typeof node !== "object" || node === null) continue;
+      const record = node as {
+        fullDatabaseId?: unknown;
+        body?: unknown;
+        author?: unknown;
+        path?: unknown;
+        line?: unknown;
+        originalLine?: unknown;
+        replyTo?: { fullDatabaseId?: unknown } | null;
+      };
+      const id = graphqlDatabaseId(record.fullDatabaseId);
+      if (id === null) continue;
+      const line =
+        typeof record.line === "number" && Number.isInteger(record.line)
+          ? record.line
+          : null;
+      const originalLine =
+        typeof record.originalLine === "number" &&
+        Number.isInteger(record.originalLine)
+          ? record.originalLine
+          : null;
+      const replyToId = graphqlDatabaseId(record.replyTo?.fullDatabaseId);
+      comments.push({
+        id,
+        user: graphqlLogin(record.author),
+        body: typeof record.body === "string" ? record.body : "",
+        path: typeof record.path === "string" ? record.path : "",
+        line,
+        original_line: originalLine,
+        in_reply_to_id: replyToId,
+      });
+    }
+  }
+  return comments;
 }
 
 export interface ReviewSubmissionOutcome {

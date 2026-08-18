@@ -25,6 +25,7 @@ import type { Finding } from "../src/findings";
 import {
   fetchCommitStatuses,
   fetchPostedFindingComments,
+  fetchPrComments,
   fetchPrReviewComments,
   ghPrHeadSha,
   postCommitStatus,
@@ -108,6 +109,16 @@ function makeFakeGh(script: ScriptEntry[]): {
 
 const OPERATOR_ROOT = "/repo";
 const HEAD = "b".repeat(40);
+
+const repoView = {
+  match: ["repo", "view", "--json", "owner,name"],
+  response: {
+    stdout: JSON.stringify({
+      name: "musive",
+      owner: { login: "MusiveTech" },
+    }),
+  },
+};
 
 function finding(overrides: Partial<Finding> & { id: string }): Finding {
   return {
@@ -198,16 +209,73 @@ describe("fetchPrReviewComments", () => {
     }
   });
 
-  test("a non-2xx response fails loud", async () => {
+  test("a non-404 non-2xx response fails loud", async () => {
     const { spawnFn } = makeFakeGh([
       {
         match: ["pulls/42/comments"],
-        response: { stderr: "gh: not found (HTTP 404)", exitCode: 1 },
+        response: { stderr: "gh: server error (HTTP 500)", exitCode: 1 },
       },
     ]);
     await expect(
       fetchPrReviewComments(OPERATOR_ROOT, 42, { spawnFn }),
     ).rejects.toThrow(/pulls\/42\/comments failed/);
+  });
+
+  test("REST 404 on pulls/<n>/comments falls back to GraphQL", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["pulls/42/comments"],
+        response: { stderr: "gh: Not Found (HTTP 404)", exitCode: 1 },
+      },
+      repoView,
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    nodes: [
+                      {
+                        comments: {
+                          nodes: [
+                            {
+                              fullDatabaseId: 9,
+                              body: "inline",
+                              author: { login: "pr-hero" },
+                              path: "src/a.ts",
+                              line: 12,
+                              originalLine: 10,
+                              replyTo: null,
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    const comments = await fetchPrReviewComments(OPERATOR_ROOT, 42, {
+      spawnFn,
+    });
+    expect(comments).toEqual([
+      {
+        id: 9,
+        user: "pr-hero",
+        body: "inline",
+        path: "src/a.ts",
+        line: 12,
+        original_line: 10,
+        in_reply_to_id: null,
+      },
+    ]);
+    expect(calls.some((c) => c.argv.join(" ").includes("graphql"))).toBe(true);
   });
 
   test("an unparseable line fails loud rather than silently dropping it", async () => {
@@ -220,6 +288,43 @@ describe("fetchPrReviewComments", () => {
     await expect(
       fetchPrReviewComments(OPERATOR_ROOT, 42, { spawnFn }),
     ).rejects.toThrow(/unparseable line/);
+  });
+});
+
+describe("fetchPrComments — REST 404 GraphQL fallback", () => {
+  test("REST 404 on issues/<n>/comments falls back to GraphQL", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["issues/42/comments"],
+        response: { stderr: "gh: Not Found (HTTP 404)", exitCode: 1 },
+      },
+      repoView,
+      {
+        match: ["graphql", "databaseId"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: {
+                    nodes: [
+                      {
+                        databaseId: 7,
+                        body: "summary",
+                        author: { login: "pr-hero" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    const comments = await fetchPrComments(OPERATOR_ROOT, 42, { spawnFn });
+    expect(comments).toEqual([{ id: 7, user: "pr-hero", body: "summary" }]);
+    expect(calls.some((c) => c.argv.join(" ").includes("graphql"))).toBe(true);
   });
 });
 
@@ -859,16 +964,6 @@ describe("postIssueTriageComment", () => {
 });
 
 describe("resolveReviewThreadForComment", () => {
-  const repoView = {
-    match: ["repo", "view", "--json", "owner,name"],
-    response: {
-      stdout: JSON.stringify({
-        name: "musive",
-        owner: { login: "MusiveTech" },
-      }),
-    },
-  };
-
   test("resolves an unresolved thread whose first comment matches the REST id", async () => {
     const { spawnFn, calls } = makeFakeGh([
       repoView,
