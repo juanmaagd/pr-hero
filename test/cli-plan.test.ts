@@ -373,6 +373,20 @@ describe("renderPrPlan", () => {
     expect(text).toContain("(estimate from GitHub's aggregate counters)");
   });
 
+  test("an interactive override annotates confirmed, not --force", () => {
+    const text = joined(
+      renderPrPlan(
+        prPlanContext({
+          sizeGate: failedGate,
+          sizeGateConfirmed: true,
+        }),
+        false,
+      ),
+    );
+    expect(text).toContain("confirmed: reviewing anyway.");
+    expect(text).not.toContain("--force given");
+  });
+
   test("styles off means not one escape byte; painting keeps the text", () => {
     expect(renderPrPlan(prPlanContext(), false).join("\n")).not.toContain(ESC);
     expect(renderPrPlan(prPlanContext(), true).join("\n")).toContain(ESC);

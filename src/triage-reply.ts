@@ -8,10 +8,14 @@
 // prior comment after a small drift. Using it here would pick a parent by
 // "nearest line on the live diff" — the exact 1724 failure (Greptile sat
 // on the same path:line; the agent replied there). Triage identity is the
-// finding marker: path + line + head + claim fingerprint, never location
-// heuristics.
+// finding marker: path + post line + head + claim fingerprint — the post
+// line comes from resolvePostLine (same as --post), not raw findings.json.
 
-import type { PostedFindingComment } from "./inline";
+import {
+  type PostedFindingComment,
+  parseHunkAnchors,
+  resolvePostLine,
+} from "./inline";
 import { claimFingerprint } from "./pr-preflight";
 import { parseTriageMarker, type TriageVerdict } from "./triage";
 
@@ -19,6 +23,36 @@ export interface FindingIdentity {
   path: string;
   line: number;
   claim: string;
+}
+
+// The marker pr-hero POSTED carries the in-diff post line (resolvePostLine
+// in cli.ts's resolveInlinePostPlan), not necessarily findings.json's hunter
+// cite. Triage reply must remap the same way or F001 at :19 never binds to a
+// comment posted at :27 after proof_ref re-anchoring (Musive re-review).
+export function findingIdentityForMarkerMatch(input: {
+  path: string;
+  line: number;
+  claim: string;
+  proof_refs?: readonly string[];
+  diffPatch: string;
+}): { identity: FindingIdentity; findingsLine: number } {
+  const anchors = parseHunkAnchors(input.diffPatch);
+  const postLine =
+    resolvePostLine(
+      {
+        id: "",
+        path: input.path,
+        line: input.line,
+        claim: input.claim,
+        tier: "blocking",
+        proof_refs: input.proof_refs,
+      },
+      anchors,
+    ) ?? input.line;
+  return {
+    identity: { path: input.path, line: postLine, claim: input.claim },
+    findingsLine: input.line,
+  };
 }
 
 export type FindingCommentMatch =

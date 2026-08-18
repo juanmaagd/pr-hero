@@ -126,6 +126,28 @@ export function menuOptions(canSkipPost: boolean): MenuOption[] {
   return options;
 }
 
+export type SizeGateConfirmResult = { kind: "proceed" } | { kind: "cancel" };
+
+// Continue / Cancel only. No cost hint (the gate exists because we will
+// not guess at this bill) and no details view (the SKIP line above the
+// menu already named the reason and the two flag hatches).
+export function sizeGateMenuOptions(): MenuOption[] {
+  return [
+    {
+      action: "review",
+      label: "Review anyway",
+      shortcuts: ["r", "y"],
+      post: false,
+    },
+    {
+      action: "cancel",
+      label: "Cancel",
+      shortcuts: ["c", "n", "q"],
+      post: false,
+    },
+  ];
+}
+
 const LABEL_WIDTH = 32;
 
 export function costHint(low: number, high: number): string {
@@ -352,6 +374,91 @@ export async function confirmReview(
 ): Promise<ConfirmResult> {
   try {
     return await runConfirm(spec, reader, io);
+  } finally {
+    reader.close();
+  }
+}
+
+// Sibling of runConfirm for the size-gate override. Same reader/io contract,
+// same unanswered-is-no rule, no details view and no dollar hint — guessing
+// at this bill is the thing the gate refuses to do.
+export async function runSizeGateConfirm(
+  styles: boolean,
+  reader: KeyReader,
+  io: ConfirmIo = defaultIo,
+): Promise<SizeGateConfirmResult> {
+  if (!reader.raw) return runPlainSizeGateConfirm(reader, io);
+
+  const options = sizeGateMenuOptions();
+  let cursor = 0;
+  const repaint = styles;
+  let drawn = 0;
+
+  const draw = (): void => {
+    if (repaint && drawn > 0) io.write(`${ESC}[${drawn}A`);
+    const lines = renderMenu(options, cursor, styles);
+    for (const line of lines) {
+      if (repaint) io.write(`${ESC}[2K`);
+      io.line(line);
+    }
+    drawn = lines.length;
+  };
+
+  io.line();
+  draw();
+
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk === undefined) {
+      io.line();
+      return { kind: "cancel" };
+    }
+    for (const rawKey of splitKeys(chunk)) {
+      const key = parseKey(rawKey);
+      if (key.type === "ignore") continue;
+      if (key.type === "cancel") {
+        io.line();
+        io.line("^C");
+        return { kind: "cancel" };
+      }
+      if (key.type === "up" || key.type === "down") {
+        cursor = moveCursor(cursor, key.type === "up" ? -1 : 1, options.length);
+        draw();
+        continue;
+      }
+      const chosen =
+        key.type === "enter"
+          ? options[cursor]
+          : options.find((option) => option.shortcuts.includes(key.char));
+      if (chosen === undefined) continue;
+      io.line();
+      return chosen.action === "cancel"
+        ? { kind: "cancel" }
+        : { kind: "proceed" };
+    }
+  }
+}
+
+async function runPlainSizeGateConfirm(
+  reader: KeyReader,
+  io: ConfirmIo,
+): Promise<SizeGateConfirmResult> {
+  io.line();
+  io.write("This diff exceeds the size gate. Review anyway? [y/N] ");
+  const answer = (await reader.read())?.trim().toLowerCase() ?? "";
+  io.line();
+  return answer === "y" || answer === "yes"
+    ? { kind: "proceed" }
+    : { kind: "cancel" };
+}
+
+export async function confirmSizeGate(
+  styles: boolean,
+  reader: KeyReader = createStdinReader(),
+  io: ConfirmIo = defaultIo,
+): Promise<SizeGateConfirmResult> {
+  try {
+    return await runSizeGateConfirm(styles, reader, io);
   } finally {
     reader.close();
   }

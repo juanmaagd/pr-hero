@@ -90,6 +90,33 @@ export type SizeGateVerdict =
       message: string;
     };
 
+// What the shell does with a verdict. Pure so the three callers (local,
+// PR, and the tests) cannot drift on who gets a prompt vs a hard skip.
+//
+// proceed — under the limit, or --force already answered "review anyway".
+// skip    — over the limit AND nobody can be asked: --yes (the watcher
+//           spawns with it) or a non-TTY stdin. This is the load-bearing
+//           unattended path; a prompt here would never fire, which is
+//           exactly how the gate used to be bypassed by accident.
+// prompt  — over the limit, interactive TTY, no --force. The operator
+//           already typed the review command; dying and making them
+//           re-run with --force is the same answer with worse UX.
+export type SizeGateDisposition =
+  | { action: "proceed" }
+  | { action: "skip"; message: string }
+  | { action: "prompt" };
+
+export function sizeGateDisposition(
+  verdict: SizeGateVerdict,
+  opts: { force: boolean; yes: boolean; interactive: boolean },
+): SizeGateDisposition {
+  if (verdict.ok || opts.force) return { action: "proceed" };
+  if (opts.yes || !opts.interactive) {
+    return { action: "skip", message: verdict.message };
+  }
+  return { action: "prompt" };
+}
+
 // Exclusions are applied FIRST and the REMAINDER is what gets compared: the
 // whole point of the list is that a regenerated lockfile must not push a
 // small change over the line. Lines are checked before files, because the

@@ -48,9 +48,13 @@ Every paid run prints a plan and a cost band, then asks for confirmation (`--yes
 | `default_base` | no | Base ref when `--base` is not given (e.g. `"dev"`). Without it: the remote head (`origin/HEAD`), then `main`. |
 | `parity_trigger_paths` | no | Glob list. The parity hunter runs only when a changed path matches one — no globs, no parity hunter. |
 | `suspicion_priors` | no | `[{path, weight, reason}]` hints injected into hunter prompts — point them at your known hotspots. |
+| `summary` | no | `{enabled, model}` for the engine-owned summarizer step. `enabled` defaults to `true`; set `"enabled": false` to skip it (and its cost). `model` defaults to `"haiku"`. |
 
 \* `agents_dir` can also come from the `--agents` flag or the `PRHERO_AGENTS_DIR` env var; the flag
 wins, then the config, then the env.
+
+† `summary.enabled` can also come from `--summary` / `--no-summary`; the flag wins, then the config,
+then the default (`true`).
 
 ### `gotchas.md`
 
@@ -68,7 +72,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
 | `pr-hero post --pr <n> --from <run-dir>` | Replay-publish a previous run's findings onto the PR (same plan as `--pr --post`). `--dry-run` previews at $0. |
 | `pr-hero triage --pr <n> --from <run-dir>` | Read reply threads and bind triage markers onto that run's `comparison.json` ledger rows. |
-| `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N --tag <tag> --body-file <path>` | Post one triage reply. The driver picks the parent from the posted `<!-- pr-hero-finding` marker (never path/line), renders the marker + badge, posts, and resolves the inline review thread. `--body-file` is reasoning only. |
+| `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N --tag <tag> --body-file <path>` | Post one triage reply. The driver picks the parent from the posted `<!-- pr-hero-finding` marker (never path/line), renders the marker + badge, posts, and resolves the inline review thread. Reads `diff.patch` from the run dir to remap post lines the same way `--post` does. `--body-file` is reasoning only. |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. |
 | `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
 | `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |
@@ -83,6 +87,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero usage [--all]` | Read-only, $0: print the observability store's per-run rows (cost, tokens, findings) — every completed review, local and PR, auto-ingests into one global `~/.prhero/metrics.db`. Scoped to the current checkout's origin by default; `--all` shows every origin instead. |
 
 Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `--model <m>`,
+`--no-summary` (skip the summarizer; see `summary` in config above),
 `--out <dir>` (run dir for `review`, output file for `ledger`), `--runs <dir>` (ledger's runs root),
 `--all` (`usage` only: every origin instead of just this checkout's).
 `pr-hero --help` lists everything.

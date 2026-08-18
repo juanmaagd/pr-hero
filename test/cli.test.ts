@@ -1948,7 +1948,68 @@ describe("runTriageCommand", () => {
 const F001_CLAIM = "the latch never resets";
 const F001_PATH = "docs/runbook.md";
 
-function greptileCollisionScript(): ScriptEntry[] {
+async function writeReplyRunDir(input?: {
+  findingLine?: number;
+  postLine?: number;
+  path?: string;
+}): Promise<{
+  dir: string;
+  bodyFile: string;
+  cleanup: () => Promise<void>;
+}> {
+  const findingPath = input?.path ?? F001_PATH;
+  const findingsLine = input?.findingLine ?? 144;
+  const postLine = input?.postLine ?? findingsLine;
+  // When post remaps off-hunk → in-diff, the hunk must cover the post line
+  // only — not the hunter cite — or resolvePostLine never moves.
+  const hunkStart = postLine !== findingsLine ? postLine : findingsLine;
+  const hunkLength = 10;
+  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-reply-test-"));
+  const runDoc = doc({
+    head_sha: RUN_HEAD,
+    findings: [
+      finding({
+        id: "F001",
+        path: findingPath,
+        line: findingsLine,
+        claim: F001_CLAIM,
+        ...(postLine !== findingsLine
+          ? { proof_refs: [`${findingPath}:${postLine}`] }
+          : {}),
+      }),
+    ],
+  });
+  await Bun.write(
+    path.join(dir, "findings.json"),
+    JSON.stringify(runDoc, null, 2),
+  );
+  const diffBody = Array.from(
+    { length: hunkLength },
+    (_, i) => `+line ${hunkStart + i}`,
+  ).join("\n");
+  const diffPatch =
+    `diff --git a/${findingPath} b/${findingPath}\n` +
+    `index 0000000..1111111 100644\n` +
+    `--- a/${findingPath}\n` +
+    `+++ b/${findingPath}\n` +
+    `@@ -0,0 +${hunkStart},${hunkLength} @@\n` +
+    `${diffBody}\n`;
+  await Bun.write(path.join(dir, "diff.patch"), diffPatch);
+  const bodyFile = path.join(dir, "reason.md");
+  await Bun.write(bodyFile, "Fixed by resetting the latch on unmount.");
+  return {
+    dir,
+    bodyFile,
+    cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
+}
+
+function greptileCollisionScript(input?: {
+  postLine?: number;
+  path?: string;
+}): ScriptEntry[] {
+  const postLine = input?.postLine ?? 144;
+  const findingPath = input?.path ?? F001_PATH;
   return [
     {
       match: ["issues/42/comments", "--paginate"],
@@ -1962,23 +2023,23 @@ function greptileCollisionScript(): ScriptEntry[] {
             id: 11,
             user: "greptile-apps",
             body: "same line, not ours",
-            path: F001_PATH,
-            line: 144,
-            original_line: 144,
+            path: findingPath,
+            line: postLine,
+            original_line: postLine,
             in_reply_to_id: null,
           },
           {
             id: 22,
             user: "pr-hero",
             body: `${findingMarker({
-              path: F001_PATH,
-              line: 144,
+              path: findingPath,
+              line: postLine,
               headSha: RUN_HEAD,
               claim: F001_CLAIM,
             })}\n${F001_CLAIM}`,
-            path: F001_PATH,
-            line: 144,
-            original_line: 144,
+            path: findingPath,
+            line: postLine,
+            original_line: postLine,
             in_reply_to_id: null,
           },
         ]),
@@ -2024,36 +2085,6 @@ function greptileCollisionScript(): ScriptEntry[] {
       },
     },
   ];
-}
-
-async function writeReplyRunDir(): Promise<{
-  dir: string;
-  bodyFile: string;
-  cleanup: () => Promise<void>;
-}> {
-  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-reply-test-"));
-  const runDoc = doc({
-    head_sha: RUN_HEAD,
-    findings: [
-      finding({
-        id: "F001",
-        path: F001_PATH,
-        line: 144,
-        claim: F001_CLAIM,
-      }),
-    ],
-  });
-  await Bun.write(
-    path.join(dir, "findings.json"),
-    JSON.stringify(runDoc, null, 2),
-  );
-  const bodyFile = path.join(dir, "reason.md");
-  await Bun.write(bodyFile, "Fixed by resetting the latch on unmount.");
-  return {
-    dir,
-    bodyFile,
-    cleanup: () => rm(dir, { recursive: true, force: true }),
-  };
 }
 
 describe("runTriageReplyCommand", () => {
@@ -2113,6 +2144,62 @@ describe("runTriageReplyCommand", () => {
           call.argv.join(" ").includes("resolveReviewThread"),
         ),
       ).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("binds when post remapped the line (findings.json:19 → posted marker:27)", async () => {
+    const findingPath = "src/a.ts";
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir({
+      path: findingPath,
+      findingLine: 19,
+      postLine: 27,
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(
+        greptileCollisionScript({ path: findingPath, postLine: 27 }),
+      );
+      const exitCode = await runTriageReplyCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        findingId: "F001",
+        tag: "applied",
+        bodyFile,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const post = calls.find(
+        (call) =>
+          call.argv.includes("--method") &&
+          call.argv.join(" ").includes("pulls/42/comments"),
+      );
+      expect(post?.argv.join(" ")).toContain("in_reply_to=22");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("refuses when diff.patch is missing", async () => {
+    const { dir, bodyFile, cleanup } = await writeReplyRunDir();
+    await rm(path.join(dir, "diff.patch"));
+    try {
+      const { spawnFn, calls } = makeFakeGh([]);
+      await expect(
+        runTriageReplyCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          findingId: "F001",
+          tag: "applied",
+          bodyFile,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/missing diff\.patch/);
+      expect(calls.length).toBe(0);
     } finally {
       await cleanup();
     }

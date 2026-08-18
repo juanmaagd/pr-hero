@@ -329,9 +329,10 @@ Options:
   --runs <dir>        ledger only: the runs root to scan for comparison.json
                       files (default: ~/.prhero/repos/<origin>/runs)
   --from <dir>        post/triage only: the run dir to read findings.json and
-                      diff.patch (post) or comparison.json (triage) from
-                      (required). triage reply also reads findings.json from
-                      it, to map --finding F00N onto the posted marker
+                      diff.patch (post and triage reply) or comparison.json
+                      (triage bind) from (required). triage reply maps
+                      --finding F00N onto the posted marker via the same
+                      post-line remapping post uses
   --finding <id>      triage reply only: the finding id in that run's
                       findings.json (F001, …). The driver maps it to the
                       posted comment; do not pass a GitHub comment id
@@ -382,7 +383,9 @@ Options:
                       Size gate: same, on the effective changed-FILE count.
                       Default ${DEFAULT_SIZE_GATE.maxChangedFiles}; 0 disables the limit
   --force             Review the diff even when the size gate would skip it.
-                      Does NOT imply --yes — the cost band still asks
+                      An interactive TTY already offers the same choice as a
+                      menu; this flag is the unattended hatch. Does NOT imply
+                      --yes — the cost band still asks
   --all               usage only: show every origin's rows instead of just
                       the current checkout's
   --yes               Skip the confirmation prompt
@@ -396,8 +399,9 @@ Every run costs real money. --dry-run costs nothing and answers most
 questions; use it first.
 
 The size gate is a COST gate, not a quality gate: past its limits a diff bills
-several times more with a much wider spread, so pr-hero skips it rather than
-guess at the bill. It says nothing about how well a large diff reviews.`;
+several times more with a much wider spread, so pr-hero skips it unattended
+rather than guess at the bill. An interactive run asks first. It says nothing
+about how well a large diff reviews.`;
 
 const VALUE_FLAGS = new Set([
   "--repo",

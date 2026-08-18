@@ -157,6 +157,7 @@ import {
   filterDiffByGlobs,
   type SizeGateVerdict,
   sizeGateConfig,
+  sizeGateDisposition,
   sizeGateLine,
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
@@ -171,6 +172,7 @@ import {
 import {
   decideThreadResolve,
   existingTriageAtHead,
+  findingIdentityForMarkerMatch,
   matchPostedFindingExact,
 } from "./triage-reply";
 import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
@@ -191,7 +193,11 @@ import {
   yellow,
 } from "./ui";
 import { type ResultLinks, renderResult } from "./ui-result";
-import { type ConfirmResult, confirmReview } from "./ui-select";
+import {
+  type ConfirmResult,
+  confirmReview,
+  confirmSizeGate,
+} from "./ui-select";
 import { watchCommand } from "./watch";
 // Pure decision module, not a shell — same category as pr-preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
@@ -629,13 +635,13 @@ async function review(options: CliOptions): Promise<number> {
     return 0;
   }
 
-  // 13 — the size gate, BEFORE the cost band's confirm() and never behind
-  // it. That ordering is the whole feature: the watcher spawns reviews with
-  // --yes, so a gate living inside the confirmation would never fire in the
-  // one place — unattended spend — it exists to protect.
-  if (!sizeGate.ok && !options.force) {
-    throw new CliError(sizeGate.message);
-  }
+  // 13 — the size gate, BEFORE the cost band's confirm() for the unattended
+  // path. The watcher spawns with --yes, so a gate that lived only inside
+  // that confirmation would never fire in the one place — unattended spend
+  // — it exists to protect. An interactive TTY is offered Continue/Cancel
+  // instead of dying: --force stays the unattended hatch, not the only one.
+  const sizeGateChoice = await applySizeGate(sizeGate, options);
+  if (sizeGateChoice === "abort") return 1;
 
   // 14 — the paid one. Local mode can never post (parseArgs rejects --post
   // without --pr), so the "don't post" option is not offered and the choice's
@@ -1028,18 +1034,16 @@ async function reviewPr(
     // purpose: before createPrRunDir, so a skipped PR leaves no run dir
     // behind. That matters beyond tidiness — the watcher counts attempts from
     // run artifacts, so a gate skip cannot consume a poison-PR attempt even
-    // when the watcher was the one that launched this review. And, exactly as
-    // in local mode, this sits BEFORE the cost band's confirm(): the watcher
-    // passes --yes, so a gate behind the prompt would never fire unattended.
+    // when the watcher was the one that launched this review. Unattended
+    // (--yes) still skips with no prompt; an interactive TTY is asked first.
     const sizeGate = evaluateSizeGate(
       parseNumstatFiles(gateNumstat.stdout),
       gateConfig,
     );
-    // On every surviving path the plan's decision block prints the verdict
-    // (and the --force note). A SKIP is the one case that never reaches the
-    // plan — the throw is above the run dir on purpose — so it states itself
-    // here, immediately before dying.
-    if (!sizeGate.ok && !options.force) {
+    // A hard skip (and the interactive prompt) never reach the plan, so the
+    // verdict states itself here. --force falls through and the plan's
+    // decision block prints the same line plus the override note.
+    const sizeGateChoice = await applySizeGate(sizeGate, options, () => {
       log(sizeGateLine(sizeGate));
       // The shell owns BOTH impure decisions here (style flag and width), the
       // same way printDryRun does — this is the one exclusion line that is
@@ -1052,7 +1056,30 @@ async function reviewPr(
       )) {
         log(line);
       }
-      throw new CliError(sizeGate.message);
+    });
+    if (sizeGateChoice === "abort") return 1;
+    const sizeGateConfirmed = !sizeGate.ok && !options.force;
+
+    // Cross-machine TOCTOU: the watcher already skipped fresh pendings at
+    // gather, but a CLI and a watcher can still overlap between that fetch
+    // and this process posting its own pending. --yes (the watcher child)
+    // aborts before createPrRunDir so it consumes no poison-PR attempt.
+    // Interactive continues: a stuck pending must not trap the operator
+    // behind the 90-minute TTL.
+    if (
+      isInFlightCommitStatus(
+        await fetchCommitStatuses(operatorRoot, headSha),
+        Date.now(),
+      )
+    ) {
+      if (options.yes) {
+        log("skip: a pr-hero review is already in-flight on this head");
+        return 0;
+      }
+      log(
+        "warning: a pr-hero review is already in-flight on this head; " +
+          "continuing",
+      );
     }
 
     // Cross-machine TOCTOU: the watcher already skipped fresh pendings at
@@ -1126,6 +1153,7 @@ async function reviewPr(
       sizeGate,
       droppedPaths: effectiveDiff.droppedPaths,
       resolved: { baseSha, diffFromSha, diffPath, parityFires },
+      ...(sizeGateConfirmed ? { sizeGateConfirmed: true } : {}),
     };
     for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
     // What this run will actually publish. `options` is never mutated: the plan
@@ -2386,6 +2414,21 @@ export async function runTriageReplyCommand(input: {
         "`<!-- pr-hero-triage`)",
     );
   }
+  const diffPath = path.join(runDir, "diff.patch");
+  if (!existsSync(diffPath)) {
+    throw new CliUsageError(
+      `${runDir} is missing diff.patch — point --from at a completed ` +
+        'PR-mode run directory ("pr-hero review --pr <n>" writes it)',
+    );
+  }
+  const diffPatch = await Bun.file(diffPath).text();
+  const { identity, findingsLine } = findingIdentityForMarkerMatch({
+    path: finding.path,
+    line: finding.line,
+    claim: finding.claim,
+    proof_refs: finding.proof_refs,
+    diffPatch,
+  });
   const fields: TriageMarkerFields = {
     tag: input.tag,
     headSha: doc.head_sha,
@@ -2398,16 +2441,20 @@ export async function runTriageReplyCommand(input: {
     spawnFn,
   });
   const match = matchPostedFindingExact({
-    finding,
+    finding: identity,
     headSha: doc.head_sha,
     posted,
   });
   if (match.kind === "none") {
+    const lineHint =
+      identity.line === findingsLine
+        ? `${finding.path}:${identity.line}`
+        : `${finding.path}: post line ${identity.line} ` +
+          `(findings.json:${findingsLine})`;
     throw new CliError(
       `no posted <!-- pr-hero-finding marker matches ${input.findingId} ` +
-        `on PR #${prNumber} (path ${finding.path}:${finding.line}, ` +
-        "this head). Bind by marker, never by a GitHub comment id or " +
-        "the nearest line",
+        `on PR #${prNumber} (${lineHint}, head ${doc.head_sha.slice(0, 8)}). ` +
+        "Bind by marker, never by a GitHub comment id or the nearest line",
     );
   }
   if (match.kind === "ambiguous") {
@@ -3014,6 +3061,10 @@ interface PlanDecision {
   sizeGateNote?: string;
   droppedPaths: string[];
   force: boolean;
+  // Interactive override, distinct from --force: the operator confirmed
+  // "review anyway" at the size-gate menu. The plan names which hatch
+  // opened so a log cannot be read as "they passed --force".
+  sizeGateConfirmed?: boolean;
   estimate: ReturnType<typeof estimateCost>;
   hunterCount: number;
   summarizer: boolean;
@@ -3044,6 +3095,16 @@ function decisionLines(
       ...markerRowLines(
         "!",
         "--force given: reviewing anyway.",
+        yellow,
+        styles,
+        width,
+      ),
+    );
+  } else if (!d.sizeGate.ok && d.sizeGateConfirmed) {
+    lines.push(
+      ...markerRowLines(
+        "!",
+        "confirmed: reviewing anyway.",
         yellow,
         styles,
         width,
@@ -3236,6 +3297,10 @@ export interface PrPlanContext {
   sizeGate: SizeGateVerdict;
   sizeGateNote?: string;
   droppedPaths: string[];
+  // Set when this plan follows an interactive "Review anyway" at the
+  // size-gate menu. Distinct from options.force so the decision block can
+  // say "confirmed" rather than lie that --force was passed.
+  sizeGateConfirmed?: boolean;
   // Present only once the fetch has happened: the canonical range and the
   // on-disk diff. A dry-run plan prints GitHub's own counters instead.
   resolved?: {
@@ -3477,6 +3542,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
           : { sizeGateNote: ctx.sizeGateNote }),
         droppedPaths: ctx.droppedPaths,
         force: ctx.options.force,
+        ...(ctx.sizeGateConfirmed === true ? { sizeGateConfirmed: true } : {}),
         estimate: ctx.estimate,
         hunterCount: ctx.hunterCount,
         summarizer: ctx.summary.enabled,
@@ -3690,6 +3756,33 @@ function confirm(
     details,
     styles: styleEnabled(),
   });
+}
+
+// The size-gate override. `onBlock` runs for both the hard skip and the
+// interactive prompt (PR mode prints the SKIP line here, because that path
+// never reaches the plan). Local mode passes nothing: the plan already
+// printed the verdict.
+async function applySizeGate(
+  verdict: SizeGateVerdict,
+  options: Pick<CliOptions, "force" | "yes">,
+  onBlock?: () => void,
+): Promise<"proceed" | "abort"> {
+  const disposition = sizeGateDisposition(verdict, {
+    force: options.force,
+    yes: options.yes,
+    interactive: Boolean(process.stdin.isTTY),
+  });
+  if (disposition.action === "proceed") return "proceed";
+  onBlock?.();
+  if (disposition.action === "skip") {
+    throw new CliError(disposition.message);
+  }
+  const choice = await confirmSizeGate(styleEnabled());
+  if (choice.kind === "cancel") {
+    log("aborted; nothing was spent.");
+    return "abort";
+  }
+  return "proceed";
 }
 
 // The envelope needs ONE model string. With no --model override each agent

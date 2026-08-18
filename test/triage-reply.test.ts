@@ -12,6 +12,7 @@ import { triageMarker } from "../src/triage";
 import {
   decideThreadResolve,
   existingTriageAtHead,
+  findingIdentityForMarkerMatch,
   matchPostedFindingExact,
 } from "../src/triage-reply";
 
@@ -46,6 +47,50 @@ function posted(input: {
     liveLine: input.liveLine,
   };
 }
+
+describe("findingIdentityForMarkerMatch", () => {
+  function diffHunkAt(path: string, start: number, count: number): string {
+    const body = Array.from(
+      { length: count },
+      (_, i) => `+line ${start + i}`,
+    ).join("\n");
+    return (
+      `diff --git a/${path} b/${path}\n` +
+      `index 0000000..1111111 100644\n` +
+      `--- a/${path}\n` +
+      `+++ b/${path}\n` +
+      `@@ -0,0 +${start},${count} @@\n` +
+      `${body}\n`
+    );
+  }
+
+  test("remaps to the post line when findings.json cites off-hunk but proof_refs do not", () => {
+    const path = "src/a.ts";
+    const diffPatch = diffHunkAt(path, 27, 5);
+    const result = findingIdentityForMarkerMatch({
+      path,
+      line: 19,
+      claim: CLAIM_A,
+      proof_refs: [`${path}:27`],
+      diffPatch,
+    });
+    expect(result.findingsLine).toBe(19);
+    expect(result.identity.line).toBe(27);
+  });
+
+  test("keeps findings.json line when it already sits in the hunk", () => {
+    const path = "docs/runbook.md";
+    const diffPatch = diffHunkAt(path, 140, 10);
+    const result = findingIdentityForMarkerMatch({
+      path,
+      line: 144,
+      claim: CLAIM_A,
+      diffPatch,
+    });
+    expect(result.identity.line).toBe(144);
+    expect(result.findingsLine).toBe(144);
+  });
+});
 
 describe("matchPostedFindingExact", () => {
   const finding = { path: "docs/runbook.md", line: 144, claim: CLAIM_A };

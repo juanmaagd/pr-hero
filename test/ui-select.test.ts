@@ -3,6 +3,7 @@ import {
   type ConfirmIo,
   type ConfirmSpec,
   confirmReview,
+  confirmSizeGate,
   costHint,
   type KeyReader,
   menuOptions,
@@ -10,6 +11,8 @@ import {
   parseKey,
   renderMenu,
   runConfirm,
+  runSizeGateConfirm,
+  sizeGateMenuOptions,
   splitKeys,
 } from "../src/ui-select";
 
@@ -348,6 +351,112 @@ describe("confirmReview", () => {
     );
     // The load-bearing guarantee: a throw mid-menu never strands a terminal
     // in raw mode.
+    expect(closed).toBe(1);
+  });
+});
+
+describe("sizeGateMenuOptions", () => {
+  test("is continue or cancel, nothing else", () => {
+    expect(sizeGateMenuOptions().map((o) => o.label)).toEqual([
+      "Review anyway",
+      "Cancel",
+    ]);
+  });
+});
+
+describe("runSizeGateConfirm — the menu", () => {
+  test("enter on Review anyway proceeds", async () => {
+    const result = await runSizeGateConfirm(
+      false,
+      fakeReader(["\r"]),
+      recorder(),
+    );
+    expect(result).toEqual({ kind: "proceed" });
+  });
+
+  test("y and r proceed; n, c, q cancel", async () => {
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["y"]), recorder()),
+    ).toEqual({ kind: "proceed" });
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["r"]), recorder()),
+    ).toEqual({ kind: "proceed" });
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["n"]), recorder()),
+    ).toEqual({ kind: "cancel" });
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["c"]), recorder()),
+    ).toEqual({ kind: "cancel" });
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["q"]), recorder()),
+    ).toEqual({ kind: "cancel" });
+  });
+
+  test("arrow up wraps to Cancel", async () => {
+    const result = await runSizeGateConfirm(
+      false,
+      fakeReader([`${ESC}[A`, "\r"]),
+      recorder(),
+    );
+    expect(result).toEqual({ kind: "cancel" });
+  });
+
+  test("ctrl-c cancels loudly", async () => {
+    const io = recorder();
+    const result = await runSizeGateConfirm(false, fakeReader(["\x03"]), io);
+    expect(result).toEqual({ kind: "cancel" });
+    expect(io.text()).toContain("^C");
+  });
+
+  test("an unanswered stream cancels rather than spending", async () => {
+    const result = await runSizeGateConfirm(
+      false,
+      fakeReader([undefined]),
+      recorder(),
+    );
+    expect(result).toEqual({ kind: "cancel" });
+  });
+
+  test("the plain path is [y/N], and anything but yes cancels", async () => {
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["yes"], false), recorder()),
+    ).toEqual({ kind: "proceed" });
+    expect(
+      await runSizeGateConfirm(false, fakeReader(["y"], false), recorder()),
+    ).toEqual({ kind: "proceed" });
+    expect(
+      await runSizeGateConfirm(false, fakeReader([""], false), recorder()),
+    ).toEqual({ kind: "cancel" });
+    expect(
+      await runSizeGateConfirm(
+        false,
+        fakeReader([undefined], false),
+        recorder(),
+      ),
+    ).toEqual({ kind: "cancel" });
+  });
+
+  test("styles off means not one escape byte in the frame", async () => {
+    const io = recorder();
+    await runSizeGateConfirm(false, fakeReader(["y"]), io);
+    expect(io.text()).not.toContain(ESC);
+    expect(io.text()).toContain("Review anyway");
+  });
+});
+
+describe("confirmSizeGate", () => {
+  test("closes the reader on the way out, including on throw", async () => {
+    let closed = 0;
+    const reader: KeyReader = {
+      raw: true,
+      read: () => Promise.reject(new Error("stdin exploded")),
+      close: () => {
+        closed++;
+      },
+    };
+    await expect(confirmSizeGate(false, reader, recorder())).rejects.toThrow(
+      "stdin exploded",
+    );
     expect(closed).toBe(1);
   });
 });

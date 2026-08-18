@@ -11,6 +11,7 @@ import {
   evaluateSizeGateAggregate,
   filterDiffByGlobs,
   sizeGateConfig,
+  sizeGateDisposition,
   sizeGateLine,
 } from "../src/size-gate";
 
@@ -223,6 +224,72 @@ describe("evaluateSizeGateAggregate", () => {
     expect(
       evaluateSizeGateAggregate(stat, { ...CONFIG, maxChangedFiles: 0 }).ok,
     ).toBe(true);
+  });
+});
+
+describe("sizeGateDisposition", () => {
+  const over = evaluateSizeGate([file("src/a.ts", 200)], CONFIG);
+  const under = evaluateSizeGate([file("src/a.ts", 10)], CONFIG);
+
+  test("under the limit proceeds even without force", () => {
+    expect(
+      sizeGateDisposition(under, {
+        force: false,
+        yes: false,
+        interactive: true,
+      }),
+    ).toEqual({ action: "proceed" });
+  });
+
+  test("--force proceeds even over the limit", () => {
+    expect(
+      sizeGateDisposition(over, {
+        force: true,
+        yes: false,
+        interactive: false,
+      }),
+    ).toEqual({ action: "proceed" });
+  });
+
+  test("--yes skips with no prompt — that is the watcher", () => {
+    const d = sizeGateDisposition(over, {
+      force: false,
+      yes: true,
+      interactive: true,
+    });
+    expect(d.action).toBe("skip");
+    if (d.action !== "skip" || over.ok) throw new Error("expected a skip");
+    expect(d.message).toBe(over.message);
+  });
+
+  test("non-TTY skips even without --yes", () => {
+    expect(
+      sizeGateDisposition(over, {
+        force: false,
+        yes: false,
+        interactive: false,
+      }).action,
+    ).toBe("skip");
+  });
+
+  test("an interactive TTY is prompted instead of dying", () => {
+    expect(
+      sizeGateDisposition(over, {
+        force: false,
+        yes: false,
+        interactive: true,
+      }),
+    ).toEqual({ action: "prompt" });
+  });
+
+  test("--force wins over --yes: the cost band is the other gate", () => {
+    expect(
+      sizeGateDisposition(over, {
+        force: true,
+        yes: true,
+        interactive: false,
+      }),
+    ).toEqual({ action: "proceed" });
   });
 });
 
