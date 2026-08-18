@@ -54,8 +54,10 @@ predates that correction and is wrong.
 Decided by Juanma the same day: the two roadmaps stay, but they stop being the condition for shipping.
 **Amended the same evening:** launch is not only distribution (npm / TUI / Action). It also includes the
 **product fundamentals** a stranger would hit on the second push — re-review, and everything that
-unblocks it. Rubric: if a stranger's second push, a CI run, or an install would lie, fail mute, or be
-impossible → before launch. If it only makes reviews better or prettier → after.
+unblocks it — plus the canonical product store (`docs/observability-canonical-store.md`): W4's
+metrics sidecar is not enough to ship. Rubric: if a stranger's second push, a CI run, or an install
+would lie, fail mute, or be impossible → before launch. If it only makes reviews better or prettier
+→ after.
 
 The engine already does the *first* review on musive (local, `--pr --post`, watcher, triage, size gate)
 as an **assistant, not a merge gate**. Claude Code only — no OpenCode, no model mix.
@@ -65,7 +67,7 @@ as an **assistant, not a merge gate**. Claude Code only — no OpenCode, no mode
 | Layer | What it is | Blocks launch? |
 |---|---|---|
 | **Floor** | Phase A closed + Phase B minus item 7 (and item 8's leftover polish) | already done |
-| **Fundamentals** | finish DoorDash M5→M6, C4, item 7, C5 | **yes** |
+| **Fundamentals** | finish DoorDash M5→M6, C4, item 7, C5, canonical store | **yes** |
 | **Distribution** | the three pillars below | **yes** |
 | **After** | C1b, C2, C3, C6, C8–C10, Phase D, rest of E, scout-as-default | no |
 
@@ -86,6 +88,16 @@ item 7 is unchanged — do not unblock by rewriting it.
    until the splice conditions on that entry hold.
 5. **C5** — global config with per-repo override. Also the load-bearing half of distribution pillar 1
    (bundled `agents_dir` as a person-key). A repo still cannot subscribe itself to extra spend.
+6. **Canonical product store** — `docs/observability-canonical-store.md`. W4's `metrics.db` is a
+   metrics sidecar; launch needs one product database. Spec, not a restatement: SQLite at
+   `~/.prhero/prhero.db` is the source of truth (runs, full findings, proof refs, hop trails, debug
+   rows, agent usage, comparison); JSON/report files become regenerable exports; a small local query
+   server is the only normal database owner (CLI, later dashboard, and a read-only MCP agent share the
+   same typed routes; no caller opens SQLite or sends arbitrary SQL); a review is not persisted until
+   that transaction commits (replaces fail-soft ingest); GC may collect worktrees and exports, never
+   canonical rows; mandatory idempotent backfill of historical `findings.json`, including pre-W4 runs.
+   Independent of the DoorDash gate — can run in parallel with M5–M6. Does **not** include the web
+   dashboard, remote hosting, or live-pipeline changes (those stay after, or out of this refactor).
 
 ### Three distribution pillars (after fundamentals, or in parallel once M5–M6 are in flight)
 
@@ -130,6 +142,8 @@ Fundamentals:
 - [ ] item 7 is live: a second push verifies (or honestly says unconfirmed), does not claim
       `resolved` from absence, and the PR shows the current state rather than an archaeology
 - [ ] C5: person-keys default globally, repo-keys stay in `.prhero/`
+- [ ] Canonical store (`docs/observability-canonical-store.md`): `prhero.db` is source of truth,
+      JSON is derived, local server owns SQLite, backfill reported, GC does not delete rows
 
 Distribution — on a machine that is not this one:
 
@@ -145,9 +159,10 @@ Distribution — on a machine that is not this one:
 ### Explicitly after launch
 
 C1b hunter-emitted fingerprint. C2 schema v1.1. C3 resume. C6 learned-knowledge. C8–C10. Scout as
-**default** (that is M6's decision, not a ship checkbox). OpenCode / multi-model / D1–D3. Web dashboard.
-Live per-step status. Fixer loop. Homebrew (nice, not blocking). Item 8 leftovers (findings browser,
-progress tree). Required status check. Cancelling Greptile.
+**default** (that is M6's decision, not a ship checkbox). OpenCode / multi-model / D1–D3. Web dashboard
+(consumes the canonical store's routes; the store itself is a launch fundamental). Live per-step
+status. Fixer loop. Homebrew (nice, not blocking). Item 8 leftovers (findings browser, progress tree).
+Required status check. Cancelling Greptile.
 
 ## Phase A — Graduate Phase 0 (the bar: ≥80% catch, ≤20% FP)
 
@@ -471,8 +486,9 @@ Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it
 > and touch the DoorDash track nowhere. Only C7 (the scout *stage*) is the experiment; scout-as-default
 > is M6's call.
 >
-> If the session is shipping: THE LAUNCH LINE, fundamentals first — right now that is **M5**.
-> Distribution pillars can proceed in parallel once M5–M6 are in flight; item 7 cannot.
+> If the session is shipping: THE LAUNCH LINE, fundamentals first — right now that is **M5** or the
+> **canonical store** (they do not gate each other). Distribution pillars can proceed in parallel once
+> M5–M6 are in flight; item 7 cannot.
 >
 > Before anything: item 8's entry below still says `IN PROGRESS 2026-08-12 (branch feat/terminal-ui)`.
 > All three claims are false — the four `ui-*` modules are on `main`, `renderResult` is wired at
@@ -1569,9 +1585,10 @@ like convoy uses its Codex quota. OpenRouter (paid per token) only for diversity
 
 **Split 2026-08-18 (THE LAUNCH LINE).** The launch slice of this phase — npm, guided `init`, CLI/TUI
 for existing knobs, thin GitHub Action, Claude-only — moved up and is specified at the top of this
-file, together with the product fundamentals (M5→M6, C4, item 7, C5). What remains here is post-launch
-product: the web dashboard, convoy-style live per-step, the fixer loop, Homebrew, and the
-TUI-as-model-router once Phase D exists.
+file, together with the product fundamentals (M5→M6, C4, item 7, C5, canonical store). What remains
+here is post-launch product: the web dashboard (it reads the store's routes; it does not own a second
+database), convoy-style live per-step, the fixer loop, Homebrew, and the TUI-as-model-router once
+Phase D exists.
 
 From the productization vision + convoy's operational layer: `.prhero/` project config (pipelines as
 YAML/TS data — the ReviewSpec already is), GitHub Actions runner mode (claude-code-action +
