@@ -351,3 +351,108 @@ export function renderFloorTable(
   if (byId.size !== cases.length) lines.push("WARNING: duplicate case ids");
   return lines;
 }
+
+// ---------------------------------------------------------------------------
+// The clean pair (§3.11), which is NOT optional garnish.
+//
+// The floor test only looks at known-bad PRs, so nothing in it can see the
+// failure a "bias, never filter" design is most likely to produce: hunters
+// chasing spurious leads into junk findings on code where the control is
+// quiet. M4's restraint gate measured the SCOUT's lead volume, not that
+// downstream effect, and Tier 2's precision guard runs only on known-bad PRs,
+// so neither instrument covers it either.
+//
+// §3.11's read is one number — *does the scout arm produce MORE findings than
+// the control on a PR where the control produces few?* — and it is the one
+// place this project sanctions a raw count, because the comparison is between
+// arms on the same PR rather than an absolute claim about quality. C1's rule
+// still applies to how it is READ, so the distinct-root-cause count is
+// reported beside the raw one: one systemic defect reported at N call sites is
+// one finding fanned out, and reading it as N is exactly how a correct review
+// scores as a precision collapse.
+// ---------------------------------------------------------------------------
+
+export interface CleanRun {
+  arm: FloorArm;
+  pr: number;
+  findings: number;
+  // Findings the refuter corroborated — the ones that would actually reach a
+  // human as blocking.
+  corroborated: number;
+  // `debug.root_causes.distinct_root_causes` when the artifact carries it.
+  // Absent on runs that predate the clusterer, and absent is not zero.
+  rootCauses?: number;
+}
+
+export interface CleanArmStat {
+  runs: number;
+  findings: number[];
+  corroborated: number[];
+  rootCauses: Array<number | undefined>;
+}
+
+export interface CleanTally {
+  pr: number;
+  control: CleanArmStat;
+  scout: CleanArmStat;
+}
+
+function cleanArmStat(runs: CleanRun[]): CleanArmStat {
+  return {
+    runs: runs.length,
+    findings: runs.map((r) => r.findings),
+    corroborated: runs.map((r) => r.corroborated),
+    rootCauses: runs.map((r) => r.rootCauses),
+  };
+}
+
+export function tallyCleanPrs(runs: CleanRun[], prs: number[]): CleanTally[] {
+  return prs.map((pr) => {
+    const mine = runs.filter((r) => r.pr === pr);
+    return {
+      pr,
+      control: cleanArmStat(mine.filter((r) => r.arm === "control")),
+      scout: cleanArmStat(mine.filter((r) => r.arm === "scout")),
+    };
+  });
+}
+
+// Every replicate is listed, never averaged into one number. §1.3 measured six
+// of eight same-head replicate pairs MOVING, with deltas as large as the whole
+// effect the scout is expected to produce — so a mean over two runs would hide
+// exactly the variance that decides whether any of this is readable.
+function cleanCell(stat: CleanArmStat): string {
+  if (stat.runs === 0) return "not run";
+  return stat.findings
+    .map((n, i) => {
+      const corroborated = stat.corroborated[i] ?? 0;
+      const causes = stat.rootCauses[i];
+      return `${n} (${corroborated} corr${
+        causes === undefined
+          ? ""
+          : `, ${causes} cause${causes === 1 ? "" : "s"}`
+      })`;
+    })
+    .join(" · ");
+}
+
+export function renderCleanTable(tallies: CleanTally[]): string[] {
+  const lines = [
+    "| PR | control | scout |",
+    "|---|---|---|",
+    ...tallies.map(
+      (t) => `| ${t.pr} | ${cleanCell(t.control)} | ${cleanCell(t.scout)} |`,
+    ),
+    "",
+    "Findings per run, one entry per replicate, never averaged (§1.3: six of " +
+      "eight same-head replicate pairs MOVED, by as much as the whole effect " +
+      "the scout is expected to produce). `corr` is refuter-corroborated; " +
+      "`causes` is distinct root causes, because one systemic defect at N call " +
+      "sites is one finding fanned out (C1).",
+    "The question here is RELATIVE and between arms on the same PR: does the " +
+      "scout arm produce MORE than the control where the control is quiet? It " +
+      "is not a claim that these PRs are defect-free — their `prhero_only` " +
+      "rows were never triaged (§2.4).",
+  ];
+  return lines;
+}

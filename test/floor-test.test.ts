@@ -16,10 +16,12 @@ import {
   type FloorCase,
   FloorCaseError,
   parseFloorCases,
+  renderCleanTable,
   renderFloorTable,
   scoreRun,
   scoutFailed,
   tallyArm,
+  tallyCleanPrs,
 } from "../src/floor-test";
 
 const CASES_PATH = path.join(
@@ -348,6 +350,68 @@ describe("renderFloorTable", () => {
     expect(renderFloorTable(cases, empty, empty).join("\n")).not.toContain(
       "\x1b",
     );
+  });
+});
+
+describe("the clean pair", () => {
+  const run = (
+    arm: "scout" | "control",
+    findings: number,
+    corroborated: number,
+    rootCauses?: number,
+  ) => ({
+    arm,
+    pr: 1720,
+    findings,
+    corroborated,
+    ...(rootCauses === undefined ? {} : { rootCauses }),
+  });
+
+  test("splits by arm and keeps every replicate", () => {
+    const [tally] = tallyCleanPrs(
+      [
+        run("control", 2, 1, 1),
+        run("control", 3, 1, 2),
+        run("scout", 5, 2, 3),
+        { ...run("scout", 9, 9, 9), pr: 999 },
+      ],
+      [1720],
+    );
+    expect(tally?.control.findings).toEqual([2, 3]);
+    expect(tally?.scout.findings).toEqual([5]);
+    // Another PR's runs must not leak in.
+    expect(tally?.scout.runs).toBe(1);
+  });
+
+  test("renders per replicate, never a mean", () => {
+    // §1.3 measured six of eight same-head replicate pairs MOVING, by as much
+    // as the whole effect the scout is expected to produce — a mean over two
+    // runs would hide exactly the variance that decides readability.
+    const text = renderCleanTable(
+      tallyCleanPrs([run("control", 2, 1, 1), run("control", 7, 3, 2)], [1720]),
+    ).join("\n");
+    expect(text).toContain(
+      "| 1720 | 2 (1 corr, 1 cause) · 7 (3 corr, 2 causes) | not run |",
+    );
+    expect(text).not.toContain("mean");
+    // The caveat travels with the number: these PRs were never triaged.
+    expect(text).toContain("not a claim that these PRs are defect-free");
+  });
+
+  test("a run with no root-cause block says nothing rather than zero", () => {
+    // Absent is not zero: a run predating the clusterer has no opinion, and
+    // printing 0 causes beside 4 findings would invent a precision collapse.
+    const text = renderCleanTable(
+      tallyCleanPrs([run("scout", 4, 2)], [1720]),
+    ).join("\n");
+    expect(text).toContain("4 (2 corr)");
+    expect(text).not.toContain("0 causes");
+  });
+
+  test("a PR nobody ran is visible, not dropped", () => {
+    const text = renderCleanTable(tallyCleanPrs([], [1720, 1721])).join("\n");
+    expect(text).toContain("| 1720 | not run | not run |");
+    expect(text).toContain("| 1721 | not run | not run |");
   });
 });
 

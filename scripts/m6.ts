@@ -33,13 +33,16 @@
 import path from "node:path";
 import {
   armOfRun,
+  type CleanRun,
   type FloorCase,
   parseFloorCases,
+  renderCleanTable,
   renderFloorTable,
   type ScoredRun,
   scoreRun,
   scoutFailed,
   tallyArm,
+  tallyCleanPrs,
 } from "../src/floor-test";
 import { resolvePrTarget } from "../src/pr-preflight";
 import {
@@ -345,7 +348,24 @@ if (mode === "run") {
         }
         console.error(`\n=== ${label} -> ${dir}`);
         const code = await review(pr, scout, r);
-        if (code !== 0) failures.push(`${label}: exit ${code}`);
+        if (code !== 0) {
+          failures.push(`${label}: exit ${code}`);
+          continue;
+        }
+        // EXIT 0 IS NOT PROOF A REVIEW RAN, and the pilot proved it: a stale
+        // in-flight commit status left by an aborted run makes `--yes` print
+        // "skip: a pr-hero review is already in-flight on this head" and
+        // return 0. So does an empty effective diff, and so does a size-gate
+        // skip. Every one of those is a HOLE in the arm — a case with one
+        // fewer replicate than the table will claim — and every one of them
+        // looks like success to an exit code. The artifact is the proof.
+        if (!(await Bun.file(path.join(dir, "findings.json")).exists())) {
+          failures.push(
+            `${label}: exited 0 but wrote no findings.json — the review was ` +
+              "SKIPPED (stale in-flight status, empty diff, or the size gate), " +
+              "and this replicate is missing from the arm",
+          );
+        }
       }
     }
   }
@@ -362,6 +382,14 @@ if (mode === "run") {
   console.error(
     "Now: bun run scripts/m6.ts score — and re-run any excluded scout-arm run " +
       "it names (§3.6) before reading the table.",
+  );
+  console.error(
+    "NOTE: every review posts a `pr-hero` commit status (pending, then " +
+      "success/error) on the PR head, as the operator's own GitHub account. " +
+      "That is the engine's normal production behaviour, not something the " +
+      "harness adds — but on merged PRs it is a visible mark on someone " +
+      "else's closed work, and an ABORTED run leaves a `pending` that blocks " +
+      "the next attempt on that head for 90 minutes.",
   );
   process.exit(failures.length === 0 ? 0 : 1);
 }
@@ -393,6 +421,7 @@ for await (const entry of new Bun.Glob("*/").scan({
 }
 dirs.sort();
 const scored: ScoredRun[] = [];
+const cleanRuns: CleanRun[] = [];
 const excluded: string[] = [];
 const unreadable: string[] = [];
 for (const dir of dirs) {
@@ -416,12 +445,35 @@ for (const dir of dirs) {
     excluded.push(dir);
     continue;
   }
-  const doc = (await docFile.json()) as { pr: number; findings: [] };
+  const doc = (await docFile.json()) as {
+    pr: number;
+    findings: Array<{ refuter_verdict?: string }>;
+    debug?: { root_causes?: { distinct_root_causes?: number } };
+  };
   if (doc.pr === undefined) {
     unreadable.push(`${dir}: findings.json carries no pr`);
     continue;
   }
-  scored.push({ arm, scores: scoreRun(doc, cases) });
+  if (cleanPrs.includes(doc.pr)) {
+    const causes = doc.debug?.root_causes?.distinct_root_causes;
+    cleanRuns.push({
+      arm,
+      pr: doc.pr,
+      findings: doc.findings.length,
+      corroborated: doc.findings.filter(
+        (f) => f.refuter_verdict === "corroborated",
+      ).length,
+      ...(typeof causes === "number" ? { rootCauses: causes } : {}),
+    });
+    continue;
+  }
+  scored.push({
+    arm,
+    scores: scoreRun(
+      doc as unknown as { pr: number; findings: never[] },
+      cases,
+    ),
+  });
 }
 
 console.log(
@@ -441,7 +493,16 @@ if (excluded.length > 0) {
   );
 }
 for (const problem of unreadable) console.log(`skipped ${problem}`);
-console.log(
-  "The clean pair is NOT in this table — it is read as a finding-count " +
-    "comparison per arm, not as cases. Read it from the run dirs directly.",
-);
+if (cleanRuns.length > 0) {
+  console.log("");
+  console.log("## The clean pair (§3.11)");
+  console.log("");
+  console.log(renderCleanTable(tallyCleanPrs(cleanRuns, cleanPrs)).join("\n"));
+} else if (cleanPrs.length > 0) {
+  console.log("");
+  console.log(
+    `no clean-pair runs found for ${cleanPrs.join(", ")} — the floor test ` +
+      "alone leaves pipeline-level restraint unmeasured, which is the one " +
+      "thing a bias-never-filter design is most likely to get wrong (§3.11).",
+  );
+}
