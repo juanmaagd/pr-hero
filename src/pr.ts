@@ -7,7 +7,8 @@
 //
 // ROADMAP B6 exception, spelled out because it changes the file's own
 // header claim: the review-submission functions below (`postPrReview`,
-// `postIssueComment`, `fetchPrReviewComments`, `fetchPostedFindingComments`)
+// `postIssueComment`, `fetchPrReviewComments`, `fetchPostedFindingComments`,
+// `postCommitStatus`, `fetchCommitStatuses`)
 // ARE offline-tested, in test/pr.test.ts, via an injectable `spawnFn` on the
 // internal `gh()` helper — the 422 recovery path is exactly the kind of
 // branch that must never rest on "we'll catch it live".
@@ -32,13 +33,17 @@ import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
   buildComparisonJson,
+  COMMIT_STATUS_CONTEXT,
+  COMMIT_STATUS_TIMEOUT_MS,
+  type CommitStatusFact,
+  type CommitStatusRequest,
   decideWorktree,
   findMarkedCommentId,
   parseFindingMarker,
   type WorktreeDecision,
   worktreeDirty,
 } from "./pr-preflight";
-import { CliError } from "./preflight";
+import { CliError, isFullCommitId } from "./preflight";
 import { renderInlineComment, renderIssueFindingComment } from "./report";
 
 // Same helper as cli.ts's git, duplicated rather than shared so neither
@@ -75,6 +80,7 @@ async function gh(
   args: string[],
   stdin?: string,
   spawnFn?: typeof Bun.spawn,
+  timeoutMs?: number,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   const spawn = spawnFn ?? Bun.spawn;
   // A missing gh must name itself: Bun.spawn's error for a binary that is
@@ -98,6 +104,7 @@ async function gh(
     ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
     stdout: "pipe",
     stderr: "pipe",
+    ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -271,6 +278,105 @@ export async function ghRepoWebUrl(
     return url === "" ? undefined : url;
   } catch {
     return undefined;
+  }
+}
+
+// In-flight / completed signal on the head SHA. Fail-loud here: the CLI
+// catches and warns, because a missing `repo:status` scope must not abort a
+// review that already cost hunter money. Context is COMMIT_STATUS_CONTEXT
+// so the watcher can find this row among CI statuses.
+export async function postCommitStatus(
+  operatorRoot: string,
+  sha: string,
+  status: CommitStatusRequest,
+  spawnFn?: typeof Bun.spawn,
+): Promise<void> {
+  if (!isFullCommitId(sha)) {
+    throw new CliError(
+      `commit status: head sha is not a full 40-char id: ${sha.slice(0, 16)}`,
+    );
+  }
+  const args = [
+    "api",
+    "--method",
+    "POST",
+    `repos/{owner}/{repo}/statuses/${sha}`,
+    "-f",
+    `state=${status.state}`,
+    "-f",
+    `context=${COMMIT_STATUS_CONTEXT}`,
+    "-f",
+    `description=${status.description}`,
+  ];
+  if (status.targetUrl !== undefined) {
+    args.push("-f", `target_url=${status.targetUrl}`);
+  }
+  // Two attempts: a single blip on the completing POST is exactly how a
+  // yellow pending gets stuck on a finished review.
+  let lastStderr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await gh(
+      operatorRoot,
+      args,
+      undefined,
+      spawnFn,
+      COMMIT_STATUS_TIMEOUT_MS,
+    );
+    if (result.ok) return;
+    lastStderr = result.stderr.trim();
+  }
+  throw new CliError(
+    `gh api (commit status ${status.state}) failed: ${lastStderr}`,
+  );
+}
+
+// Combined status (singular `/status`), not the paginated list (`/statuses`).
+// The list interleaves every CI context newest-first, so a busy SHA can bury
+// `pr-hero` past page 1 and the watcher would miss an in-flight pending.
+// Combined returns the latest row per context in one shot.
+//
+// Never throws: a 403, a hung gh (timeout), or garbage jq must not take
+// the watch tick down. Unreadable reads as not in-flight.
+export async function fetchCommitStatuses(
+  operatorRoot: string,
+  sha: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<CommitStatusFact[]> {
+  if (!isFullCommitId(sha)) return [];
+  try {
+    const result = await gh(
+      operatorRoot,
+      [
+        "api",
+        `repos/{owner}/{repo}/commits/${sha}/status`,
+        "--jq",
+        ".statuses[]? | {state: .state, context: .context, created_at: .created_at}",
+      ],
+      undefined,
+      options?.spawnFn,
+      COMMIT_STATUS_TIMEOUT_MS,
+    );
+    if (!result.ok) return [];
+    const statuses: CommitStatusFact[] = [];
+    for (const line of result.stdout.split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        const parsed = JSON.parse(line) as CommitStatusFact;
+        if (
+          typeof parsed.state === "string" &&
+          typeof parsed.context === "string" &&
+          typeof parsed.created_at === "string"
+        ) {
+          statuses.push(parsed);
+        }
+      } catch {
+        // Drop the bad line; keep whatever parsed. One garbage object must
+        // not hide a real pending on the next line.
+      }
+    }
+    return statuses;
+  } catch {
+    return [];
   }
 }
 

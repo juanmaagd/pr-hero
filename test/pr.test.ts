@@ -23,16 +23,23 @@ import { describe, expect, test } from "bun:test";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
 import {
+  fetchCommitStatuses,
   fetchPostedFindingComments,
   fetchPrReviewComments,
   ghPrHeadSha,
+  postCommitStatus,
   postIssueComment,
   postIssueTriageComment,
   postPrReview,
   postReviewCommentReply,
   resolveReviewThreadForComment,
 } from "../src/pr";
-import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+import {
+  COMMIT_STATUS_CONTEXT,
+  commitStatusRequest,
+  findingMarker,
+  PR_FINDING_MARKER_PREFIX,
+} from "../src/pr-preflight";
 import { renderIssueFindingComment } from "../src/report";
 
 // ---------------------------------------------------------------------------
@@ -995,5 +1002,189 @@ describe("resolveReviewThreadForComment", () => {
         spawnFn,
       }),
     ).resolves.toBe("not-found");
+  });
+});
+
+describe("postCommitStatus", () => {
+  test("POSTs state, context, description and target_url as -f fields, not argv prose", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["statuses", HEAD],
+        response: { stdout: "{}", exitCode: 0 },
+      },
+    ]);
+    const request = commitStatusRequest({
+      phase: "pending",
+      posted: false,
+      targetUrl: "https://github.com/org/repo/pull/7",
+    });
+    await postCommitStatus(OPERATOR_ROOT, HEAD, request, spawnFn);
+    expect(calls).toHaveLength(1);
+    const argv = calls[0]?.argv ?? [];
+    expect(argv).toContain("--method");
+    expect(argv).toContain("POST");
+    expect(argv.join(" ")).toContain(`repos/{owner}/{repo}/statuses/${HEAD}`);
+    expect(argv).toContain(`state=${request.state}`);
+    expect(argv).toContain(`context=${COMMIT_STATUS_CONTEXT}`);
+    expect(argv).toContain(`description=${request.description}`);
+    expect(argv).toContain(`target_url=${request.targetUrl}`);
+    expect(calls[0]?.stdin).toBeUndefined();
+  });
+
+  test("omits target_url when the request has none", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["statuses", HEAD],
+        response: { stdout: "{}", exitCode: 0 },
+      },
+    ]);
+    await postCommitStatus(
+      OPERATOR_ROOT,
+      HEAD,
+      commitStatusRequest({
+        phase: "success",
+        posted: false,
+        targetUrl: undefined,
+      }),
+      spawnFn,
+    );
+    expect(calls[0]?.argv.join(" ") ?? "").not.toContain("target_url=");
+  });
+
+  test("a non-2xx is a CliError naming the state", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["statuses", HEAD],
+        response: {
+          stdout: "",
+          stderr: "missing permission (HTTP 403)",
+          exitCode: 1,
+        },
+      },
+    ]);
+    await expect(
+      postCommitStatus(
+        OPERATOR_ROOT,
+        HEAD,
+        commitStatusRequest({
+          phase: "pending",
+          posted: false,
+          targetUrl: undefined,
+        }),
+        spawnFn,
+      ),
+    ).rejects.toThrow(/commit status pending/);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("an abbreviated sha never reaches gh", async () => {
+    const { spawnFn, calls } = makeFakeGh([]);
+    await expect(
+      postCommitStatus(
+        OPERATOR_ROOT,
+        "abc",
+        commitStatusRequest({
+          phase: "pending",
+          posted: false,
+          targetUrl: undefined,
+        }),
+        spawnFn,
+      ),
+    ).rejects.toThrow(/full 40-char id/);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("fetchCommitStatuses", () => {
+  test("reads the combined status endpoint, latest per context, no pagination", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: [`commits/${HEAD}/status`],
+        response: {
+          stdout: ndjson([
+            {
+              state: "pending",
+              context: COMMIT_STATUS_CONTEXT,
+              created_at: "2026-08-18T16:30:00Z",
+            },
+            {
+              state: "success",
+              context: "ci",
+              created_at: "2026-08-18T16:00:00Z",
+            },
+          ]),
+        },
+      },
+    ]);
+    const statuses = await fetchCommitStatuses(OPERATOR_ROOT, HEAD, {
+      spawnFn,
+    });
+    const argv = calls[0]?.argv ?? [];
+    expect(argv.join(" ")).toContain(`commits/${HEAD}/status`);
+    expect(argv).not.toContain("--paginate");
+    expect(statuses).toEqual([
+      {
+        state: "pending",
+        context: COMMIT_STATUS_CONTEXT,
+        created_at: "2026-08-18T16:30:00Z",
+      },
+      {
+        state: "success",
+        context: "ci",
+        created_at: "2026-08-18T16:00:00Z",
+      },
+    ]);
+  });
+
+  test("a failed fetch is empty, not a throw", async () => {
+    const { spawnFn } = makeFakeGh([
+      {
+        match: [`commits/${HEAD}/status`],
+        response: {
+          stdout: "",
+          stderr: "Resource not accessible (HTTP 403)",
+          exitCode: 1,
+        },
+      },
+    ]);
+    await expect(
+      fetchCommitStatuses(OPERATOR_ROOT, HEAD, { spawnFn }),
+    ).resolves.toEqual([]);
+  });
+
+  test("a garbage line is dropped, a well-formed neighbour is kept", async () => {
+    const { spawnFn } = makeFakeGh([
+      {
+        match: [`commits/${HEAD}/status`],
+        response: {
+          stdout:
+            "not-json\n" +
+            ndjson([
+              {
+                state: "pending",
+                context: COMMIT_STATUS_CONTEXT,
+                created_at: "2026-08-18T16:30:00Z",
+              },
+            ]),
+        },
+      },
+    ]);
+    await expect(
+      fetchCommitStatuses(OPERATOR_ROOT, HEAD, { spawnFn }),
+    ).resolves.toEqual([
+      {
+        state: "pending",
+        context: COMMIT_STATUS_CONTEXT,
+        created_at: "2026-08-18T16:30:00Z",
+      },
+    ]);
+  });
+
+  test("an abbreviated sha is empty, not a throw", async () => {
+    const { spawnFn, calls } = makeFakeGh([]);
+    await expect(
+      fetchCommitStatuses(OPERATOR_ROOT, "abc", { spawnFn }),
+    ).resolves.toEqual([]);
+    expect(calls).toHaveLength(0);
   });
 });

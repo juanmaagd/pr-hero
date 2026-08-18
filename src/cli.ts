@@ -69,6 +69,7 @@ import {
 import {
   type ComparisonOutcome,
   ensureWorktree,
+  fetchCommitStatuses,
   fetchPostedFindingComments,
   fetchPrComments,
   fetchPrRefs,
@@ -78,6 +79,7 @@ import {
   ghPrView,
   ghRepoWebUrl,
   initCodegraphIndex,
+  postCommitStatus,
   postIssueTriageComment,
   postPrComment,
   postPrReview,
@@ -87,9 +89,13 @@ import {
 } from "./pr";
 import {
   claimFingerprint,
+  commitStatusCompletion,
+  commitStatusRequest,
   findMarkedCommentId,
+  isInFlightCommitStatus,
   type PrTarget,
   parseFindingMarker,
+  prHtmlUrl,
   prRunDirCandidate,
   resolveCurrentPrNumber,
   resolvePrTarget,
@@ -795,6 +801,20 @@ async function review(options: CliOptions): Promise<number> {
 //     under ~/.prhero/repos/<id>/worktrees/pr-<n>. The pipeline's cwd, the
 //     tree the codegraph checks run against, and a root the run dir must
 //     stay outside of.
+async function tryPublishCommitStatus(
+  operatorRoot: string,
+  sha: string,
+  request: ReturnType<typeof commitStatusRequest>,
+): Promise<void> {
+  try {
+    await postCommitStatus(operatorRoot, sha, request);
+  } catch (error) {
+    log(
+      `warning: commit status (${request.state}): ${(error as Error).message}`,
+    );
+  }
+}
+
 async function reviewPr(
   options: CliOptions,
   prArg: number | "current",
@@ -1035,6 +1055,28 @@ async function reviewPr(
       throw new CliError(sizeGate.message);
     }
 
+    // Cross-machine TOCTOU: the watcher already skipped fresh pendings at
+    // gather, but a CLI and a watcher can still overlap between that fetch
+    // and this process posting its own pending. --yes (the watcher child)
+    // aborts before createPrRunDir so it consumes no poison-PR attempt.
+    // Interactive continues: a stuck pending must not trap the operator
+    // behind the 90-minute TTL.
+    if (
+      isInFlightCommitStatus(
+        await fetchCommitStatuses(operatorRoot, headSha),
+        Date.now(),
+      )
+    ) {
+      if (options.yes) {
+        log("skip: a pr-hero review is already in-flight on this head");
+        return 0;
+      }
+      log(
+        "warning: a pr-hero review is already in-flight on this head; " +
+          "continuing",
+      );
+    }
+
     // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
     const runDir = await createPrRunDir(
       options,
@@ -1107,335 +1149,372 @@ async function reviewPr(
       }
     }
 
-    // 8 — the review root.
-    const worktree = await ensureWorktree(gitDirOwner, worktreePath, headSha);
-    log();
-    log(`worktree ${worktree.action}: ${worktreePath} (${worktree.reason})`);
-    await stampWorktree(
-      repoHome.paths.registry,
+    // Committed to spending: a pending commit status is the GitHub-visible
+    // in-flight signal. Check Runs need a GitHub App; this CLI posts as the
+    // operator via `gh`, so the write path is the Statuses API. Size-gate
+    // abort and a declined confirm never reach here.
+    const statusTargetUrl = prHtmlUrl(
+      await ghRepoWebUrl(operatorRoot),
       prNumber,
-      new Date().toISOString(),
     );
-
-    // 9 — the worktree's own index. Never another checkout's: the ROADMAP
-    // forbids riding a sibling's index, because its bytes may differ.
-    let indexMs = 0;
-    if (!existsSync(path.join(worktreePath, ".codegraph"))) {
-      if (Bun.which("codegraph") === null) {
-        log(
-          "codegraph CLI not found — no index will be built; hunters run on " +
-            "Read/Grep/Glob alone",
-        );
-      } else {
-        indexMs = await initCodegraphIndex(worktreePath);
-        log(`codegraph init: ${Math.round(indexMs / 1000)}s`);
-      }
-    }
-
-    // 10 — MCP registry, checked against the WORKTREE. Local mode checks the
-    // repo root because the repo root is what its hunters read; here the
-    // hunters' tree is the worktree, and an index found in the operator
-    // checkout would be exactly the other-checkout's index the step above
-    // refuses to ride.
-    const mcpConfigPath = path.join(runDir, "mcp.json");
-    const codegraphAvailable = existsSync(
-      path.join(worktreePath, ".codegraph"),
-    );
-    await Bun.write(
-      mcpConfigPath,
-      `${JSON.stringify(
-        codegraphAvailable ? CODEGRAPH_ONLY_MCP_CONFIG : EMPTY_MCP_CONFIG,
-        null,
-        2,
-      )}\n`,
-    );
-
-    // 11 — run, with live progress (same shape as local mode's leg). The
-    // pipeline is untouched beyond the observational tap: it gets the worktree
-    // as its cwd and the PR's real number for the envelope.
-    log(
-      `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-        `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
-        "8–25 minutes",
-    );
-    const started = performance.now();
-    const progress = startProgressRenderer(
-      started,
-      `PR #${prNumber}`,
-      activeHunters.map((a) => a.key),
-      spec.agents.some((a) => a.role === "refuter"),
-      summary.enabled,
-    );
-    let result: PipelineResult;
-    try {
-      result = await runPipeline(
-        {
-          pr: prNumber,
-          // Same rule as local mode: record the commit the diff was actually
-          // computed against, or nothing downstream can reproduce the range.
-          baseSha: diffFromSha,
-          headSha,
-          worktree: worktreePath,
-          diffPath,
-          excludedPaths: effectiveDiff.droppedPaths,
-          gotchasPath,
-          agentsDir,
-          runDir,
-          outPath: path.join(runDir, "findings.json"),
-          mcpConfigPath,
-          hopBudget: options.hopBudget,
-          ...(options.model ? { model: options.model } : {}),
-          parityTriggerPaths: config.parity_trigger_paths,
-          suspicionPriors: config.suspicion_priors,
-          ...pipelineSummarizerInput(summary),
-          spec,
-        },
-        { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
-      );
-    } finally {
-      // try/finally, never success-only: a leaked interval keeps the event
-      // loop alive and hangs process exit on the error path.
-      progress.stop();
-    }
-    const wallMs = Math.round(performance.now() - started);
-
-    // 12 — the artifact and the report, exactly as local mode writes them.
-    const telemetry: Telemetry = {
-      // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
-      // when it is missing, so the init cost is real and measured. Disk stays
-      // unreported, and the mode is the same synchronous build.
-      index_ms: indexMs,
-      index_mode: "sync",
-      index_disk_mb: 0,
-      // Driver-MEASURED elapsed time, never the sum of the parallel steps —
-      // same rule as local mode.
-      wall_ms: wallMs,
-      tokens_in: result.usage.tokens_in,
-      tokens_out: result.usage.tokens_out,
-      tokens_total: result.usage.tokens_total,
-      cost_usd_est: result.usage.cost_usd_est,
-      per_agent: result.perAgent,
-    };
-    const doc = mergeRunEnvelope({
-      skillOutput: result.skillOutput,
-      pr: prNumber,
-      base_sha: diffFromSha,
-      head_sha: headSha,
-      model: envelopeModel(options, agentFiles),
-      iteration: 0,
-      engine: await engineIdentity(),
-      sessionFailed: result.sessionFailed,
-      telemetry,
-    });
-    const findingsPath = path.join(runDir, "findings.json");
-    await writeFindings(findingsPath, doc);
-    const reportPath = path.join(runDir, "report.md");
-    await Bun.write(
-      reportPath,
-      renderReport(doc, {
-        repo: path.basename(operatorRoot),
-        base: target.baseRef,
-        head: `PR #${prNumber}`,
-        diffStat,
-        excludedPaths: effectiveDiff.droppedPaths,
-        costUsd: result.usage.cost_usd_est,
-        wallMs,
+    await tryPublishCommitStatus(
+      operatorRoot,
+      headSha,
+      commitStatusRequest({
+        phase: "pending",
+        posted: false,
+        targetUrl: statusTargetUrl,
       }),
     );
 
-    // 13 — the head-to-head, in-process. A failure here must NOT fail the run:
-    // the review artifacts above are already on disk and are the product, so a
-    // gh hiccup degrades to a warning, never to an exit code. A run where
-    // EVERY hunter died writes no comparison at all — "pr-hero 0" from a
-    // review that never happened would land in B4's ledger as a measured
-    // miss, and the ledger's honesty outranks the artifact's completeness.
-    let comparison: ComparisonOutcome | null = null;
-    if (result.sessionFailed) {
-      log(
-        "comparison skipped: every hunter failed, so there is no review to compare",
+    let result: PipelineResult | undefined;
+    let posted: InlinePostOutcome | null = null;
+    try {
+      // 8 — the review root.
+      const worktree = await ensureWorktree(gitDirOwner, worktreePath, headSha);
+      log();
+      log(`worktree ${worktree.action}: ${worktreePath} (${worktree.reason})`);
+      await stampWorktree(
+        repoHome.paths.registry,
+        prNumber,
+        new Date().toISOString(),
       );
-    } else {
+
+      // 9 — the worktree's own index. Never another checkout's: the ROADMAP
+      // forbids riding a sibling's index, because its bytes may differ.
+      let indexMs = 0;
+      if (!existsSync(path.join(worktreePath, ".codegraph"))) {
+        if (Bun.which("codegraph") === null) {
+          log(
+            "codegraph CLI not found — no index will be built; hunters run on " +
+              "Read/Grep/Glob alone",
+          );
+        } else {
+          indexMs = await initCodegraphIndex(worktreePath);
+          log(`codegraph init: ${Math.round(indexMs / 1000)}s`);
+        }
+      }
+
+      // 10 — MCP registry, checked against the WORKTREE. Local mode checks the
+      // repo root because the repo root is what its hunters read; here the
+      // hunters' tree is the worktree, and an index found in the operator
+      // checkout would be exactly the other-checkout's index the step above
+      // refuses to ride.
+      const mcpConfigPath = path.join(runDir, "mcp.json");
+      const codegraphAvailable = existsSync(
+        path.join(worktreePath, ".codegraph"),
+      );
+      await Bun.write(
+        mcpConfigPath,
+        `${JSON.stringify(
+          codegraphAvailable ? CODEGRAPH_ONLY_MCP_CONFIG : EMPTY_MCP_CONFIG,
+          null,
+          2,
+        )}\n`,
+      );
+
+      // 11 — run, with live progress (same shape as local mode's leg). The
+      // pipeline is untouched beyond the observational tap: it gets the worktree
+      // as its cwd and the PR's real number for the envelope.
+      log(
+        `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+          `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
+          "8–25 minutes",
+      );
+      const started = performance.now();
+      const progress = startProgressRenderer(
+        started,
+        `PR #${prNumber}`,
+        activeHunters.map((a) => a.key),
+        spec.agents.some((a) => a.role === "refuter"),
+        summary.enabled,
+      );
       try {
-        comparison = await writeComparison({
+        result = await runPipeline(
+          {
+            pr: prNumber,
+            // Same rule as local mode: record the commit the diff was actually
+            // computed against, or nothing downstream can reproduce the range.
+            baseSha: diffFromSha,
+            headSha,
+            worktree: worktreePath,
+            diffPath,
+            excludedPaths: effectiveDiff.droppedPaths,
+            gotchasPath,
+            agentsDir,
+            runDir,
+            outPath: path.join(runDir, "findings.json"),
+            mcpConfigPath,
+            hopBudget: options.hopBudget,
+            ...(options.model ? { model: options.model } : {}),
+            parityTriggerPaths: config.parity_trigger_paths,
+            suspicionPriors: config.suspicion_priors,
+            ...pipelineSummarizerInput(summary),
+            spec,
+          },
+          { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+        );
+      } finally {
+        // try/finally, never success-only: a leaked interval keeps the event
+        // loop alive and hangs process exit on the error path.
+        progress.stop();
+      }
+      if (result === undefined) {
+        throw new CliError("internal: pipeline returned no result");
+      }
+      const wallMs = Math.round(performance.now() - started);
+
+      // 12 — the artifact and the report, exactly as local mode writes them.
+      const telemetry: Telemetry = {
+        // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
+        // when it is missing, so the init cost is real and measured. Disk stays
+        // unreported, and the mode is the same synchronous build.
+        index_ms: indexMs,
+        index_mode: "sync",
+        index_disk_mb: 0,
+        // Driver-MEASURED elapsed time, never the sum of the parallel steps —
+        // same rule as local mode.
+        wall_ms: wallMs,
+        tokens_in: result.usage.tokens_in,
+        tokens_out: result.usage.tokens_out,
+        tokens_total: result.usage.tokens_total,
+        cost_usd_est: result.usage.cost_usd_est,
+        per_agent: result.perAgent,
+      };
+      const doc = mergeRunEnvelope({
+        skillOutput: result.skillOutput,
+        pr: prNumber,
+        base_sha: diffFromSha,
+        head_sha: headSha,
+        model: envelopeModel(options, agentFiles),
+        iteration: 0,
+        engine: await engineIdentity(),
+        sessionFailed: result.sessionFailed,
+        telemetry,
+      });
+      const findingsPath = path.join(runDir, "findings.json");
+      await writeFindings(findingsPath, doc);
+      const reportPath = path.join(runDir, "report.md");
+      await Bun.write(
+        reportPath,
+        renderReport(doc, {
+          repo: path.basename(operatorRoot),
+          base: target.baseRef,
+          head: `PR #${prNumber}`,
+          diffStat,
+          excludedPaths: effectiveDiff.droppedPaths,
+          costUsd: result.usage.cost_usd_est,
+          wallMs,
+        }),
+      );
+
+      // 13 — the head-to-head, in-process. A failure here must NOT fail the run:
+      // the review artifacts above are already on disk and are the product, so a
+      // gh hiccup degrades to a warning, never to an exit code. A run where
+      // EVERY hunter died writes no comparison at all — "pr-hero 0" from a
+      // review that never happened would land in B4's ledger as a measured
+      // miss, and the ledger's honesty outranks the artifact's completeness.
+      let comparison: ComparisonOutcome | null = null;
+      if (result.sessionFailed) {
+        log(
+          "comparison skipped: every hunter failed, so there is no review to compare",
+        );
+      } else {
+        try {
+          comparison = await writeComparison({
+            operatorRoot,
+            pr: prNumber,
+            headSha,
+            diffFromSha,
+            runDir,
+            // The I/O shell owns the clock; the pure builder just records it.
+            generatedAt: new Date().toISOString(),
+            runStatus: doc.run_status,
+            findings: doc.findings.map((f) => ({
+              id: f.id,
+              path: f.path,
+              line: f.line,
+              claim: f.claim,
+              tier: f.tier,
+            })),
+          });
+        } catch (error) {
+          log(
+            "warning: comparison against Greptile failed — the review itself is " +
+              `intact: ${(error as Error).message}`,
+          );
+        }
+      }
+
+      // 13b — the observability store (W4 / #23). AFTER the comparison write,
+      // BEFORE posting: reuses repoHome.repoId from step 2 (no second origin
+      // lookup) and reads comparison.json back off disk — the artifact IS the
+      // source of truth, so ingest never re-derives the bucketing itself.
+      // Fail-soft, same contract as local mode: never turns a successful
+      // review into a failed one.
+      let storedComparison: StoredComparison | null = null;
+      if (comparison) {
+        try {
+          storedComparison = parseComparisonJson(
+            await Bun.file(comparison.jsonPath).text(),
+          );
+        } catch {
+          // Degrades to a run row without comparison children; ingestRun
+          // itself throwing is handled (and warned on) by failSoftIngest.
+        }
+      }
+      ingestReviewMetrics({
+        dbPath: prheroLayout(home).metricsDbPath,
+        repoId: repoHome.repoId,
+        runDir,
+        checkoutPath: operatorRoot,
+        doc,
+        perAgent: result.perAgent,
+        comparison: storedComparison,
+        log,
+      });
+
+      // 14 — the posting, only when asked. AFTER the comparison on purpose: a
+      // posting failure must never cost the comparison artifact. And unlike the
+      // comparison, posting does NOT degrade to a warning — it was explicitly
+      // requested. ROADMAP B6 rewire, W2 (issues #16/#17): posting now goes
+      // through the inline surface — anchorability, cross-run matching, the one
+      // review submission (with its 422 recovery into the summary Outside Diff
+      // bucket), and the summary PATCHed LAST so its delta line and Outside Diff
+      // section describe what this run actually posted, not what it planned to.
+      // Un-anchorable findings never get a `POST .../issues/<n>/comments`.
+      // `postInlineIfEligible` carries the
+      // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
+      // posting"): a clean-bill comment set from a review that never ran would
+      // be a public lie, same reasoning as the comparison guard above.
+      // Hoisted out of the branch below ONLY so step 15 can reuse it: when posting
+      // ran, the terminal's links must be built from the SAME web url the comments
+      // were published against, or a finding's comment fragment could hang off a
+      // different host than the comment itself.
+      let postedWebUrl: string | undefined;
+      if (postEnabled) {
+        postedWebUrl = await ghRepoWebUrl(operatorRoot);
+        if (postedWebUrl === undefined) {
+          log("repo web url unavailable: posting plain locations");
+        }
+        posted = await postInlineIfEligible({
+          sessionFailed: result.sessionFailed,
+          skippedReason:
+            "post skipped: every hunter failed, so there is no review to publish",
           operatorRoot,
           pr: prNumber,
           headSha,
-          diffFromSha,
-          runDir,
-          // The I/O shell owns the clock; the pure builder just records it.
-          generatedAt: new Date().toISOString(),
-          runStatus: doc.run_status,
-          findings: doc.findings.map((f) => ({
-            id: f.id,
-            path: f.path,
-            line: f.line,
-            claim: f.claim,
-            tier: f.tier,
-          })),
+          doc,
+          diffPatch: effectiveDiff.patch,
+          webUrl: postedWebUrl,
         });
-      } catch (error) {
-        log(
-          "warning: comparison against Greptile failed — the review itself is " +
-            `intact: ${(error as Error).message}`,
-        );
-      }
-    }
-
-    // 13b — the observability store (W4 / #23). AFTER the comparison write,
-    // BEFORE posting: reuses repoHome.repoId from step 2 (no second origin
-    // lookup) and reads comparison.json back off disk — the artifact IS the
-    // source of truth, so ingest never re-derives the bucketing itself.
-    // Fail-soft, same contract as local mode: never turns a successful
-    // review into a failed one.
-    let storedComparison: StoredComparison | null = null;
-    if (comparison) {
-      try {
-        storedComparison = parseComparisonJson(
-          await Bun.file(comparison.jsonPath).text(),
-        );
-      } catch {
-        // Degrades to a run row without comparison children; ingestRun
-        // itself throwing is handled (and warned on) by failSoftIngest.
-      }
-    }
-    ingestReviewMetrics({
-      dbPath: prheroLayout(home).metricsDbPath,
-      repoId: repoHome.repoId,
-      runDir,
-      checkoutPath: operatorRoot,
-      doc,
-      perAgent: result.perAgent,
-      comparison: storedComparison,
-      log,
-    });
-
-    // 14 — the posting, only when asked. AFTER the comparison on purpose: a
-    // posting failure must never cost the comparison artifact. And unlike the
-    // comparison, posting does NOT degrade to a warning — it was explicitly
-    // requested. ROADMAP B6 rewire, W2 (issues #16/#17): posting now goes
-    // through the inline surface — anchorability, cross-run matching, the one
-    // review submission (with its 422 recovery into the summary Outside Diff
-    // bucket), and the summary PATCHed LAST so its delta line and Outside Diff
-    // section describe what this run actually posted, not what it planned to.
-    // Un-anchorable findings never get a `POST .../issues/<n>/comments`.
-    // `postInlineIfEligible` carries the
-    // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
-    // posting"): a clean-bill comment set from a review that never ran would
-    // be a public lie, same reasoning as the comparison guard above.
-    let posted: InlinePostOutcome | null = null;
-    // Hoisted out of the branch below ONLY so step 15 can reuse it: when posting
-    // ran, the terminal's links must be built from the SAME web url the comments
-    // were published against, or a finding's comment fragment could hang off a
-    // different host than the comment itself.
-    let postedWebUrl: string | undefined;
-    if (postEnabled) {
-      postedWebUrl = await ghRepoWebUrl(operatorRoot);
-      if (postedWebUrl === undefined) {
-        log("repo web url unavailable: posting plain locations");
-      }
-      posted = await postInlineIfEligible({
-        sessionFailed: result.sessionFailed,
-        skippedReason:
-          "post skipped: every hunter failed, so there is no review to publish",
-        operatorRoot,
-        pr: prNumber,
-        headSha,
-        doc,
-        diffPatch: effectiveDiff.patch,
-        webUrl: postedWebUrl,
-      });
-      if (posted) {
-        await writePostReceipt(runDir, prNumber, headSha, posted);
-        log(
-          `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
-            `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
-            `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
-        );
-        // GitHub #39: said at the MOMENT it happened, not only in the result
-        // block minutes of scrollback later — the same reason the 422
-        // demotion below gets its own line here. The two can co-occur: a
-        // force-push both moves the head and 422s the pinned submission.
-        if (posted.movedHeadSha) {
+        if (posted) {
+          await writePostReceipt(runDir, prNumber, headSha, posted);
           log(
-            `warning: the PR head moved while the review ran — reviewed ` +
-              `${headSha}, head is now ${posted.movedHeadSha}; the comments ` +
-              "are pinned to the reviewed commit",
+            `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
+              `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
+              `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
           );
-        }
-        if (posted.reviewOutcome === "demoted") {
-          log(
-            "warning: the review submission was rejected (422) and recovered " +
-              "into the summary Outside Diff bucket — see the run's post.json " +
-              "for detail",
-          );
-        }
-      }
-    }
-
-    // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
-    // the worktree hint) ride in as optional inputs. The `posted:` line that
-    // used to sit here is GONE on purpose: step 14 already printed a richer one
-    // at the moment it happened, and two differently-worded reports of the same
-    // POST read as two postings. What this block keeps is the durable trace —
-    // post.json in the artifact list below.
-    //
-    // The links, in the order that keeps them honest: `gh`'s answer when posting
-    // already paid for it, otherwise the free git-remote derivation — so a run
-    // WITHOUT --post still prints a clickable url for every finding, which is
-    // the whole reason repoWebUrlFromRemote exists. No pushed-ness check here
-    // (unlike local mode): a PR head came out of `refs/pull/<n>/head`, so origin
-    // has it by construction.
-    const webUrl = postedWebUrl ?? (await gitRemoteWebUrl(operatorRoot));
-    const links: ResultLinks | undefined =
-      webUrl === undefined
-        ? undefined
-        : {
-            webUrl,
-            headSha,
-            pr: prNumber,
-            // Only when this run actually posted: a comment url for a comment
-            // that does not exist is the dead link the whole degradation rule
-            // exists to prevent. Absent ids fall through to a blob link.
-            ...(posted ? { commentUrls: posted.commentUrls } : {}),
-          };
-    for (const line of renderResult({
-      doc,
-      costUsd: result.usage.cost_usd_est,
-      wallMs,
-      estimate: { low: estimate.low, high: estimate.high },
-      runDir,
-      artifacts: [
-        path.basename(reportPath),
-        path.basename(findingsPath),
-        ...(comparison ? [path.basename(comparison.markdownPath)] : []),
-        ...(posted ? ["post.json"] : []),
-      ],
-      ...(comparison
-        ? {
-            comparison: {
-              greptileFound: comparison.greptileFound,
-              // The buckets themselves, not their counts: writeComparison's
-              // widened outcome is what lets the block name a recall miss.
-              result: comparison.result,
-            },
+          // GitHub #39: said at the MOMENT it happened, not only in the result
+          // block minutes of scrollback later — the same reason the 422
+          // demotion below gets its own line here. The two can co-occur: a
+          // force-push both moves the head and 422s the pinned submission.
+          if (posted.movedHeadSha) {
+            log(
+              `warning: the PR head moved while the review ran — reviewed ` +
+                `${headSha}, head is now ${posted.movedHeadSha}; the comments ` +
+                "are pinned to the reviewed commit",
+            );
           }
-        : {}),
-      worktree: { gitDirOwner, worktreePath },
-      ...(links === undefined ? {} : { links }),
-      // GitHub #39. Only a run that actually POSTED can know this — the
-      // re-read lives in the posting sequence — so a run without --post
-      // never claims the head moved, which is correct: it published nothing
-      // that could go stale.
-      ...(posted?.movedHeadSha === undefined
-        ? {}
-        : { movedHeadSha: posted.movedHeadSha }),
-      sessionFailed: result.sessionFailed,
-      styles: styleEnabled(),
-    })) {
-      log(line);
+          if (posted.reviewOutcome === "demoted") {
+            log(
+              "warning: the review submission was rejected (422) and recovered " +
+                "into the summary Outside Diff bucket — see the run's post.json " +
+                "for detail",
+            );
+          }
+        }
+      }
+
+      // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
+      // the worktree hint) ride in as optional inputs. The `posted:` line that
+      // used to sit here is GONE on purpose: step 14 already printed a richer one
+      // at the moment it happened, and two differently-worded reports of the same
+      // POST read as two postings. What this block keeps is the durable trace —
+      // post.json in the artifact list below.
+      //
+      // The links, in the order that keeps them honest: `gh`'s answer when posting
+      // already paid for it, otherwise the free git-remote derivation — so a run
+      // WITHOUT --post still prints a clickable url for every finding, which is
+      // the whole reason repoWebUrlFromRemote exists. No pushed-ness check here
+      // (unlike local mode): a PR head came out of `refs/pull/<n>/head`, so origin
+      // has it by construction.
+      const webUrl = postedWebUrl ?? (await gitRemoteWebUrl(operatorRoot));
+      const links: ResultLinks | undefined =
+        webUrl === undefined
+          ? undefined
+          : {
+              webUrl,
+              headSha,
+              pr: prNumber,
+              // Only when this run actually posted: a comment url for a comment
+              // that does not exist is the dead link the whole degradation rule
+              // exists to prevent. Absent ids fall through to a blob link.
+              ...(posted ? { commentUrls: posted.commentUrls } : {}),
+            };
+      for (const line of renderResult({
+        doc,
+        costUsd: result.usage.cost_usd_est,
+        wallMs,
+        estimate: { low: estimate.low, high: estimate.high },
+        runDir,
+        artifacts: [
+          path.basename(reportPath),
+          path.basename(findingsPath),
+          ...(comparison ? [path.basename(comparison.markdownPath)] : []),
+          ...(posted ? ["post.json"] : []),
+        ],
+        ...(comparison
+          ? {
+              comparison: {
+                greptileFound: comparison.greptileFound,
+                // The buckets themselves, not their counts: writeComparison's
+                // widened outcome is what lets the block name a recall miss.
+                result: comparison.result,
+              },
+            }
+          : {}),
+        worktree: { gitDirOwner, worktreePath },
+        ...(links === undefined ? {} : { links }),
+        // GitHub #39. Only a run that actually POSTED can know this — the
+        // re-read lives in the posting sequence — so a run without --post
+        // never claims the head moved, which is correct: it published nothing
+        // that could go stale.
+        ...(posted?.movedHeadSha === undefined
+          ? {}
+          : { movedHeadSha: posted.movedHeadSha }),
+        sessionFailed: result.sessionFailed,
+        styles: styleEnabled(),
+      })) {
+        log(line);
+      }
+      if (result.sessionFailed) return 1;
+      return postingExitCode(posted);
+    } finally {
+      const phase = commitStatusCompletion({
+        pipelineFinished: result !== undefined,
+        sessionFailed: result?.sessionFailed === true,
+      });
+      await tryPublishCommitStatus(
+        operatorRoot,
+        headSha,
+        commitStatusRequest({
+          phase,
+          posted: posted !== null,
+          targetUrl: statusTargetUrl,
+        }),
+      );
     }
-    if (result.sessionFailed) return 1;
-    return postingExitCode(posted);
   } finally {
     await releasePidLock(lockPath);
     await runGc({

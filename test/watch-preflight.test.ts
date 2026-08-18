@@ -34,6 +34,7 @@ import {
   parsePrFiles,
   parsePrList,
   parseWatchConfig,
+  pendingReviewsToSettle,
   prheroHomePaths,
   removeWatchRepo,
   renderWatchPlist,
@@ -627,6 +628,8 @@ function repo(overrides: Partial<TickRepoFacts> = {}): TickRepoFacts {
     attempts: [],
     tooLarge: [],
     nothingToReview: [],
+    inFlight: [],
+    pending: [],
     ...overrides,
   };
 }
@@ -808,6 +811,101 @@ describe("decideTick", () => {
     );
     expect(decision.skips.map((s) => s.pr)).toEqual([4]);
     expect(decision.launch?.pr).toBe(6);
+  });
+
+  test("an in-flight head is skipped, never launched", () => {
+    const decision = decideTick(
+      tick({
+        repos: [
+          repo({
+            prs: [cand(4, HEAD_A), cand(6, HEAD_B)],
+            inFlight: [{ pr: 4, head: HEAD_A }],
+          }),
+        ],
+      }),
+    );
+    expect(decision.skips).toEqual([
+      { repo: "/x/musive", pr: 4, head: HEAD_A, reason: "in-flight" },
+    ]);
+    expect(decision.launch?.pr).toBe(6);
+  });
+
+  test("reviewed-remote wins over in-flight on the same head", () => {
+    expect(
+      decideTick(
+        tick({
+          repos: [
+            repo({
+              prs: [cand(4, HEAD_A)],
+              remoteHeads: [{ pr: 4, heads: [HEAD_A], markerSeen: true }],
+              inFlight: [{ pr: 4, head: HEAD_A }],
+            }),
+          ],
+        }),
+      ).skips[0]?.reason,
+    ).toBe("reviewed-remote");
+  });
+
+  test("in-flight wins over attempts-exhausted", () => {
+    expect(
+      decideTick(
+        tick({
+          repos: [
+            repo({
+              prs: [cand(4, HEAD_A)],
+              attempts: [{ pr: 4, head: HEAD_A, count: MAX_WATCH_ATTEMPTS }],
+              inFlight: [{ pr: 4, head: HEAD_A }],
+            }),
+          ],
+        }),
+      ).skips[0]?.reason,
+    ).toBe("in-flight");
+  });
+
+  test("pendingReviewsToSettle only picks already-reviewed pendings", () => {
+    const reviewed = repo({
+      prs: [cand(4, HEAD_A), cand(6, HEAD_B)],
+      remoteHeads: [{ pr: 4, heads: [HEAD_A], markerSeen: true }],
+      pending: [
+        { pr: 4, head: HEAD_A },
+        { pr: 6, head: HEAD_B },
+      ],
+    });
+    const decision = decideTick(tick({ repos: [reviewed] }));
+    expect(pendingReviewsToSettle(decision.skips, [reviewed])).toEqual([
+      { repo: "/x/musive", pr: 4, head: HEAD_A },
+    ]);
+    expect(
+      pendingReviewsToSettle(
+        [{ repo: "/x/musive", pr: 6, head: HEAD_B, reason: "in-flight" }],
+        [reviewed],
+      ),
+    ).toEqual([]);
+  });
+
+  test("pendingReviewsToSettle clears a pending on attempts-exhausted", () => {
+    const facts = repo({
+      prs: [cand(4, HEAD_A)],
+      attempts: [{ pr: 4, head: HEAD_A, count: MAX_WATCH_ATTEMPTS }],
+      pending: [{ pr: 4, head: HEAD_A }],
+    });
+    const decision = decideTick(tick({ repos: [facts] }));
+    expect(decision.skips[0]?.reason).toBe("attempts-exhausted");
+    expect(pendingReviewsToSettle(decision.skips, [facts])).toEqual([
+      { repo: "/x/musive", pr: 4, head: HEAD_A },
+    ]);
+  });
+
+  test("pendingReviewsToSettle does not treat reviewed-prior-head as this head's orphan", () => {
+    const facts = repo({
+      prs: [cand(4, HEAD_B)],
+      remoteHeads: [{ pr: 4, heads: [HEAD_A], markerSeen: true }],
+      pending: [{ pr: 4, head: HEAD_B }],
+      inFlight: [{ pr: 4, head: HEAD_B }],
+    });
+    const decision = decideTick(tick({ repos: [facts] }));
+    expect(decision.skips[0]?.reason).toBe("reviewed-prior-head");
+    expect(pendingReviewsToSettle(decision.skips, [facts])).toEqual([]);
   });
 
   // Ordering: an already-reviewed PR reads as reviewed, not as too-large —
