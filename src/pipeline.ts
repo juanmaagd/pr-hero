@@ -31,10 +31,18 @@ import {
 } from "./findings";
 import {
   parseAgentFile,
+  parseAgentSource,
   renderAgentBody,
   type SuspicionPrior,
 } from "./prompt-set";
 import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
+import {
+  capScoutLeads,
+  renderLeadsBlock,
+  type ScoutLead,
+  scoutPrompt,
+  validateScoutLeads,
+} from "./scout";
 import {
   type AgentSpec,
   defaultReviewSpec,
@@ -85,6 +93,21 @@ export interface PipelineInput {
   // Optional engine-owned summary step. It is deliberately outside ReviewSpec:
   // this prompt is bundled with pr-hero, not part of the benchmarked agent set.
   summarizer?: { promptPath: string; model?: string };
+  // Optional engine-owned scout step (ROADMAP-DOORDASH M5,
+  // `docs/scout-design.md` §3.3). Outside ReviewSpec for the summarizer's
+  // reason and one more of its own: `ReviewSpec.role` is
+  // `"hunter" | "refuter"` with a runtime guard, so a scout cannot be a spec
+  // entry without widening that union — and widening it would re-fingerprint
+  // the prompt set, which is exactly what M6's one-variable property forbids.
+  // ABSENT means the control pipeline, byte for byte.
+  scout?: { promptPath: string; model?: string };
+  // Provenance for pipeline.json (§3.9), all optional so every existing
+  // caller keeps compiling and an absent one simply omits its key. These are
+  // not decoration: without a prompt-set identity in the artifact, M6's
+  // central claim — "both arms ran the same prompt set" — is believed rather
+  // than recorded.
+  engine?: { name: string; version: string };
+  promptSet?: { name: string; sha256: string };
   // Pipeline-as-data: which agents run and how they're wired. Defaults to
   // defaultReviewSpec() — EXACTLY the wiring that used to be hard-coded here,
   // so callers that pass nothing see byte-identical step names, per_agent
@@ -145,6 +168,18 @@ export type PipelineProgressEvent =
       kind: "summarizer-finished";
       ok: boolean;
       durationMs: number;
+    }
+  // The scout is the one AWAITED stage between "the run started" and the
+  // first hunter spawn, and M4 measured it at 86-600s. Without a started
+  // event that is up to ten minutes of a paid run looking hung — the exact
+  // incident the progress tap was built for (see PipelineDeps.onProgress).
+  | { kind: "scout-started"; model: string }
+  | {
+      kind: "scout-finished";
+      ok: boolean;
+      durationMs: number;
+      // Leads DELIVERED to the hunters, post-cap. Absent for a failed step.
+      leads?: number;
     }
   // A step about to be retried. Until this existed a retrying hunter looked
   // merely slow: `attempts` was counted in PerAgentUsage after the fact, which
@@ -274,7 +309,15 @@ const SUMMARY_OUTPUT_CONTRACT = [
   "The score_reason is 1-2 sentences explaining that advisory score.",
 ].join("\n");
 
-function hunterPrompt(patch: string, hopBudget: number): string {
+// `leadsBlock` defaults to the EMPTY STRING and an empty block contributes
+// nothing — not a separator, not a blank line (§3.8). That is what makes M6's
+// control arm a control arm: scout off, and scout on returning zero leads,
+// must both produce the byte-identical prompt an unled run produces.
+function hunterPrompt(
+  patch: string,
+  hopBudget: number,
+  leadsBlock = "",
+): string {
   return [
     patch,
     "",
@@ -285,6 +328,9 @@ function hunterPrompt(patch: string, hopBudget: number): string {
     "`hops_used` and `hop_trail` are self-reported and may be cross-checked",
     "against this run's telemetry MCP-call counts.",
     "",
+    // Leads sit LAST before the contract so the diff is still what the hunter
+    // reads first (§3.8's block order).
+    ...(leadsBlock.length === 0 ? [] : [leadsBlock, ""]),
     HUNTER_OUTPUT_CONTRACT,
   ].join("\n");
 }
@@ -339,9 +385,35 @@ interface StepMeta {
   status?: "ok" | "failed";
 }
 
+// pipeline.json's `scout` key (§3.9). Written on EVERY run, including one
+// with no scout at all: M6 has to be able to tell the two arms apart from the
+// artifact alone, and "the key is missing" is indistinguishable from "this run
+// predates the key".
+interface ScoutRecord {
+  enabled: boolean;
+  model?: string;
+  // "skipped" is the flag being off. "failed" and "ok" both mean the stage
+  // was asked for — a failed scout is a CONTROL-arm run wearing a scout-arm
+  // flag, and §3.6's M6 rule excludes and re-runs it on exactly this field.
+  status: "ok" | "failed" | "skipped";
+  // DELIVERED leads, post-cap — the number the hunters actually saw.
+  leads_count: number;
+  // Leads the caps dropped. A truncation that fires routinely is a PROMPT
+  // defect to fix, never a cap to raise (§3.8), so it is recorded per run
+  // rather than left to a probe nobody re-runs.
+  leads_truncated: number;
+  // `why` sentences the 240-char cap cut. Additive beyond §3.9's list, and
+  // deliberately: M5 INHERITS this defect from M4 (it fired in most runs), and
+  // a defect nothing counts in production is a defect nobody notices.
+  why_truncated: number;
+  prompt_sha256?: string;
+  duration_ms: number;
+}
+
 // Mutated as steps complete so the pipeline-ceiling path can assemble
 // whatever exists at the moment the ceiling fires.
 interface RunState {
+  scout?: ScoutRecord;
   parityFired: boolean;
   hunterCount: number;
   hunterFailures: number;
@@ -434,8 +506,16 @@ async function execute(
   );
   state.parityFired = hunters.some((a) => a.trigger !== undefined);
 
-  // Step 4 — hunter fan-out.
   const stepsDir = path.join(input.runDir, "steps");
+
+  // Step 3b — the scout (ROADMAP-DOORDASH M5). Here and not elsewhere: after
+  // `patch` and the trigger decision exist, strictly before the hunter
+  // composition loop that consumes its leads. It is AWAITED, unlike the
+  // summarizer, which puts it on the critical path — the cost this design
+  // states out loud (§3.9) rather than hiding.
+  const leadsBlock = await runScout(input, deps, state, patch, stepsDir);
+
+  // Step 4 — hunter fan-out.
   const stepTimeoutMs = input.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
   // validateReviewSpec pins hunter keys inside the findings-schema Hunter
   // enum (v1.0.0 constraint), so the cast below is checked, not assumed.
@@ -453,7 +533,7 @@ async function execute(
     const spec: StepSpec = {
       name,
       systemPromptPath,
-      prompt: hunterPrompt(patch, input.hopBudget),
+      prompt: hunterPrompt(patch, input.hopBudget, leadsBlock),
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model: resolveModel(input, hunter.model, agent.model, hunter.file),
@@ -884,6 +964,189 @@ async function runRefuter(
   if (anyFailed) state.partial = true;
 }
 
+// The scout's non-hunter budgets (§3.5 mechanism 4), and the one number here
+// that departs from the ratified design: §3.5 says "a 5-minute watchdog",
+// copying the summarizer. M4 then MEASURED the stage at 86-600s across 60
+// spawns and raised its own probe watchdog from 10 to 15 minutes on that
+// evidence (§3.10bis). A 5-minute ceiling would reap runs the only data we
+// have calls normal, so the measurement wins over the estimate that preceded
+// it. One attempt is unchanged: a scout that could not answer once has
+// nothing the run needs badly enough to pay twice for.
+const SCOUT_TIMEOUT_MS = 15 * 60 * 1000;
+
+// Last resort in the model chain, and it exists because `prompts/scout.md`
+// deliberately carries NO `model:` frontmatter: that file is M4's ratified
+// artifact (sha256 68a81d26081e, v5), and adding a line to it would move the
+// sha the milestone recorded for a prompt whose body nothing changed.
+//
+// The value is not a taste call either. M4 ran every one of its 60 measured
+// spawns on sonnet (`scripts/scout-probe.ts` defaults to it and never reads
+// the prompt's frontmatter), and M6's whole control corpus is sonnet (§1.2) —
+// so this is the model the scout has actually been measured on, and the model
+// the A/B will run it on. `--scout-model` is the documented exit; the cheap
+// tier is its own later experiment (§3.13), not a variable inside M6.
+export const DEFAULT_SCOUT_MODEL = "sonnet";
+
+// Runs the scout and returns the block to append to every hunter prompt —
+// the EMPTY STRING whenever there is nothing to append, which covers all four
+// quiet paths: the flag is off, the prompt file would not parse, the step
+// failed, and the scout honestly found nothing.
+//
+// FAIL-OPEN, and it is the load-bearing property (§3.6): nothing in here sets
+// `state.partial`. A run without a scout is the CONTROL pipeline, which is by
+// definition complete — it cannot have lost a finding it was never going to
+// produce. #42's incompleteness notice is about a review that lost a hunter or
+// the refuter, which is a different thing and stays untouched. What this must
+// never be is SILENT, so the failure lands in `pipeline.json` (`status`), in
+// `per_agent.scout`, and on the progress tap.
+async function runScout(
+  input: PipelineInput,
+  deps: PipelineDeps,
+  state: RunState,
+  patch: string,
+  stepsDir: string,
+): Promise<string> {
+  if (!input.scout) {
+    state.scout = {
+      enabled: false,
+      status: "skipped",
+      leads_count: 0,
+      leads_truncated: 0,
+      why_truncated: 0,
+      duration_ms: 0,
+    };
+    return "";
+  }
+
+  const name = "scout";
+  const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
+  // The RAW validated leads, pre-cap, beside every other step's output — the
+  // runner writes it. Capping happens in the driver afterwards, so the
+  // artifact records what the scout SAID and pipeline.json records what the
+  // hunters were given; collapsing the two would delete the evidence that a
+  // cap fired at all.
+  const outPath = path.join(stepsDir, `${name}.leads.json`);
+  const meta: StepMeta = {
+    name,
+    model: input.scout.model ?? input.model ?? "unresolved",
+    // FORCED to empty here, never read from the prompt file's frontmatter.
+    // §3.5 mechanism 1 — "the scout cannot open a file, grep, or walk a call
+    // graph" — is the guarantee this whole design rests on, and a guarantee a
+    // prompt edit can revoke is not a guarantee. `model:` in that frontmatter
+    // is still honoured; `tools:` is not.
+    tools: [],
+    systemPromptPath,
+    outPath,
+  };
+  const record: ScoutRecord = {
+    enabled: true,
+    model: meta.model,
+    // Pessimistic default: every early return below is a failure, and only
+    // the delivered path overwrites it.
+    status: "failed",
+    leads_count: 0,
+    leads_truncated: 0,
+    why_truncated: 0,
+    duration_ms: 0,
+  };
+  state.scout = record;
+  const startedAt = Date.now();
+
+  const abandon = (): string => {
+    meta.status = "failed";
+    state.perAgent.scout ??= failedAgentEntry();
+    record.duration_ms = Date.now() - startedAt;
+    emit(deps, {
+      kind: "scout-finished",
+      ok: false,
+      durationMs: record.duration_ms,
+    });
+    return "";
+  };
+
+  let spec: StepSpec;
+  try {
+    // Read once, hashed and parsed from the same bytes: a fingerprint over a
+    // second read could disagree with the prompt that actually ran.
+    const raw = await Bun.file(input.scout.promptPath).text();
+    const agent = parseAgentSource(raw);
+    await Bun.write(systemPromptPath, agent.body);
+    // Precedence, the JD rule extended one seat: --model > --scout-model >
+    // the prompt's frontmatter > the engine default. The default sits LAST so
+    // a frontmatter model added later still outranks it.
+    meta.model = resolveModel(
+      input,
+      input.scout.model,
+      agent.model ?? DEFAULT_SCOUT_MODEL,
+      input.scout.promptPath,
+    );
+    record.model = meta.model;
+    // FULL sha256, not the 12 chars the probe prints: the probe's artifact
+    // stores the full digest too, so a pipeline.json and a scout-probe.json
+    // naming the same prompt say the same string.
+    record.prompt_sha256 = new Bun.CryptoHasher("sha256")
+      .update(raw)
+      .digest("hex");
+    spec = {
+      name,
+      systemPromptPath,
+      prompt: scoutPrompt(patch),
+      tools: meta.tools,
+      mcpConfigPath: input.mcpConfigPath,
+      model: meta.model,
+      cwd: input.worktree,
+      outPath,
+      timeoutMs: SCOUT_TIMEOUT_MS,
+      maxAttempts: 1,
+      parse: (finalText) => {
+        const extracted = extractJsonObject(finalText);
+        if (extracted === undefined) {
+          throw new Error("scout final message has no JSON object");
+        }
+        return validateScoutLeads(extracted);
+      },
+      onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
+    };
+  } catch {
+    // A missing or malformed prompt file. The step still appears in the plan
+    // with status "failed": a stage that was asked for and never spawned must
+    // be visible, or the artifact reads like the flag was off.
+    state.steps.push(meta);
+    return abandon();
+  }
+
+  state.steps.push(meta);
+  emit(deps, { kind: "scout-started", model: meta.model });
+
+  let result: StepResult;
+  try {
+    result = await deps.runner.run(spec);
+  } catch {
+    return abandon();
+  }
+  // Usage lands in BOTH seats whatever the verdict — a failed step still
+  // burned tokens, and a run whose bill excludes them under-reports the arm's
+  // cost, which is one of the numbers M6 exists to compare.
+  state.perAgent.scout = perAgentEntry(result);
+  state.usageTotal = sumUsage(state.usageTotal, result.usage);
+  if (result.status !== "ok") return abandon();
+
+  const capped = capScoutLeads(result.output as ScoutLead[]);
+  meta.status = "ok";
+  record.status = "ok";
+  record.leads_count = capped.leads.length;
+  record.leads_truncated = capped.dropped;
+  record.why_truncated = capped.whyTruncated;
+  record.duration_ms = Date.now() - startedAt;
+  emit(deps, {
+    kind: "scout-finished",
+    ok: true,
+    durationMs: record.duration_ms,
+    leads: capped.leads.length,
+  });
+  return renderLeadsBlock(capped.leads);
+}
+
 // Steps 7 + 8: map verdicts, assign tiers, assemble the SkillOutput draft and
 // write pipeline.json. Also the ceiling path's landing zone — it dedupes
 // whatever hunters completed so even a truncated run emits canonical ids.
@@ -968,6 +1231,14 @@ async function writePipelinePlan(
     out_path: input.outPath,
     excluded_paths: input.excludedPaths ?? [],
     parity_hunter_fired: state.parityFired,
+    // The three provenance fields §3.2 found missing, filled while the
+    // artifact was open. `generated_at` is stamped HERE, from the clock,
+    // because an artifact that cannot say when it was written is what turned
+    // a ledger's run ordering into guesswork once already (§2.6).
+    ...(input.engine === undefined ? {} : { engine: input.engine }),
+    ...(input.promptSet === undefined ? {} : { prompt_set: input.promptSet }),
+    generated_at: new Date().toISOString(),
+    ...(state.scout === undefined ? {} : { scout: state.scout }),
     steps: state.steps,
   };
   await Bun.write(

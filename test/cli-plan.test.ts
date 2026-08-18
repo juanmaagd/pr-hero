@@ -61,6 +61,7 @@ const options = (over: Partial<CliOptions> = {}): CliOptions => ({
   repo: ".",
   head: "HEAD",
   hopBudget: 3,
+  scout: false,
   dryRun: false,
   yes: false,
   post: false,
@@ -223,6 +224,56 @@ describe("renderPlan", () => {
     expect(text).toContain("opus");
     expect(text).toContain("disabled");
     expect(text).toContain("+ summarizer disabled");
+  });
+
+  // ROADMAP-DOORDASH M5. The scout row prints on EVERY plan, off included:
+  // it adds a paid stage to the front of the run and the band below it
+  // already counts one, so "disabled" is information, not noise.
+  test("the scout row states itself whether or not the flag is on", () => {
+    const off = joined(renderPlan(planContext(), false));
+    expect(off).toContain("scout");
+    expect(off).toContain("disabled");
+    expect(off).not.toContain("+ scout");
+
+    const on = joined(
+      renderPlan(
+        planContext({
+          options: options({ scout: true }),
+          estimate: estimateCost(diffStat, 2, true, true),
+        }),
+        false,
+      ),
+    );
+    expect(on).toContain("diff-only, before the hunters (experimental)");
+    // Default model, shown before the money is spent rather than discovered
+    // in the artifact after.
+    expect(on).toContain("sonnet");
+  });
+
+  test("--scout-model is shown, and --model still outranks it", () => {
+    const scoutModel = joined(
+      renderPlan(
+        planContext({ options: options({ scout: true, scoutModel: "haiku" }) }),
+        false,
+      ),
+    );
+    expect(scoutModel).toContain("haiku");
+
+    const overridden = joined(
+      renderPlan(
+        planContext({
+          options: options({
+            scout: true,
+            scoutModel: "haiku",
+            model: "opus",
+          }),
+        }),
+        false,
+      ),
+    );
+    // The plan must print the model that will actually run, or it is a plan
+    // for a different run than the one about to happen.
+    expect(overridden).toContain("scout       opus");
   });
 
   test("--two-dot renames the range, and --force annotates a failed gate", () => {

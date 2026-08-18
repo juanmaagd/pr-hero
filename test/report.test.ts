@@ -1390,6 +1390,34 @@ describe("estimateCost", () => {
     expect(withSummary.basis).toContain("summarizer");
   });
 
+  // §3.12 obligation 6. The scout's own seat, and the reason it needs one:
+  // `agents` is the multiplier for the WHOLE band, so a scout run priced
+  // without it under-quotes every single time.
+  test("accounts for the optional scout without changing legacy callers", () => {
+    const without = estimateCost(SMALL, 4);
+    const withScout = estimateCost(SMALL, 4, false, true);
+    expect(withScout.high).toBeGreaterThan(without.high);
+    expect(withScout.low).toBeGreaterThan(without.low);
+    expect(withScout.basis).toContain("scout");
+    // The default keeps every pre-M5 caller byte-identical.
+    expect(estimateCost(SMALL, 4, false)).toEqual(without);
+  });
+
+  test("the scout and the summarizer are independent terms", () => {
+    const neither = estimateCost(SMALL, 4);
+    const both = estimateCost(SMALL, 4, true, true);
+    const summaryOnly = estimateCost(SMALL, 4, true, false);
+    const scoutOnly = estimateCost(SMALL, 4, false, true);
+    expect(both.high).toBeGreaterThan(summaryOnly.high);
+    expect(both.high).toBeGreaterThan(scoutOnly.high);
+    // Same seat size, so turning either on alone moves the band identically —
+    // the honest statement of "the scout is priced as one more agent".
+    expect(scoutOnly.high).toBeCloseTo(summaryOnly.high);
+    expect(neither.basis).not.toContain("scout");
+    expect(both.basis).toContain("summarizer");
+    expect(both.basis).toContain("scout");
+  });
+
   test("a zero diff is non-negative and still a band", () => {
     const estimate = estimateCost({ files: 0, insertions: 0, deletions: 0 }, 4);
     expect(estimate.low).toBeGreaterThanOrEqual(0);

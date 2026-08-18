@@ -138,6 +138,29 @@ describe("buildStepArgv", () => {
     expect(flagValue(argv, "--model")).toBe(spec.model);
   });
 
+  // §3.12 obligation 1, and the single mechanism §3.5 rests on: the scout's
+  // "it cannot open a file, grep, or walk a call graph" is enforced HERE, by
+  // the allow-list, and by nothing else — `cwd` is still the worktree and
+  // `--mcp-config` is still emitted, so there is no sandbox behind it. Until
+  // M5 the only `tools: []` in the repo was the summarizer's StepMeta
+  // placeholder, overwritten before any spawn, so this path had never run.
+  test("an EMPTY tools list emits --tools with an empty value, not an absent flag", async () => {
+    const spec = await makeSpec({ tools: [] });
+    const argv = buildStepArgv(spec);
+    expect(argv).toContain("--tools");
+    expect(flagValue(argv, "--tools")).toBe("");
+    // The flag and its empty value must be adjacent, or the next flag becomes
+    // the tool list: `--tools --permission-mode` grants nothing but reads as
+    // a parse accident waiting to be "fixed".
+    const at = argv.indexOf("--tools");
+    expect(argv[at + 1]).toBe("");
+    expect(argv[at + 2]).toBe("--permission-mode");
+    // Every isolation flag still rides along — an empty allow-list is not an
+    // excuse to relax the ones that make it meaningful.
+    expect(argv).toContain("--strict-mcp-config");
+    expect(flagValue(argv, "--setting-sources")).toBe("");
+  });
+
   test("drops v1's --agents and never grants Write/Task", async () => {
     const spec = await makeSpec();
     const argv = buildStepArgv(spec);

@@ -76,6 +76,10 @@ export function estimateCost(
   diffStat: DiffStat,
   hunterCount: number,
   summarizerEnabled = false,
+  // ROADMAP-DOORDASH M5. Defaulted OFF so every existing caller keeps its
+  // band byte-identical, and so a caller that forgets it under-quotes
+  // nothing it did not already under-quote.
+  scoutEnabled = false,
 ): CostEstimate {
   const files = Math.max(0, diffStat.files);
   const lines =
@@ -83,7 +87,20 @@ export function estimateCost(
   // A validated ReviewSpec always carries at least one hunter, so a zero here
   // means a caller asked hypothetically. Clamping keeps the band from
   // collapsing to $0–$0, which would read as "this is free".
-  const agents = Math.max(1, hunterCount + (summarizerEnabled ? 1 : 0));
+  // The scout takes a full agent seat, the summarizer's precedent, and that
+  // deliberately OVER-quotes: it is diff-only, one attempt, and reads no tree,
+  // so its true cost is a fraction of a hunter's. Two reasons it gets the seat
+  // anyway. First, this band's own rule — every recorded overrun was an
+  // UNDER-estimate, so the generous direction is the cheap one to be wrong in.
+  // Second, the scout has NO calibration point of its own: M4 billed $37.00
+  // across six prompt versions, two probe defects and a reverted experiment,
+  // which is a milestone total and not a per-spawn cost. M6 records cost per
+  // arm; that is the number this coefficient gets recalibrated from, and until
+  // it exists an invented per-scout coefficient would be false precision.
+  const agents = Math.max(
+    1,
+    hunterCount + (summarizerEnabled ? 1 : 0) + (scoutEnabled ? 1 : 0),
+  );
   const mid =
     agents *
     (USD_PER_AGENT_BASE + USD_PER_CHANGED_LINE * lines + USD_PER_FILE * files);
@@ -94,7 +111,9 @@ export function estimateCost(
       "coarse band from measured runs (a 7-file / +21 −8 tree with 3 " +
       "hunters + refuter, $3.92–$4.74 across two runs; a 45-file / " +
       "+2775 −1237 tree with 5 hunters + refuter, ~$11–$14.78): a " +
-      `per-agent floor for hunters + refuter${summarizerEnabled ? " + summarizer" : ""} ` +
+      "per-agent floor for hunters + refuter" +
+      `${summarizerEnabled ? " + summarizer" : ""}` +
+      `${scoutEnabled ? " + scout" : ""} ` +
       "plus changed lines and files. An order-of-magnitude " +
       "guide, not a quote — the same tree has billed 34% apart across runs.",
   };

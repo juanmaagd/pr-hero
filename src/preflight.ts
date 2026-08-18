@@ -78,6 +78,17 @@ export interface CliOptions {
   // Summary activation is tri-state at parse time: undefined means no flag,
   // so review can apply flag > config > the default-on setting.
   summary?: boolean;
+  // The scout (ROADMAP-DOORDASH M5). A plain boolean, NOT the summary's
+  // tri-state, because there is no config seat to resolve against yet: the
+  // milestone ships the flag alone, default OFF, and `.prhero/config.json`
+  // stays closed to it until M6 says whether the scout is worth defaulting
+  // on. `parseLocalConfig` rejects unknown keys, so a `scout` key added to a
+  // config today fails loudly rather than being silently ignored.
+  scout: boolean;
+  // Independent model knob (§3.7), and NOT exercised by M6 — the whole
+  // control corpus is sonnet, so ratifying this is ratifying a flag, not a
+  // second variable. `--model` still outranks it (the JD override rule).
+  scoutModel?: string;
   hopBudget: number;
   dryRun: boolean;
   yes: boolean;
@@ -355,6 +366,12 @@ Options:
   --model <model>     Override every agent's model
   --summary           Enable the engine-owned PR summary (default)
   --no-summary        Disable the engine-owned PR summary
+  --scout             review only: run the diff-only scout stage before the
+                      hunters, biasing their scan with unverified leads.
+                      EXPERIMENTAL and off by default — the A/B that decides
+                      whether it earns its cost has not run yet
+  --scout-model <m>   Model for the scout stage (default: the run's model).
+                      Requires --scout
   --hop-budget <n>    Hops per hunter (default: ${DEFAULT_HOP_BUDGET}); the biggest
                       per-hunter cost lever there is
   --two-dot           Diff the literal <base>..<head> two-point range instead
@@ -414,6 +431,7 @@ const VALUE_FLAGS = new Set([
   "--gotchas",
   "--config",
   "--model",
+  "--scout-model",
   "--hop-budget",
   "--interval",
   "--max-changed-lines",
@@ -433,6 +451,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     repo: ".",
     head: DEFAULT_HEAD_REF,
     hopBudget: DEFAULT_HOP_BUDGET,
+    // Default OFF is the milestone's exit criterion, not a preference: M6
+    // compares an arm against a control, and a control that quietly grew a
+    // stage is not a control.
+    scout: false,
     dryRun: false,
     yes: false,
     post: false,
@@ -515,6 +537,12 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--no-summary") {
       options.summary = false;
+      continue;
+    }
+    // No `--no-scout`: the flag is off unless asked for, so the negation
+    // would only ever restate the default.
+    if (arg === "--scout") {
+      options.scout = true;
       continue;
     }
     if (arg === "--yes" || arg === "-y") {
@@ -671,6 +699,23 @@ export function parseArgs(argv: string[]): ParsedCli {
   ) {
     throw new CliUsageError(
       "--post publishes the review as a PR comment, so it requires --pr",
+    );
+  }
+  // The scout is a `review` stage and nothing else reads either flag.
+  // Rejected elsewhere rather than ignored, the --from guard's reasoning: a
+  // flag that parses and then does nothing is an operator believing they
+  // changed a run they did not.
+  if (command !== "review" && (options.scout || options.scoutModel)) {
+    throw new CliUsageError(
+      "--scout and --scout-model only apply to the review command",
+    );
+  }
+  // A model for a stage that will not run is the same silent no-op, one level
+  // down — and the likeliest way to produce it is believing the model flag
+  // turns the stage on.
+  if (options.scoutModel !== undefined && !options.scout) {
+    throw new CliUsageError(
+      "--scout-model sets the model for the scout stage, so it requires --scout",
     );
   }
   // `post` (ROADMAP B6) and `triage` (ROADMAP B6c) share the same shape:
@@ -902,6 +947,9 @@ function applyValueFlag(
       return;
     case "--model":
       options.model = value;
+      return;
+    case "--scout-model":
+      options.scoutModel = value;
       return;
     case "--runs":
       options.runs = value;

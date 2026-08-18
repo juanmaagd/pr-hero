@@ -61,6 +61,7 @@ import {
 import { renderUsage } from "./metrics-preflight";
 import {
   changedPathsFromDiff,
+  DEFAULT_SCOUT_MODEL,
   type PipelineProgressEvent,
   type PipelineResult,
   parityTriggered,
@@ -140,7 +141,11 @@ import {
   createPanelState,
   renderPanelLines,
 } from "./progress";
-import { type ParsedAgent, parseAgentFile } from "./prompt-set";
+import {
+  type ParsedAgent,
+  parseAgentFile,
+  promptSetIdentity,
+} from "./prompt-set";
 import {
   type DiffStat,
   estimateCost,
@@ -237,6 +242,34 @@ export function pipelineSummarizerInput(
         summarizer: {
           promptPath: SUMMARIZER_PROMPT_PATH,
           ...(summary.model === undefined ? {} : { model: summary.model }),
+        },
+      }
+    : {};
+}
+
+const SCOUT_PROMPT_PATH = path.join(
+  import.meta.dir,
+  "..",
+  "prompts",
+  "scout.md",
+);
+
+// The scout's prompt is ENGINE-owned and lives outside the agents dir, on
+// purpose and twice over (§3.7): a `review-scout.md` dropped in the agents dir
+// without a spec entry is a hard CliError, and a new prompt-set directory
+// holding byte-identical hunter files would be a new fingerprint — which is
+// exactly the one-variable property M6 needs to be true by construction rather
+// than argued. `prompts/` is the door the summarizer already walked through.
+export function pipelineScoutInput(
+  options: Pick<CliOptions, "scout" | "scoutModel">,
+): { scout: { promptPath: string; model?: string } } | Record<string, never> {
+  return options.scout
+    ? {
+        scout: {
+          promptPath: SCOUT_PROMPT_PATH,
+          ...(options.scoutModel === undefined
+            ? {}
+            : { model: options.scoutModel }),
         },
       }
     : {};
@@ -486,6 +519,17 @@ async function review(options: CliOptions): Promise<number> {
     );
   }
 
+  // The prompt set's identity (§3.9), computed from the spec's DECLARATION
+  // order — the same order the lab's promptSetFingerprint hashes in, so the
+  // two sides produce the same string for the same bytes. It is what turns
+  // M6's central claim, "both arms ran the same prompt set", from something
+  // believed into something recorded, and it fills the `prompt_set` seat
+  // findings.ts has declared and never populated.
+  const promptSet = await promptSetIdentity(
+    agentsDir,
+    spec.agents.map((a) => path.join(agentsDir, a.file)),
+  );
+
   // 7 — gotchas. Checked HERE rather than left to the pipeline's fail-loud
   // abort: the pipeline is right to refuse, but all it can return is a
   // zero-cost partial run, which reads like a clean review to a human.
@@ -593,7 +637,12 @@ async function review(options: CliOptions): Promise<number> {
     (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
   );
   const hunterCount = activeHunters.length;
-  const estimate = estimateCost(diffStat, hunterCount, summary.enabled);
+  const estimate = estimateCost(
+    diffStat,
+    hunterCount,
+    summary.enabled,
+    options.scout,
+  );
   // Named rather than inlined into renderPlan: the same context is what the
   // confirm menu's "Show details" renders, and building it twice would risk
   // the card and the details view disagreeing about the run they describe.
@@ -660,7 +709,8 @@ async function review(options: CliOptions): Promise<number> {
   // stderr line per pipeline event (plus a TTY heartbeat between them).
   log(
     `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-      `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
+      `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
+      "comparable trees have taken " +
       "8–25 minutes",
   );
   const started = performance.now();
@@ -696,6 +746,9 @@ async function review(options: CliOptions): Promise<number> {
         parityTriggerPaths: config.parity_trigger_paths,
         suspicionPriors: config.suspicion_priors,
         ...pipelineSummarizerInput(summary),
+        ...pipelineScoutInput(options),
+        engine: await engineIdentity(),
+        promptSet,
         spec,
       },
       { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
@@ -731,6 +784,7 @@ async function review(options: CliOptions): Promise<number> {
     head_sha: headSha,
     model: envelopeModel(options, agentFiles),
     iteration: 0,
+    prompt_set: promptSet,
     engine: await engineIdentity(),
     sessionFailed: result.sessionFailed,
     telemetry,
@@ -864,6 +918,17 @@ async function reviewPr(
       await parseAgentFile(path.join(agentsDir, agent.file)),
     );
   }
+
+  // The prompt set's identity (§3.9), computed from the spec's DECLARATION
+  // order — the same order the lab's promptSetFingerprint hashes in, so the
+  // two sides produce the same string for the same bytes. It is what turns
+  // M6's central claim, "both arms ran the same prompt set", from something
+  // believed into something recorded, and it fills the `prompt_set` seat
+  // findings.ts has declared and never populated.
+  const promptSet = await promptSetIdentity(
+    agentsDir,
+    spec.agents.map((a) => path.join(agentsDir, a.file)),
+  );
   const gotchasPath = options.gotchas
     ? path.resolve(options.gotchas)
     : path.join(operatorRoot, ".prhero", "gotchas.md");
@@ -909,6 +974,7 @@ async function reviewPr(
       target.ghDiffStat,
       hunterCount,
       summary.enabled,
+      options.scout,
     );
     // The gate, ESTIMATED. A PR dry run creates nothing and fetches nothing,
     // so the only size facts on hand are GitHub's own aggregate counters —
@@ -1133,7 +1199,12 @@ async function reviewPr(
       (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
     );
     const hunterCount = activeHunters.length;
-    const estimate = estimateCost(diffStat, hunterCount, summary.enabled);
+    const estimate = estimateCost(
+      diffStat,
+      hunterCount,
+      summary.enabled,
+      options.scout,
+    );
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
     const planContext: PrPlanContext = {
@@ -1246,7 +1317,8 @@ async function reviewPr(
       // as its cwd and the PR's real number for the envelope.
       log(
         `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-          `refuter ${summarizerLabel(summary)}; comparable trees have taken ` +
+          `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
+          "comparable trees have taken " +
           "8–25 minutes",
       );
       const started = performance.now();
@@ -1278,6 +1350,9 @@ async function reviewPr(
             parityTriggerPaths: config.parity_trigger_paths,
             suspicionPriors: config.suspicion_priors,
             ...pipelineSummarizerInput(summary),
+            ...pipelineScoutInput(options),
+            engine: await engineIdentity(),
+            promptSet,
             spec,
           },
           { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
@@ -1316,6 +1391,7 @@ async function reviewPr(
         head_sha: headSha,
         model: envelopeModel(options, agentFiles),
         iteration: 0,
+        prompt_set: promptSet,
         engine: await engineIdentity(),
         sessionFailed: result.sessionFailed,
         telemetry,
@@ -3050,6 +3126,26 @@ function summarizerLabel(summary: SummarySettings): string {
   return summary.enabled ? "+ summarizer" : "+ summarizer disabled";
 }
 
+// Printed on EVERY plan, off included. The scout adds a paid stage to the
+// front of the run and the operator is about to confirm a band that already
+// counts it, so "scout: off" is information, not noise — and a stage that
+// only appears when it is on is a stage nobody notices arriving.
+function scoutRow(
+  options: Pick<CliOptions, "scout" | "scoutModel" | "model">,
+): string {
+  const label = "scout".padEnd(12);
+  if (!options.scout) return `${label}${"-".padEnd(8)}disabled`;
+  // The same chain the pipeline resolves, printed before the money is spent:
+  // --model > --scout-model > the engine default (the bundled prompt pins no
+  // model, so there is no frontmatter seat to show here).
+  const model = options.model ?? options.scoutModel ?? DEFAULT_SCOUT_MODEL;
+  return `${label}${model.padEnd(8)}diff-only, before the hunters (experimental)`;
+}
+
+function scoutLabel(options: Pick<CliOptions, "scout">): string {
+  return options.scout ? " + scout" : "";
+}
+
 // The last block on screen and the only one an operator must read: the gate
 // verdict, then the money. Both used to sit mid-list, where the eye that had
 // already given up on the plan never reached them.
@@ -3185,6 +3281,7 @@ export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   push("run dir", ctx.runDir);
   push("hop budget", String(ctx.options.hopBudget));
   push("summarizer", summarizerRow(ctx.summary));
+  push("scout", scoutRow(ctx.options));
   push(
     "parity",
     ctx.config.parity_trigger_paths.length === 0
@@ -3237,6 +3334,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
     label = "";
   }
   lines.push(...row(label, summarizerRow(ctx.summary), { styles, width }));
+  lines.push(...row("", scoutRow(ctx.options), { styles, width }));
   label = "";
   lines.push(
     "",
@@ -3428,6 +3526,7 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   push("run dir", ctx.runDir);
   push("hop budget", String(ctx.options.hopBudget));
   push("summarizer", summarizerRow(ctx.summary));
+  push("scout", scoutRow(ctx.options));
   if (ctx.options.post) {
     push(
       "post",
@@ -3485,6 +3584,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
     label = "";
   }
   lines.push(...row(label, summarizerRow(ctx.summary), { styles, width }));
+  lines.push(...row("", scoutRow(ctx.options), { styles, width }));
   label = "";
   lines.push(
     "",
@@ -3716,6 +3816,19 @@ function startLineRenderer(startedAtMs: number): ProgressRenderer {
         case "summarizer-finished":
           line(
             `summarizer: ${event.ok ? "done" : "failed (the run continues)"}`,
+          );
+          return;
+        case "scout-started":
+          line(`scout: reading the diff (${event.model})`);
+          return;
+        case "scout-finished":
+          // "unled", never "the run continues": a scout failure is not a
+          // partial review, it is the control pipeline. Naming it as a
+          // degradation would teach an operator to distrust a complete run.
+          line(
+            event.ok
+              ? `scout: ${event.leads ?? 0} lead(s)`
+              : "scout: failed (the hunters run unled)",
           );
           return;
         case "step-retry":

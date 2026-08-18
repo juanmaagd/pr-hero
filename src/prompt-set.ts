@@ -86,3 +86,41 @@ export function renderAgentBody(
     .replaceAll("{{PRIORS}}", bullets)
     .replaceAll("{{GOTCHAS}}", context.gotchas);
 }
+
+// The prompt set's identity, and the reason it exists is M6's central claim:
+// "both arms ran the same prompt set" must be RECORDED, not believed. Ported
+// byte-for-byte from the lab's `promptSetFingerprint` (deep-review
+// runner/session.ts) — sha256 over the concatenated file TEXTS in the order
+// given, truncated to 16 hex — so a fingerprint computed here and one computed
+// there are the same string for the same bytes. Changing the algorithm, the
+// truncation length, or the file order silently moves every fingerprint ever
+// recorded on either side, which is why neither is a free choice.
+//
+// Order comes from the caller (the ReviewSpec's declaration order), never from
+// a directory listing: same files, different order = different concatenation =
+// different hash.
+export async function promptSetFingerprint(files: string[]): Promise<string> {
+  const hasher = new Bun.CryptoHasher("sha256");
+  for (const file of files) {
+    hasher.update(await Bun.file(file).text());
+  }
+  return hasher.digest("hex").slice(0, 16);
+}
+
+export interface PromptSetIdentity {
+  name: string;
+  sha256: string;
+}
+
+// `name` is the agents DIRECTORY basename, which is what the lab's `arm-a` /
+// `baseline` set names have always meant — two runs can share a fingerprint
+// and differ in nothing else, so the name is a label and the sha is the fact.
+export async function promptSetIdentity(
+  agentsDir: string,
+  files: string[],
+): Promise<PromptSetIdentity> {
+  return {
+    name: agentsDir.replace(/\/+$/, "").split("/").pop() ?? agentsDir,
+    sha256: await promptSetFingerprint(files),
+  };
+}

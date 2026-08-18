@@ -39,6 +39,7 @@ describe("parseArgs", () => {
       repo: ".",
       head: "HEAD",
       hopBudget: DEFAULT_HOP_BUDGET,
+      scout: false,
       dryRun: false,
       yes: false,
       post: false,
@@ -159,6 +160,53 @@ describe("parseArgs", () => {
     expect(
       parseArgs(["review", "--no-summary", "--summary"]).options.summary,
     ).toBe(true);
+  });
+
+  // ROADMAP-DOORDASH M5. The default is the milestone's exit criterion:
+  // M6 compares an arm against a control, and a control that quietly grew a
+  // stage is not a control.
+  test("the scout is OFF unless asked for", () => {
+    expect(parseArgs(["review"]).options.scout).toBe(false);
+    expect(parseArgs(["review", "--scout"]).options.scout).toBe(true);
+    expect(parseArgs(["review", "--scout"]).options.scoutModel).toBeUndefined();
+    expect(
+      parseArgs(["review", "--scout", "--scout-model", "haiku"]).options
+        .scoutModel,
+    ).toBe("haiku");
+  });
+
+  test("--scout-model without --scout is a loud no-op, not a quiet one", () => {
+    expect(() => parseArgs(["review", "--scout-model", "haiku"])).toThrow(
+      "requires --scout",
+    );
+  });
+
+  test("the scout flags belong to review and nothing else", () => {
+    // The watcher spawns `review --pr <n> --yes` and never learns these
+    // exist; a scout flag on any other verb is an operator believing they
+    // changed a run they did not.
+    expect(() => parseArgs(["watch", "--once", "--scout"])).toThrow(
+      "only apply to the review command",
+    );
+    expect(() =>
+      parseArgs(["ledger", "--scout", "--scout-model", "haiku"]),
+    ).toThrow("only apply to the review command");
+  });
+
+  // The M5 exit criterion, pinned from the config side: the flag ships alone.
+  // `.prhero/config.json` gets a scout seat only after M6 decides whether the
+  // stage is worth defaulting on — and until then a config that tries is a
+  // loud error, never a silently ignored key.
+  test("the config file has no scout seat yet, and says so", () => {
+    expect(() => parseLocalConfig('{"scout":{"enabled":true}}')).toThrow(
+      "unknown key: scout",
+    );
+  });
+
+  test("--scout-model never swallows the following flag", () => {
+    expect(() =>
+      parseArgs(["review", "--scout", "--scout-model", "--yes"]),
+    ).toThrow("--scout-model needs a value");
   });
 
   test("--help wins wherever it appears", () => {

@@ -15,6 +15,19 @@ const SUMMARIZER_PROMPT_PATH = path.join(
   "prompts",
   "summarizer.md",
 );
+const SCOUT_PROMPT_PATH = path.join(
+  import.meta.dir,
+  "..",
+  "prompts",
+  "scout.md",
+);
+
+// `bun run fixture-eval --scout` (ROADMAP-DOORDASH M5's exit: the planted bug
+// is still found with the flag ON and with it OFF). The scout runs on the
+// fixture's haiku the same way the rest of the run does — this eval proves
+// PLUMBING, never recall, and a sonnet scout here would spend real money to
+// prove nothing extra.
+const scoutEnabled = Bun.argv.includes("--scout");
 
 const fixture = await buildPlantedFixture();
 
@@ -43,6 +56,9 @@ const result = await runPipeline(
     // No `model` override: the fixture frontmatter's haiku wins (plumbing
     // proof, not recall quality — see fixtures/setup.ts).
     summarizer: { promptPath: SUMMARIZER_PROMPT_PATH },
+    ...(scoutEnabled
+      ? { scout: { promptPath: SCOUT_PROMPT_PATH, model: "haiku" } }
+      : {}),
     parityTriggerPaths: [], // parity never fires — 2 hunters, cheapest run
     suspicionPriors: [
       {
@@ -125,9 +141,55 @@ for (const hunter of hunters) {
   }
 }
 
-// (4) Frozen-plan provenance.
-if (!(await Bun.file(path.join(fixture.runDir, "pipeline.json")).exists())) {
+// (4) Frozen-plan provenance, and the scout row inside it. Read rather than
+// merely existence-checked now: the arm a run belongs to must be legible from
+// the artifact alone (§3.9), and this is the cheapest place that claim gets
+// exercised against a REAL run instead of a fake runner.
+const planPath = path.join(fixture.runDir, "pipeline.json");
+if (!(await Bun.file(planPath).exists())) {
   failures.push("missing pipeline.json in run dir");
+} else {
+  const plan = (await Bun.file(planPath).json()) as {
+    scout?: { enabled?: boolean; status?: string; leads_count?: number };
+    generated_at?: string;
+  };
+  if (typeof plan.generated_at !== "string") {
+    failures.push("pipeline.json carries no generated_at");
+  }
+  if (plan.scout?.enabled !== scoutEnabled) {
+    failures.push(
+      `pipeline.json scout.enabled is ${plan.scout?.enabled}, expected ${scoutEnabled}`,
+    );
+  }
+  // A FAILED scout is a legal outcome the run survives (§3.6) — it is not a
+  // legal outcome for the eval, which exists to prove the wiring works.
+  if (scoutEnabled && plan.scout?.status !== "ok") {
+    failures.push(`scout status is "${plan.scout?.status}", expected "ok"`);
+  }
+  if (!scoutEnabled) {
+    const leadsArtifact = path.join(
+      fixture.runDir,
+      "steps",
+      "scout.leads.json",
+    );
+    if (await Bun.file(leadsArtifact).exists()) {
+      failures.push("the control arm wrote a scout artifact");
+    }
+  }
+}
+
+// (4b) With the flag on: the step's own artifact, and its bill.
+if (scoutEnabled) {
+  const leadsArtifact = path.join(fixture.runDir, "steps", "scout.leads.json");
+  if (!(await Bun.file(leadsArtifact).exists())) {
+    failures.push(`missing step artifact: ${leadsArtifact}`);
+  }
+  const entry = result.perAgent.scout;
+  if (!entry) {
+    failures.push("perAgent has no entry for scout");
+  } else if (entry.tokens_total <= 0) {
+    failures.push(`perAgent.scout.tokens_total is ${entry.tokens_total}`);
+  }
 }
 
 // (5) Per-agent telemetry: each hunter ran as its own session, so each must
@@ -148,6 +210,7 @@ console.log(
       pass,
       cost_usd: result.usage.cost_usd_est,
       wall_ms: wallMs,
+      scout: scoutEnabled,
       findings_count: skillOutput.findings.length,
       hit: hit ? { path: hit.path, line: hit.line } : null,
       run_dir: fixture.runDir,
