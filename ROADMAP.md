@@ -49,6 +49,106 @@ post shows acceptance populates only two of the four confusion-matrix cells and 
 telemetry. Anything in this roadmap or in the issue tracker that reads acceptance as a success condition
 predates that correction and is wrong.
 
+## THE LAUNCH LINE — 2026-08-18. The destination is not the exit.
+
+Decided by Juanma the same day: the two roadmaps stay, but they stop being the condition for shipping.
+**Amended the same evening:** launch is not only distribution (npm / TUI / Action). It also includes the
+**product fundamentals** a stranger would hit on the second push — re-review, and everything that
+unblocks it. Rubric: if a stranger's second push, a CI run, or an install would lie, fail mute, or be
+impossible → before launch. If it only makes reviews better or prettier → after.
+
+The engine already does the *first* review on musive (local, `--pr --post`, watcher, triage, size gate)
+as an **assistant, not a merge gate**. Claude Code only — no OpenCode, no model mix.
+
+**How to read this file from here.** Four layers, one ship goal:
+
+| Layer | What it is | Blocks launch? |
+|---|---|---|
+| **Floor** | Phase A closed + Phase B minus item 7 (and item 8's leftover polish) | already done |
+| **Fundamentals** | finish DoorDash M5→M6, C4, item 7, C5 | **yes** |
+| **Distribution** | the three pillars below | **yes** |
+| **After** | C1b, C2, C3, C6, C8–C10, Phase D, rest of E, scout-as-default | no |
+
+Scout ON is not a launch requirement. M6's outcome is still adopt / opt-in / drop. What launch requires
+is that M5+M6 **run**, so item 7 is designed against the pipeline we will actually have. The M6 gate on
+item 7 is unchanged — do not unblock by rewriting it.
+
+### Fundamentals (this order — we are in the middle of the DoorDash track)
+
+1. **`ROADMAP-DOORDASH.md` M5** — wire the scout behind `--scout`, default OFF. Watcher does not learn
+   the flag until M6 decides.
+2. **M6** — the A/B on the control set (~$224). Juanma decides adopt / opt-in / drop. That decision is
+   what item 7's discovery half is designed against.
+3. **C4** — engine-owned preamble + XML boundary tags on any user-authored text. Must exist **before**
+   item 7 inlines previous findings and author replies (the rule is already on the C4 entry).
+4. **Phase B item 7 — re-review.** Verification of prior findings; discovery over what changed; do not
+   infer `resolved` from absence; after N pushes the author sees the current state. Still does not start
+   until the splice conditions on that entry hold.
+5. **C5** — global config with per-repo override. Also the load-bearing half of distribution pillar 1
+   (bundled `agents_dir` as a person-key). A repo still cannot subscribe itself to extra spend.
+
+### Three distribution pillars (after fundamentals, or in parallel once M5–M6 are in flight)
+
+1. **Install + configure in one flow.** npm distribution. `npm i -g pr-hero && pr-hero init` leaves a
+   repo that `--dry-run`s. The load-bearing hole: today's `SUGGESTED_AGENTS_DIR` is a path on Juanma's
+   machine (`preflight.ts:47-48`). A published package must **bundle a frozen production prompt set**
+   and default `agents_dir` to it. `init` is a wizard, not a file dump: walk gotchas (empty still
+   fails loud — a starter is not a skip), commit-vs-ignore for `.prhero/`, dependency preflight
+   (`claude` authenticated, `git`, `gh`, codegraph). C5 (global config, per-repo override) belongs
+   here: person-keys (`agents_dir` bundled, `summary`) default globally; repo-keys stay in
+   `.prhero/`. The precedence rule on C5 is unchanged — a repo must not subscribe itself to extra spend.
+2. **CLI menus + TUI for the happy path and every knob we already have.** Not a web dashboard (that is
+   a later page). Not convoy's live per-step panel (later). Not per-hunter model picking (Phase D,
+   after launch). What it IS: `init` as menus; the review plan/confirm/result that item 8 already
+   shipped; `pr-hero` with no args as a menu (review / watch / init / config); and a config surface
+   that covers the settings that exist today, so nobody has to hand-edit JSON for the happy path.
+
+   Launch config surface — existing knobs only, no new ones from D2/C6:
+
+   | Where | Knobs |
+   |---|---|
+   | `.prhero/config.json` | `agents_dir` (bundled default), `default_base`, `parity_trigger_paths`, `suspicion_priors`, `summary.enabled` / `summary.model` (Claude family) |
+   | `.prhero/gotchas.md` | required, human-authored; wizard helps write them |
+   | `~/.prhero/watch.json` | per-repo `post`, `on_push`, size-gate overrides; global `daily_cap`, `window` |
+   | `watch install` | tick `interval` |
+   | per-run, from the same menus | `--post`, `--force`, `--max-changed-lines` / `--max-changed-files`, `--hop-budget`, `--model` as a **single Claude override** for every agent — not routing |
+
+   Commands that already work and are not launch blockers stay CLI: `ledger`, `triage`, `gc`,
+   `reverts`, `corpus`.
+3. **GitHub Actions CI.** A thin Action wrapping `pr-hero review --pr --post --yes`. Documented
+   `CLAUDE_CODE_OAUTH_TOKEN` (or the equivalent) in repo secrets. Unattended spend is bounded: the
+   size gate plus an explicit cap (per-PR / daily). It comments; it does **not** install a required
+   status check. The local watcher remains the Mac-side adapter — same product, two triggers.
+
+### Launch is done when
+
+Fundamentals:
+
+- [ ] M5 ships, flag default OFF, fixture-eval green both ways
+- [ ] M6 has numbers in the ledger and a Juanma call: adopt / opt-in / drop
+- [ ] C4 is in front of every prompt that inlines user-authored text
+- [ ] item 7 is live: a second push verifies (or honestly says unconfirmed), does not claim
+      `resolved` from absence, and the PR shows the current state rather than an archaeology
+- [ ] C5: person-keys default globally, repo-keys stay in `.prhero/`
+
+Distribution — on a machine that is not this one:
+
+- [ ] `npm i -g pr-hero` installs the command (package is not `"private": true`)
+- [ ] `pr-hero init` does not mention `deep-review` or a path under `/Users/juanma`
+- [ ] dependency preflight names whatever is missing (`claude` / `gh` / codegraph) instead of failing mute
+- [ ] every knob in the table above is settable from the TUI/menus (flags remain for scripts)
+- [ ] `pr-hero review --dry-run` and one `--pr --post` succeed on a stranger's repo
+- [ ] a second push on that PR exercises item 7, not a full re-hunt dressed as a delta
+- [ ] the Action runs on an open PR, posts, and respects the cap
+- [ ] every report still says assistant, not merge gate
+
+### Explicitly after launch
+
+C1b hunter-emitted fingerprint. C2 schema v1.1. C3 resume. C6 learned-knowledge. C8–C10. Scout as
+**default** (that is M6's decision, not a ship checkbox). OpenCode / multi-model / D1–D3. Web dashboard.
+Live per-step status. Fixer loop. Homebrew (nice, not blocking). Item 8 leftovers (findings browser,
+progress tree). Required status check. Cancelling Greptile.
+
 ## Phase A — Graduate Phase 0 (the bar: ≥80% catch, ≤20% FP)
 
 The two known capability gaps, in attack order:
@@ -364,13 +464,15 @@ Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it
 
 ## Phase B — Production wiring
 
-> **🔒 Item 7 is BLOCKED on `ROADMAP-DOORDASH.md` and item 8 is DONE — so the next session does NOT start
-> here.** Item 7 waits on that track's M6 (the scout A/B), which has not started; the full condition table
-> is on the entry itself. Everything else in this roadmap is free: Phase C's C1–C6, C8, C9 and C10 touch
-> the DoorDash track nowhere. Only C7 is the scout.
+> **🔒 Item 7 is BLOCKED on `ROADMAP-DOORDASH.md` and item 8's review surface is DONE.** Item 7 waits on
+> that track's M6 (the scout A/B). The gate is unchanged — do not rewrite it. **As of THE LAUNCH LINE
+> (amended 2026-08-18) item 7 IS a launch fundamental**, so M5→M6→C4→item 7 is on the ship path, not a
+> parallel research sideline. C5 is distribution pillar 1. C1b, C2, C3, C6, C8, C9, C10 stay after launch
+> and touch the DoorDash track nowhere. Only C7 (the scout *stage*) is the experiment; scout-as-default
+> is M6's call.
 >
-> Recommended next: **C5** (global config with per-repo override) — concrete daily pain, $0, offline
-> testable, and its precedence rule is already written down.
+> If the session is shipping: THE LAUNCH LINE, fundamentals first — right now that is **M5**.
+> Distribution pillars can proceed in parallel once M5–M6 are in flight; item 7 cannot.
 >
 > Before anything: item 8's entry below still says `IN PROGRESS 2026-08-12 (branch feat/terminal-ui)`.
 > All three claims are false — the four `ui-*` modules are on `main`, `renderResult` is wired at
@@ -849,13 +951,14 @@ What is still manual, in the order it should be closed:
    and it is worse than a matter of efficiency.
 
    **🔒 BLOCKED — DO NOT START. Preceded by `ROADMAP-DOORDASH.md` (Juanma, 2026-08-16).** This item does
-   not start until that track's splice conditions hold. State as of 2026-08-16, end of session:
+   not start until that track's splice conditions hold. **Promoted to THE LAUNCH LINE fundamentals
+   2026-08-18** — launch waits on this item; the gate itself is unchanged. State as of 2026-08-18:
 
    | # | condition | state |
    |---|---|---|
    | 1 | M1 (#42, #39) merged **and seen live** | merged and pushed; **NOT yet seen live** — no auto-launched review has been checked by hand against them |
    | 2 | M2 — #19's shape decided | ✅ done. 53/53 findings postable → #19 is criteria-shaped, not a gate |
-   | 3 | M6 — the scout A/B decided | ❌ **not started.** M3 (the design) is partial; M4, M5, M6 have not begun |
+   | 3 | M6 — the scout A/B decided | ❌ **not started.** M3 ratified, M4 done 2026-08-18 (`prompts/scout.md`); M5 is the next session |
    | 4 | M0's control set and M6's numbers in the ledger | control set ✅ (`docs/scout-design.md` §1); M6's numbers do not exist |
 
    **Condition 3 is the real gate and it is not negotiable by convenience.** This item's discovery half
@@ -866,10 +969,10 @@ What is still manual, in the order it should be closed:
    Do NOT unblock this item by rewriting the conditions. That was proposed once, on 2026-08-16, and
    rejected: the gate is not the obstacle, the unfinished experiment is.
 
-   **What is NOT blocked, so this entry does not stall the whole roadmap (Juanma, 2026-08-16):** only
-   item 7 gates on the DoorDash track. Item 8 is done, and every Phase C entry except C7 — C1 through C6,
-   C8, C9, C10 — is available now and touches none of it. Read the splice section in
-   `ROADMAP-DOORDASH.md` before touching this entry.
+   **What is NOT blocked (Juanma, 2026-08-16, still true for everything except launch):** C1b, C2, C3,
+   C6, C8, C9, C10 and the distribution pillars do not wait on M6. C4 does — it must land before this
+   item inlines user-authored text. Read the splice section in `ROADMAP-DOORDASH.md` before touching
+   this entry.
 
    **Parked from W2 (Juanma, 2026-08-15) — read this before building this item.** Issues #16/#17 closed
    the *first* review's posting surface and explicitly left re-review for this slice. Do not reopen
@@ -1147,7 +1250,10 @@ Convoy-inspired ops the engine still lacks, in value order:
   tag names out of the user content first**, so `</mr_body><mr_details>…` in a description cannot break
   out of its block. That rule is C4's — engine-owned, non-overridable, one place — and it must exist
   before the first prompt that carries a reply.
-- **C5. Global config with per-repo override** (Juanma, 2026-08-13). NOT BUILT. Today `config.json` is
+
+  **Promoted to THE LAUNCH LINE fundamentals 2026-08-18.** It lands before item 7, not after launch.
+- **C5. Global config with per-repo override** (Juanma, 2026-08-13). NOT BUILT. **Promoted to THE
+  LAUNCH LINE fundamentals + distribution pillar 1 on 2026-08-18.** Today `config.json` is
   per-repo only: `<repo>/.prhero/config.json`, four keys (`agents_dir`, `default_base`,
   `parity_trigger_paths`, `suspicion_priors`), parsed by `parseLocalConfig` (`preflight.ts:999`), with no
   global fallback anywhere. `~/.prhero/` exists but belongs entirely to the watcher (`watch.json`, log,
@@ -1461,20 +1567,27 @@ like convoy uses its Codex quota. OpenRouter (paid per token) only for diversity
 
 ## Phase E — OSS productization (pr-hero as a product)
 
+**Split 2026-08-18 (THE LAUNCH LINE).** The launch slice of this phase — npm, guided `init`, CLI/TUI
+for existing knobs, thin GitHub Action, Claude-only — moved up and is specified at the top of this
+file, together with the product fundamentals (M5→M6, C4, item 7, C5). What remains here is post-launch
+product: the web dashboard, convoy-style live per-step, the fixer loop, Homebrew, and the
+TUI-as-model-router once Phase D exists.
+
 From the productization vision + convoy's operational layer: `.prhero/` project config (pipelines as
 YAML/TS data — the ReviewSpec already is), GitHub Actions runner mode (claude-code-action +
 CLAUDE_CODE_OAUTH_TOKEN as the documented fallback), built-in provider bench, human gates in specs,
 TUI/dashboard (live per-step status, cost, provider limits — convoy's strongest UX), `runs` browser.
-Timing: only after Phase B proves the engine in anger on our own repo.
+The engine-in-anger timing is met; the leftover items still wait on launch, not on more wiring.
 
-**Scope note (added 2026-08-12 by Juanma):** the TUI is not just a viewer. It should also be the
-interactive front-end for configuring a review — picking which model runs which hunter, per-case
-(deeper vs. lighter review), and whatever other knobs Phase D's model routing exposes by the time this
-is built — as an alternative to memorizing flags. Concrete option set is deliberately NOT decided now;
-it depends on what D2's model routing and the rest of the CLI surface look like when Phase E starts.
-Runtime/language for the TUI (TypeScript vs. Go, etc.) is also open, not decided.
+**Scope note (added 2026-08-12 by Juanma; narrowed 2026-08-18):** the *launch* TUI is the config
+front-end for knobs that already exist (see THE LAUNCH LINE, pillar 2) — an alternative to memorizing
+flags and hand-editing JSON. Picking which model runs which hunter, per-case deeper vs. lighter
+review, and whatever D2's model routing exposes stay **after launch**; the first ship is Claude-only.
+Runtime/language for a later web dashboard is open, not decided. The terminal TUI at launch stays in
+this repo's TypeScript CLI (`src/ui*.ts`) — zero new runtime dependencies, same constraint as item 8.
 
-**Onboarding DX (added 2026-08-11 by Juanma, from the first real onboarding pass):** a guided
+**Onboarding DX (added 2026-08-11 by Juanma, from the first real onboarding pass; promoted to
+THE LAUNCH LINE pillar 1 on 2026-08-18):** a guided
 `pr-hero init` that collapses today's per-project ritual — scaffold, hand-write gotchas, decide
 commit-vs-ignore for `.prhero/`, optionally `watch add` — into one complete, intuitive flow with
 options. Concretely: walk the gotchas instead of leaving a template (refusing to run on empty is
@@ -1502,10 +1615,10 @@ stays unchanged. A fixer should inherit that split, and the worktree isolation i
 `src/pr.ts` already owns. Their own framing is the one to keep: *"this is not about removing engineer
 ownership. It's about removing the mechanical handoff."*
 
-**Distribution (added 2026-08-12 by Juanma):** pr-hero as a product means an install, not a clone.
-Package it for a real registry — npm and/or Homebrew are the obvious candidates — so `pr-hero` is a
-single install command away instead of `git clone` + link. Mechanism (which registries, versioning,
-release process) is deliberately NOT decided now; revisit when Phase E is actually being built.
+**Distribution (added 2026-08-12 by Juanma; npm promoted to THE LAUNCH LINE pillar 1 on 2026-08-18):**
+pr-hero as a product means an install, not a clone. npm is the launch registry; Homebrew stays
+post-launch. Mechanism (versioning, release process) is decided when pillar 1 is built, not deferred
+to "when Phase E starts".
 
 ## Standing rules (apply to every phase)
 

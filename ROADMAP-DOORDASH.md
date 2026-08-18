@@ -416,6 +416,10 @@ starts consuming them:
 
 ## The splice — resuming `ROADMAP.md` at item 7
 
+**Amended 2026-08-18 (THE LAUNCH LINE):** item 7 is a launch fundamental, not a post-ship research
+item. This file's sequence is unchanged — M5 → M6 → splice → item 7 — and that sequence now sits on
+the ship path. Scout-as-default is still M6's call (adopt / opt-in / drop), not a launch checkbox.
+
 Item 7 resumes when ALL of these hold; none is negotiable, none is large:
 
 1. **M1 merged and seen live** (#42, #39): item 7's re-review posts through the same surface, and it
