@@ -410,14 +410,22 @@ The original entry, kept for its reasoning:
 >   re-runnable from artifacts forever). One runs root, which is how §1.2's cross-root ledger problem stops
 >   applying to the new data.
 >
-> **THE PILOT RAN 2026-08-18 — 3 PRs, R=2, $33.17, and it is a HARNESS result, not a scout result.**
-> Two defects caught in the first ten minutes (`--out` names the run dir not a root; a review can exit 0
-> without running, on a stale in-flight commit status) plus one side effect nobody had written down: every
-> PR-mode review posts a `pr-hero` commit status on the head as the operator's account, which `--post`
-> does not cover. Full record: `docs/scout-design.md` §3.16. **Two corrections to the numbers below:**
-> cost per run measured $3.00 control / $3.63 scout (+21%), so the full 56 extrapolate to **~$186**, near
-> the band's low end — but wall clock measured 5.55 / 8.57 min per run, so the full session is **~6h35m,
-> not 4h44m**. The scout arm is the entire difference. Scout stage: 103-268s, mean 179s.
+> **THE PILOT RAN 2026-08-18/19 — 3 PRs, R=2, 12 runs, $44.32, and it is a HARNESS result, not a scout
+> result.** Two defects caught in the first ten minutes (`--out` names the run dir not a root; a review
+> can exit 0 without running, on a stale in-flight commit status) plus one side effect nobody had written
+> down: every PR-mode review posts a `pr-hero` commit status on the head as the operator's account, which
+> `--post` does not cover. Full record: `docs/scout-design.md` §3.16. **Three corrections to the numbers
+> below:** cost per run measured $3.36 control / $4.03 scout (+20%), so the full 56 extrapolate to
+> **~$207** — inside the band, mid-range, not at its floor; wall clock measured 6.34 / 9.76 min per run,
+> so the full session is **~7h31m, not 4h44m**, the scout arm being the entire difference; and what a
+> decision actually costs is the **REMAINING 44 runs — ~$163, ~5h54m** — because the floor test extends
+> incrementally and `m6.ts run` resumes over the 12 on disk, valid only while this engine build and
+> prompt set hold. Scout stage: 103-286s, mean 196s.
+>
+> **The latency is the pilot's real finding, and it is not about recall.** 38.9s (fixture) → 86-600s (M4
+> probe) → 103-286s here. The scout adds ~3.3 min to every review against §3.9's "one short step"; for a
+> PR-triggered reviewer that is a product number, and it plausibly caps the outcome at `opt-in` before the
+> floor table says anything.
 >
 > **The priced go/no-go, measured not guessed** (`bun run scripts/m6.ts plan`, from GitHub's counters and
 > musive's own `.prhero/config.json` — 3 hunters + refuter, summarizer OFF, parity never fires):

@@ -1373,7 +1373,7 @@ protocol — the floor test grown past five cases first, per the 2026-08-17 amen
 
 ### 3.16 THE M6 PILOT — 3 PRs, R=2, and the harness earned its money before the data did
 
-**Run 2026-08-18. 12 runs planned, 10 landed, $33.17.** Not a result about the scout: 2 of 13 cases is
+**Run 2026-08-18/19. 12 runs, $44.32 measured.** Not a result about the scout: 2 of 13 cases is
 nothing to read. It was run to prove the harness against real merged PRs before committing five hours,
 and it found two defects in the first ten minutes plus one side effect nobody had written down.
 
@@ -1401,50 +1401,72 @@ minutes. 767's was superseded by hand with an `error` state saying no review was
 
 #### 3.16.3 The numbers, which are about COST and LATENCY, not about the scout
 
+Measured over all 12 runs, 6 per arm. Every figure here is re-derivable from the artifacts:
+per-run cost and wall clock live in `findings.json` at `telemetry.cost_usd_est` and `telemetry.wall_ms`,
+and the scout stage at `telemetry.per_agent.scout.duration_ms`. **`pipeline.json` carries no cost field**
+— reach for `findings.json`, or a ledger built on the wrong file reads $0 and says nothing.
+
 | | control | scout arm | delta |
 |---|---|---|---|
-| runs | 5 | 5 | |
-| cost per run, mean | **$3.00** | **$3.63** | **+21%** |
-| wall clock per run, mean | **5.55 min** | **8.57 min** | **+54%** |
+| runs | 6 | 6 | |
+| cost per run, mean | **$3.36** | **$4.03** | **+20%** |
+| wall clock per run, mean | **6.34 min** | **9.76 min** | **+54%** |
 
-Scout stage duration, per run: **103, 149, 165, 209, 268s — mean 179s.**
+Scout stage duration, per run: **103, 148, 165, 209, 268, 286s — mean 196s.**
+
+The last two runs were the 767 replicate-1 fill-in and they landed on the SAME two ratios the first ten
+gave (+21%/+54% at N=10, +20%/+54% at N=12). Two replicates do not make a variance estimate, but a ratio
+that does not move when the sample grows by a fifth is the cheapest reassurance available here — and §1.3
+is the reason to want it, since six of eight same-head replicate pairs MOVED by as much as the whole
+effect the scout is supposed to produce.
 
 **Two corrections to the go/no-go, both from this table:**
 
-- **The cost band is honest and slightly conservative.** `estimateCost` gives the scout a full agent seat,
-  which predicted ~+33%; the measured delta is +21%. Extrapolated at these rates the full 56 runs are
-  **~$186**, near the LOW end of the $173.68-$374.22 band. The over-quote §3.15's comment defended is
-  real, small, and in the direction the band's own rule wants. **What a decision actually costs is the
-  REMAINING 44**, not 56: §2.4septies's clause makes the floor test extend incrementally, the 12 pilot
-  runs are on disk, and `scripts/m6.ts run` resumes over them — **~$152 and ~5h11m**, conditional on the
-  invariant that produced them (§3.11: same day, same engine build, same prompt set). If this engine
-  build moves or enough time passes, those 12 stop being arm data and become a variance third point, and
-  the price of the decision goes back to the full 56.
-- **The wall-clock estimate was wrong and the error is large.** `plan` assumed ~4 min/run and printed
-  ~4h44m. Measured, the full 56 runs are **28 x 5.55 + 28 x 8.57 = ~6h35m** — 39% more (the remaining 44
-  are ~5h11m). The scout arm is the whole difference, and §3.11 said wall clock, not dollars, is M6's
+- **The cost band holds, and the earlier "near the LOW end" read was an artifact of the small sample.**
+  `estimateCost` gives the scout a full agent seat, predicting ~+33% against a measured +20%. Extrapolated,
+  the full 56 runs are **~$207** — inside the $173.68-$374.22 band but mid-range, not at its floor. **What
+  a decision actually costs is the REMAINING 44**, not 56: §2.4septies's clause makes the floor test extend
+  incrementally, the 12 pilot runs are on disk, and `scripts/m6.ts run` resumes over them — **~$163**,
+  conditional on the invariant that produced them (§3.11: same day, same engine build, same prompt set).
+  If this engine build moves, those 12 stop being arm data and become a variance third point, and the
+  price of the decision goes back to the full 56.
+- **The wall-clock estimate was wrong and the error is worse than the first read said.** `plan` assumed
+  ~4 min/run and printed ~4h44m. Measured, the full 56 are **~7h31m** — 59% more — and the remaining 44
+  are **~5h54m**. The scout arm is the whole difference, and §3.11 said wall clock, not dollars, is M6's
   real constraint.
 
 **The latency finding is now the strongest thing this milestone has measured, and it is not about
 recall.** §3.9 expected "one short step". The evidence, in order: 38.9s (fixture, haiku, 2 files), then
-86-600s (M4's probe), then 103-268s here on real PRs. **The scout adds ~3 minutes to every review.** For a
-PR-triggered reviewer whose whole product claim is arriving before a human does, that is a product number
-and not just a benchmark one, and M6's adopt / opt-in / drop call should read it beside whatever the floor
-test says.
+86-600s (M4's probe), then 103-286s here on real PRs. **The scout adds ~3.3 minutes to every review**, and
+the arm's total wall clock grows by more than the stage costs (+3.4 min/run against a 196s stage) because
+the leads block lengthens every hunter's prompt too. For a PR-triggered reviewer whose whole product claim
+is arriving before a human does, that is a product number and not just a benchmark one, and M6's adopt /
+opt-in / drop call should read it beside whatever the floor test says.
+
+**Spend ledger for M6 so far (rule 6):**
+
+| | |
+|---|---|
+| the killed first attempt, `--out` defect | ~$1-3, no artifacts |
+| the pilot, 10 runs | $32.25 |
+| the 767 r1 fill-in, 2 runs | $12.07 |
+| **on disk and scorable** | **$44.32 / 12 runs** |
 
 #### 3.16.4 The two cases that did run
 
 | # | PR | type | control | scout |
 |---|---|---|---|---|
 | 1 | 1717 | miss | **0/2** | **2/2** |
-| 9 | 767 | corpus | 1/1 | 1/1 |
+| 9 | 767 | corpus | 2/2 | 2/2 |
 
 Case 1 is the cleanest shape a floor test can produce — consistent in both replicates in both directions,
 against §1.3's measured noise where six of eight same-head pairs MOVED. Three caveats, all of which
 survive into the write-up: it is ONE case; the scout's hit is at line 144 against a site at 119, which is
 **exactly 25 — the inclusive boundary of the window**, not a comfortable match; and 1717 is by
-construction a PR where the control was already recorded as missing (§2.3). Case 9 is hit by both arms,
-which is §3.11's stated weakness made concrete: a tie informs nothing.
+construction a PR where the control was already recorded as missing (§2.3). Case 9 is hit by both arms in
+every replicate, which is §3.11's stated weakness made concrete: a tie informs nothing. Its replicate 1
+ran a day after its peers (the fill-in for the two runs the in-flight lock ate) — inside §3.11's engine
+build and prompt set, outside its same-day wording, and recorded here rather than quietly averaged in.
 
 #### 3.16.5 The clean pair, one PR of the two
 
