@@ -1267,3 +1267,91 @@ they would cost the most to change later:
 4. **§3.10's exclusion rule — at most one case, a second returns diff-only to Juanma.** Stands.
 
 M4 may begin. Nothing in M5 or M6 starts without its own gate passing first.
+
+### 3.15 M5 SHIPPED — the wiring, and the two numbers the design had estimated
+
+**Done 2026-08-18, one session, `e1ed036`.** `--scout` exists on `review`, defaults OFF, and the watcher
+does not know it exists. All nine §3.12 obligations carry a named test; four more were added because the
+design implied them without listing them (model precedence, the `spec.parse` seam, the config seat, the
+plan row). Offline: 1387 tests, tsc and biome clean, `scripts/` and `fixtures/` typechecked under an
+explicit tsconfig — the coverage gap `CLAUDE.md` names, closed for this change rather than in general.
+
+#### 3.15.1 Deviation 1 — the watchdog is 15 minutes, not 5
+
+§3.5 mechanism 4 says "a 5-minute watchdog, copying the summarizer". That number was written before the
+stage had ever run. M4 then measured it at **86-600s across 60 spawns** and raised its own probe watchdog
+from 10 to 15 on that evidence (§3.10bis). A 5-minute ceiling would reap runs the only data we have calls
+normal, and it would reap them as FAILURES — which, under §3.6's fail-open rule, means silently
+converting scout-arm runs into control-arm runs. That is the exact way an A/B lies quietly, so the
+measurement outranks the estimate that preceded it. One attempt is unchanged.
+
+#### 3.15.2 Deviation 2 — `DEFAULT_SCOUT_MODEL`, because "the run's model" does not exist
+
+§3.7 says the model is an "independent knob, defaulting to the run's model". There is no such thing. A
+hunter's model comes from its own agent frontmatter; `input.model` is set only when `--model` is passed;
+and `prompts/scout.md` carries no `model:` line at all. So a plain `pr-hero review --scout` would have
+failed construction on `resolveModel` — fail-open would have swallowed it, every run would have gone
+unled, and `pipeline.json` would have said `status: "failed"` on a scout that never got as far as a
+spawn. It would have looked like a flaky provider.
+
+Two exits. Adding `model: sonnet` to `prompts/scout.md` was rejected: that file is M4's ratified artifact
+at sha256 `68a81d26081e`, and moving that sha for a prompt whose BODY nothing changed would break the
+reference every M4 number is recorded against. So the engine owns the last seat:
+
+```
+--model  >  --scout-model  >  the prompt's frontmatter  >  DEFAULT_SCOUT_MODEL
+```
+
+The default sits LAST so a frontmatter model added later still outranks it. The value is not a taste
+call: every one of M4's 60 measured spawns ran sonnet (`scripts/scout-probe.ts` defaults to it and never
+reads the prompt's frontmatter), and M6's whole control corpus is sonnet (§1.2). It is the model the
+scout has been measured on and the model the A/B will run it on. The cheap tier stays §3.13's later
+experiment.
+
+#### 3.15.3 One key beyond §3.9's list, and the reason it is not scope creep
+
+`pipeline.json`'s `scout` row carries `why_truncated` alongside the seven keys §3.9 named. M5 inherits
+M4's `why`-truncation defect — it fired in most runs — and §3.8 already rules that a truncation firing
+routinely is a PROMPT defect to fix, never a cap to raise. A defect that only a probe nobody re-runs can
+see is a defect nobody notices. It costs one integer per run.
+
+#### 3.15.4 What the live gates bought, at $0.353
+
+| gate | result | cost | wall |
+|---|---|---|---|
+| `live-micro-eval --scout` | ok, 1 lead, correct | $0.0539 | 3.6s |
+| `fixture-eval` | PASS, planted bug hit | $0.1298 | 71.0s |
+| `fixture-eval --scout` | PASS, planted bug hit | $0.1695 | 128.7s |
+
+The micro-eval grew a `--scout` mode for one reason, and it is the mechanism this whole design rests on.
+`--tools ""` is asserted at the argv layer (`test/step-runner.test.ts`), but **nothing had ever confirmed
+that the CLI on the other side ACCEPTS an empty allow-list** rather than reading it as "unrestricted" or
+refusing to start. §3.5's honest caveat still stands — `cwd` is the worktree and `--mcp-config` is still
+emitted, so this is an allow-list and not a sandbox — but the allow-list is now known to be honoured by a
+live session, not merely by our argv. The toolless scout found the planted off-by-one from the diff alone.
+
+The scout-arm fixture run wrote `prompt_sha256: 68a81d26081e…` — M4's ratified v5, byte for byte — and
+its single lead landed ON the planted defect at `src/volume.ts:4`.
+
+#### 3.15.5 The number M6 must read twice
+
+**The scout added 38.9s to a 71s run** — on haiku, over a two-file diff, one attempt. §3.9 stated the
+critical-path cost rather than hiding it and expected "one short step"; §3.10bis already recorded 86-600s
+against that expectation and called it an inherited concern. This is the third datum pointing the same
+way, and the first from the production wiring rather than a probe. M6 records latency per arm as a
+first-class number, and the adopt / opt-in / drop call will be made against a stage that is not free in
+wall clock even when it is cheap in dollars.
+
+#### 3.15.6 What M5 did NOT do
+
+- **`#40`** (soft timeout, two-stage semantics). The M1 amendment orphaned it — "pick it up on its own
+  merits, not as part of a milestone" — so M5's entry naming it is superseded, not skipped.
+- **`prompts/scout.md` is untouched.** The three inherited concerns from §3.10bis (`why` truncation
+  firing in most runs, scout latency, the v6 rule written wrong) are prompt work gated on `scout-probe`,
+  not M5 scope. Its sha is still `68a81d26081e`.
+- **The config seat stays closed.** `.prhero/config.json` rejects a `scout` key today, and gets one only
+  after M6 says the stage is worth defaulting on.
+- **No `--no-scout`.** The flag is off unless asked for, so a negation would only restate the default.
+
+**M6 may begin.** It is the only paid experiment in this track, and nothing in it starts without §3.11's
+protocol — the floor test grown past five cases first, per the 2026-08-17 amendment.

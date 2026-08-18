@@ -40,12 +40,14 @@ been burned by a manual match that inflated a score by 50%.
 ## Commands
 
 ```bash
-bun test               # 883 tests, all offline (fake spawn/runner)
+bun test               # 1387 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
 bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
 bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
 bun run fixture-eval   # LIVE: full pipeline vs a planted bug in a disposable repo (~$0.08, ~1 min)
+bun run fixture-eval --scout         # LIVE: same, with the scout stage on (~$0.17, ~2 min)
 bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
+bun run scripts/live-micro-eval.ts --scout  # LIVE: the scout's real spawn shape, tools:[] (~$0.05)
 ```
 
 `refuter-probe` is the FIRST gate for any refuter prompt change (ROADMAP A2): it plants claims whose
@@ -71,6 +73,10 @@ with an explicit `bunx tsc` / `bunx biome check` over them.
   its pure decisions — PR record → range, the worktree reuse gate, comparison.json (B4's seed).
 - `src/greptile.ts` + `src/compare.ts` + `src/compare-report.ts` — the head-to-head: parse Greptile's
   PR comment, bucket findings against ours, render the comparison.
+- `src/scout.ts` — the diff-only pre-hunter stage's PURE half (DoorDash M4/M5): output contract, lead
+  validation, the four caps, the leads block, the hunk-coverage metric. Its impure half is `runScout` in
+  `pipeline.ts`; the prompt is `prompts/scout.md`, engine-owned and outside the prompt set on purpose.
+  Wired behind `--scout`, default OFF until M6 decides.
 - `src/size-gate.ts` — pure: "this diff is too big, skip it". A COST/predictability gate, never a
   quality one (the size↔quality question is unmeasured — see `scripts/scope-probe.ts`). Wired into
   local review, PR review and the watcher, always BEFORE the cost-band confirm.

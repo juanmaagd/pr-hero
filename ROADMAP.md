@@ -77,8 +77,11 @@ item 7 is unchanged — do not unblock by rewriting it.
 
 ### Fundamentals (this order — we are in the middle of the DoorDash track)
 
-1. **`ROADMAP-DOORDASH.md` M5** — wire the scout behind `--scout`, default OFF. Watcher does not learn
-   the flag until M6 decides.
+1. ~~**`ROADMAP-DOORDASH.md` M5** — wire the scout behind `--scout`, default OFF. Watcher does not learn
+   the flag until M6 decides.~~ **DONE 2026-08-18** (`e1ed036`). Flag off by default, watcher untouched
+   (it spawns `review --pr <n> --yes` and `parseArgs` refuses `--scout` on any other verb), fixture-eval
+   green both ways at $0.30. Two design numbers changed on M4 evidence — the watchdog and the model
+   default — both recorded in `docs/scout-design.md` §3.15.
 2. **M6** — the A/B on the control set (~$224). Juanma decides adopt / opt-in / drop. That decision is
    what item 7's discovery half is designed against.
 3. **C4** — engine-owned preamble + XML boundary tags on any user-authored text. Must exist **before**
@@ -136,7 +139,7 @@ item 7 is unchanged — do not unblock by rewriting it.
 
 Fundamentals:
 
-- [ ] M5 ships, flag default OFF, fixture-eval green both ways
+- [x] M5 ships, flag default OFF, fixture-eval green both ways — 2026-08-18, `e1ed036`
 - [ ] M6 has numbers in the ledger and a Juanma call: adopt / opt-in / drop
 - [ ] C4 is in front of every prompt that inlines user-authored text
 - [ ] item 7 is live: a second push verifies (or honestly says unconfirmed), does not claim
@@ -974,7 +977,7 @@ What is still manual, in the order it should be closed:
    |---|---|---|
    | 1 | M1 (#42, #39) merged **and seen live** | merged and pushed; **NOT yet seen live** — no auto-launched review has been checked by hand against them |
    | 2 | M2 — #19's shape decided | ✅ done. 53/53 findings postable → #19 is criteria-shaped, not a gate |
-   | 3 | M6 — the scout A/B decided | ❌ **not started.** M3 ratified, M4 done 2026-08-18 (`prompts/scout.md`); M5 is the next session |
+   | 3 | M6 — the scout A/B decided | ❌ **not started.** M3 ratified, M4 done 2026-08-18 (`prompts/scout.md`), M5 done 2026-08-18 (`e1ed036`); M6 is the next session and it is the only paid one |
    | 4 | M0's control set and M6's numbers in the ledger | control set ✅ (`docs/scout-design.md` §1); M6's numbers do not exist |
 
    **Condition 3 is the real gate and it is not negotiable by convenience.** This item's discovery half

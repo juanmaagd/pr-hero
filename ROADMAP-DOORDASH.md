@@ -353,7 +353,32 @@ Diff-only spawns are cheap enough (~$0.30) to iterate the prompt here, N times, 
 where the prompt gets written and rewritten. Exit: the probe passes at the thresholds M3 set, three
 replicates each; results in the commit description.
 
-### M5 — The scout wired, behind a flag, default OFF (1–2 sessions)
+### M5 — The scout wired, behind a flag, default OFF — **DONE 2026-08-18 (`e1ed036`), one session**
+
+**Exit: MET.** The flag exists, defaults off, is fully tested, and the watcher does not know it exists —
+the last of those by construction rather than by promise: `watch.ts` spawns a literal
+`review --pr <n> --yes` argv, `parseArgs` refuses `--scout` on any verb but `review`, and
+`parseLocalConfig` still rejects a `scout` key, so the config seat stays closed until M6 decides.
+
+- All nine of `docs/scout-design.md` §3.12's obligations, one named test each, plus four the design
+  implied and did not list (model precedence, the parse seam, the config seat, the plan row).
+- **Two deviations, both because M4 measured something the design had estimated**: the watchdog is 15
+  minutes, not §3.5's 5 (M4 measured the stage at 86-600s), and the model's last seat is an engine
+  constant `DEFAULT_SCOUT_MODEL = "sonnet"` rather than "the run's model", because there is no such
+  thing when no `--model` is passed and `prompts/scout.md` deliberately carries no `model:` frontmatter.
+  Adding one would have moved the sha256 M4 ratified for a prompt whose body nothing changed. Full
+  argument in `docs/scout-design.md` §3.15.
+- **One key beyond §3.9's list**: `scout.why_truncated`, because M5 inherits M4's `why`-truncation
+  defect and a defect nothing counts in production is a defect nobody notices.
+- **`#40` did NOT land here.** The M1 amendment orphaned it — "pick it up on its own merits, not as
+  part of a milestone" — so the bullet below is superseded, not skipped.
+- **Live gates, $0.353**: `live-micro-eval --scout` (new mode — it proves `--tools ""` is ACCEPTED by a
+  live session, which no offline test can) $0.0539; `fixture-eval` PASS $0.1298 / 71.0s;
+  `fixture-eval --scout` PASS $0.1695 / 128.7s, the scout landing 1 lead on the planted defect.
+- **The number M6 must not ignore**: the scout added **38.9s to a 71s run**, on haiku, over a two-file
+  diff. §3.9 warned it sits on the critical path; this is the first datum saying that cost is not small.
+
+The original entry, kept for its reasoning:
 
 - `--scout` on `review` (and `.prhero/config.json` later; not on the watcher until M6 decides).
 - The stage runs first, its leads render into the hunter prompts per M3, `pipeline.json` carries the
@@ -361,8 +386,6 @@ replicates each; results in the commit description.
 - `#40` lands here if it did not in M1: the soft interrupt now has two stage semantics.
 - Offline gates green; `fixture-eval` passes with the flag on and off (the planted bug still found, cost
   band still honest); one `live-micro-eval` with the flag on.
-
-Exit: the flag exists, defaults off, is fully tested, and the watcher does not know it exists.
 
 ### M6 — The A/B on the control set (1 session of build-free work; ~$150–250; wall clock is the cost)
 
@@ -452,7 +475,7 @@ Phase C work with their own designs.
 | M2 #19's shape | ½ | $0 | — (the number decides) |
 | M3 scout design — **RATIFIED 2026-08-17** | 1 | $0 | all four as recommended; fork → **(a)** |
 | M4 scout-probe — **DONE 2026-08-18** | 1 | **$37.00** | restraint gate amended → (b); §3.10bis |
-| M5 scout behind flag | 1–2 | ~$0.10 | — |
+| M5 scout behind flag | 1–2 → **1, DONE** | ~$0.10 → **$0.353** | — |
 | Adjudicate #43 candidates — **DONE**, 13 cases | 1 | $0 | 8 of 20 usable; §2.4septies |
 | M6 the A/B | 1 (+ wall clock) | **~$224 — (a), floor at 13** | adopt / opt-in / drop |
 | M7 fill-ins | ride along | $0 | — |
