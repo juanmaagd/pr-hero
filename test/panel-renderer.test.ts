@@ -38,6 +38,14 @@ beforeEach(() => {
     written.push(String(chunk));
     return true;
   }) as typeof process.stderr.write;
+  // Forced OFF, and this line is why the afterEach below restores NO_COLOR:
+  // it was written to be restored and never set, so the colour assertions
+  // here only passed in a shell that happened to export NO_COLOR already.
+  // With a forced TTY and colour on, `✓ summarizer` is not a substring of the
+  // frame — the tick arrives as `\x1b[32m✓\x1b[0m` — so the test failed for
+  // everyone else. Cursor sequences (`\x1b[0J`) are emitted either way, so the
+  // post-stop-silence assertions are untouched by this.
+  process.env.NO_COLOR = "1";
 });
 
 afterEach(() => {
