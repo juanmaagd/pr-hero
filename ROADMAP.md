@@ -489,9 +489,12 @@ Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it
 > and touch the DoorDash track nowhere. Only C7 (the scout *stage*) is the experiment; scout-as-default
 > is M6's call.
 >
-> If the session is shipping: THE LAUNCH LINE, fundamentals first — right now that is **M5** or the
-> **canonical store** (they do not gate each other). Distribution pillars can proceed in parallel once
-> M5–M6 are in flight; item 7 cannot.
+> If the session is shipping: THE LAUNCH LINE, fundamentals first — **M5 shipped 2026-08-18 (`e1ed036`),
+> so right now that is **M6** or the **canonical store** (they do not gate each other). M6 is the only
+> paid experiment in the track and it does not start cold: per §3.11's 2026-08-17 amendment the floor
+> test is grown past its five cases from the widened corpus FIRST, which itself needs `pr-hero corpus`
+> re-run (the counts on disk predate `234a1ef`'s fixes). Distribution pillars can proceed in parallel;
+> item 7 cannot.
 >
 > Before anything: item 8's entry below still says `IN PROGRESS 2026-08-12 (branch feat/terminal-ui)`.
 > All three claims are false — the four `ui-*` modules are on `main`, `renderResult` is wired at

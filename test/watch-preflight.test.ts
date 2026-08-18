@@ -502,6 +502,38 @@ describe("attempts counting", () => {
 
   // pr 0 is local mode's schema-legal "not a PR" — it parses (the artifact
   // is fine) and simply never matches a real PR number.
+  // §3.12 obligation 7's second half: "the existing reader still parses it".
+  // This is that reader, and pipeline.json grew four keys in M5 — `scout`,
+  // `engine`, `prompt_set`, `generated_at`. Tolerance here is by
+  // construction (named-key reads), but the obligation names a TEST, and the
+  // cost of being wrong is the attempts guard silently falling back to
+  // dir-name counting on every run the engine now writes.
+  test("parsePipelineMeta reads M5's new-shape artifact unchanged", () => {
+    const m5 = JSON.stringify({
+      pr: 5,
+      base_sha: "06e857b3",
+      head_sha: HEAD_A,
+      out_path: "/runs/5/findings.json",
+      excluded_paths: [],
+      parity_hunter_fired: false,
+      engine: { name: "pr-hero", version: "0.4.0" },
+      prompt_set: { name: "baseline", sha256: "d34e9a6147e9c9a3" },
+      generated_at: "2026-08-18T19:13:55.178Z",
+      scout: {
+        enabled: true,
+        model: "sonnet",
+        status: "ok",
+        leads_count: 3,
+        leads_truncated: 0,
+        why_truncated: 1,
+        duration_ms: 38_882,
+        prompt_sha256: "68a81d26081e",
+      },
+      steps: [{ name: "scout", model: "sonnet", tools: [] }],
+    });
+    expect(parsePipelineMeta(m5)).toEqual({ pr: 5, head_sha: HEAD_A });
+  });
+
   test("parsePipelineMeta accepts local-mode pr 0", () => {
     expect(parsePipelineMeta(`{"pr":0,"head_sha":"${HEAD_A}"}`)).toEqual({
       pr: 0,
