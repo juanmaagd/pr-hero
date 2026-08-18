@@ -1,0 +1,132 @@
+{
+  "_source": "docs/scout-design.md §2.4septies — that markdown table is the canonical statement; this file is the machine-readable copy the scorer reads. test/floor-test.test.ts re-derives the table from the doc and fails if the two disagree.",
+  "_coordinates": "Every line is in the coordinates of the PR THAT GETS REVIEWED, never the fix PR's. Three of the eight corpus cases drift 60-104 lines between the two, which no ±25 window can absorb — see the drift table in §2.4septies.",
+  "_types": "miss = the PR under review IS where our engine missed something Greptile found (§2.3). corpus = the PR under review is the INTRODUCER; fix_pr is provenance only.",
+  "cases": [
+    {
+      "id": 1,
+      "pr": 1717,
+      "path": "packages/app/components/PaywallUpgrade/index.tsx",
+      "start_line": 119,
+      "end_line": 119,
+      "type": "miss",
+      "what": "ordering bug, visible in the diff"
+    },
+    {
+      "id": 2,
+      "pr": 1719,
+      "path": "packages/backend/src/Infrastructure/Http/SongSourceResolver.ts",
+      "start_line": 296,
+      "end_line": 296,
+      "type": "miss",
+      "what": "missing lower bound"
+    },
+    {
+      "id": 3,
+      "pr": 1722,
+      "path": "packages/backend/src/Utils/m4aRemux.ts",
+      "start_line": 181,
+      "end_line": 181,
+      "type": "miss",
+      "what": "whole-file check swapped for an mdat one; author-confirmed regression"
+    },
+    {
+      "id": 4,
+      "pr": 1724,
+      "path": "docs/runbooks/mus-638-song-bucket-rollout.md",
+      "start_line": 144,
+      "end_line": 144,
+      "type": "miss",
+      "what": "shell under `set -u` in a markdown runbook"
+    },
+    {
+      "id": 5,
+      "pr": 1724,
+      "path": "docs/runbooks/mus-638-song-bucket-rollout.md",
+      "start_line": 140,
+      "end_line": 142,
+      "type": "miss",
+      "what": "unbounded poll in the same runbook"
+    },
+    {
+      "id": 6,
+      "pr": 1471,
+      "path": ".github/workflows/build-check.yml",
+      "start_line": 39,
+      "end_line": 39,
+      "type": "corpus",
+      "fix_pr": 1557,
+      "what": "`bunx biome` unscoped — the gate checks nothing and exits 0"
+    },
+    {
+      "id": 7,
+      "pr": 853,
+      "path": "packages/app/hooks/useChangeCover.tsx",
+      "start_line": 120,
+      "end_line": 120,
+      "type": "corpus",
+      "fix_pr": 1641,
+      "what": "`const` in the `try`, dereferenced in the `catch`"
+    },
+    {
+      "id": 8,
+      "pr": 1307,
+      "path": "packages/web/src/store/FileUploaderStore.ts",
+      "start_line": 405,
+      "end_line": 405,
+      "type": "corpus",
+      "fix_pr": 1413,
+      "what": "refreshes by the track's id, overwriting `selectedProject`"
+    },
+    {
+      "id": 9,
+      "pr": 767,
+      "path": "packages/web/src/Context/AudioPlayerContext.tsx",
+      "start_line": 278,
+      "end_line": 278,
+      "type": "corpus",
+      "fix_pr": 1434,
+      "what": "preload fast-path trusts an unverified cached element"
+    },
+    {
+      "id": 10,
+      "pr": 965,
+      "path": "packages/backend/src/Infrastructure/Cloudflare/CludflareDriver.ts",
+      "start_line": 338,
+      "end_line": 338,
+      "type": "corpus",
+      "fix_pr": 1124,
+      "what": "`attachment` with no `filename=`, beside a UUID key"
+    },
+    {
+      "id": 11,
+      "pr": 1179,
+      "path": "lambda/song-waveform/src/index.ts",
+      "start_line": 145,
+      "end_line": 145,
+      "type": "corpus",
+      "fix_pr": 1394,
+      "what": "sample-rate normalisation deleted, `16000` left hardcoded"
+    },
+    {
+      "id": 12,
+      "pr": 1141,
+      "path": "packages/backend/src/Infrastructure/Http/Controllers/PublicProject.ts",
+      "start_line": 216,
+      "end_line": 216,
+      "type": "corpus",
+      "fix_pr": 1215,
+      "what": "ms assigned to `totalSeconds`, then `/3600`"
+    },
+    {
+      "id": 13,
+      "pr": 1248,
+      "path": "packages/backend/src/Infrastructure/Tigris/TigrisDriver.ts",
+      "start_line": 922,
+      "end_line": 922,
+      "type": "corpus",
+      "fix_pr": 1376,
+      "what": "`Range: \"bytes=0-15\"` feeding a magic-byte sniffer"
+    }
+  ]
+}

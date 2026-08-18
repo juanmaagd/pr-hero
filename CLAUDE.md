@@ -48,6 +48,9 @@ bun run fixture-eval   # LIVE: full pipeline vs a planted bug in a disposable re
 bun run fixture-eval --scout         # LIVE: same, with the scout stage on (~$0.17, ~2 min)
 bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
 bun run scripts/live-micro-eval.ts --scout  # LIVE: the scout's real spawn shape, tools:[] (~$0.05)
+bun run scripts/m6.ts plan   # $0: prices M6's 56 runs from gh counters + the target repo's config
+bun run scripts/m6.ts score  # $0: the floor table, re-runnable from artifacts forever
+bun run scripts/m6.ts run    # LIVE and the big one: 56 serial reviews, ~$174-374, ~4h44m
 ```
 
 `refuter-probe` is the FIRST gate for any refuter prompt change (ROADMAP A2): it plants claims whose
@@ -73,6 +76,11 @@ with an explicit `bunx tsc` / `bunx biome check` over them.
   its pure decisions — PR record → range, the worktree reuse gate, comparison.json (B4's seed).
 - `src/greptile.ts` + `src/compare.ts` + `src/compare-report.ts` — the head-to-head: parse Greptile's
   PR comment, bucket findings against ours, render the comparison.
+- `src/floor-test.ts` — M6's primary instrument, pure: the case list's validator, the per-case gate (a
+  refuter-CORROBORATED finding within compare.ts's ±25 of the site), the per-arm tally, the table. Arm
+  identity is read off `pipeline.json`'s `scout.enabled`, never a directory name. Cases live in
+  `docs/m6-floor-cases.json`, transcribed from `docs/scout-design.md` §2.4septies and drift-guarded by a
+  test that re-derives the markdown table.
 - `src/scout.ts` — the diff-only pre-hunter stage's PURE half (DoorDash M4/M5): output contract, lead
   validation, the four caps, the leads block, the hunk-coverage metric. Its impure half is `runScout` in
   `pipeline.ts`; the prompt is `prompts/scout.md`, engine-owned and outside the prompt set on purpose.

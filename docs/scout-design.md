@@ -471,11 +471,11 @@ The two case types differ in what gets reviewed, and M6 must not blur them:
 
 | # | PR to review | site | type | what a reviewer must flag |
 |---|---|---|---|---|
-| 1 | **1717** | `PaywallUpgrade/index.tsx:119` | miss | ordering bug, visible in the diff |
-| 2 | **1719** | `SongSourceResolver.ts:296` | miss | missing lower bound |
-| 3 | **1722** | `m4aRemux.ts:181` | miss | whole-file check swapped for an mdat one; author-confirmed regression |
-| 4 | **1724** | `mus-638-song-bucket-rollout.md:144` | miss | shell under `set -u` in a markdown runbook |
-| 5 | **1724** | `mus-638-song-bucket-rollout.md:140-142` | miss | unbounded poll in the same runbook |
+| 1 | **1717** | `packages/app/components/PaywallUpgrade/index.tsx:119` | miss | ordering bug, visible in the diff |
+| 2 | **1719** | `packages/backend/src/Infrastructure/Http/SongSourceResolver.ts:296` | miss | missing lower bound |
+| 3 | **1722** | `packages/backend/src/Utils/m4aRemux.ts:181` | miss | whole-file check swapped for an mdat one; author-confirmed regression |
+| 4 | **1724** | `docs/runbooks/mus-638-song-bucket-rollout.md:144` | miss | shell under `set -u` in a markdown runbook |
+| 5 | **1724** | `docs/runbooks/mus-638-song-bucket-rollout.md:140-142` | miss | unbounded poll in the same runbook |
 | 6 | **1471** | `.github/workflows/build-check.yml:39` | corpus (fix 1557) | `bunx biome` unscoped — the gate checks nothing and exits 0 |
 | 7 | **853** | `packages/app/hooks/useChangeCover.tsx:120` | corpus (fix 1641) | `const` in the `try`, dereferenced in the `catch` |
 | 8 | **1307** | `packages/web/src/store/FileUploaderStore.ts:405` | corpus (fix 1413) | refreshes by the track's id, overwriting `selectedProject` |
@@ -486,6 +486,21 @@ The two case types differ in what gets reviewed, and M6 must not blur them:
 | 13 | **1248** | `packages/backend/src/Infrastructure/Tigris/TigrisDriver.ts:922` | corpus (fix 1376) | `Range: "bytes=0-15"` feeding a magic-byte sniffer |
 
 **13 cases over 12 PRs.** Case 4 and 5 share PR 1724, as cases 1–5 always did.
+
+> **Cases 1-5's paths were REPO-RELATIVE-ised 2026-08-18, and it is the same defect this section exists
+> to prevent.** They were carried over from §2.3 in their short display form —
+> `PaywallUpgrade/index.tsx`, `m4aRemux.ts` — which reads fine to a human and matches NOTHING mechanically:
+> `compare.ts`'s `normalizePath` is deliberately minimal (trim, drop one `./`) and explicitly refuses
+> basename matching, because this monorepo has duplicate filenames across `packages/`. A scorer fed the
+> short form would have scored all five miss cases as misses by BOTH arms — the exact failure the eight-row
+> drift table below records for the corpus cases, arriving through a different door. The full paths were
+> read from the frozen control set's own `comparison.json` rows (s1 `pr-1717-052f77cb-1`, s2
+> `pr-1719-43f5098f-1`, s3 `pr-1722-24a27ba8-1`, s3 `pr-1724-bda807b3-1`), whose `start_line` values agree
+> with this table's line numbers on every one of the five.
+>
+> **The machine-readable copy is `docs/m6-floor-cases.json`**, and `test/floor-test.test.ts` re-derives
+> this table from this markdown and fails if the two disagree. The table above stays the canonical
+> statement; the JSON is what the scorer reads, and neither may drift from the other in silence.
 
 **Why this table exists rather than a pointer at the corpus artifact — corrected 2026-08-17, and worse than
 §2.4sexies first stated.** That section said four of five batch-2 drifts were tolerable and one was

@@ -69,7 +69,7 @@ as an **assistant, not a merge gate**. Claude Code only — no OpenCode, no mode
 | **Floor** | Phase A closed + Phase B minus item 7 (and item 8's leftover polish) | already done |
 | **Fundamentals** | finish DoorDash M5→M6, C4, item 7, C5, canonical store | **yes** |
 | **Distribution** | the three pillars below | **yes** |
-| **After** | C1b, C2, C3, C6, C8–C10, Phase D, rest of E, scout-as-default | no |
+| **After** | C1b, C2, C3, C6, C8–C10, Phase D, rest of E, scout-as-default, named review pipelines | no |
 
 Scout ON is not a launch requirement. M6's outcome is still adopt / opt-in / drop. What launch requires
 is that M5+M6 **run**, so item 7 is designed against the pipeline we will actually have. The M6 gate on
@@ -485,16 +485,21 @@ Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it
 > **🔒 Item 7 is BLOCKED on `ROADMAP-DOORDASH.md` and item 8's review surface is DONE.** Item 7 waits on
 > that track's M6 (the scout A/B). The gate is unchanged — do not rewrite it. **As of THE LAUNCH LINE
 > (amended 2026-08-18) item 7 IS a launch fundamental**, so M5→M6→C4→item 7 is on the ship path, not a
-> parallel research sideline. C5 is distribution pillar 1. C1b, C2, C3, C6, C8, C9, C10 stay after launch
+> parallel research sideline. C5 is distribution pillar 1. C1b, C2, C3, C6, C8, C9, C10, and named review pipelines (`docs/review-strategies.md`) stay after launch
 > and touch the DoorDash track nowhere. Only C7 (the scout *stage*) is the experiment; scout-as-default
 > is M6's call.
 >
-> If the session is shipping: THE LAUNCH LINE, fundamentals first — **M5 shipped 2026-08-18 (`e1ed036`),
-> so right now that is **M6** or the **canonical store** (they do not gate each other). M6 is the only
-> paid experiment in the track and it does not start cold: per §3.11's 2026-08-17 amendment the floor
-> test is grown past its five cases from the widened corpus FIRST, which itself needs `pr-hero corpus`
-> re-run (the counts on disk predate `234a1ef`'s fixes). Distribution pillars can proceed in parallel;
-> item 7 cannot.
+> If the session is shipping: THE LAUNCH LINE, fundamentals first — M5 shipped 2026-08-18 (`e1ed036`),
+> so right now that is **M6** or the **canonical store** (they do not gate each other). Distribution
+> pillars can proceed in parallel; item 7 cannot.
+>
+> **M6's corpus precondition is ALREADY MET — do not re-run `pr-hero corpus` and do not re-adjudicate.**
+> §3.11's 2026-08-17 amendment asked for the floor test to be grown past its five cases before M6, and
+> that happened in `c48fc9a`, `61a6fb9` and `de004ec`: **13 cases over 12 PRs**, canonical in
+> `docs/scout-design.md` §2.4septies, each coordinate re-verified against the reviewed PR's own tree —
+> which is the amendment's "adjudicating past the overstatement" branch, taken. A session that re-runs
+> the corpus burns itself redoing finished work. What M6 actually lacks is INSTRUMENTS, not cases: the
+> floor-test scorer and the run harness. Neither costs money; see the M6 entry in `ROADMAP-DOORDASH.md`.
 >
 > Before anything: item 8's entry below still says `IN PROGRESS 2026-08-12 (branch feat/terminal-ui)`.
 > All three claims are false — the four `ui-*` modules are on `main`, `renderResult` is wired at
@@ -1231,7 +1236,9 @@ Convoy-inspired ops the engine still lacks, in value order:
     exactly the residual C1a leaves: 4 root causes across three runs. That is the number to weigh against a new
     prompt set, a new arm, and the risk of perturbing recall — not a guess.
 - **C2. Schema v1.1** — lift the closed `Hunter` enum (unblocks arbitrary spec keys), make `engine` a
-  first-class field; lab migration + validator both sides.
+  first-class field; lab migration + validator both sides. Named review pipelines
+  (`docs/review-strategies.md`, After layer) grow new hunter kinds (`security`, `react`, …) on this
+  bump; the registry itself does not wait on C2.
 
   **What the enum actually blocks (recorded 2026-08-12).** `src/spec.ts` enforces two rules that together
   make the enum load-bearing far beyond schema hygiene: agent keys are unique (`:76`) and a hunter key must
@@ -1596,11 +1603,15 @@ here is post-launch product: the web dashboard (it reads the store's routes; it 
 database), convoy-style live per-step, the fixer loop, Homebrew, and the TUI-as-model-router once
 Phase D exists.
 
-From the productization vision + convoy's operational layer: `.prhero/` project config (pipelines as
-YAML/TS data — the ReviewSpec already is), GitHub Actions runner mode (claude-code-action +
+From the productization vision + convoy's operational layer: `.prhero/` project config, GitHub Actions runner mode (claude-code-action +
 CLAUDE_CODE_OAUTH_TOKEN as the documented fallback), built-in provider bench, human gates in specs,
 TUI/dashboard (live per-step status, cost, provider limits — convoy's strongest UX), `runs` browser.
 The engine-in-anger timing is met; the leftover items still wait on launch, not on more wiring.
+
+**Named review pipelines (deferred 2026-08-18, Juanma).** Design-only:
+`docs/review-strategies.md`. Convoy-shaped named recipes (selector, per-step models, later a kinded
+step list), findings invariant, no markdown report bus unless a later product call. Not DoorDash, not
+launch. Do not start it while M6 / C4 / item 7 / C5 / canonical store are open.
 
 **Scope note (added 2026-08-12 by Juanma; narrowed 2026-08-18):** the *launch* TUI is the config
 front-end for knobs that already exist (see THE LAUNCH LINE, pillar 2) — an alternative to memorizing

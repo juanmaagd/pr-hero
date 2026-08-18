@@ -387,7 +387,36 @@ The original entry, kept for its reasoning:
 - Offline gates green; `fixture-eval` passes with the flag on and off (the planted bug still found, cost
   band still honest); one `live-micro-eval` with the flag on.
 
-### M6 — The A/B on the control set (1 session of build-free work; ~$150–250; wall clock is the cost)
+### M6 — The A/B on the control set — **INSTRUMENTS BUILT 2026-08-18, the paid run is Juanma's call**
+
+> **"build-free" was wrong, and the correction is the useful part.** M6's CASES were already done (13 over
+> 12 PRs, `docs/scout-design.md` §2.4septies — do NOT re-run `pr-hero corpus`). What did not exist was any
+> way to READ a run against them: `compare.ts` scores against Greptile, not against a case list, and
+> nothing could even tell which arm a run belonged to. Built this session, all $0:
+>
+> - **`src/floor-test.ts`** — the gate (§3.11's exact wording: a refuter-CORROBORATED finding within
+>   `compare.ts`'s ±25 of the site), with "found at the site but not corroborated" reported BESIDE it and
+>   never folded in, because that gap is a statement about the refuter rather than about the scout. Arm
+>   identity comes from `pipeline.json`'s `scout.enabled` — the field M5 built for this — and a run whose
+>   artifact cannot name its arm is skipped, never counted as the arm it resembles. §3.6's exclusion rule
+>   is a predicate the scorer enforces, not a manual step.
+> - **`docs/m6-floor-cases.json`** — §2.4septies as data, drift-guarded by a test that re-derives the
+>   markdown table and fails if the two disagree. **Cases 1-5's paths were repo-relative-ised in the same
+>   pass**: they carried §2.3's display form (`m4aRemux.ts`), which `normalizePath` matches against
+>   nothing, so all five would have scored as misses by BOTH arms — §2.4septies's own lesson arriving
+>   through a second door.
+> - **`scripts/m6.ts`** — `plan` (free), `run` (the paid serial loop, arms INTERLEAVED per PR so a
+>   four-hour session's model drift cannot be confounded with the arm, and never `--post`), `score` (free,
+>   re-runnable from artifacts forever). One runs root, which is how §1.2's cross-root ledger problem stops
+>   applying to the new data.
+>
+> **The priced go/no-go, measured not guessed** (`bun run scripts/m6.ts plan`, from GitHub's counters and
+> musive's own `.prhero/config.json` — 3 hunters + refuter, summarizer OFF, parity never fires):
+> **14 PRs × 2 arms × R=2 = 56 runs, $173.68–$374.22, ~4h44m serial.** The size gate refuses none of the
+> 14, so the harness passes no `--force` and the live gate stays live. The old "~$150–250" was the band's
+> LOW half only.
+
+The original entry, kept for its protocol, which is unchanged:
 
 The only paid experiment in this track. Protocol fixed in M3; the shape it must have:
 
