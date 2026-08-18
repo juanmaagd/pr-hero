@@ -1414,10 +1414,16 @@ Scout stage duration, per run: **103, 149, 165, 209, 268s — mean 179s.**
 - **The cost band is honest and slightly conservative.** `estimateCost` gives the scout a full agent seat,
   which predicted ~+33%; the measured delta is +21%. Extrapolated at these rates the full 56 runs are
   **~$186**, near the LOW end of the $173.68-$374.22 band. The over-quote §3.15's comment defended is
-  real, small, and in the direction the band's own rule wants.
+  real, small, and in the direction the band's own rule wants. **What a decision actually costs is the
+  REMAINING 44**, not 56: §2.4septies's clause makes the floor test extend incrementally, the 12 pilot
+  runs are on disk, and `scripts/m6.ts run` resumes over them — **~$152 and ~5h11m**, conditional on the
+  invariant that produced them (§3.11: same day, same engine build, same prompt set). If this engine
+  build moves or enough time passes, those 12 stop being arm data and become a variance third point, and
+  the price of the decision goes back to the full 56.
 - **The wall-clock estimate was wrong and the error is large.** `plan` assumed ~4 min/run and printed
-  ~4h44m. Measured, the full 56 runs are **28 x 5.55 + 28 x 8.57 = ~6h35m** — 39% more. The scout arm is
-  the whole difference, and §3.11 said wall clock, not dollars, is M6's real constraint.
+  ~4h44m. Measured, the full 56 runs are **28 x 5.55 + 28 x 8.57 = ~6h35m** — 39% more (the remaining 44
+  are ~5h11m). The scout arm is the whole difference, and §3.11 said wall clock, not dollars, is M6's
+  real constraint.
 
 **The latency finding is now the strongest thing this milestone has measured, and it is not about
 recall.** §3.9 expected "one short step". The evidence, in order: 38.9s (fixture, haiku, 2 files), then
