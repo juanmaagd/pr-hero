@@ -31,6 +31,13 @@ Phase C's C7–C10, and Phase E's fixer loop.
   as of 2026-08-16, status per row (`built / partial / missing / ahead / deliberately-different`), file:line
   evidence, and the disposition each gap landed in. Also the recommended build order for the next
   session. Read it before starting any of C7–C10.
+- `docs/martian-bench.md` — **the n-vs-n field (Juanma, 2026-08-19)**. Martian's Code Review Bench:
+  50 public PRs (Sentry, Grafana, Cal.com, Discourse, Keycloak) with human goldens *and* stored reviews
+  from Greptile, CodeRabbit, Bugbot, Copilot, and the rest. Protocol for running pr-hero locally on
+  those SHAs without contamination, scoring against their judge (vendor-comparable) and against stored
+  vendor comments (our H2H × N oracles). Does not reopen Phase A, does not replace the musive Greptile
+  head-to-head, does not reorder M6. Cal.com 10 Surface A scored 2026-08-19 (`scripts/martian-cal.ts` +
+  `scripts/martian-judge.ts`). Skill: `skills/martian-bench/SKILL.md`. Not the 50, not Surface B.
 
 **The direction (Juanma, 2026-08-16): pr-hero pivots toward DoorDash's mechanisms and postures** —
 staged noticing/verifying, focused routed context, reporting guardrails, a measurement layer that refuses
@@ -1561,6 +1568,14 @@ instrument, and an unmeasured architectural change is exactly what the pivot end
   the three buckets. The first article already put a continuous-eval future in this roadmap; this entry is
   what that future should look like if it happens. Not decided.
 
+  **See-also, 2026-08-19 — a public gold that fills the both-missed cell without author annotation.**
+  Martian's offline bench (`docs/martian-bench.md`) is 50 public PRs with human goldens plus every major
+  vendor's already-collected reviews. Surface A (their LLM judge vs goldens) can book a false negative
+  even when Greptile and pr-hero were both silent. Surface B is our H2H shape against N stored oracles
+  on the same diff. Juanma 2026-08-19: lean on this as the n-vs-n field for methodology changes. It is
+  **not** a reopening of Phase A and **not** a replacement of the musive head-to-head — triangulation,
+  not a new single source. Cal.com 10 Surface A scored 2026-08-19; Surface B and the 50 are still later.
+
 - **Per-stage model tiering** is a real lever the article documents (*"use cheaper models for simpler
   steps, reserve stronger models for verification-heavy steps, skip expensive passes on low-risk PRs"*),
   but it is not a Phase C entry: `AgentSpec` already carries `model`, so the mechanism exists and what is
@@ -1594,7 +1609,14 @@ like convoy uses its Codex quota. OpenRouter (paid per token) only for diversity
   **Corrected 2026-08-16.** "Same goldens" is stale: the golden dataset was retired at THE PIVOT and
   stays sealed. D3's instrument is the live head-to-head on the frozen control set
   (`ROADMAP-DOORDASH.md` M0/M6), same protocol as the scout A/B — both arms same day, N × R replicates,
-  read with C10's blind spot stated. And the bet is no longer only convoy's: DashBench's model-mix table
+  read with C10's blind spot stated.
+
+  **See-also, 2026-08-19.** A second comparable field now exists for model-mix / pipeline A/Bs that
+  need to sit next to Greptile and CodeRabbit on *identical* public diffs: Martian offline
+  (`docs/martian-bench.md`). It does not replace D3's musive instrument; it is how a D3 arm becomes
+  vendor-n-vs-n once someone authorises that spend. One variable still.
+
+  And the bet is no longer only convoy's: DashBench's model-mix table
   (`docs/doordash-dashbench-trust.md`, Appendix C) is direct external evidence — no configuration
   dominated every axis, a Kimi K2.6 scout beat a Sonnet 4.6 scout in front of the same reviewer, and the
   cheapest single-pass configs held precision while giving up half the recall. Two constraints it adds to
@@ -1619,7 +1641,9 @@ The engine-in-anger timing is met; the leftover items still wait on launch, not 
 **Named review pipelines (deferred 2026-08-18, Juanma).** Design-only:
 `docs/review-strategies.md`. Convoy-shaped named recipes (selector, per-step models, later a kinded
 step list), findings invariant, no markdown report bus unless a later product call. Not DoorDash, not
-launch. Do not start it while M6 / C4 / item 7 / C5 / canonical store are open.
+launch. Do not start it while M6 / C4 / item 7 / C5 / canonical store are open. When a pipeline *is*
+an experiment, the n-vs-n field is Martian offline (`docs/martian-bench.md`) — same 50 PRs, one
+pipeline id per arm, scored next to Greptile/CodeRabbit — not a musive-only story.
 
 **Scope note (added 2026-08-12 by Juanma; narrowed 2026-08-18):** the *launch* TUI is the config
 front-end for knobs that already exist (see THE LAUNCH LINE, pillar 2) — an alternative to memorizing
