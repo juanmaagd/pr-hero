@@ -1,0 +1,97 @@
+{
+  "repo": "calcom/cal.com",
+  "note": "GitHub serves this repo as calcom/cal.diy after a rename; clone via cal.com still works. SHAs captured 2026-08-19 from gh pr view. All ten PRs are MERGED.",
+  "pilot": [14943, 8330, 8087],
+  "prs": [
+    {
+      "pr": 8087,
+      "title": "Async import of the appStore packages",
+      "additions": 82,
+      "deletions": 107,
+      "changedFiles": 12,
+      "baseSha": "ba9688a04a8398c9a8332ee7061bfae2f2efd524",
+      "headSha": "820d7fa87e0c824c5dee8082a33efadb1a2566f7"
+    },
+    {
+      "pr": 8330,
+      "title": "Date override fixes",
+      "additions": 111,
+      "deletions": 10,
+      "changedFiles": 4,
+      "baseSha": "93cb21f55a2a40d9116c014741f5679fbeff5fd9",
+      "headSha": "ee38fd295fd294b9fc787eba482bde24bbfea69b"
+    },
+    {
+      "pr": 10600,
+      "title": "feat: 2fa backup codes",
+      "additions": 280,
+      "deletions": 36,
+      "changedFiles": 16,
+      "baseSha": "efa6d464a38e60ceeeb88f40668c1c4ac4bfaf54",
+      "headSha": "54486a059cd2032042189bb565646ba4e0f6bd61"
+    },
+    {
+      "pr": 10967,
+      "title": "fix: handle collective multiple host on destinationCalendar",
+      "additions": 368,
+      "deletions": 216,
+      "changedFiles": 22,
+      "baseSha": "a308075bc39b77ed7059b0cae9d443d669a7bf98",
+      "headSha": "de628295646d0848226618108a52f2f1e5d04ac0"
+    },
+    {
+      "pr": 11059,
+      "title": "feat: Sync app credentials between Cal.com & self-hosted platforms",
+      "additions": 375,
+      "deletions": 119,
+      "changedFiles": 40,
+      "baseSha": "bc89fe00ea84d20bedcec782f0701b9711dc8201",
+      "headSha": "9fde0e906897cc0f4f71793f647dd629faba3317"
+    },
+    {
+      "pr": 7232,
+      "title": "Fixes that workflow reminders of cancelled and rescheduled bookings are still sent",
+      "additions": 241,
+      "deletions": 203,
+      "changedFiles": 10,
+      "baseSha": "d1440bb5d2f2190ad7ae1d26c165f970055b5370",
+      "headSha": "6048e2a86b50e81e1e3b1b467dfea5a895add3dc"
+    },
+    {
+      "pr": 14740,
+      "title": "feat: ability to add guests via app.cal.com/bookings",
+      "additions": 555,
+      "deletions": 0,
+      "changedFiles": 15,
+      "baseSha": "b004587262e8221083bafbe9a0c515e7becaa7b3",
+      "headSha": "92f44dcea7ff19e9123a30c63c167a2938df5a55"
+    },
+    {
+      "pr": 14943,
+      "title": "fix: add retryCount to workflowReminder",
+      "additions": 38,
+      "deletions": 6,
+      "changedFiles": 3,
+      "baseSha": "917c7b0764f4c6bfdca95db2c5f73dbfdbe11757",
+      "headSha": "c790227e0cda780e6fea9bb03af27948d9e286b9"
+    },
+    {
+      "pr": 22345,
+      "title": "feat: convert InsightsBookingService to use Prisma.sql raw queries",
+      "additions": 114,
+      "deletions": 231,
+      "changedFiles": 2,
+      "baseSha": "c9a47dd0cebd121ff73f24e1f8c1829579daf8e3",
+      "headSha": "da09bc0808e7c6df1bc10e00d5acf764d94c7cc7"
+    },
+    {
+      "pr": 22532,
+      "title": "feat: add calendar cache status and actions",
+      "additions": 379,
+      "deletions": 31,
+      "changedFiles": 17,
+      "baseSha": "30a92a4d66b417f7c19dee2b343099adc6e88aa6",
+      "headSha": "5fd11f9faa79c4aefd39975d1b0e963e5034f793"
+    }
+  ]
+}
