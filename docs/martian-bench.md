@@ -255,6 +255,12 @@ Ledger: every live Martian arm lands in this file (rule 6). Run dirs are as sacr
 
 ## Next step
 
+**Scheduled, not open (Juanma, 2026-08-19): the dedicated Martian push happens at the END of the
+roadmap — once the engine is stable, before launch.** Nothing here is authorised meanwhile. The
+roadmap order (C4 → item 7 → C5 → canonical store) runs first, because this bench measures a
+*methodology change* and none is on the table while those are open. The `hunters` baseline below is
+frozen: $0 to re-read, do not overwrite the run dirs, do not fetch vendor rows until that push.
+
 Cal.com 10 Surface A is on disk. Skill: `skills/martian-bench/SKILL.md`. Next spends, when authorised: (1) Surface B vs stored Greptile/CodeRabbit comments, (2) inject into a copy of `benchmark_data.json` and run *their* judge if a key appears, (3) a second methodology arm on the same 10 (one variable). Not the 50. Do not chase this F1.
 
 ## Cal.com 10 results (2026-08-19)

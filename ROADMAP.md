@@ -117,6 +117,18 @@ item 7 is unchanged — do not unblock by rewriting it.
    Independent of the DoorDash gate — can run in parallel with M5–M6. Does **not** include the web
    dashboard, remote hosting, or live-pipeline changes (those stay after, or out of this refactor).
 
+**Where the Martian bench sits in this order (Juanma, 2026-08-19).** Not now. The fundamentals above
+run first; the dedicated push on `docs/martian-bench.md` happens **at the end, once the engine is
+stable and before launch** — one block of work, not a knob turned mid-track. The reasoning is the
+instrument's own: Martian is how a *methodology change* gets measured against Greptile and CodeRabbit
+on identical diffs, and there is no methodology change on the table while C4, item 7, C5 and the
+canonical store are open. Tuning a benchmark against a moving engine measures the movement.
+
+Consequences, so nobody has to re-derive them: the Cal.com 10 `hunters` baseline (13/19 High+Critical,
+$43.32) stays frozen and re-readable at $0 — do not overwrite those run dirs. Surface B and the vendor
+rows stay unfetched until that push. This is **not** a launch checkbox in "Launch is done when" — it is
+a scheduled block before launch, and promoting it to a gate is Juanma's call, not a session's.
+
 ### Three distribution pillars (after fundamentals, or in parallel once M5–M6 are in flight)
 
 1. **Install + configure in one flow.** npm distribution. `npm i -g pr-hero && pr-hero init` leaves a
