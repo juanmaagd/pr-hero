@@ -101,6 +101,7 @@ item 7 is unchanged — do not unblock by rewriting it.
    Juanma's call and remains OPEN.
 3. **C4** — engine-owned preamble + XML boundary tags on any user-authored text. Must exist **before**
    item 7 inlines previous findings and author replies (the rule is already on the C4 entry).
+   **Design: `docs/c4-preamble-design.md`** (2026-08-19, awaiting ratification) — §5 is the done-checklist.
 4. **Phase B item 7 — re-review.** Verification of prior findings; discovery over what changed; do not
    infer `resolved` from absence; after N pushes the author sees the current state. Still does not start
    until the splice conditions on that entry hold.
@@ -1308,6 +1309,18 @@ Convoy-inspired ops the engine still lacks, in value order:
   before the first prompt that carries a reply.
 
   **Promoted to THE LAUNCH LINE fundamentals 2026-08-18.** It lands before item 7, not after launch.
+
+  **Designed 2026-08-19: `docs/c4-preamble-design.md`** (WRITTEN, awaiting ratification). The terrain
+  section is verified, not remembered, and two of its findings change the shape of the work. (a) There is
+  **no single injection point today** — the system prompt is written at four independent sites in
+  `pipeline.ts` (`:529`, `:586`, `:829`, `:1073`) and only the hunter one is templated, so the seam has to
+  be built before the preamble exists. (b) `engine.version` in `pipeline.json` reads `package.json`, which
+  has said `0.1.0` since the scaffold commit — so a pre-C4 and a post-C4 run are today indistinguishable
+  in the artifact, which is why making it discriminate is obligation O-0 rather than a footnote.
+  Divergence from Cloudflare, deliberate: we wrap third-party blocks with a **per-run nonce** instead of
+  stripping tag names from content, because stripping `</patch>`-shaped strings out of a diff corrupts the
+  code under review. Prompt sets stay untouched — `promptSetFingerprint` hashes the on-disk agent files,
+  so injection at write time moves no hash and the paid Cal.com baseline stays comparable.
 - **C5. Global config with per-repo override** (Juanma, 2026-08-13). NOT BUILT. **Promoted to THE
   LAUNCH LINE fundamentals + distribution pillar 1 on 2026-08-18.** Today `config.json` is
   per-repo only: `<repo>/.prhero/config.json`, four keys (`agents_dir`, `default_base`,

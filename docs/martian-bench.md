@@ -261,6 +261,15 @@ roadmap order (C4 → item 7 → C5 → canonical store) runs first, because thi
 *methodology change* and none is on the table while those are open. The `hunters` baseline below is
 frozen: $0 to re-read, do not overwrite the run dirs, do not fetch vendor rows until that push.
 
+**Baseline validity across engine versions — ratified 2026-08-19 (Juanma).** C4 and the fundamentals
+after it change the text every agent sees while leaving the prompt-set fingerprint byte-identical
+(`promptSetFingerprint` hashes the on-disk agent files). The `hunters` baseline below stays a valid
+comparison point across that change; the frontier gets **annotated** rather than the baseline discarded.
+That annotation is not free today: `engine.version` reads `package.json`, unchanged at `0.1.0` since the
+scaffold commit, so every run — before and after C4 — reports the same engine. Making it discriminate is
+obligation O-0 of `docs/c4-preamble-design.md`. Until it lands, a delta against this baseline must state
+the engine commit by hand.
+
 Cal.com 10 Surface A is on disk. Skill: `skills/martian-bench/SKILL.md`. Next spends, when authorised: (1) Surface B vs stored Greptile/CodeRabbit comments, (2) inject into a copy of `benchmark_data.json` and run *their* judge if a key appears, (3) a second methodology arm on the same 10 (one variable). Not the 50. Do not chase this F1.
 
 ## Cal.com 10 results (2026-08-19)
