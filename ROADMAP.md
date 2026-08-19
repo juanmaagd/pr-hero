@@ -82,8 +82,16 @@ item 7 is unchanged — do not unblock by rewriting it.
    (it spawns `review --pr <n> --yes` and `parseArgs` refuses `--scout` on any other verb), fixture-eval
    green both ways at $0.30. Two design numbers changed on M4 evidence — the watchdog and the model
    default — both recorded in `docs/scout-design.md` §3.15.
-2. **M6** — the A/B on the control set (~$224). Juanma decides adopt / opt-in / drop. That decision is
-   what item 7's discovery half is designed against.
+2. **M6 — PAUSED 2026-08-19 by Juanma, after the pilot. Do NOT run the remaining 44.** The pilot's 12
+   runs ($44.32, on disk, scorable forever) produced a CALIBRATION finding that makes the rest of the
+   matrix the wrong purchase today: the scout emits 4 leads against a 12 budget, covers 43% of the
+   diff's files, and stacks against `MAX_LEADS_PER_PATH = 3` in the main file of 2 of 3 PRs — so the
+   hunters converge on the same sites and 40% of the scout arm's drafts collapse in the merge (+100%
+   gross work for +15% net). Spending ~$163 and ~5h54m would measure THAT calibration. Full record and
+   the numbers: `docs/scout-design.md` §3.16; the leads analysis is reproducible at $0 from
+   `<run>/steps/scout.leads.json`. Resuming means re-deciding §3.11's same-build invariant first — the
+   12 pilot runs stop being arm data if the engine or prompt set moves. adopt / opt-in / drop remains
+   Juanma's call and remains OPEN.
 3. **C4** — engine-owned preamble + XML boundary tags on any user-authored text. Must exist **before**
    item 7 inlines previous findings and author replies (the rule is already on the C4 entry).
 4. **Phase B item 7 — re-review.** Verification of prior findings; discovery over what changed; do not

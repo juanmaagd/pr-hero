@@ -410,6 +410,28 @@ The original entry, kept for its reasoning:
 >   re-runnable from artifacts forever). One runs root, which is how §1.2's cross-root ledger problem stops
 >   applying to the new data.
 >
+> **M6 IS PAUSED — 2026-08-19, Juanma, after the pilot. Do NOT run the remaining 44 runs.** Not because
+> the scout failed: because the pilot found a CALIBRATION defect that makes the rest of the matrix the
+> wrong purchase today. Measured from `<run>/steps/scout.leads.json`, at $0, over the 6 scout-arm runs:
+> **24 leads against a 12-per-run budget (mean 4), covering 13 of the 30 files the diffs touch (43%)**,
+> and stacking against `MAX_LEADS_PER_PATH = 3` in the main file of 2 of the 3 PRs — 3x in
+> `PaywallUpgrade/index.tsx` and 3x in `AudioPlayerContext.tsx`, both in BOTH replicates. Downstream,
+> hunters from DIFFERENT agents (`RES` + `LC`, verified by the id prefix on every `debug.deduped[]`
+> loser) converge on those sites: **40% of the scout arm's drafts collapse in the merge vs 7% for the
+> control — +100% gross drafts for +15% net findings.** That is the signature of a stage that concentrates
+> rather than broadens, and ~$163 / ~5h54m would buy a precise number about THAT calibration.
+>
+> Rule 7 ("attribute the miss before choosing the lever") is the one that governs here, and the miss is
+> attributed: lead dispersion, not scout capability. **What this does NOT establish** is that 4 leads is
+> too few — the pilot's diffs are small (3-7 files) and some files are trivial (`Styles.ts`). The measured
+> claim is the DISTRIBUTION, not the absolute count. The cheapest next probe is still $0: read the 24
+> leads against the diffs and check whether the un-led files held anything worth a lead.
+>
+> **Resuming has a precondition, not just a budget:** §3.11's invariant is same day, same engine build,
+> same prompt set. Touching the scout prompt or the caps — which is what this finding points at — makes
+> the 12 pilot runs a variance third point rather than arm data, and the price returns to the full 56.
+> adopt / opt-in / drop remains OPEN and remains Juanma's.
+>
 > **THE PILOT RAN 2026-08-18/19 — 3 PRs, R=2, 12 runs, $44.32, and it is a HARNESS result, not a scout
 > result.** Two defects caught in the first ten minutes (`--out` names the run dir not a root; a review
 > can exit 0 without running, on a stale in-flight commit status) plus one side effect nobody had written
