@@ -387,7 +387,7 @@ The original entry, kept for its reasoning:
 - Offline gates green; `fixture-eval` passes with the flag on and off (the planted bug still found, cost
   band still honest); one `live-micro-eval` with the flag on.
 
-### M6 — The A/B on the control set — **INSTRUMENTS BUILT 2026-08-18, the paid run is Juanma's call**
+### M6 — The A/B on the control set — **DECIDED 2026-08-20: OPT-IN** (instruments built 2026-08-18; the paid matrix was never bought)
 
 > **"build-free" was wrong, and the correction is the useful part.** M6's CASES were already done (13 over
 > 12 PRs, `docs/scout-design.md` §2.4septies — do NOT re-run `pr-hero corpus`). What did not exist was any
@@ -455,6 +455,63 @@ The original entry, kept for its reasoning:
 > 14, so the harness passes no `--force` and the live gate stays live. The old "~$150–250" was the band's
 > LOW half only.
 
+> **THE DECISION — 2026-08-20, Juanma: OPT-IN.** The scout stays exactly as M5 shipped it: `src/scout.ts`,
+> `prompts/scout.md`, the `--scout` flag, default OFF, watcher still does not know the flag exists. It is
+> NOT adopted as default and it is NOT dropped. `ROADMAP.md` item 7's splice condition 3 ("M6 decided") is
+> SATISFIED by this line, and item 7 is designed against the **no-scout-by-default** pipeline.
+>
+> **Evidence 1 — the same-build invariant broke, and this is a new finding read out of the code rather
+> than remembered.** C4 shipped AFTER the pilot ran: `d0cb47e` and `bbd5277` are both 2026-08-20, the pilot
+> is 2026-08-18/19. `writeSystemPrompt` (`src/pipeline.ts:350-355`) prepends `RUNTIME_PREAMBLE` to EVERY
+> system prompt the engine writes — unconditionally, with no flag and no arm-dependence (`RUNTIME_PREAMBLE`
+> has exactly two references in `src/`: its definition and that one write site). So §3.11's invariant —
+> same day, same engine build, same prompt set — is broken **for pooling purposes**. The 12 pilot runs
+> remain internally valid as a pair (same build, arms interleaved) and stay scorable forever; they can no
+> longer be pooled with any run today's engine produces. **The consequence, stated plainly: "run the
+> remaining 44" no longer exists.** Buying M6's data now means **56 runs from zero** — the `plan` band of
+> $173.68–$374.22 and ~4h44m serial, or ~$207 / ~7h31m if §3.16.3's measured per-run ratios still hold,
+> which is itself an assumption about a build the preamble has since moved. That is what turned a paused
+> experiment into a decision.
+>
+> **Evidence 2 — the floor test scored the pilot at $0 this session.** `bun run scripts/m6.ts score`,
+> 8 runs scored from `~/Desktop/musive/musive-m6-runs`. This is the ledger entry that closes splice
+> condition 4:
+>
+> | # | PR | type | control | scout | site |
+> |---|---|---|---|---|---|
+> | 1 | 1717 | miss | 0/2 | 2/2 | `packages/app/components/PaywallUpgrade/index.tsx:119` |
+> | 2 | 1719 | miss | not run | not run | `packages/backend/src/Infrastructure/Http/SongSourceResolver.ts:296` |
+> | 3 | 1722 | miss | not run | not run | `packages/backend/src/Utils/m4aRemux.ts:181` |
+> | 4 | 1724 | miss | not run | not run | `docs/runbooks/mus-638-song-bucket-rollout.md:144` |
+> | 5 | 1724 | miss | not run | not run | `docs/runbooks/mus-638-song-bucket-rollout.md:140-142` |
+> | 6 | 1471 | corpus | not run | not run | `.github/workflows/build-check.yml:39` |
+> | 7 | 853 | corpus | not run | not run | `packages/app/hooks/useChangeCover.tsx:120` |
+> | 8 | 1307 | corpus | not run | not run | `packages/web/src/store/FileUploaderStore.ts:405` |
+> | 9 | 767 | corpus | 2/2 | 2/2 | `packages/web/src/Context/AudioPlayerContext.tsx:278` |
+> | 10 | 965 | corpus | not run | not run | `packages/backend/src/Infrastructure/Cloudflare/CludflareDriver.ts:338` |
+> | 11 | 1179 | corpus | not run | not run | `lambda/song-waveform/src/index.ts:145` |
+> | 12 | 1141 | corpus | not run | not run | `packages/backend/src/Infrastructure/Http/Controllers/PublicProject.ts:216` |
+> | 13 | 1248 | corpus | not run | not run | `packages/backend/src/Infrastructure/Tigris/TigrisDriver.ts:922` |
+>
+> ```
+> control: 1/13 cases hit in at least one replicate, 1 in every replicate, 1 found at the site before refutation
+> scout:   2/13 cases hit in at least one replicate, 2 in every replicate, 2 found at the site before refutation
+> ```
+>
+> The clean pair (§3.11), same command: PR 1720 control `0 (0 corr, 0 causes) · 0 (0 corr, 0 causes)` vs
+> scout `1 (0 corr, 1 cause) · 0 (0 corr, 0 causes)`; PR 1721 not run in either arm.
+>
+> **Why that reads `opt-in` and nothing braver.** The scorer prints its own limit beside the numbers
+> (`src/floor-test.ts:349`): *"It can say `drop` loudly; it cannot distinguish `adopt` from `opt-in`."*
+> 2/13 against 1/13 is not a loud `drop`, and 11 of the 13 cases were never run at all. The pilot does not
+> say the scout is bad — it says the instrument, on this data, cannot rank the two arms. **`opt-in` is the
+> only call the evidence supports: not enough to adopt, not enough to drop**, and §3.16's calibration
+> defect (4 leads against a 12 budget, 43% file coverage, stacking against `MAX_LEADS_PER_PATH = 3`, 40%
+> of scout-arm drafts collapsing in the merge) is the thing a re-run would have to fix FIRST.
+>
+> **Reopening M6 later is legitimate, and it is priced:** 56 runs from zero on whatever build is current
+> then, plus a recalibration decided before the money is spent.
+
 The original entry, kept for its protocol, which is unchanged:
 
 The only paid experiment in this track. Protocol fixed in M3; the shape it must have:
@@ -509,18 +566,23 @@ starts consuming them:
 
 **Amended 2026-08-18 (THE LAUNCH LINE):** item 7 is a launch fundamental, not a post-ship research
 item. This file's sequence is unchanged — M5 → M6 → splice → item 7 — and that sequence now sits on
-the ship path. Scout-as-default is still M6's call (adopt / opt-in / drop), not a launch checkbox.
+the ship path. Scout-as-default was M6's call (adopt / opt-in / drop), not a launch checkbox — **decided
+opt-in 2026-08-20**, so the default stays OFF.
 
 Item 7 resumes when ALL of these hold; none is negotiable, none is large:
 
 1. **M1 merged and seen live** (#42, #39): item 7's re-review posts through the same surface, and it
    inherits the pin.
 2. **M2 decided** (#19's shape) — and if criteria-shaped, still parked; item 7 does not depend on it.
-3. **M6 decided**: item 7's *discovery* half runs "over what changed since the last review" — if the
-   scout is adopted, that delta review has a scout stage too, and item 7 must be designed for the pipeline
-   we actually have. This is the reason the scout comes before item 7 and not after.
-4. **M0's control set and M6's numbers are in the ledger**, so item 7's own live runs are read against a
-   known baseline.
+3. **M6 decided** — ✅ **HOLDS 2026-08-20: opt-in.** Item 7's *discovery* half runs "over what changed
+   since the last review", so it must be designed for the pipeline we actually have. That pipeline is now
+   settled: the scout is off by default and stays behind `--scout`, so **item 7 is designed against the
+   no-scout-by-default pipeline** and does not carry a delta-review scout stage. This is the reason the
+   scout came before item 7 and not after; the reason has now been paid off. See the M6 entry above.
+4. **M0's control set and M6's numbers are in the ledger** — ✅ holds. The control set is
+   `docs/scout-design.md` §1; M6's numbers are the pilot's scored floor table in the M6 entry above
+   (8 runs, $0 to score, re-runnable from artifacts forever). They are a small, honest ledger entry rather
+   than the full matrix — which is exactly what the opt-in decision says they are.
 
 What item 7 receives from this track, already written into its `ROADMAP.md` entry: the three amendments
 (collapse-old-comments as an acceptance criterion; the pin/policy split; the variance update that narrows
@@ -528,7 +590,8 @@ verify-vs-infer to "verify" vs "state the delta as unconfirmed"), and the one de
 Juanma at design time — whether `applied` pays a verification step per finding.
 
 After the splice, `ROADMAP.md` continues in its own order: item 7, item 8's remainder, then Phase C in
-its listed sequence — C7 is then either done (adopted) or closed (dropped) by M6, and C8/C9/C10 remain
+its listed sequence — C7 is then either done (adopted) or closed (dropped) by M6 (the third outcome
+fired: opt-in, so C7 is shipped-but-off rather than done or closed), and C8/C9/C10 remain
 Phase C work with their own designs.
 
 ## Estimate, stated so it can be wrong in the open

@@ -1485,3 +1485,87 @@ blocker, and not reproduced. 1721 has not run.
 Nothing about adopt / opt-in / drop. 2 of 13 cases, one of two clean PRs, and the one differing case is
 the one the corpus already knew the control missed. The floor test's own caveat governs the read: it can
 say `drop` loudly and it cannot distinguish `adopt` from `opt-in`.
+
+### 3.17 THE DECISION — opt-in, 2026-08-20
+
+**Juanma, 2026-08-20: OPT-IN.** The scout stays exactly as M5 shipped it — `src/scout.ts`,
+`prompts/scout.md`, the `--scout` flag, default OFF, and the watcher still does not know the flag exists.
+It is NOT adopted as default and it is NOT dropped. `ROADMAP.md` item 7's splice condition 3 ("M6
+decided") is satisfied by this section, and item 7 is designed against the **no-scout-by-default**
+pipeline.
+
+Two things produced the call. Neither is the full matrix, and the second is why the full matrix stopped
+being the question.
+
+#### 3.17.1 Evidence 1 — §3.11's same-build invariant no longer covers the pilot runs
+
+This is a new finding, read out of the code this session rather than remembered. **C4 shipped AFTER the
+pilot ran**: `d0cb47e` and `bbd5277` are both dated 2026-08-20; the pilot is 2026-08-18/19.
+`writeSystemPrompt` (`src/pipeline.ts:350-355`) prepends `RUNTIME_PREAMBLE` to **every** system prompt the
+engine writes:
+
+```ts
+await Bun.write(systemPromptPath, `${RUNTIME_PREAMBLE}\n${body}`);
+```
+
+Unconditionally — there is no flag and no arm-dependence. `RUNTIME_PREAMBLE` has exactly two references in
+`src/`: its definition at `src/pipeline.ts:309` and that one write site.
+
+**Therefore §3.11's invariant — same day, same engine build, same prompt set — is broken for POOLING
+purposes.** The 12 pilot runs remain internally valid as a pair: they were produced by one build with the
+arms interleaved per PR, so nothing about §3.16's numbers is retracted and they stay scorable from
+artifacts forever. What they can no longer be is pooled with any run produced by today's engine.
+
+**The consequence, stated plainly: "run the remaining 44" no longer exists.** §3.16.3 priced the decision
+at the remaining 44 — ~$163, ~5h54m — explicitly "conditional on the invariant that produced them", and
+that condition has now failed. Buying M6's data means **56 runs from zero**: the `plan` band of
+$173.68–$374.22 and ~4h44m serial, or ~$207 / ~7h31m if §3.16.3's measured per-run ratios still hold,
+which is itself an assumption about a build the preamble has since moved. That arithmetic is what turned
+a paused experiment into a decision.
+
+#### 3.17.2 Evidence 2 — the floor test scored the pilot at $0
+
+`bun run scripts/m6.ts score`, 8 runs scored from `~/Desktop/musive/musive-m6-runs`. This table is the
+ledger entry that closes `ROADMAP.md` item 7's splice condition 4:
+
+| # | PR | type | control | scout | site |
+|---|---|---|---|---|---|
+| 1 | 1717 | miss | 0/2 | 2/2 | `packages/app/components/PaywallUpgrade/index.tsx:119` |
+| 2 | 1719 | miss | not run | not run | `packages/backend/src/Infrastructure/Http/SongSourceResolver.ts:296` |
+| 3 | 1722 | miss | not run | not run | `packages/backend/src/Utils/m4aRemux.ts:181` |
+| 4 | 1724 | miss | not run | not run | `docs/runbooks/mus-638-song-bucket-rollout.md:144` |
+| 5 | 1724 | miss | not run | not run | `docs/runbooks/mus-638-song-bucket-rollout.md:140-142` |
+| 6 | 1471 | corpus | not run | not run | `.github/workflows/build-check.yml:39` |
+| 7 | 853 | corpus | not run | not run | `packages/app/hooks/useChangeCover.tsx:120` |
+| 8 | 1307 | corpus | not run | not run | `packages/web/src/store/FileUploaderStore.ts:405` |
+| 9 | 767 | corpus | 2/2 | 2/2 | `packages/web/src/Context/AudioPlayerContext.tsx:278` |
+| 10 | 965 | corpus | not run | not run | `packages/backend/src/Infrastructure/Cloudflare/CludflareDriver.ts:338` |
+| 11 | 1179 | corpus | not run | not run | `lambda/song-waveform/src/index.ts:145` |
+| 12 | 1141 | corpus | not run | not run | `packages/backend/src/Infrastructure/Http/Controllers/PublicProject.ts:216` |
+| 13 | 1248 | corpus | not run | not run | `packages/backend/src/Infrastructure/Tigris/TigrisDriver.ts:922` |
+
+```
+control: 1/13 cases hit in at least one replicate, 1 in every replicate, 1 found at the site before refutation
+scout:   2/13 cases hit in at least one replicate, 2 in every replicate, 2 found at the site before refutation
+```
+
+The clean pair (§3.11), same command: PR 1720 control `0 (0 corr, 0 causes) · 0 (0 corr, 0 causes)` vs
+scout `1 (0 corr, 1 cause) · 0 (0 corr, 0 causes)`; PR 1721 not run in either arm.
+
+#### 3.17.3 Why that reads `opt-in` and nothing braver
+
+The scorer prints its own limit beside the numbers, and it is the sentence that governs this decision
+(`src/floor-test.ts:349`):
+
+> It can say `drop` loudly; it cannot distinguish `adopt` from `opt-in`.
+
+The pilot does not say the scout is bad — 2/13 against 1/13 is not a loud `drop`, and 11 of the 13 cases
+were never run at all. It says the instrument, on this data, cannot rank the two arms. **`opt-in` is the
+only call the evidence supports: not enough to adopt, not enough to drop**, and §3.16's calibration
+defect — 4 leads against a 12 budget, 43% file coverage, stacking against `MAX_LEADS_PER_PATH = 3`, 40%
+of scout-arm drafts collapsing in the merge — is the thing a future re-run would have to fix FIRST.
+§3.16.3's latency finding points the same way: ~3.3 minutes added to every review is a product number, and
+it caps the ceiling of this stage independently of what any floor table says.
+
+**Reopening M6 later is legitimate.** It costs 56 runs from zero on whatever build is current then, plus a
+recalibration decided before the money is spent — not after.
