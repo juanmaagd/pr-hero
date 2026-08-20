@@ -417,9 +417,13 @@ accepted on the weakest evidence in the loop.
   A `deferred` one does not come back as `fresh`.
 - **O-4 — no local state.** Everything item 7 needs to re-review is recoverable from the PR alone, so a
   GitHub Action, a second machine, and a stranger's clone all behave identically.
-- **O-5 — cheaper than today.** A re-review's discovery half reads the delta, not the PR; its verification
-  half spends only on D3's two populations. If a re-review costs more than a first review, the design was
-  not implemented.
+- **O-5 — the spend is visible before it happens.** A re-review's discovery half reads the delta, not the
+  PR; its verification half spends only on the §3.2 populations. **Amended 2026-08-20 (§3.10.4):** the
+  first draft said "cheaper than today", unconditionally, and that is a promise the design cannot keep —
+  a PR carrying many prior findings whose sites all moved buys many verification steps. Cheaper in the
+  ordinary case, dearer in the pathological one, and the obligation is that **the cost band shows the
+  verification-step count as its own term before the confirm**, so the human can refuse. A band that
+  estimates from the diff alone (`src/report.ts:57`) fails this obligation silently.
 - **O-6 — the mid-run head move does not lie.** A finding computed on a tree that is no longer the head
   never posts inline as though it were current.
 
@@ -736,6 +740,105 @@ its identity both exist by then.
 
 ---
 
+### 3.10 The wiring — added 2026-08-20 after Juanma asked whether the design was complete
+
+It was not. §§3.1–3.9 decide **what a re-review concludes**; this section decides **how it runs**, and the
+audit that produced it found one defect that would have shipped.
+
+#### 3.10.1 The command surface: automatic, with `--full` as the opt-out
+
+`pr-hero review --pr <n>` **is** the re-review when a prior review exists on the PR. There is no
+`--rereview` flag, and this is not a convenience choice:
+
+- A flag nobody types is a feature nobody gets. The person this item exists for is a stranger's second
+  push, and they will not pass a flag.
+- **The bug being fixed is the default**, not a missing capability. Leaving the delta path behind a flag
+  means the default stays "re-hunt the whole PR and infer repair from absence" — that is the thing item 7
+  exists to remove.
+
+`--full` forces case A (full `B..H`, everything reclassified) for the human who wants the whole PR looked
+at again. It is the only new flag, and `parseArgs` must refuse it on every verb except `review`, exactly
+as it refuses `--scout` today.
+
+#### 3.10.2 Pipeline order, and the one sequencing constraint
+
+```
+preflight   read L (§3.1 case A fallback) → state machine → the two deltas (§3.1.1) → size gate on the delta
+triage      deterministic rows 1, 5-12 settle with ZERO spend; rows 2 and 3 enter the verification queue
+discovery   hunters over the restricted delta — unchanged, parallel, as today
+dedupe      unchanged
+row 4       every discovery finding whose §3.4 identity overlaps a prior finding APPENDS it to the queue
+verify      the queue runs, one refuter-shaped step per finding (§3.3)
+refute      the normal leg over fresh BLOCKER/CRITICAL survivors — unchanged
+finish      deriveTier, vocabulary (§3.8), assemble
+```
+
+**The constraint is row 4: the verification queue cannot be closed until dedupe has run**, because that is
+when a discovery finding's identity is final. So the whole verification leg runs after dedupe. Starting
+rows 2 and 3 early, in parallel with the hunters, and appending row 4's later is a latency optimization
+worth doing **second** — it buys wall-clock, not correctness, and it makes the queue mutable while steps
+are in flight, which is exactly the kind of thing that breaks quietly.
+
+#### 3.10.3 Provenance — the M6 lesson, applied before it costs anything
+
+M6's instrument reads arm identity off `pipeline.json`'s `scout.enabled`, never off a directory name, and
+a run whose artifact cannot name its arm is skipped rather than counted as the arm it resembles
+(`src/floor-test.ts`). A re-review needs the same property or **no future measurement of this feature is
+possible**, and `writePipelinePlan` (`src/pipeline.ts:1392-1420`) records nothing about one today.
+
+A `rereview` block, absent on a first review, present on every other:
+
+```jsonc
+"rereview": {
+  "case": "A|B|C|D|E",                         // §3.1
+  "last_reviewed_head": "<40hex>",             // or null
+  "last_head_source": "summary_marker|finding_markers|absent",
+  "discovery_range": "<from>..<to>",
+  "discovery_restricted": true,                // §3.1.1 — false means case A/D full range
+  "prior_findings": 0,
+  "settled_deterministically": 0,              // rows 1, 5-12
+  "verified": 0,
+  "verification_triggers": { "touched": 0, "applied": 0, "overlap": 0 }
+}
+```
+
+`last_head_source` is there because the case-A fallback (§3.1) silently changes what the run did; an
+artifact that cannot distinguish "the summary told us L" from "we reconstructed L from finding markers"
+cannot debug the run where that fallback misfires.
+
+#### 3.10.4 The cost band would have lied, and that is a defect this audit caught
+
+`estimateCost` (`src/report.ts:75`) estimates **"from the diff, and only from the diff"** (`:57`), and the
+comment above it records why it is skewed high: *"Every recorded overrun was an UNDER-estimate, never"*
+the other way (`:47`). A re-review's spend is the delta **plus one step per verified finding**, and that
+second term is invisible to a diff-only estimate. A PR carrying 40 prior findings whose sites all moved
+is 40 extra steps the band would not have shown.
+
+So: **`estimateCost` takes the verification-step count, and the plan card shows it as its own line before
+the confirm.** Two consequences follow, and the second one amends an obligation:
+
+- The size gate runs on the delta (§3.1.1) but **cannot** see the verification queue, so it is not the
+  protection here — the cost band is.
+- **O-5 as first written is an unconditional claim and it should not be.** A re-review is cheaper in the
+  ordinary case (small delta, few prior findings) and can be dearer in the pathological one. The design's
+  job is not to promise cheap; it is to make the number visible before the money is spent, and to let the
+  confirm refuse.
+
+#### 3.10.5 The watcher gets this, and the reason it is not M5's decision again
+
+M5 deliberately kept `--scout` away from the watcher: unmeasured stage, added spend, and the watcher
+spawns `review --pr <n> --yes` with no human at the confirm. None of those three apply here.
+
+There is **nothing for the watcher to learn** — §3.10.1 makes re-review the behaviour of the command it
+already spawns, not a flag. Its spend is bounded by the delta-scoped size gate and the existing
+`daily_cap`, and in the ordinary case it goes down.
+
+**One precondition, and it is not a follow-up:** §3.10.4's cost-band change ships **before** the watcher
+runs a re-review unattended. An unattended run whose cost band cannot see the verification steps is
+exactly the shape of an unbounded spend, and this project has already paid for that lesson once.
+
+---
+
 ## 4. What item 7 does NOT do
 
 - **No exactly-once on `--post`.** Two overlapping runs can still both PATCH the same summary
@@ -775,8 +878,18 @@ its identity both exist by then.
       the blocking count.
 - [ ] **O-4** Every input to the re-review decision is derived from PR data in the test's fixtures; the
       test runs with no `~/.prhero` and no run directory present.
-- [ ] **O-5** A delta review's planned spend, given the same PR and a two-commit delta, is strictly lower
-      than the first review's — asserted on the plan, not on a live run.
+- [ ] **O-5a** The cost band carries the verification-step count as its own term: two plans over the same
+      delta but 2 vs 40 queued verifications produce different bands (§3.10.4). A band that does not move
+      fails.
+- [ ] **O-5b** In the ordinary case — small delta, few prior findings — the planned spend is strictly
+      lower than the same PR's first review. Asserted on the plan, never on a live run.
+- [ ] **W-cli** `parseArgs` accepts `--full` on `review` and refuses it on every other verb; a PR with a
+      prior review takes the delta path with **no flag** (§3.10.1).
+- [ ] **W-order** The verification queue is closed only after dedupe: a discovery finding whose identity
+      overlaps a prior one is in the queue, and no verification step is spawned before dedupe (§3.10.2).
+- [ ] **W-prov** `pipeline.json` carries the `rereview` block with the case, both range ends,
+      `last_head_source`, and the three trigger counts; a first review carries no block at all. A run that
+      cannot name its case from the artifact is unscorable, never assumed (§3.10.3).
 - [ ] **O-6** With `movedHeadSha` set, no finding computed on the stale tree appears in the inline post
       plan; all appear in the bucket.
 - [ ] **D4** `lastReviewedHead` not an ancestor of `head` → the plan is a full review, **every** prior
