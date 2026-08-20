@@ -262,23 +262,42 @@ but the correct semantics: two arms differing by nonce would be confounded by th
 
 ## 5. Done-checklist — one named test per obligation
 
-- [ ] **O-0** `engineIdentity()` returns a value that changes with the engine's prompt-affecting
-      surface; existing artifacts without it still validate.
-- [ ] **O-3.1a** All four system-prompt write sites route through `writeSystemPrompt()`.
-- [ ] **O-3.1b** A test walks every `*.system.md` in a completed run dir and fails if one lacks the
-      preamble. Artifact-level, not call-site-level.
-- [ ] **O-3.2** The preamble is engine source, carries the "engine version, not prompt-set fingerprint"
-      header comment, and a prompt-set edit cannot remove it — asserted, not asserted-in-prose.
-- [ ] **O-3.3** The nonce does not occur inside any wrapped block; the driver regenerates if it does.
-- [ ] **O-3.4** Every block in the §3.4 table that exists today is wrapped; a new block cannot reach a
-      prompt untagged.
-- [ ] **O-3.5** `boundaryNonce` is injectable; the M6 control-arm test passes one nonce to both arms and
-      still asserts byte identity.
-- [ ] **O-5.1** `bun test` green, `bun run typecheck` green, `bun run check` green.
-- [ ] **O-5.2** `bun run fixture-eval` catches the planted bug with the preamble in place — the preamble
-      must not cost recall. ~$0.08.
+**CLOSED 2026-08-20.** Implemented in `d0cb47e` (O-0) and `bbd5277` (the rest).
+`bun test` 1450 pass / 0 fail · `bun run typecheck` clean · `bun run check` clean.
 
----
+- [x] **O-0** `deriveEngineIdentity` is the pure half; `engineIdentity()` adds the short git sha from
+      `import.meta.dir/..` — not the cwd, which in PR mode is somebody else's worktree. Absent rather
+      than `"unknown"` when git cannot answer. Verified live: `revision: "bbd5277"`.
+- [x] **O-3.1a** All four system-prompt write sites route through `writeSystemPrompt()`.
+- [x] **O-3.1b** `test/pipeline.test.ts` walks every `*.system.md` a real run wrote and fails if one
+      lacks the preamble. Artifact-level, with a guard against a vacuously-empty file list.
+- [x] **O-3.2** `RUNTIME_PREAMBLE` is driver source beside the output contracts; the agent body is
+      appended to it, never the reverse. Asserted, including the `GOTCHAS` / `Hop budget` constraint.
+- [x] **O-3.3** `selectBoundaryNonce` redraws on collision, bounded at `MAX_NONCE_ATTEMPTS`; leads and
+      finding content are guarded driver-side because their content post-dates the draw.
+- [x] **O-3.4** Every block in the §3.4 table that exists today is wrapped, and the nonce is recorded
+      in `pipeline.json`.
+- [x] **O-3.5** `boundaryNonce` is injectable; the M6 control-arm test pins one nonce across both arms
+      and still asserts byte identity.
+- [x] **O-5.1** `bun test` green, `bun run typecheck` green, `bun run check` green.
+- [x] **O-5.2** `bun run fixture-eval` — **PASS**, planted bug caught at `src/volume.ts:4`,
+      1 finding, **$0.148**, 72s, scout off. The preamble costs no recall.
+
+**Live-run ledger (rule 6).** One `fixture-eval`, 2026-08-20, **$0.148**. Beyond the pass/fail it was
+read as an end-to-end proof of the mechanism against real spawns, which the offline suite cannot give:
+all four `steps/*.system.md` open with `# Runtime safety — engine-owned, non-overridable`;
+`pipeline.json` records `boundary_nonce: 30a482b2`; and `<gotchas 30a482b2>` / `<priors 30a482b2>`
+appear in both hunter system prompts. `engine` is absent from that artifact and this is NOT a
+regression — `scripts/fixture-eval.ts` calls `runPipeline` directly and has never passed the field;
+`engineIdentity()` is the CLI's, and it was verified separately.
+
+**Verified by hand, because a green suite does not prove any of it:** `../deep-review/agents/` has no
+diff, so `promptSetFingerprint` did not move and the paid Cal.com baseline stays comparable;
+`src/step-runner.ts` and `test/step-runner.test.ts` have no diff, so every isolation flag is untouched
+and its 22 assertions still pass; the M6 control arm is still byte-identical.
+
+**A gotcha this slice re-paid for:** mid-implementation the suite sat at 1425 pass / 0 fail with
+`bun run typecheck` RED. Bun does not typecheck. A green suite alone is not evidence.
 
 ## 6. Open questions
 
