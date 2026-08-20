@@ -78,9 +78,10 @@ as an **assistant, not a merge gate**. Claude Code only — no OpenCode, no mode
 | **Distribution** | the three pillars below | **yes** |
 | **After** | C1b, C2, C3, C6, C8–C10, Phase D, rest of E, scout-as-default, named review pipelines | no |
 
-Scout ON is not a launch requirement. M6's outcome is still adopt / opt-in / drop. What launch requires
-is that M5+M6 **run**, so item 7 is designed against the pipeline we will actually have. The M6 gate on
-item 7 is unchanged — do not unblock by rewriting it.
+Scout ON is not a launch requirement. **M6's outcome landed 2026-08-20: opt-in** — scout behind
+`--scout`, default OFF. What launch required was that M5+M6 **run**, so item 7 is designed against the
+pipeline we will actually have, which is now settled as the no-scout-by-default one. Item 7's gate is
+unchanged and now rests on condition 1 (M1 seen live) alone — do not unblock by rewriting it.
 
 ### Fundamentals (this order — we are in the middle of the DoorDash track)
 
@@ -89,16 +90,23 @@ item 7 is unchanged — do not unblock by rewriting it.
    (it spawns `review --pr <n> --yes` and `parseArgs` refuses `--scout` on any other verb), fixture-eval
    green both ways at $0.30. Two design numbers changed on M4 evidence — the watchdog and the model
    default — both recorded in `docs/scout-design.md` §3.15.
-2. **M6 — PAUSED 2026-08-19 by Juanma, after the pilot. Do NOT run the remaining 44.** The pilot's 12
-   runs ($44.32, on disk, scorable forever) produced a CALIBRATION finding that makes the rest of the
-   matrix the wrong purchase today: the scout emits 4 leads against a 12 budget, covers 43% of the
-   diff's files, and stacks against `MAX_LEADS_PER_PATH = 3` in the main file of 2 of 3 PRs — so the
-   hunters converge on the same sites and 40% of the scout arm's drafts collapse in the merge (+100%
-   gross work for +15% net). Spending ~$163 and ~5h54m would measure THAT calibration. Full record and
-   the numbers: `docs/scout-design.md` §3.16; the leads analysis is reproducible at $0 from
-   `<run>/steps/scout.leads.json`. Resuming means re-deciding §3.11's same-build invariant first — the
-   12 pilot runs stop being arm data if the engine or prompt set moves. adopt / opt-in / drop remains
-   Juanma's call and remains OPEN.
+2. **M6 — DECIDED 2026-08-20 by Juanma: OPT-IN.** The scout stays exactly as M5 shipped it —
+   `src/scout.ts`, `prompts/scout.md`, `--scout`, default OFF, watcher still unaware of the flag. Not
+   adopted as default, not dropped. Two things produced the call. **(a)** The pilot's 12 runs ($44.32, on
+   disk, scorable forever) produced a CALIBRATION finding, not a scout verdict: the scout emits 4 leads
+   against a 12 budget, covers 43% of the diff's files, and stacks against `MAX_LEADS_PER_PATH = 3` in
+   the main file of 2 of 3 PRs — so the hunters converge on the same sites and 40% of the scout arm's
+   drafts collapse in the merge (+100% gross work for +15% net). Scored at $0 this session, the floor
+   table is 2/13 scout against 1/13 control with 11 cases never run, and the scorer prints its own limit
+   beside it (`src/floor-test.ts:349`): it can say `drop` loudly, it cannot separate `adopt` from
+   `opt-in`. **(b)** The same-build invariant broke, verified in code this session: C4 landed after the
+   pilot (`d0cb47e`, `bbd5277`, both 2026-08-20) and `writeSystemPrompt` (`src/pipeline.ts:350-355`)
+   prepends `RUNTIME_PREAMBLE` to every system prompt unconditionally — no flag, no arm-dependence. The
+   12 runs stay valid as a pair but can no longer be pooled with anything today's engine produces, so
+   **"run the remaining 44" no longer exists: reopening M6 costs 56 runs from zero** ($173.68–$374.22,
+   ~4h44m per `plan`; ~$207 / ~7h31m at the pilot's measured ratios) on whatever build is current then,
+   plus a recalibration decided before the spend. Full record: `docs/scout-design.md` §3.16 and §3.17;
+   the leads analysis is reproducible at $0 from `<run>/steps/scout.leads.json`.
 3. **C4** — engine-owned preamble + XML boundary tags on any user-authored text. Must exist **before**
    item 7 inlines previous findings and author replies (the rule is already on the C4 entry).
    **Design: `docs/c4-preamble-design.md`** (2026-08-19, awaiting ratification) — §5 is the done-checklist.
@@ -168,8 +176,11 @@ a scheduled block before launch, and promoting it to a gate is Juanma's call, no
 Fundamentals:
 
 - [x] M5 ships, flag default OFF, fixture-eval green both ways — 2026-08-18, `e1ed036`
-- [ ] M6 has numbers in the ledger and a Juanma call: adopt / opt-in / drop
-- [ ] C4 is in front of every prompt that inlines user-authored text
+- [x] M6 has numbers in the ledger and a Juanma call: adopt / opt-in / drop — 2026-08-20, **opt-in**
+      (the pilot's scored floor table is the ledger entry; `ROADMAP-DOORDASH.md` M6, `docs/scout-design.md` §3.17)
+- [x] C4 is in front of every prompt that inlines user-authored text — 2026-08-20, `d0cb47e` + `bbd5277`
+      (`docs/c4-preamble-design.md` §5 CLOSED; all four system-prompt write sites route through
+      `writeSystemPrompt`, asserted at artifact level over every `*.system.md` a real run wrote)
 - [ ] item 7 is live: a second push verifies (or honestly says unconfirmed), does not claim
       `resolved` from absence, and the PR shows the current state rather than an archaeology
 - [ ] C5: person-keys default globally, repo-keys stay in `.prhero/`
@@ -510,16 +521,18 @@ Gate to Phase B: unchanged — the bar, on the held-out set. B0 does not move it
 
 ## Phase B — Production wiring
 
-> **🔒 Item 7 is BLOCKED on `ROADMAP-DOORDASH.md` and item 8's review surface is DONE.** Item 7 waits on
-> that track's M6 (the scout A/B). The gate is unchanged — do not rewrite it. **As of THE LAUNCH LINE
-> (amended 2026-08-18) item 7 IS a launch fundamental**, so M5→M6→C4→item 7 is on the ship path, not a
-> parallel research sideline. C5 is distribution pillar 1. C1b, C2, C3, C6, C8, C9, C10, and named review pipelines (`docs/review-strategies.md`) stay after launch
+> **🔒 Item 7 is BLOCKED on `ROADMAP-DOORDASH.md` and item 8's review surface is DONE.** **Amended
+> 2026-08-20:** M6 is decided (opt-in — scout behind `--scout`, default OFF), so the gate now rests on
+> **condition 1 alone — M1 seen live**, which has not happened. Item 7 is NOT unblocked; it is blocked on
+> one narrower thing. The conditions themselves are unchanged — do not rewrite them. **As of THE LAUNCH
+> LINE (amended 2026-08-18) item 7 IS a launch fundamental**, so M5→M6→C4→item 7 is on the ship path, not
+> a parallel research sideline. C5 is distribution pillar 1. C1b, C2, C3, C6, C8, C9, C10, and named review pipelines (`docs/review-strategies.md`) stay after launch
 > and touch the DoorDash track nowhere. Only C7 (the scout *stage*) is the experiment; scout-as-default
-> is M6's call.
+> was M6's call and it went to opt-in.
 >
-> If the session is shipping: THE LAUNCH LINE, fundamentals first — M5 shipped 2026-08-18 (`e1ed036`),
-> so right now that is **M6** or the **canonical store** (they do not gate each other). Distribution
-> pillars can proceed in parallel; item 7 cannot.
+> If the session is shipping: THE LAUNCH LINE, fundamentals first — M5 shipped 2026-08-18 (`e1ed036`) and
+> M6 decided 2026-08-20, so right now that is **seeing M1 live** (condition 1), **C4** or the **canonical
+> store** (they do not gate each other). Distribution pillars can proceed in parallel; item 7 cannot.
 >
 > **M6's corpus precondition is ALREADY MET — do not re-run `pr-hero corpus` and do not re-adjudicate.**
 > §3.11's 2026-08-17 amendment asked for the floor test to be grown past its five cases before M6, and
@@ -1005,6 +1018,14 @@ What is still manual, in the order it should be closed:
    2026-08-12, immediately after item 6 shipped and its own live runs made the gap visible. He is right,
    and it is worse than a matter of efficiency.
 
+   **DESIGNED 2026-08-20 — `docs/item7-rereview-design.md`.** §5 is the done-checklist. It resolves the
+   open question this entry reserved for Juanma (verification pays on **site-changed ∪ `applied`**), it
+   corrects two stale claims in the text below (§0.5, and the `commit_id` paragraph in amendment 2), and
+   it carries the evidence that ends the verify-vs-infer argument with OUR data instead of DoorDash's:
+   **musive PR 1759, two auto-launched runs 16 minutes apart on a byte-identical tree, byte-identical
+   prompt set and a docs-only engine delta, where today's matcher would have reported `Δ 2 resolved`
+   against zero commits** (§0.6). Read §0 before disagreeing with anything below.
+
    **🔒 BLOCKED — DO NOT START. Preceded by `ROADMAP-DOORDASH.md` (Juanma, 2026-08-16).** This item does
    not start until that track's splice conditions hold. **Promoted to THE LAUNCH LINE fundamentals
    2026-08-18** — launch waits on this item; the gate itself is unchanged. State as of 2026-08-18:
@@ -1013,13 +1034,17 @@ What is still manual, in the order it should be closed:
    |---|---|---|
    | 1 | M1 (#42, #39) merged **and seen live** | merged and pushed; **NOT yet seen live** — no auto-launched review has been checked by hand against them |
    | 2 | M2 — #19's shape decided | ✅ done. 53/53 findings postable → #19 is criteria-shaped, not a gate |
-   | 3 | M6 — the scout A/B decided | ❌ **not started.** M3 ratified, M4 done 2026-08-18 (`prompts/scout.md`), M5 done 2026-08-18 (`e1ed036`); M6 is the next session and it is the only paid one |
-   | 4 | M0's control set and M6's numbers in the ledger | control set ✅ (`docs/scout-design.md` §1); M6's numbers do not exist |
+   | 3 | M6 — the scout A/B decided | ✅ **decided 2026-08-20: opt-in.** Scout stays behind `--scout`, default OFF — so this item is designed against the **no-scout-by-default** pipeline |
+   | 4 | M0's control set and M6's numbers in the ledger | ✅ control set (`docs/scout-design.md` §1) + the pilot's scored floor table (`ROADMAP-DOORDASH.md` M6, `docs/scout-design.md` §3.17) |
 
-   **Condition 3 is the real gate and it is not negotiable by convenience.** This item's discovery half
+   **Condition 3 was the real gate and it is not negotiable by convenience.** This item's discovery half
    runs "over what changed since the last review", so it must be designed for the pipeline we will
    actually have — and whether that pipeline has a scout stage is exactly what M6 decides. Designing it
    against today's pipeline and re-doing it after M6 is the waste this ordering exists to prevent.
+
+   **Amended 2026-08-20.** Conditions 2, 3 and 4 now hold; **condition 1 does not** — M1 has still not
+   been seen live. The gate therefore rests on condition 1 alone. That is a narrower gate, not an open
+   one: this item does not start until an auto-launched review has been checked by hand against #42/#39.
 
    Do NOT unblock this item by rewriting the conditions. That was proposed once, on 2026-08-16, and
    rejected: the gate is not the obstacle, the unfinished experiment is.
@@ -1082,7 +1107,18 @@ What is still manual, in the order it should be closed:
    (2026-05-11) — ~10,000 PRs/week over 56 repos. Juanma paused this slice to absorb it. Three inputs
    land here; everything else the article contributes went to issues #39/#40, to #19/#23, or to Phase C.
 
-   Their entire re-review guidance is one paragraph, under "Reporting needs its own guardrails":
+   **CORRECTED 2026-08-20 — this line read "Their entire re-review guidance is one paragraph, under
+   'Reporting needs its own guardrails'". It is two paragraphs, and the one that was missed is the one
+   that matters for identity.** The immediately preceding bullet carries a second re-review sentence
+   (`docs/doordash-ai-code-reviewer.md:277-278`):
+
+   > **Correct findings can still be bad comments.** Broad summary notes, weak "consider checking"
+   > language, and **duplicate comments across re-reviews** all erode trust, even when the underlying
+   > concern is real.
+
+   That is the only DoorDash statement bearing on cross-run duplicate suppression — precisely what
+   `docs/item7-rereview-design.md` §3.4's identity mechanism exists to do. The guardrails paragraph, the
+   one this entry did quote:
 
    > We added checks that prevent the reporter from posting a false-clean review if the analysis found
    > issues, reconcile stale findings when a PR changes during review, and collapse old comments during
@@ -1095,14 +1131,22 @@ What is still manual, in the order it should be closed:
       guarantee, and nothing tests it today.
 
    2. **"Reconcile stale findings when a PR changes DURING review" is a hazard this entry missed —
-      the head moving mid-run, not between runs.** The *pinning* half is a defect in the already-built
-      posting surface and left this slice as **issue #39**: `postPrReview` (`pr.ts:735-801`) sends no
-      `commit_id`, so GitHub anchors to the head at post time while the lines were computed on the head
-      the worktree was created at. The *policy* half stays here and is design work: when the head moved
+      the head moving mid-run, not between runs.** The *pinning* half was left this slice as **issue #39**.
+
+      **CORRECTED 2026-08-20 — the paragraph below was stale and would have cost a rebuild.** It read
+      "`postPrReview` (`pr.ts:735-801`) sends no `commit_id`". **It does**: `src/pr.ts:1107`,
+      `commit_id: input.headSha`, with the rationale at `:1087-1106`. #39's pinning half SHIPPED
+      2026-08-16 (M1) and the head is re-read before anchoring (`src/cli.ts:1899-1903`). Line refs in
+      this entry also drifted: `pipeline.ts:536-702` → `src/pipeline.ts:922-1123`; `pr.ts:735-801` /
+      `781-800` → `src/pr.ts:1069-1156`, 422 recovery `:1136-1155`.
+
+      The *policy* half stays here and is design work: when the head moved
       under a review, what does a re-review DO with findings computed on the stale tree — re-verify
       them, demote them to the outside-diff bucket, or discard them? The 422 path
-      (`pr.ts:781-800`) only covers the case where the line vanished; a line that still exists and now
-      means something else posts cleanly and lies.
+      only covers the case where the line vanished; a line that still exists and now
+      means something else posts cleanly and lies. **Answered in `docs/item7-rereview-design.md` §3.9:
+      with `movedHeadSha` set, stale-tree findings do not post inline — they go to the bucket, which
+      §3.5 gives cross-run identity to, so the next run re-verifies rather than re-discovers.**
 
    3. **The open question above stays open, and the article does not close it.** It corroborates that
       reporting is its own failure surface, and its precision-over-recall ethos *leans* toward verifying
@@ -1134,7 +1178,8 @@ What is still manual, in the order it should be closed:
    the delta-since-last-review scoping. The article agrees with all three by construction and adds
    nothing to them — noted so a future reader does not go looking for a change that is absent.
 
-   **A second external reference for the re-review rules, and a third option for the open question
+   **A second external reference for the re-review rules — and "a third option for the open question",
+   RETRACTED 2026-08-20, see the correction below
    (2026-08-16, second pass — `docs/cloudflare-ai-code-review.md`, "Re-reviews").** Cloudflare runs
    incremental re-reviews at 2.7 reviews per MR, and its rules are worth holding next to this entry when
    it is designed: *fixed → omitted, thread auto-resolved; unfixed → re-emitted even if unchanged, so the
@@ -1146,14 +1191,54 @@ What is still manual, in the order it should be closed:
    needs a real destination (an issue number; a bare "acknowledged" has no analog here and is not being
    added), `dismissed` still needs positive disproof with cited code, and the party arguing back is never
    the same agent that wrote the code. Cloudflare's looser semantics are the reference, not the rule.
-   The one that matters for the open question: **their "fixed" is a judgment, not an inference** — the
-   coordinator re-reads the previous findings alongside the new diff and decides. That is a third option
-   between "pay a refuter step per finding" and "trust absence": one pass, prior findings in context,
-   cheaper than per-finding verification and stronger than non-detection. Two caveats travel with it, both
-   already on the record: DashBench's — one pass is one sample — and DoorDash's v2 — one session judging
-   every finding is attention spread thin, the failure the per-finding refuter shape was chosen to avoid.
-   So it narrows the fork; it does not close it, and it does not displace the refuter-shaped verification
-   this entry already argues for. Also inherited from them, for the build: previous findings and author
+
+   **CORRECTED 2026-08-20 — the "third option" was a misattribution, and it was the load-bearing one.**
+   The retracted text read: *"The one that matters for the open question: **their 'fixed' is a judgment,
+   not an inference** — the coordinator re-reads the previous findings alongside the new diff and
+   decides. That is a third option between 'pay a refuter step per finding' and 'trust absence': one
+   pass, prior findings in context, cheaper than per-finding verification and stronger than
+   non-detection."*
+
+   The source does not say that. Read directly, Cloudflare's re-review section
+   (`docs/cloudflare-ai-code-review.md:369-384`) states only the INPUT (`:371-373`) —
+
+   > When a developer pushes new commits to an already-reviewed MR, the system runs an incremental
+   > re-review that is aware of its own previous findings. The coordinator receives the full text of its
+   > last review comment and a list of inline DiffNote comments it previously posted, along with their
+   > resolution status.
+
+   — and the OUTPUT RULE (`:377-378`):
+
+   > **Fixed findings:** omit from the output, and the MCP server auto-resolves the corresponding
+   > DiffNote thread.
+
+   Between them, nothing. **It never says how fixedness is determined** — not verify, not infer, not
+   judge. "The coordinator re-reads the previous findings and decides" is a reasonable architectural
+   inference, but it was written here as what the source says, and it was the entire basis for the third
+   option in the verify-vs-infer fork.
+
+   The consequence is sharper than "unsupported". **"Omit fixed findings from the output" is equally
+   consistent with inference from non-detection**: a coordinator whose sub-reviewers simply did not
+   surface the issue on this run would also omit it. That is the exact failure mode this item exists to
+   eliminate — so the source is compatible with Cloudflare having our bug.
+
+   **This changes the RECORD, not the DESIGN.** `docs/item7-rereview-design.md` D1 and D8 rejected the
+   one-pass judge independently, on our own PR 1759 evidence, before this reading. The correction exists
+   so a future reader does not cite external validation that does not exist. The fork stands where
+   DashBench left it: "verify" versus "state the delta honestly as unconfirmed".
+
+   The two caveats that travelled with the retracted option are still true statements about a one-pass
+   judge, and they are part of why D1/D8 landed where they did: DashBench's — one pass is one sample —
+   and DoorDash's v2 — one session judging every finding is attention spread thin, the failure the
+   per-finding refuter shape was chosen to avoid. **Note on that second caveat, 2026-08-20:** DoorDash
+   diagnoses attention dilution in a *reviewing/discovery* session, not a judging one
+   (`docs/doordash-ai-code-reviewer.md:69-75`) — "each reviewer had too much to do in a single session:
+   read the full diff, evaluate it against all the rules that applied to the changed code, trace callers,
+   check sibling implementations, and verify every potential concern. **Attention spread thin across the
+   change**, and real findings sometimes got lost." Carrying it over to a JUDGING session is our
+   plausible extension, not a quoted claim; do not cite it as DoorDash's finding about judges.
+
+   Also inherited from them, for the build: previous findings and author
    replies become **user-authored text inside a prompt** the moment re-review inlines them; C4's
    boundary-tag rule applies from that day.
 
