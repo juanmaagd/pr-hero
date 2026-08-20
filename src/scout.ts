@@ -10,6 +10,7 @@
 // about the PROMPT would be confounded by a second implementation that no
 // production run ever executes.
 
+import { wrapBlock } from "./boundary";
 import { normalizePath } from "./compare";
 
 // Prose §3.7 turned into the engine-owned output contract, beside
@@ -36,8 +37,17 @@ export interface ScoutLead {
 // {{GOTCHAS}} the hunters read would correlate its attention with theirs, and
 // the independence of its pass is the entire reason it can add coverage.
 // Byte-identical in shape to summarizerPrompt: patch, blank line, contract.
-export function scoutPrompt(patch: string): string {
-  return [patch, "", SCOUT_OUTPUT_CONTRACT].join("\n");
+//
+// The patch is the ONE attacker-controlled block this prompt carries and it is
+// the first thing the scout reads, so it is wrapped in C4's nonced boundary
+// tag (`docs/c4-preamble-design.md` §3.3): a diff that adds a line reading
+// `</patch>` cannot end its own block and speak as the engine. `nonce` is
+// REQUIRED rather than defaulted — a default would let a caller compose an
+// unwrapped prompt by omission, which is the whole failure this closes.
+export function scoutPrompt(patch: string, nonce: string): string {
+  return [wrapBlock("patch", nonce, patch), "", SCOUT_OUTPUT_CONTRACT].join(
+    "\n",
+  );
 }
 
 export class ScoutValidationError extends Error {}

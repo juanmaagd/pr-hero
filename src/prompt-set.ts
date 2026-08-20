@@ -5,6 +5,8 @@
 // the {{PRIORS}}/{{GOTCHAS}} templating the orchestrator prose used to do at
 // spawn time moves into the driver (renderAgentBody).
 
+import { wrapBlock } from "./boundary";
+
 // Fixed order — the lab's promptSetFingerprint hashes the concatenated files
 // in exactly this sequence, so reordering here would silently move every
 // recorded fingerprint. The names are the file basenames inside a prompt-set
@@ -71,20 +73,39 @@ export interface SuspicionPrior {
   reason: string;
 }
 
+// Exported because the driver needs the SAME bytes twice: once here, to fill
+// the {{PRIORS}} anchor, and once at nonce-selection time, to prove the run's
+// boundary nonce does not already occur inside the block it is about to wrap
+// (C4 O-3.3). Rendering priors twice with two spellings would let the check
+// pass on a string the prompt never carries.
+export function renderPriorsBlock(priors: SuspicionPrior[]): string {
+  return priors
+    .map((p) => `- ${p.path} (weight ${p.weight}): ${p.reason}`)
+    .join("\n");
+}
+
 // Prose Step 4's two dynamic sections, now driver-side: {{PRIORS}} becomes a
 // bullet list of the config's suspicion_priors, {{GOTCHAS}} the verbatim
 // gotchas content — placed wherever the agent body anchors them (the baseline
 // bodies put gotchas ahead of the diff, per the spec's injection requirement).
+//
+// Both land inside C4 boundary tags. Not because the operator is a threat —
+// they are not — but because a uniform rule is enforceable and a rule with
+// exceptions is a rule someone forgets (§3.4). `nonce` is REQUIRED, so a future
+// caller cannot reach this substitution without one.
 export function renderAgentBody(
   body: string,
-  context: { priors: SuspicionPrior[]; gotchas: string },
+  context: { priors: SuspicionPrior[]; gotchas: string; nonce: string },
 ): string {
-  const bullets = context.priors
-    .map((p) => `- ${p.path} (weight ${p.weight}): ${p.reason}`)
-    .join("\n");
   return body
-    .replaceAll("{{PRIORS}}", bullets)
-    .replaceAll("{{GOTCHAS}}", context.gotchas);
+    .replaceAll(
+      "{{PRIORS}}",
+      wrapBlock("priors", context.nonce, renderPriorsBlock(context.priors)),
+    )
+    .replaceAll(
+      "{{GOTCHAS}}",
+      wrapBlock("gotchas", context.nonce, context.gotchas),
+    );
 }
 
 // The prompt set's identity, and the reason it exists is M6's central claim:
