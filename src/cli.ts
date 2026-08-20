@@ -3918,13 +3918,55 @@ function envelopeModel(
 // Read from package.json rather than the constants in index.ts: the version a
 // run is stamped with must be the one that would be published, and a
 // hand-maintained duplicate drifts.
-async function engineIdentity(): Promise<{ name: string; version: string }> {
+// C4 O-0. `version` alone does not discriminate: it is read from package.json,
+// which has said 0.1.0 since the scaffold commit, so every run this engine has
+// ever written — before and after a change that alters what every agent reads
+// — reports the same engine. That is not a cosmetic gap. The Cal.com Martian
+// baseline is ratified as valid ACROSS engine versions on the condition that
+// the frontier is annotated (docs/martian-bench.md), and an artifact whose
+// engine field cannot change cannot annotate anything.
+//
+// The revision is the git commit, which moves on its own and needs nobody to
+// remember a bump — the failure mode this whole item exists to remove.
+//
+// PURE half, so the fallbacks are testable without a filesystem or a spawn.
+export function deriveEngineIdentity(
+  pkg: { name?: string; version?: string },
+  revision: { ok: boolean; stdout: string },
+): { name: string; version: string; revision?: string } {
+  const sha = revision.ok ? revision.stdout.trim() : "";
+  return {
+    name: pkg.name ?? "pr-hero",
+    version: pkg.version ?? "0.0.0",
+    // ABSENT rather than "unknown" when git cannot answer. A checkout without
+    // git, or a tarball install, still has to be able to run a review — a run
+    // that refused to start over a provenance field would trade a paid review
+    // for a string. Absent reads as "this run could not name its commit",
+    // which is exactly true, and it is also what every pre-C4 artifact says.
+    ...(sha.length === 0 ? {} : { revision: sha }),
+  };
+}
+
+async function engineIdentity(): Promise<{
+  name: string;
+  version: string;
+  revision?: string;
+}> {
   const pkgPath = path.join(import.meta.dir, "..", "package.json");
   const pkg = (await Bun.file(pkgPath).json()) as {
     name?: string;
     version?: string;
   };
-  return { name: pkg.name ?? "pr-hero", version: pkg.version ?? "0.0.0" };
+  // `import.meta.dir` and not cwd: the revision that matters is the ENGINE's,
+  // and in PR mode the process is routinely pointed at a worktree of somebody
+  // else's repository. Reading that repo's HEAD here would stamp a review with
+  // the reviewed project's commit and quietly make the field a lie.
+  const revision = await git(path.join(import.meta.dir, ".."), [
+    "rev-parse",
+    "--short",
+    "HEAD",
+  ]);
+  return deriveEngineIdentity(pkg, revision);
 }
 
 // Only when executed, never on import — the pure helpers stay importable from

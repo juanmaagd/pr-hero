@@ -19,6 +19,7 @@ import {
   assertRunMatchesPr,
   computeDroppedFindingIds,
   createRunDir,
+  deriveEngineIdentity,
   type InlinePostOutcome,
   ingestReviewMetrics,
   originUsageScope,
@@ -2517,5 +2518,60 @@ describe("createRunDir — --out product fix D (W4 Phase 6)", () => {
       await repo.cleanup();
       await rm(outDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C4 O-0 — the engine identity has to be able to change
+// ---------------------------------------------------------------------------
+
+describe("deriveEngineIdentity", () => {
+  test("carries the revision so two engines are distinguishable", () => {
+    // The reason this obligation exists: `version` is read from package.json,
+    // which has said 0.1.0 since the scaffold commit. Every run this engine
+    // ever wrote reports the same engine, so an artifact could not tell a
+    // pre-C4 review from a post-C4 one — and the Martian baseline is ratified
+    // as valid across engine versions only on condition the frontier is
+    // annotated. A field that never changes annotates nothing.
+    expect(
+      deriveEngineIdentity(
+        { name: "pr-hero", version: "0.1.0" },
+        { ok: true, stdout: "961acef\n" },
+      ),
+    ).toEqual({ name: "pr-hero", version: "0.1.0", revision: "961acef" });
+  });
+
+  test("omits revision rather than inventing one when git cannot answer", () => {
+    // A tarball install or a checkout without git still has to run a review.
+    // Refusing to start over a provenance string would trade a paid review for
+    // a field, and "unknown" would be a value that sorts and compares like a
+    // real commit.
+    expect(
+      deriveEngineIdentity(
+        { name: "pr-hero", version: "0.1.0" },
+        { ok: false, stdout: "" },
+      ),
+    ).toEqual({ name: "pr-hero", version: "0.1.0" });
+  });
+
+  test("treats an empty stdout on a zero exit as no revision", () => {
+    // git can exit 0 and say nothing. An empty `revision: ""` in an artifact
+    // reads as a commit whose name is the empty string.
+    expect(
+      deriveEngineIdentity(
+        { name: "pr-hero", version: "0.1.0" },
+        {
+          ok: true,
+          stdout: "  \n",
+        },
+      ).revision,
+    ).toBeUndefined();
+  });
+
+  test("falls back on a package.json missing its own fields", () => {
+    expect(deriveEngineIdentity({}, { ok: false, stdout: "" })).toEqual({
+      name: "pr-hero",
+      version: "0.0.0",
+    });
   });
 });
