@@ -1,6 +1,8 @@
 # C4 — the runtime-safety preamble and the boundary-tag rule. Design.
 
-Status: **WRITTEN 2026-08-19, awaiting ratification.** ROADMAP entry: `ROADMAP.md` § "C4. Runtime-safety
+Status: **RATIFIED and SHIPPED 2026-08-20** — `d0cb47e` (O-0) + `bbd5277` (preamble + tags), checklist
+closed in §5. The document stays as written: the terrain in §0 is what the next reader needs and the
+decisions in §1 are what a future change has to argue against. ROADMAP entry: `ROADMAP.md` § "C4. Runtime-safety
 preamble", promoted to THE LAUNCH LINE fundamentals 2026-08-18. Source of the boundary-tag rule:
 `docs/cloudflare-ai-code-review.md:175-194`. This document is a design, not an implementation plan.
 
