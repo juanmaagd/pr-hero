@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { planDiscovery } from "../src/rereview-plan";
 import {
+  buildPhaseBQueue,
   parseNameOnly,
+  parseNameStatus,
   prepareDiscovery,
   type RereviewGit,
   shouldAbortEmptyDiscovery,
@@ -194,5 +196,84 @@ describe("prepareDiscovery", () => {
       git: git(),
     });
     expect(toRereviewProvenance(prepared, 4)).toBeUndefined();
+  });
+});
+
+describe("parseNameStatus", () => {
+  test("S-revert — a deleted path is still a touched file", () => {
+    const parsed = parseNameStatus("M\tsrc/a.ts\nD\tsrc/gone.ts\n");
+    expect(parsed.deleted).toEqual(["src/gone.ts"]);
+    expect(parsed.files).toEqual(["src/a.ts", "src/gone.ts"]);
+  });
+
+  test("renames rewrite from → to and keep both paths", () => {
+    const parsed = parseNameStatus("R100\told.ts\tnew.ts\n");
+    expect(parsed.renameMap.get("old.ts")).toBe("new.ts");
+    expect(parsed.files).toEqual(["new.ts", "old.ts"]);
+  });
+});
+
+describe("buildPhaseBQueue", () => {
+  test("case C queues a touched prior and leaves an untouched one for overlap", () => {
+    const { queued, overlapCandidates, settled } = buildPhaseBQueue({
+      case: "C",
+      priors: [
+        {
+          id: "R001",
+          sev: "CRITICAL",
+          tier: "blocking",
+          channel: "inline",
+          locs: ["src/a.ts:10"],
+          claim: "touched",
+          triage: null,
+          newThreadReply: false,
+        },
+        {
+          id: "R002",
+          sev: "WARNING",
+          tier: "advisory",
+          channel: "inline",
+          locs: ["src/b.ts:1"],
+          claim: "carried",
+          triage: null,
+          newThreadReply: false,
+        },
+      ],
+      nameStatus: {
+        files: ["src/a.ts"],
+        deleted: [],
+        renameMap: new Map(),
+      },
+      summaryUpdatedAt: null,
+    });
+    expect(queued.map((e) => `${e.priorId}:${e.trigger}`)).toEqual([
+      "R001:touched",
+    ]);
+    expect(overlapCandidates.map((e) => e.priorId)).toEqual(["R002"]);
+    expect(settled.map((s) => `${s.id}:${s.status}`)).toEqual([
+      "R001:queued",
+      "R002:carried",
+    ]);
+  });
+
+  test("D4 — case D queues every prior as verify_all", () => {
+    const { queued } = buildPhaseBQueue({
+      case: "D",
+      priors: [
+        {
+          id: "R001",
+          sev: "WARNING",
+          tier: "advisory",
+          channel: "inline",
+          locs: ["src/a.ts:10"],
+          claim: "still live?",
+          triage: null,
+          newThreadReply: false,
+        },
+      ],
+      nameStatus: { files: [], deleted: [], renameMap: new Map() },
+      summaryUpdatedAt: null,
+    });
+    expect(queued.map((e) => e.trigger)).toEqual(["verify_all"]);
   });
 });

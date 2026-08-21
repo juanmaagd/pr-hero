@@ -292,11 +292,49 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // "since <sha>" clause rather than omitting the line: spec's own "First-ever
 // run" scenario requires `0 resolved · K new · 0 persist` to be visible, not
 // silent, on the first post.
+export interface RereviewDelta {
+  verifiedGone: number;
+  unconfirmed: number;
+  carried: number;
+  deferred: number;
+  new: number;
+  suppressed: number;
+  returned: number;
+  reTiered: number;
+}
+
 export interface PrCommentDelta {
   resolved: number;
   new: number;
   persist: number;
   previousHeadSha?: string;
+  // Item 7: when present, deltaLine and the clean-bill gate read THIS, not
+  // MatchResult.resolved (C2, R2-S6). Absent keeps first-review rendering
+  // byte-identical.
+  rereview?: RereviewDelta;
+}
+
+export function rereviewDeltaFromProvenance(
+  rereview: {
+    live: readonly { status: string }[];
+    resolved_verified?: number;
+    returned?: number;
+    re_tiered?: number;
+  },
+  newFindings: number,
+): RereviewDelta {
+  const count = (status: string): number =>
+    rereview.live.filter((row) => row.status === status).length;
+  return {
+    verifiedGone: rereview.resolved_verified ?? 0,
+    unconfirmed: count("unconfirmed"),
+    carried: count("carried"),
+    deferred: count("deferred"),
+    new: newFindings,
+    suppressed: count("suppressed"),
+    returned: rereview.returned ?? 0,
+    reTiered: rereview.re_tiered ?? 0,
+  };
 }
 
 // One consistent severity → emoji mapping (Juanma's PR #2 feedback), shared
@@ -571,12 +609,11 @@ export function renderPrComment(
     // that claim is false, so the glyph is withdrawn and the line points back
     // at the notice above rather than leaving the body to jump from a zero
     // count straight to the footer (GitHub #42).
-    out.push(
-      doc.run_status === "partial"
-        ? "The agents that completed reported nothing. That is not a clean " +
-            "bill: read it against the coverage above."
-        : "✅ pr-hero reviewed this PR and found nothing to report.",
-    );
+    //
+    // Item 7 C7: zero new findings is also not a clean bill when priors
+    // remain live (carried / unconfirmed / deferred / suppressed) or this
+    // run returned / re-tiered a prior. MatchResult.resolved cannot say so.
+    out.push(cleanBillLine(doc.run_status, delta?.rereview));
     out.push("");
   } else {
     out.push(...findingIndexLines(doc.findings, commentUrlByFindingId));
@@ -611,11 +648,59 @@ export function renderPrComment(
   return `${out.join("\n").trimEnd()}\n`;
 }
 
+function rereviewIsClean(rereview: RereviewDelta | undefined): boolean {
+  if (rereview === undefined) return true;
+  return (
+    rereview.unconfirmed === 0 &&
+    rereview.carried === 0 &&
+    rereview.deferred === 0 &&
+    rereview.suppressed === 0 &&
+    rereview.returned === 0 &&
+    rereview.reTiered === 0
+  );
+}
+
+function cleanBillLine(
+  runStatus: FindingsDocument["run_status"],
+  rereview: RereviewDelta | undefined,
+): string {
+  if (runStatus === "partial") {
+    return (
+      "The agents that completed reported nothing. That is not a clean " +
+      "bill: read it against the coverage above."
+    );
+  }
+  if (!rereviewIsClean(rereview) && rereview !== undefined) {
+    const bits: string[] = [];
+    if (rereview.carried > 0) bits.push(`${rereview.carried} carried`);
+    if (rereview.unconfirmed > 0)
+      bits.push(`${rereview.unconfirmed} unconfirmed`);
+    if (rereview.deferred > 0) bits.push(`${rereview.deferred} deferred`);
+    if (rereview.suppressed > 0) bits.push(`${rereview.suppressed} suppressed`);
+    if (rereview.returned > 0) bits.push(`${rereview.returned} returned`);
+    if (rereview.reTiered > 0) bits.push(`${rereview.reTiered} re-tiered`);
+    return `No new findings this delta. Live: ${bits.join(" · ")}.`;
+  }
+  return "✅ pr-hero reviewed this PR and found nothing to report.";
+}
+
 function deltaLine(delta: PrCommentDelta): string {
   const since =
     delta.previousHeadSha === undefined
       ? "Δ"
       : `Δ since ${code(delta.previousHeadSha.slice(0, 8))}`;
+  if (delta.rereview !== undefined) {
+    const r = delta.rereview;
+    const parts: string[] = [];
+    if (r.verifiedGone > 0) {
+      parts.push(`${r.verifiedGone} resolved (verified)`);
+    }
+    parts.push(`${r.unconfirmed} unconfirmed`);
+    parts.push(`${r.carried} carried`);
+    parts.push(`${r.deferred} deferred`);
+    parts.push(`${r.new} new`);
+    return `${since}: ${parts.join(" · ")}`;
+  }
   return `${since}: ${delta.resolved} resolved · ${delta.new} new · ${delta.persist} persist`;
 }
 

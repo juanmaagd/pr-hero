@@ -14,7 +14,12 @@
 import type { Severity, Tier } from "./findings";
 import { claimFingerprint } from "./pr-preflight";
 import { isFullCommitId } from "./preflight";
-import type { FindingChannel } from "./rereview-classify";
+import type {
+  FindingChannel,
+  GateStatus,
+  PhaseBResult,
+  PriorRecord,
+} from "./rereview-classify";
 
 export const PR_STATE_MARKER_PREFIX = "<!-- pr-hero-state ";
 export const GITHUB_ISSUE_COMMENT_MAX = 65536;
@@ -264,4 +269,62 @@ function isTier(value: unknown): value is Tier {
 
 function formatR(n: number): string {
   return `R${String(n).padStart(3, "0")}`;
+}
+
+export function isLiveStatus(status: GateStatus): status is LiveStatus {
+  return (
+    status === "carried" ||
+    status === "unconfirmed" ||
+    status === "suppressed" ||
+    status === "deferred"
+  );
+}
+
+export function assembleLive(input: {
+  settled: readonly PhaseBResult[];
+  priors: readonly PriorRecord[];
+  verifyVerdicts: ReadonlyMap<string, GateStatus>;
+}): {
+  live: LiveFinding[];
+  verifiedGone: number;
+  returned: number;
+  reTiered: number;
+} {
+  const priorById = new Map(input.priors.map((prior) => [prior.id, prior]));
+  const live: LiveFinding[] = [];
+  let verifiedGone = 0;
+  let returned = 0;
+  let reTiered = 0;
+  for (const row of input.settled) {
+    let status: GateStatus = row.status;
+    if (status === "queued") {
+      status = input.verifyVerdicts.get(row.id) ?? "unconfirmed";
+    }
+    if (status === "verified-gone") {
+      verifiedGone++;
+      continue;
+    }
+    if (status === "returned") {
+      returned++;
+      continue;
+    }
+    if (status === "re-tiered") {
+      reTiered++;
+      continue;
+    }
+    if (!isLiveStatus(status)) continue;
+    const prior = priorById.get(row.id);
+    if (prior === undefined) continue;
+    live.push({
+      id: prior.id,
+      sev: prior.sev,
+      tier: prior.tier,
+      channel: prior.channel,
+      locs: row.locs,
+      c: claimFingerprint(prior.claim),
+      claim: prior.claim,
+      status,
+    });
+  }
+  return { live, verifiedGone, returned, reTiered };
 }

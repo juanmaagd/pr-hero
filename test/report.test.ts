@@ -891,6 +891,110 @@ describe("renderPrComment", () => {
     expect(body).not.toContain("since");
   });
 
+  test("O-1a — absence-only cannot print resolved; refuted and deletion can", () => {
+    const absence = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 2,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 2,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(absence).not.toContain("resolved");
+    expect(absence).toContain(
+      "Δ: 0 unconfirmed · 2 carried · 0 deferred · 0 new",
+    );
+
+    const refuted = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 99,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 1,
+          unconfirmed: 0,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(refuted).toContain("1 resolved (verified)");
+    expect(refuted).toContain("✅");
+  });
+
+  test("C7-clean — zero new + carried is not a clean bill", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 1,
+        new: 0,
+        persist: 1,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("✅");
+    expect(body).toContain("Live: 1 carried");
+  });
+
+  test("C7-unconfirmed — a cap hit is not a clean bill", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 2,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("✅");
+    expect(body).toContain("Live: 2 unconfirmed");
+  });
+
   // Spec "Mixed run": a since-sha clause appears once a previous head is
   // known (the prior summary marker's own head=, per design D5).
   test("a second run renders the delta with a since-sha clause", () => {

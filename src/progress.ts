@@ -193,13 +193,14 @@ export function applyProgressEvent(
           verdict: event.verdict,
         });
       }
-      // No explicit refuter-done event exists: the leg is done when every
-      // submitted finding has settled.
       if (state.refuter.judged >= state.refuter.total) {
         state.refuter.done = true;
       }
       return;
     }
+    case "verify-started":
+    case "verify-step-finished":
+      return;
     case "scout-started": {
       state.scout = { status: "running", model: event.model };
       return;

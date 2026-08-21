@@ -4,6 +4,7 @@
 // assembly) deterministic and testable here, and spends model tokens only on
 // the hunts and the refutation themselves.
 
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { blockForgesNonce, selectBoundaryNonce, wrapBlock } from "./boundary";
 import {
@@ -37,7 +38,26 @@ import {
   renderPriorsBlock,
   type SuspicionPrior,
 } from "./prompt-set";
+import type {
+  GateStatus,
+  PhaseBResult,
+  PriorRecord,
+} from "./rereview-classify";
 import type { RereviewProvenance } from "./rereview-prepare";
+import { assembleLive } from "./rereview-state";
+import {
+  assignVerifyIds,
+  closeVerifyQueue,
+  composeVerifyPrompt,
+  mapVerifyVerdict,
+  triggerCounts,
+  VERIFIER_AGENT,
+  type VerifyQueueEntry,
+  type VerifySubject,
+  verifyArtifactDir,
+  verifyBatchPath,
+  verifyStepName,
+} from "./rereview-verify";
 import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
 import {
   capScoutLeads,
@@ -135,6 +155,21 @@ export interface PipelineInput {
   // Item 7 provenance. ABSENT on a first review (W-prov); present on every
   // re-review so the artifact can name its case without assuming.
   rereview?: RereviewProvenance;
+  // Item 7 verify leg. ABSENT means no verification (first review, or a
+  // caller that has not classified priors). The queue CLOSES after dedupe
+  // (W-order): overlapCandidates are priors that may still be appended.
+  verifyQueue?: VerifyQueueEntry[];
+  overlapCandidates?: VerifyQueueEntry[];
+  // Default 8 matches DEFAULT_MAX_VERIFICATION_STEPS in preflight.ts.
+  // CLI always passes the resolved config value; this default is the
+  // unattended hatch if a caller forgets.
+  maxVerificationSteps?: number;
+  // Phase B settled rows + priors, so finish() can write live[] from
+  // verifyVerdicts without the CLI re-deriving the queue.
+  phaseB?: {
+    settled: PhaseBResult[];
+    priors: PriorRecord[];
+  };
 }
 
 export interface PipelineDeps {
@@ -183,6 +218,18 @@ export type PipelineProgressEvent =
   | {
       kind: "refuter-step-finished";
       findingId: string;
+      verdict: string;
+      durationMs: number;
+    }
+  | {
+      kind: "verify-started";
+      queued: number;
+      findings?: Array<{ id: string; priorId: string }>;
+    }
+  | {
+      kind: "verify-step-finished";
+      findingId: string;
+      priorId: string;
       verdict: string;
       durationMs: number;
     }
@@ -525,6 +572,15 @@ interface RunState {
   survivors?: DedupedSurvivor[];
   deduped?: DedupeLoser[];
   verdicts: Map<string, RefuterOutcome>;
+  verifyVerdicts: Map<string, GateStatus>;
+  verificationCapped: number;
+  verificationSpawned: number;
+  verificationTriggers: {
+    applied: number;
+    touched: number;
+    overlap: number;
+    verify_all: number;
+  };
   partial: boolean;
   summary?: RunSummary;
   perAgent: Record<string, PerAgentUsage>;
@@ -542,6 +598,15 @@ export async function runPipeline(
     hunterFailures: 0,
     drafts: [],
     verdicts: new Map(),
+    verifyVerdicts: new Map(),
+    verificationCapped: 0,
+    verificationSpawned: 0,
+    verificationTriggers: {
+      applied: 0,
+      touched: 0,
+      overlap: 0,
+      verify_all: 0,
+    },
     partial: false,
     perAgent: {},
     usageTotal: zeroUsage(),
@@ -873,6 +938,50 @@ async function execute(
     findings: survivors.length,
   });
 
+  // Item 7 — the verify queue closes HERE, after dedupe (W-order). Overlap
+  // with a discovery survivor can still append a prior; the cap then binds
+  // even on `--yes` (W-cap). runVerify is a DISTINCT namespaced caller, not
+  // a second runRefuter (C3): V### ids, steps/verify/, state.verifyVerdicts,
+  // per_agent.verifier. finish() never sees those ids.
+  const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
+  const closed = closeVerifyQueue({
+    queued: input.verifyQueue ?? [],
+    overlapCandidates: input.overlapCandidates ?? [],
+    survivors,
+    max: input.maxVerificationSteps ?? 8,
+  });
+  state.verificationCapped = closed.capped.length;
+  state.verificationSpawned = closed.verify.length;
+  state.verificationTriggers = triggerCounts([
+    ...closed.verify,
+    ...closed.capped,
+  ]);
+  for (const entry of closed.capped) {
+    state.verifyVerdicts.set(entry.priorId, "unconfirmed");
+  }
+  if (closed.verify.length > 0) {
+    emit(deps, {
+      kind: "verify-started",
+      queued: closed.verify.length,
+      findings: assignVerifyIds(closed.verify).map((s) => ({
+        id: s.vId,
+        priorId: s.priorId,
+      })),
+    });
+    if (refuterAgent) {
+      await runVerify(input, deps, state, closed.verify, {
+        stepsDir,
+        stepTimeoutMs,
+        agent: refuterAgent,
+        nonce: boundaryNonce,
+      });
+    } else {
+      for (const entry of closed.verify) {
+        state.verifyVerdicts.set(entry.priorId, "unconfirmed");
+      }
+    }
+  }
+
   // Step 6 — one refuter batch: every BLOCKER/CRITICAL survivor, whatever its
   // evidence_class. Severity alone is the test, because severity alone decides
   // whether a finding can block a merge, and the refuter is the gate that
@@ -892,7 +1001,6 @@ async function execute(
   // configured absence, not failure: every finding stays not_submitted (so
   // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
   // the run stays complete.
-  const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
   if (batch.length > 0 && refuterAgent) {
     emit(deps, {
       kind: "refuter-started",
@@ -1116,6 +1224,152 @@ async function runRefuter(
   // count, so the total is the meaningful number; do not read it as "retries of
   // one step".
   state.perAgent[options.agent.key] = usage
+    ? {
+        tokens_total: usage.tokens_total,
+        duration_ms: legElapsedMs,
+        tokens_in: usage.tokens_in,
+        tokens_out: usage.tokens_out,
+        cost_usd_est: usage.cost_usd_est,
+        attempts,
+        status: anyFailed ? "failed" : "ok",
+      }
+    : failedAgentEntry();
+  if (anyFailed) state.partial = true;
+}
+
+async function runVerify(
+  input: PipelineInput,
+  deps: PipelineDeps,
+  state: RunState,
+  queued: VerifyQueueEntry[],
+  options: {
+    stepsDir: string;
+    stepTimeoutMs: number;
+    agent: AgentSpec;
+    nonce: string;
+  },
+): Promise<void> {
+  const subjects = assignVerifyIds(queued);
+  await Bun.write(
+    verifyBatchPath(options.stepsDir),
+    `${JSON.stringify(
+      subjects.map((s) => ({
+        id: s.vId,
+        prior_id: s.priorId,
+        trigger: s.trigger,
+        locs: s.locs,
+        severity: s.sev,
+        claim: s.claim,
+      })),
+      null,
+      2,
+    )}\n`,
+  );
+  const agent = await parseAgentFile(
+    path.join(input.agentsDir, options.agent.file),
+  );
+  const systemPromptPath = path.join(options.stepsDir, "verifier.system.md");
+  await writeSystemPrompt(systemPromptPath, agent.body);
+  const model = resolveModel(
+    input,
+    options.agent.model,
+    agent.model,
+    options.agent.file,
+  );
+  const forged: VerifySubject[] = [];
+  const specs: Array<{ subject: VerifySubject; spec: StepSpec }> = [];
+  for (const subject of subjects) {
+    const prompt = composeVerifyPrompt(subject, options.nonce);
+    if (prompt === null) {
+      forged.push(subject);
+      continue;
+    }
+    const dir = verifyArtifactDir(options.stepsDir, subject.vId);
+    await mkdir(dir, { recursive: true });
+    const spec: StepSpec = {
+      name: verifyStepName(subject.vId),
+      systemPromptPath,
+      prompt,
+      tools: agent.tools,
+      mcpConfigPath: input.mcpConfigPath,
+      model,
+      cwd: input.worktree,
+      outPath: path.join(dir, "result.json"),
+      timeoutMs: options.stepTimeoutMs,
+      maxAttempts: DEFAULT_STEP_MAX_ATTEMPTS,
+      parse: (finalText) => {
+        const extracted = extractJsonObject(finalText);
+        if (extracted === undefined) {
+          throw new Error("verifier final message has no JSON object");
+        }
+        return validateRefuterResult(extracted, [subject.vId]);
+      },
+      onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
+    };
+    specs.push({ subject, spec });
+  }
+  for (const { spec } of specs) state.steps.push(stepMeta(spec));
+  const legStartedAt = Date.now();
+  const settled = await Promise.allSettled(
+    specs.map(({ subject, spec }) => {
+      const startedAt = Date.now();
+      const promise = deps.runner.run(spec);
+      promise.then(
+        (result) =>
+          emit(deps, {
+            kind: "verify-step-finished",
+            findingId: subject.vId,
+            priorId: subject.priorId,
+            verdict:
+              result.status === "ok"
+                ? ((result.output as RefuterResult).results.find(
+                    (r) => r.finding_id === subject.vId,
+                  )?.outcome ?? "inconclusive")
+                : "inconclusive",
+            durationMs: Date.now() - startedAt,
+          }),
+        () =>
+          emit(deps, {
+            kind: "verify-step-finished",
+            findingId: subject.vId,
+            priorId: subject.priorId,
+            verdict: "inconclusive",
+            durationMs: Date.now() - startedAt,
+          }),
+      );
+      return promise;
+    }),
+  );
+  const legElapsedMs = Date.now() - legStartedAt;
+  let usage: SessionUsage | undefined;
+  let attempts = 0;
+  let anyFailed = false;
+  for (const [i, entry] of specs.entries()) {
+    const outcome = settled[i];
+    const result = outcome?.status === "fulfilled" ? outcome.value : undefined;
+    if (result) {
+      usage = usage ? sumUsage(usage, result.usage) : result.usage;
+      attempts += result.attempts;
+      state.usageTotal = sumUsage(state.usageTotal, result.usage);
+    }
+    if (result?.status === "ok") {
+      for (const r of (result.output as RefuterResult).results) {
+        const mapped = mapVerifyVerdict(r.outcome);
+        const priorId =
+          subjects.find((s) => s.vId === r.finding_id)?.priorId ??
+          entry.subject.priorId;
+        state.verifyVerdicts.set(priorId, mapped);
+      }
+      continue;
+    }
+    anyFailed = true;
+    state.verifyVerdicts.set(entry.subject.priorId, "unconfirmed");
+  }
+  for (const subject of forged) {
+    anyFailed = true;
+    state.verifyVerdicts.set(subject.priorId, "unconfirmed");
+  }
+  state.perAgent[VERIFIER_AGENT] = usage
     ? {
         tokens_total: usage.tokens_total,
         duration_ms: legElapsedMs,
@@ -1422,13 +1676,51 @@ async function writePipelinePlan(
       ? {}
       : { boundary_nonce: state.boundaryNonce }),
     ...(state.scout === undefined ? {} : { scout: state.scout }),
-    ...(input.rereview === undefined ? {} : { rereview: input.rereview }),
+    ...(input.rereview === undefined
+      ? {}
+      : { rereview: fillRereviewProvenance(input, state) }),
     steps: state.steps,
   };
   await Bun.write(
     path.join(input.runDir, "pipeline.json"),
     `${JSON.stringify(plan, null, 2)}\n`,
   );
+}
+
+function fillRereviewProvenance(
+  input: PipelineInput,
+  state: RunState,
+): RereviewProvenance {
+  const base = input.rereview;
+  if (base === undefined) {
+    throw new Error("fillRereviewProvenance called without rereview");
+  }
+  const assembled =
+    input.phaseB === undefined
+      ? {
+          live: base.live,
+          verifiedGone: base.resolved_verified ?? 0,
+          returned: base.returned ?? 0,
+          reTiered: base.re_tiered ?? 0,
+        }
+      : assembleLive({
+          settled: input.phaseB.settled,
+          priors: input.phaseB.priors,
+          verifyVerdicts: state.verifyVerdicts,
+        });
+  const filled: RereviewProvenance = {
+    ...base,
+    verified: state.verificationSpawned,
+    verification_capped: state.verificationCapped,
+    verification_triggers: state.verificationTriggers,
+    live: assembled.live,
+    resolved_verified: assembled.verifiedGone,
+    returned: assembled.returned,
+    re_tiered: assembled.reTiered,
+  };
+  // The CLI holds this object; mutating it is how the post path sees live[].
+  Object.assign(base, filled);
+  return filled;
 }
 
 function resolveModel(

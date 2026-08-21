@@ -11,6 +11,12 @@ import path from "node:path";
 import { blockForgesNonce, wrapBlock } from "./boundary";
 import type { Severity } from "./findings";
 import type { GateStatus, VerifyTrigger } from "./rereview-classify";
+import {
+  type IdentityInput,
+  identitiesMatch,
+  identityFromFinding,
+  identityFromLocs,
+} from "./rereview-identity";
 
 export const VERIFY_BATCH_FILE = "verify-batch.json";
 export const VERIFY_STEPS_DIR = "verify";
@@ -106,6 +112,58 @@ export function assignVerifyIds(
     ...entry,
     vId: verifySubjectId(i + 1),
   }));
+}
+
+// Phase E (W-order): the queue closes AFTER dedupe. A discovery survivor
+// whose identity overlaps a prior that was not already queued appends that
+// prior with trigger `overlap`. First trigger still wins (dedupe).
+export function appendOverlapTriggers(
+  queued: readonly VerifyQueueEntry[],
+  candidates: readonly VerifyQueueEntry[],
+  survivors: readonly IdentityInput[],
+): VerifyQueueEntry[] {
+  const extra: VerifyQueueEntry[] = [];
+  for (const candidate of candidates) {
+    const priorIdent = identityFromLocs(candidate.locs);
+    if (priorIdent.size === 0) continue;
+    const hits = survivors.some((survivor) =>
+      identitiesMatch(priorIdent, identityFromFinding(survivor)),
+    );
+    if (!hits) continue;
+    extra.push({ ...candidate, trigger: "overlap" });
+  }
+  return dedupeVerifyQueue([...queued, ...extra]);
+}
+
+export function triggerCounts(queued: readonly VerifyQueueEntry[]): {
+  applied: number;
+  touched: number;
+  overlap: number;
+  verify_all: number;
+} {
+  const counts = { applied: 0, touched: 0, overlap: 0, verify_all: 0 };
+  for (const entry of queued) {
+    if (entry.trigger === "case_b_reply") {
+      counts.applied++;
+      continue;
+    }
+    counts[entry.trigger]++;
+  }
+  return counts;
+}
+
+export function closeVerifyQueue(input: {
+  queued: readonly VerifyQueueEntry[];
+  overlapCandidates?: readonly VerifyQueueEntry[];
+  survivors?: readonly IdentityInput[];
+  max: number;
+}): { verify: VerifyQueueEntry[]; capped: VerifyQueueEntry[] } {
+  const closed = appendOverlapTriggers(
+    input.queued,
+    input.overlapCandidates ?? [],
+    input.survivors ?? [],
+  );
+  return capVerificationQueue(closed, input.max);
 }
 
 export function mapVerifyVerdict(

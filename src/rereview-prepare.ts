@@ -3,7 +3,13 @@
 // `merge-base --is-ancestor`, and `diff --name-only`, and tests inject fakes.
 // The case machine itself stays in rereview-plan.ts.
 
-import type { RereviewCase } from "./rereview-classify";
+import {
+  classifyPrior,
+  type PhaseBResult,
+  type PriorRecord,
+  type RereviewCase,
+} from "./rereview-classify";
+import type { FindingIdentity } from "./rereview-identity";
 import {
   type DiscoveryPlan,
   decideRereviewCase,
@@ -14,6 +20,8 @@ import {
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
 } from "./rereview-plan";
+import type { LiveFinding, StateFinding } from "./rereview-state";
+import type { VerifyQueueEntry } from "./rereview-verify";
 
 export interface RereviewGit {
   commitExists(sha: string): Promise<boolean>;
@@ -50,7 +58,10 @@ export interface RereviewProvenance {
     overlap: number;
     verify_all: number;
   };
-  live: readonly unknown[];
+  live: LiveFinding[];
+  resolved_verified?: number;
+  returned?: number;
+  re_tiered?: number;
 }
 
 export function parseNameOnly(stdout: string): string[] {
@@ -168,5 +179,126 @@ export function toRereviewProvenance(
       verify_all: 0,
     },
     live: [],
+    resolved_verified: 0,
+    returned: 0,
+    re_tiered: 0,
   };
+}
+
+export interface NameStatus {
+  files: string[];
+  deleted: string[];
+  renameMap: Map<string, string>;
+}
+
+// `git diff --name-status` lines. Renames are `R100\told\tnew`. Every path
+// mentioned — including deleted and the old side of a rename — is a touched
+// path: S-revert needs the unrestricted L..H set, not the surviving dest.
+export function parseNameStatus(stdout: string): NameStatus {
+  const files = new Set<string>();
+  const deleted: string[] = [];
+  const renameMap = new Map<string, string>();
+  for (const line of stdout.split("\n")) {
+    if (line.length === 0) continue;
+    const status = line[0];
+    const rest = line.slice(1).replace(/^\d*/, "").replace(/^\t/, "");
+    const parts = rest.split("\t").filter((p) => p.length > 0);
+    if (status === "R" || status === "C") {
+      const from = parts[0];
+      const to = parts[1];
+      if (from === undefined || to === undefined) continue;
+      renameMap.set(from, to);
+      files.add(from);
+      files.add(to);
+      continue;
+    }
+    const path = parts[0];
+    if (path === undefined) continue;
+    files.add(path);
+    if (status === "D") deleted.push(path);
+  }
+  return {
+    files: [...files].sort(),
+    deleted: deleted.sort(),
+    renameMap,
+  };
+}
+
+export function buildPhaseBQueue(input: {
+  case: RereviewCase;
+  priors: readonly PriorRecord[];
+  nameStatus: NameStatus;
+  summaryUpdatedAt: string | null;
+}): {
+  queued: VerifyQueueEntry[];
+  overlapCandidates: VerifyQueueEntry[];
+  settled: PhaseBResult[];
+} {
+  const deltaFiles = new Set(input.nameStatus.files);
+  const ctx = {
+    case: input.case,
+    deletedFiles: new Set(input.nameStatus.deleted),
+    renameMap: input.nameStatus.renameMap,
+    touched: (identity: FindingIdentity) =>
+      [...identity.keys()].some((path) => deltaFiles.has(path)),
+    summaryUpdatedAt: input.summaryUpdatedAt,
+  };
+  const queued: VerifyQueueEntry[] = [];
+  const overlapCandidates: VerifyQueueEntry[] = [];
+  const settled: PhaseBResult[] = [];
+  for (const prior of input.priors) {
+    const result = classifyPrior(prior, ctx);
+    settled.push(result);
+    const entry = {
+      priorId: prior.id,
+      sev: prior.sev,
+      trigger: result.trigger ?? "touched",
+      claim: prior.claim,
+      locs: result.locs,
+      authorReply: "",
+      commentBody: "",
+      triageTag: prior.triage?.tag ?? "",
+      deltaHunks: "",
+    };
+    if (result.status === "queued" && result.trigger !== undefined) {
+      queued.push({ ...entry, trigger: result.trigger });
+    } else if (result.status === "carried") {
+      overlapCandidates.push(entry);
+    }
+  }
+  return { queued, overlapCandidates, settled };
+}
+
+export function priorsFromStateFindings(
+  findings: readonly StateFinding[],
+): PriorRecord[] {
+  return findings.map((finding) => ({
+    id: finding.id,
+    sev: finding.sev,
+    tier: finding.tier,
+    channel: finding.channel,
+    locs: finding.locs,
+    claim: finding.claim,
+    triage: null,
+    newThreadReply: false,
+  }));
+}
+
+export function priorsFromPostedMarkers(
+  posted: readonly {
+    path: string;
+    line: number;
+    channel: "inline" | "outside";
+  }[],
+): PriorRecord[] {
+  return posted.map((item, i) => ({
+    id: `R${String(i + 1).padStart(3, "0")}`,
+    sev: "WARNING",
+    tier: "advisory",
+    channel: item.channel,
+    locs: [`${item.path}:${item.line}`],
+    claim: "",
+    triage: null,
+    newThreadReply: false,
+  }));
 }

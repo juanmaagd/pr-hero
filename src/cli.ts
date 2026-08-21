@@ -154,13 +154,20 @@ import {
   type PrCommentDelta,
   renderPrComment,
   renderReport,
+  rereviewDeltaFromProvenance,
 } from "./report";
 import {
+  buildPhaseBQueue,
   parseNameOnly,
+  parseNameStatus,
   prepareDiscovery,
+  priorsFromPostedMarkers,
+  priorsFromStateFindings,
+  type RereviewProvenance,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
 } from "./rereview-prepare";
+import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
 import {
   effectiveDiffStat,
@@ -354,6 +361,20 @@ async function gitNameOnly(
     throw new CliError(`git diff --name-only failed: ${result.stderr.trim()}`);
   }
   return parseNameOnly(result.stdout);
+}
+
+async function gitNameStatus(
+  repo: string,
+  from: string,
+  to: string,
+): Promise<string> {
+  const result = await git(repo, ["diff", "--name-status", `${from}..${to}`]);
+  if (!result.ok) {
+    throw new CliError(
+      `git diff --name-status failed: ${result.stderr.trim()}`,
+    );
+  }
+  return result.stdout;
 }
 
 async function resolveCommit(repo: string, rev: string): Promise<string> {
@@ -1164,6 +1185,52 @@ async function reviewPr(
       rereview.discovery_skipped_empty_delta = true;
     }
 
+    let verifyQueue: ReturnType<typeof buildPhaseBQueue>["queued"] = [];
+    let overlapCandidates: ReturnType<
+      typeof buildPhaseBQueue
+    >["overlapCandidates"] = [];
+    let phaseB:
+      | {
+          settled: ReturnType<typeof buildPhaseBQueue>["settled"];
+          priors: ReturnType<typeof priorsFromStateFindings>;
+        }
+      | undefined;
+    if (prepared.case !== "A" && prepared.last.L !== null) {
+      const nameStatus = parseNameStatus(
+        await gitNameStatus(gitDirOwner, prepared.last.L, headSha),
+      );
+      const summaryBody =
+        existingSummaryId === null
+          ? ""
+          : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? "");
+      const state = parseStateBlock(summaryBody);
+      const priors =
+        state === null
+          ? priorsFromPostedMarkers(
+              postedFindings.map((p) => ({
+                path: p.livePath ?? p.marker.path,
+                line: p.liveLine ?? p.marker.line,
+                channel: p.channel === "issue" ? "outside" : "inline",
+              })),
+            )
+          : priorsFromStateFindings(state.findings);
+      const classified = buildPhaseBQueue({
+        case: prepared.case,
+        priors,
+        nameStatus,
+        summaryUpdatedAt: null,
+      });
+      verifyQueue = classified.queued;
+      overlapCandidates = classified.overlapCandidates;
+      phaseB = { settled: classified.settled, priors };
+      if (rereview !== undefined) {
+        rereview.prior_findings = priors.length;
+        rereview.settled_deterministically = classified.settled.filter(
+          (s) => s.status !== "queued",
+        ).length;
+      }
+    }
+
     let diffStat: DiffStat;
     let sizeGate: SizeGateVerdict;
     if (skipDiscovery) {
@@ -1305,10 +1372,10 @@ async function reviewPr(
         );
     const hunterCount = activeHunters.length;
     const maxVerificationSteps = resolveMaxVerificationSteps(config);
-    const queuedVerification =
-      prepared.case === "A"
-        ? 0
-        : Math.min(postedFindings.length, maxVerificationSteps);
+    const queuedVerification = Math.min(
+      verifyQueue.length,
+      maxVerificationSteps,
+    );
     const estimate = estimateCost(
       diffStat,
       hunterCount,
@@ -1480,6 +1547,10 @@ async function reviewPr(
             spec,
             ...(skipDiscovery ? { skipDiscovery: true } : {}),
             ...(rereview === undefined ? {} : { rereview }),
+            ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
+            ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
+            maxVerificationSteps,
+            ...(phaseB === undefined ? {} : { phaseB }),
           },
           { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
         );
@@ -1637,6 +1708,7 @@ async function reviewPr(
           doc,
           diffPatch: effectiveDiff.patch,
           webUrl: postedWebUrl,
+          rereview,
         });
         if (posted) {
           await writePostReceipt(runDir, prNumber, headSha, posted);
@@ -1951,8 +2023,32 @@ export async function postInlineFindings(input: {
   diffPatch: string;
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
+  rereview?: RereviewProvenance;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
+  const rereviewDelta =
+    input.rereview === undefined
+      ? undefined
+      : rereviewDeltaFromProvenance(input.rereview, doc.findings.length);
+  const overlayDelta = (delta: PrCommentDelta): PrCommentDelta =>
+    rereviewDelta === undefined ? delta : { ...delta, rereview: rereviewDelta };
+  const renderBody = (
+    delta: PrCommentDelta,
+    outside: readonly Finding[],
+    moved: string | undefined,
+    urls?: ReadonlyMap<string, string>,
+  ): string => {
+    const body = renderPrComment(
+      doc,
+      webUrl,
+      overlayDelta(delta),
+      outside,
+      moved,
+      urls,
+    );
+    if (input.rereview === undefined) return body;
+    return `${body}${renderStateBlock(doc.head_sha, input.rereview.live)}`;
+  };
   const { plan, previousHeadSha, existingSummaryId, findingRefs } =
     await resolveInlinePostPlan(input);
 
@@ -1991,7 +2087,7 @@ export async function postInlineFindings(input: {
       // absent link map above: the placeholder is provisional, the closing
       // PATCH is authoritative, and the re-read belongs as close to the
       // ANCHOR-BEARING call as it can get, not one write earlier.
-      renderPrComment(doc, webUrl, plannedDelta, plannedOutsideDiff, undefined),
+      renderBody(plannedDelta, plannedOutsideDiff, undefined),
       spawnFn,
     );
     summaryCommentId = created.commentId;
@@ -2092,14 +2188,7 @@ export async function postInlineFindings(input: {
   const patched = await postPrComment(
     operatorRoot,
     pr,
-    renderPrComment(
-      doc,
-      webUrl,
-      delta,
-      outsideDiff,
-      movedHeadSha,
-      commentUrlByFindingId,
-    ),
+    renderBody(delta, outsideDiff, movedHeadSha, commentUrlByFindingId),
     spawnFn,
     summaryCommentId ?? undefined,
   );
@@ -2120,7 +2209,7 @@ export async function postInlineFindings(input: {
     issueCommentIds,
     outsideDiffCount: outsideDiff.length,
     summary,
-    delta: plan.delta,
+    delta: overlayDelta(plan.delta),
     droppedFindingIds,
     commentUrls: commentUrlByFindingId,
     movedHeadSha,
@@ -2210,6 +2299,7 @@ export async function postInlineIfEligible(input: {
   diffPatch: string;
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
+  rereview?: RereviewProvenance;
 }): Promise<InlinePostOutcome | null> {
   if (input.sessionFailed) {
     log(input.skippedReason);
@@ -3989,6 +4079,15 @@ function startLineRenderer(startedAtMs: number): ProgressRenderer {
           return;
         case "refuter-step-finished":
           line(`refuter ${event.findingId}: ${event.verdict}`);
+          return;
+        case "verify-started":
+          line(
+            `verify: ${event.queued} prior finding` +
+              `${event.queued === 1 ? "" : "s"} to check`,
+          );
+          return;
+        case "verify-step-finished":
+          line(`verify ${event.findingId}: ${event.verdict}`);
           return;
         case "summarizer-finished":
           line(

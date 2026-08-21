@@ -3,6 +3,7 @@ import { wrapBlock } from "../src/boundary";
 import {
   assignVerifyIds,
   capVerificationQueue,
+  closeVerifyQueue,
   composeVerifyPrompt,
   dedupeVerifyQueue,
   judgeProposedMatch,
@@ -90,6 +91,42 @@ describe("queue dedupe and W-cap", () => {
     );
     expect(verify.map((e) => e.priorId)).toEqual(["R001"]);
     expect(capped.map((e) => e.priorId)).toEqual(["R002"]);
+  });
+});
+
+describe("W-order — the queue closes after dedupe via overlap", () => {
+  test("a survivor that matches a carried prior appends overlap", () => {
+    const { verify } = closeVerifyQueue({
+      queued: [],
+      overlapCandidates: [
+        entry({
+          priorId: "R001",
+          sev: "CRITICAL",
+          locs: ["src/app.ts:10"],
+        }),
+      ],
+      survivors: [
+        { path: "src/app.ts", line: 12, proof_refs: ["src/app.ts:10"] },
+      ],
+      max: 8,
+    });
+    expect(verify.map((e) => `${e.priorId}:${e.trigger}`)).toEqual([
+      "R001:overlap",
+    ]);
+  });
+
+  test("first trigger wins — overlap does not replace touched", () => {
+    const { verify } = closeVerifyQueue({
+      queued: [entry({ priorId: "R001", sev: "CRITICAL", trigger: "touched" })],
+      overlapCandidates: [
+        entry({ priorId: "R001", sev: "CRITICAL", trigger: "overlap" }),
+      ],
+      survivors: [{ path: "src/app.ts", line: 10, proof_refs: [] }],
+      max: 8,
+    });
+    expect(verify.map((e) => `${e.priorId}:${e.trigger}`)).toEqual([
+      "R001:touched",
+    ]);
   });
 });
 

@@ -6,6 +6,7 @@ import {
   prCommentMarker,
 } from "../src/pr-preflight";
 import {
+  assembleLive,
   assignFreshIds,
   capLiveFindings,
   type LiveFinding,
@@ -177,3 +178,54 @@ describe("D5b — cap evicts unconfirmed then carried, never suppressed or defer
 function stateish(): string {
   return `<!-- pr-hero-state v=1 head=${HEAD} -->`;
 }
+
+describe("assembleLive", () => {
+  test("queued priors take the verify verdict; capped ones stay unconfirmed", () => {
+    const priors = [
+      {
+        id: "R001",
+        sev: "CRITICAL" as const,
+        tier: "blocking" as const,
+        channel: "inline" as const,
+        locs: ["src/app.ts:10"],
+        claim: "still live",
+        triage: null,
+        newThreadReply: false,
+      },
+      {
+        id: "R002",
+        sev: "WARNING" as const,
+        tier: "advisory" as const,
+        channel: "inline" as const,
+        locs: ["src/b.ts:1"],
+        claim: "capped",
+        triage: null,
+        newThreadReply: false,
+      },
+    ];
+    const assembled = assembleLive({
+      settled: [
+        {
+          id: "R001",
+          status: "queued",
+          locs: ["src/app.ts:10"],
+          renamed: false,
+          trigger: "touched",
+        },
+        {
+          id: "R002",
+          status: "queued",
+          locs: ["src/b.ts:1"],
+          renamed: false,
+          trigger: "verify_all",
+        },
+      ],
+      priors,
+      verifyVerdicts: new Map([["R001", "verified-gone"]]),
+    });
+    expect(assembled.verifiedGone).toBe(1);
+    expect(assembled.live.map((row) => `${row.id}:${row.status}`)).toEqual([
+      "R002:unconfirmed",
+    ]);
+  });
+});

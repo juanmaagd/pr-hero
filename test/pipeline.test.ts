@@ -41,7 +41,8 @@ class FakeStepRunner implements StepRunner {
     // behavior rather than about id bookkeeping.
     const handler =
       this.script[spec.name] ??
-      (spec.name.startsWith("refuter-") ? this.script.refuter : undefined);
+      (spec.name.startsWith("refuter-") ? this.script.refuter : undefined) ??
+      (spec.name.startsWith("verify-") ? this.script.verifier : undefined);
     if (!handler) throw new Error(`unscripted step ${spec.name}`);
     return handler(spec);
   }
@@ -1685,6 +1686,193 @@ describe("assembly", () => {
     expect(plan.rereview.case).toBe("C");
     expect(plan.rereview.discovery_skipped_empty_delta).toBe(true);
     expect(result.skillOutput.findings).toEqual([]);
+  });
+
+  test("V-ns — runVerify uses V### ids, steps/verify/, and per_agent.verifier", async () => {
+    const runner = new FakeStepRunner({
+      verifier: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: "V001",
+              outcome: "refuted",
+              proof_refs: ["src/app.ts:10"],
+            },
+          ],
+        }),
+    });
+    const input = await makeInput({
+      skipDiscovery: true,
+      verifyQueue: [
+        {
+          priorId: "R001",
+          sev: "CRITICAL",
+          trigger: "touched",
+          claim: "a live defect",
+          locs: ["src/app.ts:10"],
+          authorReply: "",
+          commentBody: "",
+          triageTag: "",
+          deltaHunks: "",
+        },
+      ],
+      rereview: {
+        case: "C",
+        last_reviewed_head: "a".repeat(40),
+        last_head_source: "summary_marker",
+        discovery_range: `${"a".repeat(40)}..${"c".repeat(40)}`,
+        discovery_restricted: true,
+        discovery_skipped_empty_delta: true,
+        prior_findings: 1,
+        settled_deterministically: 0,
+        verified: 0,
+        verification_capped: 0,
+        verification_triggers: {
+          applied: 0,
+          touched: 0,
+          overlap: 0,
+          verify_all: 0,
+        },
+        live: [],
+      },
+      phaseB: {
+        settled: [
+          {
+            id: "R001",
+            status: "queued",
+            locs: ["src/app.ts:10"],
+            renamed: false,
+            trigger: "touched",
+          },
+        ],
+        priors: [
+          {
+            id: "R001",
+            sev: "CRITICAL",
+            tier: "blocking",
+            channel: "inline",
+            locs: ["src/app.ts:10"],
+            claim: "a live defect",
+            triage: null,
+            newThreadReply: false,
+          },
+        ],
+      },
+    });
+    const result = await runPipeline(input, { runner });
+    expect(runner.specs.map((s) => s.name)).toEqual(["verify-V001"]);
+    expect(runner.specs[0]?.outPath).toContain(`${path.sep}verify${path.sep}`);
+    expect(result.perAgent.verifier?.status).toBe("ok");
+    expect(result.perAgent.refuter).toBeUndefined();
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      rereview: {
+        verified: number;
+        verification_capped: number;
+        resolved_verified: number;
+        live: Array<{ id: string; status: string }>;
+      };
+      steps: Array<{ name: string }>;
+    };
+    expect(plan.rereview.verified).toBe(1);
+    expect(plan.rereview.verification_capped).toBe(0);
+    expect(plan.rereview.resolved_verified).toBe(1);
+    expect(plan.rereview.live).toEqual([]);
+    expect(plan.steps.some((s) => s.name.startsWith("refuter-"))).toBe(false);
+    expect(result.skillOutput.findings).toEqual([]);
+  });
+
+  test("W-cap — over-cap priors are unconfirmed without a spawn", async () => {
+    const runner = new FakeStepRunner({
+      verifier: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: "V001",
+              outcome: "corroborated",
+              proof_refs: [],
+            },
+          ],
+        }),
+    });
+    const queued = (id: string, sev: "BLOCKER" | "WARNING") => ({
+      priorId: id,
+      sev,
+      trigger: "verify_all" as const,
+      claim: "a live defect",
+      locs: ["src/app.ts:10"],
+      authorReply: "",
+      commentBody: "",
+      triageTag: "",
+      deltaHunks: "",
+    });
+    const input = await makeInput({
+      skipDiscovery: true,
+      maxVerificationSteps: 1,
+      verifyQueue: [queued("R001", "WARNING"), queued("R002", "BLOCKER")],
+      rereview: {
+        case: "D",
+        last_reviewed_head: "a".repeat(40),
+        last_head_source: "summary_marker",
+        discovery_range: `${"a".repeat(40)}..${"c".repeat(40)}`,
+        discovery_restricted: false,
+        discovery_skipped_empty_delta: false,
+        prior_findings: 2,
+        settled_deterministically: 0,
+        verified: 0,
+        verification_capped: 0,
+        verification_triggers: {
+          applied: 0,
+          touched: 0,
+          overlap: 0,
+          verify_all: 2,
+        },
+        live: [],
+      },
+    });
+    await runPipeline(input, { runner });
+    expect(runner.specs.map((s) => s.name)).toEqual(["verify-V001"]);
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      rereview: { verified: number; verification_capped: number };
+    };
+    expect(plan.rereview.verification_capped).toBe(1);
+    expect(plan.rereview.verified).toBe(1);
+  });
+
+  test("W-order — overlap after dedupe appends a prior that was not pre-queued", async () => {
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      verifier: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: "V001",
+              outcome: "corroborated",
+              proof_refs: ["src/app.ts:10"],
+            },
+          ],
+        }),
+    });
+    const input = await makeInput({
+      overlapCandidates: [
+        {
+          priorId: "R001",
+          sev: "CRITICAL",
+          trigger: "overlap",
+          claim: "a live defect",
+          locs: ["src/app.ts:10"],
+          authorReply: "",
+          commentBody: "",
+          triageTag: "",
+          deltaHunks: "",
+        },
+      ],
+    });
+    await runPipeline(input, { runner });
+    expect(runner.specs.some((s) => s.name === "verify-V001")).toBe(true);
   });
 
   test("no spec: step names and per_agent keys are byte-identical to the pre-spec wiring", async () => {
