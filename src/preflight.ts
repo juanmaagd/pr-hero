@@ -89,6 +89,10 @@ export interface CliOptions {
   // control corpus is sonnet, so ratifying this is ratifying a flag, not a
   // second variable. `--model` still outranks it (the JD override rule).
   scoutModel?: string;
+  // Item 7: widen discovery to full B..H on a re-review. Default OFF — a
+  // second push is delta-scoped unless asked otherwise. Verification,
+  // triage, and classification still run (R2-C5). Review-only, like --scout.
+  full: boolean;
   hopBudget: number;
   dryRun: boolean;
   yes: boolean;
@@ -362,7 +366,9 @@ Options:
                       supply it from outside to review a tree you cannot dirty
   --config <file>     Local config (default: <repo>/.prhero/config.json) with
                       agents_dir, default_base, parity_trigger_paths and
-                      suspicion_priors, and optional summary settings
+                      suspicion_priors, optional summary settings, and
+                      optional max_verification_steps (re-review verify cap;
+                      default 8; 0 pauses verification)
   --model <model>     Override every agent's model
   --summary           Enable the engine-owned PR summary (default)
   --no-summary        Disable the engine-owned PR summary
@@ -372,6 +378,9 @@ Options:
                       whether it earns its cost has not run yet
   --scout-model <m>   Model for the scout stage (default: the run's model).
                       Requires --scout
+  --full              review only: on a re-review, widen discovery to the
+                      full PR range (B..H). Verification and triage still
+                      run; the recorded case does not change
   --hop-budget <n>    Hops per hunter (default: ${DEFAULT_HOP_BUDGET}); the biggest
                       per-hunter cost lever there is
   --two-dot           Diff the literal <base>..<head> two-point range instead
@@ -455,6 +464,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     // compares an arm against a control, and a control that quietly grew a
     // stage is not a control.
     scout: false,
+    full: false,
     dryRun: false,
     yes: false,
     post: false,
@@ -543,6 +553,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     // would only ever restate the default.
     if (arg === "--scout") {
       options.scout = true;
+      continue;
+    }
+    if (arg === "--full") {
+      options.full = true;
       continue;
     }
     if (arg === "--yes" || arg === "-y") {
@@ -709,6 +723,9 @@ export function parseArgs(argv: string[]): ParsedCli {
     throw new CliUsageError(
       "--scout and --scout-model only apply to the review command",
     );
+  }
+  if (command !== "review" && options.full) {
+    throw new CliUsageError("--full only applies to the review command");
   }
   // A model for a stage that will not run is the same silent no-op, one level
   // down — and the likeliest way to produce it is believing the model flag
@@ -1462,6 +1479,10 @@ export interface LocalConfig {
   agents_dir?: string;
   default_base?: string;
   summary?: SummaryConfig;
+  // Item 7: unattended bound on the verify queue. Absent means
+  // DEFAULT_MAX_VERIFICATION_STEPS. 0 is legal — every queued prior lands
+  // `unconfirmed` (the pause switch, same shape as watch daily_cap).
+  max_verification_steps?: number;
 }
 
 export interface SummaryConfig {
@@ -1507,6 +1528,7 @@ export function parseLocalConfig(raw: string): LocalConfig {
     "parity_trigger_paths",
     "suspicion_priors",
     "summary",
+    "max_verification_steps",
   ]);
   for (const key of Object.keys(config)) {
     if (!knownKeys.has(key)) {
@@ -1547,12 +1569,18 @@ export function parseLocalConfig(raw: string): LocalConfig {
     }
   }
   const summary = parseSummaryConfig(config.summary);
+  const maxVerificationSteps = parseMaxVerificationSteps(
+    config.max_verification_steps,
+  );
   return {
     parity_trigger_paths: triggers as string[],
     suspicion_priors: priors as SuspicionPrior[],
     ...optionalString(config, "agents_dir"),
     ...optionalString(config, "default_base"),
     ...(summary === undefined ? {} : { summary }),
+    ...(maxVerificationSteps === undefined
+      ? {}
+      : { max_verification_steps: maxVerificationSteps }),
   };
 }
 
@@ -1586,6 +1614,22 @@ function parseSummaryConfig(value: unknown): SummaryConfig | undefined {
     ...(config.enabled === undefined ? {} : { enabled: config.enabled }),
     ...(config.model === undefined ? {} : { model: config.model as string }),
   };
+}
+
+export const DEFAULT_MAX_VERIFICATION_STEPS = 8;
+
+function parseMaxVerificationSteps(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new CliUsageError(
+      ".prhero/config.json max_verification_steps must be a non-negative integer",
+    );
+  }
+  return value;
+}
+
+export function resolveMaxVerificationSteps(config: LocalConfig): number {
+  return config.max_verification_steps ?? DEFAULT_MAX_VERIFICATION_STEPS;
 }
 
 export function resolveSummary(

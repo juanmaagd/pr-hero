@@ -80,6 +80,10 @@ export function estimateCost(
   // band byte-identical, and so a caller that forgets it under-quotes
   // nothing it did not already under-quote.
   scoutEnabled = false,
+  // Item 7 O-5a. Default 0 so every existing caller keeps its band
+  // byte-identical. Priced as its own term (not folded into `agents`) so a
+  // 40-finding re-review of a 2-file delta is not billed as 40 hunters.
+  verificationSteps = 0,
 ): CostEstimate {
   const files = Math.max(0, diffStat.files);
   const lines =
@@ -97,13 +101,26 @@ export function estimateCost(
   // which is a milestone total and not a per-spawn cost. M6 records cost per
   // arm; that is the number this coefficient gets recalibrated from, and until
   // it exists an invented per-scout coefficient would be false precision.
-  const agents = Math.max(
-    1,
+  const hunterSeats = Math.max(
+    0,
     hunterCount + (summarizerEnabled ? 1 : 0) + (scoutEnabled ? 1 : 0),
   );
+  const steps = Math.max(0, verificationSteps);
+  // A zero-hunter, zero-verify call still needs a band (the hypothetical
+  // floor). A skip-discovery re-review with N verify steps must NOT inherit
+  // that floor — that would bill a phantom hunter on top of verification.
+  const agents = hunterSeats === 0 && steps === 0 ? 1 : hunterSeats;
+  // Verification is its OWN term (item 7 O-5a), not folded into `agents`:
+  // a verify step reads one prior finding, not the whole tree, so multiplying
+  // it by changed-files would price a 40-finding re-review of a 2-file delta
+  // as if it were 40 hunters. The seat is the same per-agent floor — generous
+  // on purpose, same direction as the scout.
   const mid =
     agents *
-    (USD_PER_AGENT_BASE + USD_PER_CHANGED_LINE * lines + USD_PER_FILE * files);
+      (USD_PER_AGENT_BASE +
+        USD_PER_CHANGED_LINE * lines +
+        USD_PER_FILE * files) +
+    steps * USD_PER_AGENT_BASE;
   return {
     low: round2(mid * BAND_LOW),
     high: round2(mid * BAND_HIGH),
@@ -113,7 +130,8 @@ export function estimateCost(
       "+2775 −1237 tree with 5 hunters + refuter, ~$11–$14.78): a " +
       "per-agent floor for hunters + refuter" +
       `${summarizerEnabled ? " + summarizer" : ""}` +
-      `${scoutEnabled ? " + scout" : ""} ` +
+      `${scoutEnabled ? " + scout" : ""}` +
+      `${steps > 0 ? ` + ${steps} verification step(s)` : ""} ` +
       "plus changed lines and files. An order-of-magnitude " +
       "guide, not a quote — the same tree has billed 34% apart across runs.",
   };

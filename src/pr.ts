@@ -677,7 +677,7 @@ export async function fetchPrComments(
   operatorRoot: string,
   pr: number,
   options?: { spawnFn?: typeof Bun.spawn },
-): Promise<{ id: number; user: string; body: string }[]> {
+): Promise<{ id: number; user: string; body: string; created_at?: string }[]> {
   const result = await gh(
     operatorRoot,
     [
@@ -685,7 +685,7 @@ export async function fetchPrComments(
       "--paginate",
       `repos/{owner}/{repo}/issues/${pr}/comments`,
       "--jq",
-      ".[] | {id: .id, user: .user.login, body: .body}",
+      ".[] | {id: .id, user: .user.login, body: .body, created_at: .created_at}",
     ],
     undefined,
     options?.spawnFn,
@@ -703,13 +703,29 @@ export async function fetchPrComments(
     );
   }
   // `--jq` streams one JSON object per line.
-  const comments: { id: number; user: string; body: string }[] = [];
+  const comments: {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+  }[] = [];
   for (const line of result.stdout.split("\n")) {
     if (line.trim() === "") continue;
     try {
-      comments.push(
-        JSON.parse(line) as { id: number; user: string; body: string },
-      );
+      const parsed = JSON.parse(line) as {
+        id: number;
+        user: string;
+        body: string;
+        created_at?: unknown;
+      };
+      comments.push({
+        id: parsed.id,
+        user: parsed.user,
+        body: parsed.body,
+        ...(typeof parsed.created_at === "string"
+          ? { created_at: parsed.created_at }
+          : {}),
+      });
     } catch {
       throw new CliError(`unparseable line from gh api: ${line.slice(0, 120)}`);
     }
@@ -742,6 +758,7 @@ export interface PrReviewComment {
   line: number | null;
   original_line: number | null;
   in_reply_to_id: number | null;
+  created_at?: string;
 }
 
 export async function fetchPrReviewComments(
@@ -758,7 +775,7 @@ export async function fetchPrReviewComments(
       "--jq",
       ".[] | {id: .id, user: .user.login, body: .body, path: .path, " +
         "line: .line, original_line: .original_line, " +
-        "in_reply_to_id: .in_reply_to_id}",
+        "in_reply_to_id: .in_reply_to_id, created_at: .created_at}",
     ],
     undefined,
     options?.spawnFn,
@@ -809,12 +826,22 @@ export async function fetchPostedFindingComments(
       marker,
       livePath: comment.path,
       liveLine: comment.line ?? undefined,
+      ...(comment.created_at === undefined
+        ? {}
+        : { created_at: comment.created_at }),
     });
   }
   for (const comment of issueComments) {
     const marker = parseFindingMarker(comment.body);
     if (marker === null) continue;
-    out.push({ id: comment.id, channel: "issue", marker });
+    out.push({
+      id: comment.id,
+      channel: "issue",
+      marker,
+      ...(comment.created_at === undefined
+        ? {}
+        : { created_at: comment.created_at }),
+    });
   }
   return out;
 }
@@ -841,13 +868,13 @@ function is404(stderr: string): boolean {
 const PR_ISSUE_COMMENTS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
-  "comments(first:100){nodes{databaseId body author{login}}}}}}";
+  "comments(first:100){nodes{databaseId body createdAt author{login}}}}}}";
 
 const PR_REVIEW_COMMENTS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
   "reviewThreads(first:100){nodes{comments(first:100){nodes{" +
-  "fullDatabaseId body author{login} path line originalLine " +
+  "fullDatabaseId body createdAt author{login} path line originalLine " +
   "replyTo{fullDatabaseId}}}}}}}}";
 
 async function ghGraphql(
@@ -882,7 +909,7 @@ async function fetchPrCommentsGraphql(
   operatorRoot: string,
   pr: number,
   spawnFn?: typeof Bun.spawn,
-): Promise<{ id: number; user: string; body: string }[]> {
+): Promise<{ id: number; user: string; body: string; created_at?: string }[]> {
   const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
   const stdout = await ghGraphql(
     operatorRoot,
@@ -914,12 +941,18 @@ async function fetchPrCommentsGraphql(
       "gh api graphql (issueComments) returned no comment list",
     );
   }
-  const comments: { id: number; user: string; body: string }[] = [];
+  const comments: {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+  }[] = [];
   for (const node of nodes) {
     if (typeof node !== "object" || node === null) continue;
     const record = node as {
       databaseId?: unknown;
       body?: unknown;
+      createdAt?: unknown;
       author?: unknown;
     };
     const id = graphqlDatabaseId(record.databaseId);
@@ -928,6 +961,9 @@ async function fetchPrCommentsGraphql(
       id,
       user: graphqlLogin(record.author),
       body: typeof record.body === "string" ? record.body : "",
+      ...(typeof record.createdAt === "string"
+        ? { created_at: record.createdAt }
+        : {}),
     });
   }
   return comments;
@@ -980,6 +1016,7 @@ async function fetchPrReviewCommentsGraphql(
       const record = node as {
         fullDatabaseId?: unknown;
         body?: unknown;
+        createdAt?: unknown;
         author?: unknown;
         path?: unknown;
         line?: unknown;
@@ -1006,6 +1043,9 @@ async function fetchPrReviewCommentsGraphql(
         line,
         original_line: originalLine,
         in_reply_to_id: replyToId,
+        ...(typeof record.createdAt === "string"
+          ? { created_at: record.createdAt }
+          : {}),
       });
     }
   }

@@ -1626,9 +1626,11 @@ describe("assembly", () => {
       pr: number;
       parity_hunter_fired: boolean;
       steps: Array<Record<string, unknown>>;
+      rereview?: unknown;
     };
     expect(plan.pr).toBe(1539);
     expect(plan.parity_hunter_fired).toBe(false);
+    expect(plan.rereview).toBeUndefined();
     expect(plan.steps.map((s) => s.name)).toEqual([
       "hunter-reliability",
       "hunter-resilience",
@@ -1644,6 +1646,45 @@ describe("assembly", () => {
       expect(typeof step.outPath).toBe("string");
       expect("prompt" in step).toBe(false);
     }
+  });
+
+  test("S-empty — skipDiscovery spawns no hunters and records the rereview block", async () => {
+    const runner = new FakeStepRunner({});
+    const input = await makeInput({
+      skipDiscovery: true,
+      rereview: {
+        case: "C",
+        last_reviewed_head: "a".repeat(40),
+        last_head_source: "summary_marker",
+        discovery_range: `${"a".repeat(40)}..${"c".repeat(40)}`,
+        discovery_restricted: true,
+        discovery_skipped_empty_delta: true,
+        prior_findings: 2,
+        settled_deterministically: 0,
+        verified: 0,
+        verification_capped: 0,
+        verification_triggers: {
+          applied: 0,
+          touched: 0,
+          overlap: 0,
+          verify_all: 0,
+        },
+        live: [],
+      },
+    });
+    const result = await runPipeline(input, { runner });
+    expect(runner.specs.filter((s) => s.name.startsWith("hunter-"))).toEqual(
+      [],
+    );
+    expect(runner.specs.some((s) => s.name === "summarizer")).toBe(false);
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      rereview: { case: string; discovery_skipped_empty_delta: boolean };
+    };
+    expect(plan.rereview.case).toBe("C");
+    expect(plan.rereview.discovery_skipped_empty_delta).toBe(true);
+    expect(result.skillOutput.findings).toEqual([]);
   });
 
   test("no spec: step names and per_agent keys are byte-identical to the pre-spec wiring", async () => {

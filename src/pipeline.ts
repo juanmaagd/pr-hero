@@ -37,6 +37,7 @@ import {
   renderPriorsBlock,
   type SuspicionPrior,
 } from "./prompt-set";
+import type { RereviewProvenance } from "./rereview-prepare";
 import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
 import {
   capScoutLeads,
@@ -126,6 +127,14 @@ export interface PipelineInput {
   // so callers that pass nothing see byte-identical step names, per_agent
   // keys, and parity semantics.
   spec?: ReviewSpec;
+  // Item 7: skip hunter (and scout) fan-out. A re-review whose restricted
+  // delta is empty still classifies and verifies (C6); spawning hunters on
+  // an empty patch would bill a first-review for nothing. Absent = run
+  // hunters, so every existing caller stays byte-identical.
+  skipDiscovery?: boolean;
+  // Item 7 provenance. ABSENT on a first review (W-prov); present on every
+  // re-review so the artifact can name its case without assuming.
+  rereview?: RereviewProvenance;
 }
 
 export interface PipelineDeps {
@@ -593,12 +602,15 @@ async function execute(
   // exactly the old "parity hunter fired" semantics.
   const patch = await Bun.file(input.diffPath).text();
   const changedPaths = changedPathsFromDiff(patch);
-  const hunters = reviewSpec.agents.filter(
-    (a) =>
-      a.role === "hunter" &&
-      (a.trigger === undefined ||
-        parityTriggered(changedPaths, triggerPatterns(a, input))),
-  );
+  const skipDiscovery = input.skipDiscovery === true;
+  const hunters = skipDiscovery
+    ? []
+    : reviewSpec.agents.filter(
+        (a) =>
+          a.role === "hunter" &&
+          (a.trigger === undefined ||
+            parityTriggered(changedPaths, triggerPatterns(a, input))),
+      );
   state.parityFired = hunters.some((a) => a.trigger !== undefined);
 
   // Step 3a — the run's boundary nonce (C4 O-3.3). HERE, once, and identical
@@ -627,14 +639,9 @@ async function execute(
   // composition loop that consumes its leads. It is AWAITED, unlike the
   // summarizer, which puts it on the critical path — the cost this design
   // states out loud (§3.9) rather than hiding.
-  const leadsBlock = await runScout(
-    input,
-    deps,
-    state,
-    patch,
-    stepsDir,
-    boundaryNonce,
-  );
+  const leadsBlock = skipDiscovery
+    ? ""
+    : await runScout(input, deps, state, patch, stepsDir, boundaryNonce);
 
   // Step 4 — hunter fan-out.
   const stepTimeoutMs = input.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
@@ -695,7 +702,7 @@ async function execute(
   let summarizerSpec: StepSpec | undefined;
   let summarizerMeta: StepMeta | undefined;
   let summarizerConstructionFailed = false;
-  if (input.summarizer) {
+  if (input.summarizer && !skipDiscovery) {
     const name = "summarizer";
     const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
     const outPath = path.join(stepsDir, `${name}.summary.json`);
@@ -1415,6 +1422,7 @@ async function writePipelinePlan(
       ? {}
       : { boundary_nonce: state.boundaryNonce }),
     ...(state.scout === undefined ? {} : { scout: state.scout }),
+    ...(input.rereview === undefined ? {} : { rereview: input.rereview }),
     steps: state.steps,
   };
   await Bun.write(

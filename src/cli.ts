@@ -131,6 +131,7 @@ import {
   repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
+  resolveMaxVerificationSteps,
   resolveSummary,
   runDirCandidate,
   SUGGESTED_AGENTS_DIR,
@@ -154,6 +155,12 @@ import {
   renderPrComment,
   renderReport,
 } from "./report";
+import {
+  parseNameOnly,
+  prepareDiscovery,
+  shouldAbortEmptyDiscovery,
+  toRereviewProvenance,
+} from "./rereview-prepare";
 import { revertsCommand } from "./reverts";
 import {
   effectiveDiffStat,
@@ -316,6 +323,37 @@ async function git(
     proc.exited,
   ]);
   return { ok: exitCode === 0, stdout, stderr };
+}
+
+async function gitCommitExists(repo: string, sha: string): Promise<boolean> {
+  const result = await git(repo, ["cat-file", "-e", `${sha}^{commit}`]);
+  return result.ok;
+}
+
+async function gitIsAncestor(
+  repo: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  const result = await git(repo, [
+    "merge-base",
+    "--is-ancestor",
+    ancestor,
+    descendant,
+  ]);
+  return result.ok;
+}
+
+async function gitNameOnly(
+  repo: string,
+  from: string,
+  to: string,
+): Promise<string[]> {
+  const result = await git(repo, ["diff", "--name-only", `${from}..${to}`]);
+  if (!result.ok) {
+    throw new CliError(`git diff --name-only failed: ${result.stderr.trim()}`);
+  }
+  return parseNameOnly(result.stdout);
 }
 
 async function resolveCommit(repo: string, rev: string): Promise<string> {
@@ -1052,49 +1090,117 @@ async function reviewPr(
       headSha,
     );
 
-    // 5 — the diff and its true size, computed in the git-dir owner (the
-    // worktree shares ITS object db) and BEFORE anything is created on disk.
-    const diff = await git(gitDirOwner, ["diff", `${diffFromSha}..${headSha}`]);
-    if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
-    if (diff.stdout.trim().length === 0) {
+    // 5 — last-reviewed head, then the TWO deltas (D9). Discovery is the
+    // restricted L..H intersection (or full B..H); the size gate counts
+    // that same discovery diff, never the whole PR, so a merge of main
+    // cannot inflate the bill. Empty discovery is a re-review state, not
+    // an error (C6) — first review (case A) still fails loud.
+    const [issueComments, postedFindings] = await Promise.all([
+      fetchPrComments(operatorRoot, prNumber),
+      fetchPostedFindingComments(operatorRoot, prNumber),
+    ]);
+    const existingSummaryId = findMarkedCommentId(issueComments);
+    const summaryHead =
+      existingSummaryId === null
+        ? null
+        : parseMarkerHead(
+            issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
+          );
+    const prepared = await prepareDiscovery({
+      B: diffFromSha,
+      H: headSha,
+      full: options.full,
+      summaryHead,
+      findingMarkers: postedFindings.map((p) => ({
+        headSha: p.marker.headSha,
+        createdAt: p.created_at ?? "",
+      })),
+      git: {
+        commitExists: (sha) => gitCommitExists(gitDirOwner, sha),
+        isAncestor: (ancestor, descendant) =>
+          gitIsAncestor(gitDirOwner, ancestor, descendant),
+        nameOnly: (from, to) => gitNameOnly(gitDirOwner, from, to),
+      },
+    });
+    const discoveryRange = `${prepared.discoveryFrom}..${prepared.discoveryTo}`;
+    const pathArgs =
+      prepared.discoveryPaths !== null && prepared.discoveryPaths.length > 0
+        ? ["--", ...prepared.discoveryPaths]
+        : [];
+    const skipPlannedDiscovery =
+      prepared.plan.skipDiscovery || prepared.discoverySkippedEmptyDelta;
+
+    let rawDiff = "";
+    if (!skipPlannedDiscovery) {
+      const diff = await git(gitDirOwner, [
+        "diff",
+        discoveryRange,
+        ...pathArgs,
+      ]);
+      if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
+      rawDiff = diff.stdout;
+    }
+    if (shouldAbortEmptyDiscovery(prepared.plan, rawDiff)) {
       throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
     }
-    // The effective diff, and the empty check on it, BOTH before the run dir
-    // exists — same rule as the gate below: a PR that cannot be reviewed leaves
-    // nothing behind.
     const gateConfig = sizeGateConfig(options);
-    const effectiveDiff = filterDiffByGlobs(
-      diff.stdout,
-      gateConfig.excludeGlobs,
-    );
-    if (effectiveDiff.patch.trim().length === 0) {
-      throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
+    const effectiveDiff = skipPlannedDiscovery
+      ? { patch: "", droppedPaths: [] as string[] }
+      : filterDiffByGlobs(rawDiff, gateConfig.excludeGlobs);
+    if (
+      prepared.plan.emptyDeltaIsError &&
+      effectiveDiff.patch.trim().length === 0
+    ) {
+      throw new CliError(
+        effectiveDiff.droppedPaths.length > 0
+          ? allExcludedMessage(effectiveDiff.droppedPaths)
+          : emptyDiffMessage(target.baseRef, headLabel, false),
+      );
     }
-    // Two numstats, for the reason spelled out in local mode: the gate counts
-    // whitespace-blind so a formatter sweep cannot eat the budget, the cost
-    // band counts the bytes the hunters are actually handed.
-    const numstat = await git(gitDirOwner, [
-      "diff",
-      "--numstat",
-      `${diffFromSha}..${headSha}`,
-    ]);
-    if (!numstat.ok) {
-      throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
+    const skipDiscovery =
+      skipPlannedDiscovery || effectiveDiff.patch.trim().length === 0;
+    const rereview = toRereviewProvenance(prepared, postedFindings.length);
+    if (rereview !== undefined && skipDiscovery) {
+      rereview.discovery_skipped_empty_delta = true;
     }
-    const gateNumstat = await git(gitDirOwner, [
-      "diff",
-      "-w",
-      "--ignore-blank-lines",
-      "--numstat",
-      `${diffFromSha}..${headSha}`,
-    ]);
-    if (!gateNumstat.ok) {
-      throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
+
+    let diffStat: DiffStat;
+    let sizeGate: SizeGateVerdict;
+    if (skipDiscovery) {
+      diffStat = { files: 0, insertions: 0, deletions: 0 };
+      sizeGate = evaluateSizeGate([], gateConfig);
+    } else {
+      const numstat = await git(gitDirOwner, [
+        "diff",
+        "--numstat",
+        discoveryRange,
+        ...pathArgs,
+      ]);
+      if (!numstat.ok) {
+        throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
+      }
+      const gateNumstat = await git(gitDirOwner, [
+        "diff",
+        "-w",
+        "--ignore-blank-lines",
+        "--numstat",
+        discoveryRange,
+        ...pathArgs,
+      ]);
+      if (!gateNumstat.ok) {
+        throw new CliError(
+          `git diff -w --numstat failed: ${gateNumstat.stderr}`,
+        );
+      }
+      diffStat = effectiveDiffStat(
+        parseNumstatFiles(numstat.stdout),
+        gateConfig.excludeGlobs,
+      );
+      sizeGate = evaluateSizeGate(
+        parseNumstatFiles(gateNumstat.stdout),
+        gateConfig,
+      );
     }
-    const diffStat: DiffStat = effectiveDiffStat(
-      parseNumstatFiles(numstat.stdout),
-      gateConfig.excludeGlobs,
-    );
 
     // 5b — the size gate, on the REAL per-file numstat and placed here on
     // purpose: before createPrRunDir, so a skipped PR leaves no run dir
@@ -1102,10 +1208,6 @@ async function reviewPr(
     // run artifacts, so a gate skip cannot consume a poison-PR attempt even
     // when the watcher was the one that launched this review. Unattended
     // (--yes) still skips with no prompt; an interactive TTY is asked first.
-    const sizeGate = evaluateSizeGate(
-      parseNumstatFiles(gateNumstat.stdout),
-      gateConfig,
-    );
     // A hard skip (and the interactive prompt) never reach the plan, so the
     // verdict states itself here. --force falls through and the plan's
     // decision block prints the same line plus the override note.
@@ -1185,7 +1287,7 @@ async function reviewPr(
     const diffPath = path.join(runDir, "diff.patch");
     await Bun.write(diffPath, effectiveDiff.patch);
     if (effectiveDiff.droppedPaths.length > 0) {
-      await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
+      await Bun.write(path.join(runDir, "diff.raw.patch"), rawDiff);
     }
 
     // 7 — the plan and the paid gate, exactly like local mode but with the
@@ -1195,15 +1297,24 @@ async function reviewPr(
       changedPaths,
       config.parity_trigger_paths,
     );
-    const activeHunters = spec.agents.filter(
-      (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-    );
+    const activeHunters = skipDiscovery
+      ? []
+      : spec.agents.filter(
+          (a) =>
+            a.role === "hunter" && (a.trigger === undefined || parityFires),
+        );
     const hunterCount = activeHunters.length;
+    const maxVerificationSteps = resolveMaxVerificationSteps(config);
+    const queuedVerification =
+      prepared.case === "A"
+        ? 0
+        : Math.min(postedFindings.length, maxVerificationSteps);
     const estimate = estimateCost(
       diffStat,
       hunterCount,
-      summary.enabled,
-      options.scout,
+      summary.enabled && !skipDiscovery,
+      options.scout && !skipDiscovery,
+      queuedVerification,
     );
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
@@ -1225,6 +1336,19 @@ async function reviewPr(
       droppedPaths: effectiveDiff.droppedPaths,
       resolved: { baseSha, diffFromSha, diffPath, parityFires },
       ...(sizeGateConfirmed ? { sizeGateConfirmed: true } : {}),
+      ...(queuedVerification > 0
+        ? { verificationSteps: queuedVerification }
+        : {}),
+      ...(prepared.case === "A"
+        ? {}
+        : {
+            rereview: {
+              case: prepared.case,
+              lastHead: prepared.last.L,
+              discoveryRestricted: prepared.plan.discoveryRestricted,
+              skipDiscovery,
+            },
+          }),
     };
     for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
     // What this run will actually publish. `options` is never mutated: the plan
@@ -1349,11 +1473,13 @@ async function reviewPr(
             ...(options.model ? { model: options.model } : {}),
             parityTriggerPaths: config.parity_trigger_paths,
             suspicionPriors: config.suspicion_priors,
-            ...pipelineSummarizerInput(summary),
-            ...pipelineScoutInput(options),
+            ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
+            ...(skipDiscovery ? {} : pipelineScoutInput(options)),
             engine: await engineIdentity(),
             promptSet,
             spec,
+            ...(skipDiscovery ? { skipDiscovery: true } : {}),
+            ...(rereview === undefined ? {} : { rereview }),
           },
           { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
         );
@@ -3409,6 +3535,14 @@ export interface PrPlanContext {
   };
   // Same contract, same reason as PlanContext.width.
   width?: number;
+  // Item 7: queued verify steps shown as their own cost-band term (O-5a).
+  verificationSteps?: number;
+  rereview?: {
+    case: string;
+    lastHead: string | null;
+    discoveryRestricted: boolean;
+    skipDiscovery: boolean;
+  };
 }
 
 function prBaseSourceNote(target: PrTarget): string {
@@ -3527,6 +3661,27 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   push("hop budget", String(ctx.options.hopBudget));
   push("summarizer", summarizerRow(ctx.summary));
   push("scout", scoutRow(ctx.options));
+  if (ctx.rereview) {
+    const last =
+      ctx.rereview.lastHead === null
+        ? "none"
+        : ctx.rereview.lastHead.slice(0, 8);
+    push(
+      "re-review",
+      `case ${ctx.rereview.case} · L=${last}` +
+        (ctx.rereview.skipDiscovery
+          ? " · discovery skipped (empty delta)"
+          : ctx.rereview.discoveryRestricted
+            ? " · restricted L..H"
+            : " · full B..H"),
+    );
+  }
+  if (ctx.verificationSteps !== undefined && ctx.verificationSteps > 0) {
+    push(
+      "verify",
+      `${ctx.verificationSteps} verification step(s) (capped; not bypassed by --yes)`,
+    );
+  }
   if (ctx.options.post) {
     push(
       "post",
@@ -3585,6 +3740,28 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
   }
   lines.push(...row(label, summarizerRow(ctx.summary), { styles, width }));
   lines.push(...row("", scoutRow(ctx.options), { styles, width }));
+  if (ctx.rereview) {
+    lines.push(
+      ...row(
+        "",
+        `re-review   case ${ctx.rereview.case}` +
+          (ctx.rereview.skipDiscovery
+            ? "  discovery skipped"
+            : ctx.rereview.discoveryRestricted
+              ? "  restricted"
+              : "  full range"),
+        { styles, width },
+      ),
+    );
+  }
+  if (ctx.verificationSteps !== undefined && ctx.verificationSteps > 0) {
+    lines.push(
+      ...row("", `verify      ${ctx.verificationSteps} step(s)`, {
+        styles,
+        width,
+      }),
+    );
+  }
   label = "";
   lines.push(
     "",

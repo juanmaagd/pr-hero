@@ -1418,6 +1418,18 @@ describe("estimateCost", () => {
     expect(both.basis).toContain("scout");
   });
 
+  test("O-5a — verification-step count is its own term: 2 vs 40 moves the band", () => {
+    const two = estimateCost(SMALL, 4, false, false, 2);
+    const forty = estimateCost(SMALL, 4, false, false, 40);
+    expect(forty.high).toBeGreaterThan(two.high);
+    expect(forty.low).toBeGreaterThan(two.low);
+    expect(two.basis).toContain("2 verification step");
+    expect(forty.basis).toContain("40 verification step");
+    expect(estimateCost(SMALL, 4)).toEqual(
+      estimateCost(SMALL, 4, false, false, 0),
+    );
+  });
+
   test("a zero diff is non-negative and still a band", () => {
     const estimate = estimateCost({ files: 0, insertions: 0, deletions: 0 }, 4);
     expect(estimate.low).toBeGreaterThanOrEqual(0);

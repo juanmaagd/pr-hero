@@ -62,6 +62,7 @@ const options = (over: Partial<CliOptions> = {}): CliOptions => ({
   head: "HEAD",
   hopBudget: 3,
   scout: false,
+  full: false,
   dryRun: false,
   yes: false,
   post: false,
