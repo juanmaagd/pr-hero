@@ -236,3 +236,68 @@ The retracted rule always produced a full review. Case E is unlisted. `W-cli` co
 | R2-S9 | A | WARNING | Step 6 (`applied`) carries **no newness qualifier**, so the same tag is re-bought on every push forever — and in case B it charges for exactly the replies §3.6.1's discriminator exists to exclude. |
 | R2-S10 | B | WARNING | §6 #3 is marked CLOSED on "neither shrinks nor grows without bound", but `suppressed` and `deferred` identities **never reach `verified-gone`**, the only specified exit. The block grows monotonically against a fixed 65536-byte body. |
 | R2-S11 | B | WARNING | **D3 still says "exactly two populations"** while the mechanism it governs now has three verify triggers plus a verify-everything case. Independently reported by the round-1 fix actor as well — a third source. |
+
+---
+
+# Round 3 — scoped re-judgment over rewritten §3
+
+```
+target      docs/item7-rereview-design.md @ uncommitted, sha256 8d1ea7e6…01c1d (1100 lines pre-fix)
+baseline    docs/item7-judgment-ledger.md rounds 1-2 (26 findings = requirements)
+judge A     8 findings (1 CRITICAL, 6 WARNING, 1 SUGGESTION)
+judge B     13 findings (2 CRITICAL, 9 WARNING, 2 SUGGESTION)
+confirmed   3 CRITICAL-class, 5 WARNING-class
+suspect     8 single-judge
+contradictions 0
+round 3 fixes  R3-F1..R3-F8 — status: fixed 2026-08-21, in docs/item7-rereview-design.md
+```
+
+## CONFIRMED — round 3
+
+### R3-C1 · CRITICAL · R2-S5 · rules 4/6 outcomes had no home in `live[]` or `findings[]`  ·  status: fixed (R3-F1)
+A(:634-636) + B(:634). `dismissed`+`rejected` and `misclassified` named outcomes but the gate table and
+`live[].status` enum stopped at four values. **Fix:** `returned` / `re-tiered` gate outcomes; rules 4/6
+repost into this run's `findings[]`; `live[]` holds passive statuses only.
+
+### R3-C2 · CRITICAL · R2-C3-A · equal single-path identity matched without span check  ·  status: fixed (R3-F2)
+B(:735). `(pa = pb)` let `{util.ts:14}` match `{util.ts:50}`. **Fix:** both branches require span overlap
+on every path in `pa`; table row added.
+
+### R3-C3 · CRITICAL · deferred identities evicted on state-block cap — O-3 violation  ·  status: fixed (R3-F3)
+A(:797-799). Cap evicted `deferred` after `carried`. **Fix:** never evict `deferred` or `suppressed`.
+
+## CONFIRMED — WARNING
+
+### R3-W1 · R2-S8 · `S-revert` test contradicted §3.3 touched→verify→`unconfirmed`  ·  status: fixed (R3-F4)
+A + B. **Fix:** test expects `unconfirmed` or `verified-gone`, not `carried`.
+
+### R3-W2 · R2-S7 · case-A tie-break needed `created_at` on finding markers  ·  status: fixed (R3-F5)
+A(:528-529). **Fix:** `fetchPostedFindingComments` projection extended; `PostedFindingComment` grows field.
+
+### R3-W3 · case B promised new replies but §3.3 had only `applied`  ·  status: fixed (R3-F6)
+A(:505). **Fix:** rule 7b — new triage reply on prior thread queues verify in case B.
+
+### R3-W4 · verify queue double-charge unspecified  ·  status: fixed (R3-F7)
+B(:585). **Fix:** dedupe by `R###` before phase F spawn.
+
+### R3-W5 · R2-S6 · legacy `MatchResult.resolved` log lines still named  ·  status: fixed (R3-F8)
+B(:843). **Fix:** §3.8 gates off resolved log/count in re-review mode.
+
+## SUSPECT — one judge only
+
+| id | judge | sev | claim | disposition |
+|---|---|---|---|---|
+| R3-S1 | A | WARNING | S10 proof_refs validation still design-light | open — partial fix in §3.5 identity write rule |
+| R3-S2 | A/B | WARNING | S4 summary race — Phase E, §4 | accepted deferral |
+| R3-S3 | B | WARNING | all-suppressed clean bill ambiguous | fixed in §3.8.1 (R3-F9, same pass) |
+| R3-S4 | B | WARNING | R2-S10 monotonic growth of suppressed/deferred | open — cap never evicts them; §6 #7 tracks live-list scaling |
+| R3-S5 | B | WARNING | O-2 cross-ref §3.10 vs §3.8.1 | fixed |
+| R3-S6 | B | WARNING | §4 §3.7 vs §3.9 ref | fixed |
+| R3-S7 | B | SUGGESTION | O-5a §3.10.4 vs §3.10.3 | fixed |
+| R3-S8 | B | SUGGESTION | §0.7.4 stale step numbers | fixed (strategy refs → §3.3 rules) |
+
+## Round 3 terminal state
+
+**Pending scoped re-judgment or Juanma APPROVED.** No CRITICAL-class confirmed findings remain unfixed.
+Open suspects (S4 race, S10 validation depth, R2-S10 growth) are documented deferrals, not design blockers
+for implementation start — same class as Phase E exactly-once.

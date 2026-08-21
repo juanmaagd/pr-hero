@@ -3,27 +3,11 @@
 Written 2026-08-20 with Juanma, immediately after M6 closed as `opt-in` and unblocked splice condition 3.
 Governs `ROADMAP.md` Phase B item 7. Status: **DESIGN. No engine code has moved.**
 
-> ## ⚠️ JUDGMENT: ESCALATED — §3 does not build as written. Read `docs/item7-judgment-ledger.md` first.
+> ## ⚠️ JUDGMENT: round 3 complete — fixes applied; ready for scoped re-judgment or APPROVED pending your call
 >
-> Decided by Juanma 2026-08-20, at the end of Judgment Day round 2. **§§0-2 stand** — the terrain, the
-> PR 1759 evidence, the strategy page, D1-D9 and O-1..O-6 survived two adversarial rounds. **§3 is
-> scheduled for a rewrite from scratch**, and until it lands, nothing in §3 is an implementation
-> instruction.
->
-> **Why a rewrite rather than a third patch.** Round 1 applied fifteen corrections. Round 2's two blind
-> judges then found **five new confirmed findings and eleven suspects**, of which two were *caused* by the
-> corrections and three were corrections that did not close what they were raised against. Patching a
-> large interlocking spec section-by-section is what produced that: §3 now carries retraction markers at
-> 28 sites and reached 1450 lines by accumulation. The ledger's 26 findings are not a defect list to
-> clear — **they are the input requirements for the rewrite**, each with `file:line` evidence against the
-> real engine.
->
-> Known-broken as of this marker, and NOT to be trusted while reading §3: the ordered list's steps 8 and 9
-> are unreachable; the false-clean guard covers one of four live populations; the §3.4 containment formula
-> still over-matches; §0.3's "already built / a second caller" contradicts §3.3's retraction of exactly
-> that claim, and §0 declares precedence over §3; `rereview.carried[]` carries no finding text, so an
-> Outside Diff finding's only copy is destroyed by the summary PATCH; and the state block recreates the
-> id collision §3.3 exists to prevent.
+> Read `docs/item7-judgment-ledger.md` — rounds 1–2 frozen; **round 3 appended below**. §§0-2 stand.
+> §3 rewritten 2026-08-21; round 3 found 2 confirmed CRITICAL-class (R2-S5, R2-C3-A), 1 confirmed by
+> judge A (deferred eviction), plus WARNINGs — **round 3 fix pass applied** (R3-F1..F8 in ledger).
 
 The gate this design does NOT satisfy: splice condition 1 (M1 `#42`/`#39` seen live) is still open — §6.
 Design is not implementation; the build waits.
@@ -94,14 +78,14 @@ A noted divergence is a future argument. These are decided.
    re-examined *this* round. **Resolution: we do not repost the comment, and the summary lists every
    `carried` finding with its status.** That is now part of O-2, not an optional nicety.
 2. **"Collapse old comments" — we satisfy it by construction; we do not decline it.** On GitHub,
-   resolving a thread *is* collapsing it, and §3.7 resolves every verified-fixed thread. And there are no
+   resolving a thread *is* collapsing it, and §3.9 resolves every verified-fixed thread. And there are no
    superseded comments to hide, because we never repost — the pile never accumulates in the first place.
    §4 previously worded this as declining DoorDash's mechanism; that was wrong and is corrected there.
 3. **The semantic judge enters with zero risk, because a judge-proposed match is not a match — it is a
    verification trigger.** DashBench uses deterministic matching plus an LLM judge where semantics are
    needed (`:248-249`), and §3.4 is deterministic-only. The fear was an over-matching judge hiding a live
    defect behind a `carried`. That can only happen if the judge's output *classifies*. It does not:
-   a judge-proposed match feeds **§3.2 step 8** and forces a verification step. **The judge can never
+   a judge-proposed match feeds **phase E (§3.2)** and forces a verification step. **The judge can never
    retire a finding; the worst it can do is spend one step.** Deterministic identity remains the only
    thing that classifies, and rule 2 is preserved intact.
 
@@ -202,8 +186,11 @@ travels with the PR, and already survives a different machine and a CI runner. I
 - **Verdict → tier**: `finish()`, `src/pipeline.ts:1331-1351` → `deriveTier`, `src/findings.ts:365-381`.
   Absent id defaults to `not_submitted`; `refuted` removes the finding into `debug.refuted[]`.
 
-This is the exact shape item 7's verification half needs, and it is already built, isolated, tested and
-priced. **Item 7 does not build a verifier. It builds a second caller of this one.**
+This is the exact **shape** item 7's verification half needs — one step per finding, nonced boundary tags,
+read-only tools, engine-owned verdict vocabulary — and that machinery is already built, isolated, tested
+and priced. **`runRefuter` is not re-entrant** (judgment round 1, C3): item 7 does **not** call it twice in
+one run. Item 7 builds **`runVerify`** — a **new** namespaced caller that follows the refuter's step shape
+and isolation posture, with its own ids, artifacts, verdict map and `per_agent.verifier` entry (§3.4).
 
 ### 0.4 Triage exists, and the matcher is blind to it
 
@@ -358,7 +345,7 @@ loss is now **named** rather than unnoticed. Open question: §6 #5.
 
 > **User-resolved findings:** respected unless the issue has materially worsened.
 
-§3.2 step 2 suppresses a `dismissed`+`upheld` identity "this run and every later one at this identity" —
+§3.3 rule 3 suppresses a `dismissed`+`upheld` identity "this run and every later one at this identity" —
 permanently, with no escape hatch. Cloudflare's equivalent rule has one. Real gap, small, and it cannot
 be built before *worsened* has a definition: §6 #6.
 
@@ -388,7 +375,7 @@ they followed from a source, and neither does:
 1. **Collapse. RESOLVED the same day — it was never a divergence, and this paragraph's first draft got it
    wrong.** `doordash-ai-code-reviewer.md:284-285` says they "collapse old comments during re-review so
    the author sees the current state". The draft read that as us *declining* their mechanism. On GitHub,
-   **resolving a thread IS collapsing it** — §3.7 resolves every verified-fixed thread and GitHub folds
+   **resolving a thread IS collapsing it** — §3.9 resolves every verified-fixed thread and GitHub folds
    it away — and there are no superseded comments to hide because we never repost, so the accumulating
    pile their criterion describes cannot form. We satisfy the criterion by construction; the only thing
    declined is the minimize/hide *API call*, which is a far smaller statement (§4). What survives from
@@ -399,7 +386,7 @@ they followed from a source, and neither does:
    > **Unfixed findings:** must be re-emitted even if unchanged, so the MCP server knows to keep the
    > thread alive.
 
-   §3.2's `carried` outcome (step 10) reaches thread-alive by the **inverted** mechanism: by *not*
+   §3.3 rule 9 (`carried`) reaches thread-alive by the **inverted** mechanism: by *not*
    posting. Equivalent outcome, opposite mechanism — and the author sees something different either way:
    theirs gets a fresh comment on every push, ours gets none. Preferring ours is a product judgement
    about noise, not a derivation from the source.
@@ -432,9 +419,9 @@ they followed from a source, and neither does:
 |---|---|---|
 | **D1** | A prior finding whose site **did not change** since the last reviewed head is `carried`, decided deterministically, at zero LLM cost. Absence is never evidence of repair. | design, from §0.6 |
 | **D2** | "The last reviewed head" is the summary comment's existing `head=` marker. **No new persistent state.** | design, from §0.2 |
-| **D3** | Verification pays a refuter-shaped step for exactly two populations: findings whose **site changed**, and findings the author tagged **`applied`**. | **Juanma, 2026-08-20** |
+| **D3** | Verification pays a refuter-shaped step (`runVerify`, §3.4) for every population the gate cannot settle deterministically: findings whose **site changed** (`touched`); findings the author tagged **`applied`** (with case-B **newness**, §3.7.1); priors whose §3.5 identity **overlaps** a discovery finding (post-dedupe); and case **D/E**, where **every** prior finding enters the verify-all queue (capped by `max_verification_steps`). Triage outcomes (`suppressed`, `deferred`, file-deletion) and untouched `carried` priors do **not** buy a step unless one of those triggers fires. | **Juanma, 2026-08-20**; expanded 2026-08-21 (R2-S11) |
 | **D4** | If the last reviewed head is not an ancestor of the current head (force-push / rebase), the delta range is void: fall back to a full review and say so on both surfaces. | design |
-| **D5** | Cross-run identity is the **unordered set of `proof_ref` locations**, recorded in a new state block on the summary comment — one entry for every finding, inline and outside-diff alike. This closes the Outside-Diff **identity** hole in the same mechanism. It does not make that population **triageable**; §3.6 says so explicitly (corrected 2026-08-20, C12). | design, from §0.6 |
+| **D5** | Cross-run identity is the **unordered set of `proof_ref` locations**, recorded in a new state block on the summary comment — one entry for every finding, inline and outside-diff alike. This closes the Outside-Diff **identity** hole in the same mechanism. It does not make that population **triageable**; §3.7.2 says so explicitly (corrected 2026-08-20, C12). | design, from §0.6 |
 | **D6** | The matcher reads triage state. A `dismissed` finding does not return blocking; a `deferred` one does not return as new. | design, from §0.4 |
 | **D7** | The report's vocabulary is constrained: `resolved` is emitted only when the defect was **checked** — a verification step returned `refuted`, or git shows the file was deleted by the delta. Everything that merely failed to recur is `unconfirmed`. | design, from §0.1 |
 | **D8** | The re-review is a **five-case state machine over (L, H)** (§3.1), not a mode. Verify-everything is correct in exactly one of those cases — history rewritten — and nowhere else. | design, forced by Juanma's 2026-08-20 question |
@@ -456,21 +443,21 @@ accepted on the weakest evidence in the loop.
   returned `refuted`", full stop, which contradicted §3.8's own deterministic-deletion clause and left the
   two gate rows that emitted `resolved` at cost 0 unaccounted for. One of those rows is legitimate (a
   deleted file *was* checked — by git) and is now inside the rule; the other, "the locations at `H` are
-  identical to base", is deleted outright (§3.2).
+  identical to base", is deleted outright (§3.3).
 - **O-2 — the reader.** After N pushes the author sees the **current state**, not an archaeology of every
   round. This is a reader-facing criterion, not a matcher-mechanics one, and nothing tests it today.
-  **Amended 2026-08-20:** current state means the summary **lists every `carried` finding with its
-  status**, not merely that nothing was reposted. Silence is ambiguous — it reads identically as "still
-  live" and as "the bot forgot". This is what stands in for Cloudflare's re-emission rule (§3.7).
-  The list is rendered from `findings[]` **merged with** the `rereview.carried[]` block (§3.10.3), because
-  a `carried` finding is not in this run's `findings[]` at all — §3.8.1 explains why that merge is the
-  whole difference between an honest summary and a green false-clean bill (C7).
+  **Amended 2026-08-20:** current state means the summary **lists every live finding with its status**,
+  not merely that nothing was reposted. Silence is ambiguous — it reads identically as "still
+  live" and as "the bot forgot". This is what stands in for Cloudflare's re-emission rule (§3.9).
+  The list is rendered from `findings[]` **merged with** `rereview.live[]` (§3.8.1), because a prior
+  finding is not in this run's `findings[]` at all — §3.8.1 explains why that merge is the whole
+  difference between an honest summary and a green false-clean bill (C7).
 - **O-3 — the author's decisions stick.** A finding the author `dismissed` does not come back blocking.
   A `deferred` one does not come back as `fresh`.
 - **O-4 — no local state.** Everything item 7 needs to re-review is recoverable from the PR alone, so a
   GitHub Action, a second machine, and a stranger's clone all behave identically.
 - **O-5 — the spend is visible before it happens, and bounded where nobody is looking.** A re-review's
-  discovery half reads the delta, not the PR; its verification half spends only on the §3.2 populations.
+  discovery half reads the delta, not the PR; its verification half spends only on the §3.3 queue populations.
   **Amended 2026-08-20 (§3.10.4):** the first draft said "cheaper than today", unconditionally, and that
   is a promise the design cannot keep — a PR carrying many prior findings whose sites all moved buys many
   verification steps. Cheaper in the ordinary case, dearer in the pathological one, and the obligation is
@@ -494,819 +481,499 @@ accepted on the weakest evidence in the loop.
 
 ## 3. Mechanisms
 
-### 3.1 The state machine over (L, H) — five cases, no sixth
+Rewritten 2026-08-21 from the judgment ledger's 26 findings. **§3 is pipeline phases plus explicit
+classification precedence** — not a first-match-wins row table. Overlap and worsening settle **after dedupe**.
+Rename is evaluated **before** `touched()`. Verification is **`runVerify`**, never a second leg on
+`runRefuter`.
 
-Juanma, 2026-08-20, on reading the first draft: *"¿solo verificaremos sobre los cambios hechos a partir de
-la última review? … hay muchos casos que hay que tener en cuenta y pensar en una solución que no se
-rompa."* §3.1 and §3.2 are the answer, and two mechanisms below exist because he asked.
+### 3.1 State machine (L, H)
+
+Juanma, 2026-08-20: *"¿solo verificaremos sobre los cambios hechos a partir de la última review? … hay
+muchos casos que hay que tener en cuenta."* §3.1–§3.3 are the answer.
 
 `L` = last reviewed head. `H` = current head. `B` = `merge-base(base, H)`.
 
 | case | condition | discovery | verification |
 |---|---|---|---|
 | **A** | `L` absent | full `B..H` (today's path) | nothing to verify |
-| **B** | `L === H` | none | only findings carrying a new author reply (discriminated by §3.6, not by `head=`) |
-| **C** | `L` is an ancestor of `H` | restricted Δ (§3.1.1) | per-finding gate (§3.2) |
-| **D** | `L` is **not** an ancestor of `H` — force-push / rebase / amend | full `B..H`, banner on both surfaces | **every** prior finding, against the new tree — capped by `max_verification_steps` (§3.10.4) |
-| **E** | `L` is not a commit in this repo (branch deleted and recreated, or GC'd) | as **D** | as **D** |
+| **B** | `L === H` | none | priors with **new** triage activity (§3.7.1): new `applied`, or any new reply on a prior thread |
+| **C** | `L` is an ancestor of `H` | restricted Δ (§3.1.1) | per §3.3 classification + post-dedupe triggers |
+| **D** | `L` is **not** an ancestor of `H` — force-push / rebase / amend | full `B..H`, banner on both surfaces | **every** prior finding — verify-all queue, capped (§3.10) |
+| **E** | `L` is not a commit in this repo (branch deleted/recreated, GC'd, or **shallow clone**) | as **D** | as **D** |
 
-**`--full` is not case A** (corrected 2026-08-20, judgment round 1, S2). The table's condition column is
-the whole definition: case A is `L` **absent**, and nothing else routes into it. `--full` widens the
-discovery range of whatever case the PR is actually in; it does not throw the triage state away. §3.10.1
-carries the reasoning.
+One `git merge-base --is-ancestor` call decides C from D. Every failure mode falls to the conservative
+side: a full review, never a silently truncated delta.
 
-One `git merge-base --is-ancestor` call decides C from D. Deterministic, and every failure mode falls to
-the conservative side: a full review, never a silently truncated delta.
+**Case D is verify-everything, and only there.** When history was rewritten, `touched()` is not
+computable — a refuter verdict against the new tree is the best available evidence. Everywhere else the
+deterministic gate (§3.3) is strictly stronger than one sample (§0.6).
 
-**Case D is where verify-everything belongs, and only there.** When history was rewritten, `touched` is
-not computable — there is no meaningful diff between the old tree and the new one — so a refuter verdict
-against the new tree is the best available evidence. Everywhere else it would be strictly worse than the
-deterministic gate; §3.2 explains why in the terms that decide it.
+**Case E and CI.** Case E is a property of the **local object store**, not the PR (`L` missing from
+`git cat-file -e`). The same PR can route C on a full clone and D/E on `actions/checkout` with default
+`fetch-depth: 1`. Recommend `fetch-depth: 0` (or at least fetch `L`) in Actions workflows that run
+re-review — document in the skill, not silently assumed (S7).
 
-**Case A has a free fallback that must be built, or every thread duplicates.** If the summary comment was
-deleted or edited by a human, `parseMarkerHead` returns nothing and the run would fall to "first review",
-re-posting every finding. But the per-finding markers carry `head=` too
-(`src/pr-preflight.ts:390-392`). Recover `L` from those before declaring case A. Zero cost.
+**Case A fallback — recovers `L` only.** If the summary comment was deleted, recover `L` from per-finding
+markers' `head=` (`src/pr-preflight.ts:390-392`) before declaring case A. **What it does not recover:**
+the state block (it lived on the summary), §3.5 identity, severities for worsening, or Outside Diff
+identity (no marker). Findings resurface as `fresh`; threads may duplicate — visible noise, not invisible
+loss (C10).
 
-**What the fallback recovers is `L`, and nothing else** — corrected 2026-08-20 (judgment round 1, C10);
-the first draft ended "and it turns the worst human-caused failure into a non-event", which is false and
-is retracted. The fallback fires precisely when the summary comment is gone, and §3.5 puts the state
-block on **that same comment**. So the run recovers a range and loses: every finding's §3.4 identity,
-every prior severity §3.2's worsening test needs, and all identity for Outside Diff findings, which carry
-no marker at all (`src/report.ts:604-610`). Per-finding markers carry only path/line/head/c
-(`src/pr-preflight.ts:386-393`) — a strict anchoring key, not an identity set.
+**Which marker's `head=` wins when they disagree:** the **`created_at` of the marker comment**, not merge
+order — `fetchPostedFindingComments` must project `created_at` after widening (R2-S7). A `carried`
+finding's marker stays frozen at its original post; stale `L` widens the delta (safe direction).
+`last_head_source` (§3.10) records whether `L` came from the summary or the fallback.
 
-The honest statement: identity loss forces a full reclassification that run. Findings resurface as
-`fresh`, threads may duplicate, and the author sees noise. That is **visible noise rather than invisible
-loss**, and that — not "a non-event" — is the only reason it is acceptable under strategy rule 2.
+**`--full` (one rule, §3.10):** widens discovery for **whatever case the PR is actually in** — including
+case B (`L === H`), where discovery is otherwise none. It never skips verification, triage, or
+classification. Provenance records the real case with `discovery_restricted: false` (R2-C5, S2).
 
-**Which head becomes `L` when the markers disagree:** the one declared by the **most recently created**
-marker comment. And it can still be several pushes stale, by construction: a `carried` finding is never
-reposted (§3.2 step 10), so its marker's `head=` is frozen at its original post time. A stale `L` widens
-the delta, which errs toward re-examining too much — the safe direction — and `last_head_source`
-(§3.10.3) is what lets a later reader tell this run apart from one the summary told.
+#### 3.1.1 Two deltas
 
-#### 3.1.1 Two deltas, because they answer different questions
+A naive `Δ = L..H` breaks on merge-from-main; restricting to the PR surface breaks on revert. Two
+computations, never shared (D9):
 
-A naive `Δ = L..H` breaks the moment the author merges `main` into the branch: the delta swallows every
-upstream change and the re-review reviews someone else's work. Cost bomb and noise bomb at once. But the
-obvious fix — restrict Δ to the PR's own file surface — breaks the gate in the *revert* case. So they are
-two different computations and must not be shared:
+- **Discovery delta (restricted):** files in `B..H` ∩ files in `L..H`, diffed `L..H`. Upstream-only
+  churn excluded; a file both PR and merge touched is included.
+- **Touched gate (unrestricted):** any content change to a finding's locations between `L` and `H`, even
+  if the file dropped out of `files(B..H)` after a revert-to-base.
 
-- **Discovery reads the restricted delta:** files changed in `B..H` ∩ files changed in `L..H`, diffed
-  between `L` and `H`. That is the PR's own surface, moved. Upstream churn the author merged in is
-  excluded; a file the PR touches which the merge also changed is included, correctly — its content is
-  now something nobody reviewed.
-- **The touched gate reads unrestricted content change:** any change to a finding's locations between `L`
-  and `H` counts, whether or not the file is still part of the PR's surface. If the author reverted a
-  file back to base, it drops out of `files(B..H)` — and the gate must still see that its content moved,
-  or it would report `carried` on a file the PR no longer modifies at all.
+`resolveDiffFrom` (`src/cli.ts:2687-2712`) grows a second caller; the size gate runs on the **restricted**
+delta only.
 
-Base-branch movement is handled for free by this split: `merge-base(base, H)` moving under the PR changes
-`B..H`, but `L..H` is untouched, so a re-review is *more* stable than a first review under a moving base.
+#### 3.1.2 Empty discovery delta
 
-`resolveDiffFrom` (`src/cli.ts:2687-2712`) grows a second caller rather than a second implementation. The
-size gate (`src/size-gate.ts`) then runs on the **restricted delta**, which is the point: a re-review of
-three commits stops being priced as a re-review of the whole PR.
+**An empty restricted delta is a re-review state, not an error** (C6). Legitimate when: only commit reverts
+PR changes to base; merge of `main` touches no PR file; case B (`L === H`).
 
-**An empty restricted delta is a re-review STATE, not an error** — added 2026-08-20 (judgment round 1,
-C6), because as designed it aborted the whole run, verification included. `files(B..H) ∩ files(L..H)` is
-legitimately empty in three ordinary shapes: the author's only new commit reverts a PR change back to
-base (the bullet above says so), a merge of `main` touches no file the PR touches, and case B by
-definition. Today all three die: `src/cli.ts:1059-1060` throws `CliError(emptyDiffMessage(...))` and
-`:1070-1072` throws `CliError(allExcludedMessage(...))`, **before** the run directory, the size gate and
-the pipeline exist. So the verification half never runs, nothing is posted, and the PR keeps a stale
-report — which is exactly the failure item 7 exists to remove, reached by a different door.
+Today all three abort at `src/cli.ts:1059-1060` / `:1070-1072` before the pipeline exists.
 
-The rule: **in a re-review, an empty discovery delta skips the discovery half and proceeds to
-verification.** The gate's steps still run, `carried` findings are still listed, threads still resolve,
-the summary is still rewritten. The `CliError` path stays correct for a **first** review, where an empty
-diff genuinely means there is nothing to review at all. Test: `S-empty` (§5).
+**Rule:** in a re-review, empty discovery delta → skip discovery, **still run** prior classification,
+verification, summary PATCH, thread resolution. `CliError` on empty diff stays for **first** review only.
+Test: `S-empty` (§5).
 
-#### 3.1.2 The delta is the entry point, not the boundary
+#### 3.1.3 Discovery scope
 
-Discovery scoped to Δ does **not** mean the hunters may only look at Δ. They get the full worktree at `H`
-and codegraph, exactly as in a first review; the diff has always been the attention anchor, not a fence.
-A change inside Δ that breaks code outside it is found by following the blast radius outward — the same
-mechanism that finds it on a first review.
+Discovery scoped to Δ does **not** fence the hunters. They get the full worktree at `H` and codegraph; the
+diff is the attention anchor. Blast-radius findings outside Δ are allowed — and land in the Outside Diff
+channel (`src/report.ts:604-610`), which has identity (§3.6) but **not** triage (§3.7.2).
 
-**The product promise this makes, stated so it can be held to:** *every line of the PR is looked at once,
-when it arrives.* Not "every line is re-examined on every push". Re-hunting `B..L` on push 5 does not
-reliably recover a first-review miss — §0.6 is the proof that a second pass over an identical tree
-returns *different* findings, not *more* reliable ones — it only re-rolls, and every re-roll costs money
-and adds noise the author already dismissed once. A deliberate `--full` covers the case where a human
-wants the whole PR looked at again.
+**Product promise:** every line of the PR is looked at once when it arrives — not re-examined every push.
+§0.6 proves re-hunting an identical tree re-rolls, not improves. `--full` is the deliberate re-look.
 
-### 3.2 The change gate — an ORDERED decision list over prior findings, first match wins
+### 3.2 Pipeline phases
 
-For each prior finding recovered from the PR, ask a question `git` can answer:
+The orchestration is **seven phases**, A–G. Phases C and F are where prior findings get their status;
+phase F is explicitly **after dedupe** (C4, R2-S4).
 
 ```
-touched(finding) := any location in finding's proof-ref set falls inside a hunk of the delta diff L..H
-                    (file-level containment when the file is added/deleted/renamed)
+Phase A — Preflight
+  read L (summary marker → case-A fallback) → five-case machine (§3.1)
+  → compute both deltas (§3.1.1) → size gate on restricted delta
+  → recover priors from state block + inline markers (§3.6)
+  → fetch triage markers (§3.7) → build verification queue skeleton
+
+Phase B — Prior classification (zero LLM)
+  §3.3 rules on every recovered prior → provisional statuses + queue entries
+  rename rewrite (rule 2) before touched() (R2-C1)
+  case D/E: enqueue ALL priors for verify-all
+
+Phase C — Discovery
+  hunters over restricted delta — parallel, unchanged
+  SKIPPED when restricted delta empty (§3.1.2); classification + verify still run
+
+Phase D — Dedupe
+  unchanged
+
+Phase E — Post-dedupe reconciliation (zero LLM for queue wiring; may add verify steps)
+  identity overlap: each discovery survivor overlapping a prior → append prior to verify queue
+  worsening: suppressed + strictly-higher discovery at same identity → lift suppression, post fresh
+  re-apply max_verification_steps cap on the enlarged queue
+
+Phase F — Verify
+  runVerify (§3.4) — one step per queued prior, V### ids, steps/verify/
+  **queue is deduped by `R###` before spawn** — case D/E verify-all must not double-charge a prior
+  already queued by rules 7–8 or phase E overlap (round 3)
+  map verdicts → final statuses (§3.3 outcomes table)
+
+Phase G — Refute + finish
+  ordinary runRefuter over fresh BLOCKER/CRITICAL survivors — unchanged, F### ids only
+  deriveTier, assemble report from findings[] + rereview.live[] (§3.8)
+  rewrite state block (§3.6), PATCH summary, thread resolution (§3.9)
 ```
 
-**Rewritten 2026-08-20 (judgment round 1, C2 + C4).** This was a twelve-row table that was neither
-ordered nor disjoint, and real findings hit several rows at once with opposite prescriptions at opposite
-cost (`touched` + `dismissed`+`upheld` was the cheapest example: 1 step versus 0, verify versus suppress).
-Two rows are gone and the rest is an ordered list. **Evaluate in this order and stop at the first match.**
+**Latency note:** queuing `applied`/`touched` priors during phase B while hunters run in phase C is a
+valid optimization **second** — correctness requires phase E before the verify queue closes.
 
-#### The four outcomes, and why none of them is called `persist`
+**Case B path:** phases C and D are no-ops; B → F → G still runs.
 
-`persist` was the original name for "still there, nothing posted", and it is retracted: `MatchResult`
-already owns that word for something incompatible (`src/inline.ts:190-197`), and §3.7.1 records what the
-collision would have done — auto-close every live thread on the PR, every push. The gate's outcomes
-share no name with `MatchResult`:
+### 3.3 Prior classification rules
 
-| outcome | meaning | reader sees | thread |
-|---|---|---|---|
-| `carried` | still present; not re-hunted, not reposted | listed in the summary with its status (O-2) | untouched, stays open |
-| `verified-gone` | **checked** and gone — a `refuted` verdict, or git deleted the file | `resolved` ✅ | resolved (§3.7) |
-| `unconfirmed` | could not tell — and `inconclusive` is **not** a polite `refuted` | `unconfirmed`, stays on the PR | untouched |
-| `suppressed` | the author's decision, upheld by an adjudicator | out of the output at this identity | untouched |
+For each prior finding recovered from the PR, apply **precedence-ordered rules**. These are **not**
+first-match-wins rows — several rules can queue verification; triage and git-deletion outrank inference.
 
-#### The list
+**Definitions:**
 
-| # | condition | outcome | cost | when it settles |
+```
+touched(finding) := any location in finding's proof-ref set (re-anchored, §3.6) falls inside a hunk of
+                    the unrestricted delta L..H, OR file-level add/delete/rename containment
+renamed(finding) := git reports a rename mapping an old path in finding.locs to a new path at H
+```
+
+**Precedence (evaluate in order; later rules do not override earlier determinate outcomes):**
+
+| order | condition | outcome | verify? | settles |
 |---|---|---|---|---|
-| 1 | every location's file was **deleted** by the delta | **`verified-gone`** | 0 | preflight |
-| 2 | `dismissed` + adjudicator `upheld` | **`suppressed`** — unless §3.2.2's worsening test fires | 0 | preflight (worsening: after dedupe) |
-| 3 | `dismissed` + adjudicator `rejected` | **returns**, with the disproof cited | 0 | preflight |
-| 4 | `deferred` | out of the blocking count, listed as deferred | 0 | preflight |
-| 5 | `misclassified` | **re-tiered** per the adjudicator, never re-hunted | 0 | preflight |
-| 6 | author tagged `applied` | **verify** (§3.3) | 1 step | queued at preflight |
-| 7 | `touched` by the unrestricted delta | **verify** (§3.3) | 1 step | queued at preflight |
-| 8 | a discovery finding's §3.4 identity overlaps this one | **verify** (§3.3) | 1 step | **only after dedupe** |
-| 9 | a location's file was **renamed** | follow git's rename, re-evaluate from step 1 | 0 | preflight |
-| 10 | otherwise | **`carried`** | 0 | preflight |
+| 1 | every location's file **deleted** by unrestricted delta | `verified-gone` | no | phase B |
+| 2 | **renamed** — rewrite locs via git rename map, **re-evaluate from rule 1** | (re-entry) | no | phase B |
+| 3 | `dismissed` + adjudicator `upheld` | `suppressed` *(provisional until phase E)* | no | phase B/E |
+| 4 | `dismissed` + adjudicator `rejected` | **`returned`** — reposts blocking this run, disproof cited | no | phase B |
+| 5 | `deferred` | `deferred` — out of blocking count | no | phase B |
+| 6 | `misclassified` | **`re-tiered`** — reposts at adjudicator tier, not re-hunted | no | phase B |
+| 7 | author tagged `applied` **and** (case ≠ B **or** tag is **new**, §3.7.1) | queue verify | yes | phase B→F |
+| 7b | case B + **new** triage reply on a prior thread (any tag except already-processed `applied`) | queue verify | yes | phase B→F |
+| 8 | `touched()` | queue verify | yes | phase B→F |
+| 9 | otherwise | `carried` | no | phase B |
 
-Step 9 is the one re-entry, and it terminates: git resolves a rename to a single new path, the locations
-are rewritten once, and the second pass cannot reach step 9 again for the same file.
+**Rename before touched (R2-C1).** Rule 2 runs before rule 8. A file rename rewrites paths once; the
+re-evaluation cannot hit rename again for the same file. Without this ordering, `touched()` fires on the
+old path, verification targets a non-existent path, a spurious `refuted` → false `resolved` ✅.
 
-**Why step 1 is first.** Strategy rule 1 — deterministic before model. A deleted file is the one case
-where git can answer "gone" outright, it costs nothing, and it outranks even the author's own tags
-because it is not an opinion.
+**Triage outranks touched (O-3).** Rules 3–6 beat rule 8. An author who dismissed and then edited nearby
+has not withdrawn the dismissal. Worsening (phase E) is the exception.
 
-**Why triage (steps 2-5) outranks `touched` (step 7), which is the precedence that was missing.** An
-author who dismissed a finding and then edited near it **has not withdrawn the dismissal.** Verifying it
-anyway spends money to re-litigate a decision they already made, and O-3 says their decisions stick. The
-worsening hatch (§3.2.2) is the deliberate exception, and it is driven by discovery, not by `touched`.
+**`applied` newness (R2-S9).** In case B, an `applied` tag on a reply with `created_at ≤ summary.updated_at`
+does **not** queue verification — it was already accounted for.
 
-**Why `applied` (step 6) outranks `touched` (step 7).** Same population most of the time, but the trigger
-counts in `pipeline.json` (§3.10.3) must attribute the step to the reason it was bought. `applied` is the
-population D3 chose to pay for; `touched` is the population the gate inferred.
+**Post-dedupe only (phase E):**
 
-**Step 10 is what makes the whole design cheaper than today** and is the direct answer to §0.6: **you
-cannot report a repair in code that did not change.** It also makes O-2 mechanical — a `carried` finding
-is not reposted, so the thread stays alive without adding a comment (Cloudflare's *"unfixed → re-emitted
-… thread stays alive"*, achieved by not posting rather than by posting again).
+- **Identity overlap:** discovery finding overlaps prior (§3.5) → append prior to verify queue (`overlap`
+  trigger). Free — consumes discovery work already done (§3.3.1 hole remedy 2).
+- **Worsening:** `suppressed` prior + discovery finding at same identity with **strictly higher** severity
+  → lift suppression, post discovery finding as `fresh`, summary names both severities (Cloudflare :381).
 
-#### Two rows that left this list, and why
+**Gate outcomes** (names disjoint from `MatchResult.persist` / `.resolved`, C2):
 
-**Deleted: "the locations at `H` are identical to base — the PR no longer modifies them → `resolved`."**
-Both judges killed it independently, and the reasoning belongs where the row was:
-
-- A finding **outside** the PR's diff — which §3.1.2 explicitly permits via blast radius, and which the
-  engine already has a channel for (`src/report.ts:604-610`) — has locations identical to base **by
-  construction**. The row would fire on the **first** re-review and report a repair in code nobody ever
-  modified.
-- `causal_disposition: "pre-existing"` is a valid finding value (`src/pipeline.ts:365-366`). A
-  pre-existing defect whose file the author reverts to base satisfies the row verbatim while still being
-  present, in code that still runs.
-
-**"Identical to base" is not a disappearance.** The code exists and may still be defective. The revert
-case §3.1.1 names is handled correctly by step 7 (the unrestricted delta sees the content move) and then
-by §3.3's verdict — which is a check, not an inference. A reverted file whose defect is genuinely gone
-gets there through `refuted`, and one whose defect was never the PR's gets `carried`.
-
-**Moved, not deleted: "verification returned `inconclusive` → `unconfirmed`."** That is an *outcome* of
-step 6/7/8, not an input state a gate can test, and listing it here is what let §3.10.2 price it as
-zero-spend. It now lives in §3.3's verdict-mapping table, where the verdict is produced.
-
-#### When the gate actually settles — the heading's old claim, corrected
-
-The heading used to say the gate runs "before a single token". That is true of most of it and false as
-written, and §3.10.2 inherited the error. The accurate statement, which the `when it settles` column
-above carries per step:
-
-- **steps 1-5, 9 and 10 settle at preflight with zero spend** — git and the triage markers answer them;
-- **steps 6 and 7 queue at preflight**, and are paid later;
-- **step 8 cannot be evaluated until dedupe has run**, because that is when a discovery finding's identity
-  is final (§3.10.2's constraint);
-- §3.2.2's worsening test also needs discovery, so a step-2 `suppressed` is provisional until dedupe.
-
-#### 3.2.1 The gate's one hole, and why it is not plugged by verifying everything
-
-Raised by Juanma: *"¿qué pasa si lanzó más commits y resolvió más cosas además de lo que le marcamos?"*
-
-Most of that case is already handled. He fixed something we flagged → step 6 or 7, verified. He fixed
-something we never flagged → nothing to verify and hunters do not flag fixes; silent by design. He broke
-something new while fixing → the fix is inside Δ, so discovery finds it. **The hole is narrower and
-real: he fixed the finding from a site that is not in the finding's proof-ref set**, so the gate says
-untouched and we report a defect that no longer exists.
-
-Three remedies, none expensive, in the order they fire:
-
-1. **The proof-ref set usually carries both ends.** §0.6 shows every finding in the PR 1759 pair citing
-   producer *and* consumer, so a fix at either end lands inside the set and trips step 7. Not a guarantee
-   — a three-hop causal chain can be cited with two refs — which is why there are two more.
-2. **Step 8, the identity-overlap widening.** If discovery over Δ produces a finding whose §3.4 identity
-   overlaps a prior finding's, the area is demonstrably live and the prior one is verified. This is free:
-   it consumes work the discovery half already did, and the pipeline order already permits it.
-3. **The `applied` tag is the author's own remedy**, and D3 already funds it — this is precisely the
-   population Juanma chose to pay for. It is also the one remedy that **does not exist for Outside Diff
-   findings**, which have no thread to tag: §3.6's last paragraph.
-
-#### 3.2.2 Worsening re-opens a suppressed finding — the one Cloudflare rule we were missing
-
-`cloudflare-ai-code-review.md:381`: *"**User-resolved findings:** respected unless the issue has
-materially worsened."* Step 2 as first drafted suppressed permanently, with no escape hatch — a real gap
-(§0.7.4). Closed here, mechanically, because a judgement call would need a model and rule 1 says no:
-
-> **Worsened** := discovery over the delta produces a finding at the same §3.4 identity whose severity is
-> **strictly higher** than the suppressed finding's.
-
-That finding is posted as `fresh`, the suppression is lifted for that identity, and the summary says the
-finding returned because it worsened, naming both severities. No new step, no new prompt — the severity
-is already on every finding and the identity is already computed for step 8. Because it reads discovery
-output, the test runs **after dedupe**, which is why §3.2's table calls a step-2 `suppressed` provisional
-until then.
-
-The direction of error is the safe one: an author's `dismissed` at LOW is not overturned by another LOW,
-so we do not re-litigate a decision they made; only a genuine escalation reopens it. And the DashBench
-caution that an author's action is not ground truth (`:60-62`, §0.7.4) is precisely what this hatch
-answers — a `dismissed` given for timing or scope reasons stops being permanent the moment the defect
-gets worse.
-
-**Why NOT "verify every prior finding by default and treat the gate as a cost cap".** It was drafted and
-rejected, and the reasoning is recorded because the instinct is a good one pointed the wrong way.
-`code unchanged → defect unchanged` is **deterministic evidence, strictly stronger than one refuter
-sample.** Verifying an untouched site replaces a certainty with a die roll. The two failure modes are not
-symmetric, and the project's standing direction-of-error rule decides it outright:
-
-| | failure | class |
-|---|---|---|
-| the gate | fix landed outside the proof-ref set → a stale finding stays visible on the PR, and the author tags it `applied`, which pays verification | **visible noise**, self-healing |
-| verify-all | refuter variance on byte-identical code returns `refuted` → §3.3 maps that to `verified-gone`, the reader sees `resolved` ✅ and the thread auto-closes | **invisible loss**, and it re-rolls the dice on every push |
-
-§0.6 is the proof that one sample on an identical tree is not a measurement. Verify-all would launder
-that sample as one, on the one axis where a deterministic answer already exists. Case D (§3.1) is the
-only place verify-everything is correct, because there `touched` is not computable at all.
-
-### 3.3 The verification step — a second caller of the refuter's SHAPE, in its own namespace
-
-**Retracted 2026-08-20 (judgment round 1, C3).** This section said the leg "reuses
-`src/pipeline.ts:922-1123` **unchanged in shape**" and that the only difference is the framing of the
-question. That is false in the way that costs a finding, and `runRefuter` as it stands is **not
-re-entrant**. What the leg reuses is the **step shape and the isolation posture**: one step per finding,
-a one-element JSON array, nonced boundary tags, read-only tools, engine-owned verdict vocabulary. The
-namespacing below is item-7 **work**, not something already built.
-
-Why it is not re-entrant. Finding ids are per-run positional — `src/dedupe.ts:205` renumbers survivors to
-`F001`, `F002`… — and the state block (§3.5) stores priors under a **previous** run's ids, also starting
-at `F001`. §3.10.2 runs the verify leg and the ordinary refute leg in the same run, so five names collide:
-
-| shared name | site | what the collision does |
-|---|---|---|
-| `state.verdicts` | `src/pipeline.ts:1084` | a prior's verdict is read as this run's finding's verdict |
-| `steps/refuter-<id>.result.json` | `:1009-1012` | two steps write the same artifact path |
-| `refuter-batch.json` | `:948-951` | one audit manifest claims to describe both legs |
-| `refuter.system.md` | `:957` | one system prompt for two different questions |
-| `state.perAgent.refuter` | `:1111-1121` | verification cost is invisible, folded into the refuter's |
-
-Concretely, and this is the one that loses data: the verify leg sets `verdicts['F001'] = 'refuted'` for a
-prior; `finish()` (`:1334-1341`) reads that key for **this run's** fresh `F001` and deletes a live finding
-into `debug.refuted[]` — a finding never submitted to any refuter, gone with no reader-visible trace.
-
-**Required, therefore, and none of it exists today:**
-
-- verification subjects carry a **distinct id namespace** — `V001`, `V002`… — derived from the state
-  block's stored id, so the mapping back to the prior is recoverable from the artifact;
-- a **distinct steps subdirectory**, `steps/verify/`, and a distinct batch manifest;
-- a **distinct verdict map**, never `state.verdicts`;
-- a **distinct `per_agent` key**, `verifier`, so cost and telemetry stay separable — this is also what
-  makes §3.10.4's cost band checkable after the fact;
-- its **own subject type**. `runRefuter` takes `DedupedSurvivor[]`, and a PR-recovered prior is not one:
-  it has no draft lineage, no dedupe key, and its locations come from the state block, not from a hunter.
-
-What differs in the question itself:
-
-- The subject is a **prior** finding plus the delta hunks that touched its locations.
-- The question is *"is this specific defect still present at these locations, at this head?"*
-- The verdict maps to the gate's vocabulary (§3.2):
-
-| refuter outcome | re-review meaning | gate outcome | reader sees |
+| outcome | meaning | reader | thread |
 |---|---|---|---|
-| `refuted` | the defect is demonstrably gone — the code positively contradicts it | `verified-gone` | **`resolved`** ✅ |
-| `corroborated` | still present | `carried` | listed, thread stays |
-| `downgraded-latent` | real but unreachable at this commit | `carried` | listed, advisory tier |
-| `inconclusive` | could not tell — **and it is not a polite `refuted`** (`:439-453`) | `unconfirmed` | `unconfirmed`, stays on the PR |
+| `carried` | present, untouched site, not re-hunted | listed, status `carried` | open |
+| `verified-gone` | **checked** gone — `refuted` or git file deletion | `resolved` ✅ | resolved (§3.9) |
+| `unconfirmed` | verify inconclusive, capped, or never run | `unconfirmed` | open |
+| `suppressed` | dismissed+upheld, not worsened | hidden at this identity | open |
+| `deferred` | deferred triage | listed, status `deferred` | open |
+| `returned` | dismissal rejected — **reposted blocking** this run | blocking in body + inline | open |
+| `re-tiered` | misclassification upheld — **reposted** at new tier | listed at new tier | open |
 
-The `inconclusive` row **moved here from §3.2** (judgment round 1, C4): it was listed as a twelfth gate
-row, which made it look like an input state the gate could test at zero cost. It is an outcome of steps
-6/7/8, produced here, and it is the only place it can be produced.
+Rules 4 and 6 do **not** stay in `live[]` as passive rows — they produce **this run's repost entries**
+in `findings[]` (lab schema unchanged: a normal finding object sourced from the prior's stored
+claim/locs). `live[]` holds only passive statuses (`carried`, `unconfirmed`, `suppressed`, `deferred`).
+(R2-S5, judgment round 3.)
 
-`resolved` reaches a reader from exactly two places: this table's `refuted` row, and §3.2 step 1's
-deleted file. Nothing else — that is the one rule, stated on the strategy page.
+**`resolved` is never inferred from absence or "identical to base"** (C1). Deleted row: locations at `H`
+identical to base → would fire on Outside Diff and pre-existing reverts. Revert + real fix goes through
+`touched` → verify → `refuted`.
 
-The direction of error is deliberate and matches the project's standing rule: an unverifiable finding
-stays on the PR. Visible noise beats invisible loss.
+**Verification verdict mapping** (produced in phase F, §3.4):
 
-#### 3.3.1 The boundary tags this leg needs, and the union that does not have them yet
+| refuter outcome | gate outcome | reader |
+|---|---|---|
+| `refuted` | `verified-gone` | **`resolved`** ✅ |
+| `corroborated` | `carried` (or prior status if suppressed/deferred unchanged) | listed |
+| `downgraded-latent` | `carried`, advisory tier | listed |
+| `inconclusive` | `unconfirmed` | stays on PR |
 
-Prior findings and author replies enter this prompt as **user-authored text**, so C4's boundary-tag rule
-applies from day one. **Corrected 2026-08-20 (judgment round 1, C11):** this section used to say "the
-mechanism is already there; item 7 must not open a new path around it", citing
-`src/pipeline.ts:995-998`. That guard covers **the finding JSON and nothing else.**
+**Over-cap priors** (`max_verification_steps`, §3.10): not verified → `unconfirmed`, loud in body — never
+silent (C5, R2-S8).
 
-`src/boundary.ts:21-30` names this item by number and states the obligation:
+#### 3.3.1 The gate's hole — fix outside proof-ref set
 
-> Item 7 (`ROADMAP.md:1003-1160`) will add `previous_finding`, `author_reply`, `comment_body` and
-> `triage_tag`; they are deliberately NOT declared here yet, so adding one is a visible widening of this
-> union at review rather than a string invented at a call site.
+Author fixes a defect from a site not in the proof-ref set → rules 7–8 miss → `carried` stale. Remedies:
 
-So, as work:
+1. Proof-ref sets usually span producer and consumer (§0.6) → `touched` catches most fixes.
+2. Phase E identity overlap catches live-area fixes for free.
+3. Author tags `applied` — funded by D3; **unavailable for Outside Diff** (no thread, §3.7.2).
 
-- **Widen `BoundaryTag`** with those four tags. The widening is meant to be visible at review; it is
-  named here so it is not smuggled in at a call site.
-- **Extend the driver-side forgery check to EVERY new block before `wrapBlock` is called.** A reply or a
-  prior-comment body added as a separate block reaches `wrapBlock`, which **throws** on a forged nonce
-  (`src/boundary.ts:96-100`) — precisely the "a throw at prompt-composition time would kill a paid run at
-  its last leg" outcome the driver-side guard exists to prevent (`src/pipeline.ts:968-978`). A forged
-  block must land the subject on `inconclusive` **without spawning**, exactly as the finding block does
-  today (`:995-998`).
-- **The payload grows, and that is a change, not a reuse.** `runRefuter` inlines a fixed five-key object —
-  `{id, location, severity, claim, proof_refs}` (`src/pipeline.ts:982-994`) — with no slot for an author
-  reply and none for the delta hunks this leg's question depends on.
+Verify-all by default was rejected: replaces deterministic certainty with one die roll (§0.6).
 
-Test: `C4` (§5), which must assert the widening and the extended guard, not merely that a tag is present.
+### 3.4 Verification leg (`runVerify`)
 
-### 3.4 Identity — the unordered proof-ref location set
+Item 7 adds **`runVerify`** — a new pipeline function that **follows `runRefuter`'s step shape** (one step
+per subject, nonced boundary tags, read-only tools, engine-owned verdict vocabulary) but **never shares
+artifacts with `runRefuter` in the same run** (C3, R2-S1).
 
-From §0.6, the only key that survived the real data:
+**Why not call `runRefuter` twice.** Per-run finding ids are positional (`F001`…, `src/dedupe.ts:205).
+Prior ids stored as `F001` in an old state block collide with this run's `F001` on: `state.verdicts`,
+`steps/refuter-*.result.json`, `refuter-batch.json`, `refuter.system.md`, `state.perAgent.refuter` —
+`finish()` can delete a live finding never submitted to any refuter.
+
+**Namespace (all required, none exists today):**
+
+| artifact | refuter leg | verify leg |
+|---|---|---|
+| subject ids | `F###` (this run's findings) | `V001`, `V002`… (maps to prior `R###`) |
+| prior stable ids | — | `R001`, `R002`… in state block + `live[]` |
+| steps dir | `steps/refuter-<id>/` | `steps/verify/<id>/` |
+| batch manifest | `refuter-batch.json` | `verify-batch.json` |
+| verdict map | `state.verdicts` | `state.verifyVerdicts` (name TBD, **distinct**) |
+| per_agent | `refuter` | `verifier` |
+| subject type | `DedupedSurvivor` | `PriorFinding` — recovered from PR, no draft lineage |
+
+**Question asked:** *"is this specific defect still present at these locations, at H?"* Payload includes
+prior claim, proof_refs, re-anchored locs, delta hunks touching those locs, and **untrusted** author reply
+text if present (§3.7.3).
+
+**Boundary tags (C11).** Widen `BoundaryTag` at `src/boundary.ts:21-30` with `previous_finding`,
+`author_reply`, `comment_body`, `triage_tag`. Extend driver-side forgery check to **every** new block
+before `wrapBlock` — forged nonce → `inconclusive` without spawn (`src/pipeline.ts:968-978`). Test: `C4`
+(§5).
+
+### 3.5 Identity
+
+Cross-run identity is the **unordered set of normalized proof-ref locations**, plus anchor:
 
 ```
-identity(finding) := { normalize(path):lineSpan  for each proof_ref, plus finding.path:finding.line }
-match(a, b)       := paths(a) ⊆ paths(b) OR paths(b) ⊆ paths(a)      # the intersection IS the smaller set
-                     AND every shared path has overlapping-or-near line spans (window)
+identity(finding) := { normalize(path):lineSpan  for each valid proof_ref (path:line only) }
+                     ∪ { finding.path : finding.line }
+                     -- invalid/non-path:line proof_refs are dropped at state-block write (S10);
+                        a finding with zero valid refs after drop uses anchor only
+
+match(a, b) := LET pa = paths(a), pb = paths(b)
+               IN (pa = pb AND ∀ p ∈ pa : spans(a,p) and spans(b,p) overlap-or-near)   -- equal sets incl. single-path; span required (R2-C3-A, round 3)
+                  OR (|pa| > 1 AND |pb| > 1
+                      AND (pa ⊆ pb OR pb ⊆ pa)
+                      AND ∀ p ∈ pa ∩ pb : spans overlap-or-near)     -- window = FINDING_LINE_WINDOW
 ```
 
-**Tightened 2026-08-20 (judgment round 1, S1).** The rule first written here was
-`paths(a) ∩ paths(b) ≠ ∅ AND ∃ p ∈ the intersection with near spans` — that is "shares any ref", the
-exact rule this codebase already rejected once, with the reason recorded at `src/root-cause.ts:60-70`:
+**Parentheses matter (R2-C3-B).** The span check applies in **both** branches. Equal single-path sets
+`{util.ts:14}` and `{util.ts:50}` do **not** match — same path, spans outside the window.
 
-> findings in a fan-out also share INCIDENTAL refs (every consumer of a broken producer tends to cite the
-> same shared formatting or utility helper too), so chaining on "shares any ref" welds unrelated defects
-> into one blob.
+Direction-of-error: **under-match**, never over-match (S1, `src/root-cause.ts:60-70`).
 
-It also contradicted the direction-of-error rule two paragraphs below, which demands **under-matching**.
-The failing input is cheap to state: a suppressed LOW finding citing `{a.ts, util.ts}` swallows an
-unrelated live finding citing `{b.ts, util.ts}`, and §3.2.2 only lifts a suppression on a **strictly
-higher** severity — so the live finding never comes back at all. Containment fixes it: one finding's
-citations must be wholly inside the other's, so an incidental shared helper is never enough on its own.
-
-Both sets are non-empty by construction — `finding.path:finding.line` is always a member — so the
-vacuous `∅ ⊆ X` case cannot arise.
-
-Order-independent by construction, so the producer/consumer flip cannot break it. Verified against the
-PR 1759 pair (§0.6) in both directions, plus the incidental case the old rule failed:
-
-| pair | `paths(a)` vs `paths(b)` | containment | spans | result |
+| pair | paths | containment | spans | match? |
 |---|---|---|---|---|
-| defect A: -2 `F001` ↔ -3 `F002` | `{useRetrivePublicLinks.ts, app/pages/publicLinks/index.tsx}` vs `{app/pages/publicLinks/index.tsx, useRetrivePublicLinks.ts}` | equal sets — each contains the other | `36-41`/`36-44` overlap; `64,78-90`/`64` overlap | **pairs** ✓ |
-| defect B: -2 `F002` ↔ -3 `F001` | both `{web/.../PublicLinks/index.tsx}` | equal sets | `81-84`/`81-86` overlap; `99`/`99` exact | **pairs** ✓ |
-| over-merge check: -2 `F001` ↔ -3 `F001` | `{useRetrive…, app/pages/…}` vs `{web/.../PublicLinks/index.tsx}` | neither contains the other | — | **no match** ✓ |
-| incidental refs | `{a.ts, util.ts}` vs `{b.ts, util.ts}` | neither contains the other | — | **no match** ✓ (the old rule matched) |
+| PR1759 defect A: -2 `F001` ↔ -3 `F002` | equal 2-set | equal | overlap | **yes** |
+| PR1759 defect B: -2 `F002` ↔ -3 `F001` | equal 1-set | equal | overlap | **yes** |
+| over-merge: -2 `F001` ↔ -3 `F001` | disjoint | — | — | **no** |
+| incidental: `{a.ts, util.ts}` vs `{b.ts, util.ts}` | neither ⊆ other | — | — | **no** |
+| single vs multi: `{util.ts:14}` vs `{a.ts, util.ts:12}` | unequal | — | — | **no** |
+| same-file different span: `{util.ts:14}` vs `{util.ts:50}` | equal 1-set | equal | no overlap | **no** (R2-C3-A) |
 
-This does **not** replace the existing marker key — it layers above it. The per-finding
-`<!-- pr-hero-finding -->` marker (`src/pr-preflight.ts:386-393`) stays exactly as-is, because it is what
-binds a triage reply to its thread by exact identity (`src/triage-reply.ts:63-88`), and that binding must
-stay strict. Identity for *re-review* is the looser, order-free key.
+Layers **above** the per-finding marker (`src/pr-preflight.ts:386-393`) — marker stays strict for triage
+thread binding (`src/triage-reply.ts:63-88`).
 
-**Direction-of-error rule, inherited from C1a and non-negotiable:** this matcher must err toward
-**under-matching**. Over-matching hides a live defect behind a `carried` and flatters the engine.
+#### 3.5.1 Semantic tier (optional, deferrable)
 
-#### 3.4.1 The semantic tier, and why it costs nothing to add
+A judge-proposed match is **not** a match — it is a **verification trigger** (phase E overlap queue).
+Judge cannot write `carried`, suppress, or retire. False positive costs one step; false negative leaves
+deterministic-only result. Test: `J-trigger` (§5).
 
-DashBench pairs deterministic matching with an LLM judge "where semantic matching is needed"
-(`doordash-dashbench-trust.md:248-249`), and names the cost of deterministic-only: it "misses semantic
-equivalence" (`:208-209`). §0.6 is exactly such a miss — one defect, two claim fingerprints.
+### 3.6 State block
 
-The rule above looks like it forbids a judge. It does not, once the judge's output is given the right
-job: **a judge-proposed match is not a match. It is a verification trigger.** It feeds §3.2 step 8 and
-forces a verification step on that prior finding; it never writes `carried`, never retires an identity,
-never suppresses anything. So:
+Second marker family on the **summary** comment (`src/pr-preflight.ts:354-359`), disjoint from
+`pr-hero-finding` and `pr-hero-report`.
 
-- a judge **false positive** costs one verification step and nothing else — the verifier corroborates,
-  the finding stays;
-- a judge **false negative** leaves us exactly where deterministic-only already was.
+**Placement (R2-S9):** the state block is emitted **after** the `<!-- pr-hero-report … -->` marker and
+visible report body — never at byte 0. `findMarkedCommentId` requires `body.startsWith(PR_COMMENT_MARKER_PREFIX)`
+(`:313-323`); a leading state block orphans the summary every run.
 
-Neither direction can hide a live defect, so rule 2 of the strategy page survives intact and the
-deterministic set remains the only thing that classifies. The tier is therefore additive and safely
-deferrable: ship without it, add it when a second PR-1759-class pair shows deterministic-only losing a
-real pairing.
-
-### 3.5 The state block — one place, both holes closed
-
-A second marker family on the **summary** comment, disjoint from both existing families
-(`pr-hero-finding` and `pr-hero-report`), whose disjointness is already a tested property
-(`src/pr-preflight.ts:354-359`):
+**Shape:**
 
 ```html
+<!-- pr-hero-report head=<40hex> -->
+… visible report …
 <!-- pr-hero-state v=1 head=<40hex> -->
-<!-- {"findings":[{"id":"F001","sev":"CRITICAL","tier":"blocking","channel":"inline|outside",
-     "locs":["path:line-line", ...],"c":"<12hex>"}, ...]} -->
+<!-- {"findings":[{"id":"R001","sev":"CRITICAL","tier":"blocking","channel":"inline|outside",
+     "locs":["path:line-line"],"c":"<12hex>","claim":"<escaped>"}, …]} -->
 ```
 
-It carries identity for **every** finding, inline and outside-diff alike. That is what closes F4: an
-un-anchorable or 422-demoted finding gets cross-run identity without a `pr-hero-finding` marker on the
-summary — which `src/report.ts:608-610` correctly refuses, since it would make
-`fetchPostedFindingComments` treat the summary as a finding comment.
+- **`R###` ids** — stable across runs; assigned at first post, never reused (R2-S1). This run's hunters
+  still emit ephemeral `F###` in `findings.json`; mapping is explicit in `live[]`.
+- **`claim` text required** — especially `channel:"outside"`, where the summary body is the only copy;
+  without it the PATCH erases content (R2-S3).
+- **JSON escaped for HTML** — same reason path uses percent-encoding in markers (`src/pr-preflight.ts:336-346`).
+  A raw `-->` in claim or path terminates the comment early (S5). Escape `"`, `\`, `-->`, and U+2028/U+2029.
 
-**What the block is written FROM, which the first draft left ambiguous** — settled 2026-08-20 (judgment
-round 1, C7). Not "this run's `findings[]`": under delta-scoped discovery that array holds only the
-delta's new findings, so writing the block from it would shrink the state every push and silently strip
-identity from every `carried` finding. Not "the priors, accumulated" either: that is §6 #3's unbounded
-growth. **The block is rewritten each run from the MERGED set** — this run's `findings[]` plus every
-prior that survived §3.2 as `carried`, `unconfirmed`, `suppressed` or `deferred`. A `verified-gone`
-finding leaves the set (that is §6 #3's answer, and the ledger keeps the history). So the block neither
-shrinks silently nor grows without bound: it is exactly the PR's live state, every run.
+**Written from the merged live set each run (C7):** this run's new `findings[]` (assigned new `R###` as
+needed) plus every prior surviving as `carried`, `unconfirmed`, `suppressed`, or `deferred`. `verified-gone`
+retires the entry. Neither shrinks silently nor accumulates dead ids.
 
-Constraints:
-- The summary is already **PATCHed** in place when a marked comment exists (`src/pr.ts:615-642`), so the
-  block is rewritten each run and never accumulates.
-- GitHub's comment body cap is 65536 bytes. The block is capped and **degrades loudly**: over the cap it
-  keeps the highest-severity N and states in the visible body that identity for the remainder was dropped.
-  A silent truncation here would resurface findings as `fresh` — the exact bug being fixed.
-- `parseFindingMarker` must remain unable to parse it (it requires the `pr-hero-finding ` prefix and all
-  four fields — `src/pr-preflight.ts:411-447`), and a test must assert that.
+**Re-anchor locs every run (S3):** before `touched()` and identity, rewrite each prior's stored locs from
+inline marker `livePath`/`liveLine` when present (`src/inline.ts:178-183`), else fall back to stored locs.
 
-### 3.6 Triage-aware matching (D6)
+**Cap (65536-byte body, S8/R2-S10):** on overflow, evict **`unconfirmed` first, then `carried`**, never
+`suppressed` (upheld dismissals must not resurface as `fresh`) and never **`deferred`** (O-3 — deferral
+must survive caps). Visible body states how many identities were dropped. (R2-S10, judgment round 3
+C-R3-1.)
 
-**Corrected 2026-08-20 (judgment round 1, C13).** This said the triage markers are "already fetched by
-`runTriageCommand` (`src/cli.ts:2410-2431`) … not a new fetch, a wider read of the same comment set".
-Wrong producer. `runTriageCommand` is a **separate verb** — `pr-hero triage --pr <n> --from <run-dir>` —
-which requires an existing `comparison.json` and never runs during `review --pr`. The review path's fetch
-is `fetchPostedFindingComments` (`src/pr.ts:793-820`), and it hits the right endpoints but **discards
-every comment that does not parse as a finding marker** (`:805`, `:816`) — including every triage reply,
-which by construction is a reply and not a finding marker.
+`parseFindingMarker` must return `null` for this block (`src/pr-preflight.ts:411-447`).
 
-So it *is* a change, and this is exactly the class of stale citation §0.5 exists to correct:
-**`fetchPostedFindingComments` must retain triage-marker comments instead of dropping them**, and
-`matchPostedFindings` gains them as an input. Still no new endpoint and no second round trip — the
-comments are already on the wire.
+### 3.7 Triage integration
 
-| tag on the thread | re-review behaviour |
+**Fetch changes (C8, C13, R2-C4):**
+
+- `fetchPostedFindingComments` — **retain** triage-marker replies, not only finding markers
+  (`src/pr.ts:793-820`); projection must include **`created_at`** per comment for case-A tie-break
+  (§3.1) and case-B newness — extend `PostedFindingComment` accordingly (R2-S7, round 3).
+- `fetchPrReviewComments` — add `created_at` to projection (`src/pr.ts:759-761`).
+- `fetchPrComments` — add `updated_at` for the summary comment (`src/pr.ts:688` today omits it).
+
+| tag | re-review behaviour |
 |---|---|
-| `applied` | verify (D3). `refuted` → `verified-gone` → the reader sees `resolved`; anything else → back on the PR, and the author's claim was wrong |
-| `dismissed` + adjudicator `upheld` | `suppressed` for this and every later run at this identity |
-| `dismissed` + adjudicator `rejected` | returns, with the disproof cited |
-| `deferred` (+ issue number) | out of the blocking count, listed as deferred with its issue link |
-| `misclassified` | severity/tier re-derived per the adjudicator, not re-hunted |
-| `inconclusive` verdict (any tag) | **not** suppressed — `row.verdict = null` already routes to Pending triage (`src/triage-write.ts`) |
+| `applied` | queue verify (D3). `refuted` → `verified-gone`; else stays on PR |
+| `dismissed` + `upheld` | `suppressed` at this identity |
+| `dismissed` + `rejected` | returns with disproof |
+| `deferred` | `deferred` — issue number **optional** (`src/triage.ts:243-247`, S6) |
+| `misclassified` | re-tiered per adjudicator |
+| adjudicator `inconclusive` | **not** suppressed — pending triage |
 
-Suppression is scoped to the identity, not to the PR: the same defect appearing at a *different* location
-is a different identity and returns.
+Suppression is identity-scoped; same defect at a different location is a different identity.
 
-#### 3.6.1 Case B's discriminator — what makes a reply "new"
+#### 3.7.1 Case B newness
 
-Added 2026-08-20 (judgment round 1, C8), because case B (`L === H`) rests on "findings carrying a **new**
-author reply" and the design named no input that could decide *new*. The triage marker carries `tag`,
-`head`, `actor`, optional `issue`/`verdict` and **no timestamp** (`src/triage.ts:136-168`), and in case B
-`L === H` **by definition** — so `head=` cannot separate a reply written before the last review from one
-written after it. The review path's fetch projects no timestamps at all (`src/pr.ts:759-761`).
+**New reply:** triage comment `created_at > summary.updated_at` (both from GitHub, O-4/D2). Applies to
+rule 7b, `applied` (rule 7), and any classification keyed off author replies in case B.
 
-**The discriminator is the comment's `created_at`, compared against the summary comment's `updated_at`.**
-A reply created after the summary was last written is new; one created before it was already accounted
-for by the review that wrote that summary. Both values are read from GitHub, so O-4 (everything
-recoverable from the PR alone) still holds and D2 (no new persistent state) is not violated — no
-timestamp is stored anywhere by us.
+#### 3.7.2 Outside Diff — identity yes, triage no (C12)
 
-**The required change:** `fetchPrReviewComments`'s `--jq` projection must include `created_at`
-(`src/pr.ts:759-761` today projects `id`, `user`, `body`, `path`, `line`, `original_line`,
-`in_reply_to_id` — no timestamp). Test: `S-B` (§5), which must name this input rather than assert the
-behaviour with nothing behind it.
+Bucket findings render inside the summary with marker stripped (`src/report.ts:604-610`); no review thread;
+`decideThreadResolve` → `skip-issue-channel` (`src/triage-reply.ts:98-105`). Triage tags unreachable.
+Reach `carried`, git-deletion `verified-gone`, or `touched`/overlap verify only. Making the bucket
+triageable is out of scope (§4).
 
-#### 3.6.2 The Outside Diff population cannot be triaged at all
+#### 3.7.3 Author replies are untrusted (S11)
 
-Added 2026-08-20 (judgment round 1, C12). §3.5 gives the Outside Diff bucket cross-run **identity**. It
-does **not** give it **triage-ability**, and the difference has to be stated or the table above reads as
-covering findings it cannot reach:
+Replies are attacker-controlled input from the person under review. Wrap in boundary tags; never map reply
+text alone to `verified-gone` or auto-close threads. A `refuted` verdict requires the **verification step**,
+not the author's claim. Nonce guard is substring-only (`src/boundary.ts:53-55`) — instruction-shaped
+content inside a valid block is a known threat; verification outcome is not auto-trusted from reply content.
 
-- bucket findings are rendered **inside the summary body**, with the finding marker deliberately stripped
-  (`src/report.ts:604-610`) — that marker is what a triage reply binds to;
-- they have no review thread, so `decideThreadResolve` returns `skip-issue-channel`
-  (`src/triage-reply.ts:98-105`);
-- triage replies bind only through `in_reply_to_id` on review comments (`src/cli.ts:2413-2431`), which a
-  summary body has no way to carry.
+#### 3.7.4 Multi-agent workflow — no handshake (Juanma, 2026-08-21)
 
-**Consequence:** a 422-demoted or un-anchorable finding can never be tagged `applied`, `dismissed`,
-`deferred` or `misclassified`. §3.2's triage steps (2-5) and step 6, §3.7's thread resolution, and
-§3.2.1's third remedy are all inapplicable to it. It reaches `carried`, `verified-gone` via step 1, or
-verification via steps 7-8 — the deterministic and discovery-driven paths only.
+The default production shape is **several actors on the same PR without coordination**: a coding agent
+lands commits, a triage agent (or human) replies on threads, the watcher or CI fires `review --pr` on
+push — **in any order**. Item 7 does **not** block waiting for a triage reply, an adjudicator, or a
+"loop closed" signal from another agent. GitHub comments and git are the only shared state (O-4, D2).
 
-Making the bucket triageable is **out of scope** and needs its own issue (§4). One thing keeps the
-population from growing meanwhile: §3.9's demotion policy, which would have pushed every inline finding
-into this bucket on any concurrent push, is deleted. That is a second reason the deletion is right.
+| what happened | what re-review does | waits for triage? |
+|---|---|---|
+| Fix landed in a commit, **no** triage reply | `touched()` (rule 8) or phase-E overlap → verify | **No** — git is enough to queue verify |
+| `applied` tag on thread, fix may or may not be real | rule 7 → verify; `refuted` only path to `resolved` | **No** — tag is a **trigger**, not ground truth (D3) |
+| Review runs **before** any triage on this head | unchanged site → `carried`; changed site → `touched` | **No** — absence of reply is not evidence of repair |
+| Same head, triage arrives **after** last summary (case B) | verify only if reply/`applied` is **new** (§3.7.1) | N/A — case B has no discovery |
 
-### 3.7 Collapse (O-2)
+**Do not infer from this table that `applied` is optional.** It is the author's explicit claim that a
+check is warranted; the engine still **runs** that check rather than trusting the word. The point is only
+that **ordering is not guaranteed** and must not be required.
 
-Mechanically, `carried` already achieves it by not reposting. What is missing is anything acting on a
-verified repair — today nothing does (§0.1). Item 7 adds, in order of confidence:
+What this section does **not** solve: two review runs PATCH-ing the same summary concurrently — that
+remains Phase E (§4). This section names the **triage-vs-review ordering** gap so implementers do not
+add a synchronisation barrier that would stall the watcher or CI on an agent that never replies.
 
-1. a `✅ resolved` reply on the thread **and** GraphQL thread resolution —
-   `resolveReviewThreadForComment` already exists (`src/pr.ts:1413`), used today by `triage reply` via
-   `decideThreadResolve`. **On GitHub this IS the collapse** DoorDash's criterion asks for: a resolved
-   thread folds away on its own. It fires on **`verified-gone` and on nothing else**;
-2. the summary rewritten to the current state each run (already PATCH, §3.5), and it **lists every
-   `carried` finding with its status** — this is what replaces Cloudflare's re-emission
-   (`:379-380`) without adding a comment per push. Without it the author cannot tell "still live" from
-   "the bot forgot about it", which is the one thing their mechanism buys that silence does not;
-3. **no** minimize/hide API call — and that is not a refusal of DoorDash's criterion, see §4.
+### 3.8 Report vocabulary and live populations
 
-#### 3.7.1 Item 7 does NOT consume `MatchResult.resolved` — the severance, stated
+**`MatchResult.resolved` is severed from reader-facing surfaces (C2, R2-S6).** Thread resolution reads
+gate `verified-gone` only. `MatchResult.resolved` stays a legacy matcher counter for inline comment
+pairing — **not** consumed for `deltaLine`, clean bill, or collapse. In re-review mode,
+`buildPostPlan`/`matchPostedFindings` still run for **this run's fresh inline posts**, but the
+driver **must not** log or render `MatchResult.resolved` counts as "N resolved" — those log lines
+(`src/cli.ts:2258-2262`) are gated off when `rereview` is active; `deltaLine` reads gate outcomes only.
 
-Added 2026-08-20 (judgment round 1, C2), because as first written this section auto-closed every live
-thread on the PR on every ordinary case-C re-review. The mechanism:
-
-`MatchResult.resolved` is computed by set subtraction (`src/inline.ts:321-322`) over comments that no
-**current-run finding** matched (`src/inline.ts:310-319`). A prior finding that reaches §3.2 step 10 has
-no current-run finding **by construction** — delta-scoped discovery never visits its untouched site — so
-it lands in `MatchResult.resolved`. When the gate's outcome was also called `persist`, item 1 above read
-that member and would have posted a ✅ and called `resolveReviewThreadForComment` on **every still-live
-thread**, every push.
-
-The severance is two-part and both parts are required:
-
-- **the rename** (§3.2): the gate's outcomes are `carried`, `verified-gone`, `unconfirmed`, `suppressed`.
-  `MatchResult.persist` and `MatchResult.resolved` keep their existing meanings and are referred to only
-  with that qualifier, never bare;
-- **the non-consumption**: thread resolution reads the gate's `verified-gone` and nothing else.
-  `MatchResult.resolved` is a **legacy counter**. Its only consumers today are the delta counts
-  (`src/inline.ts:379-384`) and two log lines (`src/cli.ts:2258`, `:2261`), and §3.8's vocabulary
-  replaces it in the reader-facing surface. Item 7 adds no third consumer.
-
-O-2 is a reader criterion, so its test is a rendered-output test over a simulated N-push sequence, not a
-matcher unit test. That is the whole reason it is written down (the ROADMAP entry says as much: the
-matcher satisfying it is a claim, not a guarantee).
-
-### 3.8 The report's vocabulary (D7, O-1)
-
-`deltaLine` (`src/report.ts:596-601`) becomes:
+**`deltaLine`** (`src/report.ts:596-601`):
 
 ```
-Δ since <sha8>:  N resolved (verified) · N unconfirmed · N new · N carried · N deferred
+Δ since <sha8>:  N resolved (verified) · N unconfirmed · N carried · N deferred · N new
 ```
 
-`resolved` is emitted only when the defect was **checked**: either a verification step returned `refuted`,
-or git deterministically shows the code is **gone** (the file was deleted by the delta). Everything else
-that merely failed to recur is `unconfirmed` — so if nothing verified, the word `resolved` does not appear
-at all. That is the one rule, in the words the strategy page, D7, O-1, §3.2 and §3.3 all use. This is the
-one-line change that makes the whole feature honest, and it is testable offline in isolation.
+`resolved` appears only when **checked**: verification `refuted` or git file deletion (D7, O-1). Counts
+come from **`rereview.live[]`**, not `MatchResult.resolved`.
 
-`carried` replaces the term `persist` here for the reason §3.7.1 records: the old word named both a gate
-outcome and `MatchResult.persist`, which is a different thing.
+#### 3.8.1 Live populations and the false-clean guard (C7, R2-C2)
 
-#### 3.8.1 The counts and the clean bill read a MERGED set, not `findings[]`
+Delta-scoped discovery means `findings[]` holds **only this run's new findings**. Priors live in
+`rereview.live[]`:
 
-Added 2026-08-20 (judgment round 1, C7), and it is the difference between an honest summary and a lie.
-Delta-scoped discovery plus a `carried` outcome that is never re-hunted means this run's `findings[]`
-holds **only the delta's new findings**. Two renderers key on that array:
-
-- `src/report.ts:550-561` prints **"✅ pr-hero reviewed this PR and found nothing to report."** when
-  `findings.length === 0`;
-- `:541-544` computes the headline `🔴 N critical · 🟡 N warning` from the same array.
-
-So a PR with six live `carried` findings and one clean commit would get a **green false-clean bill** —
-violating "never post a false-clean review", the DoorDash rule this design adopts on the strategy page.
-
-**Decision, with the constraint that shaped it: `carried` findings do NOT enter `findings.json`.**
-CLAUDE.md rule 5 makes schema compatibility with the lab sacred until a coordinated v1.1 bump (ROADMAP
-C2), and `findings.json` must stay byte-compatible with the lab's validator. Widening it here to carry
-re-review state would break that for a rendering problem. Instead:
-
-- the `rereview` provenance block (§3.10.3) gains a **`carried[]`** array — id, severity, tier, identity
-  and channel per finding. Engine-owned, outside the lab schema, and already the artifact a future
-  measurement of this feature has to read anyway;
-- **the render layer merges** `findings[]` with `rereview.carried[]` for the summary body, the headline
-  counts and O-2's list of every carried finding with its status;
-- `report.ts`'s clean-bill branch must key on **both being empty**. Zero new findings and ≥1 carried
-  finding is not a clean bill; it is a PR with unfixed problems and a quiet push.
-
-Test: `C7-clean` (§5).
-
-### 3.9 The mid-run head move (O-6, #39's policy half)
-
-**Retracted in full 2026-08-20 (judgment round 1, C9). Item 7 adds nothing here.**
-
-What this section said: *"What remains is the case the 422 does not cover — a line that still exists and
-now means something else"*, and then **"Policy: when `movedHeadSha` is set, findings computed on the stale
-tree do not post inline."** Both halves are wrong, and the second one is a regression rather than a
-gap-filler.
-
-**The premise is the case the shipped pin already covers.** `src/pr.ts:1090-1097` describes exactly that
-line, in exactly those words, as the reason `commit_id` exists:
-
-> a finding's line that still EXISTS in the newer diff but now means something else anchors cleanly to
-> code the finding was never about. No error, no signal, nothing a reader could tell apart from a real
-> finding. **Pinned, GitHub anchors to the reviewed commit and marks the comment outdated ITSELF once the
-> lines move — the reconciliation the engine would otherwise have to invent.**
-
-§0.5 already verified that pin as built. The design read a solved problem as an open one.
-
-**The policy would have made things worse.** `movedHeadSha` is set whenever the live head differs **at
-all** (`src/cli.ts:1899-1903`), so "do not post inline" demotes **every** inline finding on **any**
-concurrent push. And a demoted finding loses its `pr-hero-finding` marker (`src/report.ts:604-610`) —
-the marker that binds a triage reply (`src/triage-reply.ts:63-88`) and that §3.7 acts on. Trading a
-correctly-pinned, outdated-marked inline comment for an unbindable bucket entry inverts strategy rule 2:
-it is invisible loss bought with visible caution.
-
-**What discharges O-6 is what already ships:** the pin (`src/pr.ts:1090-1097`), plus the loud disclosure
-on both surfaces — the summary banner (`src/report.ts:498-506`) and the terminal warning
-(`src/cli.ts:2298-2304`). O-6 is rewritten accordingly in §2, and its test asserts the disclosure.
-
-**The old test was unsatisfiable as worded**, which is worth recording because it is how the policy
-survived a checklist: `O-6` asserted that no stale-tree finding appears "in the inline post plan", and
-the post plan is built **before** the head re-read. `src/cli.ts:1886-1891` keeps that re-read as late as
-possible on purpose — *"the tightest window available around the anchor-bearing call, and the window is
-the whole point"* — so at plan-build time `movedHeadSha` does not exist yet. A test that cannot be
-satisfied by any implementation is not a gate.
-
----
-
-### 3.10 The wiring — added 2026-08-20 after Juanma asked whether the design was complete
-
-It was not. §§3.1–3.9 decide **what a re-review concludes**; this section decides **how it runs**, and the
-audit that produced it found one defect that would have shipped.
-
-#### 3.10.1 The command surface: automatic, with `--full` as the opt-out
-
-`pr-hero review --pr <n>` **is** the re-review when a prior review exists on the PR. There is no
-`--rereview` flag, and this is not a convenience choice:
-
-- A flag nobody types is a feature nobody gets. The person this item exists for is a stranger's second
-  push, and they will not pass a flag.
-- **The bug being fixed is the default**, not a missing capability. Leaving the delta path behind a flag
-  means the default stays "re-hunt the whole PR and infer repair from absence" — that is the thing item 7
-  exists to remove.
-
-**`--full` widens discovery. It does not discard triage state** — corrected 2026-08-20 (judgment round 1,
-S2). This said *"`--full` forces case A (full `B..H`, everything reclassified)"*, and case A's
-verification cell is "nothing to verify". So the ordinary human escape hatch would have skipped the §3.2
-list **entirely**: a finding the author `dismissed` and an adjudicator `upheld` re-posts blocking, which
-violates O-3 and fails its own test `O-3a`. Offered as the friendly option, it silently threw away every
-decision the author had made.
-
-The rule: **`--full` is case C or D with `discovery_restricted: false`.** The discovery range widens from
-the restricted delta to the full `B..H`; verification, triage suppression and the whole ordered list run
-exactly as they would have. Case A remains "`L` absent" and nothing else (§3.1).
-
-It is the only new flag, and `parseArgs` must refuse it on every verb except `review`, exactly as it
-refuses `--scout` today. A `--full` run still records its **real** case in the provenance block
-(§3.10.3) — a `--full` re-review of an ancestor head is `"case": "C"` with `discovery_restricted: false`,
-never `"case": "A"`, or no future measurement can tell the two apart.
-
-#### 3.10.2 Pipeline order, and the one sequencing constraint
-
-```
-preflight   read L (§3.1 case A fallback) → state machine → the two deltas (§3.1.1) → size gate on the delta
-triage      §3.2 steps 1-5, 9 and 10 settle with ZERO spend; steps 6 and 7 enter the verification queue
-            → max_verification_steps cap applied here (§3.10.4), BEFORE the confirm
-discovery   hunters over the restricted delta — unchanged, parallel, as today
-            (skipped entirely when the restricted delta is empty — §3.1.1 — verification still runs)
-dedupe      unchanged
-step 8      every discovery finding whose §3.4 identity overlaps a prior finding APPENDS it to the queue;
-            §3.2.2's worsening test also settles here
-verify      the queue runs, one verification step per finding, in its own namespace (§3.3)
-refute      the normal leg over fresh BLOCKER/CRITICAL survivors — unchanged
-finish      deriveTier, vocabulary (§3.8), assemble
+```jsonc
+{ "id": "R001", "sev": "CRITICAL", "tier": "blocking", "channel": "inline|outside",
+  "status": "carried|unconfirmed|suppressed|deferred", "locs": [...], "claim": "..." }
 ```
 
-**Corrected 2026-08-20 (judgment round 1, C4).** The `triage` line used to read "deterministic rows 1,
-5-12 settle with ZERO spend", and that partition was wrong twice over: row 12 was an *outcome* of a paid
-verification step priced as free pre-token work, and old row 1 required "no overlap", which is old row 4,
-which this same section places **after dedupe**. Only §3.2's ordered steps 1-5, 9 and 10 settle before a
-token is spent; step 8 cannot settle before dedupe, and neither can the worsening test.
+**Clean bill:** `findings.length === 0` **and** `live[]` empty **and** no `returned`/`re-tiered` reposts
+this run. Zero new findings + all priors `unconfirmed` is **not** clean (R2-C2). All priors
+`suppressed` with empty `findings[]`: **not** clean — body states "N findings suppressed" so the author
+sees decisions persisted (O-2); headline blocking count is zero.
 
-**The constraint is step 8: the verification queue cannot be closed until dedupe has run**, because that
-is when a discovery finding's identity is final. So the whole verification leg runs after dedupe. Starting
-steps 6 and 7 early, in parallel with the hunters, and appending step 8's later is a latency optimization
-worth doing **second** — it buys wall-clock, not correctness, and it makes the queue mutable while steps
-are in flight, which is exactly the kind of thing that breaks quietly.
+Render layer merges `findings[]` with `live[]` (status ≠ `suppressed` for headline counts; full list
+includes `carried`, `unconfirmed`, `deferred` per O-2). `findings.json` stays lab-compatible (CLAUDE.md
+rule 5). Test: `C7-clean`, `C7-unconfirmed` (§5).
 
-The cap is applied at the `triage` line and re-applied when step 8 appends, because the queue is bounded
-in total, not per phase.
+### 3.9 Collapse (thread resolution)
 
-#### 3.10.3 Provenance — the M6 lesson, applied before it costs anything
+On GitHub, resolving a thread **is** collapse (DoorDash criterion satisfied by construction, §4).
 
-M6's instrument reads arm identity off `pipeline.json`'s `scout.enabled`, never off a directory name, and
-a run whose artifact cannot name its arm is skipped rather than counted as the arm it resembles
-(`src/floor-test.ts`). A re-review needs the same property or **no future measurement of this feature is
-possible**, and `writePipelinePlan` (`src/pipeline.ts:1392-1420`) records nothing about one today.
+Item 7 adds, in order:
 
-A `rereview` block, absent on a first review, present on every other:
+1. **`verified-gone` only** — ✅ reply + `resolveReviewThreadForComment` (`src/pr.ts:1413`). Never on
+   `carried`, `unconfirmed`, or `MatchResult.resolved`.
+2. Summary PATCH lists **every non-suppressed live finding with status** (O-2) — Cloudflare re-emission
+   purpose without per-push comments.
+3. No minimize/hide API.
+
+**Mid-run head move (O-6): item 7 adds nothing.** `commit_id` pins inline comments (`src/pr.ts:1090-1097`);
+GitHub marks outdated lines; disclosure on summary (`src/report.ts:498-506`) and terminal
+(`src/cli.ts:2298-2304`). The demotion policy that would have pushed every inline finding to Outside Diff
+on any push is retracted (C9).
+
+### 3.10 Wiring
+
+#### 3.10.1 Command surface
+
+`pr-hero review --pr <n>` **is** re-review when a prior review exists — no `--rereview` flag.
+
+**`--full`:** one rule — widens discovery to full `B..H` for the **actual** case (A/B/C/D/E); verification,
+triage, and §3.3 classification unchanged; records `discovery_restricted: false` and real `"case"`. Refused
+on verbs other than `review` (mirror `--scout`).
+
+#### 3.10.2 Provenance (`pipeline.json`)
 
 ```jsonc
 "rereview": {
-  "case": "A|B|C|D|E",                         // §3.1 — the REAL case, never rewritten by --full
-  "last_reviewed_head": "<40hex>",             // or null
+  "case": "A|B|C|D|E",
+  "last_reviewed_head": "<40hex>|null",
   "last_head_source": "summary_marker|finding_markers|absent",
   "discovery_range": "<from>..<to>",
-  "discovery_restricted": true,                // §3.1.1 — false means case A/D, or --full (§3.10.1)
-  "discovery_skipped_empty_delta": false,      // §3.1.1 — the delta was empty; verification still ran
+  "discovery_restricted": true,
+  "discovery_skipped_empty_delta": false,
   "prior_findings": 0,
-  "settled_deterministically": 0,              // §3.2 steps 1-5, 9, 10
+  "settled_deterministically": 0,
   "verified": 0,
-  "verification_capped": 0,                    // §3.10.4 — queued minus verified, reported unconfirmed
-  "verification_triggers": { "applied": 0, "touched": 0, "overlap": 0 },
-  "carried": [                                 // §3.8.1 — NOT in findings.json (CLAUDE.md rule 5)
-    { "id": "F001", "sev": "CRITICAL", "tier": "blocking",
-      "channel": "inline|outside",
-      "locs": ["path:line-line", "..."] }      // §3.4's identity set, same shape as the state block
+  "verification_capped": 0,
+  "verification_triggers": { "applied": 0, "touched": 0, "overlap": 0, "verify_all": 0 },
+  "live": [
+    { "id": "R001", "sev": "CRITICAL", "tier": "blocking", "channel": "inline|outside",
+      "status": "carried|unconfirmed|suppressed|deferred", "locs": [...], "claim": "..." }
   ]
 }
 ```
 
-`last_head_source` is there because the case-A fallback (§3.1) silently changes what the run did; an
-artifact that cannot distinguish "the summary told us L" from "we reconstructed L from finding markers"
-cannot debug the run where that fallback misfires.
+Arm identity for future measurement — same lesson as M6 `scout.enabled` (`src/floor-test.ts`).
 
-`carried[]` is the run's record of every finding that is still live and was **not** re-hunted — the
-population §3.8.1 merges into the rendered summary, and the reason the ✅ clean bill cannot fire behind
-its back. It is engine-owned provenance, deliberately outside `findings.json`, whose schema stays
-byte-compatible with the lab until a coordinated v1.1 bump.
+#### 3.10.3 Cost band and `max_verification_steps` (C5)
 
-`verification_capped` and `discovery_skipped_empty_delta` exist for the same reason as `last_head_source`:
-both are paths where the run did materially less than a reader would assume, and an artifact that cannot
-say so is unscorable.
+`estimateCost` (`src/report.ts:75`) is diff-only today — verification queue invisible. Plan card adds
+**verification-step count** as its own line before confirm (O-5a).
 
-#### 3.10.4 The cost band would have lied, and that is a defect this audit caught
+**Bound:** `max_verification_steps` — config key, conservative default, enforced **before confirm** in
+the same position as the size gate, **not bypassed by `--yes`** (watcher path). Over cap → verify
+highest-severity N, remainder `unconfirmed`, loud in body + `verification_capped`. Case D subject to same
+cap. Test: `W-cap` (§5).
 
-`estimateCost` (`src/report.ts:75`) estimates **"from the diff, and only from the diff"** (`:57`), and the
-comment above it records why it is skewed high: *"Every recorded overrun was an UNDER-estimate, never"*
-the other way (`:47`). A re-review's spend is the delta **plus one step per verified finding**, and that
-second term is invisible to a diff-only estimate. A PR carrying 40 prior findings whose sites all moved
-is 40 extra steps the band would not have shown.
+#### 3.10.4 Watcher
 
-So: **`estimateCost` takes the verification-step count, and the plan card shows it as its own line before
-the confirm.** Two consequences follow, and the second one amends an obligation:
-
-- The size gate runs on the delta (§3.1.1) but **cannot** see the verification queue, so it is not the
-  protection here.
-- **O-5 as first written is an unconditional claim and it should not be.** A re-review is cheaper in the
-  ordinary case (small delta, few prior findings) and can be dearer in the pathological one. The design's
-  job is not to promise cheap; it is to make the number visible before the money is spent, and to let the
-  confirm refuse.
-
-##### The cost band is NOT the bound — `max_verification_steps` is
-
-**Corrected 2026-08-20 (judgment round 1, C5).** The bullet above used to end "so it is not the protection
-here — **the cost band is**", and §3.10.5 then cleared the watcher on that basis. The cost band is not a
-bound on the unattended path, and this design walked straight into a lesson the engine had already paid
-for and written down at `src/cli.ts:687-691`:
-
-> the size gate, BEFORE the cost band's `confirm()` for the unattended path. The watcher spawns with
-> `--yes`, so **a gate that lived only inside that confirmation would never fire in the one place —
-> unattended spend — it exists to protect.**
-
-Exactly that: the watcher spawns `review --pr <n> --yes` (`src/watch.ts:711-713`), `--yes`
-short-circuits `confirm()` (`src/cli.ts:698-706`), so the band prints to nobody. And `daily_cap` counts
-**launches**, not dollars (`src/watch-preflight.ts:740`) — twenty capped launches of an uncapped queue is
-still an uncapped bill.
-
-**`max_verification_steps` — a config key with a conservative default, enforced in the same position as
-the size gate: before the confirm and independent of it, so `--yes` cannot bypass it.** Over the cap, the
-run verifies the **highest-severity N** and reports the remainder as `unconfirmed`, saying so in the
-visible body — never silently, because a silent cap reads as "we checked and could not tell" when the
-truth is "we did not look". The count lands in `rereview.verification_capped` (§3.10.3).
-
-**Case D is subject to the same cap, and this is where it matters most.** Case D's cell says "**every**
-prior finding, against the new tree", and force-push is the routine shape, not the exotic one — so case D
-is where the queue is largest and where an unbounded rule would have done the most damage. Test:
-`W-cap` (§5).
-
-#### 3.10.5 The watcher gets this, and the reason it is not M5's decision again
-
-M5 deliberately kept `--scout` away from the watcher: unmeasured stage, added spend, and the watcher
-spawns `review --pr <n> --yes` with no human at the confirm. None of those three apply here.
-
-There is **nothing for the watcher to learn** — §3.10.1 makes re-review the behaviour of the command it
-already spawns, not a flag.
-
-**Its spend is bounded by `max_verification_steps` (§3.10.4), and by nothing else** — corrected
-2026-08-20 (judgment round 1, C5). This paragraph used to say the spend was "bounded by the delta-scoped
-size gate and the existing `daily_cap`". Neither bounds it: the size gate cannot see the verification
-queue (§3.10.4 says so outright), and `daily_cap` counts launches, not dollars
-(`src/watch-preflight.ts:740`). The queue's size is **externally driven** — case D verifies every prior
-finding, step 6 pays per `applied` tag, step 8 per overlap, case B per new reply — so a stranger pushing
-to a long-lived PR sets our bill. The cap is what makes that finite.
-
-**One precondition, and it is not a follow-up:** §3.10.4's changes — the cap **and** the cost-band term —
-ship **before** the watcher runs a re-review unattended. The cap is the hard requirement; the band is the
-part a human can act on when there is a human. In the ordinary case the spend still goes down.
+Re-review is default behaviour of `review --pr <n> --yes` — no new flag. Spend bounded by
+`max_verification_steps` only (not size gate, not `daily_cap` launches). Cap + cost-band term ship
+**before** unattended re-review runs.
 
 ---
-
 ## 4. What item 7 does NOT do
 
 - **No exactly-once on `--post`.** Two overlapping runs can still both PATCH the same summary
@@ -1314,7 +981,7 @@ part a human can act on when there is a human. In the ordinary case the spend st
 - **No minimize/hide of old GitHub comments — and this is NOT declining DoorDash's "collapse old
   comments during re-review" (`doordash-ai-code-reviewer.md:284-285`).** Corrected 2026-08-20; the
   earlier wording here framed it as a divergence and it is not one. On GitHub, **resolving a thread IS
-  collapsing it** — §3.7 resolves every verified-fixed thread and GitHub folds it away — and there are no
+  collapsing it** — §3.9 resolves every verified-fixed thread and GitHub folds it away — and there are no
   superseded comments to hide because we never repost. The accumulating pile their criterion describes
   cannot form. We satisfy it by construction; the minimize/hide *API* is what we are not calling, which
   is a different and much smaller statement.
@@ -1322,20 +989,19 @@ part a human can act on when there is a human. In the ordinary case the spend st
 - **No scout stage in the delta review.** M6 closed `opt-in` (2026-08-20), so the pipeline item 7 is
   designed against has no scout by default. `--scout` continues to work and is orthogonal: it would see
   the delta diff, which is strictly smaller, and needs no item-7-specific handling.
-- **No change to the `pr-hero-finding` marker format.** §3.4 layers above it; changing it would break
+- **No change to the `pr-hero-finding` marker format.** §3.5 layers above it; changing it would break
   every thread already on every open PR.
 - **No fix for the issue-channel triage blind spot.** `runTriageCommand` only walks review comments with
   `in_reply_to_id` (`src/cli.ts:2410-2431`), so issue-channel triage replies are invisible to the ledger
   write-back. Real, verified this session, and **out of scope** — it is a triage defect, not a re-review
   one. It needs its own issue.
-- **No triage-ability for the Outside Diff bucket** (added 2026-08-20, judgment round 1, C12). §3.5 gives
+- **No triage-ability for the Outside Diff bucket** (added 2026-08-20, judgment round 1, C12). §3.6 gives
   that population cross-run **identity**; it does not give it a thread, and without a thread there is
   nothing to reply to, nothing for `in_reply_to_id` to bind (`src/cli.ts:2413-2431`) and nothing for
   `decideThreadResolve` to resolve (`src/triage-reply.ts:98-105`). So a 422-demoted or un-anchorable
-  finding cannot be tagged `applied`, `dismissed`, `deferred` or `misclassified` — §3.6.2 states the
+  finding cannot be tagged `applied`, `dismissed`, `deferred` or `misclassified` — §3.7.2 states the
   consequence for the gate. Same class as the bullet above: a **channel** defect, not a re-review one, and
-  it needs its own issue. §3.9's deleted demotion policy is what keeps this population from growing in the
-  meantime.
+  it needs its own issue. Item 7 does not add a demotion policy that would grow this population (§3.9).
 
 ---
 
@@ -1348,18 +1014,18 @@ part a human can act on when there is a human. In the ordinary case the spend st
       `carried`, never `resolved`. **Fixture: the PR 1759 pair (§0.6), replayed offline from the two
       artifact directories.** This test is the reason this design exists; it must fail against today's
       matcher.
-- [ ] **O-1c** A gate outcome never reaches `MatchResult.resolved`: a case-C run whose priors all land on
-      step 10 posts **no** ✅ reply and calls no thread resolution (§3.7.1). Asserted on the post plan —
-      this is the auto-close-every-thread bug, and it must fail against the design as first written.
+- [ ] **O-1c** `MatchResult.resolved` does not drive thread resolution or `deltaLine`: a case-C run whose
+      priors all land `carried` posts **no** ✅ reply and calls no thread resolution (§3.8, §3.9). Asserted
+      on the post plan and rendered `deltaLine` — not on `MatchResult.resolved` count (R2-S6).
 - [ ] **O-2** A simulated three-push sequence renders a summary containing only current-state findings —
       no superseded round appears in the body.
 - [ ] **O-3a** A `dismissed`+`upheld` identity does not appear in a later run's output at any tier.
-- [ ] **O-3b** A `deferred` identity appears in the deferred list with its issue number and is absent from
-      the blocking count.
+- [ ] **O-3b** A `deferred` identity appears in the deferred list (issue number when present) and is
+      absent from the blocking count — including a reasoning-only defer with no issue (S6, §3.7).
 - [ ] **O-4** Every input to the re-review decision is derived from PR data in the test's fixtures; the
       test runs with no `~/.prhero` and no run directory present.
 - [ ] **O-5a** The cost band carries the verification-step count as its own term: two plans over the same
-      delta but 2 vs 40 queued verifications produce different bands (§3.10.4). A band that does not move
+      delta but 2 vs 40 queued verifications produce different bands (§3.10.3). A band that does not move
       fails.
 - [ ] **O-5b** In the ordinary case — small delta, few prior findings — the planned spend is strictly
       lower than the same PR's first review. Asserted on the plan, never on a live run.
@@ -1367,71 +1033,72 @@ part a human can act on when there is a human. In the ordinary case the spend st
       prior review takes the delta path with **no flag** (§3.10.1). And `--full` **is not case A**: a
       `dismissed`+`upheld` identity stays suppressed under `--full`, the run records its real case with
       `discovery_restricted: false`, and only the discovery range widens.
-- [ ] **W-order** The verification queue is closed only after dedupe: a discovery finding whose identity
-      overlaps a prior one is in the queue (step 8), and no verification step is spawned before dedupe
-      (§3.10.2).
+- [ ] **W-order** The verification queue closes only after dedupe: identity overlap appends a prior in
+      phase E, and no verification step spawns before dedupe (§3.2).
 - [ ] **W-cap** `max_verification_steps` bounds the queue **with `--yes` set and no TTY**: a run whose
       queue exceeds the cap verifies the highest-severity N, reports the rest as `unconfirmed` in the
       visible body, and records `verification_capped`. Asserted on the unattended path specifically —
-      a cap that only fires inside `confirm()` fails this test (§3.10.4).
+      a cap that only fires inside `confirm()` fails this test (§3.10.3).
 - [ ] **W-prov** `pipeline.json` carries the `rereview` block with the case, both range ends,
-      `last_head_source`, the three trigger counts, `verification_capped` and `carried[]`; a first review
+      `last_head_source`, the four trigger counts, `verification_capped` and `live[]`; a first review
       carries no block at all. A run that cannot name its case from the artifact is unscorable, never
-      assumed (§3.10.3).
+      assumed (§3.10.2).
 - [ ] **O-6** With `movedHeadSha` set, every finding still posts inline **pinned to the reviewed commit**,
-      and both surfaces carry the disclosure (`src/report.ts:498-506`, `src/cli.ts:2298-2304`). Rewritten
-      2026-08-20 (C9): the old version asserted no stale-tree finding reaches the inline post plan, which
-      no implementation can satisfy — the plan is built before the head re-read (§3.9).
+      and both surfaces carry the disclosure (`src/report.ts:498-506`, `src/cli.ts:2298-2304`). Item 7
+      adds no demotion policy (§3.9).
 - [ ] **D4** `lastReviewedHead` not an ancestor of `head` → the plan is a full review, every prior finding
       is queued for verification **up to `max_verification_steps`**, and both surfaces carry the banner.
-- [ ] **S-A** With the summary comment absent, `L` is recovered from the per-finding markers' `head=` and
-      the run does **not** fall to first-review semantics (§3.1, case A fallback).
-- [ ] **S-B** `L === H` plans zero discovery steps and verifies only findings carrying a new reply, where
-      **new** is `comment.created_at > summary.updated_at` (§3.6.1) — the test names that input and feeds
-      one reply on each side of the boundary; a reply predating the summary must buy no step.
+- [ ] **S-A** With the summary comment absent, `L` is recovered from per-finding markers — **latest
+      `created_at`** when heads disagree — and the run does **not** fall to first-review semantics (§3.1).
+- [ ] **S-B** `L === H` plans zero discovery steps and verifies only findings carrying a new reply or new
+      `applied` tag, where **new** is `comment.created_at > summary.updated_at` (§3.7.1) — both timestamps
+      named in fixtures; a predating reply must buy no step.
 - [ ] **S-merge** A delta containing a merge of the base branch produces a discovery diff restricted to
       `files(B..H) ∩ files(L..H)` — upstream-only files are absent from the plan.
-- [ ] **S-revert** A file reverted to base drops out of the restricted delta **but still trips the
-      touched gate**, so its findings reach step 7 (verify) and, absent a verdict, land on `carried` —
-      never on a `resolved` of any kind. Rewritten 2026-08-20 (C1): the old version asserted they land on
-      row 11, the deleted "identical to base → `resolved`" row.
-- [ ] **S-overlap** A discovery finding whose §3.4 identity overlaps a prior finding forces that prior
-      finding into verification (step 8).
+- [ ] **S-revert** A file reverted to base drops out of the restricted delta **but still trips `touched()`**,
+      so its findings queue verification (§3.3 rule 8). Outcomes: `refuted` → `verified-gone`; `inconclusive`
+      or cap → `unconfirmed` — never `resolved` without a check. (R2-S8: `carried` is wrong for a touched
+      prior that was verified and could not tell.)
+- [ ] **S-overlap** A discovery finding whose §3.5 identity overlaps a prior finding forces that prior into
+      verification (phase E).
 - [ ] **S-empty** A re-review whose restricted delta is **empty** still verifies and still posts: no
-      `CliError`, discovery skipped, the gate's steps run, `carried` findings are listed, and
-      `discovery_skipped_empty_delta` is recorded (§3.1.1). A first review with an empty diff still
+      `CliError`, discovery skipped, classification runs, live findings listed, and
+      `discovery_skipped_empty_delta` is recorded (§3.1.2). A first review with an empty diff still
       errors — the same test asserts both halves, or it proves nothing.
 - [ ] **S-base-moved** `merge-base(base, H)` moving between runs does not change the discovery delta.
-- [ ] **O-2b** The rendered summary lists every `carried` finding with its status — asserted on the
-      rendered lines, and a `carried` finding missing from that list fails the test (§3.7, the stand-in
-      for Cloudflare's re-emission).
-- [ ] **C7-clean** A run with **zero** new findings and ≥1 `carried` finding does **not** print
-      "✅ pr-hero reviewed this PR and found nothing to report", and its headline counts include the
-      carried severities (§3.8.1). Asserted on the rendered body — this is the false-clean bill.
+- [ ] **O-2b** The rendered summary lists every live finding with its status (`carried`, `unconfirmed`,
+      `deferred`, and a suppressed count when >0) — asserted on the rendered lines (§3.8.1, §3.9).
+- [ ] **C7-clean** A run with **zero** new findings and ≥1 live `carried` finding does **not** print
+      "✅ pr-hero reviewed this PR and found nothing to report", and its headline counts include those
+      severities (§3.8.1).
+- [ ] **C7-unconfirmed** A run with zero new findings and all priors `unconfirmed` (e.g. cap hit) also
+      does **not** print the clean bill — `live[]` non-empty (R2-C2).
 - [ ] **W-worse** A `dismissed`+`upheld` identity stays suppressed against a same-severity discovery
       finding, and **returns** against a strictly-higher-severity one, with both severities named in the
-      summary (§3.2.2).
+      summary (§3.3 post-dedupe worsening).
 - [ ] **J-trigger** A judge-proposed semantic match can only route a prior finding into verification —
       asserted by construction: no code path lets a judge output write `carried`, retire an identity, or
-      suppress a finding (§3.4.1). This test must exist **before** any judge tier is wired, not with it.
+      suppress a finding (§3.5.1). This test must exist **before** any judge tier is wired, not with it.
 - [ ] **D5a** `parseFindingMarker` returns `null` for the state block.
-- [ ] **D5b** Over the size cap, the state block drops findings **and** the visible body says so.
-- [ ] **D5c** Identity matching pairs both PR 1759 defects across runs -2/-3, over-merges neither, **and
-      does not match on an incidental shared ref** — `{a.ts, util.ts}` vs `{b.ts, util.ts}` returns no
-      match, which the pre-S1 "shares any ref" rule would have matched (§3.4). The real artifacts for the
-      two pairings, a synthetic pair for the third.
-- [ ] **D5d** The state block is rewritten from the **merged** set (§3.5): after a run with one new
-      finding, three `carried` priors and one `verified-gone` prior, the block holds four entries — the
-      `verified-gone` one is retired and the three carried ones keep their identity. Two consecutive runs
-      assert it neither shrinks nor accumulates (§6 #3).
-- [ ] **V-ns** The verification leg is namespaced: `V###` subject ids, `steps/verify/` artifacts, its own
-      batch manifest and verdict map, and a `verifier` entry in `per_agent`. A run with a prior `F001` and
-      a fresh `F001` keeps their verdicts apart, and `finish()` deletes neither (§3.3).
+- [ ] **D5b** Over the size cap, the state block drops **`unconfirmed` then `carried`**, never
+      `suppressed`, and the visible body says so (S8).
+- [ ] **D5c** Identity matching pairs both PR 1759 defects across runs -2/-3, over-merges neither, rejects
+      incidental shared ref and single-path subset cases (§3.5).
+- [ ] **D5d** The state block uses stable **`R###` ids**, includes **`claim`**, sits **after** the report
+      marker, and is rewritten from the merged live set: one new, three carried, one verified-gone → four
+      entries; verified-gone retired (§3.6).
+- [ ] **D5e** State block JSON escapes `-->` and quotes so claim/path text cannot break the HTML comment
+      (S5).
+- [ ] **V-ns** `runVerify` is namespaced: prior `R001`, subject `V001`, `steps/verify/` artifacts, distinct
+      verdict map, `verifier` in `per_agent`. Same run with fresh `F001` keeps verdicts apart; `finish()`
+      deletes neither (§3.4).
 - [ ] **C4** The verification prompt inlines prior findings and author replies inside nonced boundary
       tags, `BoundaryTag` is widened with the four tags `src/boundary.ts:21-30` names, and the driver-side
       forgery check covers **every** new block: a reply that forges the nonce lands the subject on
-      `inconclusive` **without spawning** and never reaches `wrapBlock`'s throw (§3.3.1). The
+      `inconclusive` **without spawning** and never reaches `wrapBlock`'s throw (§3.4). The
       artifact-level preamble test (`test/pipeline.test.ts`) still walks every `*.system.md`.
+- [ ] **S-rename** A prior whose file was git-renamed is re-evaluated on the new path before `touched()`;
+      verification targets the post-rename path (R2-C1).
 
 Offline in every case. `bun test` + `bun run typecheck` + `bun run check`, then one fixture eval, then a
 single live re-review on a real musive PR before this is called done.
@@ -1450,23 +1117,20 @@ single live re-review on a real musive PR before this is called done.
    PR 1759 pair matches on exact and near-exact spans, so it does not settle the number. Pick it against
    more pairs before hard-coding — and remember the direction-of-error rule says small.
 3. ~~**Does a `refuted` verification also retire the identity from the state block?**~~ **CLOSED
-   2026-08-20 (judgment round 1, C7), in §3.5.** Yes, it retires. The state block is rewritten each run
-   **from the merged set** — this run's `findings[]` plus every prior that survived §3.2 as `carried`,
-   `unconfirmed`, `suppressed` or `deferred` — so a `verified-gone` finding leaves and the block neither
-   shrinks silently nor grows without bound. A defect that returns later is `fresh` again, which is
-   arguably correct: it is a regression. The ledger keeps the history.
+   2026-08-20 (judgment round 1, C7), in §3.6.** Yes, it retires. The state block is rewritten each run
+   **from the merged live set** — this run's `findings[]` plus every prior with status `carried`,
+   `unconfirmed`, `suppressed` or `deferred` — so a `verified-gone` finding leaves. Suppressed entries
+   persist until identity changes or cap evicts (never by default). A defect that returns later is
+   `fresh` again. The ledger keeps the history.
 4. **C1a's ordering assumption is falsified (§0.6) and `root_cause_id` is affected, not only re-review.**
    Root-cause clustering anchors on the first `proof_ref`; that order is not stable. Out of scope here,
    but it wants its own entry — the cluster counts in every report inherit the same instability.
-5. ~~**A semantic identity tier.**~~ **CLOSED same day, in §3.4.1.** The question was whether a judge
+5. ~~**A semantic identity tier.**~~ **CLOSED same day, in §3.5.1.** The question was whether a judge
    could only ADD a match, never silently suppress a finding. It can: a judge-proposed match is not a
-   match, it is a **verification trigger** feeding §3.2 step 8. A false positive costs one step; a
-   false negative leaves us where deterministic-only already was. Neither direction hides a live defect.
-   Additive, and deferrable until a second PR-1759-class pair proves the loss recurs.
-6. ~~**The worsening re-open path.**~~ **CLOSED same day, in §3.2.2.** *Worsened* := a discovery finding
-   at the same §3.4 identity with **strictly higher** severity than the suppressed one. Mechanical, uses
-   only fields that already exist, and it does not re-litigate a `dismissed` at equal severity.
-7. **Does the summary's carried list scale?** O-2 now requires listing every `carried` finding with
-   its status (§3.7). On a long-lived PR with many advisories that list grows while the state block
-   (§3.5) is already competing for the same 65536-byte body. Open: does the visible list need its own
-   cap and collapse-by-severity, and does that cap interact with the state block's?
+   match, it is a **verification trigger** (phase E). A false positive costs one step; a false negative
+   leaves us where deterministic-only already was. Neither direction hides a live defect.
+6. ~~**The worsening re-open path.**~~ **CLOSED same day, in §3.3 (phase E).** *Worsened* := a discovery
+   finding at the same §3.5 identity with **strictly higher** severity than the suppressed one.
+7. **Does the summary's live list scale?** O-2 requires listing every non-suppressed live finding with
+   status (§3.9). On a long-lived PR that list grows while the state block (§3.6) competes for the same
+   65536-byte body. Open: visible list cap and interaction with state-block eviction order (R2-S10).
