@@ -2040,7 +2040,7 @@ const COLLAPSE_GH_TIMEOUT_MS = 120_000;
 // verification, WARN-3) is unchanged — the placeholder is provisional, the
 // closing PATCH is authoritative, same as before this rework.
 
-// One wording for the refusal, said by both the post sequence's precondition
+// One wording PER refusal, each said by both the post sequence's precondition
 // and `post --dry-run`'s preview of it. The preview and the post disagreeing
 // about whether a run dir may be published is the failure the whole $0-gate
 // suite exists to prevent, and two hand-written messages is how that starts.
@@ -2051,6 +2051,21 @@ function missingRereviewBlockMessage(pr: number, summaryId: number): string {
     "block in its pipeline.json, so the summary would report the old " +
     'absence matcher\'s "N resolved" and write no state block. Re-run ' +
     `\`pr-hero review --pr ${pr} --post\` instead.`
+  );
+}
+
+// The same rule read in the other direction. Same shared-wording reason, and
+// it names the mismatch specifically: the run dir describes a re-review of a
+// summary the PR no longer has.
+function vanishedPriorSummaryMessage(pr: number): string {
+  return (
+    "The run directory carries a `rereview` block in its pipeline.json, so " +
+    `this post is a re-review — but PR #${pr} no longer carries a pr-hero ` +
+    "summary comment for it to be a re-review OF. Its `live[]` rows, " +
+    "`resolved_ids` and `R###` numbering all name review threads the PR has " +
+    "no record of, so this would publish a brand new summary claiming a " +
+    `delta against a review that is not there. Re-run \`pr-hero review --pr ` +
+    `${pr} --post\` instead.`
   );
 }
 
@@ -2129,6 +2144,34 @@ export async function postInlineFindings(input: {
     existingSummaryId !== null
   ) {
     throw new CliError(missingRereviewBlockMessage(pr, existingSummaryId));
+  }
+
+  // The mirror, at the same point and for the same reason. The precondition
+  // above is a one-way check only by accident of which direction was observed
+  // live: the run dir CAN carry a valid `rereview` block while the summary it
+  // was computed against is gone from the PR — deleted, or `post --from` run
+  // long after `review`, which this seam deliberately allows. Then
+  // `existingSummaryId === null` falls into the create-first branch below and
+  // `renderBody`/`overlayDelta` publish a BRAND NEW comment full of
+  // re-review vocabulary sourced from a stale directory: a `Δ since <L>`, a
+  // `Still live:` list of `R###` ids, a state block — none of it naming a
+  // thread that exists. Same house rule as above, and refusing is the only
+  // honest answer here: `live[]`, `resolved_ids` and the `R###` numbering all
+  // describe threads that are gone, so there is nothing left to reconcile
+  // against.
+  // Narrowed to `summary_marker` on purpose: a block whose L came from
+  // `finding_markers` was ALREADY computed with no summary in sight, so a
+  // missing summary at post time is agreement, not drift — and its R### ids
+  // name finding threads that do still exist. Refusing there would break
+  // obligation S-A ("with the summary comment absent, L is recovered from
+  // per-finding markers and the run does NOT fall to first-review
+  // semantics"), which is a case the design supports rather than a hazard.
+  if (
+    input.requireRereviewOnPriorSummary === true &&
+    input.rereview?.last_head_source === "summary_marker" &&
+    existingSummaryId === null
+  ) {
+    throw new CliError(vanishedPriorSummaryMessage(pr));
   }
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
@@ -2684,6 +2727,14 @@ export async function runPostCommand(input: {
       throw new CliError(
         missingRereviewBlockMessage(prNumber, existingSummaryId),
       );
+    }
+    // Both directions, or the preview is only half a gate — and narrowed to
+    // `summary_marker` for the same reason the live guard is (S-A).
+    if (
+      rereview?.last_head_source === "summary_marker" &&
+      existingSummaryId === null
+    ) {
+      throw new CliError(vanishedPriorSummaryMessage(prNumber));
     }
     log(
       `plan: ${plan.reviewComments.length} review comment(s), ` +

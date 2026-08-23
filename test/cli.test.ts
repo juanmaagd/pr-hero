@@ -2060,6 +2060,65 @@ describe("runPostCommand — post --from carries the re-review (F008)", () => {
     }
   });
 
+  test("a rereview block whose summary the PR no longer has refuses before any write", async () => {
+    // The mirror direction, and the one nobody tested: the run dir DID come
+    // from a re-review, but the summary it was computed against is gone from
+    // the PR — deleted, or `post --from` run long enough after `review` that
+    // it did not survive. `existingSummaryId === null` then routes into the
+    // create-first branch, so without the precondition this publishes a BRAND
+    // NEW comment carrying a `Δ since` delta, a `Still live:` list of `R###`
+    // ids and a state block — none of it describing a thread that exists.
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock() },
+      { findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })] },
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/no longer carries a pr-hero summary comment/);
+      // Refused BEFORE any write. Refusing after posting the very comment the
+      // refusal is about would be worse than not refusing at all.
+      expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a finding_markers block with no summary is S-A, not drift — it posts", async () => {
+    // The narrowing the vanished-summary guard needs. Design obligation S-A:
+    // "with the summary comment absent, L is recovered from per-finding
+    // markers and the run does NOT fall to first-review semantics". Such a
+    // block was computed with no summary in sight, so a missing summary at
+    // post time is agreement, and its R### ids name finding threads that DO
+    // still exist. A guard keyed on `rereview !== undefined` alone refuses
+    // here and breaks a case the design supports.
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock({ last_head_source: "finding_markers" }) },
+      { findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })] },
+    );
+    try {
+      const { spawnFn } = makeFakeGh(emptyCommentScript(RUN_HEAD));
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).resolves.toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test("an unreadable rereview block refuses before a single gh call, naming the field", async () => {
     const { dir, cleanup } = await writeRereviewRunDir({
       rereview: rereviewBlock({ live: [{ id: "R001", status: "carried" }] }),
@@ -2147,6 +2206,32 @@ describe("runPostCommand — post --from carries the re-review (F008)", () => {
     } finally {
       await missing.cleanup();
       await verifiedGone.cleanup();
+    }
+  });
+
+  test("--dry-run refuses the vanished summary too — both directions, one answer", async () => {
+    // The mirrored half of the same rule: a $0 preview that green-lights a
+    // run dir the live path rejects has answered a different question, and
+    // that is as true of the re-review-without-a-summary direction as it is
+    // of the summary-without-a-rereview-block one above.
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock() },
+      { findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })] },
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: true,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/no longer carries a pr-hero summary comment/);
+      expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+    } finally {
+      await cleanup();
     }
   });
 
