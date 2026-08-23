@@ -115,6 +115,7 @@ import {
   CliError,
   type CliOptions,
   CliUsageError,
+  type ConfigLayer,
   type ConfigSource,
   type ConfigSources,
   DEFAULT_SUMMARY_MODEL,
@@ -125,6 +126,7 @@ import {
   headContainedInBaseMessage,
   INIT_GIT_REMINDER,
   initConfigTemplate,
+  initTemplateOmissions,
   isFullCommitId,
   type LocalConfig,
   listPaths,
@@ -221,6 +223,7 @@ import {
   terminalWidth,
   yellow,
 } from "./ui";
+import { renderConfig } from "./ui-config";
 import { type ResultLinks, renderResult } from "./ui-result";
 import {
   type ConfirmResult,
@@ -497,7 +500,9 @@ async function main(argv: string[]): Promise<number> {
                     ? await revertsCommand(parsed.options)
                     : parsed.command === "corpus"
                       ? await corpusCommand(parsed.options)
-                      : await review(parsed.options);
+                      : parsed.command === "config"
+                        ? await configCommand(parsed.options)
+                        : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -561,6 +566,31 @@ export interface EffectiveConfig {
 // because silently falling back to "no parity triggers" would disable a
 // hunter the caller just asked for, and a hunter that never fires looks
 // exactly like a hunter that found nothing.
+// The global layer on its own, and the ONE place `~/.prhero/config.json` is
+// opened. Two callers need it for different reasons and must not read it two
+// ways: loadEffectiveConfig folds it under the repo file, while `pr-hero init`
+// needs it WITHOUT the repo file, because init is writing that file and asking
+// what the global already supplies is the whole of O-9. A second read site
+// would be a second chance for the two to disagree about what "the global
+// layer" is — the same reason §3.4 collapsed review()/reviewPr()'s duplicated
+// block into one function.
+//
+// A malformed global file throws here, so it fails init exactly as loudly as
+// it fails a review. That is deliberate: a scaffold silently written against
+// "no global file" when there IS one, broken, would hardcode into the repo
+// file precisely the keys the operator was about to fix.
+export async function loadGlobalConfigLayer(home: string): Promise<{
+  filePath: string;
+  layer: ConfigLayer | undefined;
+}> {
+  const filePath = prheroLayout(home).reviewConfigPath;
+  if (!existsSync(filePath)) return { filePath, layer: undefined };
+  return {
+    filePath,
+    layer: parseGlobalConfig(await Bun.file(filePath).text()),
+  };
+}
+
 export async function loadEffectiveConfig(input: {
   root: string;
   home: string;
@@ -572,11 +602,13 @@ export async function loadEffectiveConfig(input: {
   if (input.configFlag && !existsSync(repoConfigPath)) {
     throw new CliError(`config file not found: ${repoConfigPath}`);
   }
-  const globalConfigPath = prheroLayout(input.home).reviewConfigPath;
-  const globalPresent = existsSync(globalConfigPath);
-  const global = globalPresent
-    ? parseGlobalConfig(await Bun.file(globalConfigPath).text())
-    : undefined;
+  const { filePath: globalConfigPath, layer: global } =
+    await loadGlobalConfigLayer(input.home);
+  // `global !== undefined` and not a second stat: the helper returns a layer
+  // exactly when the file was there and read, so the artifact's
+  // `global_present` cannot disagree with what was actually loaded — which is
+  // the property the field was added for.
+  const globalPresent = global !== undefined;
   const repo = existsSync(repoConfigPath)
     ? parseLocalConfig(await Bun.file(repoConfigPath).text())
     : {};
@@ -3453,6 +3485,21 @@ async function init(options: CliOptions): Promise<number> {
     remoteHead: await remoteHeadRef(repoRoot),
   });
 
+  // C5 O-9. The global file is read but never written: init scaffolds the TEAM
+  // file, and the person/capped keys the global already supplies are left OUT
+  // of it. Without this the command ships the duplication C5 exists to delete
+  // — §0.5 measured three byte-identical configs on one machine, all three
+  // restating the same agents_dir and summary block.
+  const { filePath: globalConfigPath, layer: globalLayer } =
+    await loadGlobalConfigLayer(os.homedir());
+  const templateInput = {
+    agentsDir: agentsSeed.dir,
+    defaultBase: baseSeed.ref,
+    ...(globalLayer === undefined ? {} : { global: globalLayer }),
+    agentsDirFromFlag: options.agents !== undefined,
+  };
+  const omitted = initTemplateOmissions(templateInput);
+
   // `repoConfigPath`, not `configPath`: C5 put a second config.json under
   // ~/.prhero/, and a bare `configPath` in a codebase where PrheroLayout
   // deliberately retired that name (home-preflight.ts) is the same ambiguity
@@ -3464,13 +3511,7 @@ async function init(options: CliOptions): Promise<number> {
   const wrote: string[] = [];
   const kept: string[] = [];
   for (const [file, contents] of [
-    [
-      repoConfigPath,
-      initConfigTemplate({
-        agentsDir: agentsSeed.dir,
-        defaultBase: baseSeed.ref,
-      }),
-    ],
+    [repoConfigPath, initConfigTemplate(templateInput)],
     [gotchasPath, GOTCHAS_TEMPLATE],
   ] as const) {
     if (existsSync(file)) {
@@ -3486,8 +3527,26 @@ async function init(options: CliOptions): Promise<number> {
   for (const file of wrote) log(`  wrote  ${file}`);
   for (const file of kept) log(`  kept   ${file} (already exists, untouched)`);
   log();
-  log(`  agents_dir    ${agentsSeed.dir} (from ${agentsSeed.source})`);
+  // The seed line has to follow the FILE, not the seed: a scaffold that
+  // omitted agents_dir while the terminal still reported "agents_dir <path>
+  // (from the suggested clean set)" would send the reader looking for a line
+  // that is not in the file they were just told was written.
+  log(
+    omitted.agentsDir
+      ? `  agents_dir    ${globalLayer?.agents_dir} (from ${globalConfigPath})`
+      : `  agents_dir    ${agentsSeed.dir} (from ${agentsSeed.source})`,
+  );
   log(`  default_base  ${baseSeed.ref} (from ${baseSeed.source})`);
+  if (omitted.keys.length > 0) {
+    log();
+    log(
+      `  Left out of ${repoConfigPath}: ${omitted.keys.join(", ")} — ` +
+        `${globalConfigPath} already supplies ${
+          omitted.keys.length === 1 ? "that key" : "those keys"
+        }, and restating them here is the duplication the global layer ` +
+        "exists to delete.",
+    );
+  }
   log();
   log(INIT_GIT_REMINDER);
   log();
@@ -3613,6 +3672,45 @@ async function usageCommand(options: CliOptions): Promise<number> {
   process.stdout.write(
     `${renderUsage(rows, { styles: styleEnabled() }).join("\n")}\n`,
   );
+  return 0;
+}
+
+// `pr-hero config` (C5 O-12 / D10 / §3.10) — read-only, $0, and deliberately
+// the thinnest shell in this file: resolve the two layers through the SAME
+// loadEffectiveConfig a review takes, hand the result to a pure renderer,
+// print. Every decision it could get wrong lives in mergeConfig, which is
+// already the engine's; re-deriving anything here is how the command that
+// explains the config starts disagreeing with the config.
+//
+// It never writes either file. Editing config from menus is distribution
+// pillar 2 (§3.10, "Not in scope"), and a command an operator runs to
+// UNDERSTAND their setup must be safe to run without reading its flags first.
+//
+// stdout, like `ledger` and `usage`: the listing IS this command's product,
+// so it stays pipeable. Everything human-facing elsewhere in this CLI goes to
+// stderr via log(), which is what reserves the channel — and the style flag is
+// therefore sniffed off stdout, the stream actually being written.
+async function configCommand(options: CliOptions): Promise<number> {
+  const repoRoot = await resolveRepoRoot(options.repo);
+  const loaded = await loadEffectiveConfig({
+    root: repoRoot,
+    home: os.homedir(),
+    configFlag: options.config,
+  });
+  const lines = renderConfig({
+    effective: loaded.effective,
+    sources: loaded.sources,
+    repoConfigPath: loaded.repoConfigPath,
+    // Not carried on EffectiveConfig: the review path has no use for it (an
+    // absent repo file is simply an absent layer), and widening a type six
+    // callers share to serve one renderer is how shared shapes rot.
+    repoPresent: existsSync(loaded.repoConfigPath),
+    globalConfigPath: loaded.globalConfigPath,
+    globalPresent: loaded.globalPresent,
+    styles: styleEnabled(process.stdout),
+    width: terminalWidth(),
+  });
+  process.stdout.write(`${lines.join("\n")}\n`);
   return 0;
 }
 

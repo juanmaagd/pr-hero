@@ -17,6 +17,7 @@ import {
   emptyDiffMessage,
   headContainedInBaseMessage,
   initConfigTemplate,
+  initTemplateOmissions,
   isFullCommitId,
   type LocalConfig,
   listPaths,
@@ -77,6 +78,21 @@ describe("parseArgs", () => {
     expect(parseArgs(["init"]).command).toBe("init");
     expect(parseArgs(["init", "--repo", "/tmp/x"]).options.repo).toBe("/tmp/x");
     expect(() => parseArgs(["initialise"])).toThrow(CliUsageError);
+  });
+
+  // C5 O-12. `config` takes the same --repo/--config seats a review does,
+  // because it resolves the two layers through the same loadEffectiveConfig —
+  // pointing it at another checkout, or at another repo file, has to answer
+  // for THAT one or the command cannot be used to debug the setup it is about.
+  test("config is a command and takes --repo and --config", () => {
+    expect(parseArgs(["config"]).command).toBe("config");
+    expect(parseArgs(["config", "--repo", "/tmp/x"]).options.repo).toBe(
+      "/tmp/x",
+    );
+    expect(
+      parseArgs(["config", "--config", "/tmp/c.json"]).options.config,
+    ).toBe("/tmp/c.json");
+    expect(() => parseArgs(["configure"])).toThrow(CliUsageError);
   });
 
   test("gc is a command, and --dry-run applies", () => {
@@ -1404,6 +1420,134 @@ describe("initConfigTemplate", () => {
     expect(resolveBaseRef({ configDefaultBase: config.default_base })).toEqual({
       ref: "trunk",
       source: "config",
+    });
+  });
+
+  // C5 O-9 / judgment ledger JD-17. The obligation names `agents_dir`, but the
+  // template also seeds `default_base`, `summary.model` and a hardcoded
+  // `summary.enabled: true` — and that last one is the value `capped` forbids
+  // the team file from raising over a global `false`. The full set is handled,
+  // not the key the obligation happens to name.
+  test("omits every person/capped key the global layer already supplies", () => {
+    const raw = initConfigTemplate({
+      agentsDir: "/seed/agents",
+      defaultBase: "dev",
+      global: {
+        agents_dir: "/home/me/agents/clean",
+        summary: { enabled: false, model: "haiku" },
+      },
+    });
+    expect(parseLocalConfig(raw)).toEqual({
+      // `default_base` SURVIVES: it is a `repo` key (D4), parseGlobalConfig
+      // rejects it by name, and a scaffold without it would leave the repo
+      // with no base ref at all. The two array keys are `repo` for the same
+      // reason.
+      default_base: "dev",
+      parity_trigger_paths: [],
+      suspicion_priors: [],
+    });
+    // Not `"summary": {}` — an empty block parses fine and configures
+    // nothing, which is a line whose only effect is to puzzle the next reader.
+    expect(raw).not.toContain("summary");
+    expect(raw).not.toContain("agents_dir");
+  });
+
+  test("omits only the fields the global actually named", () => {
+    // A global that sets the model and nothing else leaves the cap seat to the
+    // repo file, so `summary.enabled` still has to be seeded.
+    const config = parseLocalConfig(
+      initConfigTemplate({
+        agentsDir: "/seed/agents",
+        defaultBase: "dev",
+        global: { summary: { model: "haiku" } },
+      }),
+    );
+    expect(config.summary).toEqual({ enabled: true });
+    expect(config.agents_dir).toBe("/seed/agents");
+  });
+
+  // The regression boundary: with no global file the bytes are byte-for-byte
+  // the pre-C5 template. C5 introduces nothing for the operator who never
+  // writes a global config (D6).
+  test("with no global layer the template is unchanged", () => {
+    const seeds = { agentsDir: "/seed/agents", defaultBase: "dev" };
+    expect(initConfigTemplate(seeds)).toBe(
+      `${JSON.stringify(
+        {
+          agents_dir: "/seed/agents",
+          default_base: "dev",
+          summary: { enabled: true, model: DEFAULT_SUMMARY_MODEL },
+          parity_trigger_paths: [],
+          suspicion_priors: [],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    // And an EMPTY global file changes nothing either: a file that exists and
+    // says `{}` supplies no key, so there is nothing to leave out.
+    expect(initConfigTemplate({ ...seeds, global: {} })).toBe(
+      initConfigTemplate(seeds),
+    );
+  });
+
+  // D5's reasoning one command earlier: a flag is the operator typing an
+  // intent. `--agents` at init time is them naming this repo's prompt set, and
+  // a flag that parses and then writes nothing is the silently-dropped
+  // intention this codebase rejects everywhere else. A deliberate narrowing of
+  // O-9's letter, which names no flag exception.
+  test("--agents beats the global; PRHERO_AGENTS_DIR does not", () => {
+    const global = { agents_dir: "/home/me/agents/clean" };
+    const withFlag = parseLocalConfig(
+      initConfigTemplate({
+        agentsDir: "/flagged/agents",
+        defaultBase: "dev",
+        global,
+        agentsDirFromFlag: true,
+      }),
+    );
+    expect(withFlag.agents_dir).toBe("/flagged/agents");
+    // The env var gets no exception: the merged config already beats
+    // PRHERO_AGENTS_DIR at review time (judgment ledger JD-9), so writing the
+    // env value into the repo file would CHANGE which prompt set runs, not
+    // preserve it.
+    const withEnvSeed = parseLocalConfig(
+      initConfigTemplate({
+        agentsDir: "/from/env",
+        defaultBase: "dev",
+        global,
+        agentsDirFromFlag: false,
+      }),
+    );
+    expect(withEnvSeed.agents_dir).toBeUndefined();
+  });
+});
+
+describe("initTemplateOmissions", () => {
+  // The log and the template read the SAME decision. A scaffold that omits a
+  // key while the terminal still reports it sends the reader looking for a
+  // line that is not in the file they were just told was written.
+  test("names the omitted keys as they appear in the config file", () => {
+    expect(
+      initTemplateOmissions({
+        agentsDir: "/seed",
+        defaultBase: "dev",
+        global: {
+          agents_dir: "/home/me/agents",
+          summary: { enabled: false, model: "haiku" },
+        },
+      }).keys,
+    ).toEqual(["agents_dir", "summary.enabled", "summary.model"]);
+  });
+
+  test("no global file omits nothing", () => {
+    expect(
+      initTemplateOmissions({ agentsDir: "/seed", defaultBase: "dev" }),
+    ).toEqual({
+      agentsDir: false,
+      summaryEnabled: false,
+      summaryModel: false,
+      keys: [],
     });
   });
 });
