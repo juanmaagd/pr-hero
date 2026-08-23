@@ -63,6 +63,7 @@ import { renderUsage } from "./metrics-preflight";
 import {
   changedPathsFromDiff,
   DEFAULT_SCOUT_MODEL,
+  type PerAgentUsage,
   type PipelineProgressEvent,
   type PipelineResult,
   parityTriggered,
@@ -193,6 +194,8 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
+import { openProductStore, saveRunTransaction } from "./store";
+import { projectCompleteRun } from "./store-preflight";
 import {
   renderTriageReplyBody,
   TRIAGE_MARKER_PREFIX,
@@ -523,6 +526,52 @@ async function main(argv: string[]): Promise<number> {
 // one.
 export function ingestReviewMetrics(input: FailSoftIngestInput): void {
   failSoftIngest(input);
+}
+
+export interface PersistCanonicalReviewInput {
+  dbPath?: string;
+  repoId: string | null;
+  runDir: string;
+  checkoutPath: string | null;
+  doc: FindingsDocument;
+  perAgent?: Record<string, PerAgentUsage>;
+  comparison: StoredComparison | null;
+  generatedAt?: string;
+  log?: (line: string) => void;
+  // Test seam
+  persist?: (input: PersistCanonicalReviewInput) => number;
+}
+
+// Canonical Product Store (Fundamentals #6 / observability-canonical-store.md).
+// Persists the complete run result into ~/.prhero/prhero.db transactionally.
+export function persistCanonicalReview(
+  input: PersistCanonicalReviewInput,
+): number {
+  if (input.persist) {
+    return input.persist(input);
+  }
+  if (input.repoId === null) {
+    input.log?.(
+      "warning: no repo_id resolved for this run; skipping canonical store persistence",
+    );
+    return 0;
+  }
+  const dbPath = input.dbPath ?? prheroLayout(os.homedir()).prheroDbPath;
+  const db = openProductStore(dbPath);
+  try {
+    const projected = projectCompleteRun({
+      doc: input.doc,
+      perAgent: input.perAgent,
+      comparison: input.comparison,
+      repoId: input.repoId,
+      runDir: input.runDir,
+      checkoutPath: input.checkoutPath,
+      generatedAt: input.generatedAt,
+    });
+    return saveRunTransaction(db, projected);
+  } finally {
+    db.close();
+  }
 }
 
 export interface EffectiveConfig {
@@ -986,9 +1035,16 @@ async function review(options: CliOptions): Promise<number> {
   const findingsPath = path.join(runDir, "findings.json");
   await writeFindings(findingsPath, doc);
 
-  // 16b — the observability store (W4 / #23). AFTER the artifact the review
-  // exists to produce, and fail-soft: an ingest failure must never turn a
-  // successful review into a failed one, only into a printed warning.
+  // 16b — canonical product store & observability metrics.
+  persistCanonicalReview({
+    repoId,
+    runDir,
+    checkoutPath: repoRoot,
+    doc,
+    perAgent: result.perAgent,
+    comparison: null,
+    log,
+  });
   ingestReviewMetrics({
     dbPath: prheroLayout(os.homedir()).metricsDbPath,
     repoId,
@@ -1825,6 +1881,16 @@ async function reviewPr(
           // itself throwing is handled (and warned on) by failSoftIngest.
         }
       }
+      // 13b — canonical product store & observability metrics.
+      persistCanonicalReview({
+        repoId: repoHome.repoId,
+        runDir,
+        checkoutPath: operatorRoot,
+        doc,
+        perAgent: result.perAgent,
+        comparison: storedComparison,
+        log,
+      });
       ingestReviewMetrics({
         dbPath: prheroLayout(home).metricsDbPath,
         repoId: repoHome.repoId,
