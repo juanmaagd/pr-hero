@@ -29,17 +29,22 @@ const PATHS = {
 function render(
   global: ConfigLayer | undefined,
   repo: ConfigLayer,
-  overrides: { repoPresent?: boolean; globalPresent?: boolean } = {},
+  overrides: {
+    repoPresent?: boolean;
+    globalPresent?: boolean;
+    styles?: boolean;
+    width?: number;
+  } = {},
 ): string[] {
   return renderConfig({
     ...mergeConfig(global, repo),
     ...PATHS,
     repoPresent: overrides.repoPresent ?? true,
     globalPresent: overrides.globalPresent ?? global !== undefined,
-    styles: false,
+    styles: overrides.styles ?? false,
     // Pinned, never sniffed: these renderers were the reason `bun test` in a
     // narrow pane could fail on a wrap point no test could stub.
-    width: 100,
+    width: overrides.width ?? 100,
   });
 }
 
@@ -177,6 +182,120 @@ describe("pr-hero config styling", () => {
       width: 100,
     };
     expect(renderConfig(input).join("\n")).toContain("\x1b[");
+  });
+});
+
+// The zero-`\x1b`-with-styles-off test above passes against a row whose value
+// arrives at row() ALREADY PAINTED — it only ever walks the styles-off path,
+// so it cannot see the defect that costs: row() places the wrap with raw
+// `value.length`, counting escape bytes as visible width, and wrapText then
+// splits on whitespace and can put a colour's opening escape on one line and
+// its reset on the next. These four pin the styles-ON path instead.
+// Composed rather than written as a literal, because biome's two relevant
+// rules disagree: `/…/` is a noControlCharactersInRegex ERROR, and
+// `new RegExp("\\u001b…")` is a useRegexLiterals warning that would be fixed
+// back into the error. Interpolating the byte satisfies both — the same
+// escape-in-a-regex problem corpus-preflight.ts dodges with a codepoint loop.
+// `.replace` and `.match` each reset a global regex's lastIndex, so one shared
+// instance is safe.
+const ESC = "\x1b";
+const ESCAPE = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
+
+function stripEscapes(line: string): string {
+  return line.replace(ESCAPE, "");
+}
+
+// A line must close every colour it opens and must never begin with a reset
+// belonging to a colour opened on the line above: an unbalanced line bleeds
+// its colour into whatever the terminal prints next.
+function unbalanced(line: string): string | undefined {
+  let depth = 0;
+  for (const token of line.match(ESCAPE) ?? []) {
+    if (token === "\x1b[0m") {
+      depth -= 1;
+      if (depth < 0) return `orphaned reset: ${JSON.stringify(line)}`;
+      continue;
+    }
+    depth += 1;
+  }
+  return depth === 0 ? undefined : `unclosed colour: ${JSON.stringify(line)}`;
+}
+
+// One fixture for all four, built from mergeConfig's real fold like every
+// other case in this file. It carries the two shapes the defect needs: a
+// `global` agents_dir short enough to fit the value column UNPAINTED but not
+// once the cyan escapes are counted, and two `capped` rows whose multi-word
+// marker is long enough that the whitespace split lands inside it.
+const WRAP_GLOBAL = {
+  agents_dir: "/home/me/agents/clean-24",
+  max_verification_steps: 4,
+  summary: { enabled: false },
+};
+const WRAP_REPO = {
+  default_base: "dev",
+  max_verification_steps: 12,
+  summary: { enabled: true, model: "haiku" },
+};
+// Value column starts at 25 (indent 2 + the 23 `max_verification_steps` needs),
+// so 60 leaves 35 columns — narrow enough that the escape bytes decide the
+// wrap, wide enough that nothing hits row()'s MIN_VALUE_WIDTH floor.
+const WRAP_WIDTH = 60;
+
+describe("pr-hero config wraps the same way painted and unpainted", () => {
+  test("every line of a wrapped, styled row closes the colours it opens", () => {
+    const lines = render(WRAP_GLOBAL, WRAP_REPO, {
+      styles: true,
+      width: WRAP_WIDTH,
+    });
+    expect(lines.map(unbalanced).filter((m) => m !== undefined)).toEqual([]);
+  });
+
+  test("styles on and styles off wrap at exactly the same points", () => {
+    // The property that generalises: styling is a projection over the layout,
+    // never an input to it. Full-array equality rather than a line count —
+    // a wrap that merely moves is the same defect as one that appears.
+    const plain = render(WRAP_GLOBAL, WRAP_REPO, { width: WRAP_WIDTH });
+    const styled = render(WRAP_GLOBAL, WRAP_REPO, {
+      styles: true,
+      width: WRAP_WIDTH,
+    });
+    expect(styled.map(stripEscapes)).toEqual(plain);
+  });
+
+  test("a capped row's marker stays closed on both lines it is split across", () => {
+    const lines = render(WRAP_GLOBAL, WRAP_REPO, {
+      styles: true,
+      width: WRAP_WIDTH,
+    });
+    const plain = lines.map(stripEscapes);
+    const first = plain.findIndex((l) =>
+      l.startsWith("  max_verification_steps"),
+    );
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(unbalanced(lines[first])).toBeUndefined();
+    expect(unbalanced(lines[first + 1])).toBeUndefined();
+    // Not vacuous: the marker really is cut in two here. It is the one span
+    // wrapText's whitespace split can separate from its own reset, because it
+    // is the only painted span made of more than one word.
+    expect(plain[first]).toContain("← narrowed by the global");
+    expect(plain[first]).not.toContain("ceiling");
+    expect(plain[first + 1].trim()).toBe("ceiling");
+  });
+
+  test("the layer tag keeps its own colour, distinct from the marker's", () => {
+    // The reason the established fix (cli.ts's markerRowLines: build unstyled,
+    // paint the whole line) does not transfer — a config row has two spans
+    // coloured independently, with an uncoloured value between them.
+    const lines = render({ agents_dir: "/a" }, {}, { styles: true });
+    const agents = lines.find((l) =>
+      stripEscapes(l).startsWith("  agents_dir"),
+    );
+    expect(agents).toContain("\x1b[36mglobal");
+    const capped = render(WRAP_GLOBAL, WRAP_REPO, { styles: true }).find((l) =>
+      stripEscapes(l).startsWith("  max_verification_steps"),
+    );
+    expect(capped).toContain("\x1b[33mcapped");
+    expect(capped).toContain("\x1b[33m← narrowed by the global ceiling\x1b[0m");
   });
 });
 

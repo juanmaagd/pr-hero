@@ -174,21 +174,129 @@ const SOURCE_WIDTH = labelColumnWidth(SOURCE_NAMES);
 // asked for something wider and the global ceiling took it away.
 const CAPPED_MARKER = "← narrowed by the global ceiling";
 
-function paintSource(source: ConfigSource, styles: boolean): string {
-  const padded = source.padEnd(SOURCE_WIDTH);
+type Painter = (text: string, styles: boolean) => string;
+
+function sourcePainter(source: ConfigSource): Painter {
   switch (source) {
     case "capped":
-      return yellow(padded, styles);
+      return yellow;
     case "global":
-      return cyan(padded, styles);
+      return cyan;
     default:
       // `repo` and `default` are the unsurprising layers, and colouring them
       // would cost the two above the contrast they exist for.
-      return dim(padded, styles);
+      return dim;
   }
 }
 
 const INDENT = 2;
+
+// A value column assembled from spans that are coloured INDEPENDENTLY, so
+// that row() never receives a string containing an escape byte.
+//
+// WHY that invariant, spelled out because breaking it is silent: row() places
+// the wrap with raw `value.length`, so escape bytes are counted as visible
+// width and a painted row wraps EARLIER than the same row unpainted; then
+// wrapText splits on whitespace, which can leave a colour's opening escape on
+// one line and its reset on the next — and that colour bleeds into whatever
+// the terminal prints after the block. This module shipped with exactly that
+// bug: `paintSource(...) + value + yellow(marker)` handed straight to row().
+//
+// WHY not the established fix — cli.ts's markerRowLines builds the row
+// unstyled and paints the whole LINE afterwards (`row(..., { styles: false })
+// .map(line => paint(line))`) — a config row has TWO spans coloured
+// differently, the layer tag and the cap marker, with an uncoloured value
+// between them, and one whole-line painter cannot express that. So the same
+// discipline is applied one level down: row() lays out the plain
+// concatenation, and the colours go back onto the chunks it hands back.
+//
+// WHY not fold the layer tag into row()'s label column instead, which would
+// dodge the wrap entirely: it moves the layout. A long `agents_dir` already
+// wraps at 80 columns today (its value lands on the continuation line), and
+// widening the label column would pull it back up onto the first line.
+interface Span {
+  text: string;
+  paint?: Painter;
+}
+
+const WHITESPACE = /\s/;
+
+interface SpanRowOptions {
+  width: number;
+  styles: boolean;
+  indent: number;
+  labelWidth: number;
+}
+
+function spanRow(
+  label: string,
+  spans: readonly Span[],
+  opts: SpanRowOptions,
+): string[] {
+  const plain = spans.map((span) => span.text).join("");
+  // The span each non-whitespace character belongs to, in order. wrapText
+  // collapses whitespace, but it never reorders or drops a non-whitespace
+  // character — so this sequence is enough to walk any chunk row() returns
+  // back to the spans it came from, wrapped or verbatim.
+  const anchors: number[] = [];
+  spans.forEach((span, index) => {
+    for (let i = 0; i < span.text.length; i += 1) {
+      if (!WHITESPACE.test(span.text[i])) anchors.push(index);
+    }
+  });
+
+  // row() is handed styles:false so its head is exactly `indent + labelWidth`
+  // characters wide and every chunk is recoverable by slicing there. The
+  // label is dimmed below instead, with the same dim() row() would have used.
+  const head = " ".repeat(opts.indent) + label.padEnd(opts.labelWidth);
+  const valueCol = opts.indent + opts.labelWidth;
+  const lines = row(label, plain, {
+    width: opts.width,
+    styles: false,
+    indent: opts.indent,
+    labelWidth: opts.labelWidth,
+  });
+
+  // The anchor cursor is shared across chunks — each one resumes where the
+  // previous stopped — so the chunks MUST be painted in order.
+  let cursor = 0;
+  const paintChunk = (chunk: string): string => {
+    if (chunk.length === 0) return "";
+    const ids: number[] = [];
+    // Whitespace inherits the span of the character BEFORE it, which is what
+    // keeps a padded tag's trailing spaces inside its own colour. Leading
+    // whitespace has no such character, so it takes the span the chunk is
+    // about to resolve.
+    let owner = anchors[cursor] ?? 0;
+    for (let i = 0; i < chunk.length; i += 1) {
+      if (!WHITESPACE.test(chunk[i])) {
+        owner = anchors[cursor] ?? owner;
+        cursor += 1;
+      }
+      ids.push(owner);
+    }
+    let painted = "";
+    let start = 0;
+    for (let i = 1; i <= chunk.length; i += 1) {
+      if (i < chunk.length && ids[i] === ids[start]) continue;
+      const span = spans[ids[start]];
+      const text = chunk.slice(start, i);
+      painted +=
+        span.paint === undefined ? text : span.paint(text, opts.styles);
+      start = i;
+    }
+    return painted;
+  };
+
+  return lines.map((line, index) => {
+    const first = index === 0;
+    const prefix = first
+      ? " ".repeat(opts.indent) +
+        dim(label.padEnd(opts.labelWidth), opts.styles)
+      : " ".repeat(valueCol);
+    return prefix + paintChunk(line.slice(first ? head.length : valueCol));
+  });
+}
 
 function noteLines(text: string, width: number, styles: boolean): string[] {
   return wrapText(text, Math.max(width - INDENT, 20)).map(
@@ -220,14 +328,25 @@ export function renderConfig(input: ConfigViewInput): string[] {
   lines.push("");
 
   for (const entry of rows) {
-    const marker =
-      entry.source === "capped" ? `  ${yellow(CAPPED_MARKER, styles)}` : "";
+    // The marker's two leading spaces are their own span so they stay OUTSIDE
+    // the yellow, exactly as `value + "  " + yellow(marker)` used to put them.
+    const spans: Span[] = [
+      {
+        text: entry.source.padEnd(SOURCE_WIDTH),
+        paint: sourcePainter(entry.source),
+      },
+      { text: entry.value },
+      ...(entry.source === "capped"
+        ? [{ text: "  " }, { text: CAPPED_MARKER, paint: yellow }]
+        : []),
+    ];
     lines.push(
-      ...row(
-        entry.key,
-        `${paintSource(entry.source, styles)}${entry.value}${marker}`,
-        { width, styles, indent: INDENT, labelWidth: keyWidth },
-      ),
+      ...spanRow(entry.key, spans, {
+        width,
+        styles,
+        indent: INDENT,
+        labelWidth: keyWidth,
+      }),
     );
   }
   lines.push("");
