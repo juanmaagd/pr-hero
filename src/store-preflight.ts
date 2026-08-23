@@ -43,7 +43,7 @@ export const PRODUCT_V2_TO_V3_STATEMENTS: string[] = [
   );`,
   `CREATE INDEX IF NOT EXISTS idx_finding_triage_run_id ON finding_triage (run_id);`,
   `CREATE INDEX IF NOT EXISTS idx_finding_triage_finding_id ON finding_triage (finding_id);`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_triage_unique ON finding_triage (run_id, finding_id, comment_id);`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_triage_unique ON finding_triage (run_id, finding_id, ifnull(comment_id, 0));`,
 ];
 
 export const PRODUCT_V1_TO_V2_STATEMENTS: string[] = [
@@ -246,7 +246,7 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_finding_triage_run_id ON finding_triage (run_id)`,
   `CREATE INDEX IF NOT EXISTS idx_finding_triage_finding_id ON finding_triage (finding_id)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_triage_unique ON finding_triage (run_id, finding_id, comment_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_triage_unique ON finding_triage (run_id, finding_id, ifnull(comment_id, 0))`,
 ];
 
 export function migrationsForProductStore(

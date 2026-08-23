@@ -3402,48 +3402,48 @@ export async function runTriageReplyCommand(input: {
       `posted: ${input.tag} on ${input.findingId} ` +
         `(${parent.channel} comment ${parent.id})`,
     );
-
-    // Persist triage record to product store upon posting
-    try {
-      const layout = prheroLayout(os.homedir());
-      if (existsSync(layout.prheroDbPath)) {
-        const repoId = await tryOriginRepoId(operatorRoot);
-        if (repoId) {
-          const db = openProductStore(layout.prheroDbPath);
-          try {
-            const runDirBasename = path.basename(runDir);
-            const runRow = db
-              .query(
-                "SELECT id FROM runs WHERE repo_id = ? AND run_dir = ? LIMIT 1",
-              )
-              .get(repoId, runDirBasename) as { id: number } | null;
-            if (runRow) {
-              recordFindingTriage(db, {
-                run_id: runRow.id,
-                finding_id: input.findingId,
-                comment_id: parent.id,
-                tag: input.tag,
-                verdict: input.verdict,
-                actor: "agent",
-                reasoning,
-                issue_number: input.issue,
-                created_at: new Date().toISOString(),
-              });
-            }
-          } finally {
-            db.close();
-          }
-        }
-      }
-    } catch (err) {
-      log(
-        `warning: failed to record triage in product store: ${(err as Error).message}`,
-      );
-    }
   } else {
     log(
       `skip post: ${input.findingId} already triaged at this head ` +
         `(${parent.channel} comment ${parent.id})`,
+    );
+  }
+
+  // Persist triage record to canonical product store (idempotent upsert)
+  try {
+    const layout = prheroLayout(os.homedir());
+    if (existsSync(layout.prheroDbPath)) {
+      const repoId = await tryOriginRepoId(operatorRoot);
+      if (repoId) {
+        const db = openProductStore(layout.prheroDbPath);
+        try {
+          const runDirBasename = path.basename(runDir);
+          const runRow = db
+            .query(
+              "SELECT id FROM runs WHERE repo_id = ? AND run_dir = ? LIMIT 1",
+            )
+            .get(repoId, runDirBasename) as { id: number } | null;
+          if (runRow) {
+            recordFindingTriage(db, {
+              run_id: runRow.id,
+              finding_id: input.findingId,
+              comment_id: parent.id,
+              tag: input.tag,
+              verdict: input.verdict,
+              actor: "agent",
+              reasoning,
+              issue_number: input.issue,
+              created_at: new Date().toISOString(),
+            });
+          }
+        } finally {
+          db.close();
+        }
+      }
+    }
+  } catch (err) {
+    log(
+      `warning: failed to record triage in product store: ${(err as Error).message}`,
     );
   }
 

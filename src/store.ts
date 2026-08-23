@@ -620,30 +620,28 @@ export function recordFindingTriage(
   triage: FindingTriageRow,
 ): number {
   const runTx = db.transaction(() => {
-    if (triage.comment_id !== undefined && triage.comment_id !== null) {
-      const existing = db
-        .query(
-          "SELECT id FROM finding_triage WHERE run_id = ? AND finding_id = ? AND comment_id = ? LIMIT 1",
-        )
-        .get(triage.run_id, triage.finding_id, triage.comment_id) as {
-        id: number;
-      } | null;
-      if (existing) {
-        db.query(`
-          UPDATE finding_triage
-          SET tag = ?, verdict = ?, actor = ?, reasoning = ?, issue_number = ?, created_at = ?
-          WHERE id = ?
-        `).run(
-          triage.tag,
-          triage.verdict ?? null,
-          triage.actor,
-          triage.reasoning,
-          triage.issue_number ?? null,
-          triage.created_at,
-          existing.id,
-        );
-        return existing.id;
-      }
+    const existing = db
+      .query(
+        "SELECT id FROM finding_triage WHERE run_id = ? AND finding_id = ? AND ifnull(comment_id, 0) = ifnull(?, 0) LIMIT 1",
+      )
+      .get(triage.run_id, triage.finding_id, triage.comment_id ?? null) as {
+      id: number;
+    } | null;
+    if (existing) {
+      db.query(`
+        UPDATE finding_triage
+        SET tag = ?, verdict = ?, actor = ?, reasoning = ?, issue_number = ?, created_at = ?
+        WHERE id = ?
+      `).run(
+        triage.tag,
+        triage.verdict ?? null,
+        triage.actor,
+        triage.reasoning,
+        triage.issue_number ?? null,
+        triage.created_at,
+        existing.id,
+      );
+      return existing.id;
     }
 
     const insert = db.query(`

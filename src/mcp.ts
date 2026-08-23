@@ -4,6 +4,7 @@
 // Invariant: The MCP server is strictly read-only. All data access routes through
 // ProductStoreClient.
 
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -35,14 +36,43 @@ export async function runMcpServer(
         // Socket is alive! Reuse existing server without starting an embedded one or hijacking
         client = probeClient;
       } catch {
-        // Socket is absent or stale; start embedded server on this socket path
-        const layout = prheroLayout(os.homedir());
-        const dbPath = options.dbPath ?? layout.prheroDbPath;
-        embeddedServer = startProductStoreServer({
-          dbPath,
-          socketPath: options.socketPath,
-        });
-        client = probeClient;
+        const lockPath = `${options.socketPath}.lock`;
+        try {
+          fs.openSync(lockPath, "wx");
+        } catch {
+          // Another process may be starting the server; poll for health
+          let healthy = false;
+          for (let i = 0; i < 20; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            try {
+              await probeClient.health();
+              healthy = true;
+              break;
+            } catch {}
+          }
+          if (healthy) {
+            client = probeClient;
+          } else {
+            // Lock was stale or process died; reclaim lock
+            try {
+              fs.unlinkSync(lockPath);
+            } catch {}
+            try {
+              fs.openSync(lockPath, "wx");
+            } catch {}
+          }
+        }
+
+        if (!client) {
+          // Socket is absent or stale; start embedded server on this socket path
+          const layout = prheroLayout(os.homedir());
+          const dbPath = options.dbPath ?? layout.prheroDbPath;
+          embeddedServer = startProductStoreServer({
+            dbPath,
+            socketPath: options.socketPath,
+          });
+          client = probeClient;
+        }
       }
     } else {
       // Default: create a dedicated ephemeral socket for this MCP process
@@ -72,6 +102,11 @@ export async function runMcpServer(
       try {
         embeddedServer.stop();
       } catch {}
+      if (options.socketPath) {
+        try {
+          fs.unlinkSync(`${options.socketPath}.lock`);
+        } catch {}
+      }
     }
   };
 

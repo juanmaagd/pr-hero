@@ -221,12 +221,13 @@ export function formatToolError(message: string): ToolCallResult {
 export function parseOptionalInteger(
   val: unknown,
   paramName?: string,
+  min = 0,
 ): number | undefined {
   if (val === undefined || val === null || val === "") return undefined;
   const n = typeof val === "number" ? val : Number(val);
-  if (!Number.isInteger(n) || Number.isNaN(n) || n < 1) {
+  if (!Number.isInteger(n) || Number.isNaN(n) || n < min) {
     throw new Error(
-      `Invalid ${paramName ?? "parameter"}: must be a positive integer`,
+      `Invalid ${paramName ?? "parameter"}: must be ${min === 1 ? "a positive integer" : `an integer >= ${min}`}`,
     );
   }
   return n;
@@ -260,8 +261,8 @@ export async function handleMcpToolCall(
           typeof args.repo_id === "string" && args.repo_id.trim() !== ""
             ? args.repo_id.trim()
             : undefined;
-        const pr = parseOptionalInteger(args.pr, "pr");
-        const limit = parseOptionalInteger(args.limit, "limit");
+        const pr = parseOptionalInteger(args.pr, "pr", 0);
+        const limit = parseOptionalInteger(args.limit, "limit", 1);
         const runs = await client.listRuns({ repo_id, pr, limit });
         return formatToolSuccess(runs);
       }
@@ -291,7 +292,7 @@ export async function handleMcpToolCall(
           typeof args.repo_id === "string" && args.repo_id.trim() !== ""
             ? args.repo_id.trim()
             : undefined;
-        const run_id = parseOptionalInteger(args.run_id, "run_id");
+        const run_id = parseOptionalInteger(args.run_id, "run_id", 1);
         const path =
           typeof args.path === "string" && args.path.trim() !== ""
             ? args.path.trim()
@@ -301,7 +302,7 @@ export async function handleMcpToolCall(
           (args.tier === "blocking" || args.tier === "advisory")
             ? (args.tier as Tier)
             : undefined;
-        const limit = parseOptionalInteger(args.limit, "limit");
+        const limit = parseOptionalInteger(args.limit, "limit", 1);
         const findings = await client.searchFindings({
           repo_id,
           run_id,
