@@ -343,18 +343,12 @@ export async function processMcpMessage(
   client: ProductStoreClient,
   request: JsonRpcRequest,
 ): Promise<JsonRpcResponse | null> {
-  const isNotification = request.id === undefined || request.id === null;
-
   // JSON-RPC 2.0 §4.1: If the request is a notification, the server MUST NOT reply
-  if (
-    isNotification &&
-    (request.method.startsWith("notifications/") ||
-      request.method.startsWith("$/"))
-  ) {
+  if (request.id === undefined || request.id === null) {
     return null;
   }
 
-  const id = request.id ?? null;
+  const id = request.id;
   const { method, params } = request;
 
   switch (method) {
@@ -413,9 +407,6 @@ export async function processMcpMessage(
     }
 
     default: {
-      if (isNotification) {
-        return null;
-      }
       return {
         jsonrpc: "2.0",
         id,

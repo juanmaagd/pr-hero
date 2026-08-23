@@ -3424,8 +3424,7 @@ export async function runTriageReplyCommand(input: {
               "SELECT id FROM runs WHERE repo_id = ? AND run_dir = ? LIMIT 1",
             )
             .get(repoId, runDirBasename) as { id: number } | null;
-        }
-        if (!runRow) {
+        } else {
           runRow = db
             .query("SELECT id FROM runs WHERE run_dir = ? LIMIT 1")
             .get(runDirBasename) as { id: number } | null;
