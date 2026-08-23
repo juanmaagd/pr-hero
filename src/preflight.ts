@@ -203,6 +203,7 @@ export interface ParsedCli {
     | "usage"
     | "reverts"
     | "corpus"
+    | "config"
     | "help";
   options: CliOptions;
 }
@@ -292,6 +293,15 @@ Usage:
                              checkout's origin — every review, local and
                              PR, auto-ingests into it. --all shows every
                              origin instead of just this one. Read-only, $0
+  pr-hero config [options]   Print every config key's effective value and the
+                             LAYER it came from — global (~/.prhero/config.json),
+                             repo (<repo>/.prhero/config.json), capped (the
+                             global ceiling narrowed the repo's value away) or
+                             default (neither file spoke). Names both file
+                             paths whether or not they exist. Resolves through
+                             the same merge a review does, so it cannot drift
+                             from what actually runs. Read-only — it never
+                             writes either file. $0
 
 Options:
   --repo <dir>        Repository to review (default: current directory)
@@ -489,6 +499,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "usage"
     | "reverts"
     | "corpus"
+    | "config"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -660,12 +671,13 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "gc" &&
       arg !== "usage" &&
       arg !== "reverts" &&
-      arg !== "corpus"
+      arg !== "corpus" &&
+      arg !== "config"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
-          '"ledger", "watch", "post", "triage", "gc", "usage", "reverts" ' +
-          'and "corpus")',
+          '"ledger", "watch", "post", "triage", "gc", "usage", "reverts", ' +
+          '"corpus" and "config")',
       );
     }
     command = arg;
@@ -2006,19 +2018,92 @@ function optionalString(
   return { [key]: value };
 }
 
+export interface InitTemplateInput {
+  agentsDir: string;
+  defaultBase: string;
+  // What `~/.prhero/config.json` ALREADY says, or undefined when the operator
+  // has no global file. C5 O-9: a scaffold that re-states what the global
+  // layer already supplies ships the exact duplication C5 exists to delete —
+  // §0.5 measured three byte-identical 212-byte configs on one machine.
+  global?: ConfigLayer;
+  // True when `--agents` named the prompt set on THIS init. A deliberate
+  // narrowing of O-9's letter ("does not write a person key when the global
+  // supplies it"), and D5's reasoning one command earlier: a flag is the
+  // operator typing an intent, and a flag that parses and then writes nothing
+  // is an operator believing they scaffolded a repo they did not. `PRHERO_
+  // AGENTS_DIR` gets no such exception — the merged config already beats the
+  // env var at review time (judgment ledger JD-9), so writing the env value
+  // into the repo file would silently CHANGE which prompt set runs, not
+  // preserve it.
+  agentsDirFromFlag?: boolean;
+}
+
+export interface InitTemplateOmissions {
+  agentsDir: boolean;
+  summaryEnabled: boolean;
+  summaryModel: boolean;
+  // The same three facts as config-file key names, for init's log. Derived
+  // here rather than rebuilt at the call site, because a scaffold that omits a
+  // key and a log that does not mention it is worse than either alone: the
+  // operator reads "agents_dir <path>" and never learns the file does not
+  // contain that line.
+  keys: string[];
+}
+
+// Which person/capped keys the repo scaffold LEAVES OUT, decided once and read
+// by both the template below and init's own log.
+//
+// `default_base` is NOT here and must never be: it is a `repo` key (D4),
+// `parseGlobalConfig` rejects it by name, so no global file can supply it and
+// omitting it would scaffold a repo with no base ref at all. The two array
+// keys are `repo` for the same reason. `summary.enabled` IS here even though
+// O-9's wording names only the person keys — the template hardcodes `true`,
+// which is exactly the value `capped` forbids the team file from raising over
+// a global `false` (judgment ledger JD-17), so seeding it against a global
+// that already spoke writes a line that is either dead on arrival or pure
+// duplication.
+export function initTemplateOmissions(
+  input: InitTemplateInput,
+): InitTemplateOmissions {
+  const agentsDir =
+    input.global?.agents_dir !== undefined && input.agentsDirFromFlag !== true;
+  const summaryEnabled = input.global?.summary?.enabled !== undefined;
+  const summaryModel = input.global?.summary?.model !== undefined;
+  return {
+    agentsDir,
+    summaryEnabled,
+    summaryModel,
+    keys: [
+      ...(agentsDir ? ["agents_dir"] : []),
+      ...(summaryEnabled ? ["summary.enabled"] : []),
+      ...(summaryModel ? ["summary.model"] : []),
+    ],
+  };
+}
+
 // The scaffold `pr-hero init` writes. Kept pure and next to parseLocalConfig
 // on purpose: a template its own parser would reject is a bug that only shows
 // up on someone else's machine, and a round-trip test through parseLocalConfig
 // costs nothing.
-export function initConfigTemplate(input: {
-  agentsDir: string;
-  defaultBase: string;
-}): string {
+//
+// With no global layer the bytes are exactly what they were before C5 — the
+// regression boundary, and the reason `global` is optional rather than
+// required.
+export function initConfigTemplate(input: InitTemplateInput): string {
+  const omit = initTemplateOmissions(input);
+  const summary: SummaryConfig = {
+    ...(omit.summaryEnabled ? {} : { enabled: true }),
+    ...(omit.summaryModel ? {} : { model: DEFAULT_SUMMARY_MODEL }),
+  };
   return `${JSON.stringify(
     {
-      agents_dir: input.agentsDir,
+      ...(omit.agentsDir ? {} : { agents_dir: input.agentsDir }),
+      // Always written, whatever the global file says.
       default_base: input.defaultBase,
-      summary: { enabled: true, model: DEFAULT_SUMMARY_MODEL },
+      // Dropped WHOLE when both fields hoisted: `"summary": {}` parses fine
+      // and configures nothing, which is a line whose only effect is to make
+      // the next reader wonder what it does.
+      ...(Object.keys(summary).length === 0 ? {} : { summary }),
       parity_trigger_paths: [],
       suspicion_priors: [],
     },

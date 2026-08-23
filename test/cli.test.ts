@@ -23,6 +23,7 @@ import {
   type InlinePostOutcome,
   ingestReviewMetrics,
   loadEffectiveConfig,
+  loadGlobalConfigLayer,
   originUsageScope,
   pipelineConfigInput,
   pipelineScoutInput,
@@ -3669,6 +3670,66 @@ describe("loadEffectiveConfig — the global layer", () => {
     } finally {
       await home.cleanup();
       await repo.cleanup();
+    }
+  });
+});
+
+// C5 O-9's shell half. `pr-hero init` needs the global layer WITHOUT the repo
+// file — it is writing that file — so it cannot go through
+// loadEffectiveConfig. It goes through the same helper loadEffectiveConfig
+// does instead, because a second read site for `~/.prhero/config.json` is a
+// second chance for init and review to disagree about what the global layer
+// says.
+describe("loadGlobalConfigLayer", () => {
+  test("a missing file is an ABSENT layer, not an empty one", async () => {
+    const home = await tmpHome();
+    try {
+      const loaded = await loadGlobalConfigLayer(home.home);
+      expect(loaded.layer).toBeUndefined();
+      expect(loaded.filePath).toBe(
+        path.join(home.home, ".prhero", "config.json"),
+      );
+    } finally {
+      await home.cleanup();
+    }
+  });
+
+  test("a file that exists and says {} is a layer that supplies nothing", async () => {
+    // The distinction O-6's `global_present` exists for, at the layer that
+    // produces it: `{}` is a file, and "no file" is not.
+    const home = await tmpHome("{}");
+    try {
+      expect((await loadGlobalConfigLayer(home.home)).layer).toEqual({});
+    } finally {
+      await home.cleanup();
+    }
+  });
+
+  test("a present file is parsed by the GLOBAL parser", async () => {
+    const home = await tmpHome(
+      JSON.stringify({ agents_dir: "/g/agents", summary: { enabled: false } }),
+    );
+    try {
+      expect((await loadGlobalConfigLayer(home.home)).layer).toEqual({
+        agents_dir: "/g/agents",
+        summary: { enabled: false },
+      });
+    } finally {
+      await home.cleanup();
+    }
+  });
+
+  test("a malformed global file throws, so init fails as loudly as a review", async () => {
+    // Deliberate: a scaffold written against "no global file" when there IS
+    // one, broken, would hardcode into the repo file exactly the keys the
+    // operator was about to fix.
+    const home = await tmpHome('{"default_base": "dev"}');
+    try {
+      await expect(loadGlobalConfigLayer(home.home)).rejects.toThrow(
+        "~/.prhero/config.json: default_base is a per-repo key",
+      );
+    } finally {
+      await home.cleanup();
     }
   });
 });
