@@ -31,6 +31,11 @@ import {
   type RunSummary,
   type SkillOutput,
 } from "./findings";
+// Type-only, and deliberately so: the C5 provenance block is recorded
+// verbatim, never re-derived here, so the pipeline gains a shape from
+// preflight and not a runtime dependency on it (the same seam size-gate.ts
+// already uses for NumstatFile).
+import type { ConfigSources, LocalConfig } from "./preflight";
 import {
   parseAgentFile,
   parseAgentSource,
@@ -137,6 +142,25 @@ export interface PipelineInput {
   // would trade a paid review for a provenance field.
   engine?: { name: string; version: string; revision?: string };
   promptSet?: { name: string; sha256: string };
+  // C5 D7/O-6: the effective config and, per key, which layer produced it.
+  // A global ~/.prhero/config.json is a new INVISIBLE input to every run —
+  // it can change the prompt set, the summarizer and the verification
+  // ceiling from a file that is not in the checkout at all. M6's pilot is the
+  // standing lesson: 12 runs became unpoolable because RUNTIME_PREAMBLE
+  // entered the system prompt with nothing in the artifact to discriminate
+  // the builds. A config value that changes hunter input and leaves no trace
+  // would reproduce that one layer up, against baselines that are supposed to
+  // stay re-readable at $0.
+  //
+  // Written through VERBATIM (like `engine` and `promptSet`), so the field
+  // names here are the artifact's. Optional so every pre-C5 artifact and
+  // caller stays valid; both CLI modes always pass it, which is what makes an
+  // absent block mean "this run predates C5" rather than "the CLI forgot".
+  config?: {
+    effective: LocalConfig;
+    sources: ConfigSources;
+    global_present: boolean;
+  };
   // C4 O-3.5. The run's boundary nonce, injectable so a test can pin it —
   // production NEVER passes it and lets `selectBoundaryNonce` draw one against
   // the blocks that exist at selection time. It is here rather than in
@@ -1694,6 +1718,9 @@ async function writePipelinePlan(
     // a ledger's run ordering into guesswork once already (§2.6).
     ...(input.engine === undefined ? {} : { engine: input.engine }),
     ...(input.promptSet === undefined ? {} : { prompt_set: input.promptSet }),
+    // C5 O-6. Beside the other two provenance blocks on purpose: the question
+    // "which inputs made this run what it was" has one place to look.
+    ...(input.config === undefined ? {} : { config: input.config }),
     generated_at: new Date().toISOString(),
     // The run's C4 boundary nonce, recorded so the artifact is auditable: a
     // reader holding `steps/*.system.md` and this file can verify which tags

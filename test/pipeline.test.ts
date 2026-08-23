@@ -1723,6 +1723,54 @@ describe("assembly", () => {
     expect(plan.excluded_paths).toEqual([]);
   });
 
+  // C5 O-6 / D7. A global ~/.prhero/config.json is a new invisible input to
+  // every run — it can change the prompt set, the summarizer and the
+  // verification ceiling from a file that is not in the checkout. M6's pilot
+  // is the standing lesson: 12 runs became unpoolable because a preamble
+  // entered the system prompt with nothing in the artifact to discriminate
+  // the builds. Asserted at ARTIFACT level, over a real run dir, because the
+  // artifact is the thing a $0 re-read has to be able to trust.
+  test("pipeline.json records the effective config and per-key sources", async () => {
+    const config = {
+      effective: {
+        agents_dir: "/Users/x/.prhero/sets/clean",
+        default_base: "dev",
+        parity_trigger_paths: [],
+        suspicion_priors: [],
+        summary: { enabled: false },
+        max_verification_steps: 2,
+      },
+      sources: {
+        agents_dir: "global" as const,
+        default_base: "repo" as const,
+        parity_trigger_paths: "default" as const,
+        suspicion_priors: "default" as const,
+        summary: { enabled: "capped" as const, model: "default" as const },
+        max_verification_steps: "capped" as const,
+      },
+      global_present: true,
+    };
+    const input = await makeInput({ config });
+    await runPipeline(input, { runner: new FakeStepRunner(HUNTERS_OK) });
+
+    const plan = (await readPlan(input.runDir)) as { config: typeof config };
+    // Verbatim, both halves: the values a reader would have to reproduce, and
+    // the layer each of them came from. `capped` is distinct from `global` on
+    // purpose — a re-reader has to be able to tell "a ceiling bound this" from
+    // "a global file happened to exist".
+    expect(plan.config).toEqual(config);
+  });
+
+  test("pipeline.json omits the config block when the caller has none", async () => {
+    // Optional so every pre-C5 artifact stays valid. Both CLI modes always
+    // pass it, which is what makes an absent block mean "predates C5" rather
+    // than "the CLI forgot".
+    const input = await makeInput();
+    await runPipeline(input, { runner: new FakeStepRunner(HUNTERS_OK) });
+    const plan = (await readPlan(input.runDir)) as { config?: unknown };
+    expect("config" in plan).toBe(false);
+  });
+
   test("writes pipeline.json with the resolved plan sans prompts", async () => {
     const runner = new FakeStepRunner(HUNTERS_OK);
     const input = await makeInput();

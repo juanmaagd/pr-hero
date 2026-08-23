@@ -12,7 +12,7 @@
 // the summary comment — both hit the same `issues/<pr>/comments` endpoint).
 
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -22,7 +22,9 @@ import {
   deriveEngineIdentity,
   type InlinePostOutcome,
   ingestReviewMetrics,
+  loadEffectiveConfig,
   originUsageScope,
+  pipelineConfigInput,
   pipelineScoutInput,
   pipelineSummarizerInput,
   postInlineFindings,
@@ -42,7 +44,14 @@ import {
   PR_FINDING_MARKER_PREFIX,
 } from "../src/pr-preflight";
 import type { CliOptions, SummarySettings } from "../src/preflight";
-import { CliError, CliUsageError } from "../src/preflight";
+import {
+  CliError,
+  CliUsageError,
+  DEFAULT_MAX_VERIFICATION_STEPS,
+  EMPTY_LOCAL_CONFIG,
+  resolveMaxVerificationSteps,
+  resolveSummary,
+} from "../src/preflight";
 import type { RereviewProvenance } from "../src/rereview-prepare";
 import { triageMarker } from "../src/triage";
 
@@ -3408,5 +3417,334 @@ describe("postInlineFindings — the collapse loop cannot hang (F005)", () => {
     expect(logged).toContain("resolve failed for R001");
     expect(logged).toContain("timed out after 30 ms");
     expect(logged).not.toContain("resolved: review thread for R001");
+  });
+});
+
+// C5 — loadEffectiveConfig, the two-layer read (O-5, O-8, and §0.7's two
+// branches that had zero coverage before this slice).
+//
+// Real files in real tmpdirs, because the whole point of this function is the
+// filesystem: which paths it opens, which it refuses to open, and what a
+// missing one means. A fake fs would prove the merge, which preflight.test.ts
+// already proves purely.
+// ---------------------------------------------------------------------------
+
+async function tmpHome(global?: string): Promise<{
+  home: string;
+  cleanup: () => Promise<void>;
+}> {
+  const home = await mkdtemp(path.join(tmpdir(), "pr-hero-home-"));
+  if (global !== undefined) {
+    await mkdir(path.join(home, ".prhero"), { recursive: true });
+    await Bun.write(path.join(home, ".prhero", "config.json"), global);
+  }
+  return {
+    home,
+    cleanup: () => rm(home, { recursive: true, force: true }),
+  };
+}
+
+async function tmpRoot(repoConfig?: string): Promise<{
+  root: string;
+  cleanup: () => Promise<void>;
+}> {
+  const root = await mkdtemp(path.join(tmpdir(), "pr-hero-root-"));
+  if (repoConfig !== undefined) {
+    await mkdir(path.join(root, ".prhero"), { recursive: true });
+    await Bun.write(path.join(root, ".prhero", "config.json"), repoConfig);
+  }
+  return { root, cleanup: () => rm(root, { recursive: true, force: true }) };
+}
+
+const MUSIVE_CONFIG = JSON.stringify(
+  {
+    agents_dir: "/Users/juanma/Desktop/deep-review/agents/slice3b-clean",
+    default_base: "dev",
+    parity_trigger_paths: [],
+    suspicion_priors: [],
+    summary: { enabled: false },
+  },
+  null,
+  2,
+);
+
+describe("loadEffectiveConfig — O-5, no global file resolves as today", () => {
+  test("every key resolves to exactly what the repo file said", async () => {
+    const home = await tmpHome();
+    const repo = await tmpRoot(MUSIVE_CONFIG);
+    try {
+      const loaded = await loadEffectiveConfig({
+        root: repo.root,
+        home: home.home,
+      });
+      // The §0.5 fixture, byte-for-byte what three real checkouts carry.
+      expect(loaded.effective).toEqual({
+        agents_dir: "/Users/juanma/Desktop/deep-review/agents/slice3b-clean",
+        default_base: "dev",
+        parity_trigger_paths: [],
+        suspicion_priors: [],
+        summary: { enabled: false },
+      });
+      // Table-driven over all six keys: with no global layer every one of
+      // them is the repo's or a default, and NOTHING says `global`/`capped`.
+      expect(loaded.sources).toEqual({
+        agents_dir: "repo",
+        default_base: "repo",
+        parity_trigger_paths: "repo",
+        suspicion_priors: "repo",
+        summary: { enabled: "repo", model: "default" },
+        max_verification_steps: "default",
+      });
+      expect(loaded.globalPresent).toBe(false);
+      expect(loaded.globalConfigPath).toBe(
+        path.join(home.home, ".prhero", "config.json"),
+      );
+      expect(loaded.repoConfigPath).toBe(
+        path.join(repo.root, ".prhero", "config.json"),
+      );
+      // The two resolvers that read this layer see today's answers.
+      expect(resolveSummary({}, loaded.effective)).toEqual({ enabled: false });
+      expect(resolveMaxVerificationSteps(loaded.effective)).toBe(
+        DEFAULT_MAX_VERIFICATION_STEPS,
+      );
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+
+  // §0.7: `rg EMPTY_LOCAL_CONFIG test/` returned zero hits before C5 — the
+  // fallback both read sites depended on was never exercised. It is now
+  // reached through an ABSENT layer instead of a substituted constant, and
+  // the shape the resolvers receive has to be identical either way.
+  test("no repo config resolves to the EMPTY_LOCAL_CONFIG shape", async () => {
+    const home = await tmpHome();
+    const repo = await tmpRoot();
+    try {
+      const loaded = await loadEffectiveConfig({
+        root: repo.root,
+        home: home.home,
+      });
+      expect(loaded.effective).toEqual(EMPTY_LOCAL_CONFIG);
+      // …and says so honestly: `default` for all six, never `repo` for two
+      // arrays no file ever named (O-14 at the shell layer).
+      expect(loaded.sources).toEqual({
+        agents_dir: "default",
+        default_base: "default",
+        parity_trigger_paths: "default",
+        suspicion_priors: "default",
+        summary: { enabled: "default", model: "default" },
+        max_verification_steps: "default",
+      });
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+
+  // The other §0.7 branch. An explicitly named file that is not there stays
+  // an ERROR: silently falling back to "no parity triggers" would disable a
+  // hunter the caller just asked for, and a hunter that never fires looks
+  // exactly like a hunter that found nothing.
+  test("--config pointing at a missing file throws CliError", async () => {
+    const home = await tmpHome();
+    const repo = await tmpRoot(MUSIVE_CONFIG);
+    try {
+      const missing = path.join(repo.root, "nope", "config.json");
+      const promise = loadEffectiveConfig({
+        root: repo.root,
+        home: home.home,
+        configFlag: missing,
+      });
+      await expect(promise).rejects.toThrow(CliError);
+      await expect(promise).rejects.toThrow(
+        `config file not found: ${missing}`,
+      );
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+
+  test("--config points the REPO layer elsewhere, never the global one", async () => {
+    const home = await tmpHome(JSON.stringify({ max_verification_steps: 4 }));
+    const repo = await tmpRoot(MUSIVE_CONFIG);
+    const elsewhere = await mkdtemp(path.join(tmpdir(), "pr-hero-cfg-"));
+    try {
+      const flagPath = path.join(elsewhere, "other.json");
+      await Bun.write(flagPath, JSON.stringify({ default_base: "trunk" }));
+      const loaded = await loadEffectiveConfig({
+        root: repo.root,
+        home: home.home,
+        configFlag: flagPath,
+      });
+      expect(loaded.repoConfigPath).toBe(flagPath);
+      expect(loaded.effective.default_base).toBe("trunk");
+      // The repo's own file is NOT read once --config names another.
+      expect(loaded.effective.agents_dir).toBeUndefined();
+      // Judgment ledger JD-16, named rather than fixed: --config is no longer
+      // hermetic — the machine's global layer still merges in, and there is
+      // no suppression flag. Pinned so the day someone wants one, this test
+      // is the thing that has to change on purpose.
+      expect(loaded.effective.max_verification_steps).toBe(4);
+      expect(loaded.sources.max_verification_steps).toBe("global");
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+      await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadEffectiveConfig — the global layer", () => {
+  test("a quiet repo inherits the person's file", async () => {
+    const home = await tmpHome(
+      JSON.stringify({
+        agents_dir: "/Users/x/sets/clean",
+        summary: { enabled: false, model: "haiku" },
+        max_verification_steps: 3,
+      }),
+    );
+    const repo = await tmpRoot();
+    try {
+      const loaded = await loadEffectiveConfig({
+        root: repo.root,
+        home: home.home,
+      });
+      expect(loaded.globalPresent).toBe(true);
+      expect(loaded.effective.agents_dir).toBe("/Users/x/sets/clean");
+      expect(loaded.sources.agents_dir).toBe("global");
+      expect(loaded.sources.summary.model).toBe("global");
+      expect(loaded.sources.max_verification_steps).toBe("global");
+      // A `repo` key stays absent: the global file cannot even carry one.
+      expect(loaded.effective.default_base).toBeUndefined();
+      expect(loaded.sources.default_base).toBe("default");
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+
+  test("the cap binds through the shell, not just through the merge", async () => {
+    const home = await tmpHome(
+      JSON.stringify({
+        summary: { enabled: false },
+        max_verification_steps: 2,
+      }),
+    );
+    const repo = await tmpRoot(
+      JSON.stringify({
+        summary: { enabled: true },
+        max_verification_steps: 8,
+      }),
+    );
+    try {
+      const loaded = await loadEffectiveConfig({
+        root: repo.root,
+        home: home.home,
+      });
+      expect(loaded.effective.summary?.enabled).toBe(false);
+      expect(loaded.sources.summary.enabled).toBe("capped");
+      expect(loaded.effective.max_verification_steps).toBe(2);
+      expect(loaded.sources.max_verification_steps).toBe("capped");
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+
+  // Judgment ledger JD-11: after C5 the global file is read on EVERY review in
+  // both modes, so one bad global file fails every repo on the machine. The
+  // message has to name the file it is actually in, or the operator edits the
+  // repo's config looking for a typo that is not there.
+  test("a malformed global file names the global file", async () => {
+    const home = await tmpHome('{"parity_trigger_paths": []}');
+    const repo = await tmpRoot(MUSIVE_CONFIG);
+    try {
+      await expect(
+        loadEffectiveConfig({ root: repo.root, home: home.home }),
+      ).rejects.toThrow(
+        "~/.prhero/config.json: parity_trigger_paths is a per-repo key",
+      );
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+});
+
+// O-8. The offline half of the boundary: loadEffectiveConfig opens
+// `<root>/.prhero/config.json` and nothing else, so a config.json sitting in
+// the PR's head worktree is never even a candidate. reviewPr passes
+// `root: operatorRoot` (src/cli.ts, step 1) and the worktree does not exist
+// yet at that point — that wiring is what makes this test the whole story.
+describe("loadEffectiveConfig — O-8, the worktree is never read", () => {
+  test("a decoy config.json inside the head worktree is ignored", async () => {
+    const home = await tmpHome();
+    const operator = await tmpRoot(
+      JSON.stringify({ agents_dir: "/operator/set", default_base: "dev" }),
+    );
+    try {
+      // The reviewed PR's tree, as a sibling the way ~/.prhero/repos/<id>/
+      // worktrees actually live — with a config the PR author committed.
+      const worktree = path.join(operator.root, "..", "pr-hero-decoy-worktree");
+      await mkdir(path.join(worktree, ".prhero"), { recursive: true });
+      await Bun.write(
+        path.join(worktree, ".prhero", "config.json"),
+        JSON.stringify({
+          agents_dir: "/attacker/set",
+          default_base: "attacker-branch",
+        }),
+      );
+      try {
+        const loaded = await loadEffectiveConfig({
+          root: operator.root,
+          home: home.home,
+        });
+        expect(loaded.effective.agents_dir).toBe("/operator/set");
+        expect(loaded.effective.default_base).toBe("dev");
+        expect(loaded.repoConfigPath.startsWith(operator.root)).toBe(true);
+        expect(loaded.repoConfigPath).not.toContain("decoy-worktree");
+      } finally {
+        await rm(worktree, { recursive: true, force: true });
+      }
+    } finally {
+      await home.cleanup();
+      await operator.cleanup();
+    }
+  });
+});
+
+// O-6's caller half: the block the CLI hands the pipeline. The artifact-level
+// assertion lives in test/pipeline.test.ts, where the run harness is.
+describe("pipelineConfigInput — O-6", () => {
+  test("carries the effective config, the sources and global_present", () => {
+    const loaded = {
+      effective: { ...EMPTY_LOCAL_CONFIG, agents_dir: "/set" },
+      sources: {
+        agents_dir: "global" as const,
+        default_base: "default" as const,
+        parity_trigger_paths: "default" as const,
+        suspicion_priors: "default" as const,
+        summary: { enabled: "default" as const, model: "default" as const },
+        max_verification_steps: "default" as const,
+      },
+      repoConfigPath: "/repo/.prhero/config.json",
+      globalConfigPath: "/home/.prhero/config.json",
+      globalPresent: true,
+    };
+    expect(pipelineConfigInput(loaded)).toEqual({
+      config: {
+        effective: loaded.effective,
+        sources: loaded.sources,
+        global_present: true,
+      },
+    });
+    // Unconditional, unlike its summarizer/scout neighbours: an absent block
+    // has to mean "predates C5", never "the CLI forgot".
+    expect(
+      pipelineConfigInput({ ...loaded, globalPresent: false }).config
+        .global_present,
+    ).toBe(false);
   });
 });
