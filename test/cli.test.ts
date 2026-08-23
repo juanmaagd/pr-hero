@@ -2312,6 +2312,206 @@ describe("runPostCommand — post --from carries the re-review (F008)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The vanished prior summary on the path that has ALREADY PAID: `--pr --post`.
+//
+// Every guard test in the F008 suite above drives `runPostCommand`, and that
+// is exactly how the vanished-summary guard stayed structurally dead on the
+// primary path for a whole slice: it hung off `requireRereviewOnPriorSummary`,
+// a flag only `post --from` sets. These drive `postInlineIfEligible` — what
+// reviewPr's step 14 actually calls — because a defect on one path is
+// invisible to every test of the other.
+//
+// The window is real: the PR's comments are read in phase B, the pipeline then
+// runs 8-25 minutes, and the summary this re-review was computed against can
+// be deleted inside it. The two callers meet that state having paid very
+// different prices, so the answers differ on purpose: `post --from` refuses
+// (free to re-run), `--pr --post` publishes the findings with the re-review
+// framing dropped and says so in the log.
+// ---------------------------------------------------------------------------
+
+describe("postInlineIfEligible — a vanished prior summary degrades, never refuses", () => {
+  const PRIOR_CLAIM = "the prior finding, still live and still unfixed";
+
+  function liveRereview(
+    over: Partial<RereviewProvenance> = {},
+  ): RereviewProvenance {
+    return {
+      case: "C",
+      last_reviewed_head: OLD_HEAD,
+      last_head_source: "summary_marker",
+      discovery_range: `${OLD_HEAD}..${HEAD}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 1,
+      settled_deterministically: 0,
+      verified: 0,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 0,
+        overlap: 0,
+        verify_all: 0,
+      },
+      // Non-empty on purpose: an empty `live[]` renders no `Still live:`
+      // section even when the framing survives, so the absence assertion
+      // below would pass against the defect and prove nothing.
+      live: [
+        {
+          id: "R001",
+          sev: "CRITICAL",
+          tier: "blocking",
+          channel: "inline",
+          status: "carried",
+          locs: ["src/a.ts:10"],
+          c: claimFingerprint(PRIOR_CLAIM),
+          claim: PRIOR_CLAIM,
+        },
+      ],
+      resolved_verified: 0,
+      resolved_ids: [],
+      returned: 0,
+      re_tiered: 0,
+      ...over,
+    };
+  }
+
+  function prPostInput(spawnFn: typeof Bun.spawn) {
+    return {
+      sessionFailed: false,
+      skippedReason: "unreachable",
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({
+        findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+      }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+      rereview: liveRereview(),
+      rereviewPriors: [],
+    };
+  }
+
+  // Same stderr capture the F005 collapse suite uses: `log` writes there, and
+  // the disclosure is half of what this fix is — a silent downgrade would be
+  // the same class of defect as the dead guard it replaces.
+  async function capturingLog<T>(
+    fn: () => Promise<T>,
+  ): Promise<{ result: T; logged: string }> {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      return { result: await fn(), logged: chunks.join("") };
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  }
+
+  function lastSummaryBody(calls: RecordedCall[]): string {
+    const bodies = summaryStdins(calls);
+    return bodies[bodies.length - 1] ?? "";
+  }
+
+  test("the summary vanished mid-run: the findings post, the framing does not", async () => {
+    const { spawnFn, calls } = makeFakeGh(emptyCommentScript(HEAD));
+    const { result: outcome, logged } = await capturingLog(() =>
+      postInlineIfEligible(prPostInput(spawnFn)),
+    );
+
+    // The whole point of the asymmetry: a review that cost $2.49-$6.34 is
+    // published, not thrown away over a framing that went stale.
+    expect(outcome).not.toBeNull();
+    expect(outcome?.reviewFindingCount).toBe(1);
+    expect(outcome?.droppedFindingIds).toEqual([]);
+
+    const body = lastSummaryBody(calls);
+    // All three re-review surfaces, gone. NOT asserted via "Δ since": with
+    // no summary on the PR `previousHeadSha` is undefined either way, so the
+    // delta line reads a bare "Δ:" even on the defect — an assertion that
+    // would pass against the bug and prove nothing.
+    expect(body).not.toContain("Still live:");
+    expect(body).not.toContain("<!-- pr-hero-state ");
+    expect(body).not.toContain("unconfirmed");
+    expect(body).not.toContain("carried");
+    expect(body).not.toContain("R001");
+    // And what it renders instead is exactly the first-review shape, which is
+    // what this run now IS: the review it was a re-review OF is not there.
+    expect(body).toContain("Δ: 0 resolved · 1 new · 0 persist");
+    // post.json must describe the comment that was published, not the one the
+    // stale block said it would be.
+    expect(outcome?.delta).toEqual({ resolved: 0, new: 1, persist: 0 });
+
+    // Loud. An operator who expected a delta must be able to read WHY off the
+    // log rather than suspect the re-review silently broke.
+    expect(logged).toContain(
+      "the pr-hero summary comment this re-review was computed against is gone",
+    );
+    expect(logged).toContain("drops the re-review framing");
+    expect(logged).toContain("review --pr 42 --post");
+  });
+
+  test("`post --from` meets the same state and still refuses — the asymmetry is deliberate", async () => {
+    // The regression guard on the split. `runPostCommand`'s own coverage sits
+    // in the F008 suite above (live and --dry-run); this pins it at the seam,
+    // one flag away from the degrade path, so the two answers stay visibly
+    // different rather than drifting into one.
+    const { spawnFn, calls } = makeFakeGh(emptyCommentScript(HEAD));
+    const { sessionFailed, skippedReason, ...postInput } = prPostInput(spawnFn);
+    expect(sessionFailed).toBe(false);
+    expect(skippedReason).toBe("unreachable");
+    await expect(
+      postInlineFindings({
+        ...postInput,
+        refuseOnVanishedPriorSummary: true,
+      }),
+    ).rejects.toThrow(/no longer carries a pr-hero summary comment/);
+    // Refused before any write, exactly as `post --from` always has.
+    expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+  });
+
+  test("the summary is still there: delta, live list and state block untouched", async () => {
+    // The control. The degrade must fire on a VANISHED summary and nothing
+    // else — a fix that drops the framing whenever a `rereview` block is
+    // present would pass the first test and destroy the feature.
+    const { spawnFn, calls } = makeFakeGh([
+      headRefOidScript(HEAD),
+      {
+        match: ["issues/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 200,
+              user: "pr-hero",
+              body: `<!-- pr-hero-report head=${OLD_HEAD} -->\n## pr-hero review`,
+              updated_at: "2026-08-20T00:00:00Z",
+            },
+          ]),
+        },
+      },
+      { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
+    ]);
+    const { result: outcome, logged } = await capturingLog(() =>
+      postInlineIfEligible(prPostInput(spawnFn)),
+    );
+    expect(outcome).not.toBeNull();
+    const body = lastSummaryBody(calls);
+    expect(body).toContain(`Δ since \`${OLD_HEAD.slice(0, 8)}\``);
+    expect(body).toContain("0 unconfirmed · 1 carried · 0 deferred · 1 new");
+    expect(body).toContain("Still live:");
+    expect(body).toContain(PRIOR_CLAIM);
+    expect(body).toContain(`<!-- pr-hero-state v=1 head=${HEAD} -->`);
+    expect(logged).not.toContain("drops the re-review framing");
+  });
+});
+
 // runTriageCommand — ROADMAP B6c. BINDING rules are proven once in
 // test/triage-write.test.ts; this only proves the WIRING (same real-dir +
 // fake-gh split as runPostCommand's suite).

@@ -2069,6 +2069,25 @@ function vanishedPriorSummaryMessage(pr: number): string {
   );
 }
 
+// The `--pr --post` half of the same state (see the guard's WHY below): that
+// caller does not refuse, it drops the re-review framing and says so. Loud on
+// purpose — an operator who sees a first-review comment where a delta was
+// expected must be able to read WHY off the run log instead of suspecting the
+// re-review silently broke. A silent downgrade would be the same class of
+// defect as a guard that never fires.
+function vanishedPriorSummaryDegradedMessage(pr: number): string {
+  return (
+    "warning: the pr-hero summary comment this re-review was computed " +
+    `against is gone from PR #${pr} — deleted, or never re-findable, while ` +
+    "the review ran. Its `live[]` rows and `R###` ids name review threads " +
+    "the PR has no record of, so this post drops the re-review framing: no " +
+    "`Δ since` delta, no `Still live:` list and no state block. The findings " +
+    "themselves are published, as the first review of what the PR carries " +
+    `now. Re-run \`pr-hero review --pr ${pr} --post\` if you want a full ` +
+    "re-review against the PR's current state."
+  );
+}
+
 export async function postInlineFindings(input: {
   operatorRoot: string;
   pr: number;
@@ -2095,23 +2114,104 @@ export async function postInlineFindings(input: {
   // enforce the precondition and refuse before any write.
   //
   // A flag rather than an unconditional invariant, for two reasons that are
-  // not stylistic. The `--pr --post` path computes its own case from the same
-  // comments and reaches `rereview === undefined` only in case A (no summary
-  // head AND no finding markers), so the check is structurally dead there —
-  // except in one race, a summary created by a concurrent run between this
-  // run's phase-B fetch and this one, where aborting a review that has
-  // already been paid for would be the wrong direction of error. And the
-  // existing postInlineFindings suites script prior summaries with no block
-  // on purpose; the flag keeps this a `post --from` rule, not a rewrite of
-  // what a first-review post means.
+  // not stylistic — and BOTH of them are about this direction only, a
+  // `rereview` block that is ABSENT. The `--pr --post` path computes its own
+  // case from the same comments and reaches `rereview === undefined` only in
+  // case A (no summary head AND no finding markers), so the check is
+  // structurally dead there — except in one race, a summary created by a
+  // concurrent run between this run's phase-B fetch and this one, where
+  // aborting a review that has already been paid for would be the wrong
+  // direction of error. And the existing postInlineFindings suites script
+  // prior summaries with no block on purpose; the flag keeps this a
+  // `post --from` rule, not a rewrite of what a first-review post means.
+  //
+  // Neither reason survives the trip to the OPPOSITE direction — a `rereview`
+  // block whose summary has vanished — which is why that case carries its own
+  // flag below instead of riding on this one. Gating it here is precisely
+  // what left it structurally dead on `--pr --post`, the primary path.
   requireRereviewOnPriorSummary?: boolean;
+  // Also set ONLY by `post --from` (`runPostCommand`), and deliberately NOT
+  // the mirror of the flag above: unset, the vanished-summary case degrades
+  // rather than passing. The two callers meet the same state having paid very
+  // different prices for it — see the guard's own WHY below.
+  refuseOnVanishedPriorSummary?: boolean;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
   const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
+  const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
+    await resolveInlinePostPlan(input);
+
+  // Before the create-first POST and before the review submission — the last
+  // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
+  // on `previousHeadSha`: a summary whose `head=` will not parse is still a
+  // prior review, and rendering the matcher delta over it is still the lie.
+  if (
+    input.requireRereviewOnPriorSummary === true &&
+    input.rereview === undefined &&
+    existingSummaryId !== null
+  ) {
+    throw new CliError(missingRereviewBlockMessage(pr, existingSummaryId));
+  }
+
+  // The mirror STATE, at the same point — and deliberately NOT the mirror
+  // ANSWER. The run dir CAN carry a valid `rereview` block while the summary
+  // it was computed against is gone from the PR: deleted mid-run (the window
+  // is real — the comments are read in phase B, the pipeline then runs 8-25
+  // minutes), or `post --from` run long after `review`, which this seam
+  // deliberately allows. Then `existingSummaryId === null` falls into the
+  // create-first branch below and, left alone, `renderBody`/`overlayDelta`
+  // publish a BRAND NEW comment full of re-review vocabulary sourced from a
+  // stale directory: a delta counted in `unconfirmed`/`carried`, a `Still
+  // live:` list of `R###` ids, a state block — none of it naming a thread
+  // that exists.
+  //
+  // The two callers meet that state having paid very different prices, so
+  // they answer it differently ON PURPOSE. Only `post --from` sets
+  // `refuseOnVanishedPriorSummary`:
+  //   - `post --from` REFUSES. Nothing has been spent; the operator re-runs
+  //     `review --pr <n> --post` and gets a correct result for free.
+  //   - `--pr --post` has ALREADY paid for a full review ($2.49-$6.34 on this
+  //     repo). Throwing that away to avoid a stale framing is the wrong
+  //     direction of error — the very rule the flag above cites. So it posts,
+  //     with the re-review framing DROPPED (`framing` below): no delta
+  //     overlay, no `Still live:`, no state block. That is not a downgrade of
+  //     the findings, it is an accurate description of what the run now is —
+  //     the review this one was a re-review OF is no longer on the PR, so
+  //     what remains is a first review of the current state, and the findings
+  //     are as valid as they were a minute ago. The degradation is LOGGED,
+  //     never silent: a quiet downgrade would be the same class of defect as
+  //     a guard that never fires, which is exactly what this one was while it
+  //     hung off `requireRereviewOnPriorSummary`.
+  //
+  // Narrowed to `summary_marker` on purpose: a block whose L came from
+  // `finding_markers` was ALREADY computed with no summary in sight, so a
+  // missing summary at post time is agreement, not drift — and its R### ids
+  // name finding threads that do still exist. Refusing OR degrading there
+  // would break obligation S-A ("with the summary comment absent, L is
+  // recovered from per-finding markers and the run does NOT fall to
+  // first-review semantics"), which is a case the design supports rather
+  // than a hazard.
+  const priorSummaryVanished =
+    input.rereview?.last_head_source === "summary_marker" &&
+    existingSummaryId === null;
+  if (priorSummaryVanished && input.refuseOnVanishedPriorSummary === true) {
+    throw new CliError(vanishedPriorSummaryMessage(pr));
+  }
+  if (priorSummaryVanished) log(vanishedPriorSummaryDegradedMessage(pr));
+
+  // Every re-review-framed surface reads off THIS, never `input.rereview`
+  // directly — the delta overlay, the `Still live:` list it carries, and the
+  // state block appended after the report marker. The collapse loop at the
+  // bottom deliberately does NOT: a verified-gone prior's ✅ reply and thread
+  // resolve are bound to per-finding REVIEW threads, which the summary
+  // comment's disappearance says nothing about, and `--pr --post` binds them
+  // through priors it is still holding in memory. Suppressing those would
+  // leave a thread that IS gone sitting open on the PR.
+  const framing = priorSummaryVanished ? undefined : input.rereview;
   const rereviewDelta =
-    input.rereview === undefined
+    framing === undefined
       ? undefined
-      : rereviewDeltaFromProvenance(input.rereview, doc.findings.length);
+      : rereviewDeltaFromProvenance(framing, doc.findings.length);
   const overlayDelta = (delta: PrCommentDelta): PrCommentDelta =>
     rereviewDelta === undefined ? delta : { ...delta, rereview: rereviewDelta };
   const renderBody = (
@@ -2128,51 +2228,9 @@ export async function postInlineFindings(input: {
       moved,
       urls,
     );
-    if (input.rereview === undefined) return body;
-    return `${body}${renderStateBlock(doc.head_sha, input.rereview.live)}`;
+    if (framing === undefined) return body;
+    return `${body}${renderStateBlock(doc.head_sha, framing.live)}`;
   };
-  const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
-    await resolveInlinePostPlan(input);
-
-  // Before the create-first POST and before the review submission — the last
-  // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
-  // on `previousHeadSha`: a summary whose `head=` will not parse is still a
-  // prior review, and rendering the matcher delta over it is still the lie.
-  if (
-    input.requireRereviewOnPriorSummary === true &&
-    input.rereview === undefined &&
-    existingSummaryId !== null
-  ) {
-    throw new CliError(missingRereviewBlockMessage(pr, existingSummaryId));
-  }
-
-  // The mirror, at the same point and for the same reason. The precondition
-  // above is a one-way check only by accident of which direction was observed
-  // live: the run dir CAN carry a valid `rereview` block while the summary it
-  // was computed against is gone from the PR — deleted, or `post --from` run
-  // long after `review`, which this seam deliberately allows. Then
-  // `existingSummaryId === null` falls into the create-first branch below and
-  // `renderBody`/`overlayDelta` publish a BRAND NEW comment full of
-  // re-review vocabulary sourced from a stale directory: a `Δ since <L>`, a
-  // `Still live:` list of `R###` ids, a state block — none of it naming a
-  // thread that exists. Same house rule as above, and refusing is the only
-  // honest answer here: `live[]`, `resolved_ids` and the `R###` numbering all
-  // describe threads that are gone, so there is nothing left to reconcile
-  // against.
-  // Narrowed to `summary_marker` on purpose: a block whose L came from
-  // `finding_markers` was ALREADY computed with no summary in sight, so a
-  // missing summary at post time is agreement, not drift — and its R### ids
-  // name finding threads that do still exist. Refusing there would break
-  // obligation S-A ("with the summary comment absent, L is recovered from
-  // per-finding markers and the run does NOT fall to first-review
-  // semantics"), which is a case the design supports rather than a hazard.
-  if (
-    input.requireRereviewOnPriorSummary === true &&
-    input.rereview?.last_head_source === "summary_marker" &&
-    existingSummaryId === null
-  ) {
-    throw new CliError(vanishedPriorSummaryMessage(pr));
-  }
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
   const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
@@ -2470,6 +2528,12 @@ async function buildCommentUrlMap(input: {
 // the single decision point for BOTH callers on whether to invoke
 // postInlineFindings at all. `null` means "skipped, nothing was posted, zero
 // HTTP calls were made" — the exact shape the spec's scenario asserts.
+//
+// Neither `requireRereviewOnPriorSummary` nor `refuseOnVanishedPriorSummary`
+// is declared here, and that absence is the contract, not an oversight: this
+// is the `--pr --post` entry point, the one that has already paid for a full
+// review, and both flags exist to make `post --from` refuse where refusing is
+// free. See their WHYs on postInlineFindings.
 export async function postInlineIfEligible(input: {
   sessionFailed: boolean;
   skippedReason: string;
@@ -2778,6 +2842,7 @@ export async function runPostCommand(input: {
     spawnFn,
     ...(rereview === undefined ? {} : { rereview, rereviewPriors: [] }),
     requireRereviewOnPriorSummary: true,
+    refuseOnVanishedPriorSummary: true,
   });
   await writePostReceipt(runDir, prNumber, doc.head_sha, outcome);
   log(
@@ -2799,6 +2864,12 @@ export async function runPostCommand(input: {
   // it does not have, and passes `requireRereviewOnPriorSummary` so a missing
   // block on a PR that already has a summary cannot be published as a first
   // review. Equivalence here is enforced, never assumed.
+  //
+  // `refuseOnVanishedPriorSummary` is the other half of that, and it is where
+  // the two paths are enforced UNEQUAL: a re-review whose summary has
+  // vanished costs this caller nothing to refuse (re-run `review --pr <n>
+  // --post` and the answer is correct), while refusing it on `--pr --post`
+  // would discard a review already paid for. Set here, unset there.
   if (outcome.movedHeadSha) {
     log(
       `warning: the PR head moved while the review ran — reviewed ` +
