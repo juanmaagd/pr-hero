@@ -4,7 +4,7 @@
 //
 // Pure and testable offline: no network, no database handles, no filesystem.
 
-import type { HopTrailStep, Tier } from "./findings";
+import type { HopTrail, Tier } from "./findings";
 import type {
   CanonicalFindingRow,
   CanonicalRunRow,
@@ -62,7 +62,7 @@ export interface SearchQueryParams {
 
 export interface FindingDetail extends CanonicalFindingRow {
   proof_refs: string[];
-  hop_trail: HopTrailStep[];
+  hop_trail: HopTrail;
   run_dir: string;
   repo_id: string;
 }

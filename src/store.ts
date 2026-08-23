@@ -14,6 +14,7 @@ import {
   type DebugRefutedFinding,
   type Finding,
   type FindingsDocument,
+  type HopTrail,
   type HopTrailStep,
   type IndexMode,
   type RunSummary,
@@ -211,14 +212,25 @@ export function saveRunTransaction(
       });
 
       item.hopTrail.forEach((hop, hopIndex) => {
-        insertHopTrail.run(
-          findingDbId,
-          hopIndex,
-          hop.step,
-          hop.kind,
-          hop.query,
-          hop.reached,
-        );
+        if (typeof hop === "string") {
+          insertHopTrail.run(
+            findingDbId,
+            hopIndex,
+            hopIndex + 1,
+            "trace",
+            hop,
+            null,
+          );
+        } else {
+          insertHopTrail.run(
+            findingDbId,
+            hopIndex,
+            hop.step ?? hopIndex + 1,
+            hop.kind ?? "trace",
+            hop.query ?? "",
+            hop.reached ?? null,
+          );
+        }
       });
     }
 
@@ -351,15 +363,21 @@ export function exportFindingsDocument(
       step_num: number;
       kind: string;
       query: string;
-      reached: string;
+      reached: string | null;
     }[];
 
-    const hop_trail: HopTrailStep[] = hopTrailRows.map((h) => ({
-      step: h.step_num,
-      kind: h.kind,
-      query: h.query,
-      reached: h.reached,
-    }));
+    const hop_trail: HopTrail =
+      hopTrailRows.length > 0 &&
+      hopTrailRows.every(
+        (h) => h.kind === "trace" && (h.reached === null || h.reached === ""),
+      )
+        ? hopTrailRows.map((h) => h.query)
+        : hopTrailRows.map((h) => ({
+            step: h.step_num,
+            kind: h.kind,
+            query: h.query,
+            reached: h.reached ?? "",
+          }));
 
     findings.push({
       id: f.finding_id,

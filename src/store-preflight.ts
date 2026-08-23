@@ -9,6 +9,7 @@ import type {
   CausalDisposition,
   EvidenceClass,
   FindingsDocument,
+  HopTrail,
   HopTrailStep,
   Hunter,
   IndexMode,
@@ -108,7 +109,7 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     step_num INTEGER NOT NULL,
     kind TEXT NOT NULL,
     query TEXT NOT NULL,
-    reached TEXT NOT NULL,
+    reached TEXT NULL,
     UNIQUE (finding_id, step_order)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_finding_hop_trail_fid ON finding_hop_trail (finding_id)`,
@@ -299,7 +300,7 @@ export interface ComparisonRowProjection {
 export interface ProjectedFinding {
   finding: CanonicalFindingRow;
   proofRefs: string[];
-  hopTrail: HopTrailStep[];
+  hopTrail: HopTrail;
 }
 
 export interface ProjectedCompleteRun {

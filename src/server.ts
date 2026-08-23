@@ -5,7 +5,7 @@
 
 import type { Database } from "bun:sqlite";
 import { unlinkSync } from "node:fs";
-import type { HopTrailStep } from "./findings";
+import type { HopTrail } from "./findings";
 import {
   type FindingDetail,
   type HealthResponse,
@@ -228,15 +228,23 @@ export function startProductStoreServer(
               step_num: number;
               kind: string;
               query: string;
-              reached: string;
+              reached: string | null;
             }[];
 
-            const hop_trail: HopTrailStep[] = hopTrailRows.map((h) => ({
-              step: h.step_num,
-              kind: h.kind,
-              query: h.query,
-              reached: h.reached,
-            }));
+            const hop_trail: HopTrail =
+              hopTrailRows.length > 0 &&
+              hopTrailRows.every(
+                (h) =>
+                  h.kind === "trace" &&
+                  (h.reached === null || h.reached === ""),
+              )
+                ? hopTrailRows.map((h) => h.query)
+                : hopTrailRows.map((h) => ({
+                    step: h.step_num,
+                    kind: h.kind,
+                    query: h.query,
+                    reached: h.reached ?? "",
+                  }));
 
             findings.push({
               ...row,
