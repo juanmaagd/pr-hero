@@ -292,6 +292,14 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // "since <sha>" clause rather than omitting the line: spec's own "First-ever
 // run" scenario requires `0 resolved · K new · 0 persist` to be visible, not
 // silent, on the first post.
+export interface RereviewLiveRow {
+  id: string;
+  sev: Severity;
+  status: string;
+  locs: readonly string[];
+  claim: string;
+}
+
 export interface RereviewDelta {
   verifiedGone: number;
   unconfirmed: number;
@@ -301,6 +309,14 @@ export interface RereviewDelta {
   suppressed: number;
   returned: number;
   reTiered: number;
+  live?: readonly RereviewLiveRow[];
+  capped?: number;
+  case?: string;
+  worsened?: readonly {
+    priorId: string;
+    priorSev: Severity;
+    discoverySev: Severity;
+  }[];
 }
 
 export interface PrCommentDelta {
@@ -316,10 +332,23 @@ export interface PrCommentDelta {
 
 export function rereviewDeltaFromProvenance(
   rereview: {
-    live: readonly { status: string }[];
+    case?: string;
+    live: readonly {
+      id?: string;
+      sev?: string;
+      status: string;
+      locs?: readonly string[];
+      claim?: string;
+    }[];
     resolved_verified?: number;
+    verification_capped?: number;
     returned?: number;
     re_tiered?: number;
+    worsened?: readonly {
+      priorId: string;
+      priorSev: Severity;
+      discoverySev: Severity;
+    }[];
   },
   newFindings: number,
 ): RereviewDelta {
@@ -334,6 +363,16 @@ export function rereviewDeltaFromProvenance(
     suppressed: count("suppressed"),
     returned: rereview.returned ?? 0,
     reTiered: rereview.re_tiered ?? 0,
+    live: rereview.live.map((row) => ({
+      id: row.id ?? "",
+      sev: (row.sev as Severity) ?? "WARNING",
+      status: row.status,
+      locs: row.locs ?? [],
+      claim: row.claim ?? "",
+    })),
+    capped: rereview.verification_capped ?? 0,
+    ...(rereview.case === undefined ? {} : { case: rereview.case }),
+    ...(rereview.worsened === undefined ? {} : { worsened: rereview.worsened }),
   };
 }
 
@@ -519,10 +558,16 @@ export function renderPrComment(
   // SUGGESTION is deliberately excluded from the headline, mirroring the
   // two-bucket 🔴/🟡 shape Juanma specified — a SUGGESTION still appears in
   // the index below, just not double-counted in the headline.
-  const critical = doc.findings.filter(
-    (f) => f.severity === "BLOCKER" || f.severity === "CRITICAL",
+  const liveRows = delta?.rereview?.live ?? [];
+  const liveForHeadline = liveRows.filter((row) => row.status !== "suppressed");
+  const headlineSev = [
+    ...doc.findings.map((f) => f.severity),
+    ...liveForHeadline.map((row) => row.sev),
+  ];
+  const critical = headlineSev.filter(
+    (sev) => sev === "BLOCKER" || sev === "CRITICAL",
   ).length;
-  const warning = doc.findings.filter((f) => f.severity === "WARNING").length;
+  const warning = headlineSev.filter((sev) => sev === "WARNING").length;
   const headSha8 = code(doc.head_sha.slice(0, 8));
   const headRef =
     webUrl === undefined
@@ -559,6 +604,21 @@ export function renderPrComment(
     );
     out.push("");
     out.push(movedHeadSentence(doc.head_sha, movedHeadSha, code));
+    out.push("");
+  }
+  if (delta?.rereview?.case === "D") {
+    out.push(
+      "⚠️ **Last reviewed head is not an ancestor of this head.** " +
+        "Reviewing the full PR range (force-push / rebase / amend).",
+    );
+    out.push("");
+  }
+  if ((delta?.rereview?.capped ?? 0) > 0) {
+    out.push(
+      `⚠️ **${delta?.rereview?.capped} prior finding(s) unconfirmed:** ` +
+        "verification cap (`max_verification_steps`) bound this run; " +
+        "`--yes` does not bypass it.",
+    );
     out.push("");
   }
   // GitHub #42. The defect: a run where SOME agents died and the survivors
@@ -619,6 +679,7 @@ export function renderPrComment(
     out.push(...findingIndexLines(doc.findings, commentUrlByFindingId));
     out.push("");
   }
+  out.push(...liveFindingLines(delta?.rereview));
   if (outsideDiffFindings.length > 0) {
     out.push(...outsideDiffSection(outsideDiffFindings, doc.head_sha, webUrl));
     out.push("");
@@ -646,6 +707,39 @@ export function renderPrComment(
       "not a merge gate: every line above is a claim to verify.</sub>",
   );
   return `${out.join("\n").trimEnd()}\n`;
+}
+
+function liveFindingLines(rereview: RereviewDelta | undefined): string[] {
+  if (rereview === undefined) return [];
+  const out: string[] = [];
+  if (rereview.worsened !== undefined && rereview.worsened.length > 0) {
+    for (const hit of rereview.worsened) {
+      out.push(
+        `returned ${hit.priorId}: ${hit.priorSev} → ${hit.discoverySev}`,
+      );
+    }
+    out.push("");
+  }
+  const listed = (rereview.live ?? []).filter(
+    (row) => row.status !== "suppressed",
+  );
+  if (listed.length > 0) {
+    out.push("Still live:");
+    for (const row of listed) {
+      const loc = row.locs[0] ?? row.id;
+      out.push(
+        `- \`${row.status}\` ${severityEmoji(row.sev)} \`${loc}\` — ${leadIn(row.claim)} (${row.id})`,
+      );
+    }
+    out.push("");
+  }
+  if (rereview.suppressed > 0) {
+    out.push(
+      `${rereview.suppressed} finding${rereview.suppressed === 1 ? "" : "s"} suppressed.`,
+    );
+    out.push("");
+  }
+  return out;
 }
 
 function rereviewIsClean(rereview: RereviewDelta | undefined): boolean {

@@ -224,6 +224,7 @@ describe("assembleLive", () => {
       verifyVerdicts: new Map([["R001", "verified-gone"]]),
     });
     expect(assembled.verifiedGone).toBe(1);
+    expect(assembled.verifiedGoneIds).toEqual(["R001"]);
     expect(assembled.live.map((row) => `${row.id}:${row.status}`)).toEqual([
       "R002:unconfirmed",
     ]);

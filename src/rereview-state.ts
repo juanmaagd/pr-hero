@@ -287,12 +287,13 @@ export function assembleLive(input: {
 }): {
   live: LiveFinding[];
   verifiedGone: number;
+  verifiedGoneIds: string[];
   returned: number;
   reTiered: number;
 } {
   const priorById = new Map(input.priors.map((prior) => [prior.id, prior]));
   const live: LiveFinding[] = [];
-  let verifiedGone = 0;
+  const verifiedGoneIds: string[] = [];
   let returned = 0;
   let reTiered = 0;
   for (const row of input.settled) {
@@ -301,7 +302,7 @@ export function assembleLive(input: {
       status = input.verifyVerdicts.get(row.id) ?? "unconfirmed";
     }
     if (status === "verified-gone") {
-      verifiedGone++;
+      verifiedGoneIds.push(row.id);
       continue;
     }
     if (status === "returned") {
@@ -326,5 +327,11 @@ export function assembleLive(input: {
       status,
     });
   }
-  return { live, verifiedGone, returned, reTiered };
+  return {
+    live,
+    verifiedGone: verifiedGoneIds.length,
+    verifiedGoneIds,
+    returned,
+    reTiered,
+  };
 }

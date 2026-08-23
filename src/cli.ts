@@ -43,6 +43,7 @@ import {
 } from "./home-preflight";
 import {
   buildPostPlan,
+  type PostedFindingComment,
   type PostPlan,
   parseHunkAnchors,
   resolvePostLine,
@@ -158,6 +159,8 @@ import {
 } from "./report";
 import {
   buildPhaseBQueue,
+  collapseTargets,
+  enrichPriorsFromThreads,
   parseNameOnly,
   parseNameStatus,
   prepareDiscovery,
@@ -1116,9 +1119,10 @@ async function reviewPr(
     // that same discovery diff, never the whole PR, so a merge of main
     // cannot inflate the bill. Empty discovery is a re-review state, not
     // an error (C6) — first review (case A) still fails loud.
-    const [issueComments, postedFindings] = await Promise.all([
+    const [issueComments, postedFindings, reviewComments] = await Promise.all([
       fetchPrComments(operatorRoot, prNumber),
       fetchPostedFindingComments(operatorRoot, prNumber),
+      fetchPrReviewComments(operatorRoot, prNumber),
     ]);
     const existingSummaryId = findMarkedCommentId(issueComments);
     const summaryHead =
@@ -1199,12 +1203,13 @@ async function reviewPr(
       const nameStatus = parseNameStatus(
         await gitNameStatus(gitDirOwner, prepared.last.L, headSha),
       );
-      const summaryBody =
+      const summaryComment =
         existingSummaryId === null
-          ? ""
-          : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? "");
-      const state = parseStateBlock(summaryBody);
-      const priors =
+          ? undefined
+          : issueComments.find((c) => c.id === existingSummaryId);
+      const summaryUpdatedAt = summaryComment?.updated_at ?? null;
+      const state = parseStateBlock(summaryComment?.body ?? "");
+      const rawPriors =
         state === null
           ? priorsFromPostedMarkers(
               postedFindings.map((p) => ({
@@ -1214,11 +1219,17 @@ async function reviewPr(
               })),
             )
           : priorsFromStateFindings(state.findings);
+      const priors = enrichPriorsFromThreads({
+        priors: rawPriors,
+        posted: postedFindings,
+        replies: reviewComments,
+        summaryUpdatedAt,
+      });
       const classified = buildPhaseBQueue({
         case: prepared.case,
         priors,
         nameStatus,
-        summaryUpdatedAt: null,
+        summaryUpdatedAt,
       });
       verifyQueue = classified.queued;
       overlapCandidates = classified.overlapCandidates;
@@ -1709,6 +1720,7 @@ async function reviewPr(
           diffPatch: effectiveDiff.patch,
           webUrl: postedWebUrl,
           rereview,
+          rereviewPriors: phaseB?.priors,
         });
         if (posted) {
           await writePostReceipt(runDir, prNumber, headSha, posted);
@@ -1928,6 +1940,7 @@ async function resolveInlinePostPlan(input: {
   // #3305: re-matching a subset can dissolve a tie the plan already
   // resolved). See ReviewSubmissionOutcome's WHY in pr.ts.
   findingRefs: PrHeroFindingRef[];
+  posted: PostedFindingComment[];
 }> {
   const issueComments = await fetchPrComments(input.operatorRoot, input.pr, {
     spawnFn: input.spawnFn,
@@ -1969,7 +1982,7 @@ async function resolveInlinePostPlan(input: {
     posted,
     headSha: input.headSha,
   });
-  return { plan, previousHeadSha, existingSummaryId, findingRefs };
+  return { plan, previousHeadSha, existingSummaryId, findingRefs, posted };
 }
 
 // A finding's own posted comment, as a clickable link for the summary's
@@ -2024,6 +2037,7 @@ export async function postInlineFindings(input: {
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
   rereview?: RereviewProvenance;
+  rereviewPriors?: readonly { id: string; claim: string }[];
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
   const rereviewDelta =
@@ -2049,7 +2063,7 @@ export async function postInlineFindings(input: {
     if (input.rereview === undefined) return body;
     return `${body}${renderStateBlock(doc.head_sha, input.rereview.live)}`;
   };
-  const { plan, previousHeadSha, existingSummaryId, findingRefs } =
+  const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
     await resolveInlinePostPlan(input);
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
@@ -2203,6 +2217,48 @@ export async function postInlineFindings(input: {
     commentId: patched.commentId,
   };
 
+  if (input.rereview !== undefined) {
+    const targets = collapseTargets({
+      verifiedGoneIds: input.rereview.resolved_ids ?? [],
+      priors: input.rereviewPriors ?? [],
+      posted,
+    });
+    for (const target of targets) {
+      if (target.channel !== "review") continue;
+      await postReviewCommentReply({
+        operatorRoot,
+        pr,
+        inReplyTo: target.commentId,
+        body:
+          "✅ **RESOLVED** · verified gone\n\n" +
+          "This finding was checked at the current head and is no longer present.\n",
+        spawnFn,
+      });
+      try {
+        const resolveOutcome = await resolveReviewThreadForComment({
+          operatorRoot,
+          pr,
+          commentId: target.commentId,
+          spawnFn,
+        });
+        if (resolveOutcome === "resolved") {
+          log(`resolved: review thread for ${target.priorId} (verified-gone)`);
+        } else if (resolveOutcome === "already-resolved") {
+          log(`resolved: thread already closed for ${target.priorId}`);
+        } else {
+          log(
+            `resolve skipped: no review thread found for comment ${target.commentId}`,
+          );
+        }
+      } catch (error) {
+        log(
+          `resolve failed for ${target.priorId} after the verified-gone reply posted: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
   return {
     reviewOutcome: reviewResult.outcome,
     reviewFindingCount: reviewFindings.length,
@@ -2300,6 +2356,7 @@ export async function postInlineIfEligible(input: {
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
   rereview?: RereviewProvenance;
+  rereviewPriors?: readonly { id: string; claim: string }[];
 }): Promise<InlinePostOutcome | null> {
   if (input.sessionFailed) {
     log(input.skippedReason);
@@ -2470,14 +2527,21 @@ export async function runPostCommand(input: {
     log(
       `plan: ${plan.reviewComments.length} review comment(s), ` +
         `${plan.issueComments.length} outside diff, ` +
-        `${plan.persisting.length} already posted (skipped), ` +
-        `${plan.resolved.length} resolved`,
+        `${plan.persisting.length} already posted (skipped)` +
+        (previousHeadSha === undefined
+          ? `, ${plan.resolved.length} resolved`
+          : ""),
     );
-    log(
-      `delta: ${plan.delta.resolved} resolved · ${plan.delta.new} new · ` +
-        `${plan.delta.persist} persist` +
-        (previousHeadSha ? ` (since ${previousHeadSha.slice(0, 8)})` : ""),
-    );
+    if (previousHeadSha === undefined) {
+      log(
+        `delta: ${plan.delta.resolved} resolved · ${plan.delta.new} new · ` +
+          `${plan.delta.persist} persist`,
+      );
+    } else {
+      log(
+        `delta: re-review (MatchResult.resolved not shown; gate outcomes only)`,
+      );
+    }
     for (const finding of plan.reviewComments) {
       log(`  review  ${finding.path}:${finding.line} ${finding.id}`);
     }
@@ -3765,6 +3829,12 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
             ? " · restricted L..H"
             : " · full B..H"),
     );
+    if (ctx.rereview.case === "D") {
+      push(
+        "D4",
+        "last reviewed head is not an ancestor of this head — full B..H",
+      );
+    }
   }
   if (ctx.verificationSteps !== undefined && ctx.verificationSteps > 0) {
     push(
@@ -3843,6 +3913,15 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
         { styles, width },
       ),
     );
+    if (ctx.rereview.case === "D") {
+      lines.push(
+        ...row(
+          "",
+          "⚠️ last reviewed head is not an ancestor — reviewing full B..H",
+          { styles, width },
+        ),
+      );
+    }
   }
   if (ctx.verificationSteps !== undefined && ctx.verificationSteps > 0) {
     lines.push(

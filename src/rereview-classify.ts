@@ -12,6 +12,8 @@ import type { Severity, Tier } from "./findings";
 import {
   type FindingIdentity,
   formatLocs,
+  identitiesMatch,
+  identityFromFinding,
   identityFromLocs,
   mapIdentityPaths,
 } from "./rereview-identity";
@@ -170,4 +172,69 @@ function isNewReply(
 ): boolean {
   if (createdAt === null || summaryUpdatedAt === null) return false;
   return createdAt > summaryUpdatedAt;
+}
+
+const SEV_RANK: Record<Severity, number> = {
+  BLOCKER: 0,
+  CRITICAL: 1,
+  WARNING: 2,
+  SUGGESTION: 3,
+};
+
+export function isStrictlyHigherSev(
+  discovery: Severity,
+  prior: Severity,
+): boolean {
+  return SEV_RANK[discovery] < SEV_RANK[prior];
+}
+
+export interface WorseningHit {
+  priorId: string;
+  priorSev: Severity;
+  discoverySev: Severity;
+}
+
+// Phase E: a suppressed prior stays suppressed against a same-or-lower
+// discovery finding, and RETURNS against a strictly-higher one (W-worse).
+export function applyWorsening(input: {
+  settled: readonly PhaseBResult[];
+  priors: readonly PriorRecord[];
+  survivors: readonly {
+    path: string;
+    line: number;
+    proof_refs: readonly string[];
+    severity: Severity;
+  }[];
+}): { settled: PhaseBResult[]; hits: WorseningHit[] } {
+  const priorById = new Map(input.priors.map((prior) => [prior.id, prior]));
+  const hits: WorseningHit[] = [];
+  const settled = input.settled.map((row) => {
+    if (row.status !== "suppressed") return row;
+    const prior = priorById.get(row.id);
+    if (prior === undefined) return row;
+    const ident = identityFromLocs(row.locs);
+    for (const survivor of input.survivors) {
+      if (
+        !identitiesMatch(
+          ident,
+          identityFromFinding({
+            path: survivor.path,
+            line: survivor.line,
+            proof_refs: survivor.proof_refs,
+          }),
+        )
+      ) {
+        continue;
+      }
+      if (!isStrictlyHigherSev(survivor.severity, prior.sev)) continue;
+      hits.push({
+        priorId: row.id,
+        priorSev: prior.sev,
+        discoverySev: survivor.severity,
+      });
+      return { ...row, status: "returned" as const };
+    }
+    return row;
+  });
+  return { settled, hits };
 }

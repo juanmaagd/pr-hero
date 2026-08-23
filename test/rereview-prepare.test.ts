@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { claimFingerprint } from "../src/pr-preflight";
 import { planDiscovery } from "../src/rereview-plan";
 import {
   buildPhaseBQueue,
+  collapseTargets,
+  enrichPriorsFromThreads,
   parseNameOnly,
   parseNameStatus,
   prepareDiscovery,
@@ -9,6 +12,7 @@ import {
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
 } from "../src/rereview-prepare";
+import { triageMarker } from "../src/triage";
 
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const L = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -275,5 +279,99 @@ describe("buildPhaseBQueue", () => {
       summaryUpdatedAt: null,
     });
     expect(queued.map((e) => e.trigger)).toEqual(["verify_all"]);
+  });
+});
+
+describe("S-B — enrichPriorsFromThreads newness", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const claim = "a live defect";
+
+  test("a reply after summary.updated_at is new; a predating one is not", () => {
+    const fingerprint = claimFingerprint(claim);
+    const prior = {
+      id: "R001",
+      sev: "CRITICAL" as const,
+      tier: "blocking" as const,
+      channel: "inline" as const,
+      locs: ["src/app.ts:10"],
+      claim,
+      triage: null,
+      newThreadReply: false,
+    };
+    const posted = [{ id: 22, marker: { c: fingerprint } }];
+    const applied = `${triageMarker({ tag: "applied", headSha: HEAD, actor: "agent" })}\n`;
+    const after = enrichPriorsFromThreads({
+      priors: [prior],
+      posted,
+      replies: [
+        {
+          in_reply_to_id: 22,
+          body: applied,
+          created_at: "2026-08-21T12:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-20T12:00:00Z",
+    });
+    expect(after[0]?.newThreadReply).toBe(true);
+    expect(after[0]?.triage?.tag).toBe("applied");
+
+    const before = enrichPriorsFromThreads({
+      priors: [prior],
+      posted,
+      replies: [
+        {
+          in_reply_to_id: 22,
+          body: applied,
+          created_at: "2026-08-19T12:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-20T12:00:00Z",
+    });
+    expect(before[0]?.newThreadReply).toBe(false);
+
+    const queuedAfter = buildPhaseBQueue({
+      case: "B",
+      priors: after,
+      nameStatus: { files: [], deleted: [], renameMap: new Map() },
+      summaryUpdatedAt: "2026-08-20T12:00:00Z",
+    });
+    expect(queuedAfter.queued.map((e) => e.trigger)).toEqual(["applied"]);
+
+    const queuedBefore = buildPhaseBQueue({
+      case: "B",
+      priors: before,
+      nameStatus: { files: [], deleted: [], renameMap: new Map() },
+      summaryUpdatedAt: "2026-08-20T12:00:00Z",
+    });
+    expect(queuedBefore.queued).toEqual([]);
+    expect(queuedBefore.settled[0]?.status).toBe("carried");
+  });
+});
+
+describe("O-1c — collapseTargets ignore matcher leftovers", () => {
+  const claim = "a live defect";
+
+  test("carried priors produce no collapse even if a posted comment is unmatched", () => {
+    expect(
+      collapseTargets({
+        verifiedGoneIds: [],
+        priors: [{ id: "R001", claim }],
+        posted: [
+          { id: 9, channel: "review", marker: { c: claimFingerprint(claim) } },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  test("verified-gone maps to the posted review comment", () => {
+    expect(
+      collapseTargets({
+        verifiedGoneIds: ["R001"],
+        priors: [{ id: "R001", claim }],
+        posted: [
+          { id: 9, channel: "review", marker: { c: claimFingerprint(claim) } },
+        ],
+      }),
+    ).toEqual([{ priorId: "R001", commentId: 9, channel: "review" }]);
   });
 });

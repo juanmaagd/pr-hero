@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  applyWorsening,
   classifyPrior,
   type PhaseBContext,
   type PriorRecord,
@@ -253,5 +254,57 @@ describe("case D/E — verify-all after triage settles", () => {
       ctx({ case: "E", deletedFiles: new Set(["src/app.ts"]) }),
     );
     expect(result.status).toBe("verified-gone");
+  });
+});
+
+describe("W-worse — phase E lifts suppression only on strictly higher sev", () => {
+  test("same-severity discovery stays suppressed", () => {
+    const { settled, hits } = applyWorsening({
+      settled: [
+        {
+          id: "R001",
+          status: "suppressed",
+          locs: ["src/app.ts:10"],
+          renamed: false,
+        },
+      ],
+      priors: [prior({ sev: "CRITICAL" })],
+      survivors: [
+        {
+          path: "src/app.ts",
+          line: 10,
+          proof_refs: [],
+          severity: "CRITICAL",
+        },
+      ],
+    });
+    expect(settled[0]?.status).toBe("suppressed");
+    expect(hits).toEqual([]);
+  });
+
+  test("strictly higher discovery returns the prior", () => {
+    const { settled, hits } = applyWorsening({
+      settled: [
+        {
+          id: "R001",
+          status: "suppressed",
+          locs: ["src/app.ts:10"],
+          renamed: false,
+        },
+      ],
+      priors: [prior({ sev: "WARNING" })],
+      survivors: [
+        {
+          path: "src/app.ts",
+          line: 12,
+          proof_refs: ["src/app.ts:10"],
+          severity: "CRITICAL",
+        },
+      ],
+    });
+    expect(settled[0]?.status).toBe("returned");
+    expect(hits).toEqual([
+      { priorId: "R001", priorSev: "WARNING", discoverySev: "CRITICAL" },
+    ]);
   });
 });

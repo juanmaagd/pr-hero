@@ -1102,6 +1102,7 @@ Re-review is default behaviour of `review --pr <n> --yes` — no new flag. Spend
 
 Offline in every case. `bun test` + `bun run typecheck` + `bun run check`, then one fixture eval, then a
 single live re-review on a real musive PR before this is called done.
+When the PRs exist, walk `docs/item7-runbook.md` — case cards and surfaces, not this checklist.
 
 ---
 

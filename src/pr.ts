@@ -677,7 +677,15 @@ export async function fetchPrComments(
   operatorRoot: string,
   pr: number,
   options?: { spawnFn?: typeof Bun.spawn },
-): Promise<{ id: number; user: string; body: string; created_at?: string }[]> {
+): Promise<
+  {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[]
+> {
   const result = await gh(
     operatorRoot,
     [
@@ -685,7 +693,7 @@ export async function fetchPrComments(
       "--paginate",
       `repos/{owner}/{repo}/issues/${pr}/comments`,
       "--jq",
-      ".[] | {id: .id, user: .user.login, body: .body, created_at: .created_at}",
+      ".[] | {id: .id, user: .user.login, body: .body, created_at: .created_at, updated_at: .updated_at}",
     ],
     undefined,
     options?.spawnFn,
@@ -708,6 +716,7 @@ export async function fetchPrComments(
     user: string;
     body: string;
     created_at?: string;
+    updated_at?: string;
   }[] = [];
   for (const line of result.stdout.split("\n")) {
     if (line.trim() === "") continue;
@@ -717,6 +726,7 @@ export async function fetchPrComments(
         user: string;
         body: string;
         created_at?: unknown;
+        updated_at?: unknown;
       };
       comments.push({
         id: parsed.id,
@@ -724,6 +734,9 @@ export async function fetchPrComments(
         body: parsed.body,
         ...(typeof parsed.created_at === "string"
           ? { created_at: parsed.created_at }
+          : {}),
+        ...(typeof parsed.updated_at === "string"
+          ? { updated_at: parsed.updated_at }
           : {}),
       });
     } catch {
@@ -868,7 +881,7 @@ function is404(stderr: string): boolean {
 const PR_ISSUE_COMMENTS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
-  "comments(first:100){nodes{databaseId body createdAt author{login}}}}}}";
+  "comments(first:100){nodes{databaseId body createdAt updatedAt author{login}}}}}}";
 
 const PR_REVIEW_COMMENTS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
@@ -909,7 +922,15 @@ async function fetchPrCommentsGraphql(
   operatorRoot: string,
   pr: number,
   spawnFn?: typeof Bun.spawn,
-): Promise<{ id: number; user: string; body: string; created_at?: string }[]> {
+): Promise<
+  {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[]
+> {
   const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
   const stdout = await ghGraphql(
     operatorRoot,
@@ -946,6 +967,7 @@ async function fetchPrCommentsGraphql(
     user: string;
     body: string;
     created_at?: string;
+    updated_at?: string;
   }[] = [];
   for (const node of nodes) {
     if (typeof node !== "object" || node === null) continue;
@@ -953,6 +975,7 @@ async function fetchPrCommentsGraphql(
       databaseId?: unknown;
       body?: unknown;
       createdAt?: unknown;
+      updatedAt?: unknown;
       author?: unknown;
     };
     const id = graphqlDatabaseId(record.databaseId);
@@ -963,6 +986,9 @@ async function fetchPrCommentsGraphql(
       body: typeof record.body === "string" ? record.body : "",
       ...(typeof record.createdAt === "string"
         ? { created_at: record.createdAt }
+        : {}),
+      ...(typeof record.updatedAt === "string"
+        ? { updated_at: record.updatedAt }
         : {}),
     });
   }

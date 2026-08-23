@@ -3,10 +3,13 @@
 // `merge-base --is-ancestor`, and `diff --name-only`, and tests inject fakes.
 // The case machine itself stays in rereview-plan.ts.
 
+import type { Severity } from "./findings";
+import { claimFingerprint } from "./pr-preflight";
 import {
   classifyPrior,
   type PhaseBResult,
   type PriorRecord,
+  type PriorTriage,
   type RereviewCase,
 } from "./rereview-classify";
 import type { FindingIdentity } from "./rereview-identity";
@@ -22,6 +25,7 @@ import {
 } from "./rereview-plan";
 import type { LiveFinding, StateFinding } from "./rereview-state";
 import type { VerifyQueueEntry } from "./rereview-verify";
+import { parseTriageMarker } from "./triage";
 
 export interface RereviewGit {
   commitExists(sha: string): Promise<boolean>;
@@ -60,8 +64,14 @@ export interface RereviewProvenance {
   };
   live: LiveFinding[];
   resolved_verified?: number;
+  resolved_ids?: string[];
   returned?: number;
   re_tiered?: number;
+  worsened?: readonly {
+    priorId: string;
+    priorSev: Severity;
+    discoverySev: Severity;
+  }[];
 }
 
 export function parseNameOnly(stdout: string): string[] {
@@ -301,4 +311,75 @@ export function priorsFromPostedMarkers(
     triage: null,
     newThreadReply: false,
   }));
+}
+
+export function enrichPriorsFromThreads(input: {
+  priors: readonly PriorRecord[];
+  posted: readonly { id: number; marker: { c: string } }[];
+  replies: readonly {
+    in_reply_to_id: number | null;
+    body: string;
+    created_at?: string;
+  }[];
+  summaryUpdatedAt: string | null;
+}): PriorRecord[] {
+  return input.priors.map((prior) => {
+    const fingerprint = claimFingerprint(prior.claim);
+    const parent = input.posted.find((row) => row.marker.c === fingerprint);
+    if (parent === undefined) return prior;
+    const thread = input.replies.filter(
+      (reply) => reply.in_reply_to_id === parent.id,
+    );
+    let triage: PriorTriage | null = prior.triage;
+    for (const reply of thread) {
+      const marker = parseTriageMarker(reply.body);
+      if (marker === null) continue;
+      triage = {
+        tag: marker.tag,
+        verdict: marker.verdict ?? null,
+        createdAt: reply.created_at ?? null,
+      };
+    }
+    const newThreadReply = thread.some(
+      (reply) =>
+        reply.created_at !== undefined &&
+        input.summaryUpdatedAt !== null &&
+        reply.created_at > input.summaryUpdatedAt,
+    );
+    return { ...prior, triage, newThreadReply };
+  });
+}
+
+export function collapseTargets(input: {
+  verifiedGoneIds: readonly string[];
+  priors: readonly { id: string; claim: string }[];
+  posted: readonly {
+    id: number;
+    channel: "review" | "issue";
+    marker: { c: string };
+  }[];
+}): Array<{
+  priorId: string;
+  commentId: number;
+  channel: "review" | "issue";
+}> {
+  const priorById = new Map(input.priors.map((prior) => [prior.id, prior]));
+  const out: Array<{
+    priorId: string;
+    commentId: number;
+    channel: "review" | "issue";
+  }> = [];
+  for (const id of input.verifiedGoneIds) {
+    const prior = priorById.get(id);
+    if (prior === undefined) continue;
+    const fingerprint = claimFingerprint(prior.claim);
+    const posted = input.posted.find((row) => row.marker.c === fingerprint);
+    if (posted === undefined) continue;
+    out.push({
+      priorId: id,
+      commentId: posted.id,
+      channel: posted.channel,
+    });
+  }
+  return out;
 }

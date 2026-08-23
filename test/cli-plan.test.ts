@@ -425,6 +425,19 @@ describe("renderPrPlan", () => {
     expect(text).toContain("(estimate from GitHub's aggregate counters)");
   });
 
+  test("D4 — case D banners the force-push full-range review", () => {
+    const ctx = prPlanContext({
+      rereview: {
+        case: "D",
+        lastHead: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        discoveryRestricted: false,
+        skipDiscovery: false,
+      },
+    });
+    expect(joined(renderPrPlan(ctx, false))).toContain("not an ancestor");
+    expect(joined(prPlanDetails(ctx, false))).toContain("not an ancestor");
+  });
+
   test("an interactive override annotates confirmed, not --force", () => {
     const text = joined(
       renderPrPlan(

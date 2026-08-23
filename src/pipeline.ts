@@ -38,10 +38,12 @@ import {
   renderPriorsBlock,
   type SuspicionPrior,
 } from "./prompt-set";
-import type {
-  GateStatus,
-  PhaseBResult,
-  PriorRecord,
+import {
+  applyWorsening,
+  type GateStatus,
+  type PhaseBResult,
+  type PriorRecord,
+  type WorseningHit,
 } from "./rereview-classify";
 import type { RereviewProvenance } from "./rereview-prepare";
 import { assembleLive } from "./rereview-state";
@@ -586,6 +588,7 @@ interface RunState {
   perAgent: Record<string, PerAgentUsage>;
   usageTotal: SessionUsage;
   steps: StepMeta[];
+  worsenedHits: WorseningHit[];
 }
 
 export async function runPipeline(
@@ -611,6 +614,7 @@ export async function runPipeline(
     perAgent: {},
     usageTotal: zeroUsage(),
     steps: [],
+    worsenedHits: [],
   };
   // Pipeline ceiling: on firing, return what is assembled so far with
   // run_status "partial". The in-flight step promises are abandoned, not
@@ -937,6 +941,16 @@ async function execute(
     drafts: state.drafts.length,
     findings: survivors.length,
   });
+
+  if (input.phaseB !== undefined) {
+    const worsened = applyWorsening({
+      settled: input.phaseB.settled,
+      priors: input.phaseB.priors,
+      survivors,
+    });
+    input.phaseB.settled = worsened.settled;
+    state.worsenedHits = worsened.hits;
+  }
 
   // Item 7 — the verify queue closes HERE, after dedupe (W-order). Overlap
   // with a discovery survivor can still append a prior; the cap then binds
@@ -1700,6 +1714,7 @@ function fillRereviewProvenance(
       ? {
           live: base.live,
           verifiedGone: base.resolved_verified ?? 0,
+          verifiedGoneIds: base.resolved_ids ?? [],
           returned: base.returned ?? 0,
           reTiered: base.re_tiered ?? 0,
         }
@@ -1715,8 +1730,10 @@ function fillRereviewProvenance(
     verification_triggers: state.verificationTriggers,
     live: assembled.live,
     resolved_verified: assembled.verifiedGone,
+    resolved_ids: assembled.verifiedGoneIds,
     returned: assembled.returned,
     re_tiered: assembled.reTiered,
+    ...(state.worsenedHits.length > 0 ? { worsened: state.worsenedHits } : {}),
   };
   // The CLI holds this object; mutating it is how the post path sees live[].
   Object.assign(base, filled);
