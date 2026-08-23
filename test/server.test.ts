@@ -357,4 +357,45 @@ describe("Local Store Server & Typed Client", () => {
       serverHandle.stop();
     }
   });
+
+  test("recordTriage and getTriage record and fetch triage events via client", async () => {
+    const env = await tmpServerEnv();
+    const serverHandle = startProductStoreServer({
+      dbPath: env.dbPath,
+      socketPath: env.socketPath,
+    });
+    const client = new ProductStoreClient({ socketPath: env.socketPath });
+
+    try {
+      const doc = sampleDoc();
+      const saveRes = await client.saveRun(
+        projectCompleteRun({
+          doc,
+          repoId: "github.com/juanmaagd/pr-hero",
+          runDir: "run-triage-test",
+          checkoutPath: null,
+        }),
+      );
+      const runId = saveRes.run_id;
+
+      const triageId = await client.recordTriage(runId, {
+        finding_id: "F001",
+        comment_id: 998877,
+        tag: "applied",
+        verdict: null,
+        actor: "agent",
+        reasoning: "Fixed in commit 12345",
+      });
+      expect(triageId).toBeGreaterThan(0);
+
+      const events = await client.getTriage(runId);
+      expect(events.length).toBe(1);
+      expect(events[0]?.finding_id).toBe("F001");
+      expect(events[0]?.comment_id).toBe(998877);
+      expect(events[0]?.tag).toBe("applied");
+      expect(events[0]?.reasoning).toBe("Fixed in commit 12345");
+    } finally {
+      serverHandle.stop();
+    }
+  });
 });
