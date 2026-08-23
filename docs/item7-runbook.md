@@ -21,6 +21,38 @@ that checkbox. Design: `docs/item7-rereview-design.md`. ROADMAP: “item 7 is li
    case-C second push is enough to close “item 7 is live” if the launch lies
    do not fire. The other cards wait for a PR that has that shape.
 
+## What the first live walk taught about THIS FILE (2026-08-23)
+
+Corrections from walking it end to end. Read them before trusting a surface below.
+
+**The seven surfaces verify the ENGINE. The launch-fail lived in the SEAM to GitHub.** Every
+surface reads an artifact or a rendered body; **none asks which code path rendered it**, and
+`post --from` and `--post` produce different results from identical artifacts. Three of the seven
+— summary body, threads, state block — are path-dependent. The `3 resolved` lie was found only
+because that run happened to be posted separately, for budget reasons. **Running the Commands
+section as written (`review --pr <n> --post`) would have left it hidden.** Until a surface names
+its posting path, walk each of those three **both ways**.
+
+- **The `Already covered offline` list gave false confidence for at least one row.** `O-1c`
+  (collapse) is on it, and collapse was broken through `post --from` — the offline tests covered
+  the other path. The list's own hedge ("unless a live run contradicts") is what saved it, but
+  that hedge only works if someone runs live, and the list exists to license not doing that.
+- **Step 4 assumes an external repo.** There were zero open musive PRs; the target that worked was
+  **pr-hero's own PR**, which is stronger evidence — the reviewed code IS the re-review engine.
+  Not a fallback. Prefer it.
+- **A PR-mode `--dry-run` cannot show the case.** It creates and fetches nothing by design
+  (`src/cli.ts` step 3), so surface 1's `re-review case X` **only exists on a paid run**. Do not
+  read a dry run as evidence about the case.
+- **`0 prior(s)` on the plan card is not what it looks like.** It renders
+  `config.suspicion_priors.length`, not re-review priors. Misread once by someone holding the whole
+  design in context; assume every reader misreads it.
+- **The fixture-eval cost drifted** — documented ~$0.08, billed $0.11 and $0.22 the same day on the
+  same fixture. Re-measure, do not quote.
+- **Triage is half of item 7 and this file never mentions it.** Phase B's rules 3–7 read triage
+  state and **outrank `touched`**; nothing in these cards exercises them. Proven separately: a run
+  whose `verification_triggers` were `{applied: 3, touched: 0}` — every verify step bought by a
+  tag. Use `skills/pr-hero-triage/SKILL.md` as part of the walk, not after it.
+
 ## Surfaces to read every live run
 
 | Surface | Pass |

@@ -181,8 +181,31 @@ Fundamentals:
 - [x] C4 is in front of every prompt that inlines user-authored text — 2026-08-20, `d0cb47e` + `bbd5277`
       (`docs/c4-preamble-design.md` §5 CLOSED; all four system-prompt write sites route through
       `writeSystemPrompt`, asserted at artifact level over every `*.system.md` a real run wrote)
-- [ ] item 7 is live: a second push verifies (or honestly says unconfirmed), does not claim
+- [x] item 7 is live: a second push verifies (or honestly says unconfirmed), does not claim
       `resolved` from absence, and the PR shows the current state rather than an archaeology
+      — **2026-08-23, ticked by Juanma on the evidence below.** Proven on **pr-hero's own PR #49**,
+      not musive: no musive PR was open, and the engine reviewing its own re-review code is
+      stronger evidence than an external repo, not weaker. Four live runs, $16.84, ledger in that
+      PR's description; runbook surfaces walked in `docs/item7-runbook.md`.
+      - **Verifies, or says unconfirmed:** case C, restricted discovery, `verify` as its own plan
+        term. Four priors checked → 1 `refuted` (→ `verified-gone`, thread collapsed with ✅),
+        3 `inconclusive` (→ `unconfirmed`). Zero inferred.
+      - **Does not claim `resolved` from absence — and this one FAILED first.** Run 2 published
+        `Δ since e23d8063: 3 resolved · 0 new · 1 persist` where two had been checked: the PR 1759
+        shape, live. `postCommand` never passed `rereview`, so the delta fell back to the absence
+        matcher. Fixed in `3f32def`; run 3 published
+        `1 resolved (verified) · 3 unconfirmed · 0 carried · 0 deferred · 1 new`. The clause is
+        ticked because it was broken, caught by the runbook's own launch-fail list, and fixed —
+        not because it never failed.
+      - **Current state, not archaeology:** first `pr-hero-state` block this engine has written,
+        `rereview` present in `pipeline.json` and **absent** on the same PR's first review.
+      - **Triage feeds it:** run 4's `verification_triggers` were `{applied: 3, touched: 0}` —
+        every verify step bought by a triage tag — and the engine still returned `unconfirmed`
+        rather than believing the `applied` claim. `applied` is a trigger, not ground truth.
+      - **Known debt, deliberately open:** four reviews found four defects of one class
+        (bookkeeping trusted without reconciling against live state), each in the code written to
+        prevent it. The first three were patched per call site, which is why a fourth call site
+        was still open. Read `b58c181` before the next patch to that seam.
 - [ ] C5: person-keys default globally, repo-keys stay in `.prhero/`
 - [ ] Canonical store (`docs/observability-canonical-store.md`): `prhero.db` is source of truth,
       JSON is derived, local server owns SQLite, backfill reported, GC does not delete rows
