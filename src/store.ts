@@ -619,54 +619,58 @@ export function recordFindingTriage(
   db: Database,
   triage: FindingTriageRow,
 ): number {
-  if (triage.comment_id !== undefined && triage.comment_id !== null) {
-    const existing = db
-      .query(
-        "SELECT id FROM finding_triage WHERE run_id = ? AND finding_id = ? AND comment_id = ? LIMIT 1",
-      )
-      .get(triage.run_id, triage.finding_id, triage.comment_id) as {
-      id: number;
-    } | null;
-    if (existing) {
-      db.query(`
-        UPDATE finding_triage
-        SET tag = ?, verdict = ?, actor = ?, reasoning = ?, issue_number = ?, created_at = ?
-        WHERE id = ?
-      `).run(
-        triage.tag,
-        triage.verdict ?? null,
-        triage.actor,
-        triage.reasoning,
-        triage.issue_number ?? null,
-        triage.created_at,
-        existing.id,
-      );
-      return existing.id;
+  const runTx = db.transaction(() => {
+    if (triage.comment_id !== undefined && triage.comment_id !== null) {
+      const existing = db
+        .query(
+          "SELECT id FROM finding_triage WHERE run_id = ? AND finding_id = ? AND comment_id = ? LIMIT 1",
+        )
+        .get(triage.run_id, triage.finding_id, triage.comment_id) as {
+        id: number;
+      } | null;
+      if (existing) {
+        db.query(`
+          UPDATE finding_triage
+          SET tag = ?, verdict = ?, actor = ?, reasoning = ?, issue_number = ?, created_at = ?
+          WHERE id = ?
+        `).run(
+          triage.tag,
+          triage.verdict ?? null,
+          triage.actor,
+          triage.reasoning,
+          triage.issue_number ?? null,
+          triage.created_at,
+          existing.id,
+        );
+        return existing.id;
+      }
     }
-  }
 
-  const insert = db.query(`
-    INSERT INTO finding_triage (
-      run_id, finding_id, comment_id, tag, verdict, actor, reasoning, issue_number, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+    const insert = db.query(`
+      INSERT INTO finding_triage (
+        run_id, finding_id, comment_id, tag, verdict, actor, reasoning, issue_number, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
 
-  insert.run(
-    triage.run_id,
-    triage.finding_id,
-    triage.comment_id ?? null,
-    triage.tag,
-    triage.verdict ?? null,
-    triage.actor,
-    triage.reasoning,
-    triage.issue_number ?? null,
-    triage.created_at,
-  );
+    insert.run(
+      triage.run_id,
+      triage.finding_id,
+      triage.comment_id ?? null,
+      triage.tag,
+      triage.verdict ?? null,
+      triage.actor,
+      triage.reasoning,
+      triage.issue_number ?? null,
+      triage.created_at,
+    );
 
-  const lastId = (
-    db.query("SELECT last_insert_rowid() as id").get() as { id: number }
-  ).id;
-  return lastId;
+    const lastId = (
+      db.query("SELECT last_insert_rowid() as id").get() as { id: number }
+    ).id;
+    return lastId;
+  });
+
+  return runTx();
 }
 
 export function getFindingTriageByRunId(

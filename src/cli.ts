@@ -3408,36 +3408,31 @@ export async function runTriageReplyCommand(input: {
       const layout = prheroLayout(os.homedir());
       if (existsSync(layout.prheroDbPath)) {
         const repoId = await tryOriginRepoId(operatorRoot);
-        const db = openProductStore(layout.prheroDbPath);
-        try {
-          const runDirBasename = path.basename(runDir);
-          let runRow: { id: number } | null = null;
-          if (repoId) {
-            runRow = db
+        if (repoId) {
+          const db = openProductStore(layout.prheroDbPath);
+          try {
+            const runDirBasename = path.basename(runDir);
+            const runRow = db
               .query(
                 "SELECT id FROM runs WHERE repo_id = ? AND run_dir = ? LIMIT 1",
               )
               .get(repoId, runDirBasename) as { id: number } | null;
-          } else {
-            runRow = db
-              .query("SELECT id FROM runs WHERE run_dir = ? LIMIT 1")
-              .get(runDirBasename) as { id: number } | null;
+            if (runRow) {
+              recordFindingTriage(db, {
+                run_id: runRow.id,
+                finding_id: input.findingId,
+                comment_id: parent.id,
+                tag: input.tag,
+                verdict: input.verdict,
+                actor: "agent",
+                reasoning,
+                issue_number: input.issue,
+                created_at: new Date().toISOString(),
+              });
+            }
+          } finally {
+            db.close();
           }
-          if (runRow) {
-            recordFindingTriage(db, {
-              run_id: runRow.id,
-              finding_id: input.findingId,
-              comment_id: parent.id,
-              tag: input.tag,
-              verdict: input.verdict,
-              actor: "agent",
-              reasoning,
-              issue_number: input.issue,
-              created_at: new Date().toISOString(),
-            });
-          }
-        } finally {
-          db.close();
         }
       }
     } catch (err) {

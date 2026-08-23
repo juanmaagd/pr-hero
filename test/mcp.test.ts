@@ -393,6 +393,21 @@ describe("Read-Only MCP Server Protocol & Tools", () => {
       expect(getToolResult(missingRunRes).content[0]?.text).toContain(
         "Missing required parameter: run_id",
       );
+
+      // 4. Validation error on malformed optional integer in search_findings
+      const malformedSearchRes = await processMcpMessage(client, {
+        jsonrpc: "2.0",
+        id: 23,
+        method: "tools/call",
+        params: {
+          name: "prhero_search_findings",
+          arguments: { run_id: "not-a-number" },
+        },
+      });
+      expect(getToolResult(malformedSearchRes).isError).toBe(true);
+      expect(getToolResult(malformedSearchRes).content[0]?.text).toContain(
+        "Invalid run_id: must be a positive integer",
+      );
     } finally {
       serverHandle.stop();
     }

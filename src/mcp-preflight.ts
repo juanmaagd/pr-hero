@@ -218,10 +218,17 @@ export function formatToolError(message: string): ToolCallResult {
   };
 }
 
-export function parseOptionalInteger(val: unknown): number | undefined {
+export function parseOptionalInteger(
+  val: unknown,
+  paramName?: string,
+): number | undefined {
   if (val === undefined || val === null || val === "") return undefined;
   const n = typeof val === "number" ? val : Number(val);
-  if (!Number.isInteger(n)) return undefined;
+  if (!Number.isInteger(n) || Number.isNaN(n) || n < 1) {
+    throw new Error(
+      `Invalid ${paramName ?? "parameter"}: must be a positive integer`,
+    );
+  }
   return n;
 }
 
@@ -230,7 +237,7 @@ export function parseRequiredInteger(val: unknown, paramName: string): number {
     throw new Error(`Missing required parameter: ${paramName}`);
   }
   const n = typeof val === "number" ? val : Number(val);
-  if (!Number.isInteger(n) || n < 1) {
+  if (!Number.isInteger(n) || Number.isNaN(n) || n < 1) {
     throw new Error(`Invalid ${paramName}: must be a positive integer`);
   }
   return n;
@@ -253,8 +260,8 @@ export async function handleMcpToolCall(
           typeof args.repo_id === "string" && args.repo_id.trim() !== ""
             ? args.repo_id.trim()
             : undefined;
-        const pr = parseOptionalInteger(args.pr);
-        const limit = parseOptionalInteger(args.limit);
+        const pr = parseOptionalInteger(args.pr, "pr");
+        const limit = parseOptionalInteger(args.limit, "limit");
         const runs = await client.listRuns({ repo_id, pr, limit });
         return formatToolSuccess(runs);
       }
@@ -284,7 +291,7 @@ export async function handleMcpToolCall(
           typeof args.repo_id === "string" && args.repo_id.trim() !== ""
             ? args.repo_id.trim()
             : undefined;
-        const run_id = parseOptionalInteger(args.run_id);
+        const run_id = parseOptionalInteger(args.run_id, "run_id");
         const path =
           typeof args.path === "string" && args.path.trim() !== ""
             ? args.path.trim()
@@ -294,7 +301,7 @@ export async function handleMcpToolCall(
           (args.tier === "blocking" || args.tier === "advisory")
             ? (args.tier as Tier)
             : undefined;
-        const limit = parseOptionalInteger(args.limit);
+        const limit = parseOptionalInteger(args.limit, "limit");
         const findings = await client.searchFindings({
           repo_id,
           run_id,
