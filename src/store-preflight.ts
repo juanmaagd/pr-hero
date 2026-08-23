@@ -32,7 +32,7 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id TEXT NOT NULL,
-    run_dir TEXT NOT NULL UNIQUE,
+    run_dir TEXT NOT NULL,
     pr INTEGER NULL,
     checkout_path TEXT NULL,
     head_sha TEXT NOT NULL,
@@ -64,7 +64,8 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     blocking INTEGER NOT NULL,
     advisory INTEGER NOT NULL,
     root_causes_json TEXT NULL,
-    greptile_found INTEGER NULL
+    greptile_found INTEGER NULL,
+    UNIQUE (repo_id, run_dir)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_runs_repo_id ON runs (repo_id)`,
   `CREATE INDEX IF NOT EXISTS idx_runs_generated_at ON runs (generated_at)`,
@@ -111,6 +112,7 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     kind TEXT NOT NULL,
     query TEXT NOT NULL,
     reached TEXT NULL,
+    is_raw_string INTEGER NOT NULL DEFAULT 0,
     UNIQUE (finding_id, step_order)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_finding_hop_trail_fid ON finding_hop_trail (finding_id)`,
@@ -252,6 +254,7 @@ export interface FindingHopTrailRow {
   kind: string;
   query: string;
   reached: string;
+  is_raw_string?: number;
 }
 
 export interface DebugFindingRow {

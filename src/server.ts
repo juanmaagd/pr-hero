@@ -226,29 +226,26 @@ export function startProductStoreServer(
 
             const hopTrailRows = db
               .query(
-                "SELECT step_num, kind, query, reached FROM finding_hop_trail WHERE finding_id = ? ORDER BY step_order ASC",
+                "SELECT step_num, kind, query, reached, is_raw_string FROM finding_hop_trail WHERE finding_id = ? ORDER BY step_order ASC",
               )
               .all(row.id) as {
               step_num: number;
               kind: string;
               query: string;
               reached: string | null;
+              is_raw_string: number;
             }[];
 
-            const hop_trail: HopTrail =
-              hopTrailRows.length > 0 &&
-              hopTrailRows.every(
-                (h) =>
-                  h.kind === "trace" &&
-                  (h.reached === null || h.reached === ""),
-              )
-                ? hopTrailRows.map((h) => h.query)
-                : hopTrailRows.map((h) => ({
-                    step: h.step_num,
-                    kind: h.kind,
-                    query: h.query,
-                    reached: h.reached ?? "",
-                  }));
+            const isRaw =
+              hopTrailRows.length > 0 && hopTrailRows[0]?.is_raw_string === 1;
+            const hop_trail: HopTrail = isRaw
+              ? hopTrailRows.map((h) => h.query)
+              : hopTrailRows.map((h) => ({
+                  step: h.step_num,
+                  kind: h.kind,
+                  query: h.query,
+                  reached: h.reached ?? "",
+                }));
 
             findings.push({
               ...row,
@@ -269,18 +266,24 @@ export function startProductStoreServer(
     }
   }
 
-  const server = options.socketPath
-    ? Bun.serve({
-        unix: options.socketPath,
-        fetch: fetchHandler,
-      })
-    : Bun.serve({
-        ...(options.port !== undefined ? { port: options.port } : {}),
-        ...(options.hostname !== undefined
-          ? { hostname: options.hostname }
-          : {}),
-        fetch: fetchHandler,
-      });
+  let server: ReturnType<typeof Bun.serve>;
+  try {
+    server = options.socketPath
+      ? Bun.serve({
+          unix: options.socketPath,
+          fetch: fetchHandler,
+        })
+      : Bun.serve({
+          ...(options.port !== undefined ? { port: options.port } : {}),
+          ...(options.hostname !== undefined
+            ? { hostname: options.hostname }
+            : {}),
+          fetch: fetchHandler,
+        });
+  } catch (err) {
+    db.close();
+    throw err;
+  }
 
   return {
     db,

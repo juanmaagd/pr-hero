@@ -70,7 +70,7 @@ const RUN_UPSERT_SQL = `
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
   )
-  ON CONFLICT(run_dir) DO UPDATE SET
+  ON CONFLICT(repo_id, run_dir) DO UPDATE SET
     repo_id = excluded.repo_id,
     pr = excluded.pr,
     checkout_path = excluded.checkout_path,
@@ -153,8 +153,8 @@ export function saveRunTransaction(
   db.transaction(() => {
     db.query(RUN_UPSERT_SQL).run(...runParams(projected.run));
     const runRow = db
-      .query("SELECT id FROM runs WHERE run_dir = ?")
-      .get(projected.run.run_dir) as { id: number };
+      .query("SELECT id FROM runs WHERE repo_id = ? AND run_dir = ?")
+      .get(projected.run.repo_id, projected.run.run_dir) as { id: number };
     runId = runRow.id;
 
     // Delete existing child records for clean idempotent replacement
@@ -180,8 +180,8 @@ export function saveRunTransaction(
 
     const insertHopTrail = db.query(`
       INSERT INTO finding_hop_trail (
-        finding_id, step_order, step_num, kind, query, reached
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        finding_id, step_order, step_num, kind, query, reached, is_raw_string
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const item of projected.findings) {
@@ -223,6 +223,7 @@ export function saveRunTransaction(
             "trace",
             hop,
             null,
+            1,
           );
         } else {
           insertHopTrail.run(
@@ -232,6 +233,7 @@ export function saveRunTransaction(
             hop.kind ?? "trace",
             hop.query ?? "",
             hop.reached ?? null,
+            0,
           );
         }
       });
@@ -332,9 +334,12 @@ export function getRunById(
 
 export function getRunByDir(
   db: Database,
+  repoId: string,
   runDir: string,
 ): CanonicalRunRow | null {
-  const row = db.query("SELECT * FROM runs WHERE run_dir = ?").get(runDir);
+  const row = db
+    .query("SELECT * FROM runs WHERE repo_id = ? AND run_dir = ?")
+    .get(repoId, runDir);
   return (row as CanonicalRunRow) ?? null;
 }
 
@@ -360,27 +365,26 @@ export function exportFindingsDocument(
 
     const hopTrailRows = db
       .query(
-        "SELECT step_num, kind, query, reached FROM finding_hop_trail WHERE finding_id = ? ORDER BY step_order ASC",
+        "SELECT step_num, kind, query, reached, is_raw_string FROM finding_hop_trail WHERE finding_id = ? ORDER BY step_order ASC",
       )
       .all(f.id) as {
       step_num: number;
       kind: string;
       query: string;
       reached: string | null;
+      is_raw_string: number;
     }[];
 
-    const hop_trail: HopTrail =
-      hopTrailRows.length > 0 &&
-      hopTrailRows.every(
-        (h) => h.kind === "trace" && (h.reached === null || h.reached === ""),
-      )
-        ? hopTrailRows.map((h) => h.query)
-        : hopTrailRows.map((h) => ({
-            step: h.step_num,
-            kind: h.kind,
-            query: h.query,
-            reached: h.reached ?? "",
-          }));
+    const isRaw =
+      hopTrailRows.length > 0 && hopTrailRows[0]?.is_raw_string === 1;
+    const hop_trail: HopTrail = isRaw
+      ? hopTrailRows.map((h) => h.query)
+      : hopTrailRows.map((h) => ({
+          step: h.step_num,
+          kind: h.kind,
+          query: h.query,
+          reached: h.reached ?? "",
+        }));
 
     findings.push({
       id: f.finding_id,

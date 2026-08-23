@@ -33,15 +33,18 @@ export class StoreClientError extends Error {
 export interface StoreClientOptions {
   socketPath?: string;
   baseUrl?: string;
+  timeoutMs?: number;
 }
 
 export class ProductStoreClient {
   private readonly socketPath?: string;
   private readonly baseUrl: string;
+  private readonly timeoutMs?: number;
 
   constructor(options: StoreClientOptions) {
     this.socketPath = options.socketPath;
     this.baseUrl = options.baseUrl ?? "http://localhost";
+    this.timeoutMs = options.timeoutMs;
   }
 
   private async request<T>(
@@ -50,11 +53,13 @@ export class ProductStoreClient {
     body?: unknown,
   ): Promise<T> {
     const url = `${this.baseUrl}${pathname}`;
+    const signal = AbortSignal.timeout(this.timeoutMs ?? 10_000);
     const options: RequestInit & { unix?: string } = {
       method,
       headers: {
         "Content-Type": "application/json",
       },
+      signal,
       ...(this.socketPath ? { unix: this.socketPath } : {}),
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     };

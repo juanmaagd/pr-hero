@@ -548,4 +548,76 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       db.close();
     }
   });
+
+  test("runs table allows identical run_dir across different repos without cross-repo overwrite", async () => {
+    const dbPath = await tmpDbPath();
+    const db = openProductStore(dbPath);
+    try {
+      const docA = sampleDoc({ pr: 1 });
+      const docB = sampleDoc({ pr: 1 });
+
+      const idA = saveRunTransaction(
+        db,
+        projectCompleteRun({
+          doc: docA,
+          repoId: "github.com/org/repo-alpha",
+          runDir: "pr-1-head1234-1",
+          checkoutPath: null,
+        }),
+      );
+
+      const idB = saveRunTransaction(
+        db,
+        projectCompleteRun({
+          doc: docB,
+          repoId: "github.com/org/repo-beta",
+          runDir: "pr-1-head1234-1",
+          checkoutPath: null,
+        }),
+      );
+
+      expect(idA).not.toBe(idB);
+
+      const all = queryRuns(db, { all: true });
+      expect(all.length).toBe(2);
+      expect(all.map((r) => r.repo_id).sort()).toEqual([
+        "github.com/org/repo-alpha",
+        "github.com/org/repo-beta",
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("preserves structured HopTrailStep objects with kind trace and empty reached on export", async () => {
+    const dbPath = await tmpDbPath();
+    const db = openProductStore(dbPath);
+    try {
+      const docWithStructuredHop = sampleDoc();
+      const f0 = docWithStructuredHop.findings[0];
+      if (f0) {
+        f0.hop_trail = [
+          { step: 1, kind: "trace", query: "read index.ts", reached: "" },
+        ];
+      }
+
+      const runId = saveRunTransaction(
+        db,
+        projectCompleteRun({
+          doc: docWithStructuredHop,
+          repoId: "github.com/org/sample",
+          runDir: "run-hop-structured",
+          checkoutPath: null,
+        }),
+      );
+
+      const exported = exportFindingsDocument(db, runId);
+      expect(exported).not.toBeNull();
+      expect(exported?.findings[0]?.hop_trail).toEqual([
+        { step: 1, kind: "trace", query: "read index.ts", reached: "" },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
 });
