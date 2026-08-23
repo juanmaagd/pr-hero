@@ -36,7 +36,11 @@ import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import type { StoredComparison } from "../src/ledger";
-import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+import {
+  claimFingerprint,
+  findingMarker,
+  PR_FINDING_MARKER_PREFIX,
+} from "../src/pr-preflight";
 import type { CliOptions, SummarySettings } from "../src/preflight";
 import { CliError, CliUsageError } from "../src/preflight";
 import type { RereviewProvenance } from "../src/rereview-prepare";
@@ -1855,6 +1859,370 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
       ).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F008 — `post --from` is a re-review too.
+//
+// Found by a LIVE case-C re-review of PR #49, which is the part that matters:
+// `postCommand` called `postInlineFindings` with no `rereview` at all, so a
+// run whose pipeline.json recorded {case C, verified 4, live 2} published
+// "Δ since e23d8063: 3 resolved · 0 new · 1 persist" — the absence matcher's
+// count, three "resolved" for two checks, the exact PR 1759 shape the feature
+// exists to prevent — plus no state block, which then costs the NEXT run its
+// priors. Nothing offline caught it; the whole `post --from` seam had no
+// re-review coverage. These are that coverage.
+// ---------------------------------------------------------------------------
+
+describe("runPostCommand — post --from carries the re-review (F008)", () => {
+  const SUMMARY_MARKER = `<!-- pr-hero-report head=${OLD_HEAD} -->`;
+
+  function liveRow(over: {
+    id: string;
+    sev: Finding["severity"];
+    status: string;
+    line: number;
+    claim: string;
+  }) {
+    return {
+      id: over.id,
+      sev: over.sev,
+      tier: over.sev === "SUGGESTION" ? "advisory" : "blocking",
+      channel: "inline",
+      status: over.status,
+      locs: [`src/a.ts:${over.line}`],
+      c: claimFingerprint(over.claim),
+      claim: over.claim,
+    };
+  }
+
+  function rereviewBlock(over: Record<string, unknown> = {}) {
+    return {
+      case: "C",
+      last_reviewed_head: OLD_HEAD,
+      last_head_source: "summary_marker",
+      discovery_range: `${OLD_HEAD}..${RUN_HEAD}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 3,
+      settled_deterministically: 1,
+      verified: 2,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 2,
+        overlap: 0,
+        verify_all: 0,
+      },
+      live: [
+        liveRow({
+          id: "R001",
+          sev: "CRITICAL",
+          status: "carried",
+          line: 10,
+          claim: "the prior nobody touched",
+        }),
+        liveRow({
+          id: "R002",
+          sev: "WARNING",
+          status: "unconfirmed",
+          line: 20,
+          claim: "checked, and the check did not settle it",
+        }),
+        liveRow({
+          id: "R003",
+          sev: "WARNING",
+          status: "unconfirmed",
+          line: 30,
+          claim: "the other one the check did not settle",
+        }),
+      ],
+      resolved_verified: 0,
+      resolved_ids: [],
+      returned: 0,
+      re_tiered: 0,
+      ...over,
+    };
+  }
+
+  // A run dir as `pr-hero review --pr <n>` leaves it: findings.json,
+  // diff.patch AND pipeline.json. `writeRunDir` deliberately writes only the
+  // first two — pipeline.json stays optional, so every first-review post in
+  // the suite above keeps proving that path unchanged.
+  async function writeRereviewRunDir(
+    pipeline: Record<string, unknown> | null,
+    docOverrides: Partial<FindingsDocument> = {},
+  ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+    const { dir, cleanup } = await writeRunDir(docOverrides);
+    if (pipeline !== null) {
+      await Bun.write(
+        path.join(dir, "pipeline.json"),
+        JSON.stringify(pipeline, null, 2),
+      );
+    }
+    return { dir, cleanup };
+  }
+
+  function priorSummaryScript(): ScriptEntry[] {
+    return [
+      headRefOidScript(RUN_HEAD),
+      {
+        match: ["issues/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 200,
+              user: "pr-hero",
+              body: `${SUMMARY_MARKER}\n## pr-hero review`,
+              updated_at: "2026-08-20T00:00:00Z",
+            },
+          ]),
+        },
+      },
+      { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
+    ];
+  }
+
+  function summaryPatch(calls: RecordedCall[]): string {
+    const patches = calls.filter((c) =>
+      c.stdin?.startsWith("<!-- pr-hero-report "),
+    );
+    return patches[patches.length - 1]?.stdin ?? "";
+  }
+
+  test("the delta and the state block come from live[], never from the matcher", async () => {
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock() },
+      { findings: [] },
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      const exitCode = await runPostCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const body = summaryPatch(calls);
+      // The gate vocabulary, counted off live[]: two unconfirmed, one
+      // carried, nothing resolved because nothing was checked-and-gone.
+      expect(body).toContain(
+        "Δ since `aaaaaaaa`: 2 unconfirmed · 1 carried · 0 deferred · 0 new",
+      );
+      // The matcher's shape, in any form, is the defect.
+      expect(body).not.toContain("persist");
+      expect(body).not.toContain("resolved (verified)");
+      // §3.6: the state block, AFTER the report marker, so the next run has
+      // priors with real claims instead of `priorsFromPostedMarkers`' "".
+      expect(body).toContain(`<!-- pr-hero-state v=1 head=${RUN_HEAD} -->`);
+      expect(body.indexOf("<!-- pr-hero-state ")).toBeGreaterThan(0);
+      expect(body).toContain("the prior nobody touched");
+      // C7: zero new findings is not a clean bill while priors are live.
+      expect(body).not.toContain("found nothing to report");
+      expect(body).toContain("`carried`");
+      expect(body).toContain("`unconfirmed`");
+      // Nothing was verified gone, so nothing is collapsed.
+      expect(
+        calls.filter((c) => c.argv.join(" ").includes("reviewThreads")),
+      ).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a run dir with no rereview block refuses on a PR that already has a summary", async () => {
+    // The self-perpetuating half: publishing this as a first review would
+    // print the matcher delta AND write no state block, so the next
+    // re-review falls back to claim-less priors.
+    const { dir, cleanup } = await writeRereviewRunDir(null, {
+      findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/no\s+`rereview` block in its pipeline\.json/);
+      // Refused BEFORE any write: the summary create and the review
+      // submission are both downstream of the precondition.
+      expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("an unreadable rereview block refuses before a single gh call, naming the field", async () => {
+    const { dir, cleanup } = await writeRereviewRunDir({
+      rereview: rereviewBlock({ live: [{ id: "R001", status: "carried" }] }),
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/unreadable re-review block \(rereview\.live\[0\]\)/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("verified-gone findings refuse: the run dir cannot supply the priors collapse binds through", async () => {
+    // `assembleLive` retires a verified-gone entry from `live[]`, so the rows
+    // the collapse binding needs are exactly the rows the artifact no longer
+    // holds — and re-deriving them from the PR renumbers `R###`. Refuse, and
+    // name the path that still holds them.
+    const { dir, cleanup } = await writeRereviewRunDir({
+      rereview: rereviewBlock({
+        resolved_verified: 2,
+        resolved_ids: ["R004", "R005"],
+      }),
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(
+        /records 2 verified-gone finding\(s\) \(R004, R005\)[\s\S]*review --pr 42 --post/,
+      );
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("--dry-run refuses exactly what the post refuses — the preview cannot disagree", async () => {
+    // A $0 gate that green-lights a run dir the live path then rejects has
+    // answered a different question than the one asked.
+    const missing = await writeRereviewRunDir(null);
+    const verifiedGone = await writeRereviewRunDir({
+      rereview: rereviewBlock({ resolved_verified: 1, resolved_ids: ["R004"] }),
+    });
+    try {
+      const first = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: missing.dir,
+          dryRun: true,
+          spawnFn: first.spawnFn,
+        }),
+      ).rejects.toThrow(/no\s+`rereview` block in its pipeline\.json/);
+      expect(
+        first.calls.filter((c) => c.argv.includes("--method")),
+      ).toHaveLength(0);
+
+      const second = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: verifiedGone.dir,
+          dryRun: true,
+          spawnFn: second.spawnFn,
+        }),
+      ).rejects.toThrow(/records 1 verified-gone finding/);
+      expect(second.calls).toHaveLength(0);
+    } finally {
+      await missing.cleanup();
+      await verifiedGone.cleanup();
+    }
+  });
+
+  test("a worsened prior reaches the summary — both severities, from pipeline.json", async () => {
+    // W-worse through the `post --from` seam: the "returned" line is the
+    // only place the summary names the severity a prior came back at.
+    const { dir, cleanup } = await writeRereviewRunDir({
+      rereview: rereviewBlock({
+        worsened: [
+          { priorId: "R001", priorSev: "WARNING", discoverySev: "CRITICAL" },
+        ],
+      }),
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      expect(
+        await runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).toBe(0);
+      expect(summaryPatch(calls)).toContain(
+        "returned R001: WARNING → CRITICAL",
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a pipeline.json that is not JSON refuses before a single gh call", async () => {
+    const { dir, cleanup } = await writeRereviewRunDir(null);
+    try {
+      await Bun.write(path.join(dir, "pipeline.json"), "{ not json");
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/pipeline\.json is not valid JSON/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a first review is untouched: no summary, no block, matcher delta stays", async () => {
+    // The regression boundary. `post --from` on a PR with no prior pr-hero
+    // comment is not a re-review and must keep rendering byte-identically.
+    const { dir, cleanup } = await writeRereviewRunDir(null, {
+      findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh([
+        ...emptyCommentScript(RUN_HEAD),
+        { match: ["pulls/42/reviews"], response: { stdout: "" } },
+      ]);
+      const exitCode = await runPostCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const body = summaryPatch(calls);
+      expect(body).toContain("1 new · 0 persist");
+      expect(body).not.toContain("<!-- pr-hero-state ");
+    } finally {
+      await cleanup();
     }
   });
 });

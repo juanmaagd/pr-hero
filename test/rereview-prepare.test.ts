@@ -3,6 +3,7 @@ import { claimFingerprint } from "../src/pr-preflight";
 import type { PriorRecord } from "../src/rereview-classify";
 import { planDiscovery } from "../src/rereview-plan";
 import {
+  bindPriorsToPosted,
   buildPhaseBQueue,
   collapseTargets,
   enrichPriorsFromThreads,
@@ -11,9 +12,11 @@ import {
   prepareDiscovery,
   priorsFromPostedMarkers,
   type RereviewGit,
+  readRereviewProvenance,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
 } from "../src/rereview-prepare";
+import type { LiveFinding } from "../src/rereview-state";
 import { triageMarker } from "../src/triage";
 
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -679,5 +682,257 @@ describe("F002 — collapseTargets gives each verified-gone id its own thread", 
         ],
       }),
     ).toEqual([{ priorId: "R002", commentId: 222, channel: "review" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F006 — the prior->comment assignment does not depend on `priors` order.
+//
+// The binder used to walk `priors` in plain array order, each one taking its
+// nearest not-yet-consumed comment. When two priors' rankings cross over, the
+// prior that happens to come FIRST wins a comment the other one needed and
+// the second is pushed onto a farther one, or off the end entirely — two
+// orderings of the same PR state producing two different sets of collapsed
+// threads. `priors` order is whatever the state block happened to serialise,
+// so this was a coin flip deciding where a "✅ RESOLVED · verified gone" reply
+// lands.
+// ---------------------------------------------------------------------------
+
+describe("F006 — binding is global by distance, never by priors order", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  function comment(id: number, path: string, line: number, claim: string) {
+    return {
+      id,
+      channel: "review" as const,
+      marker: { path, line, headSha: HEAD, c: claimFingerprint(claim) },
+      livePath: path,
+      liveLine: line,
+    };
+  }
+
+  // The crossover, drawn out:
+  //   X = src/a.ts:10, Y = src/b.ts:40
+  //   R002 spans both files — X at distance 0, Y at distance 1
+  //   R001 has ONE loc, src/a.ts:11 — X at distance 1, and nothing else in
+  //        window (Y is on a path R001 never mentions)
+  // Nearest-first has exactly one answer: R002 takes X (0), and R001, whose
+  // only candidate is now gone, binds nothing. Array order used to answer
+  // "R001 takes X, R002 takes Y" whenever R001 came first.
+  const X = comment(111, "src/a.ts", 10, "the X defect");
+  const Y = comment(222, "src/b.ts", 40, "the Y defect");
+  const R001 = {
+    id: "R001",
+    claim: "a prior whose only near comment is X",
+    locs: ["src/a.ts:11"],
+  };
+  const R002 = {
+    id: "R002",
+    claim: "a prior anchored at X, with a second site near Y",
+    locs: ["src/a.ts:10", "src/b.ts:41"],
+  };
+
+  test("the nearer prior wins the contested comment, whichever order it arrives in", () => {
+    const forward = bindPriorsToPosted([R001, R002], [X, Y]);
+    expect([...forward].map(([id, row]) => [id, row.id])).toEqual([
+      ["R002", 111],
+    ]);
+    const reversed = bindPriorsToPosted([R002, R001], [X, Y]);
+    expect([...reversed].map(([id, row]) => [id, row.id])).toEqual([
+      ["R002", 111],
+    ]);
+  });
+
+  test("reversing the posted comments changes nothing either", () => {
+    const swapped = bindPriorsToPosted([R001, R002], [Y, X]);
+    expect([...swapped].map(([id, row]) => [id, row.id])).toEqual([
+      ["R002", 111],
+    ]);
+  });
+
+  test("collapse follows the same assignment — R001's thread is never closed for it", () => {
+    // The consequence, at the surface that posts the ✅: with R002 verified
+    // gone, the reply must land on 111 and R001's own comment must stay
+    // untouched — in BOTH orders.
+    for (const priors of [
+      [R001, R002],
+      [R002, R001],
+    ]) {
+      expect(
+        collapseTargets({
+          verifiedGoneIds: ["R002"],
+          priors,
+          posted: [X, Y],
+        }),
+      ).toEqual([{ priorId: "R002", commentId: 111, channel: "review" }]);
+    }
+  });
+
+  test("an equidistant contest over one comment binds nobody to it", () => {
+    // The mirror of the prior-side ambiguity rule, and the case array order
+    // used to settle by position: two priors, same distance, same comment,
+    // and claims that cannot break it (neither fingerprint matches). Nobody
+    // gets it — under-match, never a guess.
+    const contested = comment(333, "src/c.ts", 50, "the real claim");
+    const bound = bindPriorsToPosted(
+      [
+        { id: "R001", claim: "", locs: ["src/c.ts:50"] },
+        { id: "R002", claim: "", locs: ["src/c.ts:50"] },
+      ],
+      [contested],
+    );
+    expect([...bound]).toEqual([]);
+  });
+
+  test("`c` still decides an equidistant contest when exactly one prior matches", () => {
+    const claim = "the claim the comment was posted with";
+    const contested = comment(444, "src/c.ts", 50, claim);
+    const bound = bindPriorsToPosted(
+      [
+        {
+          id: "R001",
+          claim: "some other wording entirely",
+          locs: ["src/c.ts:50"],
+        },
+        { id: "R002", claim, locs: ["src/c.ts:50"] },
+      ],
+      [contested],
+    );
+    expect([...bound].map(([id, row]) => [id, row.id])).toEqual([
+      ["R002", 444],
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F007 — `readRereviewProvenance`: valid, absent, or LOUD.
+//
+// `post --from` has no pipeline in memory, so pipeline.json's `rereview` block
+// is the only surviving record of what a re-review checked. A block that
+// half-parses is worse than none: the delta silently falls back to the
+// absence matcher it was built to retire.
+// ---------------------------------------------------------------------------
+
+describe("F007 — readRereviewProvenance", () => {
+  const liveRow: LiveFinding = {
+    id: "R001",
+    sev: "CRITICAL",
+    tier: "blocking",
+    channel: "inline",
+    status: "carried",
+    locs: ["src/a.ts:10"],
+    c: claimFingerprint("a claim"),
+    claim: "a claim",
+  };
+
+  function block(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      case: "C",
+      last_reviewed_head: L,
+      last_head_source: "summary_marker",
+      discovery_range: `${L}..${H}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 1,
+      settled_deterministically: 1,
+      verified: 0,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 0,
+        overlap: 0,
+        verify_all: 0,
+      },
+      live: [liveRow],
+      ...over,
+    };
+  }
+
+  test("a pipeline.json with no rereview block is absent, not invalid", () => {
+    expect(readRereviewProvenance({ steps: [] })).toEqual({ kind: "absent" });
+  });
+
+  test("a complete block parses, and the optional counters default to zero", () => {
+    const read = readRereviewProvenance({ rereview: block() });
+    expect(read.kind).toBe("ok");
+    if (read.kind !== "ok") return;
+    expect(read.rereview.case).toBe("C");
+    expect(read.rereview.live).toEqual([liveRow]);
+    expect(read.rereview.resolved_verified).toBe(0);
+    expect(read.rereview.resolved_ids).toEqual([]);
+  });
+
+  test("resolved_ids survives the read — collapse is decided from it", () => {
+    const read = readRereviewProvenance({
+      rereview: block({ resolved_verified: 2, resolved_ids: ["R004", "R005"] }),
+    });
+    expect(read.kind === "ok" && read.rereview.resolved_ids).toEqual([
+      "R004",
+      "R005",
+    ]);
+  });
+
+  test("an unknown case is invalid, naming the field", () => {
+    expect(readRereviewProvenance({ rereview: block({ case: "Z" }) })).toEqual({
+      kind: "invalid",
+      problem: "rereview.case",
+    });
+  });
+
+  test("a live row missing its claim fingerprint is invalid, naming the row", () => {
+    const { c: _dropped, ...noFingerprint } = liveRow;
+    expect(
+      readRereviewProvenance({ rereview: block({ live: [noFingerprint] }) }),
+    ).toEqual({ kind: "invalid", problem: "rereview.live[0]" });
+  });
+
+  test("a live row with a status outside the live vocabulary is invalid", () => {
+    // `verified-gone` retires an entry; it is never a live status, and a row
+    // carrying one would render a retired finding as still on the PR.
+    expect(
+      readRereviewProvenance({
+        rereview: block({ live: [{ ...liveRow, status: "verified-gone" }] }),
+      }),
+    ).toEqual({ kind: "invalid", problem: "rereview.live[0]" });
+  });
+
+  test("a well-formed `worsened` survives the read — W-worse needs both severities", () => {
+    // `liveFindingLines` renders "returned R001: WARNING → CRITICAL" from
+    // this and nothing else; dropping it would publish a summary naming one
+    // severity where the run found two.
+    const worsened = [
+      {
+        priorId: "R001",
+        priorSev: "WARNING" as const,
+        discoverySev: "CRITICAL" as const,
+      },
+    ];
+    const read = readRereviewProvenance({ rereview: block({ worsened }) });
+    expect(read.kind === "ok" && read.rereview.worsened).toEqual(worsened);
+  });
+
+  test("a `worsened` row with an unknown severity is invalid, naming the row", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({
+          worsened: [
+            { priorId: "R001", priorSev: "WARNING", discoverySev: "FATAL" },
+          ],
+        }),
+      }),
+    ).toEqual({ kind: "invalid", problem: "rereview.worsened[0]" });
+  });
+
+  test("a missing verification trigger is invalid, naming the trigger", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({
+          verification_triggers: { applied: 0, touched: 0, overlap: 0 },
+        }),
+      }),
+    ).toEqual({
+      kind: "invalid",
+      problem: "rereview.verification_triggers.verify_all",
+    });
   });
 });

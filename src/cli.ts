@@ -167,6 +167,7 @@ import {
   priorsFromPostedMarkers,
   priorsFromStateFindings,
   type RereviewProvenance,
+  readRereviewProvenance,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
 } from "./rereview-prepare";
@@ -2038,6 +2039,21 @@ const COLLAPSE_GH_TIMEOUT_MS = 120_000;
 // The final PATCH's delta-must-describe-what-was-posted invariant (PR2
 // verification, WARN-3) is unchanged — the placeholder is provisional, the
 // closing PATCH is authoritative, same as before this rework.
+
+// One wording for the refusal, said by both the post sequence's precondition
+// and `post --dry-run`'s preview of it. The preview and the post disagreeing
+// about whether a run dir may be published is the failure the whole $0-gate
+// suite exists to prevent, and two hand-written messages is how that starts.
+function missingRereviewBlockMessage(pr: number, summaryId: number): string {
+  return (
+    `PR #${pr} already carries a pr-hero summary (comment ${summaryId}), so ` +
+    "this post is a re-review — but the run directory carries no `rereview` " +
+    "block in its pipeline.json, so the summary would report the old " +
+    'absence matcher\'s "N resolved" and write no state block. Re-run ' +
+    `\`pr-hero review --pr ${pr} --post\` instead.`
+  );
+}
+
 export async function postInlineFindings(input: {
   operatorRoot: string;
   pr: number;
@@ -2055,6 +2071,25 @@ export async function postInlineFindings(input: {
   // Watchdog for the collapse loop's gh calls. A seam, like `spawnFn`: no
   // production caller sets it, the tests drive the timeout path with it.
   ghTimeoutMs?: number;
+  // Set ONLY by `post --from` (`runPostCommand`). A PR that already carries a
+  // pr-hero summary is by definition a re-review, so publishing it without a
+  // `rereview` block renders the absence-matcher delta ("N resolved") and no
+  // state block — the PR 1759 shape, observed live on PR #49. That caller
+  // reconstructs the block from the run's `pipeline.json` and cannot see the
+  // PR, so it asks the sequence owner — which has just read the comments — to
+  // enforce the precondition and refuse before any write.
+  //
+  // A flag rather than an unconditional invariant, for two reasons that are
+  // not stylistic. The `--pr --post` path computes its own case from the same
+  // comments and reaches `rereview === undefined` only in case A (no summary
+  // head AND no finding markers), so the check is structurally dead there —
+  // except in one race, a summary created by a concurrent run between this
+  // run's phase-B fetch and this one, where aborting a review that has
+  // already been paid for would be the wrong direction of error. And the
+  // existing postInlineFindings suites script prior summaries with no block
+  // on purpose; the flag keeps this a `post --from` rule, not a rewrite of
+  // what a first-review post means.
+  requireRereviewOnPriorSummary?: boolean;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
   const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
@@ -2083,6 +2118,18 @@ export async function postInlineFindings(input: {
   };
   const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
     await resolveInlinePostPlan(input);
+
+  // Before the create-first POST and before the review submission — the last
+  // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
+  // on `previousHeadSha`: a summary whose `head=` will not parse is still a
+  // prior review, and rendering the matcher delta over it is still the lie.
+  if (
+    input.requireRereviewOnPriorSummary === true &&
+    input.rereview === undefined &&
+    existingSummaryId !== null
+  ) {
+    throw new CliError(missingRereviewBlockMessage(pr, existingSummaryId));
+  }
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
   const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
@@ -2554,15 +2601,90 @@ export async function runPostCommand(input: {
     return dryRun ? 0 : 1;
   }
 
+  // Item 7, and the reason this block exists at all: a re-review's case,
+  // `live[]` and verified-gone count live ONLY in the run's `pipeline.json`
+  // once the process that computed them has exited. Read back here, they make
+  // `post --from`'s summary say what the review actually checked; NOT read
+  // back — the defect this repairs — the summary silently falls through to
+  // `MatchResult.resolved`, prints "3 resolved" for 2 checks, and writes no
+  // state block, which then costs the NEXT run its priors as well.
+  //
+  // Validated rather than trusted: a block that half-parses would feed the
+  // same fallback with none of the noise. Absent is a legitimate answer (a
+  // first review, or a run dir from before item 7) — the precondition inside
+  // `postInlineFindings` is what tells those apart from a re-review whose
+  // block went missing, because only it can see whether the PR already has a
+  // summary.
+  const pipelinePath = path.join(runDir, "pipeline.json");
+  let rereview: RereviewProvenance | undefined;
+  if (existsSync(pipelinePath)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await Bun.file(pipelinePath).text());
+    } catch (error) {
+      throw new CliError(
+        `${pipelinePath} is not valid JSON (${(error as Error).message}) — ` +
+          "a re-review's case and live findings are only recoverable from it",
+      );
+    }
+    const read = readRereviewProvenance(parsed);
+    if (read.kind === "invalid") {
+      throw new CliError(
+        `${pipelinePath} has an unreadable re-review block (${read.problem}) — ` +
+          "publishing it would report the old absence matcher's counts and " +
+          `write no state block. Re-run \`pr-hero review --pr ${prNumber} --post\`.`,
+      );
+    }
+    if (read.kind === "ok") rereview = read.rereview;
+  }
+
+  // The one field of the `--pr --post` call that a run directory genuinely
+  // cannot supply. Collapse binds every verified-gone id to its review thread
+  // through the FULL prior set (`bindPriorsToPosted`, one-to-one over carried
+  // priors too) — and `live[]` is not that set: `assembleLive` retires a
+  // verified-gone entry from it, by design (§3.6), so the very rows collapse
+  // needs are the rows the artifact no longer holds. Re-deriving them from
+  // the PR at post time is not a substitute either: the `state === null`
+  // fallback renumbers `R###` positionally, so ids from `resolved_ids` would
+  // point at whichever comments happen to sit in those positions now — the
+  // exact over-match that puts "✅ RESOLVED · verified gone" on a live
+  // finding.
+  //
+  // So: nothing verified gone → `[]` is the whole truth and collapse is a
+  // no-op. Something verified gone → refuse, loudly, and name the path that
+  // still holds the priors in memory. A `post --from` that published the
+  // right summary and silently skipped the collapse it cannot compute would
+  // be the third thing this feature forbids.
+  const verifiedGoneIds = rereview?.resolved_ids ?? [];
+  if (verifiedGoneIds.length > 0) {
+    throw new CliError(
+      `${pipelinePath} records ${verifiedGoneIds.length} verified-gone ` +
+        `finding(s) (${verifiedGoneIds.join(", ")}), and their prior records ` +
+        "are not in the run directory — `live[]` retires a verified-gone " +
+        "entry — so `post --from` cannot bind them to their review threads " +
+        `to collapse them. Re-run \`pr-hero review --pr ${prNumber} --post\`, ` +
+        "which holds the priors from the run that checked them.",
+    );
+  }
+
   if (dryRun) {
-    const { plan, previousHeadSha } = await resolveInlinePostPlan({
-      operatorRoot,
-      pr: prNumber,
-      headSha: doc.head_sha,
-      doc,
-      diffPatch,
-      spawnFn,
-    });
+    const { plan, previousHeadSha, existingSummaryId } =
+      await resolveInlinePostPlan({
+        operatorRoot,
+        pr: prNumber,
+        headSha: doc.head_sha,
+        doc,
+        diffPatch,
+        spawnFn,
+      });
+    // The preview refuses whatever the post would refuse. A dry run that
+    // prints a plan for a run dir the live path then rejects is a $0 gate
+    // that answered a different question than the one asked.
+    if (rereview === undefined && existingSummaryId !== null) {
+      throw new CliError(
+        missingRereviewBlockMessage(prNumber, existingSummaryId),
+      );
+    }
     log(
       `plan: ${plan.reviewComments.length} review comment(s), ` +
         `${plan.issueComments.length} outside diff, ` +
@@ -2603,6 +2725,8 @@ export async function runPostCommand(input: {
     diffPatch,
     webUrl: repoWebUrl,
     spawnFn,
+    ...(rereview === undefined ? {} : { rereview, rereviewPriors: [] }),
+    requireRereviewOnPriorSummary: true,
   });
   await writePostReceipt(runDir, prNumber, doc.head_sha, outcome);
   log(
@@ -2610,10 +2734,20 @@ export async function runPostCommand(input: {
       `finding(s)), ${outcome.outsideDiffCount} outside diff, ` +
       `summary ${outcome.summary.action} comment ${outcome.summary.commentId}`,
   );
-  // GitHub #39: `post --from` publishes through the same sequence, so it
-  // gets the same disclosure. Unconditional, not chained into the else-if
-  // below — a moved head is orthogonal to both a dropped finding and a 422,
-  // and can happen alongside either.
+  // GitHub #39: `post --from` reaches the same `movedHeadSha` re-read inside
+  // the post sequence, so it can carry the same disclosure. Unconditional,
+  // not chained into the else-if below — a moved head is orthogonal to both a
+  // dropped finding and a 422, and can happen alongside either.
+  //
+  // "Same sequence, therefore same everything" is what this comment used to
+  // say, and it was false in a way that cost a live run: the sequence is
+  // shared, its INPUTS are not. `--pr --post` hands over the `rereview` block
+  // and the phase-B priors it is still holding; this path has only a
+  // directory, so it reconstructs the block from `pipeline.json` above,
+  // refuses when that block is unreadable or when collapse would need priors
+  // it does not have, and passes `requireRereviewOnPriorSummary` so a missing
+  // block on a PR that already has a summary cannot be published as a first
+  // review. Equivalence here is enforced, never assumed.
   if (outcome.movedHeadSha) {
     log(
       `warning: the PR head moved while the review ran — reviewed ` +

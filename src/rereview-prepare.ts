@@ -200,6 +200,206 @@ export function toRereviewProvenance(
   };
 }
 
+// The read-back half of the block above, for the ONE consumer that has no
+// pipeline in memory: `post --from <run-dir>` (`runPostCommand`). The run's
+// `pipeline.json` is the only place a re-review's case, `live[]` and
+// verified-gone count survive the process that computed them, so the summary
+// `post --from` publishes is truthful exactly when this parse succeeds — and
+// a block that half-parses is worse than none, because the delta it feeds
+// silently falls back to the absence matcher (`MatchResult.resolved`) that
+// item 7 exists to retire. Hence: valid, absent, or LOUD. Pure so the seam is
+// testable without a run directory.
+export type RereviewProvenanceRead =
+  | { kind: "absent" }
+  | { kind: "ok"; rereview: RereviewProvenance }
+  | { kind: "invalid"; problem: string };
+
+export function readRereviewProvenance(
+  pipeline: unknown,
+): RereviewProvenanceRead {
+  if (!isRecord(pipeline)) return { kind: "invalid", problem: "not an object" };
+  const raw = pipeline.rereview;
+  if (raw === undefined || raw === null) return { kind: "absent" };
+  if (!isRecord(raw)) return { kind: "invalid", problem: "rereview" };
+
+  const problem = (field: string): RereviewProvenanceRead => ({
+    kind: "invalid",
+    problem: `rereview.${field}`,
+  });
+  const rereviewCase = raw.case;
+  if (
+    rereviewCase !== "A" &&
+    rereviewCase !== "B" &&
+    rereviewCase !== "C" &&
+    rereviewCase !== "D" &&
+    rereviewCase !== "E"
+  ) {
+    return problem("case");
+  }
+  const lastHead = raw.last_reviewed_head;
+  if (lastHead !== null && typeof lastHead !== "string") {
+    return problem("last_reviewed_head");
+  }
+  const source = raw.last_head_source;
+  if (
+    source !== "summary_marker" &&
+    source !== "finding_markers" &&
+    source !== "absent"
+  ) {
+    return problem("last_head_source");
+  }
+  if (typeof raw.discovery_range !== "string") {
+    return problem("discovery_range");
+  }
+  if (typeof raw.discovery_restricted !== "boolean") {
+    return problem("discovery_restricted");
+  }
+  if (typeof raw.discovery_skipped_empty_delta !== "boolean") {
+    return problem("discovery_skipped_empty_delta");
+  }
+  for (const field of [
+    "prior_findings",
+    "settled_deterministically",
+    "verified",
+    "verification_capped",
+  ] as const) {
+    if (!isCount(raw[field])) return problem(field);
+  }
+  const triggers = raw.verification_triggers;
+  if (!isRecord(triggers)) return problem("verification_triggers");
+  for (const field of [
+    "applied",
+    "touched",
+    "overlap",
+    "verify_all",
+  ] as const) {
+    if (!isCount(triggers[field])) {
+      return problem(`verification_triggers.${field}`);
+    }
+  }
+  if (!Array.isArray(raw.live)) return problem("live");
+  const live: LiveFinding[] = [];
+  for (const [i, row] of raw.live.entries()) {
+    const parsed = asLiveFinding(row);
+    if (parsed === null) return problem(`live[${i}]`);
+    live.push(parsed);
+  }
+  for (const field of ["resolved_verified", "returned", "re_tiered"] as const) {
+    if (raw[field] !== undefined && !isCount(raw[field])) return problem(field);
+  }
+  const resolvedIds = raw.resolved_ids;
+  if (
+    resolvedIds !== undefined &&
+    (!Array.isArray(resolvedIds) ||
+      !resolvedIds.every((id) => typeof id === "string"))
+  ) {
+    return problem("resolved_ids");
+  }
+  // W-worse: `worsened` is what makes the summary name BOTH severities on a
+  // prior that came back stronger ("returned R001: WARNING → CRITICAL",
+  // `liveFindingLines`). Validated and carried, never quietly dropped — a
+  // `post --from` that published the same summary minus those lines would be
+  // the silent render this whole seam refuses.
+  let worsened: RereviewProvenance["worsened"];
+  if (raw.worsened !== undefined) {
+    if (!Array.isArray(raw.worsened)) return problem("worsened");
+    const rows: {
+      priorId: string;
+      priorSev: Severity;
+      discoverySev: Severity;
+    }[] = [];
+    for (const [i, row] of raw.worsened.entries()) {
+      if (
+        !isRecord(row) ||
+        typeof row.priorId !== "string" ||
+        row.priorId.length === 0 ||
+        !isSeverity(row.priorSev) ||
+        !isSeverity(row.discoverySev)
+      ) {
+        return problem(`worsened[${i}]`);
+      }
+      rows.push({
+        priorId: row.priorId,
+        priorSev: row.priorSev,
+        discoverySev: row.discoverySev,
+      });
+    }
+    worsened = rows;
+  }
+
+  return {
+    kind: "ok",
+    rereview: {
+      case: rereviewCase,
+      last_reviewed_head: lastHead,
+      last_head_source: source,
+      discovery_range: raw.discovery_range,
+      discovery_restricted: raw.discovery_restricted,
+      discovery_skipped_empty_delta: raw.discovery_skipped_empty_delta,
+      prior_findings: raw.prior_findings as number,
+      settled_deterministically: raw.settled_deterministically as number,
+      verified: raw.verified as number,
+      verification_capped: raw.verification_capped as number,
+      verification_triggers: {
+        applied: triggers.applied as number,
+        touched: triggers.touched as number,
+        overlap: triggers.overlap as number,
+        verify_all: triggers.verify_all as number,
+      },
+      live,
+      resolved_verified: (raw.resolved_verified as number | undefined) ?? 0,
+      resolved_ids: (resolvedIds as string[] | undefined) ?? [],
+      returned: (raw.returned as number | undefined) ?? 0,
+      re_tiered: (raw.re_tiered as number | undefined) ?? 0,
+      ...(worsened === undefined ? {} : { worsened }),
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isSeverity(value: unknown): value is Severity {
+  return (
+    value === "BLOCKER" ||
+    value === "CRITICAL" ||
+    value === "WARNING" ||
+    value === "SUGGESTION"
+  );
+}
+
+// A `live[]` row, validated to the shape the state block re-renders from —
+// `c` included, because `renderStateBlock` writes it back verbatim and a row
+// missing it produces a block the NEXT run's `parseStateBlock` rejects
+// wholesale, which is how a state block quietly stops existing.
+function asLiveFinding(value: unknown): LiveFinding | null {
+  if (!isRecord(value)) return null;
+  const { id, sev, tier, channel, status, locs, c, claim } = value;
+  if (typeof id !== "string" || id.length === 0) return null;
+  if (!isSeverity(sev)) return null;
+  if (tier !== "blocking" && tier !== "advisory") return null;
+  if (channel !== "inline" && channel !== "outside") return null;
+  if (
+    status !== "carried" &&
+    status !== "unconfirmed" &&
+    status !== "suppressed" &&
+    status !== "deferred"
+  ) {
+    return null;
+  }
+  if (!Array.isArray(locs) || !locs.every((loc) => typeof loc === "string")) {
+    return null;
+  }
+  if (typeof c !== "string" || !/^[0-9a-f]{12}$/.test(c)) return null;
+  if (typeof claim !== "string") return null;
+  return { id, sev, tier, channel, status, locs: [...locs], c, claim };
+}
+
 export interface NameStatus {
   files: string[];
   deleted: string[];
@@ -368,34 +568,128 @@ export interface PostedForPrior {
 // to run for the same defect. Requiring `c` would re-elevate the tie-breaker
 // to an identity from the other direction.
 //
-// One-to-one and greedy in prior order, same posture as `matchPostedFindings`
-// (`src/inline.ts`): a posted comment is consumable once, and an unresolvable
-// ambiguity binds NOTHING. Direction of error is under-match — a missed
-// binding costs a dropped triage tag or a thread left open; an over-match
-// puts a "✅ RESOLVED · verified gone" reply on a still-live finding.
+// One-to-one, and the assignment is GLOBAL by distance — never greedy in
+// `priors` array order. That order-dependence was a real defect: with prior A
+// at {X:0, Y:1} and prior B whose only candidate is X at 1, walking the array
+// gave A→X, B→nothing on `[A, B]` and B→X, A→Y on `[B, A]`. Two orderings of
+// the SAME state, two different sets of threads collapsed; and `priors` order
+// is whatever the state block happened to serialise, i.e. arbitrary.
+//
+// The algorithm, and the invariant that makes it order-free:
+//   * every (prior, comment) pair inside the window is a candidate, computed
+//     once up front;
+//   * distances are processed in increasing order, and a level runs
+//     synchronous rounds until it quiesces: each round every eligible prior
+//     makes at most ONE proposal, then every contested comment is resolved.
+//     Nothing inside a round reads array position, so a round's outcome is a
+//     function of the state alone.
+//   * a round always changes state when it has active pairs (a prior either
+//     proposes or is disqualified; a proposal either binds or blocks its
+//     comment), so a level cannot quiesce with a nearer pair still live —
+//     that is what keeps "nearest first" true, and what terminates the loop.
+//
+// The two ambiguity rules, both "bind NOTHING" as before:
+//   * prior side — a prior tied across several comments at its current best
+//     distance is resolved by `c`, and disqualified for good when `c` cannot
+//     (exactly today's rule, which also never fell through to a farther
+//     comment);
+//   * comment side — the mirror, which array-order greed used to decide by
+//     position: several priors proposing the SAME comment at the same
+//     distance are resolved by `c`, and when `c` cannot, that comment is
+//     blocked for everyone. The losers of a `c`-resolved contest are NOT
+//     disqualified; their comment is simply gone, so they fall to their next
+//     distance like any other prior.
+//
+// Direction of error stays under-match — a missed binding costs a dropped
+// triage tag or a thread left open; an over-match puts a "✅ RESOLVED ·
+// verified gone" reply on a still-live finding.
 export function bindPriorsToPosted<T extends PostedForPrior>(
   priors: readonly { id: string; locs: readonly string[]; claim: string }[],
   posted: readonly T[],
   window: number = IDENTITY_LINE_WINDOW,
 ): Map<string, T> {
-  const bound = new Map<string, T>();
-  const consumed = new Set<number>();
+  interface Pair {
+    priorId: string;
+    claim: string;
+    row: T;
+    distance: number;
+  }
+  const pairs: Pair[] = [];
   for (const prior of priors) {
     const identity = identityFromLocs(prior.locs);
     if (identity.size === 0) continue;
-    const candidates: { row: T; distance: number }[] = [];
     for (const row of posted) {
-      if (consumed.has(row.id)) continue;
       const distance = anchorDistance(identity, row, window);
-      if (distance !== null) candidates.push({ row, distance });
+      if (distance === null) continue;
+      pairs.push({ priorId: prior.id, claim: prior.claim, row, distance });
     }
-    if (candidates.length === 0) continue;
-    const min = Math.min(...candidates.map((c) => c.distance));
-    const tied = candidates.filter((c) => c.distance === min);
-    const winner = resolvePriorTie(tied, prior.claim);
-    if (winner === undefined) continue;
-    bound.set(prior.id, winner);
-    consumed.add(winner.id);
+  }
+
+  const bound = new Map<string, T>();
+  // A comment is consumable once (`consumed`), or by nobody at all when an
+  // equidistant contest over it could not be resolved (`blocked`). A prior
+  // whose own best-distance set was ambiguous binds nothing ever
+  // (`disqualified`).
+  const consumed = new Set<number>();
+  const blocked = new Set<number>();
+  const disqualified = new Set<string>();
+
+  const distances = [...new Set(pairs.map((pair) => pair.distance))].sort(
+    (a, b) => a - b,
+  );
+  for (const distance of distances) {
+    for (;;) {
+      const active = pairs.filter(
+        (pair) =>
+          pair.distance === distance &&
+          !bound.has(pair.priorId) &&
+          !disqualified.has(pair.priorId) &&
+          !consumed.has(pair.row.id) &&
+          !blocked.has(pair.row.id),
+      );
+      if (active.length === 0) break;
+
+      const byPrior = new Map<string, Pair[]>();
+      for (const pair of active) {
+        const group = byPrior.get(pair.priorId);
+        if (group === undefined) byPrior.set(pair.priorId, [pair]);
+        else group.push(pair);
+      }
+      let changed = false;
+      const proposals: Pair[] = [];
+      for (const [priorId, group] of byPrior) {
+        const winner = resolvePriorTie(group, group[0]?.claim ?? "");
+        if (winner === undefined) {
+          disqualified.add(priorId);
+          changed = true;
+          continue;
+        }
+        const proposal = group.find((pair) => pair.row.id === winner.id);
+        if (proposal !== undefined) proposals.push(proposal);
+      }
+
+      const byRow = new Map<number, Pair[]>();
+      for (const pair of proposals) {
+        const group = byRow.get(pair.row.id);
+        if (group === undefined) byRow.set(pair.row.id, [pair]);
+        else group.push(pair);
+      }
+      for (const [rowId, group] of byRow) {
+        const winner = resolveRowTie(group);
+        if (winner === undefined) {
+          blocked.add(rowId);
+          changed = true;
+          continue;
+        }
+        bound.set(winner.priorId, winner.row);
+        consumed.add(rowId);
+        changed = true;
+      }
+      // Unreachable while `active` is non-empty (every branch above changes
+      // state); kept because a loop whose termination depends on that
+      // reasoning holding forever is one refactor away from hanging a post.
+      if (!changed) break;
+    }
   }
   return bound;
 }
@@ -441,6 +735,24 @@ function resolvePriorTie<T extends PostedForPrior>(
   const fingerprint = claimFingerprint(claim);
   const matching = tied.filter((c) => c.row.marker.c === fingerprint);
   return matching.length === 1 ? matching[0]?.row : undefined;
+}
+
+// The mirror of `resolvePriorTie`, for the contest array-order greed used to
+// settle by position: several priors at the SAME distance from one comment.
+// Same rule, read the other way — `c` may break the tie and nothing else, an
+// empty claim cannot vote (`claimFingerprint("")` is a constant every
+// claim-less prior shares), and anything short of exactly one match leaves the
+// comment to nobody.
+function resolveRowTie<T extends PostedForPrior>(
+  contenders: readonly { priorId: string; claim: string; row: T }[],
+): { priorId: string; row: T } | undefined {
+  if (contenders.length === 1) return contenders[0];
+  const matching = contenders.filter(
+    (contender) =>
+      contender.claim.trim().length > 0 &&
+      contender.row.marker.c === claimFingerprint(contender.claim),
+  );
+  return matching.length === 1 ? matching[0] : undefined;
 }
 
 export function enrichPriorsFromThreads(input: {
