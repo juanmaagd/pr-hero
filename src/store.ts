@@ -38,7 +38,6 @@ export function openProductStore(dbPath: string): Database {
   const db = new Database(dbPath, { create: true });
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
-  db.exec("PRAGMA foreign_keys = ON;");
 
   const current = (
     db.query("PRAGMA user_version;").get() as { user_version: number }
@@ -46,6 +45,7 @@ export function openProductStore(dbPath: string): Database {
   const migration = migrationsForProductStore(current);
 
   if (migration.statements.length > 0) {
+    db.exec("PRAGMA foreign_keys = OFF;");
     db.transaction(() => {
       for (const statement of migration.statements) {
         db.exec(statement);
@@ -53,6 +53,8 @@ export function openProductStore(dbPath: string): Database {
     })();
     db.exec(`PRAGMA user_version = ${migration.toVersion};`);
   }
+
+  db.exec("PRAGMA foreign_keys = ON;");
 
   return db;
 }

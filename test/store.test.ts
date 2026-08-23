@@ -748,11 +748,15 @@ describe("saveRunTransaction and round-trip fidelity", () => {
         actor TEXT NULL,
         PRIMARY KEY (run_id, row_index)
       );
+      INSERT INTO runs (id, repo_id, run_dir, head_sha, base_sha, run_status, model, iteration, parity_hunter_fired, generated_at, wall_ms, index_ms, tokens_in, tokens_out, tokens_total, cost_usd_est, blocking, advisory)
+      VALUES (1, 'github.com/org/legacy', 'legacy-run-1', 'headsha', 'basesha', 'complete', 'sonnet', 0, 0, '2026-08-20T00:00:00.000Z', 1000, 100, 1000, 100, 1100, 0.05, 1, 0);
+      INSERT INTO findings (id, run_id, finding_id, category, path, line, severity, evidence_class, refuter_verdict, causal_disposition, claim, hunter, tier, hops_used, dedupe_key, finding_order)
+      VALUES (100, 1, 'F001', 1, 'src/legacy.ts', 10, 'BLOCKER', 'deterministic', 'corroborated', 'introduced', 'Legacy bug', 'reliability', 'blocking', 1, 'src/legacy.ts:10:1', 0);
       PRAGMA user_version = 1;
     `);
     legacyDb.close();
 
-    // Open via openProductStore, which must migrate it to version 2
+    // Open via openProductStore, which must migrate it to version 2 without cascade deletes
     const migratedDb = openProductStore(dbPath);
     try {
       const version = (
@@ -761,6 +765,16 @@ describe("saveRunTransaction and round-trip fidelity", () => {
         }
       ).user_version;
       expect(version).toBe(2);
+
+      // Verify that the legacy run and finding were NOT cascade deleted during DROP TABLE runs
+      const legacyRun = getRunById(migratedDb, 1);
+      expect(legacyRun).not.toBeNull();
+      expect(legacyRun?.run_dir).toBe("legacy-run-1");
+
+      const legacyFindings = migratedDb
+        .query("SELECT * FROM findings WHERE run_id = 1")
+        .all();
+      expect(legacyFindings.length).toBe(1);
 
       // Verify saveRunTransaction works cleanly with ON CONFLICT(repo_id, run_dir)
       const runId = saveRunTransaction(
