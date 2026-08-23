@@ -25,6 +25,7 @@ import {
   loadEffectiveConfig,
   loadGlobalConfigLayer,
   originUsageScope,
+  persistCanonicalReview,
   pipelineConfigInput,
   pipelineScoutInput,
   pipelineSummarizerInput,
@@ -3117,6 +3118,64 @@ describe("ingestReviewMetrics — the review()/reviewPr() caller seam (W4 Phase 
     });
     expect(warnings).toEqual([]);
     expect(seenRunDirs).toEqual(["/runs/pr-42-1"]);
+  });
+});
+
+describe("persistCanonicalReview — canonical product store persistence (Fundamentals #6)", () => {
+  test("a null repoId logs a warning and returns 0", () => {
+    const warnings: string[] = [];
+    const runId = persistCanonicalReview({
+      dbPath: "/tmp/does-not-matter.db",
+      repoId: null,
+      runDir: "/runs/local-1",
+      checkoutPath: OPERATOR_ROOT,
+      doc: doc({ pr: 0 }),
+      perAgent: {},
+      comparison: null,
+      log: (line) => warnings.push(line),
+    });
+    expect(runId).toBe(0);
+    expect(warnings).toEqual([
+      "warning: no repo_id resolved for this run; skipping canonical store persistence",
+    ]);
+  });
+
+  test("a throwing sqlite error logs a warning and returns 0 without crashing", () => {
+    const warnings: string[] = [];
+    const runId = persistCanonicalReview({
+      dbPath: "/invalid/path/that/cannot/exist/prhero.db",
+      repoId: "github.com/acme/widgets",
+      runDir: "/runs/pr-42-1",
+      checkoutPath: OPERATOR_ROOT,
+      doc: doc({ pr: 42 }),
+      perAgent: {},
+      comparison: null,
+      log: (line) => warnings.push(line),
+    });
+    expect(runId).toBe(0);
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain(
+      "warning: canonical store persistence failed — the review itself is intact:",
+    );
+  });
+
+  test("invokes custom persist seam when provided", () => {
+    const seen: string[] = [];
+    const runId = persistCanonicalReview({
+      dbPath: "/tmp/does-not-matter.db",
+      repoId: "github.com/acme/widgets",
+      runDir: "/runs/pr-42-1",
+      checkoutPath: OPERATOR_ROOT,
+      doc: doc({ pr: 42 }),
+      perAgent: {},
+      comparison: null,
+      persist: (input) => {
+        seen.push(input.runDir);
+        return 123;
+      },
+    });
+    expect(runId).toBe(123);
+    expect(seen).toEqual(["/runs/pr-42-1"]);
   });
 });
 

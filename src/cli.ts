@@ -59,10 +59,11 @@ import {
   failSoftIngest,
   queryUsage,
 } from "./metrics";
-import { renderUsage } from "./metrics-preflight";
+import { type RunRow, renderUsage } from "./metrics-preflight";
 import {
   changedPathsFromDiff,
   DEFAULT_SCOUT_MODEL,
+  type PerAgentUsage,
   type PipelineProgressEvent,
   type PipelineResult,
   parityTriggered,
@@ -193,6 +194,8 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
+import { openProductStore, queryRuns, saveRunTransaction } from "./store";
+import { projectCompleteRun } from "./store-preflight";
 import {
   renderTriageReplyBody,
   TRIAGE_MARKER_PREFIX,
@@ -523,6 +526,61 @@ async function main(argv: string[]): Promise<number> {
 // one.
 export function ingestReviewMetrics(input: FailSoftIngestInput): void {
   failSoftIngest(input);
+}
+
+export interface PersistCanonicalReviewInput {
+  dbPath?: string;
+  home?: string;
+  repoId: string | null;
+  runDir: string;
+  checkoutPath: string | null;
+  doc: FindingsDocument;
+  perAgent?: Record<string, PerAgentUsage>;
+  comparison: StoredComparison | null;
+  generatedAt?: string;
+  log?: (line: string) => void;
+  // Test seam
+  persist?: (input: PersistCanonicalReviewInput) => number;
+}
+
+// Canonical Product Store (Fundamentals #6 / observability-canonical-store.md).
+// Persists the complete run result into ~/.prhero/prhero.db transactionally.
+export function persistCanonicalReview(
+  input: PersistCanonicalReviewInput,
+): number {
+  if (input.persist) {
+    return input.persist(input);
+  }
+  if (input.repoId === null) {
+    input.log?.(
+      "warning: no repo_id resolved for this run; skipping canonical store persistence",
+    );
+    return 0;
+  }
+  try {
+    const dbPath =
+      input.dbPath ?? prheroLayout(input.home ?? os.homedir()).prheroDbPath;
+    const db = openProductStore(dbPath);
+    try {
+      const projected = projectCompleteRun({
+        doc: input.doc,
+        perAgent: input.perAgent,
+        comparison: input.comparison,
+        repoId: input.repoId,
+        runDir: input.runDir,
+        checkoutPath: input.checkoutPath,
+        generatedAt: input.generatedAt,
+      });
+      return saveRunTransaction(db, projected);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    input.log?.(
+      `warning: canonical store persistence failed — the review itself is intact: ${(err as Error).message}`,
+    );
+    return 0;
+  }
 }
 
 export interface EffectiveConfig {
@@ -986,9 +1044,16 @@ async function review(options: CliOptions): Promise<number> {
   const findingsPath = path.join(runDir, "findings.json");
   await writeFindings(findingsPath, doc);
 
-  // 16b — the observability store (W4 / #23). AFTER the artifact the review
-  // exists to produce, and fail-soft: an ingest failure must never turn a
-  // successful review into a failed one, only into a printed warning.
+  // 16b — canonical product store & observability metrics.
+  persistCanonicalReview({
+    repoId,
+    runDir,
+    checkoutPath: repoRoot,
+    doc,
+    perAgent: result.perAgent,
+    comparison: null,
+    log,
+  });
   ingestReviewMetrics({
     dbPath: prheroLayout(os.homedir()).metricsDbPath,
     repoId,
@@ -1825,6 +1890,17 @@ async function reviewPr(
           // itself throwing is handled (and warned on) by failSoftIngest.
         }
       }
+      // 13b — canonical product store & observability metrics.
+      persistCanonicalReview({
+        home,
+        repoId: repoHome.repoId,
+        runDir,
+        checkoutPath: operatorRoot,
+        doc,
+        perAgent: result.perAgent,
+        comparison: storedComparison,
+        log,
+      });
       ingestReviewMetrics({
         dbPath: prheroLayout(home).metricsDbPath,
         repoId: repoHome.repoId,
@@ -3651,17 +3727,53 @@ export async function originUsageScope(
 }
 
 async function usageCommand(options: CliOptions): Promise<number> {
-  const dbPath = prheroLayout(os.homedir()).metricsDbPath;
+  const layout = prheroLayout(os.homedir());
   const scope = options.all
     ? ({ all: true } as const)
     : await originUsageScope(os.homedir(), await resolveRepoRoot(options.repo));
-  const rows = queryUsage(dbPath, scope);
+
+  const canonicalRows = existsSync(layout.prheroDbPath)
+    ? (() => {
+        const db = openProductStore(layout.prheroDbPath);
+        try {
+          return queryRuns(db, scope);
+        } finally {
+          db.close();
+        }
+      })()
+    : [];
+
+  let runRows: RunRow[] = canonicalRows.map((r) => ({
+    repo_id: r.repo_id,
+    run_dir: r.run_dir,
+    pr: r.pr,
+    checkout_path: r.checkout_path,
+    head_sha: r.head_sha,
+    base_sha: r.base_sha,
+    run_status: r.run_status,
+    session_failed: r.session_failed === 1 ? 1 : 0,
+    model: r.model,
+    generated_at: r.generated_at,
+    wall_ms: r.wall_ms,
+    index_ms: r.index_ms,
+    tokens_in: r.tokens_in,
+    tokens_out: r.tokens_out,
+    tokens_total: r.tokens_total,
+    cost_usd_est: r.cost_usd_est,
+    blocking: r.blocking,
+    advisory: r.advisory,
+  }));
+
+  if (runRows.length === 0 && existsSync(layout.metricsDbPath)) {
+    runRows = queryUsage(layout.metricsDbPath, scope);
+  }
+
   // An empty store is a valid state of the world (no review has ingested
   // yet, or none matches this scope), not an error — same split as
   // ledgerCommand: a human note on stderr, stdout left clean, exit 0.
-  if (rows.length === 0) {
+  if (runRows.length === 0) {
     log(
-      `no usage rows found in ${dbPath} — run \`pr-hero review\` or ` +
+      `no usage rows found in ${layout.prheroDbPath} — run \`pr-hero review\` or ` +
         "`pr-hero review --pr <n>` first",
     );
     return 0;
@@ -3670,7 +3782,7 @@ async function usageCommand(options: CliOptions): Promise<number> {
   // ledgerCommand: everything human-facing above went to stderr via log(),
   // so stdout stays pipeable.
   process.stdout.write(
-    `${renderUsage(rows, { styles: styleEnabled() }).join("\n")}\n`,
+    `${renderUsage(runRows, { styles: styleEnabled() }).join("\n")}\n`,
   );
   return 0;
 }

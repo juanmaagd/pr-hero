@@ -45,6 +45,8 @@ export interface HopTrailStep {
   reached: string;
 }
 
+export type HopTrail = HopTrailStep[] | string[];
+
 export interface Finding {
   id: string;
   category: number; // hunting-map.md taxonomy, 1-14
@@ -60,7 +62,7 @@ export interface Finding {
   hunter: Hunter;
   tier: Tier;
   hops_used: number;
-  hop_trail: HopTrailStep[];
+  hop_trail: HopTrail;
   dedupe_key: string;
   // Which derived root-cause cluster this finding belongs to (RC001, …).
   // ADDITIVE and OPTIONAL: both validators are pure allowlists that reject

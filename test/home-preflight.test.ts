@@ -36,13 +36,16 @@ describe("prheroLayout", () => {
       lockPath: "/Users/x/.prhero/watch.lock",
       launchdLogPath: "/Users/x/.prhero/launchd.log",
       metricsDbPath: "/Users/x/.prhero/metrics.db",
+      prheroDbPath: "/Users/x/.prhero/prhero.db",
+      storeSocketPath: "/Users/x/.prhero/store.sock",
     });
   });
 
-  test("the metrics db is a sibling of the repos tree, not nested under it", () => {
+  test("the metrics db and prhero db are siblings of the repos tree, not nested under it", () => {
     expect(prheroLayout(HOME).metricsDbPath).toBe(
       "/Users/x/.prhero/metrics.db",
     );
+    expect(prheroLayout(HOME).prheroDbPath).toBe("/Users/x/.prhero/prhero.db");
   });
 
   // C5 / O-13. The compile-time half of this is the retirement itself: with
