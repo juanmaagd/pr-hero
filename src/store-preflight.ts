@@ -21,12 +21,29 @@ import type {
 import type { StoredComparison } from "./ledger";
 import type { PerAgentUsage } from "./pipeline";
 
-export const CURRENT_PRODUCT_SCHEMA_VERSION = 2;
+export const CURRENT_PRODUCT_SCHEMA_VERSION = 3;
 
 export interface ProductSchemaMigration {
   toVersion: number;
   statements: string[];
 }
+
+export const PRODUCT_V2_TO_V3_STATEMENTS: string[] = [
+  `CREATE TABLE IF NOT EXISTS finding_triage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    finding_id TEXT NOT NULL,
+    comment_id INTEGER NULL,
+    tag TEXT NOT NULL,
+    verdict TEXT NULL,
+    actor TEXT NOT NULL,
+    reasoning TEXT NOT NULL,
+    issue_number INTEGER NULL,
+    created_at TEXT NOT NULL
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_finding_triage_run_id ON finding_triage (run_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_finding_triage_finding_id ON finding_triage (finding_id);`,
+];
 
 export const PRODUCT_V1_TO_V2_STATEMENTS: string[] = [
   "ALTER TABLE finding_hop_trail ADD COLUMN is_raw_string INTEGER NOT NULL DEFAULT 0;",
@@ -213,6 +230,21 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     actor TEXT NULL,
     PRIMARY KEY (run_id, row_index)
   )`,
+
+  `CREATE TABLE IF NOT EXISTS finding_triage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    finding_id TEXT NOT NULL,
+    comment_id INTEGER NULL,
+    tag TEXT NOT NULL,
+    verdict TEXT NULL,
+    actor TEXT NOT NULL,
+    reasoning TEXT NOT NULL,
+    issue_number INTEGER NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_finding_triage_run_id ON finding_triage (run_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_finding_triage_finding_id ON finding_triage (finding_id)`,
 ];
 
 export function migrationsForProductStore(
@@ -227,9 +259,18 @@ export function migrationsForProductStore(
       statements: [...PRODUCT_V1_STATEMENTS],
     };
   }
+  if (currentVersion === 1) {
+    return {
+      toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
+      statements: [
+        ...PRODUCT_V1_TO_V2_STATEMENTS,
+        ...PRODUCT_V2_TO_V3_STATEMENTS,
+      ],
+    };
+  }
   return {
     toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
-    statements: [...PRODUCT_V1_TO_V2_STATEMENTS],
+    statements: [...PRODUCT_V2_TO_V3_STATEMENTS],
   };
 }
 
@@ -353,6 +394,19 @@ export interface ComparisonRowProjection {
   verdict: string | null;
   reasoning: string | null;
   actor: string | null;
+}
+
+export interface FindingTriageRow {
+  id?: number;
+  run_id: number;
+  finding_id: string;
+  comment_id?: number | null;
+  tag: string;
+  verdict?: string | null;
+  actor: string;
+  reasoning: string;
+  issue_number?: number | null;
+  created_at: string;
 }
 
 export interface ProjectedFinding {

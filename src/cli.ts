@@ -194,7 +194,12 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
-import { openProductStore, queryRuns, saveRunTransaction } from "./store";
+import {
+  openProductStore,
+  queryRuns,
+  recordFindingTriage,
+  saveRunTransaction,
+} from "./store";
 import { projectCompleteRun } from "./store-preflight";
 import {
   renderTriageReplyBody,
@@ -3400,6 +3405,40 @@ export async function runTriageReplyCommand(input: {
         `(${parent.channel} comment ${parent.id})`,
     );
   }
+
+  // Persist triage record to product store
+  try {
+    const layout = prheroLayout(os.homedir());
+    if (existsSync(layout.prheroDbPath)) {
+      const db = openProductStore(layout.prheroDbPath);
+      try {
+        const runDirBasename = path.basename(runDir);
+        const runRow = db
+          .query("SELECT id FROM runs WHERE run_dir = ? LIMIT 1")
+          .get(runDirBasename) as { id: number } | null;
+        if (runRow) {
+          recordFindingTriage(db, {
+            run_id: runRow.id,
+            finding_id: input.findingId,
+            comment_id: parent.id,
+            tag: input.tag,
+            verdict: input.verdict,
+            actor: "agent",
+            reasoning,
+            issue_number: input.issue,
+            created_at: new Date().toISOString(),
+          });
+        }
+      } finally {
+        db.close();
+      }
+    }
+  } catch (err) {
+    log(
+      `warning: failed to record triage in product store: ${(err as Error).message}`,
+    );
+  }
+
   if (resolveDecision !== "resolve") {
     return 0;
   }

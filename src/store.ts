@@ -27,6 +27,7 @@ import {
   type CanonicalFindingRow,
   type CanonicalRunRow,
   type DebugFindingRow,
+  type FindingTriageRow,
   migrationsForProductStore,
   type ProjectedCompleteRun,
 } from "./store-preflight";
@@ -612,4 +613,41 @@ export function queryRuns(
   return db
     .query("SELECT * FROM runs WHERE repo_id = ? ORDER BY generated_at DESC;")
     .all(scope.repoId) as CanonicalRunRow[];
+}
+
+export function recordFindingTriage(
+  db: Database,
+  triage: FindingTriageRow,
+): number {
+  const insert = db.query(`
+    INSERT INTO finding_triage (
+      run_id, finding_id, comment_id, tag, verdict, actor, reasoning, issue_number, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  insert.run(
+    triage.run_id,
+    triage.finding_id,
+    triage.comment_id ?? null,
+    triage.tag,
+    triage.verdict ?? null,
+    triage.actor,
+    triage.reasoning,
+    triage.issue_number ?? null,
+    triage.created_at,
+  );
+
+  const lastId = (
+    db.query("SELECT last_insert_rowid() as id").get() as { id: number }
+  ).id;
+  return lastId;
+}
+
+export function getFindingTriageByRunId(
+  db: Database,
+  runId: number,
+): FindingTriageRow[] {
+  return db
+    .query("SELECT * FROM finding_triage WHERE run_id = ? ORDER BY id ASC")
+    .all(runId) as FindingTriageRow[];
 }
