@@ -228,8 +228,10 @@ Fundamentals:
       - **Known debt, open on purpose:** ledger rows JD-6..JD-21; `pr-hero config --model x` parses
         and is silently ignored, a gap shared with `ledger`/`gc`/`usage`/`reverts` and worth its own
         slice rather than a `config`-only guard.
-- [ ] Canonical store (`docs/observability-canonical-store.md`): `prhero.db` is source of truth,
+- [x] Canonical store (`docs/observability-canonical-store.md`): `prhero.db` is source of truth,
       JSON is derived, local server owns SQLite, backfill reported, GC does not delete rows
+      — **2026-08-23**, PR #53 (`04d8f1f`). Design `docs/canonical-store-design.md`, Judgment Day
+      ledger `docs/canonical-store-judgment-ledger.md`, Schema v2, 55/55 historical runs backfilled.
 
 Distribution — on a machine that is not this one:
 
