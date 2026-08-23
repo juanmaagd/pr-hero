@@ -4,7 +4,6 @@
 //
 // 100% offline, fresh tmp database per test run.
 
-import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,7 +14,6 @@ import type { PerAgentUsage } from "../src/pipeline";
 import {
   exportComparison,
   exportFindingsDocument,
-  getRunByDir,
   getRunById,
   openProductStore,
   queryRuns,

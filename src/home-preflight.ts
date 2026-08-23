@@ -41,6 +41,8 @@ export interface PrheroLayout {
   metricsDbPath: string;
   // Canonical product database (Fundamentals #6 / observability-canonical-store.md)
   prheroDbPath: string;
+  // Local store server Unix domain socket
+  storeSocketPath: string;
 }
 
 export function prheroLayout(home: string): PrheroLayout {
@@ -55,6 +57,7 @@ export function prheroLayout(home: string): PrheroLayout {
     launchdLogPath: path.join(dir, "launchd.log"),
     metricsDbPath: path.join(dir, "metrics.db"),
     prheroDbPath: path.join(dir, "prhero.db"),
+    storeSocketPath: path.join(dir, "store.sock"),
   };
 }
 

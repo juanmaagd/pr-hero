@@ -7,10 +7,7 @@
 
 import type {
   CausalDisposition,
-  DebugDedupedFinding,
-  DebugRefutedFinding,
   EvidenceClass,
-  Finding,
   FindingsDocument,
   HopTrailStep,
   Hunter,

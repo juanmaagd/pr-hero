@@ -10,22 +10,15 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import type { Bucket } from "./compare";
 import {
-  type CausalDisposition,
   type DebugDedupedFinding,
   type DebugRefutedFinding,
-  type EvidenceClass,
   type Finding,
   type FindingsDocument,
   type HopTrailStep,
-  type Hunter,
   type IndexMode,
-  type RefuterVerdict,
-  type RunStatus,
   type RunSummary,
   SCHEMA_VERSION,
-  type Severity,
   type Telemetry,
-  type Tier,
   validateFindingsDocument,
 } from "./findings";
 import type { StoredComparison, StoredComparisonRow } from "./ledger";
@@ -33,11 +26,8 @@ import {
   type CanonicalFindingRow,
   type CanonicalRunRow,
   type DebugFindingRow,
-  type FindingHopTrailRow,
-  type FindingProofRefRow,
   migrationsForProductStore,
   type ProjectedCompleteRun,
-  type RunAgentRow,
 } from "./store-preflight";
 
 const BUSY_TIMEOUT_MS = 5000;
