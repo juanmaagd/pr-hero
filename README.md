@@ -23,6 +23,7 @@ cd /path/to/your-repo
 pr-hero init                     # scaffolds .prhero/config.json + .prhero/gotchas.md
 
 # 3. Edit the two files .prhero/ now contains (see Configuration below)
+pr-hero config                   # $0: which layer decided each value, and where both files live
 
 # 4. Always preview first — $0, spawns nothing
 pr-hero review --dry-run
@@ -35,26 +36,49 @@ pr-hero review --pr 123          # any PR by number
 
 Every paid run prints a plan and a cost band, then asks for confirmation (`--yes` skips the prompt).
 
-## Configuration — `.prhero/`
+## Configuration — two layers
 
-`pr-hero init` creates both files and never overwrites existing ones. Commit `.prhero/` or add it to
-`.gitignore` — an untracked one trips local mode's clean-tree gate.
+There are two config files, and the difference between them is *who they belong to*:
 
-### `config.json`
-
-| Key | Required | What it does |
+| File | Whose | Committed? |
 | --- | --- | --- |
-| `agents_dir` | yes* | Directory holding the agent prompt files (`deep-review-*.md`, `review-*.md`). Relative paths resolve against the config file. |
-| `default_base` | no | Base ref when `--base` is not given (e.g. `"dev"`). Without it: the remote head (`origin/HEAD`), then `main`. |
-| `parity_trigger_paths` | no | Glob list. The parity hunter runs only when a changed path matches one — no globs, no parity hunter. |
-| `suspicion_priors` | no | `[{path, weight, reason}]` hints injected into hunter prompts — point them at your known hotspots. |
-| `summary` | no | `{enabled, model}` for the engine-owned summarizer step. `enabled` defaults to `true`; set `"enabled": false` to skip it (and its cost). `model` defaults to `"haiku"`. |
+| `~/.prhero/config.json` | **yours**, across every repo on this machine | no — it is your machine |
+| `<repo>/.prhero/config.json` | **the team's** | yes, normally — it is shared through git |
 
-\* `agents_dir` can also come from the `--agents` flag or the `PRHERO_AGENTS_DIR` env var; the flag
-wins, then the config, then the env.
+`pr-hero init` creates the repo file and `gotchas.md`, and never overwrites existing ones. Commit
+`.prhero/` or add it to `.gitignore` — an untracked one trips local mode's clean-tree gate.
 
-† `summary.enabled` can also come from `--summary` / `--no-summary`; the flag wins, then the config,
-then the default (`true`).
+**Run `pr-hero config` to see which layer decided what.** It lists every key with its value, the
+layer it came from, and both file paths whether or not they exist. It never edits anything.
+
+### The one rule
+
+> The more specific layer wins — **except** where the less specific one is protecting your money.
+
+So the team file usually beats your global one. The exception exists because a committed file must
+never be able to enlarge *your* bill: on the two keys that spend, the team can only ask for **less**.
+
+### `config.json` keys
+
+| Key | Where it can live | What it does |
+| --- | --- | --- |
+| `agents_dir` | both | Directory holding the agent prompt files (`deep-review-*.md`, `review-*.md`). Relative paths resolve against **the file that named it**. |
+| `default_base` | **repo only** | Base ref when `--base` is not given (e.g. `"dev"`). Without it: the remote head (`origin/HEAD`), then `main`. Rejected in the global file on purpose — see below. |
+| `parity_trigger_paths` | **repo only** | Glob list. The parity hunter runs only when a changed path matches one — no globs, no parity hunter. |
+| `suspicion_priors` | **repo only** | `[{path, weight, reason}]` hints injected into hunter prompts — point them at your known hotspots. |
+| `summary.enabled` | both — team may only turn it **off** | Whether the engine-owned summarizer runs. Defaults to `true`, because it spends money and a silent opt-out would make the bill differ from the plan. |
+| `summary.model` | both | Model for that step. Defaults to whatever `prompts/summarizer.md` declares (`haiku`). |
+| `max_verification_steps` | both — team may only **lower** it | Cap on re-review verification spawns (item 7). Defaults to `8`; `0` is legal and pauses verification. |
+
+**Why `default_base` is repo-only, since it is the one restriction that looks arbitrary:** the
+resolver checks the config value *before* the remote head. A global `default_base` would therefore
+preempt autodetection on every repo that stays quiet, so the first repo whose default branch differs
+would silently review the wrong commit range — with a plausible branch name on the plan card.
+
+**Flags always win, and may exceed a cap.** A flag is you typing an intent in front of the cost band,
+which is a different thing from a committed file asking on your behalf. `--agents` overrides
+`agents_dir` (then the repo file, then the global, then `PRHERO_AGENTS_DIR`); `--base` overrides
+`default_base`; `--summary` / `--no-summary` and `--model` override the summary keys.
 
 ### `gotchas.md`
 
@@ -73,7 +97,8 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero post --pr <n> --from <run-dir>` | Replay-publish a previous run's findings onto the PR (same plan as `--pr --post`). `--dry-run` previews at $0. |
 | `pr-hero triage --pr <n> --from <run-dir>` | Read reply threads and bind triage markers onto that run's `comparison.json` ledger rows. |
 | `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N --tag <tag> --body-file <path>` | Post one triage reply. The driver picks the parent from the posted `<!-- pr-hero-finding` marker (never path/line), renders the marker + badge, posts, and resolves the inline review thread. Reads `diff.patch` from the run dir to remap post lines the same way `--post` does. `--body-file` is reasoning only. |
-| `pr-hero init` | Scaffold `.prhero/` in the current repo. |
+| `pr-hero config` | Read-only, $0: every config key with its value and **which layer decided it** (`repo` / `global` / `capped` / `default`), plus both file paths whether or not they exist. Resolves through the same code a review does, so it cannot drift from what actually runs. Answers; never edits. |
+| `pr-hero init` | Scaffold `.prhero/` in the current repo. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. |
 | `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
 | `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |
 | `pr-hero watch status` | Read-only, $0: config summary, today's launches vs the cap, launchd state, lock, last activity. |
