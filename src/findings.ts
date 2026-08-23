@@ -201,6 +201,37 @@ function must(condition: boolean, message: string): void {
   if (!condition) throw new FindingsValidationError(message);
 }
 
+// The artifact-side twin of drafts.ts's normalizeOptionalString — same rule,
+// stated in full there. `null` on an optional string is REPAIRED to absent,
+// a present-but-wrong-typed value is rejected.
+//
+// Repaired rather than rejected because this validator does double duty. It is
+// the write gate (writeFindings, below), but it is ALSO the read-back gate for
+// an artifact already on disk: `pr-hero post --from <run-dir>` and
+// `pr-hero triage reply --from <run-dir>` (cli.ts) both re-validate a
+// findings.json written by an earlier engine. Rejecting here would permanently
+// strand every artifact the PR #50 defect already wrote — including the $3.77
+// run whose post it ate — and turn "the post crashed" into "the post can never
+// happen". Repair keeps that recovery path open and still guarantees the
+// invariant on write, since writeFindings stringifies what this returns.
+//
+// Mutates in place: validateFindingsDocument discards this function's return
+// value, exactly as validateHunterDraft does with the draft twin.
+function normalizeOptionalString(
+  f: Record<string, unknown>,
+  key: string,
+  label: string,
+): void {
+  if (f[key] === null) {
+    delete f[key];
+    return;
+  }
+  must(
+    f[key] === undefined || typeof f[key] === "string",
+    `${label} must be a string when present`,
+  );
+}
+
 export function validateFinding(candidate: unknown, index: number): Finding {
   must(
     typeof candidate === "object" && candidate !== null,
@@ -260,6 +291,16 @@ export function validateFinding(candidate: unknown, index: number): Finding {
   must(
     typeof f.dedupe_key === "string" && f.dedupe_key.length > 0,
     `findings[${index}].dedupe_key required`,
+  );
+  must(
+    (f.proof_refs as unknown[]).every((ref) => typeof ref === "string"),
+    `findings[${index}].proof_refs must contain only strings`,
+  );
+  normalizeOptionalString(f, "symbol", `findings[${index}].symbol`);
+  normalizeOptionalString(
+    f,
+    "root_cause_id",
+    `findings[${index}].root_cause_id`,
   );
   return f as unknown as Finding;
 }

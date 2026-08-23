@@ -859,9 +859,17 @@ function findingLocationLine(
     linkLocation && webUrl !== undefined
       ? `[${loc}](${blobUrl(webUrl, headSha, finding.path, `L${finding.line}`)})`
       : loc;
-  return finding.symbol === undefined
-    ? linked
-    : `${linked} — ${oneLine(finding.symbol)}`;
+  // A POSITIVE type test, not `=== undefined`. Defence in depth: the draft and
+  // artifact validators now normalise a null symbol away, so this should be
+  // unreachable — but the old `=== undefined` guard let `"symbol": null` walk
+  // straight into oneLine() and the TypeError killed a POST the pipeline had
+  // already billed $3.77 for (PR #50, 2026-08-23). A renderer that throws
+  // loses paid work; one that renders loses a symbol. oneLine() itself is
+  // deliberately left strict — hardening it would mask this class everywhere.
+  // Empty strings fall to the same branch, which drops the trailing "— ".
+  return typeof finding.symbol === "string" && finding.symbol.length > 0
+    ? `${linked} — ${oneLine(finding.symbol)}`
+    : linked;
 }
 
 // Item 3/4 (Juanma's PR #2 feedback): "CRITICAL (advisory)" on screen with no

@@ -1536,6 +1536,33 @@ describe("renderIssueFindingComment", () => {
     expect(body).not.toContain("$");
     expect(body).not.toContain("token");
   });
+
+  // Defence in depth for the PR #50 crash. The boundary now normalises this
+  // away, so a null symbol should be unreachable here — but the guard was
+  // `=== undefined`, `null` slipped past it into oneLine(), and the TypeError
+  // took down a POST the pipeline had already billed $3.77 for. A renderer
+  // that throws loses paid work; one that renders loses a symbol. The cast is
+  // deliberate: it reproduces what the type system says cannot happen.
+  test("renders a runtime-null symbol instead of throwing", () => {
+    const f = {
+      ...finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      symbol: null,
+    } as unknown as Finding;
+    const body = renderIssueFindingComment(f, HEAD);
+    expect(body).toContain("`src/a.ts:10`");
+    expect(body).not.toContain("null");
+  });
+
+  test("renders a runtime-null symbol as a blob link too", () => {
+    const f = {
+      ...finding({ id: "F001", path: "src/a.ts", line: 10 }),
+      symbol: null,
+    } as unknown as Finding;
+    const body = renderIssueFindingComment(f, HEAD, WEB_URL);
+    expect(body).toContain(
+      `[\`src/a.ts:10\`](${WEB_URL}/blob/${HEAD}/src/a.ts#L10)`,
+    );
+  });
 });
 
 describe("estimateCost", () => {

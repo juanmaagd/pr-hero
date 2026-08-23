@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   deriveTier,
@@ -9,6 +11,7 @@ import {
   type RunSummary,
   SCHEMA_VERSION,
   validateFindingsDocument,
+  writeFindings,
 } from "../src/findings";
 
 function baseFinding(overrides: Partial<Finding> = {}): Finding {
@@ -119,6 +122,57 @@ describe("findings schema round-trip", () => {
     expect(() => validateFindingsDocument(doc)).toThrow();
   });
 
+  // The write gate for the same defect the draft boundary now normalises: a
+  // null symbol must never survive into findings.json. REPAIRED, not rejected,
+  // because this validator does double duty — `pr-hero post --from <run-dir>`
+  // (cli.ts runPostCommand) re-validates an artifact READ BACK off disk, and
+  // rejecting there would permanently strand the $3.77 PR #50 run whose post
+  // this defect already ate. Repair keeps the recovery path open.
+  test("repairs a null symbol instead of rejecting the artifact", () => {
+    const doc = baseDocument([
+      { ...baseFinding(), symbol: null } as unknown as Finding,
+    ]);
+    const validated = validateFindingsDocument(doc);
+    expect(Object.hasOwn(validated.findings[0] ?? {}, "symbol")).toBe(false);
+    expect(validated.findings[0]?.symbol).toBeUndefined();
+  });
+
+  test("repairs a null root_cause_id the same way", () => {
+    const doc = baseDocument([
+      { ...baseFinding(), root_cause_id: null } as unknown as Finding,
+    ]);
+    const validated = validateFindingsDocument(doc);
+    expect(Object.hasOwn(validated.findings[0] ?? {}, "root_cause_id")).toBe(
+      false,
+    );
+  });
+
+  test("keeps a real symbol untouched", () => {
+    const doc = baseDocument([baseFinding({ symbol: "save" })]);
+    expect(validateFindingsDocument(doc).findings[0]?.symbol).toBe("save");
+  });
+
+  // A wrong-typed symbol currently reaches the renderer and throws the same
+  // TypeError this defect did ((42).replace is not a function). Rejecting it
+  // here turns an unrecoverable crash into a legible error; unlike null there
+  // is no meaning to recover, so repair would be a guess.
+  test("rejects a symbol that is present but not a string", () => {
+    const doc = baseDocument([
+      { ...baseFinding(), symbol: 42 } as unknown as Finding,
+    ]);
+    expect(() => validateFindingsDocument(doc)).toThrow();
+  });
+
+  test("rejects a null element inside proof_refs", () => {
+    const doc = baseDocument([
+      {
+        ...baseFinding(),
+        proof_refs: ["diff-hunk#1", null],
+      } as unknown as Finding,
+    ]);
+    expect(() => validateFindingsDocument(doc)).toThrow();
+  });
+
   test("accepts an optional summary and validates it", () => {
     const doc = { ...baseDocument(), summary };
     expect(validateFindingsDocument(doc)).toEqual(doc);
@@ -199,6 +253,32 @@ describe("mergeRunEnvelope — sessionFailed persistence", () => {
     });
     expect(doc.summary).toEqual(summary);
     expect(doc.run_status).toBe("complete");
+  });
+});
+
+// findings.json is the artifact the sibling lab reads and the scorer measures;
+// what lands in those BYTES is the contract, so this asserts on the raw file
+// text rather than on a re-parsed object (a re-parse cannot tell an absent key
+// from one JSON.stringify happened to drop).
+describe("writeFindings", () => {
+  test("never writes a null symbol into the artifact", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pr-hero-findings-"));
+    const out = join(dir, "findings.json");
+    await writeFindings(
+      out,
+      baseDocument([{ ...baseFinding(), symbol: null } as unknown as Finding]),
+    );
+    const raw = await Bun.file(out).text();
+    expect(raw).not.toContain("null");
+    expect(raw).not.toContain('"symbol"');
+    expect(JSON.parse(raw).findings[0].symbol).toBeUndefined();
+  });
+
+  test("still writes a real symbol", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pr-hero-findings-"));
+    const out = join(dir, "findings.json");
+    await writeFindings(out, baseDocument([baseFinding({ symbol: "save" })]));
+    expect(await Bun.file(out).text()).toContain('"symbol": "save"');
   });
 });
 

@@ -87,6 +87,65 @@ describe("validateHunterDraft", () => {
     expect(() => validateHunterDraft({ findings: [withoutKey] })).toThrow();
     expect(() => validateHunterDraft({})).toThrow();
   });
+
+  // 2026-08-23, PR #50: a hunter emitted `"symbol": null` and nothing stopped
+  // it — the null was written into findings.json and killed the POST after the
+  // pipeline had already billed $3.77. Writing `null` for "this finding has no
+  // symbol" is ordinary model behaviour, not a corrupt draft: inline JSON has
+  // no way to spell "absent", and the value carries exactly the meaning absent
+  // does. So it is normalised here rather than rejected — the same tolerance
+  // extractJsonObject already extends to a fenced or prose-wrapped draft, and
+  // for the same reason: one `must()` throw discards EVERY other finding in
+  // the draft and burns a paid retry, over zero lost information.
+  test("normalises a null symbol to absent instead of rejecting the draft", () => {
+    const result = validateHunterDraft({
+      findings: [{ ...draft(), symbol: null }, draft({ id: "R2" })],
+    });
+    expect(result.findings).toHaveLength(2);
+    expect(Object.hasOwn(result.findings[0] ?? {}, "symbol")).toBe(false);
+    expect(result.findings[0]?.symbol).toBeUndefined();
+    expect(result.findings[1]?.id).toBe("R2");
+  });
+
+  test("normalises a null root_cause_id the same way", () => {
+    const result = validateHunterDraft({
+      findings: [{ ...draft(), root_cause_id: null }],
+    });
+    expect(Object.hasOwn(result.findings[0] ?? {}, "root_cause_id")).toBe(
+      false,
+    );
+  });
+
+  test("leaves a real symbol untouched", () => {
+    const result = validateHunterDraft({
+      findings: [draft({ symbol: "abortUpload" })],
+    });
+    expect(result.findings[0]?.symbol).toBe("abortUpload");
+  });
+
+  // `null` means "absent" and is recoverable; a number does not and is not.
+  // Normalising a wrong-typed value would be guessing, so it keeps the house
+  // fail-loud default and takes the draft down with it.
+  test("rejects a symbol that is present but not a string", () => {
+    expect(() =>
+      validateHunterDraft({ findings: [{ ...draft(), symbol: 42 }] }),
+    ).toThrow();
+    expect(() =>
+      validateHunterDraft({ findings: [{ ...draft(), root_cause_id: 7 }] }),
+    ).toThrow();
+  });
+
+  // proof_refs survives `Array.isArray` with null INSIDE it, and every one of
+  // its elements is rendered through oneLine() on the same paid posting path
+  // (report.ts evidence block). Unlike an absent symbol a null element carries
+  // no recoverable meaning, so this one rejects.
+  test("rejects a null element inside proof_refs", () => {
+    expect(() =>
+      validateHunterDraft({
+        findings: [{ ...draft(), proof_refs: ["diff-hunk#1", null] }],
+      }),
+    ).toThrow();
+  });
 });
 
 describe("validateSummary", () => {
