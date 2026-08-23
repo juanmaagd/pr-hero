@@ -158,9 +158,10 @@ a scheduled block before launch, and promoting it to a gate is Juanma's call, no
 
    | Where | Knobs |
    |---|---|
-   | `.prhero/config.json` | `agents_dir` (bundled default), `default_base`, `parity_trigger_paths`, `suspicion_priors`, `summary.enabled` / `summary.model` (Claude family) |
+   | `~/.prhero/config.json` — **the person** (C5, 2026-08-23) | `agents_dir` (bundled default), `summary.model`, and the ceilings for `summary.enabled` / `max_verification_steps` |
+   | `<repo>/.prhero/config.json` — **the team**, committed | `agents_dir`, `parity_trigger_paths`, `suspicion_priors`, `default_base` (**repo-only** — a global value would preempt remote-head autodetection and review the wrong range), `summary.enabled` / `summary.model`, `max_verification_steps`. The team may only **narrow** the two capped keys. |
    | `.prhero/gotchas.md` | required, human-authored; wizard helps write them |
-   | `~/.prhero/watch.json` | per-repo `post`, `on_push`, size-gate overrides; global `daily_cap`, `window` |
+   | `~/.prhero/watch.json` | per-repo `post`, `on_push`, size-gate overrides; global `daily_cap`, `window`. Still the **only** thing that subscribes a repo to unattended spend, and still global-only. |
    | `watch install` | tick `interval` |
    | per-run, from the same menus | `--post`, `--force`, `--max-changed-lines` / `--max-changed-files`, `--hop-budget`, `--model` as a **single Claude override** for every agent — not routing |
 
@@ -1429,27 +1430,58 @@ Convoy-inspired ops the engine still lacks, in value order:
   stripping tag names from content, because stripping `</patch>`-shaped strings out of a diff corrupts the
   code under review. Prompt sets stay untouched — `promptSetFingerprint` hashes the on-disk agent files,
   so injection at write time moves no hash and the paid Cal.com baseline stays comparable.
-- **C5. Global config with per-repo override** (Juanma, 2026-08-13). NOT BUILT. **Promoted to THE
-  LAUNCH LINE fundamentals + distribution pillar 1 on 2026-08-18.** Today `config.json` is
-  per-repo only: `<repo>/.prhero/config.json`, four keys (`agents_dir`, `default_base`,
-  `parity_trigger_paths`, `suspicion_priors`), parsed by `parseLocalConfig` (`preflight.ts:999`), with no
-  global fallback anywhere. `~/.prhero/` exists but belongs entirely to the watcher (`watch.json`, log,
-  lock, plist — `watch-preflight.ts:31`).
+- **C5. Global config with per-repo override** (Juanma, 2026-08-13). **BUILT 2026-08-23**, PR #50
+  (`afc4a13`). Design `docs/c5-global-config-design.md`, Judgment Day ledger
+  `docs/c5-judgment-ledger.md`. Two layers: `~/.prhero/config.json` (the person) and
+  `<repo>/.prhero/config.json` — **which is the team's**, because it is committed and shared through
+  git, a fact this entry originally missed. Remaining: `pr-hero config`, `init`'s O-9, and the
+  re-anchoring this paragraph is part of.
+
+  **This entry's own citations had all drifted, and fixing them is obligation O-11.** Recorded rather
+  than silently overwritten, because a design whose evidence does not resolve is how a wrong premise
+  survives a re-read — and this entry proves the point twice over:
+
+  | This entry said | Actual |
+  |---|---|
+  | `parseLocalConfig` at `preflight.ts:999` | `src/preflight.ts:1512` |
+  | `~/.prhero/` layout at `watch-preflight.ts:31` | `prheroLayout`, `src/home-preflight.ts:32-43` |
+  | the spend rule at `watch-preflight.ts:50` | `src/watch-preflight.ts:43-47` |
+  | "**four keys**" | **six** — `summary` and `max_verification_steps` joined later |
+  | "`~/.prhero/` **belongs entirely to the watcher**" | the **product's** home, watcher as one tenant (`src/home-preflight.ts:7-12`); ratified by Juanma 2026-08-23 |
+
+  The last two are worse than stale line numbers: they are stale *facts*, and the first of them
+  ("four keys") would have made a reader miss that two of the six are exactly the ones that spend
+  money.
 
   **The pain is concrete:** `agents_dir` is the same absolute path to the sibling prompt-set repo in every
   repo, retyped per `init`. A user preference (see B-summary's `summary.enabled`) is likewise a property
   of the person, not the repo. The rest — `default_base`, `parity_trigger_paths`, `suspicion_priors`,
   gotchas — is irreducibly per-repo and must stay there.
 
-  **The rule that must survive the merge, and it is the whole reason this is not a trivial file read:**
-  `watch-preflight.ts:50` records that *nothing in a repo's own `.prhero/` can subscribe it to automatic
-  spend*. Precedence therefore is NOT uniformly "repo wins". A key that can only cost the operator more
-  money or widen trust must be global-only or global-capped; the ergonomic keys are global-default with
-  repo override. Each key gets its direction declared explicitly, in the parser, next to the key — an
-  undeclared key is a bug, not a default.
+  **The rule that had to survive the merge, and it is the whole reason this was not a trivial file read:**
+  `src/watch-preflight.ts:43-47` records that *nothing in a repo's own `.prhero/` can subscribe it to
+  automatic spend*. Precedence is therefore NOT uniformly "repo wins", and each key's direction is
+  declared explicitly next to the key — an undeclared key is a bug, not a default.
 
-  Kept OUT of the summary slice deliberately (one variable per experiment): the summary is one more key in
-  a mechanism that already exists; this is a new mechanism.
+  **What was actually built refines this paragraph in two places** (`docs/c5-global-config-design.md`
+  §1 D3, and the reason the design ran a Judgment Day before any code):
+
+  1. The precedence collapsed to **one rule plus two exception lists**, not a per-key ordering: *the more
+     specific layer wins, except where the less specific one is protecting the operator's money*. The
+     exceptions are **placement** (a key meaningless outside one repo is rejected in the global file) and
+     **widening** (the team layer may only narrow `summary.enabled` and `max_verification_steps`).
+  2. `capped` applies **exactly where "narrower" is definable, and nowhere else**. A boolean has an
+     ordering, a spawn count has one, a model string does not — so `summary.model` takes plain
+     specificity. This paragraph's "global-only or global-capped" would have closed `summary.model`'s
+     team seat; Juanma reversed that on 2026-08-23, and the reason it was wrong is the entry below.
+
+  **And this entry got `default_base` right where the design first got it wrong.** "Irreducibly per-repo
+  and must stay there" is correct, and a draft of the design classified it as a person key anyway —
+  silently overriding a decision already recorded here. `resolveBaseRef` (`src/preflight.ts:1170-1175`)
+  checks the config value **before** the remote head, so a hoisted global `default_base` makes every quiet
+  repo review the wrong commit range: *"a wrong answer with a plausible face"*, in that file's own words.
+  A single judge caught it, and only after the orchestrator re-verified it in code did it get fixed.
+  The lesson is not about this key — **read the entry before rewriting what it decided.**
 - **C6. The learned-knowledge file — pr-hero's own memory of a repo** (Juanma, 2026-08-13). NOT BUILT.
   A file at the repo root that the ENGINE writes: what it learns about this repo across reviews —
   conventions confirmed, false-positive patterns it already burned a refuter step on, invariants it
@@ -1458,7 +1490,8 @@ Convoy-inspired ops the engine still lacks, in value order:
   copying it (the same discipline that re-scoped B6).
 
   **It is NOT `gotchas.md`, and the split is the design.** Gotchas are HUMAN-signed, required, and
-  fail-loud on empty (`pipeline.ts:379`) precisely because they carry what a hunter *cannot infer*. This
+  fail-loud on empty (`src/pipeline.ts:641-648` — this entry said `:379`, drifted) precisely because
+  they carry what a hunter *cannot infer*. This
   file carries what the engine *did* infer. Merging them would destroy the one property that makes the
   gotchas gate meaningful.
 
