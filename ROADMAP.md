@@ -207,7 +207,27 @@ Fundamentals:
         (bookkeeping trusted without reconciling against live state), each in the code written to
         prevent it. The first three were patched per call site, which is why a fourth call site
         was still open. Read `b58c181` before the next patch to that seam.
-- [ ] C5: person-keys default globally, repo-keys stay in `.prhero/`
+- [x] C5: person-keys default globally, repo-keys stay in `.prhero/` — **2026-08-23**, PRs #50 + #51
+      (`afc4a13`, `dab203e`). Design `docs/c5-global-config-design.md`, Judgment Day ledger
+      `docs/c5-judgment-ledger.md`, README rewritten around the two layers.
+      - **The rule shipped as one sentence, not a per-key table:** *the more specific layer wins,
+        except where the less specific one is protecting the operator's money.* `capped` applies
+        exactly where "narrower" is definable — a boolean and a spawn count, never a model string.
+      - **The repo layer is the TEAM layer.** `.prhero/` is committed, so it was always shared
+        through git; naming that is what closed the design's open question and it is why
+        `agents_dir` stays team-overridable.
+      - **`pr-hero config`** answers "why is this value what it is" through the same
+        `loadEffectiveConfig` a review uses, so it cannot drift from what runs. Its row set comes
+        from exhaustive `Record`s: a new config key fails tsc until it has a cell.
+      - **Judgment Day before any code**: 21 unique defects over two rounds, and the second
+        re-judgment caught that round one's own fix was **inert** — a return-type widening moves no
+        runtime value. Without it this would have shipped a merge writing false provenance into
+        `pipeline.json`, which is the failure that made M6's twelve runs unpoolable.
+      - **Three live reviews, $9.37**, found three more defects, two of them ledger rows JD-9 and
+        JD-10 biting exactly where they were recorded. Ledgers in the PR descriptions.
+      - **Known debt, open on purpose:** ledger rows JD-6..JD-21; `pr-hero config --model x` parses
+        and is silently ignored, a gap shared with `ledger`/`gc`/`usage`/`reverts` and worth its own
+        slice rather than a `config`-only guard.
 - [ ] Canonical store (`docs/observability-canonical-store.md`): `prhero.db` is source of truth,
       JSON is derived, local server owns SQLite, backfill reported, GC does not delete rows
 
