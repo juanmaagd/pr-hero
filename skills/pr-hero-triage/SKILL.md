@@ -91,6 +91,11 @@ current head:
    `--verdict` from the adjudicator. `--issue` is optional and only valid
    with `--tag deferred`.
 
+   *(Note: The MCP server is strictly read-only for querying runs, findings, and
+   past triage records via `prhero_get_triage` and `prhero_get_findings`. All
+   mutations — posting comments, resolving threads, and updating the database —
+   must be performed via `pr-hero triage reply`.)*
+
    **Greptile re-review:** Greptile updates its existing PR comment in place —
    it does not post a second one. Do not wait for a new Greptile comment to
    appear; poll for a body change on the existing one, or re-run
