@@ -18,16 +18,18 @@
 // prevented. A nonce closes the same hole without touching a byte, because the
 // tag name cannot be forged by content that was fixed before the nonce existed.
 
-// The tags that exist today. Item 7 (`ROADMAP.md:1003-1160`) will add
-// `previous_finding`, `author_reply`, `comment_body` and `triage_tag`; they are
-// deliberately NOT declared here yet, so adding one is a visible widening of
-// this union at review rather than a string invented at a call site.
+// Closed vocabulary. Item 7 widens it here, not at a call site, so a new
+// untrusted block cannot be wrapped under an invented tag name.
 export type BoundaryTag =
   | "patch"
   | "scout_leads"
   | "finding"
   | "gotchas"
-  | "priors";
+  | "priors"
+  | "previous_finding"
+  | "author_reply"
+  | "comment_body"
+  | "triage_tag";
 
 // 8 hex characters: short enough to cost nothing in a prompt, wide enough
 // (2^32) that guessing it from inside attacker-authored content is not a

@@ -326,6 +326,35 @@ describe("fetchPrComments — REST 404 GraphQL fallback", () => {
     expect(comments).toEqual([{ id: 7, user: "pr-hero", body: "summary" }]);
     expect(calls.some((c) => c.argv.join(" ").includes("graphql"))).toBe(true);
   });
+
+  test("S-B — REST updated_at is optional and forwarded", async () => {
+    const { spawnFn } = makeFakeGh([
+      {
+        match: ["issues/42/comments"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 1,
+              user: "pr-hero",
+              body: "summary",
+              created_at: "2026-08-20T12:00:00Z",
+              updated_at: "2026-08-21T09:00:00Z",
+            },
+          ]),
+        },
+      },
+    ]);
+    const comments = await fetchPrComments(OPERATOR_ROOT, 42, { spawnFn });
+    expect(comments).toEqual([
+      {
+        id: 1,
+        user: "pr-hero",
+        body: "summary",
+        created_at: "2026-08-20T12:00:00Z",
+        updated_at: "2026-08-21T09:00:00Z",
+      },
+    ]);
+  });
 });
 
 describe("fetchPostedFindingComments — marker prefix disjointness", () => {

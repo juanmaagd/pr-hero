@@ -891,6 +891,217 @@ describe("renderPrComment", () => {
     expect(body).not.toContain("since");
   });
 
+  test("O-1a — absence-only cannot print resolved; refuted and deletion can", () => {
+    const absence = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 2,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 2,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(absence).not.toContain("resolved");
+    expect(absence).toContain(
+      "Δ: 0 unconfirmed · 2 carried · 0 deferred · 0 new",
+    );
+
+    const refuted = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 99,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 1,
+          unconfirmed: 0,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(refuted).toContain("1 resolved (verified)");
+    expect(refuted).toContain("✅");
+  });
+
+  test("C7-clean — zero new + carried is not a clean bill", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 1,
+        new: 0,
+        persist: 1,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("✅");
+    expect(body).toContain("Live: 1 carried");
+  });
+
+  test("C7-unconfirmed — a cap hit is not a clean bill", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 2,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("✅");
+    expect(body).toContain("Live: 2 unconfirmed");
+  });
+
+  test("O-2b — every non-suppressed live finding is listed with status", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 1,
+          new: 0,
+          suppressed: 1,
+          returned: 0,
+          reTiered: 0,
+          live: [
+            {
+              id: "R001",
+              sev: "CRITICAL",
+              status: "carried",
+              locs: ["src/app.ts:10"],
+              claim: "still live",
+            },
+            {
+              id: "R002",
+              sev: "WARNING",
+              status: "deferred",
+              locs: ["src/b.ts:1"],
+              claim: "later",
+            },
+            {
+              id: "R003",
+              sev: "WARNING",
+              status: "suppressed",
+              locs: ["src/c.ts:1"],
+              claim: "hidden",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("`carried`");
+    expect(body).toContain("(R001)");
+    expect(body).toContain("`deferred`");
+    expect(body).toContain("(R002)");
+    expect(body).not.toContain("(R003)");
+    expect(body).toContain("1 finding suppressed");
+    expect(body).toContain("🔴 1 critical · 🟡 1 warning");
+  });
+
+  test("D4 — force-push case banners the full-range review", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          case: "D",
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("not an ancestor of this head");
+  });
+
+  test("W-cap — over-cap is loud in the body", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 2,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          capped: 2,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("verification cap");
+    expect(body).toContain("--yes");
+  });
+
   // Spec "Mixed run": a since-sha clause appears once a previous head is
   // known (the prior summary marker's own head=, per design D5).
   test("a second run renders the delta with a since-sha clause", () => {
@@ -1416,6 +1627,18 @@ describe("estimateCost", () => {
     expect(neither.basis).not.toContain("scout");
     expect(both.basis).toContain("summarizer");
     expect(both.basis).toContain("scout");
+  });
+
+  test("O-5a — verification-step count is its own term: 2 vs 40 moves the band", () => {
+    const two = estimateCost(SMALL, 4, false, false, 2);
+    const forty = estimateCost(SMALL, 4, false, false, 40);
+    expect(forty.high).toBeGreaterThan(two.high);
+    expect(forty.low).toBeGreaterThan(two.low);
+    expect(two.basis).toContain("2 verification step");
+    expect(forty.basis).toContain("40 verification step");
+    expect(estimateCost(SMALL, 4)).toEqual(
+      estimateCost(SMALL, 4, false, false, 0),
+    );
   });
 
   test("a zero diff is non-negative and still a band", () => {

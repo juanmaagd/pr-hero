@@ -80,6 +80,10 @@ export function estimateCost(
   // band byte-identical, and so a caller that forgets it under-quotes
   // nothing it did not already under-quote.
   scoutEnabled = false,
+  // Item 7 O-5a. Default 0 so every existing caller keeps its band
+  // byte-identical. Priced as its own term (not folded into `agents`) so a
+  // 40-finding re-review of a 2-file delta is not billed as 40 hunters.
+  verificationSteps = 0,
 ): CostEstimate {
   const files = Math.max(0, diffStat.files);
   const lines =
@@ -97,13 +101,26 @@ export function estimateCost(
   // which is a milestone total and not a per-spawn cost. M6 records cost per
   // arm; that is the number this coefficient gets recalibrated from, and until
   // it exists an invented per-scout coefficient would be false precision.
-  const agents = Math.max(
-    1,
+  const hunterSeats = Math.max(
+    0,
     hunterCount + (summarizerEnabled ? 1 : 0) + (scoutEnabled ? 1 : 0),
   );
+  const steps = Math.max(0, verificationSteps);
+  // A zero-hunter, zero-verify call still needs a band (the hypothetical
+  // floor). A skip-discovery re-review with N verify steps must NOT inherit
+  // that floor — that would bill a phantom hunter on top of verification.
+  const agents = hunterSeats === 0 && steps === 0 ? 1 : hunterSeats;
+  // Verification is its OWN term (item 7 O-5a), not folded into `agents`:
+  // a verify step reads one prior finding, not the whole tree, so multiplying
+  // it by changed-files would price a 40-finding re-review of a 2-file delta
+  // as if it were 40 hunters. The seat is the same per-agent floor — generous
+  // on purpose, same direction as the scout.
   const mid =
     agents *
-    (USD_PER_AGENT_BASE + USD_PER_CHANGED_LINE * lines + USD_PER_FILE * files);
+      (USD_PER_AGENT_BASE +
+        USD_PER_CHANGED_LINE * lines +
+        USD_PER_FILE * files) +
+    steps * USD_PER_AGENT_BASE;
   return {
     low: round2(mid * BAND_LOW),
     high: round2(mid * BAND_HIGH),
@@ -113,7 +130,8 @@ export function estimateCost(
       "+2775 −1237 tree with 5 hunters + refuter, ~$11–$14.78): a " +
       "per-agent floor for hunters + refuter" +
       `${summarizerEnabled ? " + summarizer" : ""}` +
-      `${scoutEnabled ? " + scout" : ""} ` +
+      `${scoutEnabled ? " + scout" : ""}` +
+      `${steps > 0 ? ` + ${steps} verification step(s)` : ""} ` +
       "plus changed lines and files. An order-of-magnitude " +
       "guide, not a quote — the same tree has billed 34% apart across runs.",
   };
@@ -274,11 +292,88 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // "since <sha>" clause rather than omitting the line: spec's own "First-ever
 // run" scenario requires `0 resolved · K new · 0 persist` to be visible, not
 // silent, on the first post.
+export interface RereviewLiveRow {
+  id: string;
+  sev: Severity;
+  status: string;
+  locs: readonly string[];
+  claim: string;
+}
+
+export interface RereviewDelta {
+  verifiedGone: number;
+  unconfirmed: number;
+  carried: number;
+  deferred: number;
+  new: number;
+  suppressed: number;
+  returned: number;
+  reTiered: number;
+  live?: readonly RereviewLiveRow[];
+  capped?: number;
+  case?: string;
+  worsened?: readonly {
+    priorId: string;
+    priorSev: Severity;
+    discoverySev: Severity;
+  }[];
+}
+
 export interface PrCommentDelta {
   resolved: number;
   new: number;
   persist: number;
   previousHeadSha?: string;
+  // Item 7: when present, deltaLine and the clean-bill gate read THIS, not
+  // MatchResult.resolved (C2, R2-S6). Absent keeps first-review rendering
+  // byte-identical.
+  rereview?: RereviewDelta;
+}
+
+export function rereviewDeltaFromProvenance(
+  rereview: {
+    case?: string;
+    live: readonly {
+      id?: string;
+      sev?: string;
+      status: string;
+      locs?: readonly string[];
+      claim?: string;
+    }[];
+    resolved_verified?: number;
+    verification_capped?: number;
+    returned?: number;
+    re_tiered?: number;
+    worsened?: readonly {
+      priorId: string;
+      priorSev: Severity;
+      discoverySev: Severity;
+    }[];
+  },
+  newFindings: number,
+): RereviewDelta {
+  const count = (status: string): number =>
+    rereview.live.filter((row) => row.status === status).length;
+  return {
+    verifiedGone: rereview.resolved_verified ?? 0,
+    unconfirmed: count("unconfirmed"),
+    carried: count("carried"),
+    deferred: count("deferred"),
+    new: newFindings,
+    suppressed: count("suppressed"),
+    returned: rereview.returned ?? 0,
+    reTiered: rereview.re_tiered ?? 0,
+    live: rereview.live.map((row) => ({
+      id: row.id ?? "",
+      sev: (row.sev as Severity) ?? "WARNING",
+      status: row.status,
+      locs: row.locs ?? [],
+      claim: row.claim ?? "",
+    })),
+    capped: rereview.verification_capped ?? 0,
+    ...(rereview.case === undefined ? {} : { case: rereview.case }),
+    ...(rereview.worsened === undefined ? {} : { worsened: rereview.worsened }),
+  };
 }
 
 // One consistent severity → emoji mapping (Juanma's PR #2 feedback), shared
@@ -463,10 +558,16 @@ export function renderPrComment(
   // SUGGESTION is deliberately excluded from the headline, mirroring the
   // two-bucket 🔴/🟡 shape Juanma specified — a SUGGESTION still appears in
   // the index below, just not double-counted in the headline.
-  const critical = doc.findings.filter(
-    (f) => f.severity === "BLOCKER" || f.severity === "CRITICAL",
+  const liveRows = delta?.rereview?.live ?? [];
+  const liveForHeadline = liveRows.filter((row) => row.status !== "suppressed");
+  const headlineSev = [
+    ...doc.findings.map((f) => f.severity),
+    ...liveForHeadline.map((row) => row.sev),
+  ];
+  const critical = headlineSev.filter(
+    (sev) => sev === "BLOCKER" || sev === "CRITICAL",
   ).length;
-  const warning = doc.findings.filter((f) => f.severity === "WARNING").length;
+  const warning = headlineSev.filter((sev) => sev === "WARNING").length;
   const headSha8 = code(doc.head_sha.slice(0, 8));
   const headRef =
     webUrl === undefined
@@ -503,6 +604,21 @@ export function renderPrComment(
     );
     out.push("");
     out.push(movedHeadSentence(doc.head_sha, movedHeadSha, code));
+    out.push("");
+  }
+  if (delta?.rereview?.case === "D") {
+    out.push(
+      "⚠️ **Last reviewed head is not an ancestor of this head.** " +
+        "Reviewing the full PR range (force-push / rebase / amend).",
+    );
+    out.push("");
+  }
+  if ((delta?.rereview?.capped ?? 0) > 0) {
+    out.push(
+      `⚠️ **${delta?.rereview?.capped} prior finding(s) unconfirmed:** ` +
+        "verification cap (`max_verification_steps`) bound this run; " +
+        "`--yes` does not bypass it.",
+    );
     out.push("");
   }
   // GitHub #42. The defect: a run where SOME agents died and the survivors
@@ -553,17 +669,17 @@ export function renderPrComment(
     // that claim is false, so the glyph is withdrawn and the line points back
     // at the notice above rather than leaving the body to jump from a zero
     // count straight to the footer (GitHub #42).
-    out.push(
-      doc.run_status === "partial"
-        ? "The agents that completed reported nothing. That is not a clean " +
-            "bill: read it against the coverage above."
-        : "✅ pr-hero reviewed this PR and found nothing to report.",
-    );
+    //
+    // Item 7 C7: zero new findings is also not a clean bill when priors
+    // remain live (carried / unconfirmed / deferred / suppressed) or this
+    // run returned / re-tiered a prior. MatchResult.resolved cannot say so.
+    out.push(cleanBillLine(doc.run_status, delta?.rereview));
     out.push("");
   } else {
     out.push(...findingIndexLines(doc.findings, commentUrlByFindingId));
     out.push("");
   }
+  out.push(...liveFindingLines(delta?.rereview));
   if (outsideDiffFindings.length > 0) {
     out.push(...outsideDiffSection(outsideDiffFindings, doc.head_sha, webUrl));
     out.push("");
@@ -593,11 +709,92 @@ export function renderPrComment(
   return `${out.join("\n").trimEnd()}\n`;
 }
 
+function liveFindingLines(rereview: RereviewDelta | undefined): string[] {
+  if (rereview === undefined) return [];
+  const out: string[] = [];
+  if (rereview.worsened !== undefined && rereview.worsened.length > 0) {
+    for (const hit of rereview.worsened) {
+      out.push(
+        `returned ${hit.priorId}: ${hit.priorSev} → ${hit.discoverySev}`,
+      );
+    }
+    out.push("");
+  }
+  const listed = (rereview.live ?? []).filter(
+    (row) => row.status !== "suppressed",
+  );
+  if (listed.length > 0) {
+    out.push("Still live:");
+    for (const row of listed) {
+      const loc = row.locs[0] ?? row.id;
+      out.push(
+        `- \`${row.status}\` ${severityEmoji(row.sev)} \`${loc}\` — ${leadIn(row.claim)} (${row.id})`,
+      );
+    }
+    out.push("");
+  }
+  if (rereview.suppressed > 0) {
+    out.push(
+      `${rereview.suppressed} finding${rereview.suppressed === 1 ? "" : "s"} suppressed.`,
+    );
+    out.push("");
+  }
+  return out;
+}
+
+function rereviewIsClean(rereview: RereviewDelta | undefined): boolean {
+  if (rereview === undefined) return true;
+  return (
+    rereview.unconfirmed === 0 &&
+    rereview.carried === 0 &&
+    rereview.deferred === 0 &&
+    rereview.suppressed === 0 &&
+    rereview.returned === 0 &&
+    rereview.reTiered === 0
+  );
+}
+
+function cleanBillLine(
+  runStatus: FindingsDocument["run_status"],
+  rereview: RereviewDelta | undefined,
+): string {
+  if (runStatus === "partial") {
+    return (
+      "The agents that completed reported nothing. That is not a clean " +
+      "bill: read it against the coverage above."
+    );
+  }
+  if (!rereviewIsClean(rereview) && rereview !== undefined) {
+    const bits: string[] = [];
+    if (rereview.carried > 0) bits.push(`${rereview.carried} carried`);
+    if (rereview.unconfirmed > 0)
+      bits.push(`${rereview.unconfirmed} unconfirmed`);
+    if (rereview.deferred > 0) bits.push(`${rereview.deferred} deferred`);
+    if (rereview.suppressed > 0) bits.push(`${rereview.suppressed} suppressed`);
+    if (rereview.returned > 0) bits.push(`${rereview.returned} returned`);
+    if (rereview.reTiered > 0) bits.push(`${rereview.reTiered} re-tiered`);
+    return `No new findings this delta. Live: ${bits.join(" · ")}.`;
+  }
+  return "✅ pr-hero reviewed this PR and found nothing to report.";
+}
+
 function deltaLine(delta: PrCommentDelta): string {
   const since =
     delta.previousHeadSha === undefined
       ? "Δ"
       : `Δ since ${code(delta.previousHeadSha.slice(0, 8))}`;
+  if (delta.rereview !== undefined) {
+    const r = delta.rereview;
+    const parts: string[] = [];
+    if (r.verifiedGone > 0) {
+      parts.push(`${r.verifiedGone} resolved (verified)`);
+    }
+    parts.push(`${r.unconfirmed} unconfirmed`);
+    parts.push(`${r.carried} carried`);
+    parts.push(`${r.deferred} deferred`);
+    parts.push(`${r.new} new`);
+    return `${since}: ${parts.join(" · ")}`;
+  }
   return `${since}: ${delta.resolved} resolved · ${delta.new} new · ${delta.persist} persist`;
 }
 

@@ -180,6 +180,7 @@ export interface PostedFindingComment {
   // current position, not the position at post time.
   livePath?: string;
   liveLine?: number;
+  created_at?: string;
 }
 
 export interface FindingMatch {

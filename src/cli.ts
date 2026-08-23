@@ -43,6 +43,7 @@ import {
 } from "./home-preflight";
 import {
   buildPostPlan,
+  type PostedFindingComment,
   type PostPlan,
   parseHunkAnchors,
   resolvePostLine,
@@ -131,6 +132,7 @@ import {
   repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
+  resolveMaxVerificationSteps,
   resolveSummary,
   runDirCandidate,
   SUGGESTED_AGENTS_DIR,
@@ -153,7 +155,23 @@ import {
   type PrCommentDelta,
   renderPrComment,
   renderReport,
+  rereviewDeltaFromProvenance,
 } from "./report";
+import {
+  buildPhaseBQueue,
+  collapseTargets,
+  enrichPriorsFromThreads,
+  parseNameOnly,
+  parseNameStatus,
+  prepareDiscovery,
+  priorsFromPostedMarkers,
+  priorsFromStateFindings,
+  type RereviewProvenance,
+  readRereviewProvenance,
+  shouldAbortEmptyDiscovery,
+  toRereviewProvenance,
+} from "./rereview-prepare";
+import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
 import {
   effectiveDiffStat,
@@ -316,6 +334,51 @@ async function git(
     proc.exited,
   ]);
   return { ok: exitCode === 0, stdout, stderr };
+}
+
+async function gitCommitExists(repo: string, sha: string): Promise<boolean> {
+  const result = await git(repo, ["cat-file", "-e", `${sha}^{commit}`]);
+  return result.ok;
+}
+
+async function gitIsAncestor(
+  repo: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  const result = await git(repo, [
+    "merge-base",
+    "--is-ancestor",
+    ancestor,
+    descendant,
+  ]);
+  return result.ok;
+}
+
+async function gitNameOnly(
+  repo: string,
+  from: string,
+  to: string,
+): Promise<string[]> {
+  const result = await git(repo, ["diff", "--name-only", `${from}..${to}`]);
+  if (!result.ok) {
+    throw new CliError(`git diff --name-only failed: ${result.stderr.trim()}`);
+  }
+  return parseNameOnly(result.stdout);
+}
+
+async function gitNameStatus(
+  repo: string,
+  from: string,
+  to: string,
+): Promise<string> {
+  const result = await git(repo, ["diff", "--name-status", `${from}..${to}`]);
+  if (!result.ok) {
+    throw new CliError(
+      `git diff --name-status failed: ${result.stderr.trim()}`,
+    );
+  }
+  return result.stdout;
 }
 
 async function resolveCommit(repo: string, rev: string): Promise<string> {
@@ -1052,49 +1115,171 @@ async function reviewPr(
       headSha,
     );
 
-    // 5 — the diff and its true size, computed in the git-dir owner (the
-    // worktree shares ITS object db) and BEFORE anything is created on disk.
-    const diff = await git(gitDirOwner, ["diff", `${diffFromSha}..${headSha}`]);
-    if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
-    if (diff.stdout.trim().length === 0) {
+    // 5 — last-reviewed head, then the TWO deltas (D9). Discovery is the
+    // restricted L..H intersection (or full B..H); the size gate counts
+    // that same discovery diff, never the whole PR, so a merge of main
+    // cannot inflate the bill. Empty discovery is a re-review state, not
+    // an error (C6) — first review (case A) still fails loud.
+    const [issueComments, postedFindings, reviewComments] = await Promise.all([
+      fetchPrComments(operatorRoot, prNumber),
+      fetchPostedFindingComments(operatorRoot, prNumber),
+      fetchPrReviewComments(operatorRoot, prNumber),
+    ]);
+    const existingSummaryId = findMarkedCommentId(issueComments);
+    const summaryHead =
+      existingSummaryId === null
+        ? null
+        : parseMarkerHead(
+            issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
+          );
+    const prepared = await prepareDiscovery({
+      B: diffFromSha,
+      H: headSha,
+      full: options.full,
+      summaryHead,
+      findingMarkers: postedFindings.map((p) => ({
+        headSha: p.marker.headSha,
+        createdAt: p.created_at ?? "",
+      })),
+      git: {
+        commitExists: (sha) => gitCommitExists(gitDirOwner, sha),
+        isAncestor: (ancestor, descendant) =>
+          gitIsAncestor(gitDirOwner, ancestor, descendant),
+        nameOnly: (from, to) => gitNameOnly(gitDirOwner, from, to),
+      },
+    });
+    const discoveryRange = `${prepared.discoveryFrom}..${prepared.discoveryTo}`;
+    const pathArgs =
+      prepared.discoveryPaths !== null && prepared.discoveryPaths.length > 0
+        ? ["--", ...prepared.discoveryPaths]
+        : [];
+    const skipPlannedDiscovery =
+      prepared.plan.skipDiscovery || prepared.discoverySkippedEmptyDelta;
+
+    let rawDiff = "";
+    if (!skipPlannedDiscovery) {
+      const diff = await git(gitDirOwner, [
+        "diff",
+        discoveryRange,
+        ...pathArgs,
+      ]);
+      if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
+      rawDiff = diff.stdout;
+    }
+    if (shouldAbortEmptyDiscovery(prepared.plan, rawDiff)) {
       throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
     }
-    // The effective diff, and the empty check on it, BOTH before the run dir
-    // exists — same rule as the gate below: a PR that cannot be reviewed leaves
-    // nothing behind.
     const gateConfig = sizeGateConfig(options);
-    const effectiveDiff = filterDiffByGlobs(
-      diff.stdout,
-      gateConfig.excludeGlobs,
-    );
-    if (effectiveDiff.patch.trim().length === 0) {
-      throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
+    const effectiveDiff = skipPlannedDiscovery
+      ? { patch: "", droppedPaths: [] as string[] }
+      : filterDiffByGlobs(rawDiff, gateConfig.excludeGlobs);
+    if (
+      prepared.plan.emptyDeltaIsError &&
+      effectiveDiff.patch.trim().length === 0
+    ) {
+      throw new CliError(
+        effectiveDiff.droppedPaths.length > 0
+          ? allExcludedMessage(effectiveDiff.droppedPaths)
+          : emptyDiffMessage(target.baseRef, headLabel, false),
+      );
     }
-    // Two numstats, for the reason spelled out in local mode: the gate counts
-    // whitespace-blind so a formatter sweep cannot eat the budget, the cost
-    // band counts the bytes the hunters are actually handed.
-    const numstat = await git(gitDirOwner, [
-      "diff",
-      "--numstat",
-      `${diffFromSha}..${headSha}`,
-    ]);
-    if (!numstat.ok) {
-      throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
+    const skipDiscovery =
+      skipPlannedDiscovery || effectiveDiff.patch.trim().length === 0;
+    const rereview = toRereviewProvenance(prepared, postedFindings.length);
+    if (rereview !== undefined && skipDiscovery) {
+      rereview.discovery_skipped_empty_delta = true;
     }
-    const gateNumstat = await git(gitDirOwner, [
-      "diff",
-      "-w",
-      "--ignore-blank-lines",
-      "--numstat",
-      `${diffFromSha}..${headSha}`,
-    ]);
-    if (!gateNumstat.ok) {
-      throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
+
+    let verifyQueue: ReturnType<typeof buildPhaseBQueue>["queued"] = [];
+    let overlapCandidates: ReturnType<
+      typeof buildPhaseBQueue
+    >["overlapCandidates"] = [];
+    let phaseB:
+      | {
+          settled: ReturnType<typeof buildPhaseBQueue>["settled"];
+          priors: ReturnType<typeof priorsFromStateFindings>;
+        }
+      | undefined;
+    if (prepared.case !== "A" && prepared.last.L !== null) {
+      const nameStatus = parseNameStatus(
+        await gitNameStatus(gitDirOwner, prepared.last.L, headSha),
+      );
+      const summaryComment =
+        existingSummaryId === null
+          ? undefined
+          : issueComments.find((c) => c.id === existingSummaryId);
+      const summaryUpdatedAt = summaryComment?.updated_at ?? null;
+      const state = parseStateBlock(summaryComment?.body ?? "");
+      const rawPriors =
+        state === null
+          ? priorsFromPostedMarkers(
+              postedFindings.map((p) => ({
+                path: p.livePath ?? p.marker.path,
+                line: p.liveLine ?? p.marker.line,
+                channel: p.channel === "issue" ? "outside" : "inline",
+              })),
+            )
+          : priorsFromStateFindings(state.findings);
+      const priors = enrichPriorsFromThreads({
+        priors: rawPriors,
+        posted: postedFindings,
+        replies: reviewComments,
+        summaryUpdatedAt,
+      });
+      const classified = buildPhaseBQueue({
+        case: prepared.case,
+        priors,
+        nameStatus,
+        summaryUpdatedAt,
+      });
+      verifyQueue = classified.queued;
+      overlapCandidates = classified.overlapCandidates;
+      phaseB = { settled: classified.settled, priors };
+      if (rereview !== undefined) {
+        rereview.prior_findings = priors.length;
+        rereview.settled_deterministically = classified.settled.filter(
+          (s) => s.status !== "queued",
+        ).length;
+      }
     }
-    const diffStat: DiffStat = effectiveDiffStat(
-      parseNumstatFiles(numstat.stdout),
-      gateConfig.excludeGlobs,
-    );
+
+    let diffStat: DiffStat;
+    let sizeGate: SizeGateVerdict;
+    if (skipDiscovery) {
+      diffStat = { files: 0, insertions: 0, deletions: 0 };
+      sizeGate = evaluateSizeGate([], gateConfig);
+    } else {
+      const numstat = await git(gitDirOwner, [
+        "diff",
+        "--numstat",
+        discoveryRange,
+        ...pathArgs,
+      ]);
+      if (!numstat.ok) {
+        throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
+      }
+      const gateNumstat = await git(gitDirOwner, [
+        "diff",
+        "-w",
+        "--ignore-blank-lines",
+        "--numstat",
+        discoveryRange,
+        ...pathArgs,
+      ]);
+      if (!gateNumstat.ok) {
+        throw new CliError(
+          `git diff -w --numstat failed: ${gateNumstat.stderr}`,
+        );
+      }
+      diffStat = effectiveDiffStat(
+        parseNumstatFiles(numstat.stdout),
+        gateConfig.excludeGlobs,
+      );
+      sizeGate = evaluateSizeGate(
+        parseNumstatFiles(gateNumstat.stdout),
+        gateConfig,
+      );
+    }
 
     // 5b — the size gate, on the REAL per-file numstat and placed here on
     // purpose: before createPrRunDir, so a skipped PR leaves no run dir
@@ -1102,10 +1287,6 @@ async function reviewPr(
     // run artifacts, so a gate skip cannot consume a poison-PR attempt even
     // when the watcher was the one that launched this review. Unattended
     // (--yes) still skips with no prompt; an interactive TTY is asked first.
-    const sizeGate = evaluateSizeGate(
-      parseNumstatFiles(gateNumstat.stdout),
-      gateConfig,
-    );
     // A hard skip (and the interactive prompt) never reach the plan, so the
     // verdict states itself here. --force falls through and the plan's
     // decision block prints the same line plus the override note.
@@ -1185,7 +1366,7 @@ async function reviewPr(
     const diffPath = path.join(runDir, "diff.patch");
     await Bun.write(diffPath, effectiveDiff.patch);
     if (effectiveDiff.droppedPaths.length > 0) {
-      await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
+      await Bun.write(path.join(runDir, "diff.raw.patch"), rawDiff);
     }
 
     // 7 — the plan and the paid gate, exactly like local mode but with the
@@ -1195,15 +1376,24 @@ async function reviewPr(
       changedPaths,
       config.parity_trigger_paths,
     );
-    const activeHunters = spec.agents.filter(
-      (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-    );
+    const activeHunters = skipDiscovery
+      ? []
+      : spec.agents.filter(
+          (a) =>
+            a.role === "hunter" && (a.trigger === undefined || parityFires),
+        );
     const hunterCount = activeHunters.length;
+    const maxVerificationSteps = resolveMaxVerificationSteps(config);
+    const queuedVerification = Math.min(
+      verifyQueue.length,
+      maxVerificationSteps,
+    );
     const estimate = estimateCost(
       diffStat,
       hunterCount,
-      summary.enabled,
-      options.scout,
+      summary.enabled && !skipDiscovery,
+      options.scout && !skipDiscovery,
+      queuedVerification,
     );
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
@@ -1225,6 +1415,19 @@ async function reviewPr(
       droppedPaths: effectiveDiff.droppedPaths,
       resolved: { baseSha, diffFromSha, diffPath, parityFires },
       ...(sizeGateConfirmed ? { sizeGateConfirmed: true } : {}),
+      ...(queuedVerification > 0
+        ? { verificationSteps: queuedVerification }
+        : {}),
+      ...(prepared.case === "A"
+        ? {}
+        : {
+            rereview: {
+              case: prepared.case,
+              lastHead: prepared.last.L,
+              discoveryRestricted: prepared.plan.discoveryRestricted,
+              skipDiscovery,
+            },
+          }),
     };
     for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
     // What this run will actually publish. `options` is never mutated: the plan
@@ -1349,11 +1552,17 @@ async function reviewPr(
             ...(options.model ? { model: options.model } : {}),
             parityTriggerPaths: config.parity_trigger_paths,
             suspicionPriors: config.suspicion_priors,
-            ...pipelineSummarizerInput(summary),
-            ...pipelineScoutInput(options),
+            ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
+            ...(skipDiscovery ? {} : pipelineScoutInput(options)),
             engine: await engineIdentity(),
             promptSet,
             spec,
+            ...(skipDiscovery ? { skipDiscovery: true } : {}),
+            ...(rereview === undefined ? {} : { rereview }),
+            ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
+            ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
+            maxVerificationSteps,
+            ...(phaseB === undefined ? {} : { phaseB }),
           },
           { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
         );
@@ -1511,6 +1720,8 @@ async function reviewPr(
           doc,
           diffPatch: effectiveDiff.patch,
           webUrl: postedWebUrl,
+          rereview,
+          rereviewPriors: phaseB?.priors,
         });
         if (posted) {
           await writePostReceipt(runDir, prNumber, headSha, posted);
@@ -1730,6 +1941,7 @@ async function resolveInlinePostPlan(input: {
   // #3305: re-matching a subset can dissolve a tie the plan already
   // resolved). See ReviewSubmissionOutcome's WHY in pr.ts.
   findingRefs: PrHeroFindingRef[];
+  posted: PostedFindingComment[];
 }> {
   const issueComments = await fetchPrComments(input.operatorRoot, input.pr, {
     spawnFn: input.spawnFn,
@@ -1771,7 +1983,7 @@ async function resolveInlinePostPlan(input: {
     posted,
     headSha: input.headSha,
   });
-  return { plan, previousHeadSha, existingSummaryId, findingRefs };
+  return { plan, previousHeadSha, existingSummaryId, findingRefs, posted };
 }
 
 // A finding's own posted comment, as a clickable link for the summary's
@@ -1790,6 +2002,16 @@ function findingCommentUrl(
     channel === "review" ? `discussion_r${id}` : `issuecomment-${id}`;
   return `${webUrl}/pull/${pr}#${fragment}`;
 }
+
+// Watchdog for the verified-gone collapse loop's `gh` calls. Every LLM step
+// in the pipeline is bounded by `stepTimeoutMs`; the collapse loop's two gh
+// calls were the only awaits on the `--post` path with no bound at all, and
+// an accepted-but-unanswered GitHub request there hangs `review --pr --post`
+// forever — including an unattended `--yes` run launched by the watcher,
+// where nothing is present to notice or ^C it. Two minutes is generous for a
+// single REST/graphql round trip and still finite; the failure it converts is
+// "hangs until someone kills it" → "one logged line, thread left open".
+const COLLAPSE_GH_TIMEOUT_MS = 120_000;
 
 // The actual post sequence (design D6, reordered per Juanma's PR #2
 // feedback item 2; W2 issues #16/#17 retire the issue-comment loop):
@@ -1817,6 +2039,55 @@ function findingCommentUrl(
 // The final PATCH's delta-must-describe-what-was-posted invariant (PR2
 // verification, WARN-3) is unchanged — the placeholder is provisional, the
 // closing PATCH is authoritative, same as before this rework.
+
+// One wording PER refusal, each said by both the post sequence's precondition
+// and `post --dry-run`'s preview of it. The preview and the post disagreeing
+// about whether a run dir may be published is the failure the whole $0-gate
+// suite exists to prevent, and two hand-written messages is how that starts.
+function missingRereviewBlockMessage(pr: number, summaryId: number): string {
+  return (
+    `PR #${pr} already carries a pr-hero summary (comment ${summaryId}), so ` +
+    "this post is a re-review — but the run directory carries no `rereview` " +
+    "block in its pipeline.json, so the summary would report the old " +
+    'absence matcher\'s "N resolved" and write no state block. Re-run ' +
+    `\`pr-hero review --pr ${pr} --post\` instead.`
+  );
+}
+
+// The same rule read in the other direction. Same shared-wording reason, and
+// it names the mismatch specifically: the run dir describes a re-review of a
+// summary the PR no longer has.
+function vanishedPriorSummaryMessage(pr: number): string {
+  return (
+    "The run directory carries a `rereview` block in its pipeline.json, so " +
+    `this post is a re-review — but PR #${pr} no longer carries a pr-hero ` +
+    "summary comment for it to be a re-review OF. Its `live[]` rows, " +
+    "`resolved_ids` and `R###` numbering all name review threads the PR has " +
+    "no record of, so this would publish a brand new summary claiming a " +
+    `delta against a review that is not there. Re-run \`pr-hero review --pr ` +
+    `${pr} --post\` instead.`
+  );
+}
+
+// The `--pr --post` half of the same state (see the guard's WHY below): that
+// caller does not refuse, it drops the re-review framing and says so. Loud on
+// purpose — an operator who sees a first-review comment where a delta was
+// expected must be able to read WHY off the run log instead of suspecting the
+// re-review silently broke. A silent downgrade would be the same class of
+// defect as a guard that never fires.
+function vanishedPriorSummaryDegradedMessage(pr: number): string {
+  return (
+    "warning: the pr-hero summary comment this re-review was computed " +
+    `against is gone from PR #${pr} — deleted, or never re-findable, while ` +
+    "the review ran. Its `live[]` rows and `R###` ids name review threads " +
+    "the PR has no record of, so this post drops the re-review framing: no " +
+    "`Δ since` delta, no `Still live:` list and no state block. The findings " +
+    "themselves are published, as the first review of what the PR carries " +
+    `now. Re-run \`pr-hero review --pr ${pr} --post\` if you want a full ` +
+    "re-review against the PR's current state."
+  );
+}
+
 export async function postInlineFindings(input: {
   operatorRoot: string;
   pr: number;
@@ -1825,10 +2096,141 @@ export async function postInlineFindings(input: {
   diffPatch: string;
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
+  rereview?: RereviewProvenance;
+  rereviewPriors?: readonly {
+    id: string;
+    claim: string;
+    locs: readonly string[];
+  }[];
+  // Watchdog for the collapse loop's gh calls. A seam, like `spawnFn`: no
+  // production caller sets it, the tests drive the timeout path with it.
+  ghTimeoutMs?: number;
+  // Set ONLY by `post --from` (`runPostCommand`). A PR that already carries a
+  // pr-hero summary is by definition a re-review, so publishing it without a
+  // `rereview` block renders the absence-matcher delta ("N resolved") and no
+  // state block — the PR 1759 shape, observed live on PR #49. That caller
+  // reconstructs the block from the run's `pipeline.json` and cannot see the
+  // PR, so it asks the sequence owner — which has just read the comments — to
+  // enforce the precondition and refuse before any write.
+  //
+  // A flag rather than an unconditional invariant, for two reasons that are
+  // not stylistic — and BOTH of them are about this direction only, a
+  // `rereview` block that is ABSENT. The `--pr --post` path computes its own
+  // case from the same comments and reaches `rereview === undefined` only in
+  // case A (no summary head AND no finding markers), so the check is
+  // structurally dead there — except in one race, a summary created by a
+  // concurrent run between this run's phase-B fetch and this one, where
+  // aborting a review that has already been paid for would be the wrong
+  // direction of error. And the existing postInlineFindings suites script
+  // prior summaries with no block on purpose; the flag keeps this a
+  // `post --from` rule, not a rewrite of what a first-review post means.
+  //
+  // Neither reason survives the trip to the OPPOSITE direction — a `rereview`
+  // block whose summary has vanished — which is why that case carries its own
+  // flag below instead of riding on this one. Gating it here is precisely
+  // what left it structurally dead on `--pr --post`, the primary path.
+  requireRereviewOnPriorSummary?: boolean;
+  // Also set ONLY by `post --from` (`runPostCommand`), and deliberately NOT
+  // the mirror of the flag above: unset, the vanished-summary case degrades
+  // rather than passing. The two callers meet the same state having paid very
+  // different prices for it — see the guard's own WHY below.
+  refuseOnVanishedPriorSummary?: boolean;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
-  const { plan, previousHeadSha, existingSummaryId, findingRefs } =
+  const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
+  const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
     await resolveInlinePostPlan(input);
+
+  // Before the create-first POST and before the review submission — the last
+  // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
+  // on `previousHeadSha`: a summary whose `head=` will not parse is still a
+  // prior review, and rendering the matcher delta over it is still the lie.
+  if (
+    input.requireRereviewOnPriorSummary === true &&
+    input.rereview === undefined &&
+    existingSummaryId !== null
+  ) {
+    throw new CliError(missingRereviewBlockMessage(pr, existingSummaryId));
+  }
+
+  // The mirror STATE, at the same point — and deliberately NOT the mirror
+  // ANSWER. The run dir CAN carry a valid `rereview` block while the summary
+  // it was computed against is gone from the PR: deleted mid-run (the window
+  // is real — the comments are read in phase B, the pipeline then runs 8-25
+  // minutes), or `post --from` run long after `review`, which this seam
+  // deliberately allows. Then `existingSummaryId === null` falls into the
+  // create-first branch below and, left alone, `renderBody`/`overlayDelta`
+  // publish a BRAND NEW comment full of re-review vocabulary sourced from a
+  // stale directory: a delta counted in `unconfirmed`/`carried`, a `Still
+  // live:` list of `R###` ids, a state block — none of it naming a thread
+  // that exists.
+  //
+  // The two callers meet that state having paid very different prices, so
+  // they answer it differently ON PURPOSE. Only `post --from` sets
+  // `refuseOnVanishedPriorSummary`:
+  //   - `post --from` REFUSES. Nothing has been spent; the operator re-runs
+  //     `review --pr <n> --post` and gets a correct result for free.
+  //   - `--pr --post` has ALREADY paid for a full review ($2.49-$6.34 on this
+  //     repo). Throwing that away to avoid a stale framing is the wrong
+  //     direction of error — the very rule the flag above cites. So it posts,
+  //     with the re-review framing DROPPED (`framing` below): no delta
+  //     overlay, no `Still live:`, no state block. That is not a downgrade of
+  //     the findings, it is an accurate description of what the run now is —
+  //     the review this one was a re-review OF is no longer on the PR, so
+  //     what remains is a first review of the current state, and the findings
+  //     are as valid as they were a minute ago. The degradation is LOGGED,
+  //     never silent: a quiet downgrade would be the same class of defect as
+  //     a guard that never fires, which is exactly what this one was while it
+  //     hung off `requireRereviewOnPriorSummary`.
+  //
+  // Narrowed to `summary_marker` on purpose: a block whose L came from
+  // `finding_markers` was ALREADY computed with no summary in sight, so a
+  // missing summary at post time is agreement, not drift — and its R### ids
+  // name finding threads that do still exist. Refusing OR degrading there
+  // would break obligation S-A ("with the summary comment absent, L is
+  // recovered from per-finding markers and the run does NOT fall to
+  // first-review semantics"), which is a case the design supports rather
+  // than a hazard.
+  const priorSummaryVanished =
+    input.rereview?.last_head_source === "summary_marker" &&
+    existingSummaryId === null;
+  if (priorSummaryVanished && input.refuseOnVanishedPriorSummary === true) {
+    throw new CliError(vanishedPriorSummaryMessage(pr));
+  }
+  if (priorSummaryVanished) log(vanishedPriorSummaryDegradedMessage(pr));
+
+  // Every re-review-framed surface reads off THIS, never `input.rereview`
+  // directly — the delta overlay, the `Still live:` list it carries, and the
+  // state block appended after the report marker. The collapse loop at the
+  // bottom deliberately does NOT: a verified-gone prior's ✅ reply and thread
+  // resolve are bound to per-finding REVIEW threads, which the summary
+  // comment's disappearance says nothing about, and `--pr --post` binds them
+  // through priors it is still holding in memory. Suppressing those would
+  // leave a thread that IS gone sitting open on the PR.
+  const framing = priorSummaryVanished ? undefined : input.rereview;
+  const rereviewDelta =
+    framing === undefined
+      ? undefined
+      : rereviewDeltaFromProvenance(framing, doc.findings.length);
+  const overlayDelta = (delta: PrCommentDelta): PrCommentDelta =>
+    rereviewDelta === undefined ? delta : { ...delta, rereview: rereviewDelta };
+  const renderBody = (
+    delta: PrCommentDelta,
+    outside: readonly Finding[],
+    moved: string | undefined,
+    urls?: ReadonlyMap<string, string>,
+  ): string => {
+    const body = renderPrComment(
+      doc,
+      webUrl,
+      overlayDelta(delta),
+      outside,
+      moved,
+      urls,
+    );
+    if (framing === undefined) return body;
+    return `${body}${renderStateBlock(doc.head_sha, framing.live)}`;
+  };
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
   const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
@@ -1865,7 +2267,7 @@ export async function postInlineFindings(input: {
       // absent link map above: the placeholder is provisional, the closing
       // PATCH is authoritative, and the re-read belongs as close to the
       // ANCHOR-BEARING call as it can get, not one write earlier.
-      renderPrComment(doc, webUrl, plannedDelta, plannedOutsideDiff, undefined),
+      renderBody(plannedDelta, plannedOutsideDiff, undefined),
       spawnFn,
     );
     summaryCommentId = created.commentId;
@@ -1966,14 +2368,7 @@ export async function postInlineFindings(input: {
   const patched = await postPrComment(
     operatorRoot,
     pr,
-    renderPrComment(
-      doc,
-      webUrl,
-      delta,
-      outsideDiff,
-      movedHeadSha,
-      commentUrlByFindingId,
-    ),
+    renderBody(delta, outsideDiff, movedHeadSha, commentUrlByFindingId),
     spawnFn,
     summaryCommentId ?? undefined,
   );
@@ -1988,13 +2383,72 @@ export async function postInlineFindings(input: {
     commentId: patched.commentId,
   };
 
+  if (input.rereview !== undefined) {
+    const targets = collapseTargets({
+      verifiedGoneIds: input.rereview.resolved_ids ?? [],
+      priors: input.rereviewPriors ?? [],
+      posted,
+    });
+    for (const target of targets) {
+      if (target.channel !== "review") continue;
+      // The reply is bounded AND caught, and a failure `continue`s past the
+      // resolve on purpose. Resolving a thread whose ✅ reply never landed
+      // closes the conversation with no explanation of why — a silent
+      // resolve, which is the same false `resolved` the whole verified-gone
+      // path is built to never produce. Degrading to "thread left open" is
+      // always the safe direction: the finding stays visible on the PR.
+      try {
+        await postReviewCommentReply({
+          operatorRoot,
+          pr,
+          inReplyTo: target.commentId,
+          body:
+            "✅ **RESOLVED** · verified gone\n\n" +
+            "This finding was checked at the current head and is no longer present.\n",
+          spawnFn,
+          timeoutMs: ghTimeoutMs,
+        });
+      } catch (error) {
+        log(
+          `collapse skipped for ${target.priorId}: the verified-gone reply did ` +
+            `not post (${error instanceof Error ? error.message : String(error)}) ` +
+            "— thread left open",
+        );
+        continue;
+      }
+      try {
+        const resolveOutcome = await resolveReviewThreadForComment({
+          operatorRoot,
+          pr,
+          commentId: target.commentId,
+          spawnFn,
+          timeoutMs: ghTimeoutMs,
+        });
+        if (resolveOutcome === "resolved") {
+          log(`resolved: review thread for ${target.priorId} (verified-gone)`);
+        } else if (resolveOutcome === "already-resolved") {
+          log(`resolved: thread already closed for ${target.priorId}`);
+        } else {
+          log(
+            `resolve skipped: no review thread found for comment ${target.commentId}`,
+          );
+        }
+      } catch (error) {
+        log(
+          `resolve failed for ${target.priorId} after the verified-gone reply posted: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
   return {
     reviewOutcome: reviewResult.outcome,
     reviewFindingCount: reviewFindings.length,
     issueCommentIds,
     outsideDiffCount: outsideDiff.length,
     summary,
-    delta: plan.delta,
+    delta: overlayDelta(plan.delta),
     droppedFindingIds,
     commentUrls: commentUrlByFindingId,
     movedHeadSha,
@@ -2074,6 +2528,12 @@ async function buildCommentUrlMap(input: {
 // the single decision point for BOTH callers on whether to invoke
 // postInlineFindings at all. `null` means "skipped, nothing was posted, zero
 // HTTP calls were made" — the exact shape the spec's scenario asserts.
+//
+// Neither `requireRereviewOnPriorSummary` nor `refuseOnVanishedPriorSummary`
+// is declared here, and that absence is the contract, not an oversight: this
+// is the `--pr --post` entry point, the one that has already paid for a full
+// review, and both flags exist to make `post --from` refuse where refusing is
+// free. See their WHYs on postInlineFindings.
 export async function postInlineIfEligible(input: {
   sessionFailed: boolean;
   skippedReason: string;
@@ -2084,6 +2544,12 @@ export async function postInlineIfEligible(input: {
   diffPatch: string;
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
+  rereview?: RereviewProvenance;
+  rereviewPriors?: readonly {
+    id: string;
+    claim: string;
+    locs: readonly string[];
+  }[];
 }): Promise<InlinePostOutcome | null> {
   if (input.sessionFailed) {
     log(input.skippedReason);
@@ -2242,26 +2708,116 @@ export async function runPostCommand(input: {
     return dryRun ? 0 : 1;
   }
 
+  // Item 7, and the reason this block exists at all: a re-review's case,
+  // `live[]` and verified-gone count live ONLY in the run's `pipeline.json`
+  // once the process that computed them has exited. Read back here, they make
+  // `post --from`'s summary say what the review actually checked; NOT read
+  // back — the defect this repairs — the summary silently falls through to
+  // `MatchResult.resolved`, prints "3 resolved" for 2 checks, and writes no
+  // state block, which then costs the NEXT run its priors as well.
+  //
+  // Validated rather than trusted: a block that half-parses would feed the
+  // same fallback with none of the noise. Absent is a legitimate answer (a
+  // first review, or a run dir from before item 7) — the precondition inside
+  // `postInlineFindings` is what tells those apart from a re-review whose
+  // block went missing, because only it can see whether the PR already has a
+  // summary.
+  const pipelinePath = path.join(runDir, "pipeline.json");
+  let rereview: RereviewProvenance | undefined;
+  if (existsSync(pipelinePath)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await Bun.file(pipelinePath).text());
+    } catch (error) {
+      throw new CliError(
+        `${pipelinePath} is not valid JSON (${(error as Error).message}) — ` +
+          "a re-review's case and live findings are only recoverable from it",
+      );
+    }
+    const read = readRereviewProvenance(parsed);
+    if (read.kind === "invalid") {
+      throw new CliError(
+        `${pipelinePath} has an unreadable re-review block (${read.problem}) — ` +
+          "publishing it would report the old absence matcher's counts and " +
+          `write no state block. Re-run \`pr-hero review --pr ${prNumber} --post\`.`,
+      );
+    }
+    if (read.kind === "ok") rereview = read.rereview;
+  }
+
+  // The one field of the `--pr --post` call that a run directory genuinely
+  // cannot supply. Collapse binds every verified-gone id to its review thread
+  // through the FULL prior set (`bindPriorsToPosted`, one-to-one over carried
+  // priors too) — and `live[]` is not that set: `assembleLive` retires a
+  // verified-gone entry from it, by design (§3.6), so the very rows collapse
+  // needs are the rows the artifact no longer holds. Re-deriving them from
+  // the PR at post time is not a substitute either: the `state === null`
+  // fallback renumbers `R###` positionally, so ids from `resolved_ids` would
+  // point at whichever comments happen to sit in those positions now — the
+  // exact over-match that puts "✅ RESOLVED · verified gone" on a live
+  // finding.
+  //
+  // So: nothing verified gone → `[]` is the whole truth and collapse is a
+  // no-op. Something verified gone → refuse, loudly, and name the path that
+  // still holds the priors in memory. A `post --from` that published the
+  // right summary and silently skipped the collapse it cannot compute would
+  // be the third thing this feature forbids.
+  const verifiedGoneIds = rereview?.resolved_ids ?? [];
+  if (verifiedGoneIds.length > 0) {
+    throw new CliError(
+      `${pipelinePath} records ${verifiedGoneIds.length} verified-gone ` +
+        `finding(s) (${verifiedGoneIds.join(", ")}), and their prior records ` +
+        "are not in the run directory — `live[]` retires a verified-gone " +
+        "entry — so `post --from` cannot bind them to their review threads " +
+        `to collapse them. Re-run \`pr-hero review --pr ${prNumber} --post\`, ` +
+        "which holds the priors from the run that checked them.",
+    );
+  }
+
   if (dryRun) {
-    const { plan, previousHeadSha } = await resolveInlinePostPlan({
-      operatorRoot,
-      pr: prNumber,
-      headSha: doc.head_sha,
-      doc,
-      diffPatch,
-      spawnFn,
-    });
+    const { plan, previousHeadSha, existingSummaryId } =
+      await resolveInlinePostPlan({
+        operatorRoot,
+        pr: prNumber,
+        headSha: doc.head_sha,
+        doc,
+        diffPatch,
+        spawnFn,
+      });
+    // The preview refuses whatever the post would refuse. A dry run that
+    // prints a plan for a run dir the live path then rejects is a $0 gate
+    // that answered a different question than the one asked.
+    if (rereview === undefined && existingSummaryId !== null) {
+      throw new CliError(
+        missingRereviewBlockMessage(prNumber, existingSummaryId),
+      );
+    }
+    // Both directions, or the preview is only half a gate — and narrowed to
+    // `summary_marker` for the same reason the live guard is (S-A).
+    if (
+      rereview?.last_head_source === "summary_marker" &&
+      existingSummaryId === null
+    ) {
+      throw new CliError(vanishedPriorSummaryMessage(prNumber));
+    }
     log(
       `plan: ${plan.reviewComments.length} review comment(s), ` +
         `${plan.issueComments.length} outside diff, ` +
-        `${plan.persisting.length} already posted (skipped), ` +
-        `${plan.resolved.length} resolved`,
+        `${plan.persisting.length} already posted (skipped)` +
+        (previousHeadSha === undefined
+          ? `, ${plan.resolved.length} resolved`
+          : ""),
     );
-    log(
-      `delta: ${plan.delta.resolved} resolved · ${plan.delta.new} new · ` +
-        `${plan.delta.persist} persist` +
-        (previousHeadSha ? ` (since ${previousHeadSha.slice(0, 8)})` : ""),
-    );
+    if (previousHeadSha === undefined) {
+      log(
+        `delta: ${plan.delta.resolved} resolved · ${plan.delta.new} new · ` +
+          `${plan.delta.persist} persist`,
+      );
+    } else {
+      log(
+        `delta: re-review (MatchResult.resolved not shown; gate outcomes only)`,
+      );
+    }
     for (const finding of plan.reviewComments) {
       log(`  review  ${finding.path}:${finding.line} ${finding.id}`);
     }
@@ -2284,6 +2840,9 @@ export async function runPostCommand(input: {
     diffPatch,
     webUrl: repoWebUrl,
     spawnFn,
+    ...(rereview === undefined ? {} : { rereview, rereviewPriors: [] }),
+    requireRereviewOnPriorSummary: true,
+    refuseOnVanishedPriorSummary: true,
   });
   await writePostReceipt(runDir, prNumber, doc.head_sha, outcome);
   log(
@@ -2291,10 +2850,26 @@ export async function runPostCommand(input: {
       `finding(s)), ${outcome.outsideDiffCount} outside diff, ` +
       `summary ${outcome.summary.action} comment ${outcome.summary.commentId}`,
   );
-  // GitHub #39: `post --from` publishes through the same sequence, so it
-  // gets the same disclosure. Unconditional, not chained into the else-if
-  // below — a moved head is orthogonal to both a dropped finding and a 422,
-  // and can happen alongside either.
+  // GitHub #39: `post --from` reaches the same `movedHeadSha` re-read inside
+  // the post sequence, so it can carry the same disclosure. Unconditional,
+  // not chained into the else-if below — a moved head is orthogonal to both a
+  // dropped finding and a 422, and can happen alongside either.
+  //
+  // "Same sequence, therefore same everything" is what this comment used to
+  // say, and it was false in a way that cost a live run: the sequence is
+  // shared, its INPUTS are not. `--pr --post` hands over the `rereview` block
+  // and the phase-B priors it is still holding; this path has only a
+  // directory, so it reconstructs the block from `pipeline.json` above,
+  // refuses when that block is unreadable or when collapse would need priors
+  // it does not have, and passes `requireRereviewOnPriorSummary` so a missing
+  // block on a PR that already has a summary cannot be published as a first
+  // review. Equivalence here is enforced, never assumed.
+  //
+  // `refuseOnVanishedPriorSummary` is the other half of that, and it is where
+  // the two paths are enforced UNEQUAL: a re-review whose summary has
+  // vanished costs this caller nothing to refuse (re-run `review --pr <n>
+  // --post` and the answer is correct), while refusing it on `--pr --post`
+  // would discard a review already paid for. Set here, unset there.
   if (outcome.movedHeadSha) {
     log(
       `warning: the PR head moved while the review ran — reviewed ` +
@@ -3409,6 +3984,14 @@ export interface PrPlanContext {
   };
   // Same contract, same reason as PlanContext.width.
   width?: number;
+  // Item 7: queued verify steps shown as their own cost-band term (O-5a).
+  verificationSteps?: number;
+  rereview?: {
+    case: string;
+    lastHead: string | null;
+    discoveryRestricted: boolean;
+    skipDiscovery: boolean;
+  };
 }
 
 function prBaseSourceNote(target: PrTarget): string {
@@ -3527,6 +4110,33 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
   push("hop budget", String(ctx.options.hopBudget));
   push("summarizer", summarizerRow(ctx.summary));
   push("scout", scoutRow(ctx.options));
+  if (ctx.rereview) {
+    const last =
+      ctx.rereview.lastHead === null
+        ? "none"
+        : ctx.rereview.lastHead.slice(0, 8);
+    push(
+      "re-review",
+      `case ${ctx.rereview.case} · L=${last}` +
+        (ctx.rereview.skipDiscovery
+          ? " · discovery skipped (empty delta)"
+          : ctx.rereview.discoveryRestricted
+            ? " · restricted L..H"
+            : " · full B..H"),
+    );
+    if (ctx.rereview.case === "D") {
+      push(
+        "D4",
+        "last reviewed head is not an ancestor of this head — full B..H",
+      );
+    }
+  }
+  if (ctx.verificationSteps !== undefined && ctx.verificationSteps > 0) {
+    push(
+      "verify",
+      `${ctx.verificationSteps} verification step(s) (capped; not bypassed by --yes)`,
+    );
+  }
   if (ctx.options.post) {
     push(
       "post",
@@ -3585,6 +4195,37 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
   }
   lines.push(...row(label, summarizerRow(ctx.summary), { styles, width }));
   lines.push(...row("", scoutRow(ctx.options), { styles, width }));
+  if (ctx.rereview) {
+    lines.push(
+      ...row(
+        "",
+        `re-review   case ${ctx.rereview.case}` +
+          (ctx.rereview.skipDiscovery
+            ? "  discovery skipped"
+            : ctx.rereview.discoveryRestricted
+              ? "  restricted"
+              : "  full range"),
+        { styles, width },
+      ),
+    );
+    if (ctx.rereview.case === "D") {
+      lines.push(
+        ...row(
+          "",
+          "⚠️ last reviewed head is not an ancestor — reviewing full B..H",
+          { styles, width },
+        ),
+      );
+    }
+  }
+  if (ctx.verificationSteps !== undefined && ctx.verificationSteps > 0) {
+    lines.push(
+      ...row("", `verify      ${ctx.verificationSteps} step(s)`, {
+        styles,
+        width,
+      }),
+    );
+  }
   label = "";
   lines.push(
     "",
@@ -3812,6 +4453,15 @@ function startLineRenderer(startedAtMs: number): ProgressRenderer {
           return;
         case "refuter-step-finished":
           line(`refuter ${event.findingId}: ${event.verdict}`);
+          return;
+        case "verify-started":
+          line(
+            `verify: ${event.queued} prior finding` +
+              `${event.queued === 1 ? "" : "s"} to check`,
+          );
+          return;
+        case "verify-step-finished":
+          line(`verify ${event.findingId}: ${event.verdict}`);
           return;
         case "summarizer-finished":
           line(

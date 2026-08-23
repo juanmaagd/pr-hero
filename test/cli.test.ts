@@ -36,9 +36,14 @@ import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import type { StoredComparison } from "../src/ledger";
-import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+import {
+  claimFingerprint,
+  findingMarker,
+  PR_FINDING_MARKER_PREFIX,
+} from "../src/pr-preflight";
 import type { CliOptions, SummarySettings } from "../src/preflight";
 import { CliError, CliUsageError } from "../src/preflight";
+import type { RereviewProvenance } from "../src/rereview-prepare";
 import { triageMarker } from "../src/triage";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +58,12 @@ interface ScriptedResponse {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  // Streams and exit settle only when kill() fires — the shape of a `gh`
+  // call GitHub accepted and never answered. Ported from
+  // test/step-runner.test.ts's makeFakeSpawn, which is how that module's
+  // watchdog is exercised without a real 30-minute wait; the collapse loop's
+  // watchdog needs the same lever.
+  hang?: boolean;
 }
 
 interface ScriptEntry {
@@ -124,18 +135,39 @@ function makeFakeGh(script: ScriptEntry[]): {
         ? { stdout: JSON.stringify({ id: nextId++ }), exitCode: 0 }
         : { stdout: "", exitCode: 0 };
     }
+    const held: ReadableStreamDefaultController<Uint8Array>[] = [];
+    let resolveExit: (code: number) => void = () => {};
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
     const stream = (text: string) =>
       new ReadableStream<Uint8Array>({
         start(controller) {
+          if (scripted?.hang) {
+            held.push(controller);
+            return;
+          }
           if (text) controller.enqueue(encoder.encode(text));
           controller.close();
         },
       });
+    const stdout = stream(scripted.stdout ?? "");
+    const stderr = stream(scripted.stderr ?? "");
+    if (!scripted.hang) resolveExit(scripted.exitCode ?? 0);
     return {
-      stdout: stream(scripted.stdout ?? ""),
-      stderr: stream(scripted.stderr ?? ""),
-      exited: Promise.resolve(scripted.exitCode ?? 0),
-      kill() {},
+      stdout,
+      stderr,
+      exited,
+      kill() {
+        for (const controller of held) {
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        }
+        resolveExit(143);
+      },
     };
   }) as unknown as typeof Bun.spawn;
   return { spawnFn, calls };
@@ -1831,6 +1863,655 @@ describe("runPostCommand — CRIT-B: the $0 gate before the first live write", (
   });
 });
 
+// ---------------------------------------------------------------------------
+// F008 — `post --from` is a re-review too.
+//
+// Found by a LIVE case-C re-review of PR #49, which is the part that matters:
+// `postCommand` called `postInlineFindings` with no `rereview` at all, so a
+// run whose pipeline.json recorded {case C, verified 4, live 2} published
+// "Δ since e23d8063: 3 resolved · 0 new · 1 persist" — the absence matcher's
+// count, three "resolved" for two checks, the exact PR 1759 shape the feature
+// exists to prevent — plus no state block, which then costs the NEXT run its
+// priors. Nothing offline caught it; the whole `post --from` seam had no
+// re-review coverage. These are that coverage.
+// ---------------------------------------------------------------------------
+
+describe("runPostCommand — post --from carries the re-review (F008)", () => {
+  const SUMMARY_MARKER = `<!-- pr-hero-report head=${OLD_HEAD} -->`;
+
+  function liveRow(over: {
+    id: string;
+    sev: Finding["severity"];
+    status: string;
+    line: number;
+    claim: string;
+  }) {
+    return {
+      id: over.id,
+      sev: over.sev,
+      tier: over.sev === "SUGGESTION" ? "advisory" : "blocking",
+      channel: "inline",
+      status: over.status,
+      locs: [`src/a.ts:${over.line}`],
+      c: claimFingerprint(over.claim),
+      claim: over.claim,
+    };
+  }
+
+  function rereviewBlock(over: Record<string, unknown> = {}) {
+    return {
+      case: "C",
+      last_reviewed_head: OLD_HEAD,
+      last_head_source: "summary_marker",
+      discovery_range: `${OLD_HEAD}..${RUN_HEAD}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 3,
+      settled_deterministically: 1,
+      verified: 2,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 2,
+        overlap: 0,
+        verify_all: 0,
+      },
+      live: [
+        liveRow({
+          id: "R001",
+          sev: "CRITICAL",
+          status: "carried",
+          line: 10,
+          claim: "the prior nobody touched",
+        }),
+        liveRow({
+          id: "R002",
+          sev: "WARNING",
+          status: "unconfirmed",
+          line: 20,
+          claim: "checked, and the check did not settle it",
+        }),
+        liveRow({
+          id: "R003",
+          sev: "WARNING",
+          status: "unconfirmed",
+          line: 30,
+          claim: "the other one the check did not settle",
+        }),
+      ],
+      resolved_verified: 0,
+      resolved_ids: [],
+      returned: 0,
+      re_tiered: 0,
+      ...over,
+    };
+  }
+
+  // A run dir as `pr-hero review --pr <n>` leaves it: findings.json,
+  // diff.patch AND pipeline.json. `writeRunDir` deliberately writes only the
+  // first two — pipeline.json stays optional, so every first-review post in
+  // the suite above keeps proving that path unchanged.
+  async function writeRereviewRunDir(
+    pipeline: Record<string, unknown> | null,
+    docOverrides: Partial<FindingsDocument> = {},
+  ): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+    const { dir, cleanup } = await writeRunDir(docOverrides);
+    if (pipeline !== null) {
+      await Bun.write(
+        path.join(dir, "pipeline.json"),
+        JSON.stringify(pipeline, null, 2),
+      );
+    }
+    return { dir, cleanup };
+  }
+
+  function priorSummaryScript(): ScriptEntry[] {
+    return [
+      headRefOidScript(RUN_HEAD),
+      {
+        match: ["issues/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 200,
+              user: "pr-hero",
+              body: `${SUMMARY_MARKER}\n## pr-hero review`,
+              updated_at: "2026-08-20T00:00:00Z",
+            },
+          ]),
+        },
+      },
+      { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
+    ];
+  }
+
+  function summaryPatch(calls: RecordedCall[]): string {
+    const patches = calls.filter((c) =>
+      c.stdin?.startsWith("<!-- pr-hero-report "),
+    );
+    return patches[patches.length - 1]?.stdin ?? "";
+  }
+
+  test("the delta and the state block come from live[], never from the matcher", async () => {
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock() },
+      { findings: [] },
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      const exitCode = await runPostCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const body = summaryPatch(calls);
+      // The gate vocabulary, counted off live[]: two unconfirmed, one
+      // carried, nothing resolved because nothing was checked-and-gone.
+      expect(body).toContain(
+        "Δ since `aaaaaaaa`: 2 unconfirmed · 1 carried · 0 deferred · 0 new",
+      );
+      // The matcher's shape, in any form, is the defect.
+      expect(body).not.toContain("persist");
+      expect(body).not.toContain("resolved (verified)");
+      // §3.6: the state block, AFTER the report marker, so the next run has
+      // priors with real claims instead of `priorsFromPostedMarkers`' "".
+      expect(body).toContain(`<!-- pr-hero-state v=1 head=${RUN_HEAD} -->`);
+      expect(body.indexOf("<!-- pr-hero-state ")).toBeGreaterThan(0);
+      expect(body).toContain("the prior nobody touched");
+      // C7: zero new findings is not a clean bill while priors are live.
+      expect(body).not.toContain("found nothing to report");
+      expect(body).toContain("`carried`");
+      expect(body).toContain("`unconfirmed`");
+      // Nothing was verified gone, so nothing is collapsed.
+      expect(
+        calls.filter((c) => c.argv.join(" ").includes("reviewThreads")),
+      ).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a run dir with no rereview block refuses on a PR that already has a summary", async () => {
+    // The self-perpetuating half: publishing this as a first review would
+    // print the matcher delta AND write no state block, so the next
+    // re-review falls back to claim-less priors.
+    const { dir, cleanup } = await writeRereviewRunDir(null, {
+      findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/no\s+`rereview` block in its pipeline\.json/);
+      // Refused BEFORE any write: the summary create and the review
+      // submission are both downstream of the precondition.
+      expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a rereview block whose summary the PR no longer has refuses before any write", async () => {
+    // The mirror direction, and the one nobody tested: the run dir DID come
+    // from a re-review, but the summary it was computed against is gone from
+    // the PR — deleted, or `post --from` run long enough after `review` that
+    // it did not survive. `existingSummaryId === null` then routes into the
+    // create-first branch, so without the precondition this publishes a BRAND
+    // NEW comment carrying a `Δ since` delta, a `Still live:` list of `R###`
+    // ids and a state block — none of it describing a thread that exists.
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock() },
+      { findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })] },
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/no longer carries a pr-hero summary comment/);
+      // Refused BEFORE any write. Refusing after posting the very comment the
+      // refusal is about would be worse than not refusing at all.
+      expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a finding_markers block with no summary is S-A, not drift — it posts", async () => {
+    // The narrowing the vanished-summary guard needs. Design obligation S-A:
+    // "with the summary comment absent, L is recovered from per-finding
+    // markers and the run does NOT fall to first-review semantics". Such a
+    // block was computed with no summary in sight, so a missing summary at
+    // post time is agreement, and its R### ids name finding threads that DO
+    // still exist. A guard keyed on `rereview !== undefined` alone refuses
+    // here and breaks a case the design supports.
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock({ last_head_source: "finding_markers" }) },
+      { findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })] },
+    );
+    try {
+      const { spawnFn } = makeFakeGh(emptyCommentScript(RUN_HEAD));
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).resolves.toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("an unreadable rereview block refuses before a single gh call, naming the field", async () => {
+    const { dir, cleanup } = await writeRereviewRunDir({
+      rereview: rereviewBlock({ live: [{ id: "R001", status: "carried" }] }),
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/unreadable re-review block \(rereview\.live\[0\]\)/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("verified-gone findings refuse: the run dir cannot supply the priors collapse binds through", async () => {
+    // `assembleLive` retires a verified-gone entry from `live[]`, so the rows
+    // the collapse binding needs are exactly the rows the artifact no longer
+    // holds — and re-deriving them from the PR renumbers `R###`. Refuse, and
+    // name the path that still holds them.
+    const { dir, cleanup } = await writeRereviewRunDir({
+      rereview: rereviewBlock({
+        resolved_verified: 2,
+        resolved_ids: ["R004", "R005"],
+      }),
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(
+        /records 2 verified-gone finding\(s\) \(R004, R005\)[\s\S]*review --pr 42 --post/,
+      );
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("--dry-run refuses exactly what the post refuses — the preview cannot disagree", async () => {
+    // A $0 gate that green-lights a run dir the live path then rejects has
+    // answered a different question than the one asked.
+    const missing = await writeRereviewRunDir(null);
+    const verifiedGone = await writeRereviewRunDir({
+      rereview: rereviewBlock({ resolved_verified: 1, resolved_ids: ["R004"] }),
+    });
+    try {
+      const first = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: missing.dir,
+          dryRun: true,
+          spawnFn: first.spawnFn,
+        }),
+      ).rejects.toThrow(/no\s+`rereview` block in its pipeline\.json/);
+      expect(
+        first.calls.filter((c) => c.argv.includes("--method")),
+      ).toHaveLength(0);
+
+      const second = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: verifiedGone.dir,
+          dryRun: true,
+          spawnFn: second.spawnFn,
+        }),
+      ).rejects.toThrow(/records 1 verified-gone finding/);
+      expect(second.calls).toHaveLength(0);
+    } finally {
+      await missing.cleanup();
+      await verifiedGone.cleanup();
+    }
+  });
+
+  test("--dry-run refuses the vanished summary too — both directions, one answer", async () => {
+    // The mirrored half of the same rule: a $0 preview that green-lights a
+    // run dir the live path rejects has answered a different question, and
+    // that is as true of the re-review-without-a-summary direction as it is
+    // of the summary-without-a-rereview-block one above.
+    const { dir, cleanup } = await writeRereviewRunDir(
+      { rereview: rereviewBlock() },
+      { findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })] },
+    );
+    try {
+      const { spawnFn, calls } = makeFakeGh(emptyCommentScript(RUN_HEAD));
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: true,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/no longer carries a pr-hero summary comment/);
+      expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a worsened prior reaches the summary — both severities, from pipeline.json", async () => {
+    // W-worse through the `post --from` seam: the "returned" line is the
+    // only place the summary names the severity a prior came back at.
+    const { dir, cleanup } = await writeRereviewRunDir({
+      rereview: rereviewBlock({
+        worsened: [
+          { priorId: "R001", priorSev: "WARNING", discoverySev: "CRITICAL" },
+        ],
+      }),
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      expect(
+        await runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).toBe(0);
+      expect(summaryPatch(calls)).toContain(
+        "returned R001: WARNING → CRITICAL",
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a pipeline.json that is not JSON refuses before a single gh call", async () => {
+    const { dir, cleanup } = await writeRereviewRunDir(null);
+    try {
+      await Bun.write(path.join(dir, "pipeline.json"), "{ not json");
+      const { spawnFn, calls } = makeFakeGh(priorSummaryScript());
+      await expect(
+        runPostCommand({
+          operatorRoot: OPERATOR_ROOT,
+          pr: 42,
+          from: dir,
+          dryRun: false,
+          spawnFn,
+        }),
+      ).rejects.toThrow(/pipeline\.json is not valid JSON/);
+      expect(calls).toHaveLength(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a first review is untouched: no summary, no block, matcher delta stays", async () => {
+    // The regression boundary. `post --from` on a PR with no prior pr-hero
+    // comment is not a re-review and must keep rendering byte-identically.
+    const { dir, cleanup } = await writeRereviewRunDir(null, {
+      findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+    });
+    try {
+      const { spawnFn, calls } = makeFakeGh([
+        ...emptyCommentScript(RUN_HEAD),
+        { match: ["pulls/42/reviews"], response: { stdout: "" } },
+      ]);
+      const exitCode = await runPostCommand({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        from: dir,
+        dryRun: false,
+        spawnFn,
+      });
+      expect(exitCode).toBe(0);
+      const body = summaryPatch(calls);
+      expect(body).toContain("1 new · 0 persist");
+      expect(body).not.toContain("<!-- pr-hero-state ");
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The vanished prior summary on the path that has ALREADY PAID: `--pr --post`.
+//
+// Every guard test in the F008 suite above drives `runPostCommand`, and that
+// is exactly how the vanished-summary guard stayed structurally dead on the
+// primary path for a whole slice: it hung off `requireRereviewOnPriorSummary`,
+// a flag only `post --from` sets. These drive `postInlineIfEligible` — what
+// reviewPr's step 14 actually calls — because a defect on one path is
+// invisible to every test of the other.
+//
+// The window is real: the PR's comments are read in phase B, the pipeline then
+// runs 8-25 minutes, and the summary this re-review was computed against can
+// be deleted inside it. The two callers meet that state having paid very
+// different prices, so the answers differ on purpose: `post --from` refuses
+// (free to re-run), `--pr --post` publishes the findings with the re-review
+// framing dropped and says so in the log.
+// ---------------------------------------------------------------------------
+
+describe("postInlineIfEligible — a vanished prior summary degrades, never refuses", () => {
+  const PRIOR_CLAIM = "the prior finding, still live and still unfixed";
+
+  function liveRereview(
+    over: Partial<RereviewProvenance> = {},
+  ): RereviewProvenance {
+    return {
+      case: "C",
+      last_reviewed_head: OLD_HEAD,
+      last_head_source: "summary_marker",
+      discovery_range: `${OLD_HEAD}..${HEAD}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 1,
+      settled_deterministically: 0,
+      verified: 0,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 0,
+        overlap: 0,
+        verify_all: 0,
+      },
+      // Non-empty on purpose: an empty `live[]` renders no `Still live:`
+      // section even when the framing survives, so the absence assertion
+      // below would pass against the defect and prove nothing.
+      live: [
+        {
+          id: "R001",
+          sev: "CRITICAL",
+          tier: "blocking",
+          channel: "inline",
+          status: "carried",
+          locs: ["src/a.ts:10"],
+          c: claimFingerprint(PRIOR_CLAIM),
+          claim: PRIOR_CLAIM,
+        },
+      ],
+      resolved_verified: 0,
+      resolved_ids: [],
+      returned: 0,
+      re_tiered: 0,
+      ...over,
+    };
+  }
+
+  function prPostInput(spawnFn: typeof Bun.spawn) {
+    return {
+      sessionFailed: false,
+      skippedReason: "unreachable",
+      operatorRoot: OPERATOR_ROOT,
+      pr: 42,
+      headSha: HEAD,
+      doc: doc({
+        findings: [finding({ id: "F001", path: "src/a.ts", line: 10 })],
+      }),
+      diffPatch: diffAddingLines("src/a.ts", 20),
+      webUrl: undefined,
+      spawnFn,
+      rereview: liveRereview(),
+      rereviewPriors: [],
+    };
+  }
+
+  // Same stderr capture the F005 collapse suite uses: `log` writes there, and
+  // the disclosure is half of what this fix is — a silent downgrade would be
+  // the same class of defect as the dead guard it replaces.
+  async function capturingLog<T>(
+    fn: () => Promise<T>,
+  ): Promise<{ result: T; logged: string }> {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      return { result: await fn(), logged: chunks.join("") };
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  }
+
+  function lastSummaryBody(calls: RecordedCall[]): string {
+    const bodies = summaryStdins(calls);
+    return bodies[bodies.length - 1] ?? "";
+  }
+
+  test("the summary vanished mid-run: the findings post, the framing does not", async () => {
+    const { spawnFn, calls } = makeFakeGh(emptyCommentScript(HEAD));
+    const { result: outcome, logged } = await capturingLog(() =>
+      postInlineIfEligible(prPostInput(spawnFn)),
+    );
+
+    // The whole point of the asymmetry: a review that cost $2.49-$6.34 is
+    // published, not thrown away over a framing that went stale.
+    expect(outcome).not.toBeNull();
+    expect(outcome?.reviewFindingCount).toBe(1);
+    expect(outcome?.droppedFindingIds).toEqual([]);
+
+    const body = lastSummaryBody(calls);
+    // All three re-review surfaces, gone. NOT asserted via "Δ since": with
+    // no summary on the PR `previousHeadSha` is undefined either way, so the
+    // delta line reads a bare "Δ:" even on the defect — an assertion that
+    // would pass against the bug and prove nothing.
+    expect(body).not.toContain("Still live:");
+    expect(body).not.toContain("<!-- pr-hero-state ");
+    expect(body).not.toContain("unconfirmed");
+    expect(body).not.toContain("carried");
+    expect(body).not.toContain("R001");
+    // And what it renders instead is exactly the first-review shape, which is
+    // what this run now IS: the review it was a re-review OF is not there.
+    expect(body).toContain("Δ: 0 resolved · 1 new · 0 persist");
+    // post.json must describe the comment that was published, not the one the
+    // stale block said it would be.
+    expect(outcome?.delta).toEqual({ resolved: 0, new: 1, persist: 0 });
+
+    // Loud. An operator who expected a delta must be able to read WHY off the
+    // log rather than suspect the re-review silently broke.
+    expect(logged).toContain(
+      "the pr-hero summary comment this re-review was computed against is gone",
+    );
+    expect(logged).toContain("drops the re-review framing");
+    expect(logged).toContain("review --pr 42 --post");
+  });
+
+  test("`post --from` meets the same state and still refuses — the asymmetry is deliberate", async () => {
+    // The regression guard on the split. `runPostCommand`'s own coverage sits
+    // in the F008 suite above (live and --dry-run); this pins it at the seam,
+    // one flag away from the degrade path, so the two answers stay visibly
+    // different rather than drifting into one.
+    const { spawnFn, calls } = makeFakeGh(emptyCommentScript(HEAD));
+    const { sessionFailed, skippedReason, ...postInput } = prPostInput(spawnFn);
+    expect(sessionFailed).toBe(false);
+    expect(skippedReason).toBe("unreachable");
+    await expect(
+      postInlineFindings({
+        ...postInput,
+        refuseOnVanishedPriorSummary: true,
+      }),
+    ).rejects.toThrow(/no longer carries a pr-hero summary comment/);
+    // Refused before any write, exactly as `post --from` always has.
+    expect(calls.filter((c) => c.argv.includes("--method"))).toHaveLength(0);
+  });
+
+  test("the summary is still there: delta, live list and state block untouched", async () => {
+    // The control. The degrade must fire on a VANISHED summary and nothing
+    // else — a fix that drops the framing whenever a `rereview` block is
+    // present would pass the first test and destroy the feature.
+    const { spawnFn, calls } = makeFakeGh([
+      headRefOidScript(HEAD),
+      {
+        match: ["issues/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 200,
+              user: "pr-hero",
+              body: `<!-- pr-hero-report head=${OLD_HEAD} -->\n## pr-hero review`,
+              updated_at: "2026-08-20T00:00:00Z",
+            },
+          ]),
+        },
+      },
+      { match: ["pulls/42/comments", "--paginate"], response: { stdout: "" } },
+    ]);
+    const { result: outcome, logged } = await capturingLog(() =>
+      postInlineIfEligible(prPostInput(spawnFn)),
+    );
+    expect(outcome).not.toBeNull();
+    const body = lastSummaryBody(calls);
+    expect(body).toContain(`Δ since \`${OLD_HEAD.slice(0, 8)}\``);
+    expect(body).toContain("0 unconfirmed · 1 carried · 0 deferred · 1 new");
+    expect(body).toContain("Still live:");
+    expect(body).toContain(PRIOR_CLAIM);
+    expect(body).toContain(`<!-- pr-hero-state v=1 head=${HEAD} -->`);
+    expect(logged).not.toContain("drops the re-review framing");
+  });
+});
+
 // runTriageCommand — ROADMAP B6c. BINDING rules are proven once in
 // test/triage-write.test.ts; this only proves the WIRING (same real-dir +
 // fake-gh split as runPostCommand's suite).
@@ -2468,6 +3149,7 @@ function runDirOptions(over: Partial<CliOptions> = {}): CliOptions {
     head: "HEAD",
     hopBudget: 3,
     scout: false,
+    full: false,
     dryRun: false,
     yes: false,
     post: false,
@@ -2573,5 +3255,158 @@ describe("deriveEngineIdentity", () => {
       name: "pr-hero",
       version: "0.0.0",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F005 — the verified-gone collapse loop's two gh calls are bounded.
+//
+// Every LLM step in the pipeline is bounded by `stepTimeoutMs`; these two were
+// the only awaits on the `--post` path with no bound at all, so an
+// accepted-but-unanswered GitHub request hung `review --pr --post` forever —
+// including an unattended `--yes` run from the watcher, where nothing is
+// present to notice it. The bound has to degrade to "thread left open": a
+// resolve on a thread whose ✅ reply never landed is a silent close, the same
+// false `resolved` item 7 exists to never produce.
+// ---------------------------------------------------------------------------
+
+describe("postInlineFindings — the collapse loop cannot hang (F005)", () => {
+  const PRIOR_CLAIM = "the prior finding, checked and gone at this head";
+  const PRIOR_MARKER = findingMarker({
+    path: "src/a.ts",
+    line: 10,
+    headSha: OLD_HEAD,
+    claim: PRIOR_CLAIM,
+  });
+
+  function rereview(): RereviewProvenance {
+    return {
+      case: "C",
+      last_reviewed_head: OLD_HEAD,
+      last_head_source: "summary_marker",
+      discovery_range: `${OLD_HEAD}..${HEAD}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 1,
+      settled_deterministically: 0,
+      verified: 1,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 1,
+        overlap: 0,
+        verify_all: 0,
+      },
+      live: [],
+      resolved_verified: 1,
+      resolved_ids: ["R001"],
+      returned: 0,
+      re_tiered: 0,
+    };
+  }
+
+  function priorCommentScript(hangOn: string): ScriptEntry[] {
+    return [
+      headRefOidScript(HEAD),
+      { match: ["issues/42/comments", "--paginate"], response: { stdout: "" } },
+      {
+        match: ["pulls/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 501,
+              user: "pr-hero",
+              body: `${PRIOR_MARKER}\n${PRIOR_CLAIM}`,
+              path: "src/a.ts",
+              line: 10,
+              original_line: 10,
+              in_reply_to_id: null,
+            },
+          ]),
+        },
+      },
+      // Ahead of the successful entries so a `hangOn` naming any of them
+      // wins the `script.find` — including `owner,name`, the repo lookup
+      // resolveReviewThreadForComment makes BEFORE either graphql call. A
+      // bound on two of three gh calls still hangs on the third.
+      { match: [hangOn], response: { hang: true } },
+      {
+        match: ["repo", "view", "--json", "owner,name"],
+        response: {
+          stdout: JSON.stringify({
+            owner: { login: "juanmaagd" },
+            name: "pr-hero",
+          }),
+        },
+      },
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ];
+  }
+
+  async function collapseWith(hangOn: string): Promise<{
+    logged: string;
+    calls: RecordedCall[];
+  }> {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorCommentScript(hangOn));
+      await postInlineFindings({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        headSha: HEAD,
+        doc: doc({ findings: [] }),
+        diffPatch: diffAddingLines("src/a.ts", 20),
+        webUrl: undefined,
+        spawnFn,
+        rereview: rereview(),
+        rereviewPriors: [
+          { id: "R001", claim: PRIOR_CLAIM, locs: ["src/a.ts:10"] },
+        ],
+        ghTimeoutMs: 30,
+      });
+      return { logged: chunks.join(""), calls };
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  }
+
+  test("a hung reply post leaves the thread open and never resolves it", async () => {
+    // Without the bound this test does not fail — it never returns.
+    const { logged, calls } = await collapseWith("in_reply_to=501");
+    expect(logged).toContain("collapse skipped for R001");
+    expect(logged).toContain("thread left open");
+    expect(logged).toContain("timed out after 30 ms");
+    // The resolve must NOT run: closing a thread whose ✅ reply never posted
+    // is the false `resolved` the whole verified-gone path forbids.
+    expect(
+      calls.filter((c) => c.argv.join(" ").includes("reviewThreads")),
+    ).toHaveLength(0);
+    expect(logged).not.toContain("resolved: review thread for R001");
+  });
+
+  test("a hung thread-resolve is reported, not awaited forever", async () => {
+    const { logged, calls } = await collapseWith("reviewThreads");
+    expect(
+      calls.filter((c) => c.argv.join(" ").includes("in_reply_to=501")),
+    ).toHaveLength(1);
+    expect(logged).toContain("resolve failed for R001");
+    expect(logged).toContain("timed out after 30 ms");
+    expect(logged).not.toContain("resolved: review thread for R001");
+  });
+
+  test("the resolve's inner repo lookup is bounded too", async () => {
+    // `resolveReviewThreadForComment` makes THREE gh calls; `ghRepoOwnerName`
+    // is the first and used to be the one nobody thought to bound.
+    const { logged } = await collapseWith("owner,name");
+    expect(logged).toContain("resolve failed for R001");
+    expect(logged).toContain("timed out after 30 ms");
+    expect(logged).not.toContain("resolved: review thread for R001");
   });
 });

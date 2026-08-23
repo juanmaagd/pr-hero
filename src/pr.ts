@@ -106,11 +106,43 @@ async function gh(
     stderr: "pipe",
     ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  // Watchdog, same shape as ClaudeCodeRunner.runAttempt's
+  // (`src/step-runner.ts:361-378`): kill on the deadline, clear in a
+  // `finally`, and report the kill as a failure rather than as an empty
+  // success. Bun.spawn's own `timeout` above would also reap a real process,
+  // but only a real one — every `gh` seam in this codebase is a `spawnFn`,
+  // and an explicit kill is the only bound that holds for both. Without it
+  // an accepted-but-unanswered `gh` call parks on `proc.exited` forever and
+  // takes the whole command with it, including an unattended `--yes` run.
+  let timedOut = false;
+  const watchdog =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          proc.kill();
+        }, timeoutMs);
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+  }
+  if (timedOut) {
+    return {
+      ok: false,
+      stdout,
+      stderr: `gh timed out after ${timeoutMs} ms${
+        stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`
+      }`,
+    };
+  }
   return { ok: exitCode === 0, stdout, stderr };
 }
 
@@ -677,7 +709,15 @@ export async function fetchPrComments(
   operatorRoot: string,
   pr: number,
   options?: { spawnFn?: typeof Bun.spawn },
-): Promise<{ id: number; user: string; body: string }[]> {
+): Promise<
+  {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[]
+> {
   const result = await gh(
     operatorRoot,
     [
@@ -685,7 +725,7 @@ export async function fetchPrComments(
       "--paginate",
       `repos/{owner}/{repo}/issues/${pr}/comments`,
       "--jq",
-      ".[] | {id: .id, user: .user.login, body: .body}",
+      ".[] | {id: .id, user: .user.login, body: .body, created_at: .created_at, updated_at: .updated_at}",
     ],
     undefined,
     options?.spawnFn,
@@ -703,13 +743,34 @@ export async function fetchPrComments(
     );
   }
   // `--jq` streams one JSON object per line.
-  const comments: { id: number; user: string; body: string }[] = [];
+  const comments: {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[] = [];
   for (const line of result.stdout.split("\n")) {
     if (line.trim() === "") continue;
     try {
-      comments.push(
-        JSON.parse(line) as { id: number; user: string; body: string },
-      );
+      const parsed = JSON.parse(line) as {
+        id: number;
+        user: string;
+        body: string;
+        created_at?: unknown;
+        updated_at?: unknown;
+      };
+      comments.push({
+        id: parsed.id,
+        user: parsed.user,
+        body: parsed.body,
+        ...(typeof parsed.created_at === "string"
+          ? { created_at: parsed.created_at }
+          : {}),
+        ...(typeof parsed.updated_at === "string"
+          ? { updated_at: parsed.updated_at }
+          : {}),
+      });
     } catch {
       throw new CliError(`unparseable line from gh api: ${line.slice(0, 120)}`);
     }
@@ -742,6 +803,7 @@ export interface PrReviewComment {
   line: number | null;
   original_line: number | null;
   in_reply_to_id: number | null;
+  created_at?: string;
 }
 
 export async function fetchPrReviewComments(
@@ -758,7 +820,7 @@ export async function fetchPrReviewComments(
       "--jq",
       ".[] | {id: .id, user: .user.login, body: .body, path: .path, " +
         "line: .line, original_line: .original_line, " +
-        "in_reply_to_id: .in_reply_to_id}",
+        "in_reply_to_id: .in_reply_to_id, created_at: .created_at}",
     ],
     undefined,
     options?.spawnFn,
@@ -809,12 +871,22 @@ export async function fetchPostedFindingComments(
       marker,
       livePath: comment.path,
       liveLine: comment.line ?? undefined,
+      ...(comment.created_at === undefined
+        ? {}
+        : { created_at: comment.created_at }),
     });
   }
   for (const comment of issueComments) {
     const marker = parseFindingMarker(comment.body);
     if (marker === null) continue;
-    out.push({ id: comment.id, channel: "issue", marker });
+    out.push({
+      id: comment.id,
+      channel: "issue",
+      marker,
+      ...(comment.created_at === undefined
+        ? {}
+        : { created_at: comment.created_at }),
+    });
   }
   return out;
 }
@@ -841,13 +913,13 @@ function is404(stderr: string): boolean {
 const PR_ISSUE_COMMENTS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
-  "comments(first:100){nodes{databaseId body author{login}}}}}}";
+  "comments(first:100){nodes{databaseId body createdAt updatedAt author{login}}}}}}";
 
 const PR_REVIEW_COMMENTS_QUERY =
   "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
   "reviewThreads(first:100){nodes{comments(first:100){nodes{" +
-  "fullDatabaseId body author{login} path line originalLine " +
+  "fullDatabaseId body createdAt author{login} path line originalLine " +
   "replyTo{fullDatabaseId}}}}}}}}";
 
 async function ghGraphql(
@@ -882,7 +954,15 @@ async function fetchPrCommentsGraphql(
   operatorRoot: string,
   pr: number,
   spawnFn?: typeof Bun.spawn,
-): Promise<{ id: number; user: string; body: string }[]> {
+): Promise<
+  {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[]
+> {
   const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
   const stdout = await ghGraphql(
     operatorRoot,
@@ -914,12 +994,20 @@ async function fetchPrCommentsGraphql(
       "gh api graphql (issueComments) returned no comment list",
     );
   }
-  const comments: { id: number; user: string; body: string }[] = [];
+  const comments: {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[] = [];
   for (const node of nodes) {
     if (typeof node !== "object" || node === null) continue;
     const record = node as {
       databaseId?: unknown;
       body?: unknown;
+      createdAt?: unknown;
+      updatedAt?: unknown;
       author?: unknown;
     };
     const id = graphqlDatabaseId(record.databaseId);
@@ -928,6 +1016,12 @@ async function fetchPrCommentsGraphql(
       id,
       user: graphqlLogin(record.author),
       body: typeof record.body === "string" ? record.body : "",
+      ...(typeof record.createdAt === "string"
+        ? { created_at: record.createdAt }
+        : {}),
+      ...(typeof record.updatedAt === "string"
+        ? { updated_at: record.updatedAt }
+        : {}),
     });
   }
   return comments;
@@ -980,6 +1074,7 @@ async function fetchPrReviewCommentsGraphql(
       const record = node as {
         fullDatabaseId?: unknown;
         body?: unknown;
+        createdAt?: unknown;
         author?: unknown;
         path?: unknown;
         line?: unknown;
@@ -1006,6 +1101,9 @@ async function fetchPrReviewCommentsGraphql(
         line,
         original_line: originalLine,
         in_reply_to_id: replyToId,
+        ...(typeof record.createdAt === "string"
+          ? { created_at: record.createdAt }
+          : {}),
       });
     }
   }
@@ -1232,6 +1330,10 @@ export async function postReviewCommentReply(input: {
   inReplyTo: number;
   body: string;
   spawnFn?: typeof Bun.spawn;
+  // Optional per-call watchdog. Absent keeps the historical unbounded wait
+  // for the interactive triage path (a human is watching); the verified-gone
+  // collapse loop passes one, because nothing is watching an unattended run.
+  timeoutMs?: number;
 }): Promise<number> {
   const result = await gh(
     input.operatorRoot,
@@ -1247,6 +1349,7 @@ export async function postReviewCommentReply(input: {
     ],
     input.body,
     input.spawnFn,
+    input.timeoutMs,
   );
   if (!result.ok) {
     throw new CliError(
@@ -1330,12 +1433,14 @@ interface RepoOwnerName {
 async function ghRepoOwnerName(
   operatorRoot: string,
   spawnFn?: typeof Bun.spawn,
+  timeoutMs?: number,
 ): Promise<RepoOwnerName> {
   const result = await gh(
     operatorRoot,
     ["repo", "view", "--json", "owner,name"],
     undefined,
     spawnFn,
+    timeoutMs,
   );
   if (!result.ok) {
     throw new CliError(`gh repo view failed: ${result.stderr.trim()}`);
@@ -1415,10 +1520,17 @@ export async function resolveReviewThreadForComment(input: {
   pr: number;
   commentId: number;
   spawnFn?: typeof Bun.spawn;
+  // Applied to EVERY gh call this function makes — the repo lookup and both
+  // graphql round trips. A bound on two of three still hangs on the third.
+  timeoutMs?: number;
 }): Promise<ResolveThreadOutcome> {
   assertBalancedGraphql(REVIEW_THREADS_QUERY, "reviewThreads");
   assertBalancedGraphql(RESOLVE_THREAD_MUTATION, "resolveReviewThread");
-  const repo = await ghRepoOwnerName(input.operatorRoot, input.spawnFn);
+  const repo = await ghRepoOwnerName(
+    input.operatorRoot,
+    input.spawnFn,
+    input.timeoutMs,
+  );
   const listed = await gh(
     input.operatorRoot,
     [
@@ -1435,6 +1547,7 @@ export async function resolveReviewThreadForComment(input: {
     ],
     undefined,
     input.spawnFn,
+    input.timeoutMs,
   );
   if (!listed.ok) {
     throw new CliError(
@@ -1459,6 +1572,7 @@ export async function resolveReviewThreadForComment(input: {
     ],
     undefined,
     input.spawnFn,
+    input.timeoutMs,
   );
   if (!mutated.ok) {
     throw new CliError(

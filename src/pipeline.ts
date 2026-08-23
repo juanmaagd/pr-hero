@@ -4,6 +4,7 @@
 // assembly) deterministic and testable here, and spends model tokens only on
 // the hunts and the refutation themselves.
 
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { blockForgesNonce, selectBoundaryNonce, wrapBlock } from "./boundary";
 import {
@@ -37,6 +38,28 @@ import {
   renderPriorsBlock,
   type SuspicionPrior,
 } from "./prompt-set";
+import {
+  applyWorsening,
+  type GateStatus,
+  type PhaseBResult,
+  type PriorRecord,
+  type WorseningHit,
+} from "./rereview-classify";
+import type { RereviewProvenance } from "./rereview-prepare";
+import { assembleLive } from "./rereview-state";
+import {
+  assignVerifyIds,
+  closeVerifyQueue,
+  composeVerifyPrompt,
+  mapVerifyVerdict,
+  triggerCounts,
+  VERIFIER_AGENT,
+  type VerifyQueueEntry,
+  type VerifySubject,
+  verifyArtifactDir,
+  verifyBatchPath,
+  verifyStepName,
+} from "./rereview-verify";
 import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
 import {
   capScoutLeads,
@@ -126,6 +149,29 @@ export interface PipelineInput {
   // so callers that pass nothing see byte-identical step names, per_agent
   // keys, and parity semantics.
   spec?: ReviewSpec;
+  // Item 7: skip hunter (and scout) fan-out. A re-review whose restricted
+  // delta is empty still classifies and verifies (C6); spawning hunters on
+  // an empty patch would bill a first-review for nothing. Absent = run
+  // hunters, so every existing caller stays byte-identical.
+  skipDiscovery?: boolean;
+  // Item 7 provenance. ABSENT on a first review (W-prov); present on every
+  // re-review so the artifact can name its case without assuming.
+  rereview?: RereviewProvenance;
+  // Item 7 verify leg. ABSENT means no verification (first review, or a
+  // caller that has not classified priors). The queue CLOSES after dedupe
+  // (W-order): overlapCandidates are priors that may still be appended.
+  verifyQueue?: VerifyQueueEntry[];
+  overlapCandidates?: VerifyQueueEntry[];
+  // Default 8 matches DEFAULT_MAX_VERIFICATION_STEPS in preflight.ts.
+  // CLI always passes the resolved config value; this default is the
+  // unattended hatch if a caller forgets.
+  maxVerificationSteps?: number;
+  // Phase B settled rows + priors, so finish() can write live[] from
+  // verifyVerdicts without the CLI re-deriving the queue.
+  phaseB?: {
+    settled: PhaseBResult[];
+    priors: PriorRecord[];
+  };
 }
 
 export interface PipelineDeps {
@@ -174,6 +220,18 @@ export type PipelineProgressEvent =
   | {
       kind: "refuter-step-finished";
       findingId: string;
+      verdict: string;
+      durationMs: number;
+    }
+  | {
+      kind: "verify-started";
+      queued: number;
+      findings?: Array<{ id: string; priorId: string }>;
+    }
+  | {
+      kind: "verify-step-finished";
+      findingId: string;
+      priorId: string;
       verdict: string;
       durationMs: number;
     }
@@ -516,11 +574,21 @@ interface RunState {
   survivors?: DedupedSurvivor[];
   deduped?: DedupeLoser[];
   verdicts: Map<string, RefuterOutcome>;
+  verifyVerdicts: Map<string, GateStatus>;
+  verificationCapped: number;
+  verificationSpawned: number;
+  verificationTriggers: {
+    applied: number;
+    touched: number;
+    overlap: number;
+    verify_all: number;
+  };
   partial: boolean;
   summary?: RunSummary;
   perAgent: Record<string, PerAgentUsage>;
   usageTotal: SessionUsage;
   steps: StepMeta[];
+  worsenedHits: WorseningHit[];
 }
 
 export async function runPipeline(
@@ -533,10 +601,20 @@ export async function runPipeline(
     hunterFailures: 0,
     drafts: [],
     verdicts: new Map(),
+    verifyVerdicts: new Map(),
+    verificationCapped: 0,
+    verificationSpawned: 0,
+    verificationTriggers: {
+      applied: 0,
+      touched: 0,
+      overlap: 0,
+      verify_all: 0,
+    },
     partial: false,
     perAgent: {},
     usageTotal: zeroUsage(),
     steps: [],
+    worsenedHits: [],
   };
   // Pipeline ceiling: on firing, return what is assembled so far with
   // run_status "partial". The in-flight step promises are abandoned, not
@@ -568,6 +646,19 @@ async function execute(
   const gotchasFile = Bun.file(input.gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
   if (gotchas.trim().length === 0) {
+    // The plan is still written, and that is not tidiness — `writePipelinePlan`
+    // is the ONLY caller of `fillRereviewProvenance`, and that is the only
+    // thing that fills the CLI's `rereview.live` from phase B. Returning
+    // straight out left it at its initial `live: []` while `postInlineFindings`
+    // went on to PATCH the summary's state block with that empty list, so a
+    // run that spawned nothing at all erased every carried prior — BLOCKERs
+    // included — from cross-run tracking with no verification ever performed.
+    // Nothing may retire a prior on a path that ran no check: that is §3.3's
+    // "`resolved` is never inferred from absence", violated from the other
+    // direction. Phase B already ran in the CLI, so the deterministic
+    // outcomes stand and anything that was queued lands as `unconfirmed` —
+    // which is precisely what "never run" means there.
+    await writePipelinePlan(input, state);
     return {
       skillOutput: {
         findings: [],
@@ -593,12 +684,15 @@ async function execute(
   // exactly the old "parity hunter fired" semantics.
   const patch = await Bun.file(input.diffPath).text();
   const changedPaths = changedPathsFromDiff(patch);
-  const hunters = reviewSpec.agents.filter(
-    (a) =>
-      a.role === "hunter" &&
-      (a.trigger === undefined ||
-        parityTriggered(changedPaths, triggerPatterns(a, input))),
-  );
+  const skipDiscovery = input.skipDiscovery === true;
+  const hunters = skipDiscovery
+    ? []
+    : reviewSpec.agents.filter(
+        (a) =>
+          a.role === "hunter" &&
+          (a.trigger === undefined ||
+            parityTriggered(changedPaths, triggerPatterns(a, input))),
+      );
   state.parityFired = hunters.some((a) => a.trigger !== undefined);
 
   // Step 3a — the run's boundary nonce (C4 O-3.3). HERE, once, and identical
@@ -627,14 +721,9 @@ async function execute(
   // composition loop that consumes its leads. It is AWAITED, unlike the
   // summarizer, which puts it on the critical path — the cost this design
   // states out loud (§3.9) rather than hiding.
-  const leadsBlock = await runScout(
-    input,
-    deps,
-    state,
-    patch,
-    stepsDir,
-    boundaryNonce,
-  );
+  const leadsBlock = skipDiscovery
+    ? ""
+    : await runScout(input, deps, state, patch, stepsDir, boundaryNonce);
 
   // Step 4 — hunter fan-out.
   const stepTimeoutMs = input.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
@@ -695,7 +784,7 @@ async function execute(
   let summarizerSpec: StepSpec | undefined;
   let summarizerMeta: StepMeta | undefined;
   let summarizerConstructionFailed = false;
-  if (input.summarizer) {
+  if (input.summarizer && !skipDiscovery) {
     const name = "summarizer";
     const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
     const outPath = path.join(stepsDir, `${name}.summary.json`);
@@ -866,6 +955,60 @@ async function execute(
     findings: survivors.length,
   });
 
+  if (input.phaseB !== undefined) {
+    const worsened = applyWorsening({
+      settled: input.phaseB.settled,
+      priors: input.phaseB.priors,
+      survivors,
+    });
+    input.phaseB.settled = worsened.settled;
+    state.worsenedHits = worsened.hits;
+  }
+
+  // Item 7 — the verify queue closes HERE, after dedupe (W-order). Overlap
+  // with a discovery survivor can still append a prior; the cap then binds
+  // even on `--yes` (W-cap). runVerify is a DISTINCT namespaced caller, not
+  // a second runRefuter (C3): V### ids, steps/verify/, state.verifyVerdicts,
+  // per_agent.verifier. finish() never sees those ids.
+  const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
+  const closed = closeVerifyQueue({
+    queued: input.verifyQueue ?? [],
+    overlapCandidates: input.overlapCandidates ?? [],
+    survivors,
+    max: input.maxVerificationSteps ?? 8,
+  });
+  state.verificationCapped = closed.capped.length;
+  state.verificationSpawned = closed.verify.length;
+  state.verificationTriggers = triggerCounts([
+    ...closed.verify,
+    ...closed.capped,
+  ]);
+  for (const entry of closed.capped) {
+    state.verifyVerdicts.set(entry.priorId, "unconfirmed");
+  }
+  if (closed.verify.length > 0) {
+    emit(deps, {
+      kind: "verify-started",
+      queued: closed.verify.length,
+      findings: assignVerifyIds(closed.verify).map((s) => ({
+        id: s.vId,
+        priorId: s.priorId,
+      })),
+    });
+    if (refuterAgent) {
+      await runVerify(input, deps, state, closed.verify, {
+        stepsDir,
+        stepTimeoutMs,
+        agent: refuterAgent,
+        nonce: boundaryNonce,
+      });
+    } else {
+      for (const entry of closed.verify) {
+        state.verifyVerdicts.set(entry.priorId, "unconfirmed");
+      }
+    }
+  }
+
   // Step 6 — one refuter batch: every BLOCKER/CRITICAL survivor, whatever its
   // evidence_class. Severity alone is the test, because severity alone decides
   // whether a finding can block a merge, and the refuter is the gate that
@@ -885,7 +1028,6 @@ async function execute(
   // configured absence, not failure: every finding stays not_submitted (so
   // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
   // the run stays complete.
-  const refuterAgent = reviewSpec.agents.find((a) => a.role === "refuter");
   if (batch.length > 0 && refuterAgent) {
     emit(deps, {
       kind: "refuter-started",
@@ -1109,6 +1251,152 @@ async function runRefuter(
   // count, so the total is the meaningful number; do not read it as "retries of
   // one step".
   state.perAgent[options.agent.key] = usage
+    ? {
+        tokens_total: usage.tokens_total,
+        duration_ms: legElapsedMs,
+        tokens_in: usage.tokens_in,
+        tokens_out: usage.tokens_out,
+        cost_usd_est: usage.cost_usd_est,
+        attempts,
+        status: anyFailed ? "failed" : "ok",
+      }
+    : failedAgentEntry();
+  if (anyFailed) state.partial = true;
+}
+
+async function runVerify(
+  input: PipelineInput,
+  deps: PipelineDeps,
+  state: RunState,
+  queued: VerifyQueueEntry[],
+  options: {
+    stepsDir: string;
+    stepTimeoutMs: number;
+    agent: AgentSpec;
+    nonce: string;
+  },
+): Promise<void> {
+  const subjects = assignVerifyIds(queued);
+  await Bun.write(
+    verifyBatchPath(options.stepsDir),
+    `${JSON.stringify(
+      subjects.map((s) => ({
+        id: s.vId,
+        prior_id: s.priorId,
+        trigger: s.trigger,
+        locs: s.locs,
+        severity: s.sev,
+        claim: s.claim,
+      })),
+      null,
+      2,
+    )}\n`,
+  );
+  const agent = await parseAgentFile(
+    path.join(input.agentsDir, options.agent.file),
+  );
+  const systemPromptPath = path.join(options.stepsDir, "verifier.system.md");
+  await writeSystemPrompt(systemPromptPath, agent.body);
+  const model = resolveModel(
+    input,
+    options.agent.model,
+    agent.model,
+    options.agent.file,
+  );
+  const forged: VerifySubject[] = [];
+  const specs: Array<{ subject: VerifySubject; spec: StepSpec }> = [];
+  for (const subject of subjects) {
+    const prompt = composeVerifyPrompt(subject, options.nonce);
+    if (prompt === null) {
+      forged.push(subject);
+      continue;
+    }
+    const dir = verifyArtifactDir(options.stepsDir, subject.vId);
+    await mkdir(dir, { recursive: true });
+    const spec: StepSpec = {
+      name: verifyStepName(subject.vId),
+      systemPromptPath,
+      prompt,
+      tools: agent.tools,
+      mcpConfigPath: input.mcpConfigPath,
+      model,
+      cwd: input.worktree,
+      outPath: path.join(dir, "result.json"),
+      timeoutMs: options.stepTimeoutMs,
+      maxAttempts: DEFAULT_STEP_MAX_ATTEMPTS,
+      parse: (finalText) => {
+        const extracted = extractJsonObject(finalText);
+        if (extracted === undefined) {
+          throw new Error("verifier final message has no JSON object");
+        }
+        return validateRefuterResult(extracted, [subject.vId]);
+      },
+      onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
+    };
+    specs.push({ subject, spec });
+  }
+  for (const { spec } of specs) state.steps.push(stepMeta(spec));
+  const legStartedAt = Date.now();
+  const settled = await Promise.allSettled(
+    specs.map(({ subject, spec }) => {
+      const startedAt = Date.now();
+      const promise = deps.runner.run(spec);
+      promise.then(
+        (result) =>
+          emit(deps, {
+            kind: "verify-step-finished",
+            findingId: subject.vId,
+            priorId: subject.priorId,
+            verdict:
+              result.status === "ok"
+                ? ((result.output as RefuterResult).results.find(
+                    (r) => r.finding_id === subject.vId,
+                  )?.outcome ?? "inconclusive")
+                : "inconclusive",
+            durationMs: Date.now() - startedAt,
+          }),
+        () =>
+          emit(deps, {
+            kind: "verify-step-finished",
+            findingId: subject.vId,
+            priorId: subject.priorId,
+            verdict: "inconclusive",
+            durationMs: Date.now() - startedAt,
+          }),
+      );
+      return promise;
+    }),
+  );
+  const legElapsedMs = Date.now() - legStartedAt;
+  let usage: SessionUsage | undefined;
+  let attempts = 0;
+  let anyFailed = false;
+  for (const [i, entry] of specs.entries()) {
+    const outcome = settled[i];
+    const result = outcome?.status === "fulfilled" ? outcome.value : undefined;
+    if (result) {
+      usage = usage ? sumUsage(usage, result.usage) : result.usage;
+      attempts += result.attempts;
+      state.usageTotal = sumUsage(state.usageTotal, result.usage);
+    }
+    if (result?.status === "ok") {
+      for (const r of (result.output as RefuterResult).results) {
+        const mapped = mapVerifyVerdict(r.outcome);
+        const priorId =
+          subjects.find((s) => s.vId === r.finding_id)?.priorId ??
+          entry.subject.priorId;
+        state.verifyVerdicts.set(priorId, mapped);
+      }
+      continue;
+    }
+    anyFailed = true;
+    state.verifyVerdicts.set(entry.subject.priorId, "unconfirmed");
+  }
+  for (const subject of forged) {
+    anyFailed = true;
+    state.verifyVerdicts.set(subject.priorId, "unconfirmed");
+  }
+  state.perAgent[VERIFIER_AGENT] = usage
     ? {
         tokens_total: usage.tokens_total,
         duration_ms: legElapsedMs,
@@ -1415,12 +1703,54 @@ async function writePipelinePlan(
       ? {}
       : { boundary_nonce: state.boundaryNonce }),
     ...(state.scout === undefined ? {} : { scout: state.scout }),
+    ...(input.rereview === undefined
+      ? {}
+      : { rereview: fillRereviewProvenance(input, state) }),
     steps: state.steps,
   };
   await Bun.write(
     path.join(input.runDir, "pipeline.json"),
     `${JSON.stringify(plan, null, 2)}\n`,
   );
+}
+
+function fillRereviewProvenance(
+  input: PipelineInput,
+  state: RunState,
+): RereviewProvenance {
+  const base = input.rereview;
+  if (base === undefined) {
+    throw new Error("fillRereviewProvenance called without rereview");
+  }
+  const assembled =
+    input.phaseB === undefined
+      ? {
+          live: base.live,
+          verifiedGone: base.resolved_verified ?? 0,
+          verifiedGoneIds: base.resolved_ids ?? [],
+          returned: base.returned ?? 0,
+          reTiered: base.re_tiered ?? 0,
+        }
+      : assembleLive({
+          settled: input.phaseB.settled,
+          priors: input.phaseB.priors,
+          verifyVerdicts: state.verifyVerdicts,
+        });
+  const filled: RereviewProvenance = {
+    ...base,
+    verified: state.verificationSpawned,
+    verification_capped: state.verificationCapped,
+    verification_triggers: state.verificationTriggers,
+    live: assembled.live,
+    resolved_verified: assembled.verifiedGone,
+    resolved_ids: assembled.verifiedGoneIds,
+    returned: assembled.returned,
+    re_tiered: assembled.reTiered,
+    ...(state.worsenedHits.length > 0 ? { worsened: state.worsenedHits } : {}),
+  };
+  // The CLI holds this object; mutating it is how the post path sees live[].
+  Object.assign(base, filled);
+  return filled;
 }
 
 function resolveModel(

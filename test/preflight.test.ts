@@ -7,6 +7,7 @@ import {
   CliUsageError,
   DEFAULT_BASE_REF,
   DEFAULT_HOP_BUDGET,
+  DEFAULT_MAX_VERIFICATION_STEPS,
   DEFAULT_SUMMARY_MODEL,
   emptyDiffMessage,
   headContainedInBaseMessage,
@@ -22,6 +23,7 @@ import {
   repoWebUrlFromRemote,
   resolveAgentsDirSetting,
   resolveBaseRef,
+  resolveMaxVerificationSteps,
   resolveSummary,
   runDirCandidate,
 } from "../src/preflight";
@@ -40,6 +42,7 @@ describe("parseArgs", () => {
       head: "HEAD",
       hopBudget: DEFAULT_HOP_BUDGET,
       scout: false,
+      full: false,
       dryRun: false,
       yes: false,
       post: false,
@@ -173,6 +176,17 @@ describe("parseArgs", () => {
       parseArgs(["review", "--scout", "--scout-model", "haiku"]).options
         .scoutModel,
     ).toBe("haiku");
+  });
+
+  test("W-cli — --full is OFF unless asked for, and review-only", () => {
+    expect(parseArgs(["review"]).options.full).toBe(false);
+    expect(parseArgs(["review", "--full"]).options.full).toBe(true);
+    expect(() => parseArgs(["watch", "--once", "--full"])).toThrow(
+      "only applies to the review command",
+    );
+    expect(() => parseArgs(["ledger", "--full"])).toThrow(
+      "only applies to the review command",
+    );
   });
 
   test("--scout-model without --scout is a loud no-op, not a quiet one", () => {
@@ -832,6 +846,27 @@ describe("parseLocalConfig", () => {
       enabled: false,
       model: "sonnet",
     });
+  });
+
+  test("max_verification_steps is optional; absent resolves to the default", () => {
+    expect(parseLocalConfig("{}").max_verification_steps).toBeUndefined();
+    expect(resolveMaxVerificationSteps(parseLocalConfig("{}"))).toBe(
+      DEFAULT_MAX_VERIFICATION_STEPS,
+    );
+    expect(
+      parseLocalConfig('{"max_verification_steps": 3}').max_verification_steps,
+    ).toBe(3);
+    expect(
+      resolveMaxVerificationSteps(
+        parseLocalConfig('{"max_verification_steps": 0}'),
+      ),
+    ).toBe(0);
+    expect(() => parseLocalConfig('{"max_verification_steps": -1}')).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseLocalConfig('{"max_verification_steps": 1.5}')).toThrow(
+      CliUsageError,
+    );
   });
 });
 
