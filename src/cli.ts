@@ -54,6 +54,7 @@ import {
   renderLedger,
   type StoredComparison,
 } from "./ledger";
+import { runMcpServer } from "./mcp";
 import {
   type FailSoftIngestInput,
   failSoftIngest,
@@ -510,7 +511,9 @@ async function main(argv: string[]): Promise<number> {
                       ? await corpusCommand(parsed.options)
                       : parsed.command === "config"
                         ? await configCommand(parsed.options)
-                        : await review(parsed.options);
+                        : parsed.command === "mcp"
+                          ? await mcpCommand(parsed.options)
+                          : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -3862,6 +3865,14 @@ async function configCommand(options: CliOptions): Promise<number> {
     width: terminalWidth(),
   });
   process.stdout.write(`${lines.join("\n")}\n`);
+  return 0;
+}
+
+export async function mcpCommand(options: CliOptions): Promise<number> {
+  await runMcpServer({
+    socketPath: options.socket,
+    dbPath: options.db,
+  });
   return 0;
 }
 

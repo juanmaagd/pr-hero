@@ -1,0 +1,89 @@
+// Read-only MCP server (Fundamentals #6 / observability-canonical-store.md),
+// impure half: stdio line reader, JSON-RPC event loop, and store client binding.
+//
+// Invariant: The MCP server is strictly read-only. All data access routes through
+// ProductStoreClient.
+
+import os from "node:os";
+import readline from "node:readline";
+import { ProductStoreClient } from "./client";
+import { prheroLayout } from "./home-preflight";
+import { type JsonRpcRequest, processMcpMessage } from "./mcp-preflight";
+import { type StoreServerHandle, startProductStoreServer } from "./server";
+
+export interface McpServerOptions {
+  socketPath?: string;
+  dbPath?: string;
+  client?: ProductStoreClient;
+}
+
+export async function runMcpServer(
+  options: McpServerOptions = {},
+): Promise<void> {
+  let client = options.client;
+  let embeddedServer: StoreServerHandle | null = null;
+
+  if (!client) {
+    const layout = prheroLayout(os.homedir());
+    const socketPath = options.socketPath ?? layout.storeSocketPath;
+    const dbPath = options.dbPath ?? layout.prheroDbPath;
+
+    // Start embedded product store server for this MCP session
+    embeddedServer = startProductStoreServer({
+      dbPath,
+      socketPath,
+    });
+
+    client = new ProductStoreClient({ socketPath });
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: false,
+  });
+
+  const cleanup = () => {
+    rl.close();
+    if (embeddedServer) {
+      try {
+        embeddedServer.stop();
+      } catch {}
+    }
+  };
+
+  process.on("SIGINT", () => {
+    cleanup();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", () => {
+    cleanup();
+    process.exit(0);
+  });
+
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    try {
+      const request = JSON.parse(trimmed) as JsonRpcRequest;
+      const response = await processMcpMessage(client, request);
+      if (response !== null) {
+        process.stdout.write(`${JSON.stringify(response)}\n`);
+      }
+    } catch (err) {
+      const errorResponse = {
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32700,
+          message: `Parse error: ${(err as Error).message}`,
+        },
+      };
+      process.stdout.write(`${JSON.stringify(errorResponse)}\n`);
+    }
+  }
+
+  cleanup();
+}
