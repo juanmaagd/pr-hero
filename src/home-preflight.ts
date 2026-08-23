@@ -39,6 +39,8 @@ export interface PrheroLayout {
   // nested under it, so GC's `glob.scan({ cwd: reposDir })` (gc.ts)
   // structurally cannot enumerate or delete it.
   metricsDbPath: string;
+  // Canonical product database (Fundamentals #6 / observability-canonical-store.md)
+  prheroDbPath: string;
 }
 
 export function prheroLayout(home: string): PrheroLayout {
@@ -52,6 +54,7 @@ export function prheroLayout(home: string): PrheroLayout {
     lockPath: path.join(dir, "watch.lock"),
     launchdLogPath: path.join(dir, "launchd.log"),
     metricsDbPath: path.join(dir, "metrics.db"),
+    prheroDbPath: path.join(dir, "prhero.db"),
   };
 }
 
