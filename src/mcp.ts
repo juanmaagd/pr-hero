@@ -25,22 +25,39 @@ export async function runMcpServer(
   let embeddedServer: StoreServerHandle | null = null;
 
   if (!client) {
-    const layout = prheroLayout(os.homedir());
-    const socketPath =
-      options.socketPath ??
-      path.join(
+    if (options.socketPath) {
+      // Test if an existing store server is already alive on this socket
+      const probeClient = new ProductStoreClient({
+        socketPath: options.socketPath,
+      });
+      try {
+        await probeClient.health();
+        // Socket is alive! Reuse existing server without starting an embedded one or hijacking
+        client = probeClient;
+      } catch {
+        // Socket is absent or stale; start embedded server on this socket path
+        const layout = prheroLayout(os.homedir());
+        const dbPath = options.dbPath ?? layout.prheroDbPath;
+        embeddedServer = startProductStoreServer({
+          dbPath,
+          socketPath: options.socketPath,
+        });
+        client = probeClient;
+      }
+    } else {
+      // Default: create a dedicated ephemeral socket for this MCP process
+      const layout = prheroLayout(os.homedir());
+      const socketPath = path.join(
         os.tmpdir(),
         `prhero-mcp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.sock`,
       );
-    const dbPath = options.dbPath ?? layout.prheroDbPath;
-
-    // Start embedded product store server for this MCP session
-    embeddedServer = startProductStoreServer({
-      dbPath,
-      socketPath,
-    });
-
-    client = new ProductStoreClient({ socketPath });
+      const dbPath = options.dbPath ?? layout.prheroDbPath;
+      embeddedServer = startProductStoreServer({
+        dbPath,
+        socketPath,
+      });
+      client = new ProductStoreClient({ socketPath });
+    }
   }
 
   const rl = readline.createInterface({
