@@ -86,13 +86,17 @@ export const PRHERO_MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "prhero_search_findings",
     description:
-      "Search findings across historical runs by file path, tier (blocking/advisory), or repository.",
+      "Search findings across historical runs by file path, tier (blocking/advisory), repository, or specific run ID.",
     inputSchema: {
       type: "object",
       properties: {
         repo_id: {
           type: "string",
           description: "Repository identifier",
+        },
+        run_id: {
+          type: "number",
+          description: "Canonical run ID to filter findings within",
         },
         path: {
           type: "string",
@@ -214,6 +218,24 @@ export function formatToolError(message: string): ToolCallResult {
   };
 }
 
+export function parseOptionalInteger(val: unknown): number | undefined {
+  if (val === undefined || val === null || val === "") return undefined;
+  const n = typeof val === "number" ? val : Number(val);
+  if (!Number.isInteger(n)) return undefined;
+  return n;
+}
+
+export function parseRequiredInteger(val: unknown, paramName: string): number {
+  if (val === undefined || val === null || val === "") {
+    throw new Error(`Missing required parameter: ${paramName}`);
+  }
+  const n = typeof val === "number" ? val : Number(val);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`Invalid ${paramName}: must be a positive integer`);
+  }
+  return n;
+}
+
 export async function handleMcpToolCall(
   client: ProductStoreClient,
   name: string,
@@ -228,19 +250,17 @@ export async function handleMcpToolCall(
 
       case "prhero_list_runs": {
         const repo_id =
-          typeof args.repo_id === "string" ? args.repo_id : undefined;
-        const pr = typeof args.pr === "number" ? args.pr : undefined;
-        const limit = typeof args.limit === "number" ? args.limit : undefined;
+          typeof args.repo_id === "string" && args.repo_id.trim() !== ""
+            ? args.repo_id.trim()
+            : undefined;
+        const pr = parseOptionalInteger(args.pr);
+        const limit = parseOptionalInteger(args.limit);
         const runs = await client.listRuns({ repo_id, pr, limit });
         return formatToolSuccess(runs);
       }
 
       case "prhero_get_run": {
-        const run_id =
-          typeof args.run_id === "number" ? args.run_id : Number(args.run_id);
-        if (Number.isNaN(run_id)) {
-          return formatToolError("Invalid run_id: must be a number");
-        }
+        const run_id = parseRequiredInteger(args.run_id, "run_id");
         const run = await client.getRun(run_id);
         if (!run) {
           return formatToolError(`Run #${run_id} not found`);
@@ -249,11 +269,7 @@ export async function handleMcpToolCall(
       }
 
       case "prhero_get_findings": {
-        const run_id =
-          typeof args.run_id === "number" ? args.run_id : Number(args.run_id);
-        if (Number.isNaN(run_id)) {
-          return formatToolError("Invalid run_id: must be a number");
-        }
+        const run_id = parseRequiredInteger(args.run_id, "run_id");
         const doc = await client.getFindingsDocument(run_id);
         if (!doc) {
           return formatToolError(
@@ -265,13 +281,23 @@ export async function handleMcpToolCall(
 
       case "prhero_search_findings": {
         const repo_id =
-          typeof args.repo_id === "string" ? args.repo_id : undefined;
-        const path = typeof args.path === "string" ? args.path : undefined;
+          typeof args.repo_id === "string" && args.repo_id.trim() !== ""
+            ? args.repo_id.trim()
+            : undefined;
+        const run_id = parseOptionalInteger(args.run_id);
+        const path =
+          typeof args.path === "string" && args.path.trim() !== ""
+            ? args.path.trim()
+            : undefined;
         const tier =
-          typeof args.tier === "string" ? (args.tier as Tier) : undefined;
-        const limit = typeof args.limit === "number" ? args.limit : undefined;
+          typeof args.tier === "string" &&
+          (args.tier === "blocking" || args.tier === "advisory")
+            ? (args.tier as Tier)
+            : undefined;
+        const limit = parseOptionalInteger(args.limit);
         const findings = await client.searchFindings({
           repo_id,
+          run_id,
           path,
           tier,
           limit,
@@ -281,7 +307,9 @@ export async function handleMcpToolCall(
 
       case "prhero_get_usage": {
         const repo_id =
-          typeof args.repo_id === "string" ? args.repo_id : undefined;
+          typeof args.repo_id === "string" && args.repo_id.trim() !== ""
+            ? args.repo_id.trim()
+            : undefined;
         const all =
           typeof args.all === "boolean" ? args.all : repo_id === undefined;
         const usage = await client.getUsage({ repo_id, all });
@@ -289,11 +317,7 @@ export async function handleMcpToolCall(
       }
 
       case "prhero_get_comparison": {
-        const run_id =
-          typeof args.run_id === "number" ? args.run_id : Number(args.run_id);
-        if (Number.isNaN(run_id)) {
-          return formatToolError("Invalid run_id: must be a number");
-        }
+        const run_id = parseRequiredInteger(args.run_id, "run_id");
         const comp = await client.getComparison(run_id);
         if (!comp) {
           return formatToolError(`Comparison for run #${run_id} not found`);
@@ -302,11 +326,7 @@ export async function handleMcpToolCall(
       }
 
       case "prhero_get_triage": {
-        const run_id =
-          typeof args.run_id === "number" ? args.run_id : Number(args.run_id);
-        if (Number.isNaN(run_id)) {
-          return formatToolError("Invalid run_id: must be a number");
-        }
+        const run_id = parseRequiredInteger(args.run_id, "run_id");
         const triage = await client.getTriage(run_id);
         return formatToolSuccess(triage);
       }
@@ -323,7 +343,19 @@ export async function processMcpMessage(
   client: ProductStoreClient,
   request: JsonRpcRequest,
 ): Promise<JsonRpcResponse | null> {
-  const { id = null, method, params } = request;
+  const isNotification = request.id === undefined || request.id === null;
+
+  // JSON-RPC 2.0 §4.1: If the request is a notification, the server MUST NOT reply
+  if (
+    isNotification &&
+    (request.method.startsWith("notifications/") ||
+      request.method.startsWith("$/"))
+  ) {
+    return null;
+  }
+
+  const id = request.id ?? null;
+  const { method, params } = request;
 
   switch (method) {
     case "initialize": {
@@ -381,6 +413,9 @@ export async function processMcpMessage(
     }
 
     default: {
+      if (isNotification) {
+        return null;
+      }
       return {
         jsonrpc: "2.0",
         id,

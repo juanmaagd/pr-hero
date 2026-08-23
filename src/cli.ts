@@ -3413,12 +3413,23 @@ export async function runTriageReplyCommand(input: {
   try {
     const layout = prheroLayout(os.homedir());
     if (existsSync(layout.prheroDbPath)) {
+      const repoId = await tryOriginRepoId(operatorRoot);
       const db = openProductStore(layout.prheroDbPath);
       try {
         const runDirBasename = path.basename(runDir);
-        const runRow = db
-          .query("SELECT id FROM runs WHERE run_dir = ? LIMIT 1")
-          .get(runDirBasename) as { id: number } | null;
+        let runRow: { id: number } | null = null;
+        if (repoId) {
+          runRow = db
+            .query(
+              "SELECT id FROM runs WHERE repo_id = ? AND run_dir = ? LIMIT 1",
+            )
+            .get(repoId, runDirBasename) as { id: number } | null;
+        }
+        if (!runRow) {
+          runRow = db
+            .query("SELECT id FROM runs WHERE run_dir = ? LIMIT 1")
+            .get(runDirBasename) as { id: number } | null;
+        }
         if (runRow) {
           recordFindingTriage(db, {
             run_id: runRow.id,

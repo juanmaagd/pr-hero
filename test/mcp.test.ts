@@ -294,15 +294,15 @@ describe("Read-Only MCP Server Protocol & Tools", () => {
     }
   });
 
-  test("returns -32601 on unknown JSON-RPC method", async () => {
+  test("returns -32601 on unknown JSON-RPC method with id, but returns null for notifications", async () => {
     const mockClient = {} as ProductStoreClient;
-    const response = await processMcpMessage(mockClient, {
+    const responseWithId = await processMcpMessage(mockClient, {
       jsonrpc: "2.0",
       id: 99,
       method: "unknown/method",
     });
 
-    expect(response).toEqual({
+    expect(responseWithId).toEqual({
       jsonrpc: "2.0",
       id: 99,
       error: {
@@ -310,5 +310,91 @@ describe("Read-Only MCP Server Protocol & Tools", () => {
         message: "Method not found: unknown/method",
       },
     });
+
+    // Notifications (no id) must return null
+    const notifResponse = await processMcpMessage(mockClient, {
+      jsonrpc: "2.0",
+      method: "notifications/cancelled",
+      params: { requestId: 123 },
+    });
+    expect(notifResponse).toBeNull();
+
+    const customNotif = await processMcpMessage(mockClient, {
+      jsonrpc: "2.0",
+      method: "$/customNotification",
+    });
+    expect(customNotif).toBeNull();
+  });
+
+  test("validates and coerces parameters across tool calls", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "mcp-params-test-"));
+    const dbPath = path.join(dir, "mcp.db");
+    const socketPath = path.join(dir, "mcp.sock");
+
+    const serverHandle = startProductStoreServer({
+      dbPath,
+      socketPath,
+    });
+    const client = new ProductStoreClient({ socketPath });
+
+    try {
+      const saveRes = await client.saveRun(
+        projectCompleteRun({
+          doc: sampleDoc(),
+          repoId: "github.com/juanmaagd/pr-hero",
+          runDir: "run-mcp-params",
+          checkoutPath: null,
+        }),
+      );
+      const runId = saveRes.run_id;
+
+      // 1. search_findings with run_id
+      const searchRes = await processMcpMessage(client, {
+        jsonrpc: "2.0",
+        id: 20,
+        method: "tools/call",
+        params: {
+          name: "prhero_search_findings",
+          arguments: { run_id: runId, tier: "blocking" },
+        },
+      });
+      const searchData = JSON.parse(
+        getToolResult(searchRes).content[0]?.text ?? "[]",
+      );
+      expect(searchData.length).toBe(1);
+      expect(searchData[0].finding_id).toBe("F001");
+
+      // 2. Numeric coercion with string numbers
+      const getRunRes = await processMcpMessage(client, {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: {
+          name: "prhero_get_run",
+          arguments: { run_id: String(runId) },
+        },
+      });
+      const getRunData = JSON.parse(
+        getToolResult(getRunRes).content[0]?.text ?? "{}",
+      );
+      expect(getRunData.id).toBe(runId);
+
+      // 3. Validation error on missing required run_id
+      const missingRunRes = await processMcpMessage(client, {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: {
+          name: "prhero_get_run",
+          arguments: {},
+        },
+      });
+      expect(getToolResult(missingRunRes).isError).toBe(true);
+      expect(getToolResult(missingRunRes).content[0]?.text).toContain(
+        "Missing required parameter: run_id",
+      );
+    } finally {
+      serverHandle.stop();
+    }
   });
 });

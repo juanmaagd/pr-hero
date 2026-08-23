@@ -5,6 +5,7 @@
 // ProductStoreClient.
 
 import os from "node:os";
+import path from "node:path";
 import readline from "node:readline";
 import { ProductStoreClient } from "./client";
 import { prheroLayout } from "./home-preflight";
@@ -25,7 +26,12 @@ export async function runMcpServer(
 
   if (!client) {
     const layout = prheroLayout(os.homedir());
-    const socketPath = options.socketPath ?? layout.storeSocketPath;
+    const socketPath =
+      options.socketPath ??
+      path.join(
+        os.tmpdir(),
+        `prhero-mcp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.sock`,
+      );
     const dbPath = options.dbPath ?? layout.prheroDbPath;
 
     // Start embedded product store server for this MCP session
