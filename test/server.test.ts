@@ -133,7 +133,7 @@ const SAMPLE_PER_AGENT: Record<string, PerAgentUsage> = {
 const SAMPLE_COMPARISON: StoredComparison = {
   pr: 42,
   head_sha: "b".repeat(40),
-  diff_from_sha: "a".repeat(40),
+  diff_from_sha: "c".repeat(40),
   run_dir: "run-42",
   run_status: "complete",
   generated_at: "2026-08-23T18:00:00.000Z",
@@ -259,8 +259,22 @@ describe("Local Store Server & Typed Client", () => {
         }),
       );
 
+      await client.saveRun(
+        projectCompleteRun({
+          doc: sampleDoc({ pr: 0 }),
+          repoId: "github.com/org/repo-c",
+          runDir: "local-run-1",
+          checkoutPath: null,
+          generatedAt: "2026-08-23T18:02:00.000Z",
+        }),
+      );
+
       const allRuns = await client.listRuns();
-      expect(allRuns.length).toBe(2);
+      expect(allRuns.length).toBe(3);
+
+      const localRuns = await client.listRuns({ pr: 0 });
+      expect(localRuns.length).toBe(1);
+      expect(localRuns[0]?.run_dir).toBe("local-run-1");
 
       const repoARuns = await client.listRuns({
         repo_id: "github.com/org/repo-a",
@@ -269,9 +283,9 @@ describe("Local Store Server & Typed Client", () => {
       expect(repoARuns[0]?.run_dir).toBe("run-1");
 
       const usageAll = await client.getUsage({ all: true });
-      expect(usageAll.rows.length).toBe(2);
-      expect(usageAll.total_tokens).toBe(11000);
-      expect(usageAll.total_cost_usd).toBeCloseTo(0.4, 2);
+      expect(usageAll.rows.length).toBe(3);
+      expect(usageAll.total_tokens).toBe(16500);
+      expect(usageAll.total_cost_usd).toBeCloseTo(0.6, 2);
 
       const usageRepoA = await client.getUsage({
         repo_id: "github.com/org/repo-a",

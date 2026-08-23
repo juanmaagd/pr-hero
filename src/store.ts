@@ -59,15 +59,16 @@ export function openProductStore(dbPath: string): Database {
 
 const RUN_UPSERT_SQL = `
   INSERT INTO runs (
-    repo_id, run_dir, pr, checkout_path, head_sha, base_sha, run_status,
-    session_failed, model, iteration, parity_hunter_fired, prompt_set_name,
-    prompt_set_sha256, driver_sha, engine_name, engine_version, summary_prose,
-    summary_score, summary_score_reason, generated_at, wall_ms, index_ms,
-    index_mode, index_disk_mb, sync_ms, tokens_in, tokens_out, tokens_total,
-    cost_usd_est, blocking, advisory, root_causes_json, greptile_found
+    repo_id, run_dir, pr, checkout_path, head_sha, base_sha, diff_from_sha,
+    run_status, session_failed, model, iteration, parity_hunter_fired,
+    prompt_set_name, prompt_set_sha256, driver_sha, engine_name, engine_version,
+    summary_prose, summary_score, summary_score_reason, generated_at, wall_ms,
+    index_ms, index_mode, index_disk_mb, sync_ms, tokens_in, tokens_out,
+    tokens_total, cost_usd_est, blocking, advisory, root_causes_json,
+    greptile_found
   ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
   )
   ON CONFLICT(run_dir) DO UPDATE SET
     repo_id = excluded.repo_id,
@@ -75,6 +76,7 @@ const RUN_UPSERT_SQL = `
     checkout_path = excluded.checkout_path,
     head_sha = excluded.head_sha,
     base_sha = excluded.base_sha,
+    diff_from_sha = excluded.diff_from_sha,
     run_status = excluded.run_status,
     session_failed = excluded.session_failed,
     model = excluded.model,
@@ -112,6 +114,7 @@ function runParams(row: CanonicalRunRow): SQLQueryBindings[] {
     row.checkout_path,
     row.head_sha,
     row.base_sha,
+    row.diff_from_sha,
     row.run_status,
     row.session_failed,
     row.model,
@@ -580,7 +583,7 @@ export function exportComparison(
   return {
     pr: run.pr,
     head_sha: run.head_sha,
-    diff_from_sha: run.base_sha,
+    diff_from_sha: run.diff_from_sha ?? run.base_sha,
     run_dir: run.run_dir,
     run_status: run.run_status,
     generated_at: run.generated_at,

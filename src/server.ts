@@ -105,8 +105,12 @@ export function startProductStoreServer(
             params.push(query.repo_id);
           }
           if (query.pr !== undefined) {
-            sql += " AND pr = ?";
-            params.push(query.pr);
+            if (query.pr === 0) {
+              sql += " AND (pr = 0 OR pr IS NULL)";
+            } else {
+              sql += " AND pr = ?";
+              params.push(query.pr);
+            }
           }
           sql += " ORDER BY generated_at DESC";
           if (query.limit !== undefined) {

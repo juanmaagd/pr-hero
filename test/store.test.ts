@@ -209,7 +209,7 @@ const SAMPLE_PER_AGENT: Record<string, PerAgentUsage> = {
 const SAMPLE_COMPARISON: StoredComparison = {
   pr: 42,
   head_sha: "b".repeat(40),
-  diff_from_sha: "a".repeat(40),
+  diff_from_sha: "c".repeat(40),
   run_dir: "2026-08-23T18-00-00-000Z-pr-42",
   run_status: "complete",
   generated_at: "2026-08-23T18:00:00.000Z",

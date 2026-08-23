@@ -3140,6 +3140,25 @@ describe("persistCanonicalReview — canonical product store persistence (Fundam
     ]);
   });
 
+  test("a throwing sqlite error logs a warning and returns 0 without crashing", () => {
+    const warnings: string[] = [];
+    const runId = persistCanonicalReview({
+      dbPath: "/invalid/path/that/cannot/exist/prhero.db",
+      repoId: "github.com/acme/widgets",
+      runDir: "/runs/pr-42-1",
+      checkoutPath: OPERATOR_ROOT,
+      doc: doc({ pr: 42 }),
+      perAgent: {},
+      comparison: null,
+      log: (line) => warnings.push(line),
+    });
+    expect(runId).toBe(0);
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain(
+      "warning: canonical store persistence failed — the review itself is intact:",
+    );
+  });
+
   test("invokes custom persist seam when provided", () => {
     const seen: string[] = [];
     const runId = persistCanonicalReview({

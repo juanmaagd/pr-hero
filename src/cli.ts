@@ -530,6 +530,7 @@ export function ingestReviewMetrics(input: FailSoftIngestInput): void {
 
 export interface PersistCanonicalReviewInput {
   dbPath?: string;
+  home?: string;
   repoId: string | null;
   runDir: string;
   checkoutPath: string | null;
@@ -556,21 +557,29 @@ export function persistCanonicalReview(
     );
     return 0;
   }
-  const dbPath = input.dbPath ?? prheroLayout(os.homedir()).prheroDbPath;
-  const db = openProductStore(dbPath);
   try {
-    const projected = projectCompleteRun({
-      doc: input.doc,
-      perAgent: input.perAgent,
-      comparison: input.comparison,
-      repoId: input.repoId,
-      runDir: input.runDir,
-      checkoutPath: input.checkoutPath,
-      generatedAt: input.generatedAt,
-    });
-    return saveRunTransaction(db, projected);
-  } finally {
-    db.close();
+    const dbPath =
+      input.dbPath ?? prheroLayout(input.home ?? os.homedir()).prheroDbPath;
+    const db = openProductStore(dbPath);
+    try {
+      const projected = projectCompleteRun({
+        doc: input.doc,
+        perAgent: input.perAgent,
+        comparison: input.comparison,
+        repoId: input.repoId,
+        runDir: input.runDir,
+        checkoutPath: input.checkoutPath,
+        generatedAt: input.generatedAt,
+      });
+      return saveRunTransaction(db, projected);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    input.log?.(
+      `warning: canonical store persistence failed — the review itself is intact: ${(err as Error).message}`,
+    );
+    return 0;
   }
 }
 
@@ -1883,6 +1892,7 @@ async function reviewPr(
       }
       // 13b — canonical product store & observability metrics.
       persistCanonicalReview({
+        home,
         repoId: repoHome.repoId,
         runDir,
         checkoutPath: operatorRoot,

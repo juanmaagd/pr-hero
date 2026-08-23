@@ -5,12 +5,12 @@
 //
 // Pure and testable offline: never opens a connection, never touches the clock or fs.
 
+import path from "node:path";
 import type {
   CausalDisposition,
   EvidenceClass,
   FindingsDocument,
   HopTrail,
-  HopTrailStep,
   Hunter,
   IndexMode,
   RefuterVerdict,
@@ -37,6 +37,7 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     checkout_path TEXT NULL,
     head_sha TEXT NOT NULL,
     base_sha TEXT NOT NULL,
+    diff_from_sha TEXT NULL,
     run_status TEXT NOT NULL,
     session_failed INTEGER NULL,
     model TEXT NOT NULL,
@@ -185,6 +186,7 @@ export interface CanonicalRunRow {
   checkout_path: string | null;
   head_sha: string;
   base_sha: string;
+  diff_from_sha: string | null;
   run_status: RunStatus;
   session_failed: 0 | 1 | null;
   model: string;
@@ -334,11 +336,12 @@ export function projectCompleteRun(input: {
 
   const run: CanonicalRunRow = {
     repo_id: input.repoId,
-    run_dir: input.runDir,
+    run_dir: path.basename(input.runDir),
     pr: input.doc.pr === 0 ? null : input.doc.pr,
     checkout_path: input.checkoutPath,
     head_sha: input.doc.head_sha,
     base_sha: input.doc.base_sha,
+    diff_from_sha: input.comparison?.diff_from_sha ?? null,
     run_status: input.doc.run_status,
     session_failed,
     model: input.doc.model,
