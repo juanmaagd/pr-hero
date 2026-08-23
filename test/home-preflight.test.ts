@@ -30,7 +30,8 @@ describe("prheroLayout", () => {
     expect(prheroLayout(HOME)).toEqual({
       dir: "/Users/x/.prhero",
       reposDir: "/Users/x/.prhero/repos",
-      configPath: "/Users/x/.prhero/watch.json",
+      watchConfigPath: "/Users/x/.prhero/watch.json",
+      reviewConfigPath: "/Users/x/.prhero/config.json",
       logPath: "/Users/x/.prhero/watch.log",
       lockPath: "/Users/x/.prhero/watch.lock",
       launchdLogPath: "/Users/x/.prhero/launchd.log",
@@ -42,6 +43,19 @@ describe("prheroLayout", () => {
     expect(prheroLayout(HOME).metricsDbPath).toBe(
       "/Users/x/.prhero/metrics.db",
     );
+  });
+
+  // C5 / O-13. The compile-time half of this is the retirement itself: with
+  // no `configPath` on PrheroLayout, an un-migrated `paths.configPath` is a
+  // tsc failure rather than a wrong-file read. This is the runtime witness
+  // for the half tsc cannot state — that the name is GONE (not merely
+  // re-pointed), and that the two survivors name the two different files.
+  test("the layout exposes watchConfigPath and reviewConfigPath and no configPath", () => {
+    const layout = prheroLayout(HOME);
+    expect(Object.keys(layout)).not.toContain("configPath");
+    expect(layout.watchConfigPath).toBe("/Users/x/.prhero/watch.json");
+    expect(layout.reviewConfigPath).toBe("/Users/x/.prhero/config.json");
+    expect(layout.watchConfigPath).not.toBe(layout.reviewConfigPath);
   });
 });
 

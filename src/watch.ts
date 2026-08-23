@@ -169,15 +169,15 @@ interface WatchedRepoFacts extends TickRepoFacts {
 
 async function watchOnce(dryRun: boolean): Promise<number> {
   const paths = prheroHomePaths(os.homedir());
-  if (!existsSync(paths.configPath)) {
+  if (!existsSync(paths.watchConfigPath)) {
     throw new CliError(
-      `no watch config at ${paths.configPath} — the watcher reviews (and ` +
+      `no watch config at ${paths.watchConfigPath} — the watcher reviews (and ` +
         "spends money on) exactly the repos listed there, so it refuses to " +
         "guess. Opt a repo in with `pr-hero watch add` (run inside the " +
         "repo, or with --repo <path>).",
     );
   }
-  const config = parseWatchConfig(await Bun.file(paths.configPath).text());
+  const config = parseWatchConfig(await Bun.file(paths.watchConfigPath).text());
 
   const now = new Date();
   const ts = localIsoTimestamp(now);
@@ -676,7 +676,7 @@ function printDryRun(
     log(line);
   }
   log();
-  emit("CONFIG", shortPath(paths.configPath));
+  emit("CONFIG", shortPath(paths.watchConfigPath));
   emit(
     "WINDOW",
     config.window === null
@@ -770,10 +770,10 @@ async function watchInstall(intervalMin: number): Promise<number> {
   log(`loaded ${WATCH_LAUNCHD_LABEL} — one tick every ${intervalMin} min`);
   log(`tick output: ${paths.launchdLogPath}`);
   log(`event log:   ${paths.logPath}`);
-  if (!existsSync(paths.configPath)) {
+  if (!existsSync(paths.watchConfigPath)) {
     log();
     log(
-      `NOTE: no ${paths.configPath} yet — ticks will fail until a repo is ` +
+      `NOTE: no ${paths.watchConfigPath} yet — ticks will fail until a repo is ` +
         "opted in. Run `pr-hero watch add` inside the repo to watch.",
     );
   }
@@ -812,8 +812,8 @@ async function watchAdd(options: CliOptions): Promise<number> {
   const repoRoot = await resolveRepoRoot(options.repo);
   const home = os.homedir();
   const paths = prheroHomePaths(home);
-  const raw = existsSync(paths.configPath)
-    ? await Bun.file(paths.configPath).text()
+  const raw = existsSync(paths.watchConfigPath)
+    ? await Bun.file(paths.watchConfigPath).text()
     : null;
   const result = upsertWatchRepo(
     raw,
@@ -832,13 +832,13 @@ async function watchAdd(options: CliOptions): Promise<number> {
     home,
   );
   await mkdir(paths.dir, { recursive: true });
-  await Bun.write(paths.configPath, result.config);
+  await Bun.write(paths.watchConfigPath, result.config);
   log(
     `${result.action} ${result.storedPath} (post=${options.post} ` +
       `on_push=${options.onPush} ` +
       `max_changed_lines=${options.maxChangedLines ?? DEFAULT_SIZE_GATE.maxChangedLines} ` +
       `max_changed_files=${options.maxChangedFiles ?? DEFAULT_SIZE_GATE.maxChangedFiles}` +
-      `) in ${paths.configPath}`,
+      `) in ${paths.watchConfigPath}`,
   );
   await resolveRepoHome({
     home,
@@ -864,21 +864,21 @@ async function watchRemove(options: CliOptions): Promise<number> {
   const paths = prheroHomePaths(home);
   // Idempotent by contract: removing what is not there succeeds saying so —
   // a missing config file is just the emptiest way of not being listed.
-  if (!existsSync(paths.configPath)) {
-    log(`not listed: no ${paths.configPath} exists`);
+  if (!existsSync(paths.watchConfigPath)) {
+    log(`not listed: no ${paths.watchConfigPath} exists`);
     return 0;
   }
   const result = removeWatchRepo(
-    await Bun.file(paths.configPath).text(),
+    await Bun.file(paths.watchConfigPath).text(),
     repoRoot,
     home,
   );
   if (result.action === "not-listed" || result.config === null) {
-    log(`not listed: ${repoRoot} is not in ${paths.configPath}`);
+    log(`not listed: ${repoRoot} is not in ${paths.watchConfigPath}`);
     return 0;
   }
-  await Bun.write(paths.configPath, result.config);
-  log(`removed ${repoRoot} from ${paths.configPath}`);
+  await Bun.write(paths.watchConfigPath, result.config);
+  log(`removed ${repoRoot} from ${paths.watchConfigPath}`);
   return 0;
 }
 
@@ -891,9 +891,9 @@ async function watchStatus(): Promise<number> {
   const paths = prheroHomePaths(home);
   let config: WatchConfig | null = null;
   let configError: string | null = null;
-  if (existsSync(paths.configPath)) {
+  if (existsSync(paths.watchConfigPath)) {
     try {
-      config = parseWatchConfig(await Bun.file(paths.configPath).text());
+      config = parseWatchConfig(await Bun.file(paths.watchConfigPath).text());
     } catch (error) {
       configError = (error as Error).message;
     }
@@ -904,7 +904,7 @@ async function watchStatus(): Promise<number> {
   const installed = existsSync(paths.plistPath);
   const activity = lastLogActivity(logText);
   const lines = renderWatchStatus({
-    configPath: paths.configPath,
+    watchConfigPath: paths.watchConfigPath,
     config,
     configError,
     launchedToday: countLaunchedToday(

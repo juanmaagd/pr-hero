@@ -19,7 +19,19 @@ export const GC_TTL_HOURS = 72;
 export interface PrheroLayout {
   dir: string;
   reposDir: string;
-  configPath: string;
+  // C5: two config files live in this dir and NEITHER of them is called
+  // configPath. The watcher's opt-in registry (watch.json) and the global
+  // review config (config.json) are both `string`, so re-pointing a single
+  // `configPath` identifier from one file to the other would have kept
+  // compiling at all 19 `paths.configPath` sites in watch.ts while silently
+  // reading the wrong file. The name was RETIRED rather than reused: an
+  // identifier that no longer exists is the one thing tsc can flag, and no
+  // test can enumerate call sites the way the type checker does.
+  watchConfigPath: string;
+  // Nothing reads this yet — a later C5 unit wires the global review config.
+  // It ships now on purpose: arriving beside a retired name is what makes
+  // the change above a rename instead of a silent re-point.
+  reviewConfigPath: string;
   logPath: string;
   lockPath: string;
   launchdLogPath: string;
@@ -34,7 +46,8 @@ export function prheroLayout(home: string): PrheroLayout {
   return {
     dir,
     reposDir: path.join(dir, "repos"),
-    configPath: path.join(dir, "watch.json"),
+    watchConfigPath: path.join(dir, "watch.json"),
+    reviewConfigPath: path.join(dir, "config.json"),
     logPath: path.join(dir, "watch.log"),
     lockPath: path.join(dir, "watch.lock"),
     launchdLogPath: path.join(dir, "launchd.log"),

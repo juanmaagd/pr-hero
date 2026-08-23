@@ -46,6 +46,7 @@ import {
   upsertWatchRepo,
   WATCH_LAUNCHD_LABEL,
   type WatchPrCandidate,
+  type WatchStatusFacts,
 } from "../src/watch-preflight";
 
 const HEAD_A = "a".repeat(40);
@@ -1374,7 +1375,8 @@ describe("prheroHomePaths", () => {
     expect(paths).toEqual({
       dir: "/Users/x/.prhero",
       reposDir: "/Users/x/.prhero/repos",
-      configPath: "/Users/x/.prhero/watch.json",
+      watchConfigPath: "/Users/x/.prhero/watch.json",
+      reviewConfigPath: "/Users/x/.prhero/config.json",
       logPath: "/Users/x/.prhero/watch.log",
       lockPath: "/Users/x/.prhero/watch.lock",
       launchdLogPath: "/Users/x/.prhero/launchd.log",
@@ -1777,7 +1779,7 @@ describe("watch status pure pieces", () => {
 
 describe("renderWatchStatus", () => {
   const BASE = {
-    configPath: "/Users/x/.prhero/watch.json",
+    watchConfigPath: "/Users/x/.prhero/watch.json",
     config: {
       repos: [
         {
@@ -1811,6 +1813,21 @@ describe("renderWatchStatus", () => {
     expect(text).toContain("lock         free");
     expect(text).toContain("T launched pr=5");
     expect(text).toContain("T outcome pr=5");
+  });
+
+  // C5 / O-13, the half the identifier retirement provably cannot enforce.
+  // WatchStatusFacts is a different type from PrheroLayout, so watch.ts:907
+  // would have compiled with either name — this fixture is the only witness
+  // that the hand-rename happened. The annotation is the assertion: a facts
+  // object still spelling `configPath` does not typecheck. The rendered
+  // lines must NOT move, because the label `config` is hardcoded in row().
+  test("WatchStatusFacts names watchConfigPath and the output does not move", () => {
+    const facts: WatchStatusFacts = BASE;
+    expect(Object.keys(facts)).toContain("watchConfigPath");
+    expect(Object.keys(facts)).not.toContain("configPath");
+    expect(renderWatchStatus(facts)).toContain(
+      `  ${"config".padEnd(13)}/Users/x/.prhero/watch.json`,
+    );
   });
 
   test("no config points at watch add and still counts the log", () => {
