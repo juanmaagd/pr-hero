@@ -183,9 +183,35 @@ Ledger the live spend in the commit or PR description (project rule 6).
 
 ## After it passes
 
-- [ ] Fixture eval noted (cost + outcome).
-- [ ] One live musive (or agreed real) re-review noted: PR, heads L/H, case, what was checked.
+- [x] Fixture eval noted (cost + outcome). **2026-08-23 — pass, $0.22, 3m07s, hit `src/volume.ts:4`.**
+      Note the drift: this command is documented at ~$0.08 and billed $0.11 that morning and $0.22
+      that afternoon on the same fixture. Re-measure before quoting it.
+- [x] One live re-review noted: PR, heads L/H, case, what was checked. **2026-08-23 — and the
+      target was not musive.** No musive PR was open, so the proof ran on **pr-hero's own PR #49**
+      (`juanmaagd/pr-hero`), which is strictly better evidence: a real PR, a real second push, and
+      the reviewed code is the re-review engine itself.
+      - **L** `f6492170` → **H** `3f32def4`, base `886bf1d4`. **Case C**, discovery restricted.
+      - Restriction shrank the delta from 4986 lines to **877 in 7 files**, which is what let the
+        size gate *pass* on a PR that `--force` was needed to review the first time.
+      - 4 priors verified: 1 `refuted` → `verified-gone` (thread collapsed with ✅), 3
+        `inconclusive` → `unconfirmed`. **Zero inferred from absence.**
+      - Summary: `Δ since f6492170: 1 resolved (verified) · 3 unconfirmed · 0 carried · 0 deferred · 1 new`.
+      - First `pr-hero-state` block ever written by this engine.
+      - Ledger of all four runs: PR #49's description ($14.35 total).
 - [ ] ROADMAP “item 7 is live” may be ticked. Distribution “second push on a stranger’s repo” is a later machine.
+      **Left unticked deliberately — that promotion is Juanma's call, not a session's.** The three
+      clauses are demonstrated; the evidence is above.
+
+### What the live pass caught that offline never could
+
+Recorded because it is the argument for this runbook existing. The second run posted through
+`post --from` and published `Δ since e23d8063: 3 resolved · 0 new · 1 persist` — three resolved
+where two were checked, the PR 1759 shape named at the top of this file as a launch failure.
+`postCommand` called `postInlineFindings` without `rereview`, so the delta fell back to the
+absence matcher and no state block was written; a comment in that file claimed the two post paths
+were equivalent, and every offline test exercised only the other one. **A green suite cannot find
+that.** Fixed in `3f32def`, with the guard's own mirror direction fixed in `838c147` after the
+third run caught *that* as half a gate.
 
 ## Out of scope (do not block the live pass)
 
