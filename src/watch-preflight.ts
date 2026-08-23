@@ -1163,7 +1163,14 @@ export function outcomeNotificationText(outcome: ReviewOutcome): string {
 // every branch.
 
 export interface WatchStatusFacts {
-  configPath: string;
+  // Named for the file it carries (~/.prhero/watch.json), never `configPath`
+  // — C5 retired that name on PrheroLayout because it stopped identifying a
+  // file. This field is the one consumer that retirement provably cannot
+  // reach: it belongs to a DIFFERENT type, so `watchConfigPath: paths.
+  // watchConfigPath` in watch.ts would have compiled just as happily as
+  // `configPath:` did. Renamed by hand, and pinned by a test, because a
+  // mechanism that cannot enforce a rule has to be paired with one that can.
+  watchConfigPath: string;
   // null = no config file. configError carries the parse failure when the
   // file exists but is invalid — status REPORTS brokenness instead of
   // crashing over it, because a status you cannot run on a broken setup is
@@ -1186,18 +1193,18 @@ export function renderWatchStatus(facts: WatchStatusFacts): string[] {
   const lines = ["pr-hero watch — status", ""];
   if (facts.configError !== null) {
     lines.push(
-      row("config", `INVALID — ${facts.configPath}: ${facts.configError}`),
+      row("config", `INVALID — ${facts.watchConfigPath}: ${facts.configError}`),
     );
   } else if (facts.config === null) {
     lines.push(
       row(
         "config",
-        `none (${facts.configPath}) — run "pr-hero watch add" inside a ` +
+        `none (${facts.watchConfigPath}) — run "pr-hero watch add" inside a ` +
           "repo to opt it in",
       ),
     );
   } else {
-    lines.push(row("config", facts.configPath));
+    lines.push(row("config", facts.watchConfigPath));
     if (facts.config.repos.length === 0) {
       lines.push(row("", 'no repos watched — "pr-hero watch add" opts one in'));
     }

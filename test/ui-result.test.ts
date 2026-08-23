@@ -180,6 +180,24 @@ describe("renderResult findings", () => {
     ).toContain("src/triage-write.ts:70 · writeTriage");
   });
 
+  // The SECOND crash site of the PR #50 defect, and the earlier one: locationOf
+  // guarded with `=== undefined ||` and then read `.length`, so a null symbol
+  // threw here — in the terminal block an operator reads at the end of every
+  // run — before posting was ever reached. Same cast-past-the-type reproduction
+  // as the report renderer's.
+  test("a runtime-null symbol renders the location instead of throwing", () => {
+    const nullSymbol = {
+      ...finding(),
+      symbol: null,
+    } as unknown as Finding;
+    const text = joined(
+      renderResult(input({ doc: doc({ findings: [nullSymbol] }) })),
+    );
+    expect(text).toContain("src/triage-write.ts:70");
+    expect(text).not.toContain("·  ·");
+    expect(text).not.toContain("null");
+  });
+
   test("an advisory finding is marked as one, not as blocking", () => {
     const text = joined(
       renderResult(

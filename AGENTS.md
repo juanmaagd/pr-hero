@@ -59,7 +59,21 @@ bun run scripts/martian-judge.ts     # LIVE: Martian Surface A judge on existing
 correct verdict is known and asserts all four outcomes — `corroborated`, `refuted` (adjacent and 3-hop),
 and `downgraded-latent`. A prompt edit that cannot pass it does not deserve a $10 replay. Note the
 coverage gap above: `scripts/` and `fixtures/` are checked by neither command, so verify new probe files
-with an explicit `bunx tsc` / `bunx biome check` over them.
+explicitly — **but not with `bunx`, which is how this instruction used to read and it was wrong twice
+over** (found while wiring C5, 2026-08-23):
+
+- **`bunx biome check <file>` checks nothing and exits 0.** The repo's linter is `@biomejs/biome`; bare
+  `biome` resolves to an unrelated abandoned package that ignores the flags. This is not hypothetical —
+  `docs/scout-design.md:344` records the CI gate sitting green for 18 days on exactly this while real
+  Biome found 10 errors over the same commit. Use `./node_modules/.bin/biome check <file>`.
+- **`bunx tsc --noEmit <file>` ignores `tsconfig.json`.** Naming files on the command line switches tsc
+  out of project mode, so strictness and paths silently differ from the real gate. Reconstruct the
+  project's flags, and sanity-check the recipe against an unchanged sibling file first — if the recipe
+  cannot pass a file that is already good, its verdict on your new file means nothing.
+
+**This file and `CLAUDE.md` are copies, not symlinks, and nothing keeps them in sync.** pr-hero found
+this paragraph here *because* the C5 slice fixed it in `CLAUDE.md` alone and left this one lying. When
+you correct one, correct both.
 
 ## Architecture (one line per module)
 

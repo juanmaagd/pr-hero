@@ -1,21 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type AgentsDirConfigSeat,
   agentsDirProblems,
+  agentsDirSeat,
   allExcludedMessage,
   assertBasenameOnly,
   assertOutsideRepo,
   CliUsageError,
+  CONFIG_DIRECTION,
+  type ConfigLayer,
   DEFAULT_BASE_REF,
   DEFAULT_HOP_BUDGET,
   DEFAULT_MAX_VERIFICATION_STEPS,
   DEFAULT_SUMMARY_MODEL,
+  EMPTY_LOCAL_CONFIG,
   emptyDiffMessage,
   headContainedInBaseMessage,
   initConfigTemplate,
   isFullCommitId,
+  type LocalConfig,
   listPaths,
   localReviewSpec,
+  mergeConfig,
   parseArgs,
+  parseGlobalConfig,
   parseLocalConfig,
   parseNumstat,
   parseNumstatFiles,
@@ -26,6 +34,8 @@ import {
   resolveMaxVerificationSteps,
   resolveSummary,
   runDirCandidate,
+  SUMMARY_DIRECTION,
+  type SummaryConfig,
 } from "../src/preflight";
 import { validateReviewSpec } from "../src/spec";
 
@@ -409,11 +419,17 @@ describe("resolveBaseRef", () => {
 });
 
 describe("resolveAgentsDirSetting", () => {
+  const seat = (
+    value: string,
+    dir: string,
+    layer: "repo" | "global" = "repo",
+  ): AgentsDirConfigSeat => ({ value, layer, dir });
+
   test("the flag wins, resolved against cwd", () => {
     expect(
       resolveAgentsDirSetting({
         flag: "agents",
-        configAgentsDir: "/from/config",
+        config: seat("/from/config", "/repo/.prhero"),
         env: "/from/env",
         cwd: "/work",
       }),
@@ -429,22 +445,35 @@ describe("resolveAgentsDirSetting", () => {
       resolveAgentsDirSetting({
         // Two levels up: the config lives in <repo>/.prhero/, so a sibling
         // repo is `../../` from there, not `../`.
-        configAgentsDir: "../../deep-review/agents/clean",
-        configDir: "/Users/x/Desktop/musive/.prhero",
+        config: seat(
+          "../../deep-review/agents/clean",
+          "/Users/x/Desktop/musive/.prhero",
+        ),
         env: "/from/env",
         cwd: "/somewhere/else",
       }),
     ).toEqual({
       dir: "/Users/x/Desktop/deep-review/agents/clean",
-      source: "config",
+      source: "repo",
     });
+  });
+
+  // C5 §3.6: `"config"` is gone, and the two layers report themselves by
+  // name — the plan card has to be able to say WHICH file supplied the
+  // biggest spend lever in the config.
+  test("the source names the layer, not the word config", () => {
+    expect(
+      resolveAgentsDirSetting({
+        config: seat("./prompts", "/Users/x/.prhero", "global"),
+        cwd: "/work",
+      }),
+    ).toEqual({ dir: "/Users/x/.prhero/prompts", source: "global" });
   });
 
   test("an absolute config path is taken as is", () => {
     expect(
       resolveAgentsDirSetting({
-        configAgentsDir: "/abs/agents",
-        configDir: "/repo/.prhero",
+        config: seat("/abs/agents", "/repo/.prhero"),
         cwd: "/work",
       }).dir,
     ).toBe("/abs/agents");
@@ -459,16 +488,101 @@ describe("resolveAgentsDirSetting", () => {
     );
   });
 
-  test("the error names all three ways to fix it", () => {
+  test("the error names all four ways to fix it", () => {
     try {
       resolveAgentsDirSetting({ cwd: "/work" });
       throw new Error("should have thrown");
     } catch (error) {
       const message = (error as Error).message;
       expect(message).toContain("--agents");
-      expect(message).toContain("agents_dir");
+      expect(message).toContain(".prhero/config.json");
+      // C5's fourth exit. Named exactly, because "agents_dir" alone matches
+      // the repo sentence too and would pass against the pre-C5 text.
+      expect(message).toContain("~/.prhero/config.json");
       expect(message).toContain("PRHERO_AGENTS_DIR");
     }
+  });
+});
+
+// Judgment ledger JD-14, confirmed by both judges and left untested by the
+// design: the ONE place mergeConfig's source record is load-bearing at
+// runtime. A relative `agents_dir` resolves against the directory of the file
+// that NAMED it, so the same string in the two layers means two different
+// prompt sets — and picking the wrong one either runs hunters nobody chose or
+// throws "agents dir does not exist" naming a path in neither file.
+describe("agentsDirSeat", () => {
+  const paths = {
+    repoConfigPath: "/Users/x/Desktop/musive/.prhero/config.json",
+    globalConfigPath: "/Users/x/.prhero/config.json",
+  };
+
+  test("a global value carries the GLOBAL dir, not the repo's", () => {
+    const seat = agentsDirSeat({
+      config: { agents_dir: "./prompts" },
+      sources: { agents_dir: "global" },
+      ...paths,
+    });
+    expect(seat).toEqual({
+      value: "./prompts",
+      layer: "global",
+      dir: "/Users/x/.prhero",
+    });
+    // The end-to-end fact the seat exists to protect: resolved, it lands
+    // under the operator's home and NOT under the repo's .prhero/.
+    expect(resolveAgentsDirSetting({ config: seat, cwd: "/work" })).toEqual({
+      dir: "/Users/x/.prhero/prompts",
+      source: "global",
+    });
+  });
+
+  test("a repo value keeps the repo dir", () => {
+    const seat = agentsDirSeat({
+      config: { agents_dir: "./prompts" },
+      sources: { agents_dir: "repo" },
+      ...paths,
+    });
+    expect(seat?.layer).toBe("repo");
+    expect(resolveAgentsDirSetting({ config: seat, cwd: "/work" }).dir).toBe(
+      "/Users/x/Desktop/musive/.prhero/prompts",
+    );
+  });
+
+  // Absent means no seat at all, which is what lets the env var and the hard
+  // error keep their places at the end of the chain.
+  test("no configured value produces no seat", () => {
+    expect(
+      agentsDirSeat({
+        config: {},
+        sources: { agents_dir: "default" },
+        ...paths,
+      }),
+    ).toBeUndefined();
+  });
+
+  // The whole chain, through the real merge rather than a hand-built record:
+  // a quiet repo inherits the person's set, and the moment the team commits
+  // one the team wins — with each relative path read against its own file.
+  test("the merge decides which dir wins", () => {
+    const quiet = mergeConfig({ agents_dir: "./prompts" }, {});
+    expect(
+      agentsDirSeat({
+        config: quiet.effective,
+        sources: quiet.sources,
+        ...paths,
+      })?.dir,
+    ).toBe("/Users/x/.prhero");
+
+    const team = mergeConfig(
+      { agents_dir: "./prompts" },
+      { agents_dir: "./prompts" },
+    );
+    expect(
+      agentsDirSeat({
+        config: team.effective,
+        sources: team.sources,
+        ...paths,
+      })?.dir,
+    ).toBe("/Users/x/Desktop/musive/.prhero");
   });
 });
 
@@ -734,10 +848,18 @@ describe("localReviewSpec", () => {
 });
 
 describe("parseLocalConfig", () => {
-  test("both keys are optional", () => {
-    expect(parseLocalConfig("{}")).toEqual({
+  // Re-pointed for C5, and the change of contract is the whole point: this
+  // used to assert `{ parity_trigger_paths: [], suspicion_priors: [] }`. A
+  // materialised `[]` cannot be told apart from a file that really said `[]`,
+  // so the merge downstream reported `repo` for a key no repo ever named. An
+  // absent key is now ABSENT, and `[]` is materialised once, by mergeConfig.
+  test("an absent key is absent, not empty", () => {
+    expect(parseLocalConfig("{}")).toEqual({});
+    expect(parseLocalConfig('{"default_base":"dev"}')).toEqual({
+      default_base: "dev",
+    });
+    expect(parseLocalConfig('{"parity_trigger_paths":[]}')).toEqual({
       parity_trigger_paths: [],
-      suspicion_priors: [],
     });
   });
 
@@ -870,6 +992,382 @@ describe("parseLocalConfig", () => {
   });
 });
 
+// The exact message a rejection produced. `toThrow(string)` matches a
+// SUBSTRING, and `.prhero/config.json …` is a substring of
+// `~/.prhero/config.json …` — so substring matching cannot tell the two files
+// apart, which is precisely the confusion these tests exist to catch.
+function messageOf(run: () => unknown): string {
+  try {
+    run();
+  } catch (error) {
+    return (error as Error).message;
+  }
+  throw new Error("expected a rejection, got none");
+}
+
+// The six keys the parser admitted before C5, written out rather than derived,
+// so a future narrowing of the team file's surface has to be deliberate.
+const PRE_C5_LOCAL_KEYS = [
+  "agents_dir",
+  "default_base",
+  "max_verification_steps",
+  "parity_trigger_paths",
+  "summary",
+  "suspicion_priors",
+];
+
+describe("CONFIG_DIRECTION", () => {
+  // The type-level guard is the `Record` — an undeclared key does not compile.
+  // This is its runtime witness, and it is only a witness at all because the
+  // fixture is typed `Required<LocalConfig>`: tsc forces it to name every
+  // member, so it cannot quietly omit the one key the table also forgot.
+  test("covers every LocalConfig key, and every SummaryConfig field", () => {
+    const populated: Required<LocalConfig> = {
+      agents_dir: "/tmp/agents",
+      default_base: "dev",
+      parity_trigger_paths: ["**/Auth*"],
+      suspicion_priors: [{ path: "a.ts", weight: "high", reason: "hot" }],
+      summary: { enabled: false, model: "opus" },
+      max_verification_steps: 3,
+    };
+    expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(
+      Object.keys(populated).sort(),
+    );
+    for (const key of Object.keys(populated)) {
+      expect(CONFIG_DIRECTION[key as keyof LocalConfig]).toBeString();
+    }
+
+    const summary: Required<SummaryConfig> = { enabled: true, model: "opus" };
+    expect(Object.keys(SUMMARY_DIRECTION).sort()).toEqual(
+      Object.keys(summary).sort(),
+    );
+  });
+
+  // The directions themselves are the decision, not an implementation detail:
+  // getting `default_base` wrong reviews the wrong commit range, and getting a
+  // `capped` row wrong lets a committed file raise the operator's bill.
+  test("declares the ratified direction for each key", () => {
+    expect(CONFIG_DIRECTION).toEqual({
+      agents_dir: "person",
+      default_base: "repo",
+      parity_trigger_paths: "repo",
+      suspicion_priors: "repo",
+      summary: "capped",
+      max_verification_steps: "capped",
+    });
+    expect(SUMMARY_DIRECTION).toEqual({ enabled: "capped", model: "person" });
+  });
+});
+
+describe("parseGlobalConfig", () => {
+  // One case per `repo` key, so the table covers all three. The message is
+  // templated over the OFFENDING key: a fixed example would send two operators
+  // out of three looking for the wrong line.
+  test("rejects a repo key and names the repo file", () => {
+    const cases: [string, unknown][] = [
+      ["default_base", "dev"],
+      ["parity_trigger_paths", ["**/Auth*"]],
+      ["suspicion_priors", []],
+    ];
+    for (const [key, value] of cases) {
+      const raw = JSON.stringify({ [key]: value });
+      expect(() => parseGlobalConfig(raw)).toThrow(CliUsageError);
+      expect(messageOf(() => parseGlobalConfig(raw))).toBe(
+        `~/.prhero/config.json: ${key} is a per-repo key — ` +
+          "put it in <repo>/.prhero/config.json",
+      );
+    }
+  });
+
+  test("admits every person and capped key", () => {
+    const admitted = {
+      agents_dir: "/tmp/agents",
+      summary: { enabled: false, model: "opus" },
+      max_verification_steps: 2,
+    };
+    expect(parseGlobalConfig(JSON.stringify(admitted))).toEqual(admitted);
+    expect(parseGlobalConfig("{}")).toEqual({});
+  });
+
+  test("an unknown key is fatal there too", () => {
+    expect(messageOf(() => parseGlobalConfig('{"scout": {}}'))).toBe(
+      "~/.prhero/config.json unknown key: scout",
+    );
+  });
+
+  // Judgment ledger JD-6: the validators are SHARED, and they used to hardcode
+  // the repo file's name — so a malformed global file sent the operator to
+  // edit a file that was fine. Every reachable rejection now names the file it
+  // is actually in.
+  test("every rejection names the file it is actually in", () => {
+    expect(
+      messageOf(() => parseGlobalConfig("nope")).startsWith(
+        "~/.prhero/config.json is not valid JSON:",
+      ),
+    ).toBe(true);
+    const cases: [string, string][] = [
+      ["[]", "must be a JSON object"],
+      ['{"agents_dir": 3}', "agents_dir must be a non-empty string"],
+      ['{"summary": []}', "summary must be an object"],
+      ['{"summary": {"enabeld": false}}', "summary unknown key: enabeld"],
+      ['{"summary": {"enabled": "no"}}', "summary.enabled must be a boolean"],
+      [
+        '{"summary": {"model": "  "}}',
+        "summary.model must be a non-empty string",
+      ],
+      [
+        '{"max_verification_steps": -1}',
+        "max_verification_steps must be a non-negative integer",
+      ],
+    ];
+    for (const [raw, tail] of cases) {
+      expect(messageOf(() => parseGlobalConfig(raw))).toBe(
+        `~/.prhero/config.json ${tail}`,
+      );
+      // The repo file's own text is byte-identical to what it was before C5 —
+      // exact equality, because substring matching cannot tell `~/x` from `x`.
+      expect(messageOf(() => parseLocalConfig(raw))).toBe(
+        `.prhero/config.json ${tail}`,
+      );
+    }
+  });
+});
+
+describe("parseLocalConfig admits the same keys it does today", () => {
+  // C5 adds NO rejection to the team file. The global file rejects the three
+  // keys no global answer could get right; this one rejects nothing new, and
+  // that asymmetry is the design, not an oversight.
+  test("the admitted key set is unchanged, summary.model included", () => {
+    expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(PRE_C5_LOCAL_KEYS);
+    const full = {
+      agents_dir: "/tmp/agents",
+      default_base: "dev",
+      parity_trigger_paths: ["**/Auth*"],
+      suspicion_priors: [{ path: "a.ts", weight: 3, reason: "hot" }],
+      summary: { enabled: false, model: "opus" },
+      max_verification_steps: 3,
+    };
+    expect(parseLocalConfig(JSON.stringify(full))).toEqual(full);
+    for (const key of PRE_C5_LOCAL_KEYS) {
+      const one = { [key]: (full as Record<string, unknown>)[key] };
+      expect(() => parseLocalConfig(JSON.stringify(one))).not.toThrow();
+    }
+  });
+});
+
+describe("mergeConfig", () => {
+  const layer = (value: ConfigLayer): ConfigLayer => value;
+
+  // O-4. `capped` is the spend rule made computable: the team may narrow the
+  // operator's ceiling, never widen it. Both orders, either side absent.
+  test("narrows capped keys in both directions", () => {
+    const steps = (global: number | undefined, repo: number | undefined) =>
+      mergeConfig(
+        global === undefined
+          ? undefined
+          : layer({ max_verification_steps: global }),
+        repo === undefined ? {} : layer({ max_verification_steps: repo }),
+      );
+
+    // The repo narrows itself: min is the repo's own value, so no cap bound.
+    expect(steps(8, 3).effective.max_verification_steps).toBe(3);
+    expect(steps(8, 3).sources.max_verification_steps).toBe("repo");
+    // Repo 0 beats global 8 — 0 is legal and is the pause switch.
+    expect(steps(8, 0).effective.max_verification_steps).toBe(0);
+    expect(steps(8, 0).sources.max_verification_steps).toBe("repo");
+    // The cap BINDS: the repo asked for more than the ceiling allows.
+    expect(steps(3, 8).effective.max_verification_steps).toBe(3);
+    expect(steps(3, 8).sources.max_verification_steps).toBe("capped");
+    expect(steps(0, 8).effective.max_verification_steps).toBe(0);
+    expect(steps(0, 8).sources.max_verification_steps).toBe("capped");
+    // Either side absent.
+    expect(steps(5, undefined).effective.max_verification_steps).toBe(5);
+    expect(steps(5, undefined).sources.max_verification_steps).toBe("global");
+    expect(steps(undefined, 5).effective.max_verification_steps).toBe(5);
+    expect(steps(undefined, 5).sources.max_verification_steps).toBe("repo");
+    // Neither: absent from the effective config, so the resolver's own default
+    // decides — which is byte-for-byte today's behaviour.
+    expect(
+      steps(undefined, undefined).effective.max_verification_steps,
+    ).toBeUndefined();
+    expect(steps(undefined, undefined).sources.max_verification_steps).toBe(
+      "default",
+    );
+    expect(
+      resolveMaxVerificationSteps(steps(undefined, undefined).effective),
+    ).toBe(DEFAULT_MAX_VERIFICATION_STEPS);
+  });
+
+  test("summary.enabled is a boolean AND, all four combinations", () => {
+    const enabled = (global?: boolean, repo?: boolean) =>
+      mergeConfig(
+        global === undefined
+          ? undefined
+          : layer({ summary: { enabled: global } }),
+        repo === undefined ? {} : layer({ summary: { enabled: repo } }),
+      );
+
+    expect(enabled(true, true).effective.summary?.enabled).toBe(true);
+    expect(enabled(true, true).sources.summary.enabled).toBe("repo");
+    // A team turning the roll-up OFF is a narrowing, and it stays legal — it
+    // is what every config on disk does today.
+    expect(enabled(true, false).effective.summary?.enabled).toBe(false);
+    expect(enabled(true, false).sources.summary.enabled).toBe("repo");
+    // A team turning it ON over my global `false` is the widening the cap
+    // exists to refuse: it would make a normal review's bill differ from the
+    // plan without me ever seeing the file that did it.
+    expect(enabled(false, true).effective.summary?.enabled).toBe(false);
+    expect(enabled(false, true).sources.summary.enabled).toBe("capped");
+    expect(enabled(false, false).effective.summary?.enabled).toBe(false);
+    expect(enabled(false, false).sources.summary.enabled).toBe("repo");
+    // Either side absent.
+    expect(enabled(false, undefined).sources.summary.enabled).toBe("global");
+    expect(enabled(undefined, false).sources.summary.enabled).toBe("repo");
+    expect(enabled(undefined, undefined).sources.summary.enabled).toBe(
+      "default",
+    );
+    expect(enabled(undefined, undefined).effective.summary).toBeUndefined();
+  });
+
+  // Judgment ledger JD-20: two rounds of judgment left the tie case without a
+  // defined label. It is `repo` — `capped` has to mean the ceiling actually
+  // BOUND, and deleting the global file would change nothing about a value
+  // both layers already agree on.
+  test("a tie is the more specific layer, not a cap", () => {
+    const steps = mergeConfig(
+      { max_verification_steps: 8 },
+      { max_verification_steps: 8 },
+    );
+    expect(steps.effective.max_verification_steps).toBe(8);
+    expect(steps.sources.max_verification_steps).toBe("repo");
+
+    for (const value of [true, false]) {
+      const merged = mergeConfig(
+        { summary: { enabled: value } },
+        { summary: { enabled: value } },
+      );
+      expect(merged.effective.summary?.enabled).toBe(value);
+      expect(merged.sources.summary.enabled).toBe("repo");
+    }
+  });
+
+  test("a person key is pure specificity — the team wins", () => {
+    const both = mergeConfig(
+      { agents_dir: "/global/agents", summary: { model: "haiku" } },
+      { agents_dir: "/repo/agents", summary: { model: "opus" } },
+    );
+    expect(both.effective.agents_dir).toBe("/repo/agents");
+    expect(both.sources.agents_dir).toBe("repo");
+    expect(both.effective.summary?.model).toBe("opus");
+    expect(both.sources.summary.model).toBe("repo");
+
+    const quiet = mergeConfig(
+      { agents_dir: "/global/agents", summary: { model: "haiku" } },
+      {},
+    );
+    expect(quiet.effective.agents_dir).toBe("/global/agents");
+    expect(quiet.sources.agents_dir).toBe("global");
+    expect(quiet.sources.summary.model).toBe("global");
+  });
+
+  // The parser rejects a `repo` key in the global file, but the fold does not
+  // lean on that: a per-repo key folds only from repo-scoped layers, so the
+  // day that guarantee slips the merge still refuses to answer `global` for a
+  // value that could never apply anywhere else.
+  test("a repo key is never taken from a global layer", () => {
+    const merged = mergeConfig(
+      { default_base: "main", parity_trigger_paths: ["**/Global*"] },
+      { default_base: "dev" },
+    );
+    expect(merged.effective.default_base).toBe("dev");
+    expect(merged.sources.default_base).toBe("repo");
+    expect(merged.effective.parity_trigger_paths).toEqual([]);
+    expect(merged.sources.parity_trigger_paths).toBe("default");
+  });
+
+  test("arrays and the summary block are replaced, never deep-merged", () => {
+    const merged = mergeConfig(
+      { summary: { enabled: true, model: "haiku" } },
+      {
+        parity_trigger_paths: ["**/Auth*"],
+        suspicion_priors: [{ path: "a.ts", weight: "high", reason: "hot" }],
+        summary: { model: "opus" },
+      },
+    );
+    expect(merged.effective.parity_trigger_paths).toEqual(["**/Auth*"]);
+    expect(merged.sources.parity_trigger_paths).toBe("repo");
+    expect(merged.effective.suspicion_priors).toHaveLength(1);
+    // The block is descended into per field, so the global's `enabled`
+    // survives a repo block that only names `model`.
+    expect(merged.effective.summary).toEqual({ enabled: true, model: "opus" });
+    expect(merged.sources.summary).toEqual({
+      enabled: "global",
+      model: "repo",
+    });
+  });
+
+  // O-14, and it takes two cases because only the second can detect the
+  // residue that killed the first attempt at this change. Case (a) never
+  // reaches the parser at all — a missing file is an ABSENT layer — so it
+  // passes even against a parser that still materialises the arrays.
+  test("absence survives the parsers and reports default", () => {
+    const nothing = mergeConfig(undefined, {});
+    expect(nothing.sources).toEqual({
+      agents_dir: "default",
+      default_base: "default",
+      parity_trigger_paths: "default",
+      suspicion_priors: "default",
+      summary: { enabled: "default", model: "default" },
+      max_verification_steps: "default",
+    });
+    // The resolvers still receive the shape they always received.
+    expect(nothing.effective).toEqual(EMPTY_LOCAL_CONFIG);
+
+    // (b) The case that proves the parser stopped materialising: a repo file
+    // that EXISTS and omits one array key. Routed through the real parser on
+    // purpose — a hand-built `{}` layer would pass either way.
+    const present = mergeConfig(
+      undefined,
+      parseLocalConfig(
+        JSON.stringify({ default_base: "dev", suspicion_priors: [] }),
+      ),
+    );
+    expect(present.sources.parity_trigger_paths).toBe("default");
+    expect(present.sources.suspicion_priors).toBe("repo");
+    expect(present.sources.default_base).toBe("repo");
+    expect(present.effective.parity_trigger_paths).toEqual([]);
+  });
+
+  // O-5's pure half: with no global layer the effective config is exactly what
+  // the repo file said, so every resolver downstream sees today's input.
+  test("with no global layer the repo file stands alone", () => {
+    const raw = JSON.stringify({
+      agents_dir: "/Users/juanma/Desktop/deep-review/agents/clean",
+      default_base: "dev",
+      parity_trigger_paths: [],
+      suspicion_priors: [],
+      summary: { enabled: false },
+    });
+    const { effective, sources } = mergeConfig(
+      undefined,
+      parseLocalConfig(raw),
+    );
+    expect(effective).toEqual({
+      agents_dir: "/Users/juanma/Desktop/deep-review/agents/clean",
+      default_base: "dev",
+      parity_trigger_paths: [],
+      suspicion_priors: [],
+      summary: { enabled: false },
+    });
+    expect(sources.summary.enabled).toBe("repo");
+    expect(sources.summary.model).toBe("default");
+    expect(resolveSummary({}, effective)).toEqual({ enabled: false });
+    expect(resolveMaxVerificationSteps(effective)).toBe(
+      DEFAULT_MAX_VERIFICATION_STEPS,
+    );
+  });
+});
+
 describe("initConfigTemplate", () => {
   // A scaffold its own parser rejects is a bug that only shows up on someone
   // else's machine, on their first ever command.
@@ -895,8 +1393,11 @@ describe("initConfigTemplate", () => {
     );
     expect(
       resolveAgentsDirSetting({
-        configAgentsDir: config.agents_dir,
-        configDir: "/repo/.prhero",
+        config: {
+          value: config.agents_dir as string,
+          layer: "repo",
+          dir: "/repo/.prhero",
+        },
         cwd: "/work",
       }).dir,
     ).toBe("/abs/agents");

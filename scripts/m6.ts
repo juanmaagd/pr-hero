@@ -155,10 +155,19 @@ if (mode === "plan") {
   // The conditional parity hunter fires only when a changed path matches a
   // configured trigger; with none configured it never fires at all, and
   // pricing a step that cannot run is the same lie in the other direction.
+  //
+  // `?? []` is not defensive style, it is C5: parseLocalConfig returns a
+  // ConfigLayer and no longer materialises the two array keys, so a target
+  // repo whose config OMITS parity_trigger_paths hands back `undefined` here.
+  // Unguarded this threw a TypeError — and `scripts/` is covered by neither
+  // `bun run typecheck` nor `bun run check`, so no offline gate would have
+  // caught it. The engine merges layers before its resolvers see a config;
+  // this script deliberately does not (design §4), so the guard is its own.
   const HUNTERS = localReviewSpec().agents.filter(
     (a) =>
       a.role === "hunter" &&
-      (a.trigger === undefined || config.parity_trigger_paths.length > 0),
+      (a.trigger === undefined ||
+        (config.parity_trigger_paths ?? []).length > 0),
   ).length;
   const gate = sizeGateConfig({});
   const rows: string[] = [
@@ -216,7 +225,10 @@ if (mode === "plan") {
     `priced from ${configPath}: ${HUNTERS} hunter(s) + refuter` +
       `${summary.enabled ? " + summarizer" : ", summarizer disabled"}` +
       `${
-        config.parity_trigger_paths.length === 0
+        // Same C5 guard as the HUNTERS count above, and it has to be the same
+        // answer: a line that priced two hunters while printing "parity never
+        // fires" would be the pricing pass contradicting itself.
+        (config.parity_trigger_paths ?? []).length === 0
           ? ", parity hunter never fires (no triggers configured)"
           : ""
       }.`,

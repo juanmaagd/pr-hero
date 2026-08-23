@@ -158,10 +158,15 @@ function headerRule(
   };
 }
 
+// A POSITIVE type test for the same reason report.ts's findingLocationLine
+// carries one: `=== undefined ||` let a null symbol through to `.length` and
+// threw. This was the EARLIER of the two crash sites in PR #50's defect — the
+// terminal block an operator reads at the end of every run, reached before
+// posting is ever attempted.
 function locationOf(f: Finding): string {
-  return f.symbol === undefined || f.symbol.length === 0
-    ? `${f.path}:${f.line}`
-    : `${f.path}:${f.line} · ${f.symbol}`;
+  return typeof f.symbol === "string" && f.symbol.length > 0
+    ? `${f.path}:${f.line} · ${f.symbol}`
+    : `${f.path}:${f.line}`;
 }
 
 // The tier as a marker, because the tier is what decides whether a human must

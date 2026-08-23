@@ -11,6 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  type ConfigProvenance,
   type PlanContext,
   type PrPlanContext,
   planDetails,
@@ -18,7 +19,7 @@ import {
   renderPlan,
   renderPrPlan,
 } from "../src/cli";
-import type { CliOptions } from "../src/preflight";
+import type { CliOptions, ConfigSources } from "../src/preflight";
 import type { ParsedAgent } from "../src/prompt-set";
 import { estimateCost } from "../src/report";
 import type { SizeGateVerdict } from "../src/size-gate";
@@ -643,5 +644,368 @@ describe("plan renderers are deterministic offline", () => {
     expect(renderPlan({ ...ctx, width: NARROW_WIDTH }, false)).not.toEqual(
       pinned,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C5 O-7 — the plan names any value the operator cannot see in the checkout.
+//
+// A global ~/.prhero/config.json changes what a review does from a file that
+// is not in the repository at all. Every case below asserts the RETURNED
+// lines, and the last one asserts zero escape bytes with styles off — the
+// same three renderer criteria the rest of this file holds to.
+// ---------------------------------------------------------------------------
+
+const GLOBAL_CONFIG_PATH = "/Users/x/.prhero/config.json";
+const REPO_CONFIG_PATH = "/tmp/pr-hero-fake-repo/.prhero/config.json";
+
+// row() wraps at the pinned width, so a tag can straddle two lines. These
+// assertions are about WHICH tags appear, not which column they land in — the
+// wrap itself is already pinned by the determinism block above — so they match
+// against the unwrapped text.
+const flat = (lines: string[]): string => joined(lines).replace(/\s+/g, " ");
+
+const provenance = (
+  over: Partial<ConfigProvenance> = {},
+  sources: Partial<ConfigSources> = {},
+): ConfigProvenance => ({
+  agentsDirSource: "repo",
+  repoConfigPath: REPO_CONFIG_PATH,
+  globalConfigPath: GLOBAL_CONFIG_PATH,
+  globalPresent: false,
+  ...over,
+  sources: {
+    agents_dir: "repo",
+    default_base: "repo",
+    parity_trigger_paths: "repo",
+    suspicion_priors: "repo",
+    summary: { enabled: "repo", model: "default" },
+    max_verification_steps: "default",
+    ...sources,
+  },
+});
+
+describe("plan card config provenance (C5 O-7)", () => {
+  test("tags a global-sourced value and a capped one, and names the file", () => {
+    const text = flat(
+      renderPlan(
+        planContext({
+          configProvenance: provenance(
+            { agentsDirSource: "global", globalPresent: true },
+            {
+              agents_dir: "global",
+              summary: { enabled: "capped", model: "global" },
+              max_verification_steps: "capped",
+            },
+          ),
+        }),
+        false,
+      ),
+    );
+    expect(text).toContain("CONFIG");
+    // The biggest spend lever in the file, arriving from outside the repo.
+    expect(text).toContain("agents_dir ← global");
+    // `capped` is NOT `global`: the operator has to see that a ceiling BOUND,
+    // not merely that a global file existed.
+    expect(text).toContain("summary.enabled ← capped");
+    expect(text).toContain("max_verification_steps ← capped");
+    expect(text).toContain("summary.model ← global");
+    // Where to go look, on the card itself.
+    expect(text).toContain(GLOBAL_CONFIG_PATH);
+  });
+
+  // The unsurprising case costs the card nothing: a repo-sourced value is
+  // visible by opening the checkout, so it is not tagged and the row does not
+  // even appear.
+  test("an all-repo run prints no CONFIG row at all", () => {
+    const lines = renderPlan(
+      planContext({ configProvenance: provenance() }),
+      false,
+    );
+    expect(flat(lines)).not.toContain("CONFIG");
+    // …and byte-identical to a plan that carries no provenance at all, so the
+    // row cannot cost layout on the common path.
+    expect(lines).toEqual(renderPlan(planContext(), false));
+  });
+
+  // Judgment ledger JD-21: O-7 says "any value that did not come from the
+  // repo file", which includes `default`; §3.6 tags only global and capped.
+  // §3.6's reading is implemented — a defaulted value is byte-for-byte pre-C5
+  // behaviour and already has its own row on this card, so tagging six of
+  // them per quiet repo would bury the one tag that is new information.
+  test("a defaulted value is not tagged", () => {
+    const text = flat(
+      renderPlan(
+        planContext({
+          configProvenance: provenance(
+            {},
+            {
+              agents_dir: "default",
+              default_base: "default",
+              parity_trigger_paths: "default",
+              suspicion_priors: "default",
+              summary: { enabled: "default", model: "default" },
+              max_verification_steps: "default",
+            },
+          ),
+        }),
+        false,
+      ),
+    );
+    expect(text).not.toContain("CONFIG");
+    expect(text).not.toContain("← default");
+  });
+
+  // Judgment ledger JD-10: ConfigSource has no `flag` member, so the record
+  // cannot name a flag-supplied value. The card must therefore not claim a
+  // LAYER won a key a flag decided — D5 lets a flag exceed a cap on purpose,
+  // and printing `capped` next to a value --no-summary already overrode would
+  // be the plan describing a run that is not the one about to happen.
+  test("a flag-decided value carries no layer tag", () => {
+    // `default_base: "global"` is unreachable today — it is a `repo` key, the
+    // global parser rejects it and the fold refuses it. It is here because the
+    // suppression is generic on purpose: the card must not start naming a
+    // layer for a flag-decided key the day a direction changes.
+    const sources: Partial<ConfigSources> = {
+      agents_dir: "global",
+      default_base: "global",
+      summary: { enabled: "capped", model: "global" },
+    };
+    const flagged = flat(
+      renderPlan(
+        planContext({
+          options: options({
+            agents: "/flagged/set",
+            base: "release",
+            summary: true,
+            model: "opus",
+          }),
+          // --agents won, so the RESOLUTION says flag even though the record
+          // still remembers a global value existed.
+          configProvenance: provenance({ agentsDirSource: "flag" }, sources),
+        }),
+        false,
+      ),
+    );
+    expect(flagged).not.toContain("agents_dir ←");
+    expect(flagged).not.toContain("default_base ←");
+    expect(flagged).not.toContain("summary.enabled ←");
+    expect(flagged).not.toContain("summary.model ←");
+
+    // Same sources, no flags: now every one of them is named. agents_dir's
+    // resolution changes with the flag too — that IS the mechanism, not a
+    // second switch beside it.
+    const unflagged = flat(
+      renderPlan(
+        planContext({
+          configProvenance: provenance({ agentsDirSource: "global" }, sources),
+        }),
+        false,
+      ),
+    );
+    expect(unflagged).toContain("agents_dir ← global");
+    expect(unflagged).toContain("default_base ← global");
+    expect(unflagged).toContain("summary.enabled ← capped");
+    expect(unflagged).toContain("summary.model ← global");
+  });
+
+  test("the PR card tags the same way", () => {
+    const text = flat(
+      renderPrPlan(
+        prPlanContext({
+          configProvenance: provenance(
+            { agentsDirSource: "global", globalPresent: true },
+            { agents_dir: "global" },
+          ),
+        }),
+        false,
+      ),
+    );
+    expect(text).toContain("agents_dir ← global");
+    expect(text).toContain(GLOBAL_CONFIG_PATH);
+  });
+
+  // The details view is the un-dense one, so it answers the other half of the
+  // question — "where do I even write this" — with both paths, present or not.
+  test("both details views name both files whether or not they exist", () => {
+    for (const lines of [
+      planDetails(planContext({ configProvenance: provenance() }), false),
+      prPlanDetails(prPlanContext({ configProvenance: provenance() }), false),
+    ]) {
+      const text = flat(lines);
+      expect(text).toContain(REPO_CONFIG_PATH);
+      expect(text).toContain(GLOBAL_CONFIG_PATH);
+      expect(text).toContain("absent");
+      expect(text).toContain(
+        "every value came from the repo file or a built-in default",
+      );
+    }
+
+    const present = flat(
+      planDetails(
+        planContext({
+          configProvenance: provenance(
+            { agentsDirSource: "global", globalPresent: true },
+            { agents_dir: "global" },
+          ),
+        }),
+        false,
+      ),
+    );
+    expect(present).toContain("(present)");
+    expect(present).toContain("agents_dir ← global");
+  });
+
+  // ui.ts's contract, on the rows this slice added: styles arrive as a
+  // parameter, and with them off nothing paints.
+  test("no escape bytes with styles off, and the width still decides", () => {
+    const ctx = planContext({
+      configProvenance: provenance(
+        { agentsDirSource: "global", globalPresent: true },
+        {
+          agents_dir: "global",
+          summary: { enabled: "capped", model: "global" },
+          max_verification_steps: "capped",
+        },
+      ),
+    });
+    for (const lines of [
+      renderPlan(ctx, false),
+      planDetails(ctx, false),
+      renderPrPlan(
+        prPlanContext({ configProvenance: ctx.configProvenance }),
+        false,
+      ),
+      prPlanDetails(
+        prPlanContext({ configProvenance: ctx.configProvenance }),
+        false,
+      ),
+    ]) {
+      expect(lines.join("")).not.toContain(ESC);
+    }
+    // Painted, the same rows still carry the same text.
+    expect(flat(renderPlan(ctx, true))).toContain("agents_dir ← global");
+    // And the tags wrap on the PINNED width, never on the pane's. Captured
+    // BEFORE the stub, or the two sides of the comparison are the same
+    // expression and the assertion cannot fail — the determinism block above
+    // takes the same precaution for the same reason.
+    const pinned = renderPlan(ctx, false);
+    const restore = stubColumns(NARROW_WIDTH);
+    try {
+      expect(renderPlan(ctx, false)).toEqual(pinned);
+    } finally {
+      restore();
+    }
+    expect(renderPlan({ ...ctx, width: NARROW_WIDTH }, false)).not.toEqual(
+      renderPlan(ctx, false),
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // The empty-tag caption may not claim an origin configTags never checked.
+  //
+  // Judgment ledger JD-10 is the reason the hole exists: configTags suppresses
+  // the tag for a flag-decided key, because ConfigSource has no `flag` member
+  // and naming a LAYER for a key a flag decided would name the file that lost
+  // (D5 — a flag may exceed a cap on purpose). Suppressing the tag was right;
+  // what was never adjusted is the caption on the other side of the same
+  // `tags.length === 0` test, which goes on asserting that every value came
+  // from the repo file or a default. On a run where a flag decided one, that
+  // sentence is false about exactly the value the operator most recently
+  // typed. The fix is a caption scoped to what the function verified, not a
+  // flag tag — a flag tag reopens JD-10.
+  // -------------------------------------------------------------------------
+
+  const ALL_REPO_CAPTION =
+    "every value came from the repo file or a built-in default";
+  const FLAGGED_CAPTION =
+    "every value a flag did not decide came from the repo file or a built-in default";
+
+  test("a flag-decided value voids the all-repo caption", () => {
+    const lines = planDetails(
+      planContext({
+        options: options({ base: "release" }),
+        configProvenance: provenance(),
+      }),
+      false,
+    );
+    const text = flat(lines);
+    // The load-bearing half: the FALSE claim is gone. `default_base` came from
+    // --base, so "every value came from the repo file or a built-in default"
+    // is a statement about this run that is not true of it.
+    expect(text).not.toContain(ALL_REPO_CAPTION);
+    // And the replacement is a claim, not a shrug: it still names repo/default
+    // as the origin of everything the flags left alone.
+    expect(text).toContain(FLAGGED_CAPTION);
+    expect(lines.join("")).not.toContain(ESC);
+  });
+
+  // The case that kills a vague caption. Both suppressed keys have a source
+  // the record REMEMBERS — `capped` and `global` — so a caption that tried to
+  // say "no cap narrowed a value" or "nothing came from the global file"
+  // would be false here too, on a different word.
+  test("a capped-and-global pair a flag overrode still voids the caption", () => {
+    const text = flat(
+      planDetails(
+        planContext({
+          options: options({ summary: true, model: "opus" }),
+          configProvenance: provenance(
+            { globalPresent: true },
+            { summary: { enabled: "capped", model: "global" } },
+          ),
+        }),
+        false,
+      ),
+    );
+    expect(text).not.toContain(ALL_REPO_CAPTION);
+    expect(text).toContain(FLAGGED_CAPTION);
+    // The suppression itself is unchanged: still no layer named for a key a
+    // flag decided (JD-10).
+    expect(text).not.toContain("summary.enabled ←");
+    expect(text).not.toContain("summary.model ←");
+  });
+
+  // With no flag in play the old sentence is exact, and stays: every source is
+  // repo-or-default, `flag` is excluded by the branch, and `global`/`env` both
+  // produce a tag — so nothing unchecked can reach here.
+  test("with no flags the all-repo caption is still the exact one", () => {
+    const text = flat(
+      planDetails(planContext({ configProvenance: provenance() }), false),
+    );
+    expect(text).toContain(ALL_REPO_CAPTION);
+    expect(text).not.toContain(FLAGGED_CAPTION);
+  });
+
+  // -------------------------------------------------------------------------
+  // Judgment ledger JD-9: a global `agents_dir` silently preempts
+  // PRHERO_AGENTS_DIR. The C5 mitigation was "the card prints
+  // `agents_dir ← global`, so the operator sees which one won" — but the tag
+  // fired on `global` alone, so the REVERSE direction was invisible: an
+  // env-sourced prompt set is exactly as absent from the checkout as a
+  // global-sourced one, which is the surprise O-7 exists to prevent.
+  // -------------------------------------------------------------------------
+  test("an env-sourced agents_dir is tagged like a global-sourced one", () => {
+    const ctx = planContext({
+      configProvenance: provenance({ agentsDirSource: "env" }),
+    });
+    const lines = renderPlan(ctx, false);
+    const text = flat(lines);
+    expect(text).toContain("CONFIG");
+    expect(text).toContain("agents_dir ← env");
+    expect(lines.join("")).not.toContain(ESC);
+    // The details view says it too, and the presence of a tag means the
+    // all-repo caption is correctly out of the way.
+    const details = flat(planDetails(ctx, false));
+    expect(details).toContain("agents_dir ← env");
+    expect(details).not.toContain(ALL_REPO_CAPTION);
+    // The PR card is the same code path, and the same operator surprise.
+    expect(
+      flat(
+        renderPrPlan(
+          prPlanContext({ configProvenance: ctx.configProvenance }),
+          false,
+        ),
+      ),
+    ).toContain("agents_dir ← env");
   });
 });

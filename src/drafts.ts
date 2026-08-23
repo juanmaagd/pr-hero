@@ -44,6 +44,44 @@ function must(condition: boolean, message: string): void {
   if (!condition) throw new DraftValidationError(message);
 }
 
+// An optional string field the model filled with `null`. Inline JSON gives a
+// model no way to spell "absent", so `null` here means exactly what an absent
+// key means — and it is NORMALISED away rather than rejected.
+//
+// That is a deliberate exception to this file's fail-loud default, on the same
+// reasoning extractJsonObject already tolerates a fenced or prose-wrapped
+// draft: the value is unambiguous, refusing it recovers nothing, and one
+// must() throw discards every OTHER finding in the same draft and burns a paid
+// retry. A hunter writing `"symbol": null` is ordinary model behaviour, not a
+// corrupt draft.
+//
+// A present-but-wrong-typed value is NOT normalised. There is nothing to
+// recover from `symbol: 42`, and left in place it reaches the renderer and
+// throws the same TypeError this rule exists to prevent.
+//
+// PAID-FOR FAILURE (PR #50, 2026-08-23): a hunter emitted `"symbol": null`,
+// neither validator looked at the field, the null was written into
+// findings.json — the artifact the sibling lab validates — and then killed the
+// POST at report.ts's oneLine(). The pipeline had already billed $3.77.
+//
+// Mutates IN PLACE: validateHunterDraft discards this function's return value,
+// so rebuilding here would be silently inert. pipeline.ts stamps `hunter` onto
+// the same extracted object the same way.
+function normalizeOptionalString(
+  f: Record<string, unknown>,
+  key: string,
+  label: string,
+): void {
+  if (f[key] === null) {
+    delete f[key];
+    return;
+  }
+  must(
+    f[key] === undefined || typeof f[key] === "string",
+    `${label} must be a string when present`,
+  );
+}
+
 // Fence/prose-tolerant JSON extraction. Models occasionally wrap the mandated
 // JSON-only final message in a code fence or a sentence of prose; both are
 // recoverable without a retry. Anything not confidently readable returns
@@ -201,6 +239,22 @@ export function validateDraftFinding(
     typeof f.dedupe_key === "string" && f.dedupe_key.length > 0,
     `draft findings[${index}].dedupe_key required`,
   );
+  // Array.isArray above says nothing about what is INSIDE, and every element
+  // is rendered through oneLine() on the same paid posting path the null
+  // symbol crashed. Unlike an absent symbol a null element carries no
+  // recoverable meaning, so this one rejects.
+  must(
+    (f.proof_refs as unknown[]).every((ref) => typeof ref === "string"),
+    `draft findings[${index}].proof_refs must contain only strings`,
+  );
+  // The only two optional keys on a DraftFinding. `root_cause_id` is normally
+  // engine-assigned (pipeline.ts), which does not stop a hunter emitting it.
+  normalizeOptionalString(f, "symbol", `draft findings[${index}].symbol`);
+  normalizeOptionalString(
+    f,
+    "root_cause_id",
+    `draft findings[${index}].root_cause_id`,
+  );
   return f as unknown as DraftFinding;
 }
 
@@ -249,6 +303,13 @@ export function validateRefuterResult(
     must(
       Array.isArray(r.proof_refs),
       `refuter results[${i}].proof_refs must be an array`,
+    );
+    // Preventive, not a live crash vector: only `outcome` is read off a
+    // refuter result today (pipeline.ts). Kept symmetric with the draft rule
+    // above so a future consumer cannot inherit the same class of defect.
+    must(
+      (r.proof_refs as unknown[]).every((ref) => typeof ref === "string"),
+      `refuter results[${i}].proof_refs must contain only strings`,
     );
     const id = r.finding_id as string;
     must(!seen.has(id), `refuter results duplicate verdict for ${id}`);

@@ -104,7 +104,10 @@ import {
 } from "./pr-preflight";
 import {
   AGENT_FILE_PATTERNS,
+  type AgentsDirResolution,
+  type AgentsDirSource,
   agentsDirProblems,
+  agentsDirSeat,
   allExcludedMessage,
   assertBasenameOnly,
   assertOutsideRepo,
@@ -112,8 +115,9 @@ import {
   CliError,
   type CliOptions,
   CliUsageError,
+  type ConfigSource,
+  type ConfigSources,
   DEFAULT_SUMMARY_MODEL,
-  EMPTY_LOCAL_CONFIG,
   emptyDiffMessage,
   GOTCHAS_TEMPLATE,
   gotchasErrorMessage,
@@ -125,7 +129,9 @@ import {
   type LocalConfig,
   listPaths,
   localReviewSpec,
+  mergeConfig,
   parseArgs,
+  parseGlobalConfig,
   parseLocalConfig,
   parseNumstatFiles,
   parseRemoteHead,
@@ -291,6 +297,29 @@ export function pipelineScoutInput(
         },
       }
     : {};
+}
+
+// C5 O-6's half of the pipeline input. Unconditional, unlike its two
+// neighbours above: the summarizer and the scout are stages that may not run,
+// while a config ALWAYS resolved to something — and D7's whole point is that
+// the artifact must discriminate the builds. `global_present` is carried
+// separately because `sources` cannot express it: a global file that exists
+// and says `{}` leaves every source at `repo` or `default`, exactly like no
+// file at all.
+export function pipelineConfigInput(loaded: EffectiveConfig): {
+  config: {
+    effective: LocalConfig;
+    sources: ConfigSources;
+    global_present: boolean;
+  };
+} {
+  return {
+    config: {
+      effective: loaded.effective,
+      sources: loaded.sources,
+      global_present: loaded.globalPresent,
+    },
+  };
 }
 
 const EMPTY_MCP_CONFIG = { mcpServers: {} };
@@ -491,6 +520,74 @@ export function ingestReviewMetrics(input: FailSoftIngestInput): void {
   failSoftIngest(input);
 }
 
+export interface EffectiveConfig {
+  // The ONE shape every resolver downstream receives, exactly as before C5.
+  // They cannot tell how it was built, which is the whole of D9's promise.
+  effective: LocalConfig;
+  sources: ConfigSources;
+  repoConfigPath: string;
+  globalConfigPath: string;
+  // Additive beyond design §3.4's four fields, and O-6 needs it: pipeline.json
+  // has to record whether a global layer EXISTED, and that is not derivable
+  // from `sources` — a global file that exists and says `{}` leaves every
+  // source at `repo` or `default`, indistinguishable from no file at all.
+  // Returned from the same stat the read used, so the artifact cannot
+  // disagree with what was actually loaded.
+  globalPresent: boolean;
+}
+
+// C5 §3.4 — the two-layer read, and the ONLY place either config file is
+// opened on the review path. Replaces the duplicated
+// existsSync/parseLocalConfig/EMPTY_LOCAL_CONFIG block that used to sit in
+// both review() and reviewPr().
+//
+// `root` is the OPERATOR root in both modes and NEVER the review worktree
+// (O-8): a reviewed PR's tree must not influence engine config, and the
+// global file is read from os.homedir(), which is one step further from a PR
+// author's reach than the operator checkout already was. C5 cannot weaken
+// that boundary; it only adds a source the author has strictly less access to.
+//
+// WHY a missing file yields an ABSENT layer instead of EMPTY_LOCAL_CONFIG:
+// the constant materialises `parity_trigger_paths: []` and
+// `suspicion_priors: []`, so handing it to the merge would make "no file at
+// all" indistinguishable from "a file that said []", and provenance would
+// report `repo` for a layer that does not exist. mergeConfig decides what an
+// all-silent run resolves to; EMPTY_LOCAL_CONFIG is now the shape that comes
+// OUT of that, not the input that goes in.
+//
+// `--config` overrides the repo path only. A flag that repointed the global
+// layer is a footgun with no use case. Its missing-file CliError is
+// unchanged: an explicitly named file that is not there stays an error,
+// because silently falling back to "no parity triggers" would disable a
+// hunter the caller just asked for, and a hunter that never fires looks
+// exactly like a hunter that found nothing.
+export async function loadEffectiveConfig(input: {
+  root: string;
+  home: string;
+  configFlag?: string | undefined;
+}): Promise<EffectiveConfig> {
+  const repoConfigPath = input.configFlag
+    ? path.resolve(input.configFlag)
+    : path.join(input.root, ".prhero", "config.json");
+  if (input.configFlag && !existsSync(repoConfigPath)) {
+    throw new CliError(`config file not found: ${repoConfigPath}`);
+  }
+  const globalConfigPath = prheroLayout(input.home).reviewConfigPath;
+  const globalPresent = existsSync(globalConfigPath);
+  const global = globalPresent
+    ? parseGlobalConfig(await Bun.file(globalConfigPath).text())
+    : undefined;
+  const repo = existsSync(repoConfigPath)
+    ? parseLocalConfig(await Bun.file(repoConfigPath).text())
+    : {};
+  return {
+    ...mergeConfig(global, repo),
+    repoConfigPath,
+    globalConfigPath,
+    globalPresent,
+  };
+}
+
 async function review(options: CliOptions): Promise<number> {
   // PR mode is a different front half (gh-resolved range, detached worktree)
   // around the same pipeline; it branches here so the local flow below stays
@@ -505,18 +602,15 @@ async function review(options: CliOptions): Promise<number> {
   // depend on it; loading it later would mean resolving them against a config
   // that had not been read yet.
   //
-  // An explicit --config is an ERROR when missing: silently falling back to
-  // "no parity triggers" would disable a hunter the caller just asked for, and
-  // a hunter that never fires looks exactly like a hunter that found nothing.
-  const configPath = options.config
-    ? path.resolve(options.config)
-    : path.join(repoRoot, ".prhero", "config.json");
-  if (options.config && !existsSync(configPath)) {
-    throw new CliError(`config file not found: ${configPath}`);
-  }
-  const config: LocalConfig = existsSync(configPath)
-    ? parseLocalConfig(await Bun.file(configPath).text())
-    : EMPTY_LOCAL_CONFIG;
+  // Two layers since C5, folded by loadEffectiveConfig into the one
+  // LocalConfig everything below already expected. The --config missing-file
+  // error and the boundary rules live there.
+  const loaded = await loadEffectiveConfig({
+    root: repoRoot,
+    home: os.homedir(),
+    configFlag: options.config,
+  });
+  const config = loaded.effective;
   const summary = resolveSummary(options, config);
 
   // 3 — the base ref, then the canonical refs and the range.
@@ -563,7 +657,10 @@ async function review(options: CliOptions): Promise<number> {
   }
 
   // 5 + 6 — the prompt set and the wiring that consumes it.
-  const agentsDir = resolveAgentsDir(options, config, configPath);
+  const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
+    options,
+    loaded,
+  );
   const spec = validateReviewSpec(localReviewSpec());
   spec.agents.forEach((agent, i) => {
     assertBasenameOnly(agent.file, i);
@@ -732,6 +829,7 @@ async function review(options: CliOptions): Promise<number> {
     // the plan only prints the verdict, last, where the decision is made.
     sizeGate,
     droppedPaths: effectiveDiff.droppedPaths,
+    configProvenance: configProvenanceOf(loaded, agentsDirSource),
   };
   for (const line of renderPlan(planContext, styleEnabled())) log(line);
 
@@ -810,6 +908,7 @@ async function review(options: CliOptions): Promise<number> {
         suspicionPriors: config.suspicion_priors,
         ...pipelineSummarizerInput(summary),
         ...pipelineScoutInput(options),
+        ...pipelineConfigInput(loaded),
         engine: await engineIdentity(),
         promptSet,
         spec,
@@ -955,17 +1054,24 @@ async function reviewPr(
   if (prArg === "current") {
     log(`pr resolved from current branch: #${prNumber}`);
   }
-  const configPath = options.config
-    ? path.resolve(options.config)
-    : path.join(operatorRoot, ".prhero", "config.json");
-  if (options.config && !existsSync(configPath)) {
-    throw new CliError(`config file not found: ${configPath}`);
-  }
-  const config: LocalConfig = existsSync(configPath)
-    ? parseLocalConfig(await Bun.file(configPath).text())
-    : EMPTY_LOCAL_CONFIG;
+  // The product home, hoisted above the config read: C5's global layer lives
+  // under it, and step 2 below needs the same value for the repo registry.
+  const home = os.homedir();
+  // `operatorRoot`, NEVER worktreePath — the worktree does not even exist
+  // yet at this point, and a `.prhero/config.json` committed by the PR author
+  // must stay unread (O-8). Same loader as local mode, so the two modes
+  // cannot drift on precedence.
+  const loaded = await loadEffectiveConfig({
+    root: operatorRoot,
+    home,
+    configFlag: options.config,
+  });
+  const config = loaded.effective;
   const summary = resolveSummary(options, config);
-  const agentsDir = resolveAgentsDir(options, config, configPath);
+  const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
+    options,
+    loaded,
+  );
   const spec = validateReviewSpec(localReviewSpec());
   spec.agents.forEach((agent, i) => {
     assertBasenameOnly(agent.file, i);
@@ -1006,9 +1112,9 @@ async function reviewPr(
   // the PR's own head).
 
   // 2 — the global home (origin → repo-id → worktree/runs paths), then the
-  // PR record. persist is false on --dry-run so the free exit creates
+  // PR record. `home` is resolved in step 1 above, where C5's global config
+  // layer needs it. persist is false on --dry-run so the free exit creates
   // nothing, including registry.json.
-  const home = os.homedir();
   const repoHome = await resolveRepoHome({
     home,
     operatorRoot,
@@ -1079,6 +1185,11 @@ async function reviewPr(
         "(estimate from GitHub's aggregate counters; exclusions not " +
         "applied and the count is not whitespace-adjusted)",
       droppedPaths: [],
+      // On the dry run too, and it is the case that matters most: this is the
+      // free card an operator reads BEFORE deciding to spend, so a value
+      // arriving from the global layer must be visible here or it is
+      // discovered only in the bill.
+      configProvenance: configProvenanceOf(loaded, agentsDirSource),
     };
     for (const line of renderPrPlan(dryRunPlan, styleEnabled())) log(line);
     log();
@@ -1413,6 +1524,7 @@ async function reviewPr(
       hunterCount,
       sizeGate,
       droppedPaths: effectiveDiff.droppedPaths,
+      configProvenance: configProvenanceOf(loaded, agentsDirSource),
       resolved: { baseSha, diffFromSha, diffPath, parityFires },
       ...(sizeGateConfirmed ? { sizeGateConfirmed: true } : {}),
       ...(queuedVerification > 0
@@ -1554,6 +1666,11 @@ async function reviewPr(
             suspicionPriors: config.suspicion_priors,
             ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
             ...(skipDiscovery ? {} : pipelineScoutInput(options)),
+            // NOT gated on skipDiscovery: an empty-delta re-review still
+            // classifies and verifies against this config, and a run whose
+            // artifact cannot name its config inputs is the unpoolable case
+            // D7 exists to prevent — whether or not hunters fanned out.
+            ...pipelineConfigInput(loaded),
             engine: await engineIdentity(),
             promptSet,
             spec,
@@ -3286,22 +3403,29 @@ async function resolveDiffFrom(
   return sha;
 }
 
+// The impure half of the agents-dir chain: the seat's `configDir` is the
+// dirname of the file the WINNING layer lives in (agentsDirSeat, JD-14), and
+// only the existence check below touches the disk.
 function resolveAgentsDir(
   options: CliOptions,
-  config: LocalConfig,
-  configPath: string,
-): string {
-  const { dir } = resolveAgentsDirSetting({
+  loaded: EffectiveConfig,
+): AgentsDirResolution {
+  const seat = agentsDirSeat({
+    config: loaded.effective,
+    sources: loaded.sources,
+    repoConfigPath: loaded.repoConfigPath,
+    globalConfigPath: loaded.globalConfigPath,
+  });
+  const resolution = resolveAgentsDirSetting({
     flag: options.agents,
-    configAgentsDir: config.agents_dir,
-    configDir: path.dirname(configPath),
+    ...(seat === undefined ? {} : { config: seat }),
     env: process.env.PRHERO_AGENTS_DIR,
     cwd: process.cwd(),
   });
-  if (!existsSync(dir)) {
-    throw new CliError(`agents dir does not exist: ${dir}`);
+  if (!existsSync(resolution.dir)) {
+    throw new CliError(`agents dir does not exist: ${resolution.dir}`);
   }
-  return dir;
+  return resolution;
 }
 
 // `pr-hero init` — the other half of making `pr-hero review` a zero-flag
@@ -3329,13 +3453,19 @@ async function init(options: CliOptions): Promise<number> {
     remoteHead: await remoteHeadRef(repoRoot),
   });
 
-  const configPath = path.join(dir, "config.json");
+  // `repoConfigPath`, not `configPath`: C5 put a second config.json under
+  // ~/.prhero/, and a bare `configPath` in a codebase where PrheroLayout
+  // deliberately retired that name (home-preflight.ts) is the same ambiguity
+  // the retirement exists to delete. `init` writes the TEAM file and only the
+  // team file — the global layer is the operator's own, and scaffolding it
+  // from inside a repo would be this command reaching outside its checkout.
+  const repoConfigPath = path.join(dir, "config.json");
   const gotchasPath = path.join(dir, "gotchas.md");
   const wrote: string[] = [];
   const kept: string[] = [];
   for (const [file, contents] of [
     [
-      configPath,
+      repoConfigPath,
       initConfigTemplate({
         agentsDir: agentsSeed.dir,
         defaultBase: baseSeed.ref,
@@ -3597,6 +3727,170 @@ function predictPrRunDir(
   }
 }
 
+// C5 O-7's payload for both plan surfaces: everything the card and the
+// details view need to name a value the operator cannot see by opening their
+// checkout. Optional on both contexts, so a context assembled without it
+// renders exactly the pre-C5 plan.
+export interface ConfigProvenance {
+  sources: ConfigSources;
+  // Read off the RESOLUTION, never off `sources`: ConfigSource has no `flag`
+  // member (judgment ledger JD-10), so the record cannot say that --agents
+  // beat both layers — and a card that tagged such a run `global` would be
+  // naming the file that LOST. AgentsDirSource can say it, so it is what the
+  // tag is derived from.
+  agentsDirSource: AgentsDirSource;
+  repoConfigPath: string;
+  globalConfigPath: string;
+  globalPresent: boolean;
+}
+
+// The two halves the shell holds separately — the merge's record, and the
+// agents-dir chain's own answer — joined once, so the three plan contexts
+// (local, PR dry run, PR real) cannot assemble three different versions of
+// the same fact.
+function configProvenanceOf(
+  loaded: EffectiveConfig,
+  agentsDirSource: AgentsDirSource,
+): ConfigProvenance {
+  return {
+    sources: loaded.sources,
+    agentsDirSource,
+    repoConfigPath: loaded.repoConfigPath,
+    globalConfigPath: loaded.globalConfigPath,
+    globalPresent: loaded.globalPresent,
+  };
+}
+
+// A value the operator cannot see in the checkout is tagged; a value from the
+// repo file is not, because that is the unsurprising case and the card is
+// already dense.
+//
+// `default` is deliberately NOT tagged (judgment ledger JD-21, where O-7's
+// "any value that did not come from the repo file" and §3.6's "global or
+// capped" disagree). §3.6's reading is the one that keeps the operator
+// un-surprised: a defaulted value is byte-for-byte pre-C5 behaviour, and the
+// card already prints every one of them in a row of its own — the summarizer
+// row, the parity row, the priors count, the base's source tag. Tagging six
+// defaults on every quiet repo would bury the one tag that is genuinely new
+// information. Naming every key's layer is `pr-hero config`'s job (§3.10),
+// where the whole point is the exhaustive list.
+function configTag(key: string, source: ConfigSource): string | undefined {
+  return source === "global" || source === "capped"
+    ? `${key} ← ${source}`
+    : undefined;
+}
+
+// Which keys a flag decided, so the two consumers below cannot disagree about
+// it. A flag decided the value, so NO config layer did — and D5 lets a flag
+// exceed a cap on purpose. ConfigSource cannot express that (JD-10), so the
+// honest move is to print no tag at all rather than to name a layer that lost.
+// `agents_dir` is read off the RESOLUTION, the only thing that can say a flag
+// beat both layers. Shared rather than inlined because the suppression and the
+// caption that has to account for it are two sides of one fact: when this said
+// only "suppress the tag", configDetail went on claiming an origin for exactly
+// the keys the suppression had removed from the check.
+function flagDecided(
+  provenance: ConfigProvenance,
+  options: Pick<CliOptions, "base" | "summary" | "model">,
+): { base: boolean; summary: boolean; model: boolean; any: boolean } {
+  const base = options.base !== undefined;
+  const summary = options.summary !== undefined;
+  const model = options.model !== undefined;
+  return {
+    base,
+    summary,
+    model,
+    any: base || summary || model || provenance.agentsDirSource === "flag",
+  };
+}
+
+function configTags(
+  provenance: ConfigProvenance,
+  options: Pick<CliOptions, "base" | "summary" | "model">,
+): string[] {
+  const s = provenance.sources;
+  const flagged = flagDecided(provenance, options);
+  // Every key is listed, including the three `repo` ones that can never
+  // produce a tag today: a direction change must not silently drop a key off
+  // the card.
+  return [
+    // Both sources the operator cannot see by opening the checkout, not just
+    // the global file. Judgment ledger JD-9 left "a global `agents_dir`
+    // silently preempts PRHERO_AGENTS_DIR" open on the grounds that this tag
+    // is the mitigation — but firing on `global` alone covered one direction
+    // only: an env-sourced prompt set, which picks every hunter's model, was
+    // as absent from the checkout as a global one and printed nothing. `flag`
+    // stays untagged (D5, JD-10) and `repo` stays untagged (§3.6, the
+    // unsurprising case).
+    provenance.agentsDirSource === "global" ||
+    provenance.agentsDirSource === "env"
+      ? `agents_dir ← ${provenance.agentsDirSource}`
+      : undefined,
+    flagged.base ? undefined : configTag("default_base", s.default_base),
+    configTag("parity_trigger_paths", s.parity_trigger_paths),
+    configTag("suspicion_priors", s.suspicion_priors),
+    flagged.summary
+      ? undefined
+      : configTag("summary.enabled", s.summary.enabled),
+    flagged.model ? undefined : configTag("summary.model", s.summary.model),
+    configTag("max_verification_steps", s.max_verification_steps),
+  ].filter((tag): tag is string => tag !== undefined);
+}
+
+// The card's row, present only when there is something to say. Empty is the
+// common case — one global file and one quiet repo produce at most a couple
+// of tags — so this costs the card nothing on a run where nothing hoisted.
+function configRow(
+  provenance: ConfigProvenance | undefined,
+  options: Pick<CliOptions, "base" | "summary" | "model">,
+  styles: boolean,
+  width: number,
+): string[] {
+  if (provenance === undefined) return [];
+  const tags = configTags(provenance, options);
+  if (tags.length === 0) return [];
+  return row(
+    "CONFIG",
+    `${tags.join(" · ")}  (${provenance.globalConfigPath})`,
+    {
+      styles,
+      width,
+    },
+  );
+}
+
+// The details view's row: both file paths whether or not they exist, because
+// "where do I even write this" is the other half of the question a teammate
+// asks the moment a value surprises them. Not dense, and this is the view
+// that exists for the reader who wants the whole answer.
+function configDetail(
+  provenance: ConfigProvenance,
+  options: Pick<CliOptions, "base" | "summary" | "model">,
+): string {
+  const tags = configTags(provenance, options);
+  // No tags has TWO causes, and only one of them licenses the sentence this
+  // used to print unconditionally. Nothing hoisted is one. The other is that a
+  // flag decided a key and configTags suppressed its tag on purpose (JD-10) —
+  // and on that run "every value came from the repo file or a built-in
+  // default" is false about the one value the operator most recently typed.
+  // The caption is therefore scoped to what the function actually checked; it
+  // is not fixed by tagging the flag, which would reopen JD-10 by naming a
+  // layer for a key no layer decided. With no flag in play the original
+  // sentence is exact and stays: `flag` is excluded by the branch, `global`
+  // and `env` both produce a tag, so only repo-or-default can reach it.
+  return (
+    `repo ${provenance.repoConfigPath}` +
+    ` · global ${provenance.globalConfigPath}` +
+    ` (${provenance.globalPresent ? "present" : "absent"})` +
+    (tags.length > 0
+      ? ` · ${tags.join(" · ")}`
+      : flagDecided(provenance, options).any
+        ? " — every value a flag did not decide came from the repo file or" +
+          " a built-in default"
+        : " — every value came from the repo file or a built-in default")
+  );
+}
+
 export interface PlanContext {
   options: CliOptions;
   repoRoot: string;
@@ -3621,6 +3915,9 @@ export interface PlanContext {
   // confirm() — this only moves where the line lands on screen.
   sizeGate: SizeGateVerdict;
   droppedPaths: string[];
+  // C5 O-7. Optional for the reason `resolved`/`rereview` are on the PR
+  // context: a plan assembled without it renders the pre-C5 card.
+  configProvenance?: ConfigProvenance;
   // The terminal width every row and card below is laid out against, carried
   // in exactly as ui-result.ts's ResultInput carries it. Optional so the shell
   // may leave the one sniff to the renderer's entry point; the tests ALWAYS
@@ -3853,6 +4150,9 @@ export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   );
   push("diff", ctx.diffPath);
   push("agents dir", ctx.agentsDir);
+  if (ctx.configProvenance) {
+    push("config", configDetail(ctx.configProvenance, ctx.options));
+  }
   push("run dir", ctx.runDir);
   push("hop budget", String(ctx.options.hopBudget));
   push("summarizer", summarizerRow(ctx.summary));
@@ -3935,6 +4235,7 @@ export function renderPlan(ctx: PlanContext, styles: boolean): string[] {
         ` · ${ctx.config.suspicion_priors.length} prior(s)`,
       { styles, width },
     ),
+    ...configRow(ctx.configProvenance, ctx.options, styles, width),
     ...decisionLines(
       {
         sizeGate: ctx.sizeGate,
@@ -3970,6 +4271,8 @@ export interface PrPlanContext {
   sizeGate: SizeGateVerdict;
   sizeGateNote?: string;
   droppedPaths: string[];
+  // C5 O-7, same contract as PlanContext's.
+  configProvenance?: ConfigProvenance;
   // Set when this plan follows an interactive "Review anyway" at the
   // size-gate menu. Distinct from options.force so the decision block can
   // say "confirmed" rather than lie that --force was passed.
@@ -4106,6 +4409,11 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
     `${ctx.worktreePath} — ${worktreePlanNote(ctx.worktreePath)}`,
   );
   push("agents dir", ctx.agentsDir);
+  if (ctx.configProvenance) {
+    // The repo path here is the OPERATOR checkout's, never the worktree's
+    // (O-8) — printed so that fact is visible rather than asserted.
+    push("config", configDetail(ctx.configProvenance, ctx.options));
+  }
   push("run dir", ctx.runDir);
   push("hop budget", String(ctx.options.hopBudget));
   push("summarizer", summarizerRow(ctx.summary));
@@ -4264,6 +4572,7 @@ export function renderPrPlan(ctx: PrPlanContext, styles: boolean): string[] {
         `${ctx.config.suspicion_priors.length} prior(s)`,
       { styles, width },
     ),
+    ...configRow(ctx.configProvenance, ctx.options, styles, width),
   );
   if (ctx.options.post) {
     lines.push(

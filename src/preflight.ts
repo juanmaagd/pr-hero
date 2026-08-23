@@ -1175,11 +1175,34 @@ export function resolveBaseRef(input: {
   return { ref: DEFAULT_BASE_REF, source: "fallback" };
 }
 
-export type AgentsDirSource = "flag" | "config" | "env";
+// C5 §3.6: `"config"` is RETIRED. Two files can carry `agents_dir` now, and
+// one label covering both would tell the operator the value came from "the
+// config" while leaving them to guess which of two files to open — for the
+// single biggest spend lever in the file, whose prompt-set frontmatter picks
+// every hunter's model.
+export type AgentsDirSource = "flag" | "repo" | "global" | "env";
 
 export interface AgentsDirResolution {
   dir: string;
   source: AgentsDirSource;
+}
+
+// The config seat as ONE object rather than three loose optionals. A value,
+// the layer that spoke it, and the directory that value is relative TO are a
+// single fact: split apart, a caller can hand over the GLOBAL file's
+// `agents_dir` with the REPO's `.prhero/` as its base, which resolves a
+// relative path against a directory the value never lived in and then labels
+// the result `repo`. Grouped, that mistake does not type-check — which is the
+// only mitigation available, because the two are both `string` and tsc cannot
+// otherwise tell them apart (judgment ledger JD-14).
+export interface AgentsDirConfigSeat {
+  value: string;
+  // Read off mergeConfig's source record by `agentsDirSeat` below: the merge
+  // is the only thing that knows which layer won.
+  layer: Extract<ConfigSource, "repo" | "global">;
+  // The directory the RELATIVE case resolves against — the dirname of the
+  // file `layer` names, never cwd and never the other layer's.
+  dir: string;
 }
 
 // WHY `agents_dir` belongs in the config at all: requiring a flag that points
@@ -1191,20 +1214,21 @@ export interface AgentsDirResolution {
 // config is the thing that names the path, so the path travels with it. A
 // cwd-relative reading would make the same config mean different prompt sets
 // depending on which subdirectory the developer happened to be standing in.
+// After C5 "the config file" is whichever LAYER won, which is why the seat
+// carries its own directory instead of taking one from the caller's context.
 export function resolveAgentsDirSetting(input: {
   flag?: string | undefined;
-  configAgentsDir?: string | undefined;
-  configDir?: string | undefined;
+  config?: AgentsDirConfigSeat | undefined;
   env?: string | undefined;
   cwd: string;
 }): AgentsDirResolution {
   if (input.flag) {
     return { dir: path.resolve(input.cwd, input.flag), source: "flag" };
   }
-  if (input.configAgentsDir) {
+  if (input.config) {
     return {
-      dir: path.resolve(input.configDir ?? input.cwd, input.configAgentsDir),
-      source: "config",
+      dir: path.resolve(input.config.dir, input.config.value),
+      source: input.config.layer,
     };
   }
   if (input.env) {
@@ -1212,9 +1236,45 @@ export function resolveAgentsDirSetting(input: {
   }
   throw new CliUsageError(
     "no prompt set given. Pass --agents <dir>, set agents_dir in " +
-      ".prhero/config.json (run `pr-hero init`), or set PRHERO_AGENTS_DIR. " +
+      ".prhero/config.json (run `pr-hero init`) or in ~/.prhero/config.json, " +
+      "or set PRHERO_AGENTS_DIR. " +
       `The current clean set is ${SUGGESTED_AGENTS_DIR}`,
   );
+}
+
+// The seat, assembled from the merge's own source record. THIS is the one
+// place that record is load-bearing at RUNTIME rather than for display
+// (judgment ledger JD-14): a relative `"agents_dir": "./prompts"` in the
+// global file must resolve under `~/.prhero/`, while the same string in the
+// repo file resolves under `<repo>/.prhero/`. They are two different prompt
+// sets — one the operator's, one the team's — and resolving the global value
+// against the repo's directory picks a set nobody configured, or throws
+// "agents dir does not exist" naming a path that appears in neither file.
+//
+// Pure and here rather than in the shell for CLAUDE.md's split: the FILES are
+// the shell's business, the decision of which of them a value belongs to is
+// not, and it is the half that has to be provable offline.
+export function agentsDirSeat(input: {
+  config: Pick<LocalConfig, "agents_dir">;
+  sources: Pick<ConfigSources, "agents_dir">;
+  repoConfigPath: string;
+  globalConfigPath: string;
+}): AgentsDirConfigSeat | undefined {
+  const value = input.config.agents_dir;
+  if (value === undefined) return undefined;
+  // `agents_dir` is a `person` key, so `capped` cannot occur, and `default`
+  // cannot occur for a value some layer demonstrably spoke. Everything that
+  // is not `global` is therefore the repo file — written as the remainder
+  // rather than as a second equality so a direction change cannot land the
+  // value in a branch that silently drops it.
+  const fromGlobal = input.sources.agents_dir === "global";
+  return {
+    value,
+    layer: fromGlobal ? "global" : "repo",
+    dir: path.dirname(
+      fromGlobal ? input.globalConfigPath : input.repoConfigPath,
+    ),
+  };
 }
 
 // The already-merged branch, spelled out. This is not a rare edge: reviewing a
@@ -1470,6 +1530,50 @@ export function localReviewSpec(): ReviewSpec {
   };
 }
 
+export type ConfigDirection = "person" | "repo" | "capped";
+
+// Declared per key, and this table IS the known-key set for both parsers and
+// the merge — both derive from it below rather than restating it, because a
+// second hand-written key list is how the table and the parser drift apart
+// with nothing firing. A key added to LocalConfig without a row here fails
+// tsc: an undeclared direction is a bug, never a silent default.
+//
+// The `capped` rows exist because the spend rule the watcher writes down
+// (src/watch-preflight.ts:43-47) is DIRECTIONAL: the danger is a committed
+// repo file enlarging the OPERATOR's bill, never the reverse. Plain
+// specificity cannot express that asymmetry — "repo wins" lets a team raise
+// my bill, "person wins" forbids a team from being more frugal.
+export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
+  agents_dir: "person",
+  // `repo`, and this is the one that costs money if it is wrong:
+  // resolveBaseRef checks the config value BEFORE the remote head, so a
+  // global default_base would sit ahead of an autodetection that already
+  // solves the common case for free. Every quiet repo whose default branch
+  // differs would review the wrong range with a plausible branch name on the
+  // plan card — verbatim the "wrong answer with a plausible face" failure the
+  // comment at the top of this file names.
+  default_base: "repo",
+  // The values are paths INSIDE one repository. A global answer is meaningless
+  // everywhere else and would silently arm or disarm the parity hunter across
+  // every repo on the machine.
+  parity_trigger_paths: "repo",
+  suspicion_priors: "repo",
+  // Per-field below — the two fields disagree, which is why SUMMARY_DIRECTION
+  // exists. This row declares the key for the known-key set; the merge
+  // descends into it rather than folding the object whole.
+  summary: "capped",
+  max_verification_steps: "capped",
+};
+
+// The ONE nested key, so this is a second table and not a pattern. `enabled`
+// takes the cap because it switches spend on; `model` cannot be capped even
+// in principle — "narrower" is undefinable for a string, and a direction that
+// cannot be computed is worse than no direction at all.
+export const SUMMARY_DIRECTION: Record<keyof SummaryConfig, ConfigDirection> = {
+  enabled: "capped",
+  model: "person",
+};
+
 export interface LocalConfig {
   parity_trigger_paths: string[];
   suspicion_priors: SuspicionPrior[];
@@ -1500,6 +1604,39 @@ export const EMPTY_LOCAL_CONFIG: LocalConfig = {
   suspicion_priors: [],
 };
 
+// What a layer SAID, not what the engine will use — every key optional,
+// including the two arrays LocalConfig declares required.
+//
+// WHY the distinction is load-bearing rather than cosmetic: a merge whose
+// input cannot represent absence has already destroyed the fact it needs to
+// fold on. Under LocalConfig a repo file that omits `parity_trigger_paths`
+// hands the merge a materialised `[]`, the fold sees the repo layer speak,
+// and provenance reports `repo` for a value that file never named. That is a
+// lie in pipeline.json and in `pr-hero config`, and no amount of care in the
+// merge can recover the bit the parser threw away.
+//
+// LocalConfig itself is unchanged: it is the EFFECTIVE config, the single
+// shape the resolvers receive, produced once at the end of mergeConfig.
+export type ConfigLayer = Partial<LocalConfig>;
+
+// Derived, never restated: D2's "the table IS the known-key set" is only true
+// if the parsers actually read the table. `Object.keys` rather than `in`,
+// because `in` would admit `toString` and every other prototype member as a
+// known key.
+const KNOWN_CONFIG_KEYS = new Set<string>(Object.keys(CONFIG_DIRECTION));
+
+const GLOBAL_CONFIG_KEYS = new Set<string>(
+  Object.keys(CONFIG_DIRECTION).filter(
+    (key) => CONFIG_DIRECTION[key as keyof LocalConfig] !== "repo",
+  ),
+);
+
+// The two file labels every rejection is templated over. A shared validator
+// that hardcodes one file name sends the operator to edit the wrong file the
+// moment the other file is the malformed one.
+const REPO_CONFIG_LABEL = ".prhero/config.json";
+const GLOBAL_CONFIG_LABEL = "~/.prhero/config.json";
+
 // `.prhero/config.json` is optional and every setting inside it is optional —
 // an absent config is a legal, complete configuration (parity simply never
 // fires, while summary activation is resolved by resolveSummary). What is NOT
@@ -1509,30 +1646,65 @@ export const EMPTY_LOCAL_CONFIG: LocalConfig = {
 // WHY summary defaults on: it is the first defaulted setting that spends
 // money, and a silent opt-out would make a normal review's bill differ from
 // the plan. `--no-summary` and `summary.enabled: false` are the explicit exits.
-export function parseLocalConfig(raw: string): LocalConfig {
+//
+// WHY it returns a ConfigLayer and no longer materialises the two arrays: the
+// return object used to write `parity_trigger_paths` and `suspicion_priors`
+// unconditionally, because LocalConfig required them. That destroyed the
+// difference between "the file said []" and "the file never mentioned it" —
+// and the merge downstream can only report truthful provenance for a key it
+// can still see was absent. The `?? []` locals below stay exactly as they
+// are: they feed the validators, and validating an absent key against the
+// empty array is what keeps every error string byte-identical.
+export function parseLocalConfig(raw: string): ConfigLayer {
+  return parseConfigLayer(raw, REPO_CONFIG_LABEL, KNOWN_CONFIG_KEYS);
+}
+
+// The global layer's parser: same JSON dialect, same validators, same strict
+// unknown-key rejection — it differs only in which keys it admits and in the
+// file it names. It admits every key whose direction is not `repo`, and
+// rejects the three that are, because no global answer to them could be
+// right: two are lists of paths inside one repository and the third selects a
+// commit range ahead of an autodetection that already works.
+export function parseGlobalConfig(raw: string): ConfigLayer {
+  return parseConfigLayer(raw, GLOBAL_CONFIG_LABEL, GLOBAL_CONFIG_KEYS);
+}
+
+// `??` is what makes an explicit `null` mean "absent" for the two arrays, and
+// the returned layer has to agree with it: `{"suspicion_priors": null}`
+// validates as the empty array, so it must not claim the layer spoke either.
+function given(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+function parseConfigLayer(
+  raw: string,
+  file: string,
+  admitted: ReadonlySet<string>,
+): ConfigLayer {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
     throw new CliUsageError(
-      `.prhero/config.json is not valid JSON: ${(error as Error).message}`,
+      `${file} is not valid JSON: ${(error as Error).message}`,
     );
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new CliUsageError(".prhero/config.json must be a JSON object");
+    throw new CliUsageError(`${file} must be a JSON object`);
   }
   const config = parsed as Record<string, unknown>;
-  const knownKeys = new Set([
-    "agents_dir",
-    "default_base",
-    "parity_trigger_paths",
-    "suspicion_priors",
-    "summary",
-    "max_verification_steps",
-  ]);
   for (const key of Object.keys(config)) {
-    if (!knownKeys.has(key)) {
-      throw new CliUsageError(`.prhero/config.json unknown key: ${key}`);
+    if (!KNOWN_CONFIG_KEYS.has(key)) {
+      throw new CliUsageError(`${file} unknown key: ${key}`);
+    }
+    // Templated over the OFFENDING key, never a fixed example: one hardcoded
+    // key name across three rejections sends two operators out of three
+    // looking for the wrong line in their config.
+    if (!admitted.has(key)) {
+      throw new CliUsageError(
+        `${file}: ${key} is a per-repo key — put it in ` +
+          "<repo>/.prhero/config.json",
+      );
     }
   }
   const triggers = config.parity_trigger_paths ?? [];
@@ -1541,15 +1713,12 @@ export function parseLocalConfig(raw: string): LocalConfig {
     !triggers.every((p) => typeof p === "string" && p.length > 0)
   ) {
     throw new CliUsageError(
-      ".prhero/config.json parity_trigger_paths must be an array of " +
-        "non-empty strings",
+      `${file} parity_trigger_paths must be an array of non-empty strings`,
     );
   }
   const priors = config.suspicion_priors ?? [];
   if (!Array.isArray(priors)) {
-    throw new CliUsageError(
-      ".prhero/config.json suspicion_priors must be an array",
-    );
+    throw new CliUsageError(`${file} suspicion_priors must be an array`);
   }
   for (const [i, entry] of priors.entries()) {
     if (typeof entry !== "object" || entry === null) {
@@ -1568,15 +1737,20 @@ export function parseLocalConfig(raw: string): LocalConfig {
       throw new CliUsageError(`suspicion_priors[${i}].reason required`);
     }
   }
-  const summary = parseSummaryConfig(config.summary);
+  const summary = parseSummaryConfig(config.summary, file);
   const maxVerificationSteps = parseMaxVerificationSteps(
     config.max_verification_steps,
+    file,
   );
   return {
-    parity_trigger_paths: triggers as string[],
-    suspicion_priors: priors as SuspicionPrior[],
-    ...optionalString(config, "agents_dir"),
-    ...optionalString(config, "default_base"),
+    ...(given(config.parity_trigger_paths)
+      ? { parity_trigger_paths: triggers as string[] }
+      : {}),
+    ...(given(config.suspicion_priors)
+      ? { suspicion_priors: priors as SuspicionPrior[] }
+      : {}),
+    ...optionalString(config, "agents_dir", file),
+    ...optionalString(config, "default_base", file),
     ...(summary === undefined ? {} : { summary }),
     ...(maxVerificationSteps === undefined
       ? {}
@@ -1584,31 +1758,28 @@ export function parseLocalConfig(raw: string): LocalConfig {
   };
 }
 
-function parseSummaryConfig(value: unknown): SummaryConfig | undefined {
+function parseSummaryConfig(
+  value: unknown,
+  file: string,
+): SummaryConfig | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new CliUsageError(".prhero/config.json summary must be an object");
+    throw new CliUsageError(`${file} summary must be an object`);
   }
   const config = value as Record<string, unknown>;
   for (const key of Object.keys(config)) {
     if (key !== "enabled" && key !== "model") {
-      throw new CliUsageError(
-        `.prhero/config.json summary unknown key: ${key}`,
-      );
+      throw new CliUsageError(`${file} summary unknown key: ${key}`);
     }
   }
   if (config.enabled !== undefined && typeof config.enabled !== "boolean") {
-    throw new CliUsageError(
-      ".prhero/config.json summary.enabled must be a boolean",
-    );
+    throw new CliUsageError(`${file} summary.enabled must be a boolean`);
   }
   if (
     config.model !== undefined &&
     (typeof config.model !== "string" || config.model.trim().length === 0)
   ) {
-    throw new CliUsageError(
-      ".prhero/config.json summary.model must be a non-empty string",
-    );
+    throw new CliUsageError(`${file} summary.model must be a non-empty string`);
   }
   return {
     ...(config.enabled === undefined ? {} : { enabled: config.enabled }),
@@ -1618,23 +1789,33 @@ function parseSummaryConfig(value: unknown): SummaryConfig | undefined {
 
 export const DEFAULT_MAX_VERIFICATION_STEPS = 8;
 
-function parseMaxVerificationSteps(value: unknown): number | undefined {
+function parseMaxVerificationSteps(
+  value: unknown,
+  file: string,
+): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     throw new CliUsageError(
-      ".prhero/config.json max_verification_steps must be a non-negative integer",
+      `${file} max_verification_steps must be a non-negative integer`,
     );
   }
   return value;
 }
 
-export function resolveMaxVerificationSteps(config: LocalConfig): number {
+// Widened, not weakened. Each of these reads exactly ONE property, so the
+// parameter names that property instead of demanding a whole LocalConfig —
+// which is what lets a caller hand over a raw parsed layer, before the merge
+// has run, without either side lying about what it needs. The precedence each
+// resolver applies is untouched.
+export function resolveMaxVerificationSteps(
+  config: Pick<ConfigLayer, "max_verification_steps">,
+): number {
   return config.max_verification_steps ?? DEFAULT_MAX_VERIFICATION_STEPS;
 }
 
 export function resolveSummary(
   options: Pick<CliOptions, "summary" | "model">,
-  config: LocalConfig,
+  config: Pick<ConfigLayer, "summary">,
 ): SummarySettings {
   const model = options.model ?? config.summary?.model;
   return {
@@ -1643,19 +1824,184 @@ export function resolveSummary(
   };
 }
 
+// Which layer produced each effective value. `capped` is deliberately NOT the
+// same answer as `global`: the operator needs to see that a ceiling BOUND —
+// that the team asked for something and was narrowed away — not merely that a
+// global file happened to exist. `default` means no layer spoke at all and
+// the downstream resolver's own fallback decides.
+export type ConfigSource = "global" | "repo" | "capped" | "default";
+
+// `summary` gets a per-field seat rather than one entry, because its two
+// fields have DIFFERENT directions and a flat record cannot say
+// `{ enabled: "capped", model: "global" }`. It is the only nested key, so this
+// is one seat, not a pattern.
+export type ConfigSources = Record<
+  Exclude<keyof LocalConfig, "summary">,
+  ConfigSource
+> & {
+  summary: Record<keyof SummaryConfig, ConfigSource>;
+};
+
+type ConfigLayerName = Exclude<ConfigSource, "capped" | "default">;
+
+interface ConfigLayerEntry {
+  name: ConfigLayerName;
+  layer: ConfigLayer;
+  // WHY a flag and not a name comparison: a `repo`-direction key may only be
+  // folded from a layer that IS scoped to one repository. parseGlobalConfig
+  // rejects those keys, but a fold that leans on another function's rejection
+  // starts reporting `global` for a per-repo key the day that guarantee slips
+  // — and D3b's deferred config.local.json is a second repo-scoped entry, so
+  // `name === "repo"` would be wrong the moment the list grows.
+  repoScoped: boolean;
+}
+
+interface FoldedValue<T> {
+  value: T | undefined;
+  source: ConfigSource;
+}
+
+function foldKey<T>(
+  layers: readonly ConfigLayerEntry[],
+  direction: ConfigDirection,
+  read: (layer: ConfigLayer) => T | undefined,
+  narrower?: (a: T, b: T) => T,
+): FoldedValue<T> {
+  let value: T | undefined;
+  let source: ConfigSource = "default";
+  for (const entry of layers) {
+    if (direction === "repo" && !entry.repoScoped) continue;
+    const spoken = read(entry.layer);
+    if (spoken === undefined) continue;
+    if (
+      value === undefined ||
+      direction !== "capped" ||
+      narrower === undefined
+    ) {
+      value = spoken;
+      source = entry.name;
+      continue;
+    }
+    const narrowed = narrower(value, spoken);
+    // WHY a tie reports the more specific layer and not `capped`: `capped` has
+    // to mean the ceiling actually BOUND, or the operator cannot tell a
+    // narrowing from a coincidence — and deleting the global file would change
+    // nothing about a value both layers already agree on. (Judgment ledger
+    // JD-20 left this label undefined; this is the choice, and it is tested.)
+    value = narrowed;
+    source = narrowed === spoken ? entry.name : "capped";
+  }
+  return { value, source };
+}
+
+// The merge, pure: two layers in, one effective LocalConfig plus its per-key
+// provenance out. The signature names the two layers there are today, but the
+// body folds over an ORDERED LIST, least specific first — so D3b's deferred
+// third layer is one entry appended here plus a row in the direction table,
+// not a rewrite of every rule below.
+export function mergeConfig(
+  global: ConfigLayer | undefined,
+  repo: ConfigLayer,
+): { effective: LocalConfig; sources: ConfigSources } {
+  const layers: ConfigLayerEntry[] = [
+    ...(global === undefined
+      ? []
+      : [{ name: "global" as const, layer: global, repoScoped: false }]),
+    { name: "repo" as const, layer: repo, repoScoped: true },
+  ];
+
+  const agentsDir = foldKey(
+    layers,
+    CONFIG_DIRECTION.agents_dir,
+    (layer) => layer.agents_dir,
+  );
+  const defaultBase = foldKey(
+    layers,
+    CONFIG_DIRECTION.default_base,
+    (layer) => layer.default_base,
+  );
+  const triggers = foldKey(
+    layers,
+    CONFIG_DIRECTION.parity_trigger_paths,
+    (layer) => layer.parity_trigger_paths,
+  );
+  const priors = foldKey(
+    layers,
+    CONFIG_DIRECTION.suspicion_priors,
+    (layer) => layer.suspicion_priors,
+  );
+  // `summary` is descended into per-field: CONFIG_DIRECTION.summary declares
+  // the key for the parsers, SUMMARY_DIRECTION decides each field. Folding the
+  // object whole would silently adopt one layer's entire block.
+  const summaryEnabled = foldKey(
+    layers,
+    SUMMARY_DIRECTION.enabled,
+    (layer) => layer.summary?.enabled,
+    (a, b) => a && b,
+  );
+  const summaryModel = foldKey(
+    layers,
+    SUMMARY_DIRECTION.model,
+    (layer) => layer.summary?.model,
+  );
+  const maxSteps = foldKey(
+    layers,
+    CONFIG_DIRECTION.max_verification_steps,
+    (layer) => layer.max_verification_steps,
+    Math.min,
+  );
+
+  const summary: SummaryConfig = {
+    ...(summaryEnabled.value === undefined
+      ? {}
+      : { enabled: summaryEnabled.value }),
+    ...(summaryModel.value === undefined ? {} : { model: summaryModel.value }),
+  };
+
+  const effective: LocalConfig = {
+    // The ONE place `[]` is materialised, and it is here on purpose: the fold
+    // above ran on absence and has already recorded `source: "default"` for a
+    // key nobody named, so the array can be handed to the resolvers without
+    // that fact being lost. Materialising it any earlier is what made
+    // provenance a lie.
+    parity_trigger_paths: triggers.value ?? [],
+    suspicion_priors: priors.value ?? [],
+    ...(agentsDir.value === undefined ? {} : { agents_dir: agentsDir.value }),
+    ...(defaultBase.value === undefined
+      ? {}
+      : { default_base: defaultBase.value }),
+    ...(summaryEnabled.value === undefined && summaryModel.value === undefined
+      ? {}
+      : { summary }),
+    ...(maxSteps.value === undefined
+      ? {}
+      : { max_verification_steps: maxSteps.value }),
+  };
+
+  const sources: ConfigSources = {
+    agents_dir: agentsDir.source,
+    default_base: defaultBase.source,
+    parity_trigger_paths: triggers.source,
+    suspicion_priors: priors.source,
+    summary: { enabled: summaryEnabled.source, model: summaryModel.source },
+    max_verification_steps: maxSteps.source,
+  };
+
+  return { effective, sources };
+}
+
 // Same fail-loud discipline as the two array keys: an `agents_dir` that is a
 // number, or an empty `default_base`, must not be read as "absent" — that is
 // how a config silently stops configuring anything.
 function optionalString(
   config: Record<string, unknown>,
   key: "agents_dir" | "default_base",
+  file: string,
 ): Record<string, string> {
   const value = config[key];
   if (value === undefined || value === null) return {};
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new CliUsageError(
-      `.prhero/config.json ${key} must be a non-empty string`,
-    );
+    throw new CliUsageError(`${file} ${key} must be a non-empty string`);
   }
   return { [key]: value };
 }
