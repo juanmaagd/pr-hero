@@ -4,6 +4,7 @@
 //
 // 100% offline, fresh tmp database per test run.
 
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -618,6 +619,165 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       ]);
     } finally {
       db.close();
+    }
+  });
+
+  test("migrates a legacy user_version=1 database to version 2 seamlessly", async () => {
+    const dbPath = await tmpDbPath();
+    // Bootstrap a legacy v1 database
+    const legacyDb = new Database(dbPath, { create: true });
+    legacyDb.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id TEXT NOT NULL,
+        run_dir TEXT NOT NULL UNIQUE,
+        pr INTEGER NULL,
+        checkout_path TEXT NULL,
+        head_sha TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        diff_from_sha TEXT NULL,
+        run_status TEXT NOT NULL,
+        session_failed INTEGER NULL,
+        model TEXT NOT NULL,
+        iteration INTEGER NOT NULL,
+        parity_hunter_fired INTEGER NOT NULL,
+        prompt_set_name TEXT NULL,
+        prompt_set_sha256 TEXT NULL,
+        driver_sha TEXT NULL,
+        engine_name TEXT NULL,
+        engine_version TEXT NULL,
+        summary_prose TEXT NULL,
+        summary_score INTEGER NULL,
+        summary_score_reason TEXT NULL,
+        generated_at TEXT NOT NULL,
+        wall_ms INTEGER NOT NULL,
+        index_ms INTEGER NOT NULL,
+        index_mode TEXT NULL,
+        index_disk_mb REAL NULL,
+        sync_ms INTEGER NULL,
+        tokens_in INTEGER NOT NULL,
+        tokens_out INTEGER NOT NULL,
+        tokens_total INTEGER NOT NULL,
+        cost_usd_est REAL NOT NULL,
+        blocking INTEGER NOT NULL,
+        advisory INTEGER NOT NULL,
+        root_causes_json TEXT NULL,
+        greptile_found INTEGER NULL
+      );
+      CREATE TABLE IF NOT EXISTS findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        finding_id TEXT NOT NULL,
+        category INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        line INTEGER NOT NULL,
+        symbol TEXT NULL,
+        severity TEXT NOT NULL,
+        evidence_class TEXT NOT NULL,
+        refuter_verdict TEXT NOT NULL,
+        causal_disposition TEXT NOT NULL,
+        claim TEXT NOT NULL,
+        hunter TEXT NOT NULL,
+        tier TEXT NOT NULL,
+        hops_used INTEGER NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        root_cause_id TEXT NULL,
+        finding_order INTEGER NOT NULL,
+        UNIQUE (run_id, finding_id)
+      );
+      CREATE TABLE IF NOT EXISTS finding_proof_refs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        finding_id INTEGER NOT NULL REFERENCES findings (id) ON DELETE CASCADE,
+        ref_order INTEGER NOT NULL,
+        proof_ref TEXT NOT NULL,
+        UNIQUE (finding_id, ref_order)
+      );
+      CREATE TABLE IF NOT EXISTS finding_hop_trail (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        finding_id INTEGER NOT NULL REFERENCES findings (id) ON DELETE CASCADE,
+        step_order INTEGER NOT NULL,
+        step_num INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        query TEXT NOT NULL,
+        reached TEXT NULL,
+        UNIQUE (finding_id, step_order)
+      );
+      CREATE TABLE IF NOT EXISTS debug_findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        finding_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        merged_into TEXT NULL,
+        category INTEGER NOT NULL,
+        path TEXT NOT NULL,
+        line INTEGER NOT NULL,
+        symbol TEXT NULL,
+        severity TEXT NOT NULL,
+        evidence_class TEXT NOT NULL,
+        refuter_verdict TEXT NOT NULL,
+        causal_disposition TEXT NOT NULL,
+        claim TEXT NOT NULL,
+        proof_refs_json TEXT NOT NULL,
+        hunter TEXT NOT NULL,
+        hops_used INTEGER NOT NULL,
+        hop_trail_json TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        root_cause_id TEXT NULL,
+        debug_order INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS run_agents (
+        run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        agent_key TEXT NOT NULL,
+        tokens_total INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        tokens_in INTEGER NOT NULL,
+        tokens_out INTEGER NOT NULL,
+        cost_usd_est REAL NOT NULL,
+        attempts INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        PRIMARY KEY (run_id, agent_key)
+      );
+      CREATE TABLE IF NOT EXISTS comparison_rows (
+        run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+        row_index INTEGER NOT NULL,
+        bucket TEXT NOT NULL,
+        greptile_json TEXT NULL,
+        prhero_json TEXT NULL,
+        verdict TEXT NULL,
+        reasoning TEXT NULL,
+        actor TEXT NULL,
+        PRIMARY KEY (run_id, row_index)
+      );
+      PRAGMA user_version = 1;
+    `);
+    legacyDb.close();
+
+    // Open via openProductStore, which must migrate it to version 2
+    const migratedDb = openProductStore(dbPath);
+    try {
+      const version = (
+        migratedDb.query("PRAGMA user_version;").get() as {
+          user_version: number;
+        }
+      ).user_version;
+      expect(version).toBe(2);
+
+      // Verify saveRunTransaction works cleanly with ON CONFLICT(repo_id, run_dir)
+      const runId = saveRunTransaction(
+        migratedDb,
+        projectCompleteRun({
+          doc: sampleDoc(),
+          repoId: "github.com/org/migrated",
+          runDir: "run-v2",
+          checkoutPath: null,
+        }),
+      );
+      expect(runId).toBeGreaterThan(0);
+
+      const exported = exportFindingsDocument(migratedDb, runId);
+      expect(exported).not.toBeNull();
+    } finally {
+      migratedDb.close();
     }
   });
 });

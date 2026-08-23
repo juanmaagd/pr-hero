@@ -21,12 +21,59 @@ import type {
 import type { StoredComparison } from "./ledger";
 import type { PerAgentUsage } from "./pipeline";
 
-export const CURRENT_PRODUCT_SCHEMA_VERSION = 1;
+export const CURRENT_PRODUCT_SCHEMA_VERSION = 2;
 
 export interface ProductSchemaMigration {
   toVersion: number;
   statements: string[];
 }
+
+export const PRODUCT_V1_TO_V2_STATEMENTS: string[] = [
+  "ALTER TABLE finding_hop_trail ADD COLUMN is_raw_string INTEGER NOT NULL DEFAULT 0;",
+  `CREATE TABLE IF NOT EXISTS runs_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_id TEXT NOT NULL,
+    run_dir TEXT NOT NULL,
+    pr INTEGER NULL,
+    checkout_path TEXT NULL,
+    head_sha TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    diff_from_sha TEXT NULL,
+    run_status TEXT NOT NULL,
+    session_failed INTEGER NULL,
+    model TEXT NOT NULL,
+    iteration INTEGER NOT NULL,
+    parity_hunter_fired INTEGER NOT NULL,
+    prompt_set_name TEXT NULL,
+    prompt_set_sha256 TEXT NULL,
+    driver_sha TEXT NULL,
+    engine_name TEXT NULL,
+    engine_version TEXT NULL,
+    summary_prose TEXT NULL,
+    summary_score INTEGER NULL,
+    summary_score_reason TEXT NULL,
+    generated_at TEXT NOT NULL,
+    wall_ms INTEGER NOT NULL,
+    index_ms INTEGER NOT NULL,
+    index_mode TEXT NULL,
+    index_disk_mb REAL NULL,
+    sync_ms INTEGER NULL,
+    tokens_in INTEGER NOT NULL,
+    tokens_out INTEGER NOT NULL,
+    tokens_total INTEGER NOT NULL,
+    cost_usd_est REAL NOT NULL,
+    blocking INTEGER NOT NULL,
+    advisory INTEGER NOT NULL,
+    root_causes_json TEXT NULL,
+    greptile_found INTEGER NULL,
+    UNIQUE (repo_id, run_dir)
+  );`,
+  `INSERT OR IGNORE INTO runs_new SELECT id, repo_id, run_dir, pr, checkout_path, head_sha, base_sha, diff_from_sha, run_status, session_failed, model, iteration, parity_hunter_fired, prompt_set_name, prompt_set_sha256, driver_sha, engine_name, engine_version, summary_prose, summary_score, summary_score_reason, generated_at, wall_ms, index_ms, index_mode, index_disk_mb, sync_ms, tokens_in, tokens_out, tokens_total, cost_usd_est, blocking, advisory, root_causes_json, greptile_found FROM runs;`,
+  `DROP TABLE runs;`,
+  `ALTER TABLE runs_new RENAME TO runs;`,
+  `CREATE INDEX IF NOT EXISTS idx_runs_repo_id ON runs (repo_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_runs_generated_at ON runs (generated_at);`,
+];
 
 export const PRODUCT_V1_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS runs (
@@ -174,9 +221,15 @@ export function migrationsForProductStore(
   if (currentVersion >= CURRENT_PRODUCT_SCHEMA_VERSION) {
     return { toVersion: currentVersion, statements: [] };
   }
+  if (currentVersion === 0) {
+    return {
+      toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
+      statements: [...PRODUCT_V1_STATEMENTS],
+    };
+  }
   return {
     toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
-    statements: [...PRODUCT_V1_STATEMENTS],
+    statements: [...PRODUCT_V1_TO_V2_STATEMENTS],
   };
 }
 
