@@ -39,6 +39,7 @@ import type { StoredComparison } from "../src/ledger";
 import { findingMarker, PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
 import type { CliOptions, SummarySettings } from "../src/preflight";
 import { CliError, CliUsageError } from "../src/preflight";
+import type { RereviewProvenance } from "../src/rereview-prepare";
 import { triageMarker } from "../src/triage";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,12 @@ interface ScriptedResponse {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
+  // Streams and exit settle only when kill() fires — the shape of a `gh`
+  // call GitHub accepted and never answered. Ported from
+  // test/step-runner.test.ts's makeFakeSpawn, which is how that module's
+  // watchdog is exercised without a real 30-minute wait; the collapse loop's
+  // watchdog needs the same lever.
+  hang?: boolean;
 }
 
 interface ScriptEntry {
@@ -124,18 +131,39 @@ function makeFakeGh(script: ScriptEntry[]): {
         ? { stdout: JSON.stringify({ id: nextId++ }), exitCode: 0 }
         : { stdout: "", exitCode: 0 };
     }
+    const held: ReadableStreamDefaultController<Uint8Array>[] = [];
+    let resolveExit: (code: number) => void = () => {};
+    const exited = new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    });
     const stream = (text: string) =>
       new ReadableStream<Uint8Array>({
         start(controller) {
+          if (scripted?.hang) {
+            held.push(controller);
+            return;
+          }
           if (text) controller.enqueue(encoder.encode(text));
           controller.close();
         },
       });
+    const stdout = stream(scripted.stdout ?? "");
+    const stderr = stream(scripted.stderr ?? "");
+    if (!scripted.hang) resolveExit(scripted.exitCode ?? 0);
     return {
-      stdout: stream(scripted.stdout ?? ""),
-      stderr: stream(scripted.stderr ?? ""),
-      exited: Promise.resolve(scripted.exitCode ?? 0),
-      kill() {},
+      stdout,
+      stderr,
+      exited,
+      kill() {
+        for (const controller of held) {
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        }
+        resolveExit(143);
+      },
     };
   }) as unknown as typeof Bun.spawn;
   return { spawnFn, calls };
@@ -2574,5 +2602,158 @@ describe("deriveEngineIdentity", () => {
       name: "pr-hero",
       version: "0.0.0",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F005 — the verified-gone collapse loop's two gh calls are bounded.
+//
+// Every LLM step in the pipeline is bounded by `stepTimeoutMs`; these two were
+// the only awaits on the `--post` path with no bound at all, so an
+// accepted-but-unanswered GitHub request hung `review --pr --post` forever —
+// including an unattended `--yes` run from the watcher, where nothing is
+// present to notice it. The bound has to degrade to "thread left open": a
+// resolve on a thread whose ✅ reply never landed is a silent close, the same
+// false `resolved` item 7 exists to never produce.
+// ---------------------------------------------------------------------------
+
+describe("postInlineFindings — the collapse loop cannot hang (F005)", () => {
+  const PRIOR_CLAIM = "the prior finding, checked and gone at this head";
+  const PRIOR_MARKER = findingMarker({
+    path: "src/a.ts",
+    line: 10,
+    headSha: OLD_HEAD,
+    claim: PRIOR_CLAIM,
+  });
+
+  function rereview(): RereviewProvenance {
+    return {
+      case: "C",
+      last_reviewed_head: OLD_HEAD,
+      last_head_source: "summary_marker",
+      discovery_range: `${OLD_HEAD}..${HEAD}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 1,
+      settled_deterministically: 0,
+      verified: 1,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 1,
+        overlap: 0,
+        verify_all: 0,
+      },
+      live: [],
+      resolved_verified: 1,
+      resolved_ids: ["R001"],
+      returned: 0,
+      re_tiered: 0,
+    };
+  }
+
+  function priorCommentScript(hangOn: string): ScriptEntry[] {
+    return [
+      headRefOidScript(HEAD),
+      { match: ["issues/42/comments", "--paginate"], response: { stdout: "" } },
+      {
+        match: ["pulls/42/comments", "--paginate"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 501,
+              user: "pr-hero",
+              body: `${PRIOR_MARKER}\n${PRIOR_CLAIM}`,
+              path: "src/a.ts",
+              line: 10,
+              original_line: 10,
+              in_reply_to_id: null,
+            },
+          ]),
+        },
+      },
+      // Ahead of the successful entries so a `hangOn` naming any of them
+      // wins the `script.find` — including `owner,name`, the repo lookup
+      // resolveReviewThreadForComment makes BEFORE either graphql call. A
+      // bound on two of three gh calls still hangs on the third.
+      { match: [hangOn], response: { hang: true } },
+      {
+        match: ["repo", "view", "--json", "owner,name"],
+        response: {
+          stdout: JSON.stringify({
+            owner: { login: "juanmaagd" },
+            name: "pr-hero",
+          }),
+        },
+      },
+      { match: ["pulls/42/reviews"], response: { stdout: "" } },
+    ];
+  }
+
+  async function collapseWith(hangOn: string): Promise<{
+    logged: string;
+    calls: RecordedCall[];
+  }> {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const { spawnFn, calls } = makeFakeGh(priorCommentScript(hangOn));
+      await postInlineFindings({
+        operatorRoot: OPERATOR_ROOT,
+        pr: 42,
+        headSha: HEAD,
+        doc: doc({ findings: [] }),
+        diffPatch: diffAddingLines("src/a.ts", 20),
+        webUrl: undefined,
+        spawnFn,
+        rereview: rereview(),
+        rereviewPriors: [
+          { id: "R001", claim: PRIOR_CLAIM, locs: ["src/a.ts:10"] },
+        ],
+        ghTimeoutMs: 30,
+      });
+      return { logged: chunks.join(""), calls };
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  }
+
+  test("a hung reply post leaves the thread open and never resolves it", async () => {
+    // Without the bound this test does not fail — it never returns.
+    const { logged, calls } = await collapseWith("in_reply_to=501");
+    expect(logged).toContain("collapse skipped for R001");
+    expect(logged).toContain("thread left open");
+    expect(logged).toContain("timed out after 30 ms");
+    // The resolve must NOT run: closing a thread whose ✅ reply never posted
+    // is the false `resolved` the whole verified-gone path forbids.
+    expect(
+      calls.filter((c) => c.argv.join(" ").includes("reviewThreads")),
+    ).toHaveLength(0);
+    expect(logged).not.toContain("resolved: review thread for R001");
+  });
+
+  test("a hung thread-resolve is reported, not awaited forever", async () => {
+    const { logged, calls } = await collapseWith("reviewThreads");
+    expect(
+      calls.filter((c) => c.argv.join(" ").includes("in_reply_to=501")),
+    ).toHaveLength(1);
+    expect(logged).toContain("resolve failed for R001");
+    expect(logged).toContain("timed out after 30 ms");
+    expect(logged).not.toContain("resolved: review thread for R001");
+  });
+
+  test("the resolve's inner repo lookup is bounded too", async () => {
+    // `resolveReviewThreadForComment` makes THREE gh calls; `ghRepoOwnerName`
+    // is the first and used to be the one nobody thought to bound.
+    const { logged } = await collapseWith("owner,name");
+    expect(logged).toContain("resolve failed for R001");
+    expect(logged).toContain("timed out after 30 ms");
+    expect(logged).not.toContain("resolved: review thread for R001");
   });
 });

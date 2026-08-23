@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { claimFingerprint } from "../src/pr-preflight";
+import type { PriorRecord } from "../src/rereview-classify";
 import { planDiscovery } from "../src/rereview-plan";
 import {
   buildPhaseBQueue,
@@ -8,6 +9,7 @@ import {
   parseNameOnly,
   parseNameStatus,
   prepareDiscovery,
+  priorsFromPostedMarkers,
   type RereviewGit,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
@@ -298,7 +300,12 @@ describe("S-B — enrichPriorsFromThreads newness", () => {
       triage: null,
       newThreadReply: false,
     };
-    const posted = [{ id: 22, marker: { c: fingerprint } }];
+    // path/line joined this fixture when the prior->comment binding stopped
+    // keying on `c` alone (F001/F003). Same prior, same comment, same
+    // assertions — the marker now simply carries the identity it always had.
+    const posted = [
+      { id: 22, marker: { path: "src/app.ts", line: 10, c: fingerprint } },
+    ];
     const applied = `${triageMarker({ tag: "applied", headSha: HEAD, actor: "agent" })}\n`;
     const after = enrichPriorsFromThreads({
       priors: [prior],
@@ -355,9 +362,17 @@ describe("O-1c — collapseTargets ignore matcher leftovers", () => {
     expect(
       collapseTargets({
         verifiedGoneIds: [],
-        priors: [{ id: "R001", claim }],
+        priors: [{ id: "R001", claim, locs: ["src/app.ts:10"] }],
         posted: [
-          { id: 9, channel: "review", marker: { c: claimFingerprint(claim) } },
+          {
+            id: 9,
+            channel: "review",
+            marker: {
+              path: "src/app.ts",
+              line: 10,
+              c: claimFingerprint(claim),
+            },
+          },
         ],
       }),
     ).toEqual([]);
@@ -367,11 +382,302 @@ describe("O-1c — collapseTargets ignore matcher leftovers", () => {
     expect(
       collapseTargets({
         verifiedGoneIds: ["R001"],
-        priors: [{ id: "R001", claim }],
+        priors: [{ id: "R001", claim, locs: ["src/app.ts:10"] }],
         posted: [
-          { id: 9, channel: "review", marker: { c: claimFingerprint(claim) } },
+          {
+            id: 9,
+            channel: "review",
+            marker: {
+              path: "src/app.ts",
+              line: 10,
+              c: claimFingerprint(claim),
+            },
+          },
         ],
       }),
     ).toEqual([{ priorId: "R001", commentId: 9, channel: "review" }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F001/F002/F003 — the prior->comment binding is path:line, `c` is the
+// tie-breaker it was always documented to be (`src/pr-preflight.ts:374-379`).
+//
+// Before this, both consumers keyed on `claimFingerprint(prior.claim)` ALONE
+// and their `posted` parameter type was narrowed to `{ id, marker: { c } }`,
+// so neither could reach the path and line the caller was already handing
+// them. Two hats on one bug: identical claim text cross-wired two priors, and
+// `priorsFromPostedMarkers`'s `claim: ""` — the path taken on the FIRST
+// re-review of every PR, because a first review writes no state block — hashes
+// to a constant no real marker carries, so both functions were silent no-ops
+// there.
+// ---------------------------------------------------------------------------
+
+describe("F001/F003 — prior->comment binding by path:line", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const dismissed = `${triageMarker({
+    tag: "dismissed",
+    headSha: HEAD,
+    actor: "human",
+    verdict: "upheld",
+  })}\n`;
+
+  function prior(over: {
+    id: string;
+    locs: readonly string[];
+    claim: string;
+  }): PriorRecord {
+    return {
+      sev: "CRITICAL",
+      tier: "blocking",
+      channel: "inline",
+      triage: null,
+      newThreadReply: false,
+      ...over,
+    };
+  }
+
+  function comment(over: {
+    id: number;
+    path: string;
+    line: number;
+    claim: string;
+    liveLine?: number;
+  }) {
+    return {
+      id: over.id,
+      channel: "review" as const,
+      marker: {
+        path: over.path,
+        line: over.line,
+        headSha: HEAD,
+        c: claimFingerprint(over.claim),
+      },
+      livePath: over.path,
+      liveLine: over.liveLine ?? over.line,
+    };
+  }
+
+  test("two priors with identical claim text keep their own triage", () => {
+    // The whole point: `c` is EQUAL across these two comments (same claim
+    // text, different defects at different sites), so a fingerprint-only
+    // lookup hands both priors the first comment — a `dismissed`+`upheld`
+    // meant for R001 would suppress R002, a different and still-live finding.
+    const claim = "the value is stored in seconds and read as milliseconds";
+    const posted = [
+      comment({ id: 111, path: "src/a.ts", line: 10, claim }),
+      comment({ id: 222, path: "src/b.ts", line: 20, claim }),
+    ];
+    expect(posted[0]?.marker.c).toBe(posted[1]?.marker.c ?? "");
+
+    const enriched = enrichPriorsFromThreads({
+      priors: [
+        prior({ id: "R001", locs: ["src/a.ts:10"], claim }),
+        prior({ id: "R002", locs: ["src/b.ts:20"], claim }),
+      ],
+      posted,
+      replies: [
+        {
+          in_reply_to_id: 111,
+          body: dismissed,
+          created_at: "2026-08-22T00:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-01T00:00:00Z",
+    });
+    expect(enriched.map((p) => [p.id, p.triage?.tag ?? null])).toEqual([
+      ["R001", "dismissed"],
+      ["R002", null],
+    ]);
+  });
+
+  test("a claim-less prior recovered from posted markers still enriches", () => {
+    // `priorsFromPostedMarkers` is the state === null fallback, and
+    // `claimFingerprint("")` is the constant e3b0c44298fc, which no real
+    // marker's `c` ever equals — so this whole path used to drop every triage
+    // reply an author wrote. path:line is the identity both sides DO have.
+    const priors = priorsFromPostedMarkers([
+      { path: "src/a.ts", line: 10, channel: "inline" },
+      { path: "src/b.ts", line: 20, channel: "inline" },
+    ]);
+    expect(priors.map((p) => p.claim)).toEqual(["", ""]);
+    expect(claimFingerprint("")).toBe("e3b0c44298fc");
+
+    const enriched = enrichPriorsFromThreads({
+      priors,
+      posted: [
+        comment({ id: 111, path: "src/a.ts", line: 10, claim: "one" }),
+        comment({ id: 222, path: "src/b.ts", line: 20, claim: "two" }),
+      ],
+      replies: [
+        {
+          in_reply_to_id: 222,
+          body: dismissed,
+          created_at: "2026-08-22T00:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-01T00:00:00Z",
+    });
+    expect(enriched.map((p) => [p.id, p.triage?.tag ?? null])).toEqual([
+      ["R001", null],
+      ["R002", "dismissed"],
+    ]);
+    expect(enriched[1]?.newThreadReply).toBe(true);
+  });
+
+  test("a base-driven live-line re-anchor still binds on the stored line", () => {
+    // GitHub re-anchors a review comment's live `line` when the BASE advances
+    // with no new push (`src/inline.ts:213-219`). Marker stored at 100, live
+    // projection 112, prior still at 100: zero drift, and live-only matching
+    // would silently drop this author's triage.
+    const enriched = enrichPriorsFromThreads({
+      priors: [prior({ id: "R001", locs: ["src/c.ts:100"], claim: "drifted" })],
+      posted: [
+        comment({
+          id: 333,
+          path: "src/c.ts",
+          line: 100,
+          claim: "drifted",
+          liveLine: 112,
+        }),
+      ],
+      replies: [
+        {
+          in_reply_to_id: 333,
+          body: dismissed,
+          created_at: "2026-08-22T00:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-01T00:00:00Z",
+    });
+    expect(enriched[0]?.triage?.tag).toBe("dismissed");
+  });
+
+  test("`c` breaks a tie between two comments at the same path:line", () => {
+    // Two distinct defects reported at one line: both candidates sit at
+    // distance 0, so the tie-breaker does exactly the job it was named for.
+    const posted = [
+      comment({ id: 111, path: "src/a.ts", line: 10, claim: "defect one" }),
+      comment({ id: 222, path: "src/a.ts", line: 10, claim: "defect two" }),
+    ];
+    const enriched = enrichPriorsFromThreads({
+      priors: [
+        prior({ id: "R001", locs: ["src/a.ts:10"], claim: "defect two" }),
+      ],
+      posted,
+      replies: [
+        {
+          in_reply_to_id: 222,
+          body: dismissed,
+          created_at: "2026-08-22T00:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-01T00:00:00Z",
+    });
+    expect(enriched[0]?.triage?.tag).toBe("dismissed");
+  });
+
+  test("an unbreakable tie binds nothing — under-match, never over-match", () => {
+    // Same path:line, same claim text, no claim on the prior to break it
+    // with. Binding either one would be a guess, and the guess a ✅ on a live
+    // finding. `src/inline.ts`'s ambiguity rule, applied here.
+    const enriched = enrichPriorsFromThreads({
+      priors: [prior({ id: "R001", locs: ["src/a.ts:10"], claim: "" })],
+      posted: [
+        comment({ id: 111, path: "src/a.ts", line: 10, claim: "same" }),
+        comment({ id: 222, path: "src/a.ts", line: 10, claim: "same" }),
+      ],
+      replies: [
+        {
+          in_reply_to_id: 111,
+          body: dismissed,
+          created_at: "2026-08-22T00:00:00Z",
+        },
+      ],
+      summaryUpdatedAt: "2026-08-01T00:00:00Z",
+    });
+    expect(enriched[0]?.triage).toBeNull();
+  });
+});
+
+describe("F002 — collapseTargets gives each verified-gone id its own thread", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  function comment(id: number, path: string, line: number, claim: string) {
+    return {
+      id,
+      channel: "review" as const,
+      marker: { path, line, headSha: HEAD, c: claimFingerprint(claim) },
+      livePath: path,
+      liveLine: line,
+    };
+  }
+
+  test("a batch of claim-less priors collapses each to its own comment", () => {
+    // The guaranteed-reachable shape from the review: every prior recovered
+    // by `priorsFromPostedMarkers` carries `claim: ""`, so the old
+    // fingerprint-only `.find()` returned the SAME first comment for every id
+    // in the batch — a "✅ RESOLVED · verified gone" reply and a programmatic
+    // thread-resolve landing on a finding nobody checked.
+    const priors = priorsFromPostedMarkers([
+      { path: "src/a.ts", line: 10, channel: "inline" },
+      { path: "src/b.ts", line: 20, channel: "inline" },
+      { path: "src/c.ts", line: 30, channel: "inline" },
+    ]);
+    expect(
+      collapseTargets({
+        verifiedGoneIds: ["R001", "R002", "R003"],
+        priors,
+        posted: [
+          comment(111, "src/a.ts", 10, "one"),
+          comment(222, "src/b.ts", 20, "two"),
+          comment(333, "src/c.ts", 30, "three"),
+        ],
+      }),
+    ).toEqual([
+      { priorId: "R001", commentId: 111, channel: "review" },
+      { priorId: "R002", commentId: 222, channel: "review" },
+      { priorId: "R003", commentId: 333, channel: "review" },
+    ]);
+  });
+
+  test("priors sharing claim text collapse to their own threads, not the first", () => {
+    const claim = "a recurring pattern, reported at two sites";
+    expect(
+      collapseTargets({
+        verifiedGoneIds: ["R001", "R002"],
+        priors: [
+          { id: "R001", claim, locs: ["src/a.ts:10"] },
+          { id: "R002", claim, locs: ["src/b.ts:20"] },
+        ],
+        posted: [
+          comment(111, "src/a.ts", 10, claim),
+          comment(222, "src/b.ts", 20, claim),
+        ],
+      }),
+    ).toEqual([
+      { priorId: "R001", commentId: 111, channel: "review" },
+      { priorId: "R002", commentId: 222, channel: "review" },
+    ]);
+  });
+
+  test("a carried neighbour's thread is never taken by a verified-gone prior", () => {
+    // One-to-one runs over EVERY prior, not just the retired ones: R002 is
+    // carried and still live, and its comment sits within the line window of
+    // R001's. Binding only the verified-gone subset would hand R001 whichever
+    // comment came first and close a live finding's thread.
+    expect(
+      collapseTargets({
+        verifiedGoneIds: ["R002"],
+        priors: [
+          { id: "R001", claim: "still live", locs: ["src/a.ts:10"] },
+          { id: "R002", claim: "gone now", locs: ["src/a.ts:12"] },
+        ],
+        posted: [
+          comment(111, "src/a.ts", 10, "still live"),
+          comment(222, "src/a.ts", 12, "gone now"),
+        ],
+      }),
+    ).toEqual([{ priorId: "R002", commentId: 222, channel: "review" }]);
   });
 });

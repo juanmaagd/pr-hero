@@ -2002,6 +2002,16 @@ function findingCommentUrl(
   return `${webUrl}/pull/${pr}#${fragment}`;
 }
 
+// Watchdog for the verified-gone collapse loop's `gh` calls. Every LLM step
+// in the pipeline is bounded by `stepTimeoutMs`; the collapse loop's two gh
+// calls were the only awaits on the `--post` path with no bound at all, and
+// an accepted-but-unanswered GitHub request there hangs `review --pr --post`
+// forever — including an unattended `--yes` run launched by the watcher,
+// where nothing is present to notice or ^C it. Two minutes is generous for a
+// single REST/graphql round trip and still finite; the failure it converts is
+// "hangs until someone kills it" → "one logged line, thread left open".
+const COLLAPSE_GH_TIMEOUT_MS = 120_000;
+
 // The actual post sequence (design D6, reordered per Juanma's PR #2
 // feedback item 2; W2 issues #16/#17 retire the issue-comment loop):
 // summary CREATED FIRST when none exists yet → review submission (with
@@ -2037,9 +2047,17 @@ export async function postInlineFindings(input: {
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
   rereview?: RereviewProvenance;
-  rereviewPriors?: readonly { id: string; claim: string }[];
+  rereviewPriors?: readonly {
+    id: string;
+    claim: string;
+    locs: readonly string[];
+  }[];
+  // Watchdog for the collapse loop's gh calls. A seam, like `spawnFn`: no
+  // production caller sets it, the tests drive the timeout path with it.
+  ghTimeoutMs?: number;
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
+  const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
   const rereviewDelta =
     input.rereview === undefined
       ? undefined
@@ -2225,21 +2243,38 @@ export async function postInlineFindings(input: {
     });
     for (const target of targets) {
       if (target.channel !== "review") continue;
-      await postReviewCommentReply({
-        operatorRoot,
-        pr,
-        inReplyTo: target.commentId,
-        body:
-          "✅ **RESOLVED** · verified gone\n\n" +
-          "This finding was checked at the current head and is no longer present.\n",
-        spawnFn,
-      });
+      // The reply is bounded AND caught, and a failure `continue`s past the
+      // resolve on purpose. Resolving a thread whose ✅ reply never landed
+      // closes the conversation with no explanation of why — a silent
+      // resolve, which is the same false `resolved` the whole verified-gone
+      // path is built to never produce. Degrading to "thread left open" is
+      // always the safe direction: the finding stays visible on the PR.
+      try {
+        await postReviewCommentReply({
+          operatorRoot,
+          pr,
+          inReplyTo: target.commentId,
+          body:
+            "✅ **RESOLVED** · verified gone\n\n" +
+            "This finding was checked at the current head and is no longer present.\n",
+          spawnFn,
+          timeoutMs: ghTimeoutMs,
+        });
+      } catch (error) {
+        log(
+          `collapse skipped for ${target.priorId}: the verified-gone reply did ` +
+            `not post (${error instanceof Error ? error.message : String(error)}) ` +
+            "— thread left open",
+        );
+        continue;
+      }
       try {
         const resolveOutcome = await resolveReviewThreadForComment({
           operatorRoot,
           pr,
           commentId: target.commentId,
           spawnFn,
+          timeoutMs: ghTimeoutMs,
         });
         if (resolveOutcome === "resolved") {
           log(`resolved: review thread for ${target.priorId} (verified-gone)`);
@@ -2356,7 +2391,11 @@ export async function postInlineIfEligible(input: {
   webUrl: string | undefined;
   spawnFn?: typeof Bun.spawn;
   rereview?: RereviewProvenance;
-  rereviewPriors?: readonly { id: string; claim: string }[];
+  rereviewPriors?: readonly {
+    id: string;
+    claim: string;
+    locs: readonly string[];
+  }[];
 }): Promise<InlinePostOutcome | null> {
   if (input.sessionFailed) {
     log(input.skippedReason);

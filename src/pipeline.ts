@@ -646,6 +646,19 @@ async function execute(
   const gotchasFile = Bun.file(input.gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
   if (gotchas.trim().length === 0) {
+    // The plan is still written, and that is not tidiness — `writePipelinePlan`
+    // is the ONLY caller of `fillRereviewProvenance`, and that is the only
+    // thing that fills the CLI's `rereview.live` from phase B. Returning
+    // straight out left it at its initial `live: []` while `postInlineFindings`
+    // went on to PATCH the summary's state block with that empty list, so a
+    // run that spawned nothing at all erased every carried prior — BLOCKERs
+    // included — from cross-run tracking with no verification ever performed.
+    // Nothing may retire a prior on a path that ran no check: that is §3.3's
+    // "`resolved` is never inferred from absence", violated from the other
+    // direction. Phase B already ran in the CLI, so the deterministic
+    // outcomes stand and anything that was queued lands as `unconfirmed` —
+    // which is precisely what "never run" means there.
+    await writePipelinePlan(input, state);
     return {
       skillOutput: {
         findings: [],

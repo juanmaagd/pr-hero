@@ -106,11 +106,43 @@ async function gh(
     stderr: "pipe",
     ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
+  // Watchdog, same shape as ClaudeCodeRunner.runAttempt's
+  // (`src/step-runner.ts:361-378`): kill on the deadline, clear in a
+  // `finally`, and report the kill as a failure rather than as an empty
+  // success. Bun.spawn's own `timeout` above would also reap a real process,
+  // but only a real one — every `gh` seam in this codebase is a `spawnFn`,
+  // and an explicit kill is the only bound that holds for both. Without it
+  // an accepted-but-unanswered `gh` call parks on `proc.exited` forever and
+  // takes the whole command with it, including an unattended `--yes` run.
+  let timedOut = false;
+  const watchdog =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          proc.kill();
+        }, timeoutMs);
+  let stdout: string;
+  let stderr: string;
+  let exitCode: number;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+  }
+  if (timedOut) {
+    return {
+      ok: false,
+      stdout,
+      stderr: `gh timed out after ${timeoutMs} ms${
+        stderr.trim().length === 0 ? "" : `: ${stderr.trim()}`
+      }`,
+    };
+  }
   return { ok: exitCode === 0, stdout, stderr };
 }
 
@@ -1298,6 +1330,10 @@ export async function postReviewCommentReply(input: {
   inReplyTo: number;
   body: string;
   spawnFn?: typeof Bun.spawn;
+  // Optional per-call watchdog. Absent keeps the historical unbounded wait
+  // for the interactive triage path (a human is watching); the verified-gone
+  // collapse loop passes one, because nothing is watching an unattended run.
+  timeoutMs?: number;
 }): Promise<number> {
   const result = await gh(
     input.operatorRoot,
@@ -1313,6 +1349,7 @@ export async function postReviewCommentReply(input: {
     ],
     input.body,
     input.spawnFn,
+    input.timeoutMs,
   );
   if (!result.ok) {
     throw new CliError(
@@ -1396,12 +1433,14 @@ interface RepoOwnerName {
 async function ghRepoOwnerName(
   operatorRoot: string,
   spawnFn?: typeof Bun.spawn,
+  timeoutMs?: number,
 ): Promise<RepoOwnerName> {
   const result = await gh(
     operatorRoot,
     ["repo", "view", "--json", "owner,name"],
     undefined,
     spawnFn,
+    timeoutMs,
   );
   if (!result.ok) {
     throw new CliError(`gh repo view failed: ${result.stderr.trim()}`);
@@ -1481,10 +1520,17 @@ export async function resolveReviewThreadForComment(input: {
   pr: number;
   commentId: number;
   spawnFn?: typeof Bun.spawn;
+  // Applied to EVERY gh call this function makes — the repo lookup and both
+  // graphql round trips. A bound on two of three still hangs on the third.
+  timeoutMs?: number;
 }): Promise<ResolveThreadOutcome> {
   assertBalancedGraphql(REVIEW_THREADS_QUERY, "reviewThreads");
   assertBalancedGraphql(RESOLVE_THREAD_MUTATION, "resolveReviewThread");
-  const repo = await ghRepoOwnerName(input.operatorRoot, input.spawnFn);
+  const repo = await ghRepoOwnerName(
+    input.operatorRoot,
+    input.spawnFn,
+    input.timeoutMs,
+  );
   const listed = await gh(
     input.operatorRoot,
     [
@@ -1501,6 +1547,7 @@ export async function resolveReviewThreadForComment(input: {
     ],
     undefined,
     input.spawnFn,
+    input.timeoutMs,
   );
   if (!listed.ok) {
     throw new CliError(
@@ -1525,6 +1572,7 @@ export async function resolveReviewThreadForComment(input: {
     ],
     undefined,
     input.spawnFn,
+    input.timeoutMs,
   );
   if (!mutated.ok) {
     throw new CliError(

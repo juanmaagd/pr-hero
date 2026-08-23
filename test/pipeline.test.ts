@@ -18,6 +18,8 @@ import {
   RUNTIME_PREAMBLE,
   runPipeline,
 } from "../src/pipeline";
+import type { PriorRecord } from "../src/rereview-classify";
+import type { RereviewProvenance } from "../src/rereview-prepare";
 import type { ScoutLead } from "../src/scout";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
 import type { SessionUsage } from "../src/usage";
@@ -270,6 +272,110 @@ describe("gotchas fail-loud", () => {
     const result = await runPipeline(input, { runner });
     expect(result.skillOutput).toEqual(PARTIAL_EMPTY);
     expect(runner.specs.length).toBe(0);
+  });
+
+  // F004 — the short-circuit must not erase what it never checked.
+  //
+  // `writePipelinePlan` is the only caller of `fillRereviewProvenance`, and
+  // that is the only thing that fills the CLI's `rereview.live` from phase B.
+  // Returning without it left `live: []` on the object the CLI holds, and
+  // `postInlineFindings` still PATCHes the summary's state block from that
+  // list (`sessionFailed` is false on this path) — so a run that spawned
+  // nothing at all wiped every carried prior, BLOCKERs included, out of
+  // cross-run tracking with no verification performed. §3.3's "`resolved` is
+  // never inferred from absence", violated from the other direction.
+  test("F004 — the gotchas-empty path carries priors instead of erasing them", async () => {
+    const rereview: RereviewProvenance = {
+      case: "C",
+      last_reviewed_head: "1".repeat(40),
+      last_head_source: "summary_marker",
+      discovery_range: `${"1".repeat(40)}..${"2".repeat(40)}`,
+      discovery_restricted: true,
+      discovery_skipped_empty_delta: false,
+      prior_findings: 2,
+      settled_deterministically: 1,
+      verified: 0,
+      verification_capped: 0,
+      verification_triggers: {
+        applied: 0,
+        touched: 0,
+        overlap: 0,
+        verify_all: 0,
+      },
+      live: [],
+      resolved_verified: 0,
+      returned: 0,
+      re_tiered: 0,
+    };
+    const priors: PriorRecord[] = [
+      {
+        id: "R001",
+        sev: "BLOCKER",
+        tier: "blocking",
+        channel: "inline",
+        locs: ["src/a.ts:10"],
+        claim: "a carried blocker nobody checked this run",
+        triage: null,
+        newThreadReply: false,
+      },
+      {
+        id: "R002",
+        sev: "CRITICAL",
+        tier: "blocking",
+        channel: "inline",
+        locs: ["src/b.ts:20"],
+        claim: "a prior that was queued for verification",
+        triage: null,
+        newThreadReply: false,
+      },
+    ];
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput(
+      {
+        rereview,
+        phaseB: {
+          priors,
+          settled: [
+            {
+              id: "R001",
+              status: "carried",
+              locs: ["src/a.ts:10"],
+              renamed: false,
+            },
+            {
+              id: "R002",
+              status: "queued",
+              locs: ["src/b.ts:20"],
+              renamed: false,
+              trigger: "touched",
+            },
+          ],
+        },
+      },
+      { gotchas: "" },
+    );
+    const result = await runPipeline(input, { runner });
+
+    // The short circuit itself is unchanged: still partial, still zero steps.
+    expect(result.skillOutput).toEqual(PARTIAL_EMPTY);
+    expect(runner.specs.length).toBe(0);
+
+    // The object the CLI holds — and therefore the state block it PATCHes.
+    // R002 was queued and never verified, so it lands `unconfirmed`, which is
+    // exactly what "verification never ran" means (§3.3). Neither prior is
+    // retired, because nothing checked either of them.
+    expect(rereview.live.map((f) => [f.id, f.status])).toEqual([
+      ["R001", "carried"],
+      ["R002", "unconfirmed"],
+    ]);
+    expect(rereview.resolved_ids).toEqual([]);
+    expect(rereview.verified).toBe(0);
+
+    // And the run can prove it: the provenance artifact is written too.
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as { rereview?: { live?: { id: string }[] } };
+    expect(plan.rereview?.live?.map((f) => f.id)).toEqual(["R001", "R002"]);
   });
 });
 

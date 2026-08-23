@@ -3,6 +3,7 @@
 // `merge-base --is-ancestor`, and `diff --name-only`, and tests inject fakes.
 // The case machine itself stays in rereview-plan.ts.
 
+import { normalizePath } from "./compare";
 import type { Severity } from "./findings";
 import { claimFingerprint } from "./pr-preflight";
 import {
@@ -12,7 +13,11 @@ import {
   type PriorTriage,
   type RereviewCase,
 } from "./rereview-classify";
-import type { FindingIdentity } from "./rereview-identity";
+import {
+  type FindingIdentity,
+  IDENTITY_LINE_WINDOW,
+  identityFromLocs,
+} from "./rereview-identity";
 import {
   type DiscoveryPlan,
   decideRereviewCase,
@@ -313,9 +318,134 @@ export function priorsFromPostedMarkers(
   }));
 }
 
+// A previously posted per-finding comment, as much of it as the prior→comment
+// binding needs. Deliberately NOT narrowed to `{ id, marker: { c } }`: that
+// narrowing is what made the two consumers below structurally unable to
+// consult the path and line sitting right there in the marker, so both keyed
+// on `c` alone and neither could ever bind a prior recovered by
+// `priorsFromPostedMarkers` (claim `""`, so a fingerprint no real marker
+// carries). Types are a place bugs hide.
+export interface PostedForPrior {
+  id: number;
+  marker: { path: string; line: number; c: string };
+  // GitHub's live projection of a REVIEW comment. Present only for the
+  // review channel, and only a projection — see the two-projection rule in
+  // `bindPriorsToPosted`.
+  livePath?: string;
+  liveLine?: number;
+}
+
+// THE PRIOR→COMMENT BINDING, and the one place `c` is allowed to speak here.
+//
+// Three identity regimes now live in this codebase and they are NOT
+// interchangeable. Naming them together because conflating two of them is
+// exactly the defect this function replaces:
+//
+//   1. marker-strict — `matchPostedFindingExact` (`src/triage-reply.ts:63-88`):
+//      path + line + headSha + c, live projection ignored ON PURPOSE. It binds
+//      a triage reply to the comment a human was looking at, and design §3.5
+//      says the marker stays strict there.
+//   2. the §3.5 loc-SET identity — `identitiesMatch`
+//      (`src/rereview-identity.ts`): equal-or-contained path sets with
+//      overlapping spans. It pairs two FINDINGS across runs. It cannot serve
+//      here: a posted comment has ONE anchor while a prior may carry many
+//      locs, so `identitiesMatch` would refuse every multi-loc prior its own
+//      single-anchor comment.
+//   3. this one — the comment's anchor must land within the window of one of
+//      the prior's locs on the same normalized path; `c` breaks a distance
+//      TIE and nothing else.
+//
+// WHY the anchor is tested against BOTH the marker's stored path/line and the
+// live projection, taking whichever is nearer: GitHub re-anchors a review
+// comment's live `line` whenever the PR's diff changes, including when the
+// BASE advances with no new push (`src/inline.ts:213-219`). A state-block
+// prior still at `a.ts:100` and its own comment now projected to `a.ts:112`
+// is zero-drift; live-only matching would miss it and silently drop the
+// author's triage — the same class of invisible failure being fixed.
+//
+// WHY `c` is not a requirement even for a lone candidate: a prior recovered
+// from posted markers has no claim at all, and LLM claim wording drifts run
+// to run for the same defect. Requiring `c` would re-elevate the tie-breaker
+// to an identity from the other direction.
+//
+// One-to-one and greedy in prior order, same posture as `matchPostedFindings`
+// (`src/inline.ts`): a posted comment is consumable once, and an unresolvable
+// ambiguity binds NOTHING. Direction of error is under-match — a missed
+// binding costs a dropped triage tag or a thread left open; an over-match
+// puts a "✅ RESOLVED · verified gone" reply on a still-live finding.
+export function bindPriorsToPosted<T extends PostedForPrior>(
+  priors: readonly { id: string; locs: readonly string[]; claim: string }[],
+  posted: readonly T[],
+  window: number = IDENTITY_LINE_WINDOW,
+): Map<string, T> {
+  const bound = new Map<string, T>();
+  const consumed = new Set<number>();
+  for (const prior of priors) {
+    const identity = identityFromLocs(prior.locs);
+    if (identity.size === 0) continue;
+    const candidates: { row: T; distance: number }[] = [];
+    for (const row of posted) {
+      if (consumed.has(row.id)) continue;
+      const distance = anchorDistance(identity, row, window);
+      if (distance !== null) candidates.push({ row, distance });
+    }
+    if (candidates.length === 0) continue;
+    const min = Math.min(...candidates.map((c) => c.distance));
+    const tied = candidates.filter((c) => c.distance === min);
+    const winner = resolvePriorTie(tied, prior.claim);
+    if (winner === undefined) continue;
+    bound.set(prior.id, winner);
+    consumed.add(winner.id);
+  }
+  return bound;
+}
+
+// Nearest approach of the comment's anchor to any of the prior's spans on a
+// shared path, over both projections; null when neither lands within window.
+function anchorDistance(
+  identity: FindingIdentity,
+  row: PostedForPrior,
+  window: number,
+): number | null {
+  const projections: readonly (readonly [string, number])[] = [
+    [row.marker.path, row.marker.line],
+    [row.livePath ?? row.marker.path, row.liveLine ?? row.marker.line],
+  ];
+  let best: number | null = null;
+  for (const [path, line] of projections) {
+    const spans = identity.get(normalizePath(path));
+    if (spans === undefined) continue;
+    for (const span of spans) {
+      const distance =
+        line < span.start
+          ? span.start - line
+          : line > span.end
+            ? line - span.end
+            : 0;
+      if (distance > window) continue;
+      if (best === null || distance < best) best = distance;
+    }
+  }
+  return best;
+}
+
+function resolvePriorTie<T extends PostedForPrior>(
+  tied: readonly { row: T; distance: number }[],
+  claim: string,
+): T | undefined {
+  if (tied.length === 1) return tied[0]?.row;
+  // No claim, no tie-break: `claimFingerprint("")` is a real constant hash
+  // (`e3b0c44298fc`) that every empty-claim prior shares, so consulting it
+  // here would hand the whole tied set to whichever row came first.
+  if (claim.trim().length === 0) return undefined;
+  const fingerprint = claimFingerprint(claim);
+  const matching = tied.filter((c) => c.row.marker.c === fingerprint);
+  return matching.length === 1 ? matching[0]?.row : undefined;
+}
+
 export function enrichPriorsFromThreads(input: {
   priors: readonly PriorRecord[];
-  posted: readonly { id: number; marker: { c: string } }[];
+  posted: readonly PostedForPrior[];
   replies: readonly {
     in_reply_to_id: number | null;
     body: string;
@@ -323,9 +453,9 @@ export function enrichPriorsFromThreads(input: {
   }[];
   summaryUpdatedAt: string | null;
 }): PriorRecord[] {
+  const bound = bindPriorsToPosted(input.priors, input.posted);
   return input.priors.map((prior) => {
-    const fingerprint = claimFingerprint(prior.claim);
-    const parent = input.posted.find((row) => row.marker.c === fingerprint);
+    const parent = bound.get(prior.id);
     if (parent === undefined) return prior;
     const thread = input.replies.filter(
       (reply) => reply.in_reply_to_id === parent.id,
@@ -350,30 +480,28 @@ export function enrichPriorsFromThreads(input: {
   });
 }
 
+// WHY the binding runs over EVERY prior and not just the verified-gone ones:
+// one-to-one only means anything when the carried priors get to claim their
+// own comments too. Binding the verified-gone subset alone would let a
+// retired prior take a still-live neighbour's thread, which is the ✅ on a
+// live defect this whole function exists to avoid.
 export function collapseTargets(input: {
   verifiedGoneIds: readonly string[];
-  priors: readonly { id: string; claim: string }[];
-  posted: readonly {
-    id: number;
-    channel: "review" | "issue";
-    marker: { c: string };
-  }[];
+  priors: readonly { id: string; claim: string; locs: readonly string[] }[];
+  posted: readonly (PostedForPrior & { channel: "review" | "issue" })[];
 }): Array<{
   priorId: string;
   commentId: number;
   channel: "review" | "issue";
 }> {
-  const priorById = new Map(input.priors.map((prior) => [prior.id, prior]));
+  const bound = bindPriorsToPosted(input.priors, input.posted);
   const out: Array<{
     priorId: string;
     commentId: number;
     channel: "review" | "issue";
   }> = [];
   for (const id of input.verifiedGoneIds) {
-    const prior = priorById.get(id);
-    if (prior === undefined) continue;
-    const fingerprint = claimFingerprint(prior.claim);
-    const posted = input.posted.find((row) => row.marker.c === fingerprint);
+    const posted = bound.get(id);
     if (posted === undefined) continue;
     out.push({
       priorId: id,
