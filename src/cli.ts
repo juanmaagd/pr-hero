@@ -3780,26 +3780,52 @@ function configTag(key: string, source: ConfigSource): string | undefined {
     : undefined;
 }
 
+// Which keys a flag decided, so the two consumers below cannot disagree about
+// it. A flag decided the value, so NO config layer did — and D5 lets a flag
+// exceed a cap on purpose. ConfigSource cannot express that (JD-10), so the
+// honest move is to print no tag at all rather than to name a layer that lost.
+// `agents_dir` is read off the RESOLUTION, the only thing that can say a flag
+// beat both layers. Shared rather than inlined because the suppression and the
+// caption that has to account for it are two sides of one fact: when this said
+// only "suppress the tag", configDetail went on claiming an origin for exactly
+// the keys the suppression had removed from the check.
+function flagDecided(
+  provenance: ConfigProvenance,
+  options: Pick<CliOptions, "base" | "summary" | "model">,
+): { base: boolean; summary: boolean; model: boolean; any: boolean } {
+  const base = options.base !== undefined;
+  const summary = options.summary !== undefined;
+  const model = options.model !== undefined;
+  return {
+    base,
+    summary,
+    model,
+    any: base || summary || model || provenance.agentsDirSource === "flag",
+  };
+}
+
 function configTags(
   provenance: ConfigProvenance,
   options: Pick<CliOptions, "base" | "summary" | "model">,
 ): string[] {
   const s = provenance.sources;
-  // A flag decided the value, so NO config layer did — and D5 lets a flag
-  // exceed a cap on purpose. ConfigSource cannot express that (JD-10), so the
-  // honest move is to print no tag at all rather than to name a layer that
-  // lost. `agents_dir` needs no such guard: its own resolution reports
-  // `flag`, and only `global` is tagged.
-  const flagged = {
-    base: options.base !== undefined,
-    summary: options.summary !== undefined,
-    model: options.model !== undefined,
-  };
+  const flagged = flagDecided(provenance, options);
   // Every key is listed, including the three `repo` ones that can never
   // produce a tag today: a direction change must not silently drop a key off
   // the card.
   return [
-    provenance.agentsDirSource === "global" ? "agents_dir ← global" : undefined,
+    // Both sources the operator cannot see by opening the checkout, not just
+    // the global file. Judgment ledger JD-9 left "a global `agents_dir`
+    // silently preempts PRHERO_AGENTS_DIR" open on the grounds that this tag
+    // is the mitigation — but firing on `global` alone covered one direction
+    // only: an env-sourced prompt set, which picks every hunter's model, was
+    // as absent from the checkout as a global one and printed nothing. `flag`
+    // stays untagged (D5, JD-10) and `repo` stays untagged (§3.6, the
+    // unsurprising case).
+    provenance.agentsDirSource === "global" ||
+    provenance.agentsDirSource === "env"
+      ? `agents_dir ← ${provenance.agentsDirSource}`
+      : undefined,
     flagged.base ? undefined : configTag("default_base", s.default_base),
     configTag("parity_trigger_paths", s.parity_trigger_paths),
     configTag("suspicion_priors", s.suspicion_priors),
@@ -3842,13 +3868,26 @@ function configDetail(
   options: Pick<CliOptions, "base" | "summary" | "model">,
 ): string {
   const tags = configTags(provenance, options);
+  // No tags has TWO causes, and only one of them licenses the sentence this
+  // used to print unconditionally. Nothing hoisted is one. The other is that a
+  // flag decided a key and configTags suppressed its tag on purpose (JD-10) —
+  // and on that run "every value came from the repo file or a built-in
+  // default" is false about the one value the operator most recently typed.
+  // The caption is therefore scoped to what the function actually checked; it
+  // is not fixed by tagging the flag, which would reopen JD-10 by naming a
+  // layer for a key no layer decided. With no flag in play the original
+  // sentence is exact and stays: `flag` is excluded by the branch, `global`
+  // and `env` both produce a tag, so only repo-or-default can reach it.
   return (
     `repo ${provenance.repoConfigPath}` +
     ` · global ${provenance.globalConfigPath}` +
     ` (${provenance.globalPresent ? "present" : "absent"})` +
-    (tags.length === 0
-      ? " — every value came from the repo file or a built-in default"
-      : ` · ${tags.join(" · ")}`)
+    (tags.length > 0
+      ? ` · ${tags.join(" · ")}`
+      : flagDecided(provenance, options).any
+        ? " — every value a flag did not decide came from the repo file or" +
+          " a built-in default"
+        : " — every value came from the repo file or a built-in default")
   );
 }
 

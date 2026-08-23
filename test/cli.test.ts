@@ -3687,7 +3687,21 @@ describe("loadEffectiveConfig — O-8, the worktree is never read", () => {
     try {
       // The reviewed PR's tree, as a sibling the way ~/.prhero/repos/<id>/
       // worktrees actually live — with a config the PR author committed.
-      const worktree = path.join(operator.root, "..", "pr-hero-decoy-worktree");
+      //
+      // mkdtemp, like every other fixture in this file, and NOT
+      // `path.join(operator.root, "..", "pr-hero-decoy-worktree")`. That built
+      // a FIXED name one level above an mkdtemp-randomised root, which is the
+      // OS tmp root itself — so every concurrent run of this suite (parallel
+      // shards, a second `bun test` on the machine) shared one directory and
+      // raced: one run's mkdir/Bun.write interleaving with another's cleanup
+      // `rm` is a flaky ENOENT/EEXIST, or a run reading the other's decoy.
+      // `operator.root` is itself a direct child of tmpdir(), so a randomised
+      // name here is still the sibling the comment above describes, and the
+      // "decoy-worktree" substring is kept because the last assertion below
+      // is what gives it meaning.
+      const worktree = await mkdtemp(
+        path.join(tmpdir(), "pr-hero-decoy-worktree-"),
+      );
       await mkdir(path.join(worktree, ".prhero"), { recursive: true });
       await Bun.write(
         path.join(worktree, ".prhero", "config.json"),
