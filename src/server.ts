@@ -14,6 +14,8 @@ import {
   parseListRunsQuery,
   parseSearchFindingsQuery,
   parseUsageQuery,
+  type RecordTriageRequestBody,
+  type RecordTriageResponse,
   type SaveRunRequestBody,
   type SaveRunResponse,
   type SearchFindingsResponse,
@@ -22,8 +24,10 @@ import {
 import {
   exportComparison,
   exportFindingsDocument,
+  getFindingTriageByRunId,
   getRunById,
   openProductStore,
+  recordFindingTriage,
   saveRunTransaction,
 } from "./store";
 import type { CanonicalFindingRow, CanonicalRunRow } from "./store-preflight";
@@ -148,6 +152,34 @@ export function startProductStoreServer(
           const id = Number(match.params.id);
           const comp = exportComparison(db, id);
           return Response.json({ comparison: comp });
+        }
+
+        case "get_run_triage": {
+          const id = Number(match.params.id);
+          const triage = getFindingTriageByRunId(db, id);
+          return Response.json({ triage });
+        }
+
+        case "record_run_triage": {
+          const id = Number(match.params.id);
+          const run = getRunById(db, id);
+          if (!run) {
+            return Response.json({ error: "Run not found" }, { status: 404 });
+          }
+          const body = (await req.json()) as RecordTriageRequestBody;
+          const triageId = recordFindingTriage(db, {
+            run_id: id,
+            finding_id: body.finding_id,
+            comment_id: body.comment_id ?? null,
+            tag: body.tag,
+            verdict: body.verdict ?? null,
+            actor: body.actor,
+            reasoning: body.reasoning,
+            issue_number: body.issue_number ?? null,
+            created_at: body.created_at ?? new Date().toISOString(),
+          });
+          const response: RecordTriageResponse = { ok: true, id: triageId };
+          return Response.json(response);
         }
 
         case "get_usage": {

@@ -15,9 +15,11 @@ import type { PerAgentUsage } from "../src/pipeline";
 import {
   exportComparison,
   exportFindingsDocument,
+  getFindingTriageByRunId,
   getRunById,
   openProductStore,
   queryRuns,
+  recordFindingTriage,
   saveRunTransaction,
 } from "../src/store";
 import {
@@ -756,7 +758,7 @@ describe("saveRunTransaction and round-trip fidelity", () => {
     `);
     legacyDb.close();
 
-    // Open via openProductStore, which must migrate it to version 2 without cascade deletes
+    // Open via openProductStore, which must migrate it to current version without cascade deletes
     const migratedDb = openProductStore(dbPath);
     try {
       const version = (
@@ -764,7 +766,7 @@ describe("saveRunTransaction and round-trip fidelity", () => {
           user_version: number;
         }
       ).user_version;
-      expect(version).toBe(2);
+      expect(version).toBe(CURRENT_PRODUCT_SCHEMA_VERSION);
 
       // Verify that the legacy run and finding were NOT cascade deleted during DROP TABLE runs
       const legacyRun = getRunById(migratedDb, 1);
@@ -792,6 +794,115 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       expect(exported).not.toBeNull();
     } finally {
       migratedDb.close();
+    }
+  });
+
+  test("records and retrieves finding triage events with cascade deletion on run delete", async () => {
+    const dbPath = await tmpDbPath();
+    const db = openProductStore(dbPath);
+    try {
+      const runId = saveRunTransaction(
+        db,
+        projectCompleteRun({
+          doc: sampleDoc(),
+          repoId: "github.com/org/triage-repo",
+          runDir: "run-triage-1",
+          checkoutPath: null,
+        }),
+      );
+
+      const triageId = recordFindingTriage(db, {
+        run_id: runId,
+        finding_id: "F001",
+        comment_id: 12345,
+        tag: "applied",
+        verdict: null,
+        actor: "agent",
+        reasoning: "Fixed in commit abc1234",
+        issue_number: null,
+        created_at: "2026-08-23T18:00:00.000Z",
+      });
+
+      expect(triageId).toBeGreaterThan(0);
+
+      const events = getFindingTriageByRunId(db, runId);
+      expect(events.length).toBe(1);
+      expect(events[0]?.finding_id).toBe("F001");
+      expect(events[0]?.tag).toBe("applied");
+      expect(events[0]?.actor).toBe("agent");
+      expect(events[0]?.reasoning).toBe("Fixed in commit abc1234");
+      expect(events[0]?.comment_id).toBe(12345);
+
+      // Deleting the run must cascade-delete the triage event
+      db.query("DELETE FROM runs WHERE id = ?").run(runId);
+      const afterDelete = getFindingTriageByRunId(db, runId);
+      expect(afterDelete.length).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("migrates a user_version=2 database to version 3 seamlessly", async () => {
+    const dbPath = await tmpDbPath();
+    const dbV2 = new Database(dbPath, { create: true });
+    dbV2.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id TEXT NOT NULL,
+        run_dir TEXT NOT NULL,
+        pr INTEGER NULL,
+        checkout_path TEXT NULL,
+        head_sha TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        diff_from_sha TEXT NULL,
+        run_status TEXT NOT NULL,
+        session_failed INTEGER NULL,
+        model TEXT NOT NULL,
+        iteration INTEGER NOT NULL,
+        parity_hunter_fired INTEGER NOT NULL,
+        prompt_set_name TEXT NULL,
+        prompt_set_sha256 TEXT NULL,
+        driver_sha TEXT NULL,
+        engine_name TEXT NULL,
+        engine_version TEXT NULL,
+        summary_prose TEXT NULL,
+        summary_score INTEGER NULL,
+        summary_score_reason TEXT NULL,
+        generated_at TEXT NOT NULL,
+        wall_ms INTEGER NOT NULL,
+        index_ms INTEGER NOT NULL,
+        index_mode TEXT NULL,
+        index_disk_mb REAL NULL,
+        sync_ms INTEGER NULL,
+        tokens_in INTEGER NOT NULL,
+        tokens_out INTEGER NOT NULL,
+        tokens_total INTEGER NOT NULL,
+        cost_usd_est REAL NOT NULL,
+        blocking INTEGER NOT NULL,
+        advisory INTEGER NOT NULL,
+        root_causes_json TEXT NULL,
+        greptile_found INTEGER NULL,
+        UNIQUE (repo_id, run_dir)
+      );
+      PRAGMA user_version = 2;
+    `);
+    dbV2.close();
+
+    const dbV3 = openProductStore(dbPath);
+    try {
+      const version = (
+        dbV3.query("PRAGMA user_version;").get() as { user_version: number }
+      ).user_version;
+      expect(version).toBe(3);
+
+      const tableExists = dbV3
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='finding_triage'",
+        )
+        .get();
+      expect(tableExists).not.toBeNull();
+    } finally {
+      dbV3.close();
     }
   });
 });

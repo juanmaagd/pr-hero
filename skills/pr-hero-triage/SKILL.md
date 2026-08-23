@@ -4,7 +4,7 @@ description: "Triage pr-hero findings posted as PR comments — for each one, re
 license: MIT
 metadata:
   author: gentleman-programming
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## When to Use
@@ -81,13 +81,20 @@ current head:
 
    The driver resolves the parent from the posted `<!-- pr-hero-finding`
    marker (never a comment id, never the nearest line), prepends the triage
-   marker and the visible badge, posts the reply, and — when the parent is
-   an inline review comment — resolves that review thread. If the driver
-   says no posted marker matches this `F00N`, the finding lives in the
-   summary bucket (or was never posted): stop. Do not fall back to `gh`.
-   `applied` takes no `--verdict`. `dismissed` / `deferred` /
-   `misclassified` require `--verdict` from the adjudicator.
-   `--issue` is optional and only valid with `--tag deferred`.
+   marker and the visible badge, posts the reply, records the triage event
+   transactionally in the canonical product store (`finding_triage` table in
+   `~/.prhero/prhero.db`), and — when the parent is an inline review
+   comment — resolves that review thread. If the driver says no posted marker
+   matches this `F00N`, the finding lives in the summary bucket (or was
+   never posted): stop. Do not fall back to `gh`. `applied` takes no
+   `--verdict`. `dismissed` / `deferred` / `misclassified` require
+   `--verdict` from the adjudicator. `--issue` is optional and only valid
+   with `--tag deferred`.
+
+   *(Note: The MCP server is strictly read-only for querying runs, findings, and
+   past triage records via `prhero_get_triage` and `prhero_get_findings`. All
+   mutations — posting comments, resolving threads, and updating the database —
+   must be performed via `pr-hero triage reply`.)*
 
    **Greptile re-review:** Greptile updates its existing PR comment in place —
    it does not post a second one. Do not wait for a new Greptile comment to
@@ -183,7 +190,8 @@ nothing else to consult.
 
 `--body-file` is **reasoning prose only**. Do not put a `<!-- pr-hero-triage` marker or a
 badge line in that file — the driver prepends both, picks the parent comment from the posted
-`<!-- pr-hero-finding` marker, and resolves the inline review thread when there is one.
+`<!-- pr-hero-finding` marker, records the decision to the canonical store (`finding_triage`
+table), and resolves the inline review thread when there is one.
 Passing a GitHub comment id, or posting with `gh api … in_reply_to`, is how replies landed
 under Greptile on Musive #1724. Do not do that. Do not reply on
 `<!-- pr-hero-report -->` either: that is the summary, including Outside Diff.

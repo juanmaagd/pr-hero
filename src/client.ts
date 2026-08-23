@@ -8,9 +8,12 @@ import type { FindingsDocument } from "./findings";
 import type { StoredComparison } from "./ledger";
 import type {
   FindingDetail,
+  GetTriageResponse,
   HealthResponse,
   ListRunsQuery,
   ListRunsResponse,
+  RecordTriageRequestBody,
+  RecordTriageResponse,
   SaveRunRequestBody,
   SaveRunResponse,
   SearchFindingsResponse,
@@ -18,7 +21,11 @@ import type {
   UsageQueryParams,
   UsageResponse,
 } from "./server-preflight";
-import type { CanonicalRunRow, ProjectedCompleteRun } from "./store-preflight";
+import type {
+  CanonicalRunRow,
+  FindingTriageRow,
+  ProjectedCompleteRun,
+} from "./store-preflight";
 
 export class StoreClientError extends Error {
   constructor(
@@ -175,5 +182,25 @@ export class ProductStoreClient {
     const path = `/v1/findings${qs ? `?${qs}` : ""}`;
     const res = await this.request<SearchFindingsResponse>("GET", path);
     return res.findings;
+  }
+
+  async getTriage(runId: number): Promise<FindingTriageRow[]> {
+    const res = await this.request<GetTriageResponse>(
+      "GET",
+      `/v1/runs/${runId}/triage`,
+    );
+    return res.triage;
+  }
+
+  async recordTriage(
+    runId: number,
+    input: RecordTriageRequestBody,
+  ): Promise<number> {
+    const res = await this.request<RecordTriageResponse>(
+      "POST",
+      `/v1/runs/${runId}/triage`,
+      input,
+    );
+    return res.id;
   }
 }

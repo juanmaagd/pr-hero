@@ -189,6 +189,9 @@ export interface CliOptions {
   // split (splitBugLabels) never lowercases. Requires --issues — a value
   // flag of a source that is not on would be a silently dropped intention.
   bugLabels?: string;
+  // mcp only (Canonical Store / MCP): optional socket or db path overrides.
+  socket?: string;
+  db?: string;
 }
 
 export interface ParsedCli {
@@ -204,6 +207,7 @@ export interface ParsedCli {
     | "reverts"
     | "corpus"
     | "config"
+    | "mcp"
     | "help";
   options: CliOptions;
 }
@@ -215,6 +219,8 @@ Usage:
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero ledger [options]   Accumulate every run's comparison.json into one
                              markdown ledger (the three buckets as a rate)
+  pr-hero mcp [options]      Start the read-only Model Context Protocol (MCP)
+                             server over stdio for AI coding assistants. Read-only, $0
   pr-hero post --pr <n> --from <run-dir> [--dry-run]
                              Publish a PREVIOUSLY RUN review's findings.json
                              to PR <n>, reading it (and diff.patch) off disk
@@ -463,6 +469,8 @@ const VALUE_FLAGS = new Set([
   "--since",
   "--proximity-days",
   "--bug-labels",
+  "--socket",
+  "--db",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -500,6 +508,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "reverts"
     | "corpus"
     | "config"
+    | "mcp"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -672,12 +681,13 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "usage" &&
       arg !== "reverts" &&
       arg !== "corpus" &&
-      arg !== "config"
+      arg !== "config" &&
+      arg !== "mcp"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", ` +
           '"ledger", "watch", "post", "triage", "gc", "usage", "reverts", ' +
-          '"corpus" and "config")',
+          '"corpus", "config" and "mcp")',
       );
     }
     command = arg;
@@ -1070,6 +1080,12 @@ function applyValueFlag(
       options.issue = parsed;
       return;
     }
+    case "--socket":
+      options.socket = value;
+      return;
+    case "--db":
+      options.db = value;
+      return;
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {

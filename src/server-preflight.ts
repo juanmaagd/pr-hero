@@ -8,6 +8,7 @@ import type { HopTrail, Tier } from "./findings";
 import type {
   CanonicalFindingRow,
   CanonicalRunRow,
+  FindingTriageRow,
   ProjectedCompleteRun,
 } from "./store-preflight";
 
@@ -71,6 +72,26 @@ export interface SearchFindingsResponse {
   findings: FindingDetail[];
 }
 
+export interface GetTriageResponse {
+  triage: FindingTriageRow[];
+}
+
+export interface RecordTriageRequestBody {
+  finding_id: string;
+  comment_id?: number | null;
+  tag: string;
+  verdict?: string | null;
+  actor: string;
+  reasoning: string;
+  issue_number?: number | null;
+  created_at?: string;
+}
+
+export interface RecordTriageResponse {
+  ok: true;
+  id: number;
+}
+
 export interface ErrorResponse {
   error: string;
 }
@@ -90,6 +111,16 @@ export type RoutePattern =
       method: "GET";
       pathPattern: "/v1/runs/:id/comparison";
     }
+  | {
+      name: "get_run_triage";
+      method: "GET";
+      pathPattern: "/v1/runs/:id/triage";
+    }
+  | {
+      name: "record_run_triage";
+      method: "POST";
+      pathPattern: "/v1/runs/:id/triage";
+    }
   | { name: "get_usage"; method: "GET"; path: "/v1/usage" }
   | { name: "search_findings"; method: "GET"; path: "/v1/findings" };
 
@@ -101,6 +132,8 @@ export interface MatchedRoute {
     | "get_run"
     | "get_run_findings_doc"
     | "get_run_comparison"
+    | "get_run_triage"
+    | "record_run_triage"
     | "get_usage"
     | "search_findings";
   params: Record<string, string>;
@@ -130,6 +163,19 @@ export function matchRoute(
 
   if (m === "GET" && pathname === "/v1/findings") {
     return { name: "search_findings", params: {} };
+  }
+
+  const triageMatch = /^\/v1\/runs\/(\d+)\/triage$/.exec(pathname);
+  if (triageMatch) {
+    if (m === "GET") {
+      return { name: "get_run_triage", params: { id: triageMatch[1] ?? "" } };
+    }
+    if (m === "POST") {
+      return {
+        name: "record_run_triage",
+        params: { id: triageMatch[1] ?? "" },
+      };
+    }
   }
 
   const findingsDocMatch = /^\/v1\/runs\/(\d+)\/findings-document$/.exec(

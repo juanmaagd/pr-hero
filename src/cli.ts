@@ -54,6 +54,7 @@ import {
   renderLedger,
   type StoredComparison,
 } from "./ledger";
+import { runMcpServer } from "./mcp";
 import {
   type FailSoftIngestInput,
   failSoftIngest,
@@ -194,7 +195,12 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner } from "./step-runner";
-import { openProductStore, queryRuns, saveRunTransaction } from "./store";
+import {
+  openProductStore,
+  queryRuns,
+  recordFindingTriage,
+  saveRunTransaction,
+} from "./store";
 import { projectCompleteRun } from "./store-preflight";
 import {
   renderTriageReplyBody,
@@ -505,7 +511,9 @@ async function main(argv: string[]): Promise<number> {
                       ? await corpusCommand(parsed.options)
                       : parsed.command === "config"
                         ? await configCommand(parsed.options)
-                        : await review(parsed.options);
+                        : parsed.command === "mcp"
+                          ? await mcpCommand(parsed.options)
+                          : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -3400,6 +3408,45 @@ export async function runTriageReplyCommand(input: {
         `(${parent.channel} comment ${parent.id})`,
     );
   }
+
+  // Persist triage record to canonical product store (idempotent upsert)
+  try {
+    const layout = prheroLayout(os.homedir());
+    if (existsSync(layout.prheroDbPath)) {
+      const repoId = await tryOriginRepoId(operatorRoot);
+      if (repoId) {
+        const db = openProductStore(layout.prheroDbPath);
+        try {
+          const runDirBasename = path.basename(runDir);
+          const runRow = db
+            .query(
+              "SELECT id FROM runs WHERE repo_id = ? AND run_dir = ? LIMIT 1",
+            )
+            .get(repoId, runDirBasename) as { id: number } | null;
+          if (runRow) {
+            recordFindingTriage(db, {
+              run_id: runRow.id,
+              finding_id: input.findingId,
+              comment_id: parent.id,
+              tag: input.tag,
+              verdict: input.verdict,
+              actor: "agent",
+              reasoning,
+              issue_number: input.issue,
+              created_at: new Date().toISOString(),
+            });
+          }
+        } finally {
+          db.close();
+        }
+      }
+    }
+  } catch (err) {
+    log(
+      `warning: failed to record triage in product store: ${(err as Error).message}`,
+    );
+  }
+
   if (resolveDecision !== "resolve") {
     return 0;
   }
@@ -3823,6 +3870,14 @@ async function configCommand(options: CliOptions): Promise<number> {
     width: terminalWidth(),
   });
   process.stdout.write(`${lines.join("\n")}\n`);
+  return 0;
+}
+
+export async function mcpCommand(options: CliOptions): Promise<number> {
+  await runMcpServer({
+    socketPath: options.socket,
+    dbPath: options.db,
+  });
   return 0;
 }
 
