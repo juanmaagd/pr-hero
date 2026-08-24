@@ -17,6 +17,14 @@ import { chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  getWatcherSpend,
+  killActiveRun,
+  listActiveRuns,
+  queryRecentRuns,
+  registerActiveRun,
+  unregisterActiveRun,
+} from "./activity";
 import { resolveEngineAssets } from "./assets";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
@@ -196,7 +204,7 @@ import {
   sizeGateLine,
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
-import { ClaudeCodeRunner } from "./step-runner";
+import { ClaudeCodeRunner, killAllChildProcesses } from "./step-runner";
 import {
   openProductStore,
   queryRuns,
@@ -234,6 +242,7 @@ import {
   terminalWidth,
   yellow,
 } from "./ui";
+import { renderActivityScreen } from "./ui-activity";
 import { renderConfig } from "./ui-config";
 import { type ResultLinks, renderResult } from "./ui-result";
 import {
@@ -508,31 +517,33 @@ async function main(argv: string[]): Promise<number> {
         ? await runWizard({ cwd: await resolveRepoRoot(parsed.options.repo) })
         : parsed.command === "doctor"
           ? await doctorCommand(parsed.options)
-          : parsed.command === "ledger"
-            ? await ledgerCommand(parsed.options)
-            : parsed.command === "watch"
-              ? await watchCommand(parsed.options)
-              : parsed.command === "post"
-                ? await postCommand(parsed.options)
-                : parsed.command === "triage"
-                  ? await triageCommand(parsed.options)
-                  : parsed.command === "gc"
-                    ? await gcCommand(parsed.options)
-                    : parsed.command === "usage"
-                      ? await usageCommand(parsed.options)
-                      : parsed.command === "reverts"
-                        ? await revertsCommand(parsed.options)
-                        : parsed.command === "corpus"
-                          ? await corpusCommand(parsed.options)
-                          : parsed.command === "config"
-                            ? await configCommand(parsed.options)
-                            : parsed.command === "mcp"
-                              ? await mcpCommand(parsed.options)
-                              : parsed.command === "upgrade"
-                                ? await upgradeCommand(parsed.options)
-                                : parsed.command === "uninstall"
-                                  ? await uninstallCommand(parsed.options)
-                                  : await review(parsed.options);
+          : parsed.command === "activity"
+            ? await activityCommand(parsed.options)
+            : parsed.command === "ledger"
+              ? await ledgerCommand(parsed.options)
+              : parsed.command === "watch"
+                ? await watchCommand(parsed.options)
+                : parsed.command === "post"
+                  ? await postCommand(parsed.options)
+                  : parsed.command === "triage"
+                    ? await triageCommand(parsed.options)
+                    : parsed.command === "gc"
+                      ? await gcCommand(parsed.options)
+                      : parsed.command === "usage"
+                        ? await usageCommand(parsed.options)
+                        : parsed.command === "reverts"
+                          ? await revertsCommand(parsed.options)
+                          : parsed.command === "corpus"
+                            ? await corpusCommand(parsed.options)
+                            : parsed.command === "config"
+                              ? await configCommand(parsed.options)
+                              : parsed.command === "mcp"
+                                ? await mcpCommand(parsed.options)
+                                : parsed.command === "upgrade"
+                                  ? await upgradeCommand(parsed.options)
+                                  : parsed.command === "uninstall"
+                                    ? await uninstallCommand(parsed.options)
+                                    : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -1000,6 +1011,12 @@ async function review(options: CliOptions): Promise<number> {
     summary.enabled,
   );
   let result: PipelineResult;
+  await registerActiveRun({
+    pid: process.pid,
+    repo: repoId ?? path.basename(repoRoot),
+    runDir,
+    startedAt: new Date().toISOString(),
+  });
   try {
     result = await runPipeline(
       {
@@ -1036,6 +1053,7 @@ async function review(options: CliOptions): Promise<number> {
     // try/finally, never success-only: a leaked interval keeps the event
     // loop alive and hangs process exit on the error path.
     progress.stop();
+    await unregisterActiveRun(process.pid);
   }
   const wallMs = Math.round(performance.now() - started);
 
@@ -1768,6 +1786,13 @@ async function reviewPr(
         spec.agents.some((a) => a.role === "refuter"),
         summary.enabled,
       );
+      await registerActiveRun({
+        pid: process.pid,
+        repo: repoHome.paths.repoId ?? path.basename(gitDirOwner),
+        pr: prNumber,
+        runDir,
+        startedAt: new Date().toISOString(),
+      });
       try {
         result = await runPipeline(
           {
@@ -1811,6 +1836,7 @@ async function reviewPr(
         // try/finally, never success-only: a leaked interval keeps the event
         // loop alive and hangs process exit on the error path.
         progress.stop();
+        await unregisterActiveRun(process.pid);
       }
       if (result === undefined) {
         throw new CliError("internal: pipeline returned no result");
@@ -5462,6 +5488,62 @@ async function uninstallCommand(options: CliOptions): Promise<number> {
   return 0;
 }
 
+async function activityCommand(options: CliOptions): Promise<number> {
+  const home = os.homedir();
+
+  if (options.kill !== undefined) {
+    const pid = options.kill;
+    if (!options.yes) {
+      if (!process.stdin.isTTY) {
+        throw new CliError(
+          "--yes is required to terminate a review in non-interactive mode",
+        );
+      }
+      process.stderr.write(`Terminate review process (PID ${pid})? [y/N] `);
+      const reader = process.stdin[Symbol.asyncIterator]();
+      const chunk = (await reader.next()).value;
+      const answer = chunk ? chunk.toString().trim().toLowerCase() : "";
+      if (answer !== "y" && answer !== "yes") {
+        log("Aborted.");
+        return 0;
+      }
+    }
+
+    const res = await killActiveRun(pid, { home });
+    if (res.status === "not_found") {
+      log(`error: ${res.message}`);
+      return 1;
+    }
+    if (res.status === "identity_mismatch") {
+      log(`error: ${res.message}`);
+      return 1;
+    }
+    if (res.status === "terminated") {
+      log(`✓ Terminated review process ${res.pid} (${res.signal}).`);
+      if (res.warning) {
+        log(`warning: ${res.warning}`);
+      }
+      return 0;
+    }
+    return 0;
+  }
+
+  const runs = await listActiveRuns({ home });
+  const spend = await getWatcherSpend({ home });
+  const history = await queryRecentRuns({ home, limit: 10 });
+
+  const lines = renderActivityScreen(
+    { runs, spend, history },
+    { styles: styleEnabled(), width: terminalWidth() },
+  );
+
+  for (const line of lines) {
+    log(line);
+  }
+
+  return 0;
+}
+
 // PURE half, so the fallbacks are testable without a filesystem or a spawn.
 export function deriveEngineIdentity(
   pkg: { name?: string; version?: string },
@@ -5512,12 +5594,24 @@ if (import.meta.main) {
       // Ignore
     }
   };
-  process.on("SIGTERM", () => {
+  process.on("SIGTERM", async () => {
     restoreCursor();
+    try {
+      killAllChildProcesses();
+      await unregisterActiveRun(process.pid);
+    } catch {
+      // Ignore
+    }
     process.exit(143);
   });
-  process.on("SIGINT", () => {
+  process.on("SIGINT", async () => {
     restoreCursor();
+    try {
+      killAllChildProcesses();
+      await unregisterActiveRun(process.pid);
+    } catch {
+      // Ignore
+    }
     process.exit(130);
   });
   process.on("exit", () => {

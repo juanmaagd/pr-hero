@@ -192,6 +192,8 @@ export interface CliOptions {
   purge?: boolean;
   check?: boolean;
   reconcile?: boolean;
+  // activity only
+  kill?: number;
 }
 
 export interface ParsedCli {
@@ -200,6 +202,7 @@ export interface ParsedCli {
     | "init"
     | "setup"
     | "doctor"
+    | "activity"
     | "ledger"
     | "watch"
     | "post"
@@ -223,6 +226,9 @@ Usage:
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero setup [options]    Run interactive onboarding wizard
   pr-hero doctor [options]   Check system tools and environment readiness
+  pr-hero activity [options] View currently running reviews and recent store history
+  pr-hero activity --kill <pid> [--yes]
+                             Safely terminate a running review (checks process identity)
   pr-hero upgrade [options]  Upgrade pr-hero to latest version & sync agent assets
   pr-hero uninstall [opts]   Remove pr-hero daemons, MCP registrations & skills
   pr-hero ledger [options]   Accumulate every run's comparison.json into one
@@ -479,6 +485,7 @@ const VALUE_FLAGS = new Set([
   "--bug-labels",
   "--socket",
   "--db",
+  "--kill",
 ]);
 
 export function parseArgs(argv: string[]): ParsedCli {
@@ -509,6 +516,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "init"
     | "setup"
     | "doctor"
+    | "activity"
     | "ledger"
     | "watch"
     | "post"
@@ -699,6 +707,7 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "init" &&
       arg !== "setup" &&
       arg !== "doctor" &&
+      arg !== "activity" &&
       arg !== "ledger" &&
       arg !== "watch" &&
       arg !== "post" &&
@@ -715,8 +724,8 @@ export function parseArgs(argv: string[]): ParsedCli {
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", "setup", "doctor", ` +
-          '"ledger", "watch", "post", "triage", "gc", "usage", "reverts", ' +
-          '"corpus", "config", "mcp", "upgrade" and "uninstall")',
+          '"activity", "ledger", "watch", "post", "triage", "gc", "usage", ' +
+          '"reverts", "corpus", "config", "mcp", "upgrade" and "uninstall")',
       );
     }
     command = arg === "update" ? "upgrade" : arg;
@@ -883,6 +892,9 @@ export function parseArgs(argv: string[]): ParsedCli {
   // operator-wide escape hatch, and valid on nothing else.
   if (options.all && command !== "usage") {
     throw new CliUsageError("--all only applies to usage");
+  }
+  if (options.kill !== undefined && command !== "activity") {
+    throw new CliUsageError("--kill only applies to the activity command");
   }
   // The watch surface, validated after the loop for the same order-blindness.
   if (command === "watch") {
@@ -1115,6 +1127,16 @@ function applyValueFlag(
     case "--db":
       options.db = value;
       return;
+    case "--kill": {
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new CliUsageError(
+          `--kill must be a positive integer (PID), got: ${value}`,
+        );
+      }
+      options.kill = parsed;
+      return;
+    }
     default: {
       const parsed = Number(value);
       if (!Number.isInteger(parsed) || parsed < 1) {
