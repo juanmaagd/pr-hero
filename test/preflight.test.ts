@@ -95,6 +95,14 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["configure"])).toThrow(CliUsageError);
   });
 
+  test("doctor is a command and takes --repo", () => {
+    expect(parseArgs(["doctor"]).command).toBe("doctor");
+    expect(parseArgs(["doctor", "--repo", "/tmp/x"]).options.repo).toBe(
+      "/tmp/x",
+    );
+    expect(() => parseArgs(["doc"])).toThrow(CliUsageError);
+  });
+
   test("gc is a command, and --dry-run applies", () => {
     expect(parseArgs(["gc"]).command).toBe("gc");
     expect(parseArgs(["gc", "--dry-run"]).options.dryRun).toBe(true);
@@ -495,28 +503,11 @@ describe("resolveAgentsDirSetting", () => {
     ).toBe("/abs/agents");
   });
 
-  test("the env var is the last fallback before the hard error", () => {
+  test("the env var is the fallback before the bundled default", () => {
     expect(resolveAgentsDirSetting({ env: "/from/env", cwd: "/work" })).toEqual(
       { dir: "/from/env", source: "env" },
     );
-    expect(() => resolveAgentsDirSetting({ cwd: "/work" })).toThrow(
-      CliUsageError,
-    );
-  });
-
-  test("the error names all four ways to fix it", () => {
-    try {
-      resolveAgentsDirSetting({ cwd: "/work" });
-      throw new Error("should have thrown");
-    } catch (error) {
-      const message = (error as Error).message;
-      expect(message).toContain("--agents");
-      expect(message).toContain(".prhero/config.json");
-      // C5's fourth exit. Named exactly, because "agents_dir" alone matches
-      // the repo sentence too and would pass against the pre-C5 text.
-      expect(message).toContain("~/.prhero/config.json");
-      expect(message).toContain("PRHERO_AGENTS_DIR");
-    }
+    expect(resolveAgentsDirSetting({ cwd: "/work" }).source).toBe("default");
   });
 });
 

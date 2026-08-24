@@ -182,7 +182,7 @@ Verified by reading every resolver:
 
 | Chain | file:line | Order |
 |---|---|---|
-| `resolveAgentsDirSetting` | `src/preflight.ts:1194-1218` | flag (`--agents`) → config (relative to config dir) → env `PRHERO_AGENTS_DIR` → **throw** |
+| `resolveAgentsDirSetting` | `src/preflight.ts:1247-1271` | flag (`--agents`) → config (relative to config dir) → env `PRHERO_AGENTS_DIR` → bundled default |
 | `resolveBaseRef` | `src/preflight.ts:1165-1176` | flag (`--base`) → config → remote head → `"main"` |
 | `resolveSummary` | `src/preflight.ts:1635-1644` | flag (`--summary`/`--no-summary`, `--model`) → config → default-on |
 | `resolveMaxVerificationSteps` | `src/preflight.ts:1631-1633` | config → `8` |
@@ -240,8 +240,8 @@ Stated because the previous draft of §1 D4 conflated them (Juanma, 2026-08-23):
 
 So the onboarding sentence for a teammate is *install, `init`, run* — never *clone and go*.
 The one thing the bundled prompt set buys is that `agents_dir` becomes **optional**: absent
-from both layers, the engine still has a set to run. Today its absence is a hard error
-(`src/preflight.ts:1213-1217`).
+from both layers, the engine still has a set to run. (Pre-S1 its absence was a hard error
+at `src/preflight.ts:1265-1270`).
 
 ### 0.10 `agents_dir` is the biggest spend lever in the file, and the team already holds it
 
@@ -705,10 +705,9 @@ provenance blocks already there (`src/pipeline.ts:129`):
 }
 ```
 
-Optional, so every existing artifact stays valid. `AgentsDirSource` (`src/preflight.ts:1178`)
-widens from `"flag" | "config" | "env"` to `"flag" | "repo" | "global" | "env"` so the plan
-card can say *where*, and `resolveAgentsDirSetting`'s hard-error message (`:1216`) gains the
-global file as a fourth named fix.
+Optional, so every existing artifact stays valid. `AgentsDirSource` (`src/preflight.ts:1207`)
+widens from `"flag" | "config" | "env"` to `"flag" | "repo" | "global" | "env" | "default"` so the plan
+card can say *where*, and `resolveAgentsDirSetting` resolves the bundled default.
 
 Plan card (O-7): a value that came from the global layer, or that a cap narrowed, is tagged.
 A value from the repo file is not — that is the unsurprising case and the card is already

@@ -98,8 +98,10 @@ import {
 import { zeroUsage } from "../src/usage";
 
 const REPLICATES = Number(process.argv[2] ?? 3);
-const REFUTER_SOURCE_PATH =
-  "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v2-refuter/review-refuter.md";
+const REFUTER_SOURCE_PATH = path.resolve(
+  import.meta.dir,
+  "../prompts/default/review-refuter.md",
+);
 // The production model. A haiku refuter would answer a different question —
 // this probe is about the v2 PROMPT's deference, not about what a cheap model
 // can verify. Set on the AgentSpec so the probe is pinned even if the agent

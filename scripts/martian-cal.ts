@@ -24,9 +24,11 @@ import {
   type MartianGoldenPr,
   prNumberFromUrl,
 } from "../src/martian-adapter";
-import { SUGGESTED_AGENTS_DIR } from "../src/preflight";
 import { estimateCost } from "../src/report";
 import { DEFAULT_SIZE_GATE, evaluateSizeGateAggregate } from "../src/size-gate";
+
+const LAB_AGENTS_DIR =
+  "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
 
 const ROOT = path.join(import.meta.dir, "..");
 const CASES_PATH = path.join(ROOT, "docs", "martian-cal-cases.json");
@@ -165,7 +167,7 @@ async function review(row: CaseRow, dryRun: boolean): Promise<number> {
     "--yes",
     "--no-summary",
     "--agents",
-    SUGGESTED_AGENTS_DIR,
+    LAB_AGENTS_DIR,
     "--gotchas",
     GOTCHAS_PATH,
     "--out",
