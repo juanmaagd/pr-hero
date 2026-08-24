@@ -284,7 +284,10 @@ export async function reconcileUpgrade(
   // 2. Verify MCP registration
   if (options.verifyMcp) {
     try {
-      await options.verifyMcp();
+      const res = await options.verifyMcp();
+      if (!res.ok) {
+        errors.push("MCP verification failed");
+      }
     } catch (err) {
       errors.push(`MCP verification failed: ${(err as Error).message}`);
     }
@@ -309,7 +312,10 @@ export async function reconcileUpgrade(
   // 3. Store migrations
   if (options.migrateStore) {
     try {
-      await options.migrateStore();
+      const res = await options.migrateStore();
+      if (!res.ok) {
+        errors.push("Store migration failed");
+      }
     } catch (err) {
       errors.push(`Store migration failed: ${(err as Error).message}`);
     }
@@ -327,7 +333,10 @@ export async function reconcileUpgrade(
   // 5. Doctor check
   if (options.runDoctorCheck) {
     try {
-      await options.runDoctorCheck();
+      const doc = await options.runDoctorCheck();
+      if (doc.overall === "blocking") {
+        errors.push("Doctor check found blocking issues");
+      }
     } catch (err) {
       errors.push(`Doctor check failed: ${(err as Error).message}`);
     }
