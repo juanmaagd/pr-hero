@@ -26,6 +26,7 @@ export interface DoctorReport {
 
 export interface RunDoctorOptions {
   cwd?: string;
+  repoRoot?: string;
   home?: string;
   checkToolsOptions?: CheckSystemToolsOptions;
   exists?: (p: string) => boolean;
@@ -50,9 +51,9 @@ export function evaluateDoctorReport(checks: DoctorCheckItem[]): DoctorReport {
 export async function runDoctor(
   options: RunDoctorOptions = {},
 ): Promise<DoctorReport> {
-  const cwd = options.cwd ?? process.cwd();
   const home = options.home ?? os.homedir();
-  const exists = options.exists ?? existsSync;
+  const exists =
+    options.exists ?? options.checkToolsOptions?.exists ?? existsSync;
   const readFile =
     options.readFile ??
     ((p: string) => {
@@ -63,11 +64,13 @@ export async function runDoctor(
       }
     });
 
+  const repoDir = options.repoRoot ?? options.cwd;
+
   const checks: DoctorCheckItem[] = [];
 
   // 1. System tools
   const tools = await checkSystemTools({
-    cwd,
+    cwd: repoDir ?? process.cwd(),
     home,
     exists,
     ...options.checkToolsOptions,
@@ -159,11 +162,13 @@ export async function runDoctor(
   }
 
   // 2. Config layer / agents_dir check
-  const repoConfigPath = path.join(cwd, ".prhero", "config.json");
+  const repoConfigPath = repoDir
+    ? path.join(repoDir, ".prhero", "config.json")
+    : undefined;
   const globalConfigPath = path.join(home, ".prhero", "config.json");
 
   let parsedAgentsDir: string | undefined;
-  if (exists(repoConfigPath)) {
+  if (repoConfigPath && exists(repoConfigPath)) {
     try {
       const raw = readFile(repoConfigPath);
       if (raw) {
@@ -218,9 +223,9 @@ export async function runDoctor(
     });
   }
 
-  // 3. Gotchas check (only when repo root is supplied)
-  if (cwd) {
-    const gotchasPath = path.join(cwd, ".prhero", "gotchas.md");
+  // 3. Gotchas check (only when repo root is supplied or discovered)
+  if (repoDir) {
+    const gotchasPath = path.join(repoDir, ".prhero", "gotchas.md");
     const gotchasContent = exists(gotchasPath)
       ? readFile(gotchasPath)
       : undefined;
