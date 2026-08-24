@@ -178,34 +178,55 @@ interface BoxOptions {
   // Required for the reason RowOptions.width is.
   width: number;
   styles?: boolean;
+  borderStyle?: "round" | "double";
 }
 
 const MIN_BOX_WIDTH = 24;
 const MAX_BOX_WIDTH = 96;
 
-// A unicode card: `╭─ title ───╮` over a body. Both the title and the body
-// lines are truncated to fit rather than wrapped — a card whose border does
-// not close reads as corruption, and the facts it summarises are all
-// repeated in the rows below it.
+// A unicode card: `╭─ title ───╮` or `╔═ title ═══╗` over a body. Both the title
+// and the body lines are truncated to fit rather than wrapped — a card whose border
+// does not close reads as corruption.
 export function box(title: string, body: string[], opts: BoxOptions): string[] {
   const width = Math.max(Math.min(opts.width, MAX_BOX_WIDTH), MIN_BOX_WIDTH);
   const styles = opts.styles ?? false;
+  const isDouble = opts.borderStyle === "double";
+  const tl = isDouble ? "╔" : "╭";
+  const tr = isDouble ? "╗" : "╮";
+  const bl = isDouble ? "╚" : "╰";
+  const br = isDouble ? "╝" : "╯";
+  const h = isDouble ? "═" : "─";
+  const v = isDouble ? "║" : "│";
+
   const inner = width - 4;
   const shownTitle = truncate(title, width - 6);
   const fill = Math.max(width - 5 - shownTitle.length, 1);
   const lines = [
-    dim("╭─ ", styles) +
+    dim(`${tl}${h} `, styles) +
       bold(shownTitle, styles) +
-      dim(` ${"─".repeat(fill)}╮`, styles),
+      dim(` ${h.repeat(fill)}${tr}`, styles),
   ];
   for (const line of body) {
     lines.push(
-      `${dim("│", styles)} ${truncate(line, inner).padEnd(inner)} ` +
-        dim("│", styles),
+      `${dim(v, styles)} ${truncate(line, inner).padEnd(inner)} ` +
+        dim(v, styles),
     );
   }
-  lines.push(dim(`╰${"─".repeat(width - 2)}╯`, styles));
+  lines.push(dim(`${bl}${h.repeat(width - 2)}${br}`, styles));
   return lines;
+}
+
+const ANSI_ESCAPE_REGEX = new RegExp(
+  `${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`,
+  "g",
+);
+const CONTROL_CHAR_REGEX = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
+  "g",
+);
+
+export function sanitizeText(text: string): string {
+  return text.replace(ANSI_ESCAPE_REGEX, "").replace(CONTROL_CHAR_REGEX, "");
 }
 
 const SHORT_SHA_LENGTH = 10;

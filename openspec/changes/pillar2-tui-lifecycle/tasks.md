@@ -27,13 +27,13 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 3: Menu Context & Pure UI Renderers
 
-- [ ] 3.1 Write failing tests in `test/menu-context.test.ts`: `resolveMenuContext` classification; `menuOptions` per context (Review/Ledger omitted outside a configured repo; Init first in an unconfigured repo; Activity present in every context; the Lifecycle group present in every context with `Upgrade & sync`, `Sync skills & MCP` mapped to the existing `setup` action, and `Managed uninstall`; no Reset/Vacuum item)
-- [ ] 3.2 Write failing renderer tests in `test/ui-menu.test.ts`: exact lines for `renderSolidHeader`, `renderContextBox`, `renderMenuCard`, and the persistent footer (key hints + the selected item's CLI equivalent; submenu-openers show the submenu hint) with styles on and off, including a test asserting zero `\x1b` bytes with styles off; the width tiers (full layout at >= 60, plain one-line title for 24-59) with no horizontal overflow at width >= 24; status badges rendered from `MenuStatusInfo` (Upgrade state on the Lifecycle group label)
-- [ ] 3.3 Write failing tests for the `box()` border-style option in `src/ui.ts`: default `"round"` leaves existing callers' output unchanged; `"double"` draws `╔ ╗ ╚ ╝ ═ ║`
-- [ ] 3.4 Write failing tests for the control-byte sanitizer in `src/ui.ts`: strips `0x00-0x1F`, `0x7F`, and ESC sequences from externally-sourced strings; pure, with its own test file coverage
-- [ ] 3.5 Implement `src/menu-context.ts` (`resolveMenuContext` and dynamic `menuOptions` with live status badges and the Lifecycle group)
-- [ ] 3.6 Extend `src/ui.ts` with the border-style option and the sanitizer
-- [ ] 3.7 Implement `src/ui-menu.ts` (`renderSolidHeader` with tiers, `renderContextBox`, `renderMenuCard`, footer); make all Phase 3 tests pass
+- [x] 3.1 Write failing tests in `test/menu-context.test.ts`: `resolveMenuContext` classification; `menuOptions` per context (Review/Ledger omitted outside a configured repo; Init first in an unconfigured repo; Activity present in every context; the Lifecycle group present in every context with `Upgrade & sync`, `Sync skills & MCP` mapped to the existing `setup` action, and `Managed uninstall`; no Reset/Vacuum item)
+- [x] 3.2 Write failing renderer tests in `test/ui-menu.test.ts`: exact lines for `renderSolidHeader`, `renderContextBox`, `renderMenuCard`, and the persistent footer (key hints + the selected item's CLI equivalent; submenu-openers show the submenu hint) with styles on and off, including a test asserting zero `\x1b` bytes with styles off; the width tiers (full layout at >= 60, plain one-line title for 24-59) with no horizontal overflow at width >= 24; status badges rendered from `MenuStatusInfo` (Upgrade state on the Lifecycle group label)
+- [x] 3.3 Write failing tests for the `box()` border-style option in `src/ui.ts`: default `"round"` leaves existing callers' output unchanged; `"double"` draws `╔ ╗ ╚ ╝ ═ ║`
+- [x] 3.4 Write failing tests for the control-byte sanitizer in `src/ui.ts`: strips `0x00-0x1F`, `0x7F`, and ESC sequences from externally-sourced strings; pure, with its own test file coverage
+- [x] 3.5 Implement `src/menu-context.ts` (`resolveMenuContext` and dynamic `menuOptions` with live status badges and the Lifecycle group)
+- [x] 3.6 Extend `src/ui.ts` with the border-style option and the sanitizer
+- [x] 3.7 Implement `src/ui-menu.ts` (`renderSolidHeader` with tiers, `renderContextBox`, `renderMenuCard`, footer); make all Phase 3 tests pass
 
 ## Phase 4: Keyboard Foundations & Repo-Optional Commands
 
