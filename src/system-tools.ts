@@ -217,12 +217,10 @@ export async function installSystemTool(
 
   if (tool === "claude") {
     const npmBin = (await which("npm")) ?? "npm";
-    const res = await exec([
-      npmBin,
-      "install",
-      "-g",
-      "@anthropic-ai/claude-code",
-    ]);
+    const res = await exec(
+      [npmBin, "install", "-g", "@anthropic-ai/claude-code"],
+      { timeoutMs: 300_000 },
+    );
     return {
       ok: res.exitCode === 0,
       manualCommand: "npm install -g @anthropic-ai/claude-code",
@@ -233,7 +231,9 @@ export async function installSystemTool(
   const brewBin = await which("brew");
   if (platform === "darwin" && brewBin) {
     const formula = tool === "codegraph" ? "codegraph" : tool;
-    const res = await exec([brewBin, "install", formula]);
+    const res = await exec([brewBin, "install", formula], {
+      timeoutMs: 300_000,
+    });
     return {
       ok: res.exitCode === 0,
       manualCommand: `brew install ${formula}`,
