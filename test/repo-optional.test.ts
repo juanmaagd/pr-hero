@@ -11,21 +11,23 @@ describe("repo-optional commands", () => {
   describe("4.2 repo-optional doctor", () => {
     test("runs system checks and succeeds when cwd is not a git repo", async () => {
       const report = await runDoctor({
-        cwd: tmpDir,
+        cwd: undefined,
         checkToolsOptions: {
-          which: async (bin) => (bin === "git" ? "/usr/bin/git" : null),
+          which: (bin) =>
+            ["git", "claude"].includes(bin) ? `/usr/bin/${bin}` : null,
           exec: async () => ({
             exitCode: 0,
-            stdout: "git version 2.39.0",
+            stdout: "1.0.0",
             stderr: "",
           }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
           exists: () => false,
         },
       });
 
       expect(report.checks.some((c) => c.name === "git")).toBe(true);
       expect(report.checks.some((c) => c.name === "claude")).toBe(true);
-      expect(report.overall).toBeDefined();
+      expect(report.exitCode).toBe(0);
     });
   });
 

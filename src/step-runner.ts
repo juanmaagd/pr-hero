@@ -216,11 +216,24 @@ function notifyRetry(step: StepSpec, info: RetryInfo): void {
 
 // The minimal surface this runner needs from a spawned process — lets tests
 // inject a scripted fake for the retry/watchdog paths (untested in v1).
-interface SpawnedProcess {
+export interface SpawnedProcess {
   stdout: ReadableStream<Uint8Array>;
   stderr: ReadableStream<Uint8Array>;
   exited: Promise<number>;
   kill(): void;
+}
+
+export const ACTIVE_CHILD_PROCS = new Set<SpawnedProcess>();
+
+export function killAllChildProcesses(): void {
+  for (const proc of ACTIVE_CHILD_PROCS) {
+    try {
+      proc.kill();
+    } catch {
+      // Swallowed — process may have already exited
+    }
+  }
+  ACTIVE_CHILD_PROCS.clear();
 }
 
 interface AttemptOutcome {
@@ -357,6 +370,7 @@ export class ClaudeCodeRunner implements StepRunner {
       stdout: "pipe",
       stderr: "pipe",
     }) as unknown as SpawnedProcess;
+    ACTIVE_CHILD_PROCS.add(proc);
     let timedOut = false;
     const watchdog = setTimeout(() => {
       timedOut = true;
@@ -375,6 +389,7 @@ export class ClaudeCodeRunner implements StepRunner {
         proc.exited,
       ]);
     } finally {
+      ACTIVE_CHILD_PROCS.delete(proc);
       clearTimeout(watchdog);
     }
     const wall_ms = Math.round(performance.now() - start);

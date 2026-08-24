@@ -26,7 +26,10 @@ export function renderSolidHeader(width: number, styles: boolean): string[] {
   if (width >= 60) {
     return SOLID_BANNER_LINES.map((line) => cyan(bold(line, styles), styles));
   }
-  return [cyan(bold("PR-HERO — Multi-Agent PR Review", styles), styles)];
+  const title = "PR-HERO — Multi-Agent PR Review";
+  const truncated =
+    width < title.length ? title.slice(0, Math.max(0, width)) : title;
+  return [cyan(bold(truncated, styles), styles)];
 }
 
 export function renderContextBox(
@@ -37,18 +40,23 @@ export function renderContextBox(
   const lines: string[] = [];
 
   if (context.kind === "configured-repo") {
-    lines.push(
-      `Repository:  ${context.name} (${context.root})`,
-      `Base branch: ${context.defaultBase ?? "auto"}`,
-    );
+    const name = sanitizeText(context.name);
+    const root = sanitizeText(context.root);
+    const base = context.defaultBase
+      ? sanitizeText(context.defaultBase)
+      : "auto";
+    lines.push(`Repository:  ${name} (${root})`, `Base branch: ${base}`);
   } else if (context.kind === "unconfigured-repo") {
+    const name = sanitizeText(context.name);
+    const root = sanitizeText(context.root);
     lines.push(
-      `Unconfigured Repository: ${context.name} (${context.root})`,
+      `Unconfigured Repository: ${name} (${root})`,
       "Run 'Initialize repo' to scaffold .prhero/ configuration.",
     );
   } else {
+    const cwd = sanitizeText(context.cwd);
     lines.push(
-      `Not inside a repository (${context.cwd})`,
+      `Not inside a repository (${cwd})`,
       "Global commands and configuration are available.",
     );
   }

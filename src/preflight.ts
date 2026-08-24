@@ -194,6 +194,7 @@ export interface CliOptions {
   reconcile?: boolean;
   // activity only
   kill?: number;
+  repoExplicit?: boolean;
 }
 
 export interface ParsedCli {
@@ -578,6 +579,7 @@ export function parseArgs(argv: string[]): ParsedCli {
       }
       i++;
       if (arg === "--head") headExplicit = true;
+      if (arg === "--repo") options.repoExplicit = true;
       applyValueFlag(options, arg, value);
       continue;
     }
