@@ -247,6 +247,11 @@ import {
 } from "./ui";
 import { renderActivityScreen } from "./ui-activity";
 import { renderConfig } from "./ui-config";
+import {
+  runConfigEditor,
+  setConfigValue,
+  unsetConfigValue,
+} from "./ui-config-edit";
 import { runLifecycleSubmenu, runMenuLoop, runWatcherSubmenu } from "./ui-menu";
 import { type ResultLinks, renderResult } from "./ui-result";
 import { runReviewMenu } from "./ui-review-menu";
@@ -3962,6 +3967,50 @@ async function resolveOptionalRepoRoot(
 
 async function configCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveOptionalRepoRoot(options);
+
+  if (options.configSubcommand === "edit") {
+    return await runConfigEditor({
+      home: os.homedir(),
+      repoRoot,
+      styles: styleEnabled(process.stderr),
+      width: terminalWidth(),
+    });
+  }
+
+  if (options.configSubcommand === "set") {
+    if (!options.configKey || !options.configValue) {
+      throw new CliError("config set requires a key and value");
+    }
+    const layer = options.configLayer ?? "person";
+    const res = await setConfigValue({
+      layer,
+      key: options.configKey,
+      value: options.configValue,
+      home: os.homedir(),
+      repoRoot,
+    });
+    if (res.annotation) {
+      log(res.annotation);
+    } else {
+      log(`✓ Updated ${layer} configuration (${options.configKey}).`);
+    }
+    return 0;
+  }
+
+  if (options.configSubcommand === "unset") {
+    if (!options.configKey) {
+      throw new CliError("config unset requires a key");
+    }
+    const layer = options.configLayer ?? "person";
+    await unsetConfigValue({
+      layer,
+      key: options.configKey,
+      home: os.homedir(),
+      repoRoot,
+    });
+    log(`✓ Removed ${options.configKey} from ${layer} configuration.`);
+    return 0;
+  }
   const loaded = await loadEffectiveConfig({
     root: repoRoot,
     home: os.homedir(),
