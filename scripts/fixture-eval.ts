@@ -28,6 +28,15 @@ const SCOUT_PROMPT_PATH = path.join(
 // PLUMBING, never recall, and a sonnet scout here would spend real money to
 // prove nothing extra.
 const scoutEnabled = Bun.argv.includes("--scout");
+const agentsArgIndex = Bun.argv.indexOf("--agents");
+const customAgentsDir =
+  agentsArgIndex !== -1 && Bun.argv[agentsArgIndex + 1]
+    ? path.resolve(Bun.argv[agentsArgIndex + 1])
+    : undefined;
+
+const modelArgIndex = Bun.argv.indexOf("--model");
+const customModel =
+  modelArgIndex !== -1 ? Bun.argv[modelArgIndex + 1] : undefined;
 
 const fixture = await buildPlantedFixture();
 
@@ -46,15 +55,14 @@ const result = await runPipeline(
     worktree: fixture.repoDir,
     diffPath: fixture.diffPath,
     gotchasPath: fixture.gotchasPath,
-    agentsDir: fixture.agentsDir,
+    agentsDir: customAgentsDir ?? fixture.agentsDir,
     runDir: fixture.runDir,
     // The pipeline never writes outPath (the caller's job) — recorded here
     // only so pipeline.json carries the full resolved plan.
     outPath: path.join(fixture.runDir, "findings.json"),
     mcpConfigPath,
     hopBudget: 4,
-    // No `model` override: the fixture frontmatter's haiku wins (plumbing
-    // proof, not recall quality — see fixtures/setup.ts).
+    ...(customModel ? { model: customModel } : {}),
     summarizer: { promptPath: SUMMARIZER_PROMPT_PATH },
     ...(scoutEnabled
       ? { scout: { promptPath: SCOUT_PROMPT_PATH, model: "haiku" } }
