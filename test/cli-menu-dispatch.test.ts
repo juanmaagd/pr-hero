@@ -108,5 +108,6 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
       },
     });
     expect(outRepo.join("")).toContain("Add current repo");
+    expect(outRepo.join("")).toContain("Add repo with on-push");
   });
 });

@@ -53,6 +53,8 @@ export function renderConfigEditCard(
   });
 }
 
+const TIME_WINDOW_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
 export async function setConfigValue(input: {
   layer: "person" | "team" | "watch";
   key: string;
@@ -90,6 +92,7 @@ export async function setConfigValue(input: {
       currentRepo.max_verification_steps = num;
     } else if (input.key === "summary.enabled") {
       const b = input.value.toLowerCase() === "true";
+      parsedVal = b;
       currentRepo.summary = {
         ...(typeof currentRepo.summary === "object" &&
         currentRepo.summary !== null
@@ -97,10 +100,54 @@ export async function setConfigValue(input: {
           : {}),
         enabled: b,
       };
+    } else if (input.key === "summary.model") {
+      if (typeof input.value !== "string" || input.value.trim().length === 0) {
+        throw new Error("summary.model must be a non-empty string");
+      }
+      currentRepo.summary = {
+        ...(typeof currentRepo.summary === "object" &&
+        currentRepo.summary !== null
+          ? (currentRepo.summary as Record<string, unknown>)
+          : {}),
+        model: input.value.trim(),
+      };
     } else if (input.key === "default_base") {
-      currentRepo.default_base = input.value;
+      if (typeof input.value !== "string" || input.value.trim().length === 0) {
+        throw new Error("default_base must be a non-empty string");
+      }
+      currentRepo.default_base = input.value.trim();
+    } else if (input.key === "parity_trigger_paths") {
+      let paths: string[];
+      if (input.value.startsWith("[")) {
+        try {
+          paths = JSON.parse(input.value);
+        } catch {
+          throw new Error(
+            "parity_trigger_paths must be an array of non-empty strings",
+          );
+        }
+      } else {
+        paths = input.value
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      if (
+        !Array.isArray(paths) ||
+        paths.length === 0 ||
+        paths.some((p) => typeof p !== "string" || p.trim().length === 0)
+      ) {
+        throw new Error(
+          "parity_trigger_paths must be an array of non-empty strings",
+        );
+      }
+      currentRepo.parity_trigger_paths = paths;
+    } else if (input.key === "agents_dir") {
+      currentRepo.agents_dir = input.value.trim();
     } else {
-      currentRepo[input.key] = input.value;
+      throw new Error(
+        `unknown or unsupported key for team configuration: ${input.key}`,
+      );
     }
 
     writeFileSync(repoConfigPath, `${JSON.stringify(currentRepo, null, 2)}\n`);
@@ -123,6 +170,12 @@ export async function setConfigValue(input: {
           parsedVal !== merged.effective.max_verification_steps
         ) {
           annotation = `written: ${parsedVal} — your effective value remains ${merged.effective.max_verification_steps}, capped by your Person layer`;
+        } else if (
+          input.key === "summary.enabled" &&
+          globalLayer.summary?.enabled !== undefined &&
+          merged.effective.summary?.enabled !== parsedVal
+        ) {
+          annotation = `written: ${parsedVal} — your effective value remains ${merged.effective.summary?.enabled}, capped by your Person layer`;
         }
       } catch {
         // Ignore
@@ -133,6 +186,16 @@ export async function setConfigValue(input: {
   }
 
   if (input.layer === "person") {
+    if (
+      input.key === "default_base" ||
+      input.key === "parity_trigger_paths" ||
+      input.key === "suspicion_priors"
+    ) {
+      throw new Error(
+        `${input.key} is a per-repo key; use --team to configure it.`,
+      );
+    }
+
     const personConfigPath = path.join(home, ".prhero", "config.json");
     let currentPerson: Record<string, unknown> = {};
     if (existsSync(personConfigPath)) {
@@ -161,17 +224,22 @@ export async function setConfigValue(input: {
         enabled: b,
       };
     } else if (input.key === "summary.model") {
+      if (typeof input.value !== "string" || input.value.trim().length === 0) {
+        throw new Error("summary.model must be a non-empty string");
+      }
       currentPerson.summary = {
         ...(typeof currentPerson.summary === "object" &&
         currentPerson.summary !== null
           ? (currentPerson.summary as Record<string, unknown>)
           : {}),
-        model: input.value,
+        model: input.value.trim(),
       };
     } else if (input.key === "agents_dir") {
-      currentPerson.agents_dir = input.value;
+      currentPerson.agents_dir = input.value.trim();
     } else {
-      currentPerson[input.key] = input.value;
+      throw new Error(
+        `unknown or unsupported key for person configuration: ${input.key}`,
+      );
     }
 
     writeFileSync(
@@ -200,12 +268,23 @@ export async function setConfigValue(input: {
       currentWatch.daily_cap = num;
     } else if (input.key === "window") {
       const parts = input.value.split("-");
-      if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        throw new Error("window must be in format 'HH:MM-HH:MM'");
+      if (
+        parts.length !== 2 ||
+        !parts[0] ||
+        !parts[1] ||
+        !TIME_WINDOW_RE.test(parts[0]) ||
+        !TIME_WINDOW_RE.test(parts[1]) ||
+        parts[0] === parts[1]
+      ) {
+        throw new Error(
+          "window must be in format 'HH:MM-HH:MM' with valid 24h times where start != end",
+        );
       }
       currentWatch.window = { start: parts[0], end: parts[1] };
     } else {
-      currentWatch[input.key] = input.value;
+      throw new Error(
+        `unknown or unsupported key for watch configuration: ${input.key}`,
+      );
     }
 
     writeFileSync(
@@ -226,6 +305,17 @@ export async function unsetConfigValue(input: {
 }): Promise<{ status: "ok" }> {
   const home = input.home ?? os.homedir();
 
+  const removeKey = (obj: Record<string, unknown>, key: string) => {
+    if (key.startsWith("summary.")) {
+      const sub = key.slice("summary.".length);
+      if (obj.summary && typeof obj.summary === "object") {
+        delete (obj.summary as Record<string, unknown>)[sub];
+      }
+    } else {
+      delete obj[key];
+    }
+  };
+
   if (input.layer === "team") {
     if (!input.repoRoot) {
       throw new Error(
@@ -235,7 +325,7 @@ export async function unsetConfigValue(input: {
     const repoConfigPath = path.join(input.repoRoot, ".prhero", "config.json");
     if (existsSync(repoConfigPath)) {
       const current = JSON.parse(readFileSync(repoConfigPath, "utf-8"));
-      delete current[input.key];
+      removeKey(current, input.key);
       writeFileSync(repoConfigPath, `${JSON.stringify(current, null, 2)}\n`);
     }
     return { status: "ok" };
@@ -245,7 +335,7 @@ export async function unsetConfigValue(input: {
     const personConfigPath = path.join(home, ".prhero", "config.json");
     if (existsSync(personConfigPath)) {
       const current = JSON.parse(readFileSync(personConfigPath, "utf-8"));
-      delete current[input.key];
+      removeKey(current, input.key);
       writeFileSync(personConfigPath, `${JSON.stringify(current, null, 2)}\n`);
     }
     return { status: "ok" };
@@ -255,7 +345,7 @@ export async function unsetConfigValue(input: {
     const watchConfigPath = path.join(home, ".prhero", "watch.json");
     if (existsSync(watchConfigPath)) {
       const current = JSON.parse(readFileSync(watchConfigPath, "utf-8"));
-      delete current[input.key];
+      removeKey(current, input.key);
       writeFileSync(watchConfigPath, `${JSON.stringify(current, null, 2)}\n`);
     }
     return { status: "ok" };

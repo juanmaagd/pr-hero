@@ -1,4 +1,4 @@
-import type { CliOptions } from "./preflight";
+import { type CliOptions, DEFAULT_HOP_BUDGET } from "./preflight";
 import { bold, box, cyan, dim, sanitizeText } from "./ui";
 import { type KeyReader, parseKey, splitKeys } from "./ui-select";
 
@@ -179,7 +179,7 @@ export async function runReviewMenu(
               force: state.force,
               full: state.full,
               dryRun: state.dryRun,
-              hopBudget: 2,
+              hopBudget: DEFAULT_HOP_BUDGET,
               yes: false,
               twoDot: false,
               onPush: false,
