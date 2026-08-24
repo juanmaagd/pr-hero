@@ -341,6 +341,8 @@ export async function runMenuLoop(
           exit = await options.dispatchAction(chosenItem.id, chosenItem);
         } finally {
           isInteractive = true;
+          width = terminalWidth();
+          drawn = 0;
         }
         if (exit === "back") {
           context = await resolveMenuContext(cwd);
