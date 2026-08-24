@@ -3939,7 +3939,10 @@ async function configCommand(options: CliOptions): Promise<number> {
 
 async function doctorCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveOptionalRepoRoot(options);
-  const report = await runDoctor({ cwd: repoRoot ?? process.cwd() });
+  const report = await runDoctor({
+    repoRoot: repoRoot ?? undefined,
+    cwd: repoRoot ?? process.cwd(),
+  });
   const lines = renderDoctorReport(report, {
     styles: styleEnabled(process.stdout),
     width: terminalWidth(),
