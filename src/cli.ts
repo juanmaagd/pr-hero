@@ -5360,7 +5360,9 @@ async function upgradeCommand(options: CliOptions): Promise<number> {
     await Bun.write(tempBinary, binBuffer);
     chmodSync(tempBinary, 0o755);
 
-    if (existsSync(bakBinary)) {
+    if (!existsSync(targetBinary) && existsSync(bakBinary)) {
+      renameSync(bakBinary, targetBinary);
+    } else if (existsSync(bakBinary)) {
       try {
         unlinkSync(bakBinary);
       } catch {
@@ -5374,13 +5376,19 @@ async function upgradeCommand(options: CliOptions): Promise<number> {
     renameSync(tempBinary, targetBinary);
 
     // Smoke test that the upgraded binary can execute before removing backup
-    const smokeProc = Bun.spawn([targetBinary, "--help"], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    const smokeExit = await smokeProc.exited;
+    let smokeOk = false;
+    try {
+      const smokeProc = Bun.spawn([targetBinary, "--help"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      const smokeExit = await smokeProc.exited;
+      smokeOk = smokeExit === 0;
+    } catch {
+      smokeOk = false;
+    }
 
-    if (smokeExit !== 0) {
+    if (!smokeOk) {
       log(
         "warning: upgraded binary failed to execute. Restoring previous version...",
       );
@@ -5392,20 +5400,33 @@ async function upgradeCommand(options: CliOptions): Promise<number> {
       );
     }
 
-    if (existsSync(bakBinary)) {
-      unlinkSync(bakBinary);
+    log("Running reconciliation via upgraded binary...");
+    let reconcileOk = false;
+    try {
+      const proc = Bun.spawn([targetBinary, "upgrade", "--reconcile"], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const exitCode = await proc.exited;
+      reconcileOk = exitCode === 0;
+    } catch {
+      reconcileOk = false;
     }
 
-    log("Running reconciliation via upgraded binary...");
-    const proc = Bun.spawn([targetBinary, "upgrade", "--reconcile"], {
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    const exitCode = await proc.exited;
-    if (exitCode !== 0) {
+    if (!reconcileOk) {
       log(
-        "warning: reconciliation reported errors. Run 'pr-hero upgrade --reconcile' to retry.",
+        "warning: reconciliation reported errors. Restoring previous version...",
       );
+      if (existsSync(bakBinary)) {
+        renameSync(bakBinary, targetBinary);
+      }
+      throw new CliError(
+        "Upgrade failed during reconciliation and was rolled back. Run 'pr-hero upgrade --reconcile' to retry.",
+      );
+    }
+
+    if (existsSync(bakBinary)) {
+      unlinkSync(bakBinary);
     }
 
     log(`✓ Successfully upgraded pr-hero to v${latestVersion}!`);

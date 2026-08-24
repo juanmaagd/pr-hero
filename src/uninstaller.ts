@@ -401,8 +401,10 @@ export async function executeUninstallPlan(
                     `${JSON.stringify(config, null, 2)}\n`,
                   );
                 }
-              } catch {
-                // Ignore parse errors if file is invalid
+              } catch (e) {
+                if (!(e instanceof SyntaxError)) {
+                  throw e;
+                }
               }
             }
           }
@@ -411,14 +413,10 @@ export async function executeUninstallPlan(
 
         case "remove_skills":
           if (step.targetPath && exists(step.targetPath)) {
-            try {
-              if (options.rmdir) {
-                options.rmdir(step.targetPath, { recursive: true });
-              } else {
-                rmSync(step.targetPath, { recursive: true, force: true });
-              }
-            } catch {
-              // Ignore if already deleted
+            if (options.rmdir) {
+              options.rmdir(step.targetPath, { recursive: true });
+            } else {
+              rmSync(step.targetPath, { recursive: true, force: true });
             }
           }
           executedSteps.push(step.desc);
