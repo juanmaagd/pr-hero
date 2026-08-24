@@ -26,6 +26,21 @@ import {
   unregisterActiveRun,
 } from "./activity";
 import { resolveEngineAssets } from "./assets";
+import {
+  budgetDisabledWarningMessage,
+  type CiGateSkipPlan,
+  ciExitCode,
+  planCiBudgetSkip,
+  planCiSizeSkip,
+} from "./ci-gates";
+import {
+  appendCiOutputs,
+  appendStepSummary,
+  type CiOutputs,
+  type CiSummaryData,
+  formatWorkflowCommand,
+  renderStepSummary,
+} from "./ci-reporter";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
 import { renderDoctorReport, runDoctor } from "./doctor";
@@ -143,6 +158,7 @@ import {
   INIT_GIT_REMINDER,
   initConfigTemplate,
   initTemplateOmissions,
+  isCiEnvironment,
   isFullCommitId,
   type LocalConfig,
   listPaths,
@@ -1282,7 +1298,29 @@ async function reviewPr(
   const summary = resolveSummary(options, config);
   const scout = resolveScout(options, config);
   const post = resolvePost(options, config);
-  options = { ...options, scout, post };
+  // ROADMAP Pillar 3 (GitHub Actions CI). isCi folds in HERE, alongside
+  // scout/post, so `options.yes` carries the headless bypass (spec 2.1:
+  // "MUST run headlessly ... equivalent to --yes") through every downstream
+  // read of `options.yes` in one move — the confirm gate below, the in-flight
+  // TOCTOU check (`if (options.yes) return 0` is the correct CI answer to a
+  // stuck pending), and applySizeGate's own `opts.yes` read. A parallel
+  // `effectiveYes` local would miss whichever of those reads came later.
+  const isCi = isCiEnvironment(options, {
+    GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+    CI: process.env.CI,
+  });
+  options = { ...options, scout, post, yes: options.yes || isCi };
+  // Spec 3.1: a silent disable is indistinguishable from a passing gate, so
+  // an EXPLICIT `--budget-usd <= 0` warns even though it never skips a run.
+  // Emitted here (once, as soon as isCi/budgetUsd are both known) rather
+  // than beside the budget-gate check below, which only runs at all when
+  // there IS an estimate to compare against.
+  if (isCi) {
+    const disabledWarning = budgetDisabledWarningMessage(options.budgetUsd);
+    if (disabledWarning !== null) {
+      log(formatWorkflowCommand("warning", disabledWarning));
+    }
+  }
   const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
     options,
     loaded,
@@ -1607,6 +1645,37 @@ async function reviewPr(
       );
     }
 
+    // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
+    // CI, a hard skip in non-interactive mode THROWS a CliError (see
+    // applySizeGate below), which the top-level catch turns into exit 1 —
+    // exactly the "blocks CI" behavior spec 2.1 forbids. `--force` bypasses
+    // here too, same as the non-CI path just below, since it answers the
+    // same question ("is this diff too big to be worth its cost") either
+    // way. planCiSizeSkip (ci-gates.ts) is the ONE call: it is null unless
+    // isCi && the gate actually failed, so no separate isCi guard is needed
+    // around it beyond --force.
+    if (!options.force) {
+      const sizePlan = planCiSizeSkip({
+        isCi,
+        verdict: sizeGate,
+        prNumber,
+        maxChangedLines: gateConfig.maxChangedLines,
+        maxChangedFiles: gateConfig.maxChangedFiles,
+      });
+      if (sizePlan !== null) {
+        return await publishCiSkip({
+          operatorRoot,
+          prNumber,
+          post: options.post === true,
+          isCi,
+          stepSummaryFlag: options.stepSummary,
+          plan: sizePlan,
+          noticeMessage:
+            "pr-hero review skipped — diff exceeds the configured size gate",
+        });
+      }
+    }
+
     // 5b — the size gate, on the REAL per-file numstat and placed here on
     // purpose: before createPrRunDir, so a skipped PR leaves no run dir
     // behind. That matters beyond tidiness — the watcher counts attempts from
@@ -1721,6 +1790,44 @@ async function reviewPr(
       options.scout && !skipDiscovery,
       queuedVerification,
     );
+    // 7b(CI) — the budget gate, immediately after the estimate it reads and
+    // BEFORE the plan card/confirm/"committed to spending" commit-status
+    // block below: spec 3.1 ("Review MUST halt before agent spawning") is
+    // satisfied at any point before runPipeline, and this is the earliest
+    // point the REAL (parity-narrowed) estimate exists — the same one the
+    // plan card is about to show, so the skip comment's number and the
+    // (unrendered) plan's number can never have disagreed. `estimate.high`,
+    // not `.low`: report.ts's own doctrine (~97-98) is that every recorded
+    // overrun was an UNDER-estimate, so the generous side is the cheap one
+    // to be wrong on. Unlike the size gate above, this is NOT gated on
+    // `--force` — `--force`'s own doc comment (preflight.ts CliOptions)
+    // scopes it to the size gate's "is this diff too big" question, not
+    // spend. Tradeoff accepted: unlike the size gate, this runs AFTER
+    // createPrRunDir (step 6), so a budget skip can leave a near-empty run
+    // dir behind — the tidiness rationale that placement protects against
+    // (the watcher's attempt counter) does not apply to an ephemeral CI
+    // runner, and restructuring the cost estimate earlier is out of Phase
+    // 3's scope.
+    if (isCi && options.budgetUsd !== undefined) {
+      const budgetPlan = planCiBudgetSkip({
+        isCi,
+        estimatedCostUsd: estimate.high,
+        budgetUsd: options.budgetUsd,
+        prNumber,
+      });
+      if (budgetPlan !== null) {
+        return await publishCiSkip({
+          operatorRoot,
+          prNumber,
+          post: options.post === true,
+          isCi,
+          stepSummaryFlag: options.stepSummary,
+          plan: budgetPlan,
+          noticeMessage:
+            "pr-hero review skipped — estimated cost exceeds the configured CI budget ceiling",
+        });
+      }
+    }
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
     const planContext: PrPlanContext = {
@@ -1845,6 +1952,12 @@ async function reviewPr(
       // 11 — run, with live progress (same shape as local mode's leg). The
       // pipeline is untouched beyond the observational tap: it gets the worktree
       // as its cwd and the PR's real number for the envelope.
+      // Spec 2.1: "Progress updates MUST use GitHub Actions log workflow
+      // groups (`::group::` / `::endgroup::`) to structure runner logs
+      // cleanly." One group around the whole hunt+refute run is the minimum
+      // that satisfies it — `::endgroup::` closes in the SAME finally as
+      // progress.stop() below, so an error path can't leave the group open.
+      if (isCi) log(formatWorkflowCommand("group", "pr-hero review"));
       log(
         `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
           `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
@@ -1907,8 +2020,11 @@ async function reviewPr(
         );
       } finally {
         // try/finally, never success-only: a leaked interval keeps the event
-        // loop alive and hangs process exit on the error path.
+        // loop alive and hangs process exit on the error path. `::endgroup::`
+        // rides the same guarantee — an error inside runPipeline must not
+        // leave a `::group::` open in the runner log.
         progress.stop();
+        if (isCi) log(formatWorkflowCommand("endgroup"));
         await unregisterActiveRun(process.pid);
       }
       if (result === undefined) {
@@ -2164,8 +2280,56 @@ async function reviewPr(
       })) {
         log(line);
       }
+      // 16 — CI headless publishing (ROADMAP Pillar 3): the "reviewed"
+      // outcome's step summary + $GITHUB_OUTPUT, built from the SAME `doc`
+      // renderResult just printed from above, so nothing here can disagree
+      // with what the terminal (and the PR comments, via step 14's posted
+      // outcome) already reported. `posted?.delta` reuses postInlineFindings'
+      // own re-review delta — no separate computation.
+      if (isCi) {
+        const ciPlan = planCiReview({
+          prNumber,
+          headSha,
+          findings: doc.findings,
+          costUsdEst: result.usage.cost_usd_est,
+          wallMs,
+          model: envelopeModel(options, agentFiles),
+          ...(webUrl === undefined ? {} : { repoWebUrl: webUrl }),
+          ...(posted?.delta === undefined ? {} : { delta: posted.delta }),
+          runDir,
+        });
+        const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+        if (shouldWriteStepSummary(isCi, options.stepSummary, summaryPath)) {
+          await appendStepSummary(
+            summaryPath as string,
+            ciPlan.summaryMarkdown,
+          );
+        }
+        const outputPath = process.env.GITHUB_OUTPUT;
+        if (shouldWriteCiOutputs(isCi, outputPath)) {
+          await appendCiOutputs(outputPath as string, ciPlan.outputs);
+        }
+        log(
+          formatWorkflowCommand(
+            "notice",
+            `pr-hero review complete — ${ciPlan.outputs.findings_count} ` +
+              `finding(s) (${ciPlan.outputs.blocking_count} blocking)`,
+          ),
+        );
+      }
       if (result.sessionFailed) return 1;
-      return postingExitCode(posted);
+      // Assistant posture (spec 2.1): in CI mode, exit 0 even with blocking
+      // findings — ciExitCode only fails on a fatal session failure (already
+      // returned above) or a genuine posting drop (design D6). Outside CI,
+      // postingExitCode keeps its existing behavior unchanged.
+      return isCi
+        ? ciExitCode({
+            sessionFailed: result.sessionFailed,
+            droppedFindingIds: posted?.droppedFindingIds.length ?? 0,
+            blockingCount: doc.findings.filter((f) => f.tier === "blocking")
+              .length,
+          })
+        : postingExitCode(posted);
     } finally {
       const phase = commitStatusCompletion({
         pipelineFinished: result !== undefined,
@@ -2918,6 +3082,86 @@ export async function postInlineIfEligible(input: {
 export function postingExitCode(outcome: InlinePostOutcome | null): 0 | 1 {
   if (outcome === null) return 0;
   return outcome.droppedFindingIds.length > 0 ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// CI headless shell (ROADMAP Pillar 3, GitHub Actions) — the "reviewed"
+// (non-skip) outcome's summary + outputs, and the two pure "should I write"
+// gates the shell checks before touching $GITHUB_STEP_SUMMARY/$GITHUB_OUTPUT.
+// planCiSizeSkip/planCiBudgetSkip (ci-gates.ts) cover the two gate-skip
+// outcomes the same way; this is their sibling for a review that actually
+// ran. Kept here, not ci-gates.ts/ci-reporter.ts: this is reviewPr's own
+// single-consumer composition (the exact `postingExitCode` precedent above),
+// not a spend-gate decision or a report-formatting primitive.
+// ---------------------------------------------------------------------------
+
+// Spec 2.1's "reviewed" step-summary + spec 1.1's $GITHUB_OUTPUT contract,
+// from the SAME findings array — so the two can never disagree on counts.
+// `delta`/`repoWebUrl` are optional pass-throughs (posted.delta when a run
+// posted; undefined renders plain code spans / omits the delta line).
+export function planCiReview(input: {
+  prNumber: number;
+  headSha: string;
+  findings: readonly Finding[];
+  costUsdEst: number;
+  wallMs: number;
+  model: string;
+  repoWebUrl?: string;
+  delta?: PrCommentDelta;
+  runDir: string;
+}): { summaryMarkdown: string; outputs: CiOutputs } {
+  const blockingCount = input.findings.filter(
+    (f) => f.tier === "blocking",
+  ).length;
+  const summary: CiSummaryData = {
+    kind: "reviewed",
+    prNumber: input.prNumber,
+    headSha: input.headSha,
+    findings: input.findings,
+    costUsdEst: input.costUsdEst,
+    wallMs: input.wallMs,
+    model: input.model,
+    ...(input.repoWebUrl === undefined ? {} : { repoWebUrl: input.repoWebUrl }),
+    ...(input.delta === undefined ? {} : { delta: input.delta }),
+  };
+  return {
+    summaryMarkdown: renderStepSummary(summary),
+    outputs: {
+      status: "reviewed",
+      findings_count: input.findings.length,
+      blocking_count: blockingCount,
+      advisory_count: input.findings.length - blockingCount,
+      cost_usd_est: input.costUsdEst,
+      run_dir: input.runDir,
+    },
+  };
+}
+
+// Spec 1.1: "Output parameter writing when $GITHUB_OUTPUT is provided" —
+// the outputs are core to the Action's own contract (declared unconditionally
+// in action.yml), so nothing beyond CI mode + a real path gates them.
+export function shouldWriteCiOutputs(
+  isCi: boolean,
+  outputPath: string | undefined,
+): boolean {
+  return isCi && outputPath !== undefined && outputPath.length > 0;
+}
+
+// Spec 2.1: step-summary writing is additionally gated on the tri-state
+// `--step-summary`/`--no-step-summary` flag (`stepSummary`), unset meaning
+// the shell's own default of on — mirroring `summary`/`scout`'s own
+// unset-means-default convention (preflight.ts's CliOptions).
+export function shouldWriteStepSummary(
+  isCi: boolean,
+  stepSummaryFlag: boolean | undefined,
+  summaryPath: string | undefined,
+): boolean {
+  return (
+    isCi &&
+    (stepSummaryFlag ?? true) &&
+    summaryPath !== undefined &&
+    summaryPath.length > 0
+  );
 }
 
 // post.json — the receipt (design's File Changes table): channel, comment
@@ -5309,6 +5553,45 @@ async function applySizeGate(
     return "abort";
   }
   return "proceed";
+}
+
+// ROADMAP Pillar 3 (GitHub Actions CI). The mechanical glue behind a gate
+// skip in CI mode: every DECISION (what to say, which marker, what the
+// outputs are) already happened in `plan` (planCiSizeSkip/planCiBudgetSkip,
+// ci-gates.ts) — this function has nothing left to decide, only three
+// straight-line I/O calls gated by shouldWriteStepSummary/shouldWriteCiOutputs.
+// `postPrComment`'s own `markerPrefix` (Phase 3's parameterization) makes
+// this idempotent: a repeat CI run on the same still-failing PR updates its
+// own prior skip comment rather than stacking a new one on every push.
+async function publishCiSkip(input: {
+  operatorRoot: string;
+  prNumber: number;
+  post: boolean;
+  isCi: boolean;
+  stepSummaryFlag: boolean | undefined;
+  plan: CiGateSkipPlan;
+  noticeMessage: string;
+}): Promise<number> {
+  log(formatWorkflowCommand("notice", input.noticeMessage));
+  if (input.post) {
+    await postPrComment(
+      input.operatorRoot,
+      input.prNumber,
+      input.plan.comment,
+      undefined,
+      undefined,
+      input.plan.markerPrefix,
+    );
+  }
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (shouldWriteStepSummary(input.isCi, input.stepSummaryFlag, summaryPath)) {
+    await appendStepSummary(summaryPath as string, input.plan.summaryMarkdown);
+  }
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (shouldWriteCiOutputs(input.isCi, outputPath)) {
+    await appendCiOutputs(outputPath as string, input.plan.outputs);
+  }
+  return 0;
 }
 
 // The envelope needs ONE model string. With no --model override each agent

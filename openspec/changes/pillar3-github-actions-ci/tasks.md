@@ -24,15 +24,15 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 3: Review CLI Integration & CI Headless Shell
 
-- [ ] 3.1 Write failing tests in `test/ci-review.test.ts`:
+- [x] 3.1 Write failing tests in `test/ci-review.test.ts`:
   - CLI argument parsing for `--ci`, `--budget-usd <num>`, `--step-summary`, `--no-step-summary`
   - Environment detection: auto-enabling CI mode when `GITHUB_ACTIONS=true`
   - Assistant posture verification: when review finds blocking findings in CI mode, the CLI publishes findings, writes summary, and exits with code 0 (never blocks CI)
   - Size gate and budget gate skips in CI mode: posting skip PR comment when `--post` is on, writing summary, and exiting 0 with output `status=skipped-size` / `status=skipped-budget`
   - Step summary file writing when `$GITHUB_STEP_SUMMARY` is provided
   - Output parameter writing when `$GITHUB_OUTPUT` is provided
-- [ ] 3.2 Wire `--ci`, `--budget-usd`, and CI runner hooks into `src/pr.ts` and `src/cli.ts`
-- [ ] 3.3 Make all Phase 3 tests pass with `bun test test/ci-review.test.ts`
+- [x] 3.2 Wire `--ci`, `--budget-usd`, and CI runner hooks into `src/pr.ts` and `src/cli.ts`
+- [x] 3.3 Make all Phase 3 tests pass with `bun test test/ci-review.test.ts`
 
 ## Phase 4: CI Scaffolding & Doctor Diagnostics
 

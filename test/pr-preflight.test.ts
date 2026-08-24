@@ -10,6 +10,10 @@
 // handles is the shape gh actually emits, not the shape a spec described.
 
 import { describe, expect, test } from "bun:test";
+import {
+  SKIP_BUDGET_COMMENT_MARKER,
+  SKIP_SIZE_COMMENT_MARKER,
+} from "../src/ci-gates";
 import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
 import type { GreptileFinding } from "../src/greptile";
 import {
@@ -33,6 +37,8 @@ import {
   worktreeDirty,
 } from "../src/pr-preflight";
 import { CliError, CliUsageError, parseArgs } from "../src/preflight";
+import { PR_STATE_MARKER_PREFIX } from "../src/rereview-state";
+import { TRIAGE_MARKER_PREFIX } from "../src/triage";
 
 // Merged the ordinary way: mergeCommit present, base branch is the default.
 const PR_1682_MERGED = `{"additions":21,"baseRefName":"dev","baseRefOid":"b22c3b367f6ac8531ad40e172f7aa82384dbbeb1","changedFiles":7,"deletions":8,"headRefOid":"e3ab386a63020c6f5c21d814d176ff33849eef8d","mergeCommit":{"oid":"0f7d53cc602a0dbf51372e8a601fef87ea85cc94"},"number":1682,"state":"MERGED","title":"chore(MUS-716): loading-flag resets, style arrays and fetch check (slice 5)"}`;
@@ -558,6 +564,27 @@ describe("findMarkedCommentId", () => {
     expect(findMarkedCommentId([legacyMarked(10), marked(20)])).toBe(20);
   });
 
+  // ROADMAP Pillar 3: the `prefix` parameter, defaulted to
+  // PR_COMMENT_MARKER_PREFIX so every call above (all single-argument) stays
+  // byte-identical. A custom prefix matches ONLY comments under that exact
+  // marker — a summary comment must never be mistaken for a CI skip comment,
+  // or vice versa.
+  test("a custom prefix matches only comments under that exact marker", () => {
+    const skipMarked = (id: number) => ({
+      id,
+      body: `${SKIP_SIZE_COMMENT_MARKER}\n## pr-hero review skipped`,
+    });
+    expect(
+      findMarkedCommentId(
+        [marked(10), skipMarked(20)],
+        SKIP_SIZE_COMMENT_MARKER,
+      ),
+    ).toBe(20);
+    expect(
+      findMarkedCommentId([marked(10)], SKIP_SIZE_COMMENT_MARKER),
+    ).toBeNull();
+  });
+
   // The exact-prefix lesson (a real `<!-- linear-linkback -->` bot comment
   // motivated it): a foreign marker that merely shares the leading words
   // must not match — the trailing space in the prefix rejects it.
@@ -603,18 +630,50 @@ describe("findMarkedCommentId", () => {
   });
 });
 
-// The collision test named in design D3: both marker families now post into
-// the same issue-comment stream (the summary comment and per-finding issue
-// comments), so a matcher that could confuse one for the other would either
-// orphan the summary or mistake a per-finding comment for it.
+// The collision test named in design D3: every marker family now posts into
+// the same issue-comment stream (the summary comment, per-finding issue
+// comments, the rereview state block, triage replies, and — ROADMAP Pillar 3
+// — the two CI gate-skip comments), so a matcher that could confuse one for
+// another would misfile a comment across families.
+//
+// Phase 3 (Pillar 3 apply-progress handoff #1) registers the two skip
+// markers here rather than leaving them unaddressed: they are field-less,
+// self-closing tags (`<!-- pr-hero-skip-size -->`), unlike the four
+// `<!-- pr-hero-<noun> ` + trailing-space prefixes, so the trailing-space
+// argument that keeps THOSE four disjoint does not apply to them — they need
+// their own proof. And the existing test only ever checked PR_FINDING vs
+// PR_COMMENT; strengthened here to every pair across all six, closing the
+// PR_STATE/TRIAGE gap noted in the same handoff.
 describe("marker prefix disjointness", () => {
-  test("neither marker prefix is a prefix of the other", () => {
+  const ALL_MARKER_PREFIXES: readonly [string, string][] = [
+    ["PR_COMMENT_MARKER_PREFIX", PR_COMMENT_MARKER_PREFIX],
+    ["PR_FINDING_MARKER_PREFIX", PR_FINDING_MARKER_PREFIX],
+    ["PR_STATE_MARKER_PREFIX", PR_STATE_MARKER_PREFIX],
+    ["TRIAGE_MARKER_PREFIX", TRIAGE_MARKER_PREFIX],
+    ["SKIP_SIZE_COMMENT_MARKER", SKIP_SIZE_COMMENT_MARKER],
+    ["SKIP_BUDGET_COMMENT_MARKER", SKIP_BUDGET_COMMENT_MARKER],
+  ];
+
+  test("neither marker prefix is a prefix of the other (legacy pair, kept for regression pinning)", () => {
     expect(PR_FINDING_MARKER_PREFIX.startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(
       false,
     );
     expect(PR_COMMENT_MARKER_PREFIX.startsWith(PR_FINDING_MARKER_PREFIX)).toBe(
       false,
     );
+  });
+
+  test("every pair across all six marker families is mutually disjoint", () => {
+    const colliding: string[] = [];
+    for (let i = 0; i < ALL_MARKER_PREFIXES.length; i++) {
+      for (let j = 0; j < ALL_MARKER_PREFIXES.length; j++) {
+        if (i === j) continue;
+        const [nameA, a] = ALL_MARKER_PREFIXES[i] as [string, string];
+        const [nameB, b] = ALL_MARKER_PREFIXES[j] as [string, string];
+        if (a.startsWith(b)) colliding.push(`${nameA} starts with ${nameB}`);
+      }
+    }
+    expect(colliding).toEqual([]);
   });
 });
 

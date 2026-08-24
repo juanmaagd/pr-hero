@@ -310,13 +310,22 @@ export function prCommentMarker(headSha: string): string {
 // idempotency is find-and-update, never stack: if legacy duplicates exist we
 // update the newest and leave history alone. None → null (the caller
 // creates).
+// `prefix` defaults to the summary comment's own marker, so every existing
+// caller stays byte-identical. Parameterized (ROADMAP Pillar 3) so
+// pr.ts's postPrComment can reuse this exact find-or-update logic for a CI
+// gate-skip comment under its own marker (ci-gates.ts's
+// SKIP_SIZE_COMMENT_MARKER / SKIP_BUDGET_COMMENT_MARKER) — the same
+// idempotency the summary comment already gets, so a repeat CI run on the
+// same still-failing PR updates the existing skip comment instead of
+// stacking a new one on every push.
 export function findMarkedCommentId(
   comments: { id: number; body: string }[],
+  prefix: string = PR_COMMENT_MARKER_PREFIX,
 ): number | null {
   let found: number | null = null;
   for (const comment of comments) {
     if (typeof comment?.body !== "string") continue;
-    if (!comment.body.startsWith(PR_COMMENT_MARKER_PREFIX)) continue;
+    if (!comment.body.startsWith(prefix)) continue;
     found = comment.id;
   }
   return found;

@@ -20,6 +20,7 @@
 // identity marker and its claim, verbatim, never via argv".
 
 import { describe, expect, test } from "bun:test";
+import { SKIP_SIZE_COMMENT_MARKER } from "../src/ci-gates";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
 import {
@@ -31,6 +32,7 @@ import {
   postCommitStatus,
   postIssueComment,
   postIssueTriageComment,
+  postPrComment,
   postPrReview,
   postReviewCommentReply,
   resolveReviewThreadForComment,
@@ -39,6 +41,7 @@ import {
   COMMIT_STATUS_CONTEXT,
   commitStatusRequest,
   findingMarker,
+  PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
 } from "../src/pr-preflight";
 import { renderIssueFindingComment } from "../src/report";
@@ -946,6 +949,145 @@ describe("postIssueComment", () => {
         spawnFn,
       ),
     ).rejects.toThrow(/post finding issue comment/);
+  });
+});
+
+// ROADMAP Pillar 3 (GitHub Actions CI): postPrComment's `markerPrefix`
+// parameter, exercised with NO `knownCommentId` — the fallback lookup path
+// both existing production callers (cli.ts's summary-comment create/update)
+// always skip by passing one. This is the first caller to reach it for
+// real: a CI gate-skip comment finding-or-updating itself by its OWN marker
+// (ci-gates.ts's SKIP_SIZE_COMMENT_MARKER), never the summary comment's.
+describe("postPrComment — custom marker prefix (ROADMAP Pillar 3 CI skip comments)", () => {
+  test("with no prior comment, creates under the given marker prefix", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["--paginate", "issues/42/comments"],
+        response: { stdout: "" },
+      },
+      {
+        match: ["--method", "POST", "issues/42/comments"],
+        response: { stdout: JSON.stringify({ id: 90 }) },
+      },
+    ]);
+    const result = await postPrComment(
+      OPERATOR_ROOT,
+      42,
+      `${SKIP_SIZE_COMMENT_MARKER}\nsize skip`,
+      spawnFn,
+      undefined,
+      SKIP_SIZE_COMMENT_MARKER,
+    );
+    expect(result).toEqual({ action: "created", commentId: 90 });
+    const created = calls.find((c) =>
+      argvContains(c.argv, ["--method", "POST", "issues/42/comments"]),
+    );
+    expect(created?.stdin).toContain(SKIP_SIZE_COMMENT_MARKER);
+  });
+
+  // The idempotency proof: a comment already marked with the SIZE-skip
+  // prefix is found and PATCHed — never a fresh POST — so a second CI run
+  // on the same still-oversized PR does not stack a duplicate notice.
+  test("with a prior skip comment under the same prefix, updates it in place", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["--paginate", "issues/42/comments"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 91,
+              user: "pr-hero-bot",
+              body: `${SKIP_SIZE_COMMENT_MARKER}\nold size skip`,
+            },
+          ]),
+        },
+      },
+      {
+        match: ["--method", "PATCH", "issues/comments/91"],
+        response: { stdout: JSON.stringify({ id: 91 }) },
+      },
+    ]);
+    const result = await postPrComment(
+      OPERATOR_ROOT,
+      42,
+      `${SKIP_SIZE_COMMENT_MARKER}\nnew size skip`,
+      spawnFn,
+      undefined,
+      SKIP_SIZE_COMMENT_MARKER,
+    );
+    expect(result).toEqual({ action: "updated", commentId: 91 });
+    expect(
+      calls.some((c) =>
+        argvContains(c.argv, ["--method", "POST", "issues/42/comments"]),
+      ),
+    ).toBe(false);
+  });
+
+  // Disjointness proven at the wiring level, not just the constant level: a
+  // pre-existing SUMMARY comment (the default PR_COMMENT_MARKER_PREFIX) must
+  // never be mistaken for a skip comment's own marker family.
+  test("a comment under the default summary marker is NOT matched by a different marker prefix", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["--paginate", "issues/42/comments"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 92,
+              user: "pr-hero-bot",
+              body: `${PR_COMMENT_MARKER_PREFIX}head=${"a".repeat(40)} -->\nsummary`,
+            },
+          ]),
+        },
+      },
+      {
+        match: ["--method", "POST", "issues/42/comments"],
+        response: { stdout: JSON.stringify({ id: 93 }) },
+      },
+    ]);
+    const result = await postPrComment(
+      OPERATOR_ROOT,
+      42,
+      `${SKIP_SIZE_COMMENT_MARKER}\nsize skip`,
+      spawnFn,
+      undefined,
+      SKIP_SIZE_COMMENT_MARKER,
+    );
+    expect(result).toEqual({ action: "created", commentId: 93 });
+    expect(
+      calls.some((c) =>
+        argvContains(c.argv, ["--method", "PATCH", "issues/comments/92"]),
+      ),
+    ).toBe(false);
+  });
+
+  test("with no markerPrefix given, defaults to the summary comment's own marker (unchanged behavior)", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["--paginate", "issues/42/comments"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 94,
+              user: "pr-hero-bot",
+              body: `${PR_COMMENT_MARKER_PREFIX}head=${"a".repeat(40)} -->\nsummary`,
+            },
+          ]),
+        },
+      },
+      {
+        match: ["--method", "PATCH", "issues/comments/94"],
+        response: { stdout: JSON.stringify({ id: 94 }) },
+      },
+    ]);
+    const result = await postPrComment(
+      OPERATOR_ROOT,
+      42,
+      `${PR_COMMENT_MARKER_PREFIX}head=${"a".repeat(40)} -->\nupdated summary`,
+      spawnFn,
+    );
+    expect(result).toEqual({ action: "updated", commentId: 94 });
+    expect(calls.length).toBeGreaterThan(0);
   });
 });
 
