@@ -14,13 +14,13 @@ disclaimer, and nothing in this tool blocks a merge.
 
 ```bash
 # Option A: Standalone binary (macOS / Linux, zero external runtime dependency)
-curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/pr-hero/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/juanmaagd/pr-hero/main/install.sh | bash
 
 # Option B: Global npm install (requires Bun >= 1.3 on PATH)
 npm install -g pr-hero
 
 # Option C: From source / development
-git clone https://github.com/Gentleman-Programming/pr-hero.git && cd pr-hero
+git clone https://github.com/juanmaagd/pr-hero.git && cd pr-hero
 bun install && bun link
 ```
 

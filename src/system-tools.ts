@@ -184,7 +184,7 @@ export async function checkSystemTools(
     codegraphStatus = {
       installed: false,
       repoIndexed,
-      hint: "Install CodeGraph: brew install codegraph or see https://github.com/Gentleman-Programming/codegraph",
+      hint: "Install CodeGraph: brew install codegraph",
     };
   } else {
     const versionRes = await exec([codegraphBin, "--version"]);

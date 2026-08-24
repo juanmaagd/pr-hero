@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="Gentleman-Programming/pr-hero"
+REPO="juanmaagd/pr-hero"
 INSTALL_DIR="${HOME}/.prhero/bin"
 BIN_PATH="${INSTALL_DIR}/pr-hero"
 

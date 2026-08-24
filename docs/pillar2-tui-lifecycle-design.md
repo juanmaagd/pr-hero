@@ -44,7 +44,7 @@ Pillar 1 delivered unified installation, global/team configuration foundation (C
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║  pr-hero v0.2.0 • Multi-Agent PR Review Engine                               ║
-║  Context: 🟢 Gentleman-Programming/pr-hero (branch: main)                    ║
+║  Context: 🟢 juanmaagd/pr-hero (branch: main)                                ║
 ║  MCP: 🟢 Registered (claude) • Store: 🟢 ~/.prhero/prhero.db                 ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -67,7 +67,7 @@ Pillar 1 delivered unified installation, global/team configuration foundation (C
 Notes on the mockup:
 
 - The version string (`v0.2.0`) is illustrative. At runtime it is rendered from `resolveVersion()` in `src/assets.ts` (compile-time `__PRHERO_VERSION__` define, `dev` fallback in source checkouts).
-- The repository identity (`Gentleman-Programming/pr-hero`) is rendered from the canonical repo constant (§4.6), never a second hardcoded string.
+- The repository identity (`juanmaagd/pr-hero`) is rendered from the canonical repo constant (§4.6), never a second hardcoded string.
 - The MCP chip says **Registered**, not "Connected": registration in the detected agent environments is what pr-hero verifies; nothing measures a live connection.
 - **Lifecycle** groups `Upgrade & sync`, `Sync skills & MCP registrations`, and `Managed uninstall` into one submenu. Its badge surfaces the cached upgrade-check state (`(up to date)` / `(v0.3.0 available)` / `(unknown)`), read from the cache only (§4.6): the menu never blocks on the network and works fully offline.
 - The `Active & recent reviews (● 1 running)` badge is derived from the `~/.prhero/active_runs/` registry (§4.5), a cheap local read.
@@ -80,7 +80,7 @@ Notes on the mockup:
 ╔═ Active Reviews & Activity ══════════════════════════════════════════════════╗
 ║                                                                              ║
 ║  ▸ ● RUNNING (PID 84219) · Elapsed: 01m 45s                                  ║
-║    Repo:   Gentleman-Programming/pr-hero                                     ║
+║    Repo:   juanmaagd/pr-hero                                                 ║
 ║    Target: PR #56 (branch: feat/pillar2-tui)                                 ║
 ║    Status: Running hunters (3/4 complete)                                    ║
 ║    Origin: Local watcher (launchd)                                           ║
@@ -269,7 +269,7 @@ Channel discipline: the menu renders to stderr through the existing `log()` chan
   - Reconciliation completion is recorded — the reconciled version is stored in `upgrade-check.json` — and `doctor` flags a version/reconciled mismatch as "reconciliation pending — run pr-hero upgrade --reconcile".
 - `--yes` and `--dry-run` apply to everything above.
 - **Upgrade check & cache (`pr-hero upgrade --check`):** a read-only current-vs-latest report with no mutation of the installation. `--check` always performs a fresh Releases query and rewrites the cache at `~/.prhero/upgrade-check.json` (a new `PrheroLayout` field, `upgradeCheckPath`). The 24h TTL governs only passive refresh: a plain `upgrade` run refreshes the cache opportunistically when it is older than 24h, and the menu never queries the network — it only reads the cache. The Lifecycle label renders instantly (`up to date` / `vX.Y.Z available` / `unknown`) and works offline.
-- **Canonical identity:** one exported constant for the GitHub repo identity (`Gentleman-Programming/pr-hero`, matching `README.md` and `install.sh`), used by the upgrader's Releases API and any surface rendering the repo identity, pinned by a test. Rationale: a single constant cannot drift from the published install source.
+- **Canonical identity:** one exported constant for the GitHub repo identity (`juanmaagd/pr-hero`, matching `README.md` and `install.sh`), used by the upgrader's Releases API and any surface rendering the repo identity, pinned by a test. Rationale: a single constant cannot drift from the published install source.
 
 ### 4.7 Uninstaller Module (`src/uninstaller.ts` & `pr-hero uninstall`)
 

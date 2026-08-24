@@ -10,7 +10,7 @@ import {
 import { resolveEngineAssets, selfInvocation } from "./assets";
 import { runDoctor } from "./doctor";
 
-export const PRHERO_GITHUB_REPO = "Gentleman-Programming/pr-hero";
+export const PRHERO_GITHUB_REPO = "juanmaagd/pr-hero";
 
 export type InstallMethodKind = "standalone" | "package_manager" | "source";
 

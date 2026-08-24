@@ -8,7 +8,7 @@
      - Development source checkout iff `resolveVersion()` reports `dev`.
      - Global package manager (`npm` / `bun`) otherwise (a global package tree).
    - MUST operate only on the installation that is running. When other installations are detected (e.g. a standalone binary exists while the npm copy is running), it MUST warn about the shadow install and touch nothing else.
-   - MUST query the GitHub Releases API using the canonical repo constant (`Gentleman-Programming/pr-hero`, matching `README.md` and `install.sh`, pinned by a test).
+   - MUST query the GitHub Releases API using the canonical repo constant (`juanmaagd/pr-hero`, matching `README.md` and `install.sh`, pinned by a test).
    - For standalone binary installations, it MUST:
      - Download `pr-hero-<target>` matching the current platform and architecture to a sibling temp file of the target (e.g. `~/.prhero/bin/.pr-hero.download-<pid>`), so `renameSync` stays atomic on one filesystem (a cross-filesystem rename fails with `EXDEV`; `/tmp` is commonly a different filesystem).
      - Verify the SHA256 checksum against `SHA256SUMS`.

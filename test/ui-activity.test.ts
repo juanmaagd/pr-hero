@@ -11,7 +11,7 @@ describe("ui-activity renderers", () => {
   const sampleRuns: ActiveRunRecord[] = [
     {
       pid: 84219,
-      repo: "Gentleman-Programming/pr-hero",
+      repo: "juanmaagd/pr-hero",
       pr: 56,
       runDir: "/tmp/prhero-run-84219",
       startedAt: "2026-08-24T12:00:00.000Z",
@@ -39,7 +39,7 @@ describe("ui-activity renderers", () => {
       cost_usd_est: 0.85,
       generated_at: "2026-08-24T11:45:00.000Z",
       pr: 55,
-      repo_id: "Gentleman-Programming/pr-hero",
+      repo_id: "juanmaagd/pr-hero",
     },
     {
       id: "run-002",
@@ -50,7 +50,7 @@ describe("ui-activity renderers", () => {
       cost_usd_est: 0.52,
       generated_at: "2026-08-24T11:30:00.000Z",
       pr: 54,
-      repo_id: "Gentleman-Programming/pr-hero",
+      repo_id: "juanmaagd/pr-hero",
     },
   ];
 
@@ -65,7 +65,7 @@ describe("ui-activity renderers", () => {
 
     const output = lines.join("\n");
     expect(output).toContain("84219");
-    expect(output).toContain("Gentleman-Programming/pr-hero");
+    expect(output).toContain("juanmaagd/pr-hero");
     expect(output).toContain("PR #56");
     expect(output).toContain("02m 00s");
   });

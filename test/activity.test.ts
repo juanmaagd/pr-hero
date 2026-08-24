@@ -25,7 +25,7 @@ describe("activity (active runs tracker & store activity monitor)", () => {
 
       const record: ActiveRunRecord = {
         pid: 12345,
-        repo: "Gentleman-Programming/pr-hero",
+        repo: "juanmaagd/pr-hero",
         pr: 56,
         runDir: "/tmp/run-12345",
         startedAt: "2026-08-24T12:00:00.000Z",
@@ -42,7 +42,7 @@ describe("activity (active runs tracker & store activity monitor)", () => {
       expect(written[expectedPath]).toBeDefined();
       const parsed = JSON.parse(written[expectedPath] || "{}");
       expect(parsed.pid).toBe(12345);
-      expect(parsed.repo).toBe("Gentleman-Programming/pr-hero");
+      expect(parsed.repo).toBe("juanmaagd/pr-hero");
       expect(parsed.pr).toBe(56);
 
       await unregisterActiveRun(12345, {
@@ -244,7 +244,7 @@ describe("activity (active runs tracker & store activity monitor)", () => {
           cost_usd_est: 0.5 + i * 0.1,
           generated_at: new Date(Date.now() - i * 60000).toISOString(),
           pr: 100 + i,
-          repo_id: "Gentleman-Programming/pr-hero",
+          repo_id: "juanmaagd/pr-hero",
         }),
       );
 
