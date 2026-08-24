@@ -283,33 +283,63 @@ export async function reconcileUpgrade(
 
   // 2. Verify MCP registration
   if (options.verifyMcp) {
-    await options.verifyMcp();
+    try {
+      await options.verifyMcp();
+    } catch (err) {
+      errors.push(`MCP verification failed: ${(err as Error).message}`);
+    }
   } else {
     for (const env of envs) {
       if (env.mcpConfigFile && (env.status === "active" || env.binaryFound)) {
-        await registerMcpServer(env, {
-          command: self.command,
-          args: [...self.args, "mcp"],
-        });
+        try {
+          const res = await registerMcpServer(env, {
+            command: self.command,
+            args: [...self.args, "mcp"],
+          });
+          if (!res.registered && res.error) {
+            errors.push(`${env.displayName} MCP: ${res.error}`);
+          }
+        } catch (err) {
+          errors.push(`${env.displayName} MCP: ${(err as Error).message}`);
+        }
       }
     }
   }
 
   // 3. Store migrations
   if (options.migrateStore) {
-    await options.migrateStore();
+    try {
+      await options.migrateStore();
+    } catch (err) {
+      errors.push(`Store migration failed: ${(err as Error).message}`);
+    }
   }
 
   // 4. Reload daemons on macOS
   if (options.reloadDaemons) {
-    await options.reloadDaemons();
+    try {
+      await options.reloadDaemons();
+    } catch (err) {
+      errors.push(`Daemon reload failed: ${(err as Error).message}`);
+    }
   }
 
   // 5. Doctor check
   if (options.runDoctorCheck) {
-    await options.runDoctorCheck();
+    try {
+      await options.runDoctorCheck();
+    } catch (err) {
+      errors.push(`Doctor check failed: ${(err as Error).message}`);
+    }
   } else {
-    await runDoctor({ home });
+    try {
+      const doc = await runDoctor({ home });
+      if (doc.overall === "blocking") {
+        errors.push("Doctor check found blocking issues");
+      }
+    } catch (err) {
+      errors.push(`Doctor check error: ${(err as Error).message}`);
+    }
   }
 
   return {

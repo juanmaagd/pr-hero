@@ -218,25 +218,27 @@ export async function runDoctor(
     });
   }
 
-  // 3. Gotchas check
-  const gotchasPath = path.join(cwd, ".prhero", "gotchas.md");
-  const gotchasContent = exists(gotchasPath)
-    ? readFile(gotchasPath)
-    : undefined;
-  if (!gotchasContent || gotchasContent.trim().length === 0) {
-    checks.push({
-      name: "gotchas",
-      severity: "blocking",
-      message:
-        "Repository gotchas file (.prhero/gotchas.md) is empty or missing",
-      hint: "Create and populate .prhero/gotchas.md with repository-specific invariants and failure traps.",
-    });
-  } else {
-    checks.push({
-      name: "gotchas",
-      severity: "healthy",
-      message: "Repository gotchas present (.prhero/gotchas.md)",
-    });
+  // 3. Gotchas check (only when repo root is supplied)
+  if (cwd) {
+    const gotchasPath = path.join(cwd, ".prhero", "gotchas.md");
+    const gotchasContent = exists(gotchasPath)
+      ? readFile(gotchasPath)
+      : undefined;
+    if (!gotchasContent || gotchasContent.trim().length === 0) {
+      checks.push({
+        name: "gotchas",
+        severity: "blocking",
+        message:
+          "Repository gotchas file (.prhero/gotchas.md) is empty or missing",
+        hint: "Create and populate .prhero/gotchas.md with repository-specific invariants and failure traps.",
+      });
+    } else {
+      checks.push({
+        name: "gotchas",
+        severity: "healthy",
+        message: "Repository gotchas present (.prhero/gotchas.md)",
+      });
+    }
   }
 
   // 4. Setup state check (~/.prhero/setup.json)

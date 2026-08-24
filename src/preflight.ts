@@ -200,6 +200,7 @@ export interface CliOptions {
   configValue?: string;
   configLayer?: "person" | "team" | "watch";
   edit?: boolean;
+  repoExplicit?: boolean;
 }
 
 export interface ParsedCli {
@@ -584,6 +585,7 @@ export function parseArgs(argv: string[]): ParsedCli {
       }
       i++;
       if (arg === "--head") headExplicit = true;
+      if (arg === "--repo") options.repoExplicit = true;
       applyValueFlag(options, arg, value);
       continue;
     }
