@@ -202,6 +202,7 @@ export interface ParsedCli {
     | "init"
     | "setup"
     | "doctor"
+    | "menu"
     | "activity"
     | "ledger"
     | "watch"
@@ -222,6 +223,8 @@ export interface ParsedCli {
 export const HELP_TEXT = `pr-hero — multi-agent review of a real repo + branch
 
 Usage:
+  pr-hero [options]          Open interactive terminal user interface (TTY)
+  pr-hero menu [options]     Open interactive terminal user interface
   pr-hero review [options]   Review a branch (zero flags inside a configured repo)
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero setup [options]    Run interactive onboarding wizard
@@ -516,6 +519,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "init"
     | "setup"
     | "doctor"
+    | "menu"
     | "activity"
     | "ledger"
     | "watch"
@@ -707,6 +711,7 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "init" &&
       arg !== "setup" &&
       arg !== "doctor" &&
+      arg !== "menu" &&
       arg !== "activity" &&
       arg !== "ledger" &&
       arg !== "watch" &&
@@ -723,7 +728,7 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "uninstall"
     ) {
       throw new CliUsageError(
-        `unknown command: ${arg} (the commands are "review", "init", "setup", "doctor", ` +
+        `unknown command: ${arg} (the commands are "menu", "review", "init", "setup", "doctor", ` +
           '"activity", "ledger", "watch", "post", "triage", "gc", "usage", ' +
           '"reverts", "corpus", "config", "mcp", "upgrade" and "uninstall")',
       );

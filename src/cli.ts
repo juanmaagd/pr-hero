@@ -66,6 +66,7 @@ import {
   type StoredComparison,
 } from "./ledger";
 import { runMcpServer } from "./mcp";
+import { resolveMenuContext } from "./menu-context";
 import {
   type FailSoftIngestInput,
   failSoftIngest,
@@ -131,6 +132,8 @@ import {
   type ConfigLayer,
   type ConfigSource,
   type ConfigSources,
+  DEFAULT_HEAD_REF,
+  DEFAULT_HOP_BUDGET,
   DEFAULT_SUMMARY_MODEL,
   emptyDiffMessage,
   GOTCHAS_TEMPLATE,
@@ -244,7 +247,9 @@ import {
 } from "./ui";
 import { renderActivityScreen } from "./ui-activity";
 import { renderConfig } from "./ui-config";
+import { runLifecycleSubmenu, runMenuLoop, runWatcherSubmenu } from "./ui-menu";
 import { type ResultLinks, renderResult } from "./ui-result";
+import { runReviewMenu } from "./ui-review-menu";
 import {
   type ConfirmResult,
   confirmReview,
@@ -484,22 +489,51 @@ async function localResultLinks(
 }
 
 async function main(argv: string[]): Promise<number> {
-  // Bare zero-argument entry: launch wizard if un-onboarded in a TTY, otherwise error in non-TTY
+  // Bare zero-argument entry
   if (argv.length === 0) {
-    if (!process.stdin.isTTY) {
+    if (process.env.PRHERO_NO_TUI !== undefined) {
+      log(HELP_TEXT);
+      return 0;
+    }
+    if (!process.stdin.isTTY || !process.stderr.isTTY) {
       log(HELP_TEXT);
       log();
-      log("error: no command given");
+      log("error: no command given (interactive TTY required for menu)");
+      return 2;
+    }
+    if (terminalWidth() < 24) {
+      log("terminal too narrow (width < 24 columns)");
+      log();
+      log(HELP_TEXT);
       return 2;
     }
     if (!isMachineOnboarded()) {
       return await runWizard();
     }
+    return await menuCommand({
+      repo: ".",
+      head: DEFAULT_HEAD_REF,
+      hopBudget: DEFAULT_HOP_BUDGET,
+      scout: false,
+      full: false,
+      dryRun: false,
+      yes: false,
+      post: false,
+      twoDot: false,
+      onPush: false,
+      force: false,
+      all: false,
+      fixes: false,
+      incidents: false,
+      issues: false,
+      proximity: false,
+      threads: false,
+    });
   }
 
   let parsed: ReturnType<typeof parseArgs>;
   try {
-    parsed = parseArgs(argv.length === 0 ? ["review"] : argv);
+    parsed = parseArgs(argv);
   } catch (error) {
     log(HELP_TEXT);
     log();
@@ -509,6 +543,21 @@ async function main(argv: string[]): Promise<number> {
   if (parsed.command === "help") {
     log(HELP_TEXT);
     return 0;
+  }
+  if (parsed.command === "menu") {
+    if (!process.stdin.isTTY || !process.stderr.isTTY) {
+      log(HELP_TEXT);
+      log();
+      log("error: interactive TTY required for menu");
+      return 2;
+    }
+    if (terminalWidth() < 24) {
+      log("terminal too narrow (width < 24 columns)");
+      log();
+      log(HELP_TEXT);
+      return 2;
+    }
+    return await menuCommand(parsed.options);
   }
   try {
     return parsed.command === "init"
@@ -5511,6 +5560,91 @@ async function activityCommand(options: CliOptions): Promise<number> {
   }
 
   return 0;
+}
+
+async function menuCommand(options: CliOptions): Promise<number> {
+  const repoRoot = options.repo
+    ? await resolveRepoRoot(options.repo).catch(() => undefined)
+    : await resolveRepoRoot(process.cwd()).catch(() => undefined);
+  const context = await resolveMenuContext(repoRoot ?? process.cwd());
+
+  return await runMenuLoop({
+    context,
+    styles: styleEnabled(process.stderr),
+    width: terminalWidth(),
+    dispatchAction: async (action) => {
+      switch (action) {
+        case "review": {
+          const res = await runReviewMenu({
+            styles: styleEnabled(process.stderr),
+            width: terminalWidth(),
+            defaultBase:
+              context.kind === "configured-repo"
+                ? context.defaultBase
+                : undefined,
+          });
+          if (res.action === "launch") {
+            return await review(res.options);
+          }
+          return "back";
+        }
+        case "init": {
+          return await init(options);
+        }
+        case "activity": {
+          return await activityCommand(options);
+        }
+        case "ledger": {
+          return await ledgerCommand(options);
+        }
+        case "doctor": {
+          return await doctorCommand(options);
+        }
+        case "config": {
+          return await configCommand(options);
+        }
+        case "watcher": {
+          return await runWatcherSubmenu({
+            styles: styleEnabled(process.stderr),
+            width: terminalWidth(),
+            inRepo: context.kind !== "not-a-repo",
+            dispatch: async (subcmd) => {
+              if (subcmd === "status")
+                return await watchCommand({ ...options, watch: undefined });
+              if (subcmd === "install")
+                return await watchCommand({ ...options, watch: "install" });
+              if (subcmd === "uninstall")
+                return await watchCommand({ ...options, watch: "uninstall" });
+              if (subcmd === "add")
+                return await watchCommand({ ...options, watch: "add" });
+              if (subcmd === "remove")
+                return await watchCommand({ ...options, watch: "remove" });
+              return 0;
+            },
+          });
+        }
+        case "lifecycle": {
+          return await runLifecycleSubmenu({
+            styles: styleEnabled(process.stderr),
+            width: terminalWidth(),
+            dispatch: async (subcmd) => {
+              if (subcmd === "upgrade") return await upgradeCommand(options);
+              if (subcmd === "setup")
+                return await runWizard({ cwd: repoRoot ?? process.cwd() });
+              if (subcmd === "uninstall")
+                return await uninstallCommand(options);
+              return 0;
+            },
+          });
+        }
+        case "quit": {
+          return 0;
+        }
+        default:
+          return 0;
+      }
+    },
+  });
 }
 
 // PURE half, so the fallbacks are testable without a filesystem or a spawn.
