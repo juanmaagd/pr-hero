@@ -1,0 +1,280 @@
+import { describe, expect, test } from "bun:test";
+import {
+  type AgentEnvDetection,
+  detectAgentEnvironments,
+  inspectMcpRegistration,
+  inspectSkillsSync,
+  registerMcpServer,
+  syncSkills,
+} from "../src/agent-env";
+import { resolveEngineAssets, selfInvocation } from "../src/assets";
+
+describe("Agent environment detector and sync", () => {
+  const fakeAssets = {
+    ...resolveEngineAssets(),
+    triageSkillFiles: {
+      "SKILL.md": "/abs/skills/pr-hero-triage/SKILL.md",
+      "adjudicator.md": "/abs/skills/pr-hero-triage/adjudicator.md",
+    },
+  };
+
+  describe("detectAgentEnvironments", () => {
+    test("detects multiple environments concurrently without collision", async () => {
+      const detected = await detectAgentEnvironments({
+        home: "/home/user",
+        exists: (p) => {
+          if (p.includes(".claude")) return true;
+          if (p.includes(".cursor")) return true;
+          if (p.includes(".gemini")) return true;
+          return false;
+        },
+        which: (bin) => {
+          if (bin === "claude") return "/usr/local/bin/claude";
+          if (bin === "cursor") return "/usr/local/bin/cursor";
+          return null;
+        },
+      });
+
+      const claude = detected.find((d) => d.id === "claude");
+      expect(claude).toBeDefined();
+      expect(claude?.binaryFound || claude?.status === "active").toBe(true);
+      expect(claude?.skillsDir).toBeDefined();
+
+      const cursor = detected.find((d) => d.id === "cursor");
+      expect(cursor).toBeDefined();
+      expect(cursor?.binaryFound || cursor?.status === "active").toBe(true);
+
+      const antigravity = detected.find((d) => d.id === "antigravity");
+      expect(antigravity).toBeDefined();
+      expect(antigravity?.status).toBe("active");
+    });
+  });
+
+  describe("skills digest & sync", () => {
+    test("syncSkills writes files and digest.json on first sync", async () => {
+      const written: Record<string, string> = {};
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        skillsDir: "/home/user/.claude/skills",
+      };
+
+      const result = await syncSkills(env, fakeAssets, {
+        readFile: (p) => {
+          if (p.endsWith("SKILL.md")) return "content of SKILL.md";
+          if (p.endsWith("adjudicator.md")) return "content of adjudicator.md";
+          return written[p];
+        },
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(result.synced).toEqual(["SKILL.md", "adjudicator.md"]);
+      expect(written["/home/user/.claude/skills/pr-hero-triage/SKILL.md"]).toBe(
+        "content of SKILL.md",
+      );
+      expect(
+        written["/home/user/.claude/skills/pr-hero-triage/adjudicator.md"],
+      ).toBe("content of adjudicator.md");
+      expect(
+        written["/home/user/.claude/skills/pr-hero-triage/digest.json"],
+      ).toBeDefined();
+
+      // Second sync is a no-op when digest matches
+      const secondResult = await syncSkills(env, fakeAssets, {
+        readFile: (p) => {
+          if (p.endsWith("SKILL.md")) return "content of SKILL.md";
+          if (p.endsWith("adjudicator.md")) return "content of adjudicator.md";
+          return written[p];
+        },
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(secondResult.synced).toEqual([]);
+      expect(secondResult.upToDate).toBe(true);
+    });
+
+    test("manual user edit triggers drift protection unless force: true", async () => {
+      const written: Record<string, string> = {
+        "/home/user/.claude/skills/pr-hero-triage/SKILL.md":
+          "user modified content",
+        "/home/user/.claude/skills/pr-hero-triage/adjudicator.md":
+          "content of adjudicator.md",
+        "/home/user/.claude/skills/pr-hero-triage/digest.json": JSON.stringify({
+          files: {
+            "SKILL.md": "original_hash",
+            "adjudicator.md": "content_hash",
+          },
+          engine_version: "0.1.0",
+        }),
+      };
+
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        skillsDir: "/home/user/.claude/skills",
+      };
+
+      // Without force: drift detected, skipped
+      const resultNoForce = await syncSkills(env, fakeAssets, {
+        readFile: (p) => {
+          if (p === fakeAssets.triageSkillFiles["SKILL.md"])
+            return "new upstream content";
+          if (p === fakeAssets.triageSkillFiles["adjudicator.md"])
+            return "content of adjudicator.md";
+          return written[p];
+        },
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(resultNoForce.driftDetected).toBe(true);
+      expect(resultNoForce.synced).toEqual([]);
+
+      // With force: overwrites
+      const resultForce = await syncSkills(env, fakeAssets, {
+        force: true,
+        readFile: (p) => {
+          if (p === fakeAssets.triageSkillFiles["SKILL.md"])
+            return "new upstream content";
+          if (p === fakeAssets.triageSkillFiles["adjudicator.md"])
+            return "content of adjudicator.md";
+          return written[p];
+        },
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(resultForce.synced).toEqual(["SKILL.md", "adjudicator.md"]);
+      expect(written["/home/user/.claude/skills/pr-hero-triage/SKILL.md"]).toBe(
+        "new upstream content",
+      );
+    });
+  });
+
+  describe("MCP registration", () => {
+    test("registerMcpServer adds pr-hero entry without altering existing servers", async () => {
+      const initialConfig = JSON.stringify({
+        mcpServers: {
+          existingServer: {
+            command: "npx",
+            args: ["-y", "existing"],
+          },
+        },
+      });
+
+      const written: Record<string, string> = {
+        "/home/user/.cursor/mcp.json": initialConfig,
+      };
+
+      const env: AgentEnvDetection = {
+        id: "cursor",
+        displayName: "Cursor",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        mcpConfigFile: "/home/user/.cursor/mcp.json",
+      };
+
+      const self = selfInvocation();
+      const reg = {
+        command: self.command,
+        args: [...self.args, "mcp"],
+      };
+
+      const result = await registerMcpServer(env, reg, {
+        readFile: (p) => written[p],
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(result.registered).toBe(true);
+      const parsed = JSON.parse(written["/home/user/.cursor/mcp.json"]);
+      expect(parsed.mcpServers.existingServer).toBeDefined();
+      expect(parsed.mcpServers["pr-hero"]).toEqual({
+        command: reg.command,
+        args: reg.args,
+      });
+
+      // Second registration is idempotent
+      const secondResult = await registerMcpServer(env, reg, {
+        readFile: (p) => written[p],
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(secondResult.alreadyRegistered).toBe(true);
+    });
+
+    test("inspectMcpRegistration returns true when configured, false otherwise", () => {
+      const self = selfInvocation();
+      const reg = {
+        command: self.command,
+        args: [...self.args, "mcp"],
+      };
+
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        mcpConfigFile: "/home/user/.claude/mcp.json",
+      };
+
+      const notRegistered = inspectMcpRegistration(env, reg, {
+        exists: () => false,
+      });
+      expect(notRegistered).toBe(false);
+
+      const registered = inspectMcpRegistration(env, reg, {
+        exists: () => true,
+        readFile: () =>
+          JSON.stringify({
+            mcpServers: {
+              "pr-hero": { command: reg.command, args: reg.args },
+            },
+          }),
+      });
+      expect(registered).toBe(true);
+    });
+  });
+
+  describe("inspectSkillsSync", () => {
+    test("inspectSkillsSync returns false when digest missing", () => {
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        skillsDir: "/home/user/.claude/skills",
+      };
+
+      const status = inspectSkillsSync(env, fakeAssets, {
+        exists: () => false,
+      });
+      expect(status.synced).toBe(false);
+      expect(status.drift).toBe(false);
+    });
+  });
+});
