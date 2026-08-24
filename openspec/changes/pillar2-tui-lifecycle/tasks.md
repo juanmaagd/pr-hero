@@ -64,6 +64,6 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 7: Verification & Documentation
 
-- [ ] 7.1 Run full offline test suite (`bun test`)
-- [ ] 7.2 Run typecheck (`bun run typecheck`) and Biome linter (`bun run check`)
-- [ ] 7.3 Update `README.md` and the CLI help: document the removal of the implicit zero-argument `review` default as a breaking change, the new verbs (`menu`, `upgrade` including `--check`, `uninstall`, `activity`, `config set`/`config unset`), the repo-optional behavior of `doctor`/`config`/`setup`, and the `PRHERO_NO_TUI` escape hatch
+- [x] 7.1 Run full offline test suite (`bun test`)
+- [x] 7.2 Run typecheck (`bun run typecheck`) and Biome linter (`bun run check`)
+- [x] 7.3 Update `README.md` and the CLI help: document the removal of the implicit zero-argument `review` default as a breaking change, the new verbs (`menu`, `upgrade` including `--check`, `uninstall`, `activity`, `config set`/`config unset`), the repo-optional behavior of `doctor`/`config`/`setup`, and the `PRHERO_NO_TUI` escape hatch

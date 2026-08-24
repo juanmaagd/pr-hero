@@ -27,20 +27,22 @@ bun install && bun link
 ## Quick start
 
 ```bash
-# 1. Check system readiness & dependencies
+# 1. Interactive terminal user interface (TUI)
+pr-hero                          # opens the root interactive menu in a TTY
+
+# 2. Check system readiness & dependencies (works inside or outside a repo)
 pr-hero doctor
 
-# 2. Run interactive onboarding wizard (or simply run `pr-hero` on a new machine)
+# 3. Machine-level onboarding & skill/MCP synchronization
 pr-hero setup
 
-# 3. Always preview first — $0, spawns nothing
-pr-hero review --dry-run
-
-# 4. Review
+# 4. Review a branch or pull request
 pr-hero review                   # your checked-out branch vs the merge base
 pr-hero review --pr              # the current branch's PR, in an isolated worktree
 pr-hero review --pr 123          # any PR by number
 ```
+
+> **Breaking change in v2.0**: Invoking `pr-hero` with zero arguments in a TTY now opens the **interactive TUI menu** instead of implicitly starting a local `review`. In non-interactive environments, it prints the help text and exits with code 2. Set `PRHERO_NO_TUI=1` to bypass the TUI in automation.
 
 Every paid run prints a plan and a cost band, then asks for confirmation (`--yes` skips the prompt).
 
@@ -99,13 +101,22 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 
 | Command | What it does |
 | --- | --- |
+| `pr-hero` / `pr-hero menu` | Open the interactive terminal user interface (TUI) with context-aware navigation, review launcher, and submenus. |
 | `pr-hero review` | Review the checked-out branch against the merge base with `--base`. Requires a clean tree sitting on `--head` (default `HEAD`). |
 | `pr-hero review --pr [n]` | Review a GitHub PR: by number, or — bare, no number — the PR that belongs to the current branch (errors loudly if it has none). Resolves the range through `gh`, runs in a detached worktree with its own codegraph index, then compares the result against Greptile's comment on that PR. |
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
+| `pr-hero doctor` | Run diagnostic environment and dependency checks (git, claude auth, gh, codegraph, config). Works inside or outside a repository. |
+| `pr-hero setup` | Run machine-level onboarding, skill synchronization, and MCP registration. Works inside or outside a repository. |
+| `pr-hero activity [--kill <pid>]` | Inspect running reviews (with elapsed time, PID, repo/PR), watcher spend against daily cap, and completed run history. `--kill <pid>` safely terminates a running review. |
 | `pr-hero post --pr <n> --from <run-dir>` | Replay-publish a previous run's findings onto the PR (same plan as `--pr --post`). `--dry-run` previews at $0. |
 | `pr-hero triage --pr <n> --from <run-dir>` | Read reply threads and bind triage markers onto that run's `comparison.json` ledger rows. |
 | `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N --tag <tag> --body-file <path>` | Post one triage reply. The driver picks the parent from the posted `<!-- pr-hero-finding` marker (never path/line), renders the marker + badge, posts, and resolves the inline review thread. Reads `diff.patch` from the run dir to remap post lines the same way `--post` does. `--body-file` is reasoning only. |
-| `pr-hero config` | Read-only, $0: every config key with its value and **which layer decided it** (`repo` / `global` / `capped` / `default`), plus both file paths whether or not they exist. Resolves through the same code a review does, so it cannot drift from what actually runs. Answers; never edits. |
+| `pr-hero config` | Read-only, $0: every config key with its value and **which layer decided it** (`repo` / `global` / `capped` / `default`), plus both file paths whether or not they exist. |
+| `pr-hero config set <key> <val> [--person\|--team\|--watch]` | Set a scalar configuration value in the selected layer (defaults to `--person`). Capped team keys accept and annotate over-ceiling values. |
+| `pr-hero config unset <key> [--person\|--team\|--watch]` | Remove a configuration value from the selected layer. |
+| `pr-hero config --edit` | Open the interactive configuration editor across Person, Team, and Watcher layers. |
+| `pr-hero upgrade [--check]` | Upgrade `pr-hero` to the latest release and reconcile installed skills and MCP registrations. `--check` checks for updates without installing. |
+| `pr-hero uninstall [--purge]` | Managed uninstallation: unloads launchd background daemons, cleans up skills, unregisters MCPs, and optionally purges `~/.prhero` with `--purge`. |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. |
 | `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
 | `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |
