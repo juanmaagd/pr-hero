@@ -204,7 +204,7 @@ import {
   sizeGateLine,
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
-import { ClaudeCodeRunner } from "./step-runner";
+import { ClaudeCodeRunner, killAllChildProcesses } from "./step-runner";
 import {
   openProductStore,
   queryRuns,
@@ -5478,8 +5478,20 @@ async function activityCommand(options: CliOptions): Promise<number> {
 
   if (options.kill !== undefined) {
     const pid = options.kill;
-    if (!options.yes && process.stdin.isTTY) {
-      log(`Are you sure you want to terminate review process (PID ${pid})?`);
+    if (!options.yes) {
+      if (!process.stdin.isTTY) {
+        throw new CliError(
+          "--yes is required to terminate a review in non-interactive mode",
+        );
+      }
+      process.stderr.write(`Terminate review process (PID ${pid})? [y/N] `);
+      const reader = process.stdin[Symbol.asyncIterator]();
+      const chunk = (await reader.next()).value;
+      const answer = chunk ? chunk.toString().trim().toLowerCase() : "";
+      if (answer !== "y" && answer !== "yes") {
+        log("Aborted.");
+        return 0;
+      }
     }
 
     const res = await killActiveRun(pid, { home });
@@ -5562,6 +5574,7 @@ async function engineIdentity(): Promise<{
 if (import.meta.main) {
   process.on("SIGTERM", async () => {
     try {
+      killAllChildProcesses();
       await unregisterActiveRun(process.pid);
     } catch {
       // Ignore
