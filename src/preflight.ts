@@ -194,6 +194,12 @@ export interface CliOptions {
   reconcile?: boolean;
   // activity only
   kill?: number;
+  // config only
+  configSubcommand?: "set" | "unset" | "edit";
+  configKey?: string;
+  configValue?: string;
+  configLayer?: "person" | "team" | "watch";
+  edit?: boolean;
 }
 
 export interface ParsedCli {
@@ -668,6 +674,23 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.threads = true;
       continue;
     }
+    if (arg === "--person") {
+      options.configLayer = "person";
+      continue;
+    }
+    if (arg === "--team") {
+      options.configLayer = "team";
+      continue;
+    }
+    if (arg === "--watch") {
+      options.configLayer = "watch";
+      continue;
+    }
+    if (arg === "--edit") {
+      options.edit = true;
+      options.configSubcommand = "edit";
+      continue;
+    }
     if (arg.startsWith("-")) {
       throw new CliUsageError(`unknown option: ${arg}`);
     }
@@ -686,6 +709,35 @@ export function parseArgs(argv: string[]): ParsedCli {
     ) {
       options.watch = arg;
       continue;
+    }
+    if (command === "config" && options.configSubcommand === undefined) {
+      if (arg === "set") {
+        options.configSubcommand = "set";
+        const key = argv[++i];
+        if (!key || key.startsWith("-")) {
+          throw new CliUsageError("config set requires <key> and <value>");
+        }
+        const val = argv[++i];
+        if (!val || val.startsWith("--")) {
+          throw new CliUsageError("config set requires <key> and <value>");
+        }
+        options.configKey = key;
+        options.configValue = val;
+        continue;
+      }
+      if (arg === "unset") {
+        options.configSubcommand = "unset";
+        const key = argv[++i];
+        if (!key || key.startsWith("-")) {
+          throw new CliUsageError("config unset requires <key>");
+        }
+        options.configKey = key;
+        continue;
+      }
+      if (arg === "edit") {
+        options.configSubcommand = "edit";
+        continue;
+      }
     }
     if (
       command === "gc" &&
@@ -999,6 +1051,9 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (options.issue !== undefined) {
       throw new CliUsageError("--issue only applies to triage reply");
     }
+  }
+  if (command === "config" && options.configSubcommand !== undefined) {
+    options.configLayer = options.configLayer ?? "person";
   }
   return { command, options };
 }
