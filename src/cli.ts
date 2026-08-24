@@ -3941,7 +3941,7 @@ async function doctorCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveOptionalRepoRoot(options);
   const report = await runDoctor({
     repoRoot: repoRoot ?? undefined,
-    cwd: repoRoot ?? process.cwd(),
+    cwd: repoRoot ?? undefined,
   });
   const lines = renderDoctorReport(report, {
     styles: styleEnabled(process.stdout),
