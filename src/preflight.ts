@@ -5,6 +5,7 @@
 // tested is a preflight that gets tested once, live, at $10 a go.
 
 import path from "node:path";
+import { resolveEngineAssets } from "./assets";
 import type { SuspicionPrior } from "./prompt-set";
 // size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
@@ -41,11 +42,6 @@ export const DEFAULT_HEAD_REF = "HEAD";
 // of truth for execution when no model override is configured; this value is
 // only the honest model label shown in a preflight plan.
 export const DEFAULT_SUMMARY_MODEL = "haiku";
-
-// The clean 5-file set at the time of writing. Named in the error text so a
-// first-time user is one copy-paste from a working run instead of guessing.
-export const SUGGESTED_AGENTS_DIR =
-  "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
 
 export class CliUsageError extends Error {}
 
@@ -198,6 +194,8 @@ export interface ParsedCli {
   command:
     | "review"
     | "init"
+    | "setup"
+    | "doctor"
     | "ledger"
     | "watch"
     | "post"
@@ -217,6 +215,8 @@ export const HELP_TEXT = `pr-hero — multi-agent review of a real repo + branch
 Usage:
   pr-hero review [options]   Review a branch (zero flags inside a configured repo)
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
+  pr-hero setup [options]    Run interactive onboarding wizard
+  pr-hero doctor [options]   Check system tools and environment readiness
   pr-hero ledger [options]   Accumulate every run's comparison.json into one
                              markdown ledger (the three buckets as a rate)
   pr-hero mcp [options]      Start the read-only Model Context Protocol (MCP)
@@ -499,6 +499,8 @@ export function parseArgs(argv: string[]): ParsedCli {
   let command:
     | "review"
     | "init"
+    | "setup"
+    | "doctor"
     | "ledger"
     | "watch"
     | "post"
@@ -673,6 +675,8 @@ export function parseArgs(argv: string[]): ParsedCli {
     if (
       arg !== "review" &&
       arg !== "init" &&
+      arg !== "setup" &&
+      arg !== "doctor" &&
       arg !== "ledger" &&
       arg !== "watch" &&
       arg !== "post" &&
@@ -685,7 +689,7 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "mcp"
     ) {
       throw new CliUsageError(
-        `unknown command: ${arg} (the commands are "review", "init", ` +
+        `unknown command: ${arg} (the commands are "review", "init", "setup", "doctor", ` +
           '"ledger", "watch", "post", "triage", "gc", "usage", "reverts", ' +
           '"corpus", "config" and "mcp")',
       );
@@ -1208,7 +1212,7 @@ export function resolveBaseRef(input: {
 // config" while leaving them to guess which of two files to open — for the
 // single biggest spend lever in the file, whose prompt-set frontmatter picks
 // every hunter's model.
-export type AgentsDirSource = "flag" | "repo" | "global" | "env";
+export type AgentsDirSource = "flag" | "repo" | "global" | "env" | "default";
 
 export interface AgentsDirResolution {
   dir: string;
@@ -1262,12 +1266,11 @@ export function resolveAgentsDirSetting(input: {
   if (input.env) {
     return { dir: path.resolve(input.cwd, input.env), source: "env" };
   }
-  throw new CliUsageError(
-    "no prompt set given. Pass --agents <dir>, set agents_dir in " +
-      ".prhero/config.json (run `pr-hero init`) or in ~/.prhero/config.json, " +
-      "or set PRHERO_AGENTS_DIR. " +
-      `The current clean set is ${SUGGESTED_AGENTS_DIR}`,
-  );
+  const assets = resolveEngineAssets();
+  return {
+    dir: assets.defaultAgentsDir,
+    source: "default",
+  };
 }
 
 // The seat, assembled from the merge's own source record. THIS is the one
@@ -2035,7 +2038,7 @@ function optionalString(
 }
 
 export interface InitTemplateInput {
-  agentsDir: string;
+  agentsDir?: string | undefined;
   defaultBase: string;
   // What `~/.prhero/config.json` ALREADY says, or undefined when the operator
   // has no global file. C5 O-9: a scaffold that re-states what the global
@@ -2082,7 +2085,9 @@ export function initTemplateOmissions(
   input: InitTemplateInput,
 ): InitTemplateOmissions {
   const agentsDir =
-    input.global?.agents_dir !== undefined && input.agentsDirFromFlag !== true;
+    input.agentsDir === undefined ||
+    (input.global?.agents_dir !== undefined &&
+      input.agentsDirFromFlag !== true);
   const summaryEnabled = input.global?.summary?.enabled !== undefined;
   const summaryModel = input.global?.summary?.model !== undefined;
   return {

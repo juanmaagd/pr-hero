@@ -16,8 +16,10 @@ import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveEngineAssets } from "./assets";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
+import { renderDoctorReport, runDoctor } from "./doctor";
 import {
   type Finding,
   type FindingsDocument,
@@ -145,7 +147,6 @@ import {
   resolveMaxVerificationSteps,
   resolveSummary,
   runDirCandidate,
-  SUGGESTED_AGENTS_DIR,
   type SummarySettings,
 } from "./preflight";
 import {
@@ -246,6 +247,7 @@ import { watchCommand } from "./watch";
 // PrCommentDelta.previousHeadSha), the exact reuse watch-preflight.ts's own
 // header describes for the cross-machine guard.
 import { parseMarkerHead } from "./watch-preflight";
+import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
 // handed to every step together with the runner's --strict-mcp-config: an
@@ -261,13 +263,6 @@ const CODEGRAPH_ONLY_MCP_CONFIG = {
   },
 };
 
-const SUMMARIZER_PROMPT_PATH = path.join(
-  import.meta.dir,
-  "..",
-  "prompts",
-  "summarizer.md",
-);
-
 export function pipelineSummarizerInput(
   summary: SummarySettings,
 ):
@@ -276,19 +271,12 @@ export function pipelineSummarizerInput(
   return summary.enabled
     ? {
         summarizer: {
-          promptPath: SUMMARIZER_PROMPT_PATH,
+          promptPath: resolveEngineAssets().summarizerPromptPath,
           ...(summary.model === undefined ? {} : { model: summary.model }),
         },
       }
     : {};
 }
-
-const SCOUT_PROMPT_PATH = path.join(
-  import.meta.dir,
-  "..",
-  "prompts",
-  "scout.md",
-);
 
 // The scout's prompt is ENGINE-owned and lives outside the agents dir, on
 // purpose and twice over (§3.7): a `review-scout.md` dropped in the agents dir
@@ -302,7 +290,7 @@ export function pipelineScoutInput(
   return options.scout
     ? {
         scout: {
-          promptPath: SCOUT_PROMPT_PATH,
+          promptPath: resolveEngineAssets().scoutPromptPath,
           ...(options.scoutModel === undefined
             ? {}
             : { model: options.scoutModel }),
@@ -477,9 +465,22 @@ async function localResultLinks(
 }
 
 async function main(argv: string[]): Promise<number> {
+  // Bare zero-argument entry: launch wizard if un-onboarded in a TTY, otherwise error in non-TTY
+  if (argv.length === 0) {
+    if (!process.stdin.isTTY) {
+      log(HELP_TEXT);
+      log();
+      log("error: no command given");
+      return 2;
+    }
+    if (!isMachineOnboarded()) {
+      return await runWizard();
+    }
+  }
+
   let parsed: ReturnType<typeof parseArgs>;
   try {
-    parsed = parseArgs(argv);
+    parsed = parseArgs(argv.length === 0 ? ["review"] : argv);
   } catch (error) {
     log(HELP_TEXT);
     log();
@@ -493,27 +494,31 @@ async function main(argv: string[]): Promise<number> {
   try {
     return parsed.command === "init"
       ? await init(parsed.options)
-      : parsed.command === "ledger"
-        ? await ledgerCommand(parsed.options)
-        : parsed.command === "watch"
-          ? await watchCommand(parsed.options)
-          : parsed.command === "post"
-            ? await postCommand(parsed.options)
-            : parsed.command === "triage"
-              ? await triageCommand(parsed.options)
-              : parsed.command === "gc"
-                ? await gcCommand(parsed.options)
-                : parsed.command === "usage"
-                  ? await usageCommand(parsed.options)
-                  : parsed.command === "reverts"
-                    ? await revertsCommand(parsed.options)
-                    : parsed.command === "corpus"
-                      ? await corpusCommand(parsed.options)
-                      : parsed.command === "config"
-                        ? await configCommand(parsed.options)
-                        : parsed.command === "mcp"
-                          ? await mcpCommand(parsed.options)
-                          : await review(parsed.options);
+      : parsed.command === "setup"
+        ? await runWizard({ cwd: await resolveRepoRoot(parsed.options.repo) })
+        : parsed.command === "doctor"
+          ? await doctorCommand(parsed.options)
+          : parsed.command === "ledger"
+            ? await ledgerCommand(parsed.options)
+            : parsed.command === "watch"
+              ? await watchCommand(parsed.options)
+              : parsed.command === "post"
+                ? await postCommand(parsed.options)
+                : parsed.command === "triage"
+                  ? await triageCommand(parsed.options)
+                  : parsed.command === "gc"
+                    ? await gcCommand(parsed.options)
+                    : parsed.command === "usage"
+                      ? await usageCommand(parsed.options)
+                      : parsed.command === "reverts"
+                        ? await revertsCommand(parsed.options)
+                        : parsed.command === "corpus"
+                          ? await corpusCommand(parsed.options)
+                          : parsed.command === "config"
+                            ? await configCommand(parsed.options)
+                            : parsed.command === "mcp"
+                              ? await mcpCommand(parsed.options)
+                              : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -3595,14 +3600,14 @@ async function init(options: CliOptions): Promise<number> {
   // NOT resolveAgentsDirSetting: that one is the review-time precedence
   // (flag > config > env) and it throws when nothing is set. init has no
   // config to read yet — it is writing one — and a missing prompt set must
-  // still produce a usable scaffold, so the suggested clean set is the seed of
-  // last resort rather than a hard error.
+  // still produce a usable scaffold. When no flag or env is given, agents_dir
+  // is omitted entirely so the repo uses the engine's bundled default.
   const agentsFromEnv = process.env.PRHERO_AGENTS_DIR;
   const agentsSeed = options.agents
     ? { dir: path.resolve(options.agents), source: "--agents" }
     : agentsFromEnv
       ? { dir: path.resolve(agentsFromEnv), source: "PRHERO_AGENTS_DIR" }
-      : { dir: SUGGESTED_AGENTS_DIR, source: "the suggested clean set" };
+      : undefined;
   const baseSeed = resolveBaseRef({
     flag: options.base,
     remoteHead: await remoteHeadRef(repoRoot),
@@ -3616,7 +3621,7 @@ async function init(options: CliOptions): Promise<number> {
   const { filePath: globalConfigPath, layer: globalLayer } =
     await loadGlobalConfigLayer(os.homedir());
   const templateInput = {
-    agentsDir: agentsSeed.dir,
+    ...(agentsSeed === undefined ? {} : { agentsDir: agentsSeed.dir }),
     defaultBase: baseSeed.ref,
     ...(globalLayer === undefined ? {} : { global: globalLayer }),
     agentsDirFromFlag: options.agents !== undefined,
@@ -3656,8 +3661,10 @@ async function init(options: CliOptions): Promise<number> {
   // that is not in the file they were just told was written.
   log(
     omitted.agentsDir
-      ? `  agents_dir    ${globalLayer?.agents_dir} (from ${globalConfigPath})`
-      : `  agents_dir    ${agentsSeed.dir} (from ${agentsSeed.source})`,
+      ? globalLayer?.agents_dir
+        ? `  agents_dir    ${globalLayer.agents_dir} (from ${globalConfigPath})`
+        : "  agents_dir    bundled default (from engine)"
+      : `  agents_dir    ${agentsSeed?.dir} (from ${agentsSeed?.source})`,
   );
   log(`  default_base  ${baseSeed.ref} (from ${baseSeed.source})`);
   if (omitted.keys.length > 0) {
@@ -3871,6 +3878,17 @@ async function configCommand(options: CliOptions): Promise<number> {
   });
   process.stdout.write(`${lines.join("\n")}\n`);
   return 0;
+}
+
+async function doctorCommand(options: CliOptions): Promise<number> {
+  const repoRoot = await resolveRepoRoot(options.repo);
+  const report = await runDoctor({ cwd: repoRoot });
+  const lines = renderDoctorReport(report, {
+    styles: styleEnabled(process.stdout),
+    width: terminalWidth(),
+  });
+  process.stdout.write(`${lines.join("\n")}\n`);
+  return report.exitCode;
 }
 
 export async function mcpCommand(options: CliOptions): Promise<number> {

@@ -7,3 +7,5 @@ fixtures/.build/
 .playwright-mcp/
 # corpus mining artifacts: candidates for a human glance, not source
 corpus-artifacts/
+dist/
+

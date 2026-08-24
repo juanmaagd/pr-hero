@@ -118,6 +118,11 @@ over** (found while wiring C5, 2026-08-23):
   *exported* symbols, so an `export` for a hypothetical consumer is how dead code hides).
 - `src/ledger.ts` — B4 pure half (`pr-hero ledger`): comparison.json read-back, one-vote-per-PR
   aggregation, as-is verdict tally, markdown ledger with the pending-triage list.
+- `src/assets.ts` + `src/asset-manifest.ts` — bundled productized prompts, triage skills, and self-invocation resolution.
+- `src/system-tools.ts` — pure and system checkers for git, claude CLI auth, gh, and codegraph.
+- `src/doctor.ts` — tri-state (`healthy | degraded | blocking`) environment diagnostic report evaluator and renderer.
+- `src/agent-env.ts` — multi-agent IDE/CLI environment detector, skills digest sync with drift protection, and MCP registration.
+- `src/wizard.ts` — interactive TUI onboarding wizard (steps as data: tools, env, skills/mcp, workspace gotchas, verification) + zero-argument entry.
 - `fixtures/` + `scripts/` — the planted-bug eval and live micro-eval.
 
 ## Rules that outrank convenience

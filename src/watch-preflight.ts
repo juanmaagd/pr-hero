@@ -231,7 +231,7 @@ export function contractTilde(p: string, home: string): string {
 // data loss.
 
 // A stored path and a freshly resolved repo root must collide however the
-// config spells the repo — `~/x` and `/Users/juanma/x` are the same entry.
+// config spells the repo — `~/x` and `/Users/user/x` are the same entry.
 function sameRepoPath(stored: string, repoRoot: string, home: string): boolean {
   return path.resolve(expandTilde(stored, home)) === path.resolve(repoRoot);
 }

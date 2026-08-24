@@ -10,25 +10,33 @@ defects — stuck loading latches, missing cleanups, re-entrancy, stalls — and
 style or convention. It is an **assistant, not a merge gate**: every report closes with that
 disclaimer, and nothing in this tool blocks a merge.
 
+## Installation
+
+```bash
+# Option A: Standalone binary (macOS / Linux, zero external runtime dependency)
+curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/pr-hero/main/install.sh | bash
+
+# Option B: Global npm install (requires Bun >= 1.3 on PATH)
+npm install -g pr-hero
+
+# Option C: From source / development
+git clone https://github.com/Gentleman-Programming/pr-hero.git && cd pr-hero
+bun install && bun link
+```
+
 ## Quick start
 
 ```bash
-# 1. Requirements on PATH: bun, git, claude (Claude Code CLI, authenticated).
-#    Optional: gh (PR mode), codegraph (code-intelligence index).
-git clone <this-repo> && cd pr-hero
-bun install && bun link          # `pr-hero` becomes a global command
+# 1. Check system readiness & dependencies
+pr-hero doctor
 
-# 2. Configure the repo you want reviewed
-cd /path/to/your-repo
-pr-hero init                     # scaffolds .prhero/config.json + .prhero/gotchas.md
+# 2. Run interactive onboarding wizard (or simply run `pr-hero` on a new machine)
+pr-hero setup
 
-# 3. Edit the two files .prhero/ now contains (see Configuration below)
-pr-hero config                   # $0: which layer decided each value, and where both files live
-
-# 4. Always preview first — $0, spawns nothing
+# 3. Always preview first — $0, spawns nothing
 pr-hero review --dry-run
 
-# 5. Review
+# 4. Review
 pr-hero review                   # your checked-out branch vs the merge base
 pr-hero review --pr              # the current branch's PR, in an isolated worktree
 pr-hero review --pr 123          # any PR by number

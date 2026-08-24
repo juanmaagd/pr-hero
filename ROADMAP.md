@@ -148,6 +148,8 @@ a scheduled block before launch, and promoting it to a gate is Juanma's call, no
    (`claude` authenticated, `git`, `gh`, codegraph). C5 (global config, per-repo override) belongs
    here: person-keys (`agents_dir` bundled, `summary`) default globally; repo-keys stay in
    `.prhero/`. The precedence rule on C5 is unchanged — a repo must not subscribe itself to extra spend.
+   Design + slice plan (S1–S5): `docs/pillar1-distribution-onboarding-design.md` +
+   `openspec/changes/pillar1-distribution-onboarding/`. D0 decided 2026-08-24: full open source, Apache-2.0.
 2. **CLI menus + TUI for the happy path and every knob we already have.** Not a web dashboard (that is
    a later page). Not convoy's live per-step panel (later). Not per-hunter model picking (Phase D,
    after launch). What it IS: `init` as menus; the review plan/confirm/result that item 8 already
@@ -231,13 +233,14 @@ Fundamentals:
 - [x] Canonical store (`docs/observability-canonical-store.md`): `prhero.db` is source of truth,
       JSON is derived, local server owns SQLite, backfill reported, GC does not delete rows
       — **2026-08-23**, PR #53 (`04d8f1f`). Design `docs/canonical-store-design.md`, Judgment Day
-      ledger `docs/canonical-store-judgment-ledger.md`, Schema v2, 55/55 historical runs backfilled.
+      ledger `docs/canonical-store-judgment-ledger.md`, Schema v2 (bumped to v3 by PR #54,
+      `c53011e`), 55/55 historical runs backfilled.
 
 Distribution — on a machine that is not this one:
 
-- [ ] `npm i -g pr-hero` installs the command (package is not `"private": true`)
-- [ ] `pr-hero init` does not mention `deep-review` or a path under `/Users/juanma`
-- [ ] dependency preflight names whatever is missing (`claude` / `gh` / codegraph) instead of failing mute
+- [x] `npm i -g pr-hero` installs the command (package is not `"private": true`, builds to `dist/`, has `bin/pr-hero.js`, `engines`, Apache-2.0)
+- [x] `pr-hero init` does not mention `deep-review` or a path under `/Users/juanma` (bundled default prompt assets via `import ... with { type: "file" }` manifest)
+- [x] dependency preflight names whatever is missing (`claude` / `gh` / codegraph) instead of failing mute (`src/system-tools.ts` + `pr-hero doctor` tri-state)
 - [ ] every knob in the table above is settable from the TUI/menus (flags remain for scripts)
 - [ ] `pr-hero review --dry-run` and one `--pr --post` succeed on a stranger's repo
 - [ ] a second push on that PR exercises item 7, not a full re-hunt dressed as a delta

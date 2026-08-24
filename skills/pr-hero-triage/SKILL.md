@@ -1,7 +1,7 @@
 ---
 name: pr-hero-triage
 description: "Triage pr-hero findings posted as PR comments — for each one, reply in its own thread with applied, dismissed, deferred, or misclassified plus reasoning. Trigger: pr-hero finding comments on a PR you authored, responding to automated code review, `<!-- pr-hero-finding` markers in a PR."
-license: MIT
+license: Apache-2.0
 metadata:
   author: gentleman-programming
   version: "1.2"

@@ -1,0 +1,64 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  Tech stack: TypeScript (strict ESM), Bun runtime, SQLite persistent store, Biome (linter & formatter)
+  Architecture: Multi-agent PR review engine with parallel hunter agents, dedupe, adversarial refuters, tier derivation, and CLI/PR workflows
+  Testing: bun test (1710 tests across 52 files, 0 failures, offline unit and integration suites)
+  Quality: Biome check (linter/formatter), TypeScript tsc --noEmit
+
+strict_tdd: true
+
+testing:
+  runner:
+    command: "bun test"
+    framework: "bun:test"
+  layers:
+    unit:
+      available: true
+      tool: "bun:test"
+    integration:
+      available: true
+      tool: "bun:test (offline pipeline, preflight suites, store, CLI)"
+    e2e:
+      available: true
+      tool: "bun run fixture-eval / refuter-probe / martian-cal.ts"
+  coverage:
+    available: true
+    command: "bun test --coverage"
+  quality:
+    linter:
+      available: true
+      command: "bun run check"
+    typecheck:
+      available: true
+      command: "bun run typecheck"
+    formatter:
+      available: true
+      command: "bun run check"
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Verify against ROADMAP.md and AGENTS.md constraints
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale and porting context
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    guidelines:
+      - Follow existing code patterns and isolation flags
+      - Ensure styles and width are passed as parameters in UI renderers
+    tdd: true
+    test_command: "bun test"
+  verify:
+    test_command: "bun test"
+    build_command: "bun run typecheck"
+    coverage_threshold: 80
+  archive:
+    - Warn before merging destructive deltas

@@ -9,5 +9,10 @@
     "esModuleInterop": true,
     "types": ["bun-types"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "fixtures/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "test/**/*.ts",
+    "fixtures/**/*.ts"
+  ]
 }
