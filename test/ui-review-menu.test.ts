@@ -51,8 +51,9 @@ describe("5.5 Review Submenu", () => {
   test("renderReviewMenuCard renders options and toggles cleanly", () => {
     const lines = renderReviewMenuCard(defaultState, 0, 80, false);
     expect(lines[0]).toContain("╔");
-    expect(lines.join("\n")).toContain("Target: Local Branch");
-    expect(lines.join("\n")).toContain("Start Review");
+    expect(lines.join("\n")).toContain("Target: Local branch");
+    expect(lines.join("\n")).toContain("[ Start review ]");
+    expect(lines.join("\n")).toContain("[ Discard & back ]");
     expect(lines.at(-1)).toContain("╚");
   });
 
@@ -63,8 +64,8 @@ describe("5.5 Review Submenu", () => {
 
   test("runReviewMenu allows toggling options and confirms launch", async () => {
     const io = testIo();
-    // Move to 'Start Review' and press Enter to launch
-    const reader = fakeReader(["j", "j", "\r"]);
+    // Move to '[ Start review ]' (index 7) and press Enter to launch
+    const reader = fakeReader(["j", "j", "j", "j", "j", "j", "j", "\r"]);
 
     const result = await runReviewMenu({
       createReader: () => reader,
@@ -78,6 +79,121 @@ describe("5.5 Review Submenu", () => {
     if (result.action === "launch") {
       expect(result.options).toBeDefined();
       expect(result.options.repo).toBeDefined();
+    }
+  });
+
+  test("runReviewMenu allows toggling Post to PR and auto-promotes target to pr", async () => {
+    const io = testIo();
+    // Key sequence:
+    // 1. Move to 'Post to PR' (index 2): 'j', 'j'
+    // 2. Press Space to toggle Post (switches target to 'pr' and post to true)
+    // 3. Move down to '[ Start review ]' (index 7): 5 'j's, then Enter ('\r')
+    const reader = fakeReader(["j", "j", " ", "j", "j", "j", "j", "j", "\r"]);
+
+    const result = await runReviewMenu({
+      createReader: () => reader,
+      io,
+      styles: false,
+      width: 80,
+      defaultBase: "main",
+    });
+
+    expect(result.action).toBe("launch");
+    if (result.action === "launch") {
+      expect(result.options.post).toBe(true);
+      expect(result.options.pr).toBe("current");
+    }
+  });
+
+  test("runReviewMenu resolves initial base, scout, and post from effectiveConfig with auto-promotion", async () => {
+    const io = testIo();
+    // Launch directly: move 7 times down to [ Start review ], press enter
+    const reader = fakeReader(["j", "j", "j", "j", "j", "j", "j", "\r"]);
+
+    const result = await runReviewMenu({
+      createReader: () => reader,
+      io,
+      styles: false,
+      width: 80,
+      effectiveConfig: {
+        parity_trigger_paths: [],
+        suspicion_priors: [],
+        default_base: "develop",
+        scout: true,
+        post: true,
+      },
+    });
+
+    expect(result.action).toBe("launch");
+    if (result.action === "launch") {
+      expect(result.options.base).toBe("develop");
+      expect(result.options.scout).toBe(true);
+      expect(result.options.post).toBe(true);
+      expect(result.options.pr).toBe("current");
+    }
+  });
+
+  test("runReviewMenu respects explicit defaultBase, defaultScout, and defaultPost overrides over effectiveConfig", async () => {
+    const io = testIo();
+    const reader = fakeReader(["j", "j", "j", "j", "j", "j", "j", "\r"]);
+
+    const result = await runReviewMenu({
+      createReader: () => reader,
+      io,
+      styles: false,
+      width: 80,
+      effectiveConfig: {
+        parity_trigger_paths: [],
+        suspicion_priors: [],
+        default_base: "develop",
+        scout: true,
+        post: true,
+      },
+      defaultBase: "staging",
+      defaultScout: false,
+      defaultPost: false,
+    });
+
+    expect(result.action).toBe("launch");
+    if (result.action === "launch") {
+      expect(result.options.base).toBe("staging");
+      expect(result.options.scout).toBe(false);
+      expect(result.options.post).toBe(false);
+      expect(result.options.pr).toBeUndefined();
+    }
+  });
+
+  test("runReviewMenu preserves invariants: toggling target to branch resets post, toggling post to true promotes to pr", async () => {
+    const io = testIo();
+    // Start with post: true (target is "pr").
+    // 1. Cursor is at 0 (Target: Current PR). Press Space to toggle to branch -> post becomes false.
+    // 2. Move down to 2 (Post to PR: [ ] No). Press Space -> post becomes true, target becomes "pr".
+    // 3. Move down to 7 ([ Start review ]). Press Enter.
+    const reader = fakeReader([
+      " ",
+      "j",
+      "j",
+      " ",
+      "j",
+      "j",
+      "j",
+      "j",
+      "j",
+      "\r",
+    ]);
+
+    const result = await runReviewMenu({
+      createReader: () => reader,
+      io,
+      styles: false,
+      width: 80,
+      defaultPost: true,
+    });
+
+    expect(result.action).toBe("launch");
+    if (result.action === "launch") {
+      expect(result.options.post).toBe(true);
+      expect(result.options.pr).toBe("current");
     }
   });
 

@@ -819,7 +819,7 @@ async function watchAdd(options: CliOptions): Promise<number> {
     raw,
     repoRoot,
     {
-      post: options.post,
+      post: options.post ?? false,
       onPush: options.onPush,
       // Same disclosed reset semantics as post/on_push: an absent flag
       // records the shipped default rather than preserving the old value —

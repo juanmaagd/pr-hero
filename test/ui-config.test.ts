@@ -95,6 +95,21 @@ describe("pr-hero config names the layer behind every value", () => {
     expect(rowFor(lines, "suspicion_priors")).toBe(
       "suspicion_priors default (unset)",
     );
+    expect(rowFor(lines, "scout")).toBe("scout default (unset)");
+    expect(rowFor(lines, "post")).toBe("post default (unset)");
+  });
+
+  test("scout and post display capped marker when global ceiling narrows repo setting", () => {
+    const lines = render(
+      { scout: false, post: false },
+      { scout: true, post: true },
+    );
+    expect(rowFor(lines, "scout")).toBe(
+      "scout capped false ← narrowed by the global ceiling",
+    );
+    expect(rowFor(lines, "post")).toBe(
+      "post capped false ← narrowed by the global ceiling",
+    );
   });
 
   test("a value a cap did NOT narrow keeps its own layer and no marker", () => {

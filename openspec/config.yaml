@@ -2,10 +2,11 @@
 schema: spec-driven
 
 context: |
-  Tech stack: TypeScript (strict ESM), Bun runtime, SQLite persistent store, Biome (linter & formatter)
+  Tech stack: TypeScript (strict ESM), Bun runtime (>=1.3.0), SQLite persistent store, Biome (linter & formatter), TTY/TUI terminal workflows
   Architecture: Multi-agent PR review engine with parallel hunter agents, dedupe, adversarial refuters, tier derivation, and CLI/PR workflows
   Testing: bun test (offline unit and integration suites)
-  Quality: Biome check (linter/formatter), TypeScript tsc --noEmit
+  Quality: Biome check (linter/formatter: ./node_modules/.bin/biome check src test), TypeScript tsc --noEmit
+  Active changes: interactive-config-tui, pillar2-tui-lifecycle
 
 strict_tdd: true
 
@@ -29,13 +30,13 @@ testing:
   quality:
     linter:
       available: true
-      command: "bun run check"
+      command: "./node_modules/.bin/biome check src test"
     typecheck:
       available: true
       command: "bun run typecheck"
     formatter:
       available: true
-      command: "bun run check"
+      command: "./node_modules/.bin/biome check src test"
 
 rules:
   proposal:

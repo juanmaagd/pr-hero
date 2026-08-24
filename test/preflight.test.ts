@@ -33,6 +33,8 @@ import {
   resolveAgentsDirSetting,
   resolveBaseRef,
   resolveMaxVerificationSteps,
+  resolvePost,
+  resolveScout,
   resolveSummary,
   runDirCandidate,
   SUMMARY_DIRECTION,
@@ -52,11 +54,9 @@ describe("parseArgs", () => {
       repo: ".",
       head: "HEAD",
       hopBudget: DEFAULT_HOP_BUDGET,
-      scout: false,
       full: false,
       dryRun: false,
       yes: false,
-      post: false,
       twoDot: false,
       onPush: false,
       force: false,
@@ -199,17 +199,28 @@ describe("parseArgs", () => {
     ).toBe(true);
   });
 
-  // ROADMAP-DOORDASH M5. The default is the milestone's exit criterion:
-  // M6 compares an arm against a control, and a control that quietly grew a
-  // stage is not a control.
-  test("the scout is OFF unless asked for", () => {
-    expect(parseArgs(["review"]).options.scout).toBe(false);
+  test("the scout is tri-state: undefined by default, true with --scout, false with --no-scout", () => {
+    expect(parseArgs(["review"]).options.scout).toBeUndefined();
     expect(parseArgs(["review", "--scout"]).options.scout).toBe(true);
+    expect(parseArgs(["review", "--no-scout"]).options.scout).toBe(false);
     expect(parseArgs(["review", "--scout"]).options.scoutModel).toBeUndefined();
     expect(
       parseArgs(["review", "--scout", "--scout-model", "haiku"]).options
         .scoutModel,
     ).toBe("haiku");
+  });
+
+  test("post is tri-state: undefined by default, true with --post, false with --no-post", () => {
+    expect(parseArgs(["review"]).options.post).toBeUndefined();
+    expect(parseArgs(["review", "--pr", "42", "--post"]).options.post).toBe(
+      true,
+    );
+    expect(parseArgs(["review", "--pr", "42", "--no-post"]).options.post).toBe(
+      false,
+    );
+    expect(() => parseArgs(["review", "--post"])).toThrow(
+      "--post publishes the review as a PR comment, so it requires --pr",
+    );
   });
 
   test("W-cli — --full is OFF unless asked for, and review-only", () => {
@@ -241,13 +252,13 @@ describe("parseArgs", () => {
     ).toThrow("only apply to the review command");
   });
 
-  // The M5 exit criterion, pinned from the config side: the flag ships alone.
-  // `.prhero/config.json` gets a scout seat only after M6 decides whether the
-  // stage is worth defaulting on — and until then a config that tries is a
-  // loud error, never a silently ignored key.
-  test("the config file has no scout seat yet, and says so", () => {
+  test("the config file admits scout and post boolean keys", () => {
+    expect(parseLocalConfig('{"scout": true, "post": false}')).toEqual({
+      scout: true,
+      post: false,
+    });
     expect(() => parseLocalConfig('{"scout":{"enabled":true}}')).toThrow(
-      "unknown key: scout",
+      "scout must be a boolean",
     );
   });
 
@@ -997,6 +1008,53 @@ describe("parseLocalConfig", () => {
       CliUsageError,
     );
   });
+
+  test("max_changed_lines and max_changed_files are optional in local and global configs", () => {
+    expect(parseLocalConfig("{}").max_changed_lines).toBeUndefined();
+    expect(parseLocalConfig("{}").max_changed_files).toBeUndefined();
+    expect(parseGlobalConfig("{}").max_changed_lines).toBeUndefined();
+    expect(parseGlobalConfig("{}").max_changed_files).toBeUndefined();
+
+    const parsedLocal = parseLocalConfig(
+      '{"max_changed_lines": 2000, "max_changed_files": 50}',
+    );
+    expect(parsedLocal.max_changed_lines).toBe(2000);
+    expect(parsedLocal.max_changed_files).toBe(50);
+
+    const parsedGlobal = parseGlobalConfig(
+      '{"max_changed_lines": 3000, "max_changed_files": 100}',
+    );
+    expect(parsedGlobal.max_changed_lines).toBe(3000);
+    expect(parsedGlobal.max_changed_files).toBe(100);
+
+    expect(() => parseLocalConfig('{"max_changed_lines": -1}')).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseLocalConfig('{"max_changed_files": "50"}')).toThrow(
+      CliUsageError,
+    );
+    expect(() => parseGlobalConfig('{"max_changed_lines": 1.5}')).toThrow(
+      CliUsageError,
+    );
+  });
+});
+
+describe("resolveScout & resolvePost", () => {
+  test("resolveScout precedence: CLI flag > Merged Config > Default false", () => {
+    expect(resolveScout({ scout: true }, { scout: false })).toBe(true);
+    expect(resolveScout({ scout: false }, { scout: true })).toBe(false);
+    expect(resolveScout({}, { scout: true })).toBe(true);
+    expect(resolveScout({}, { scout: false })).toBe(false);
+    expect(resolveScout({}, {})).toBe(false);
+  });
+
+  test("resolvePost precedence: CLI flag > Merged Config > Default false", () => {
+    expect(resolvePost({ post: true }, { post: false })).toBe(true);
+    expect(resolvePost({ post: false }, { post: true })).toBe(false);
+    expect(resolvePost({}, { post: true })).toBe(true);
+    expect(resolvePost({}, { post: false })).toBe(false);
+    expect(resolvePost({}, {})).toBe(false);
+  });
 });
 
 // The exact message a rejection produced. `toThrow(string)` matches a
@@ -1017,8 +1075,12 @@ function messageOf(run: () => unknown): string {
 const PRE_C5_LOCAL_KEYS = [
   "agents_dir",
   "default_base",
+  "max_changed_files",
+  "max_changed_lines",
   "max_verification_steps",
   "parity_trigger_paths",
+  "post",
+  "scout",
   "summary",
   "suspicion_priors",
 ];
@@ -1036,6 +1098,10 @@ describe("CONFIG_DIRECTION", () => {
       suspicion_priors: [{ path: "a.ts", weight: "high", reason: "hot" }],
       summary: { enabled: false, model: "opus" },
       max_verification_steps: 3,
+      max_changed_lines: 1500,
+      max_changed_files: 150,
+      scout: false,
+      post: false,
     };
     expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(
       Object.keys(populated).sort(),
@@ -1061,6 +1127,10 @@ describe("CONFIG_DIRECTION", () => {
       suspicion_priors: "repo",
       summary: "capped",
       max_verification_steps: "capped",
+      max_changed_lines: "capped",
+      max_changed_files: "capped",
+      scout: "capped",
+      post: "capped",
     });
     expect(SUMMARY_DIRECTION).toEqual({ enabled: "capped", model: "person" });
   });
@@ -1091,14 +1161,16 @@ describe("parseGlobalConfig", () => {
       agents_dir: "/tmp/agents",
       summary: { enabled: false, model: "opus" },
       max_verification_steps: 2,
+      scout: false,
+      post: true,
     };
     expect(parseGlobalConfig(JSON.stringify(admitted))).toEqual(admitted);
     expect(parseGlobalConfig("{}")).toEqual({});
   });
 
   test("an unknown key is fatal there too", () => {
-    expect(messageOf(() => parseGlobalConfig('{"scout": {}}'))).toBe(
-      "~/.prhero/config.json unknown key: scout",
+    expect(messageOf(() => parseGlobalConfig('{"unknown_key": {}}'))).toBe(
+      "~/.prhero/config.json unknown key: unknown_key",
     );
   });
 
@@ -1126,6 +1198,8 @@ describe("parseGlobalConfig", () => {
         '{"max_verification_steps": -1}',
         "max_verification_steps must be a non-negative integer",
       ],
+      ['{"scout": "yes"}', "scout must be a boolean"],
+      ['{"post": 1}', "post must be a boolean"],
     ];
     for (const [raw, tail] of cases) {
       expect(messageOf(() => parseGlobalConfig(raw))).toBe(
@@ -1153,6 +1227,8 @@ describe("parseLocalConfig admits the same keys it does today", () => {
       suspicion_priors: [{ path: "a.ts", weight: 3, reason: "hot" }],
       summary: { enabled: false, model: "opus" },
       max_verification_steps: 3,
+      scout: true,
+      post: false,
     };
     expect(parseLocalConfig(JSON.stringify(full))).toEqual(full);
     for (const key of PRE_C5_LOCAL_KEYS) {
@@ -1205,6 +1281,37 @@ describe("mergeConfig", () => {
     ).toBe(DEFAULT_MAX_VERIFICATION_STEPS);
   });
 
+  test("narrows max_changed_lines and max_changed_files with Math.min (capped)", () => {
+    const linesMerge = (global?: number, repo?: number) =>
+      mergeConfig(
+        global === undefined ? undefined : layer({ max_changed_lines: global }),
+        repo === undefined ? {} : layer({ max_changed_lines: repo }),
+      );
+
+    expect(linesMerge(1500, 1000).effective.max_changed_lines).toBe(1000);
+    expect(linesMerge(1500, 1000).sources.max_changed_lines).toBe("repo");
+    expect(linesMerge(1000, 2000).effective.max_changed_lines).toBe(1000);
+    expect(linesMerge(1000, 2000).sources.max_changed_lines).toBe("capped");
+    expect(linesMerge(1500, undefined).sources.max_changed_lines).toBe(
+      "global",
+    );
+    expect(linesMerge(undefined, 1500).sources.max_changed_lines).toBe("repo");
+    expect(linesMerge(undefined, undefined).sources.max_changed_lines).toBe(
+      "default",
+    );
+
+    const filesMerge = (global?: number, repo?: number) =>
+      mergeConfig(
+        global === undefined ? undefined : layer({ max_changed_files: global }),
+        repo === undefined ? {} : layer({ max_changed_files: repo }),
+      );
+
+    expect(filesMerge(150, 50).effective.max_changed_files).toBe(50);
+    expect(filesMerge(150, 50).sources.max_changed_files).toBe("repo");
+    expect(filesMerge(50, 200).effective.max_changed_files).toBe(50);
+    expect(filesMerge(50, 200).sources.max_changed_files).toBe("capped");
+  });
+
   test("summary.enabled is a boolean AND, all four combinations", () => {
     const enabled = (global?: boolean, repo?: boolean) =>
       mergeConfig(
@@ -1234,6 +1341,61 @@ describe("mergeConfig", () => {
       "default",
     );
     expect(enabled(undefined, undefined).effective.summary).toBeUndefined();
+  });
+
+  test("scout and post are folded with boolean AND (capped)", () => {
+    const mergeBool = (
+      key: "scout" | "post",
+      global?: boolean,
+      repo?: boolean,
+    ) =>
+      mergeConfig(
+        global === undefined ? undefined : layer({ [key]: global }),
+        repo === undefined ? {} : layer({ [key]: repo }),
+      );
+
+    for (const key of ["scout", "post"] as const) {
+      // Both true -> repo true
+      const tt = mergeBool(key, true, true);
+      expect(tt.effective[key]).toBe(true);
+      expect(tt.sources[key]).toBe("repo");
+
+      // Global true, repo false -> repo false
+      const tf = mergeBool(key, true, false);
+      expect(tf.effective[key]).toBe(false);
+      expect(tf.sources[key]).toBe("repo");
+
+      // Global false, repo true -> capped false
+      const ft = mergeBool(key, false, true);
+      expect(ft.effective[key]).toBe(false);
+      expect(ft.sources[key]).toBe("capped");
+
+      // Both false -> repo false
+      const ff = mergeBool(key, false, false);
+      expect(ff.effective[key]).toBe(false);
+      expect(ff.sources[key]).toBe("repo");
+
+      // Global only
+      const gTrue = mergeBool(key, true, undefined);
+      expect(gTrue.effective[key]).toBe(true);
+      expect(gTrue.sources[key]).toBe("global");
+      const gFalse = mergeBool(key, false, undefined);
+      expect(gFalse.effective[key]).toBe(false);
+      expect(gFalse.sources[key]).toBe("global");
+
+      // Repo only
+      const rTrue = mergeBool(key, undefined, true);
+      expect(rTrue.effective[key]).toBe(true);
+      expect(rTrue.sources[key]).toBe("repo");
+      const rFalse = mergeBool(key, undefined, false);
+      expect(rFalse.effective[key]).toBe(false);
+      expect(rFalse.sources[key]).toBe("repo");
+
+      // Unset
+      const unset = mergeBool(key, undefined, undefined);
+      expect(unset.effective[key]).toBeUndefined();
+      expect(unset.sources[key]).toBe("default");
+    }
   });
 
   // Judgment ledger JD-20: two rounds of judgment left the tie case without a
@@ -1326,6 +1488,10 @@ describe("mergeConfig", () => {
       suspicion_priors: "default",
       summary: { enabled: "default", model: "default" },
       max_verification_steps: "default",
+      max_changed_lines: "default",
+      max_changed_files: "default",
+      scout: "default",
+      post: "default",
     });
     // The resolvers still receive the shape they always received.
     expect(nothing.effective).toEqual(EMPTY_LOCAL_CONFIG);

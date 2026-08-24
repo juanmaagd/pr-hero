@@ -1,5 +1,11 @@
-import { type CliOptions, DEFAULT_HOP_BUDGET } from "./preflight";
+import {
+  type CliOptions,
+  DEFAULT_HOP_BUDGET,
+  type LocalConfig,
+} from "./preflight";
 import { bold, box, cyan, dim, sanitizeText } from "./ui";
+import { cycleStringPreset } from "./ui-config-edit";
+import { clearDrawnLines } from "./ui-menu";
 import { type KeyReader, parseKey, splitKeys } from "./ui-select";
 
 export interface ReviewMenuState {
@@ -19,35 +25,58 @@ export interface ReviewMenuIo {
   line: (text?: string) => void;
 }
 
+export const REVIEW_CARD_ACTIONS = [
+  "[ Start review ]",
+  "[ Discard & back ]",
+] as const;
+
 export function renderReviewMenuCard(
   state: ReviewMenuState,
   cursor: number,
   width: number,
   styles: boolean,
+  actions: readonly string[] = REVIEW_CARD_ACTIONS,
 ): string[] {
   const targetLabel =
     state.target === "branch"
-      ? "Local Branch"
+      ? "Local branch"
       : state.pr
         ? `PR #${state.pr}`
         : "Current PR";
-  const items = [
-    `Target: ${targetLabel}`,
-    `Base: ${state.base} · Head: ${state.head}`,
-    "Start Review",
-    `Post to PR: ${state.post ? "Yes" : "No"}`,
-    `Scout stage: ${state.scout ? "Enabled" : "Disabled"}`,
-    `Force review: ${state.force ? "Yes" : "No"}`,
-    `Full verification: ${state.full ? "Yes" : "No"}`,
-    `Dry run: ${state.dryRun ? "Yes" : "No"}`,
+
+  const fields = [
+    `Target: ${targetLabel} — Review target mode`,
+    `Base: ${state.base} · Head: ${state.head} — Git diff range`,
+    `Post to PR: ${state.post ? "[✓] Yes" : "[ ] No"} — Publish comments to GitHub PR`,
+    `Scout stage: ${state.scout ? "[✓] Enabled" : "[ ] Disabled"} — Run pre-hunt reconnaissance`,
+    `Force review: ${state.force ? "[✓] Yes" : "[ ] No"} — Bypass size gate thresholds`,
+    `Full verification: ${state.full ? "[✓] Yes" : "[ ] No"} — Run deep refuter checks`,
+    `Dry run: ${state.dryRun ? "[✓] Yes" : "[ ] No"} — Execute without posting or resolving`,
   ];
 
-  const lines = items.map((item, idx) => {
+  const lines: string[] = [];
+
+  for (let idx = 0; idx < fields.length; idx++) {
     const isSelected = idx === cursor;
     const prefix = isSelected ? "▸ " : "  ";
-    const line = sanitizeText(`${prefix}${item}`);
-    return isSelected ? bold(cyan(line, styles), styles) : line;
-  });
+    const line = sanitizeText(`${prefix}${fields[idx]}`);
+    lines.push(isSelected ? bold(cyan(line, styles), styles) : line);
+  }
+
+  if (actions.length > 0) {
+    lines.push("");
+    const innerWidth = Math.max(10, width - 4);
+    lines.push(dim("─".repeat(innerWidth), styles));
+    for (let i = 0; i < actions.length; i++) {
+      const actionIdx = fields.length + i;
+      const isSelected = actionIdx === cursor;
+      const prefix = isSelected ? "▸ " : "  ";
+      const line = `${prefix}${actions[i]}`;
+      lines.push(
+        isSelected ? bold(cyan(line, styles), styles) : sanitizeText(line),
+      );
+    }
+  }
 
   return box("Review PR Configuration", lines, {
     width,
@@ -66,15 +95,25 @@ export async function runReviewMenu(
     io?: ReviewMenuIo;
     styles?: boolean;
     width?: number;
+    effectiveConfig?: LocalConfig;
     defaultBase?: string;
+    defaultScout?: boolean;
+    defaultPost?: boolean;
   } = {},
 ): Promise<ReviewMenuOutcome> {
+  const resolvedBase =
+    deps.defaultBase ?? deps.effectiveConfig?.default_base ?? "main";
+  const resolvedScout =
+    deps.defaultScout ?? deps.effectiveConfig?.scout ?? false;
+  const resolvedPost = deps.defaultPost ?? deps.effectiveConfig?.post ?? false;
+  const resolvedTarget = resolvedPost ? "pr" : "branch";
+
   const state: ReviewMenuState = {
-    target: "branch",
+    target: resolvedTarget,
     head: "HEAD",
-    base: deps.defaultBase ?? "main",
-    post: false,
-    scout: false,
+    base: resolvedBase,
+    post: resolvedPost,
+    scout: resolvedScout,
     force: false,
     full: false,
     dryRun: false,
@@ -128,7 +167,9 @@ export async function runReviewMenu(
     });
 
   let cursor = 0;
-  const itemCount = 8;
+  const fieldCount = 7;
+  const actions = REVIEW_CARD_ACTIONS;
+  const totalItems = fieldCount + actions.length;
   const ESC = "\x1b";
   const repaint = styles;
   let drawn = 0;
@@ -136,8 +177,8 @@ export async function runReviewMenu(
   const render = (clearScreen = false) => {
     const lines: string[] = [
       "",
-      ...renderReviewMenuCard(state, cursor, width, styles),
-      dim("j/k: move • space/enter: toggle / start • q/esc: back", styles),
+      ...renderReviewMenuCard(state, cursor, width, styles, actions),
+      dim("j/k: move • space/enter: toggle • q/esc: back", styles),
     ];
 
     let buf = "";
@@ -173,53 +214,89 @@ export async function runReviewMenu(
           return { action: "back" };
         }
         if (key.type === "up" || (key.type === "char" && key.char === "k")) {
-          cursor = (cursor - 1 + itemCount) % itemCount;
+          cursor = (cursor - 1 + totalItems) % totalItems;
           render(false);
           continue;
         }
         if (key.type === "down" || (key.type === "char" && key.char === "j")) {
-          cursor = (cursor + 1) % itemCount;
+          cursor = (cursor + 1) % totalItems;
           render(false);
           continue;
         }
-        if (key.type === "enter" || (key.type === "char" && key.char === " ")) {
-          if (cursor === 2) {
-            // Start Review
-            const options: CliOptions = {
-              repo: ".",
-              head: state.head,
-              base: state.base,
-              pr: state.target === "pr" ? (state.pr ?? "current") : undefined,
-              post: state.post,
-              scout: state.scout,
-              force: state.force,
-              full: state.full,
-              dryRun: state.dryRun,
-              hopBudget: DEFAULT_HOP_BUDGET,
-              yes: false,
-              twoDot: false,
-              onPush: false,
-              all: false,
-              fixes: false,
-              incidents: false,
-              issues: false,
-              proximity: false,
-              threads: false,
-            };
-            return { action: "launch", options };
+        if (key.type === "char" && /^[1-9]$/.test(key.char)) {
+          const numIdx = Number(key.char) - 1;
+          if (numIdx < totalItems) {
+            cursor = numIdx;
+            render(false);
           }
+          continue;
+        }
+
+        // Action buttons
+        if (cursor >= fieldCount) {
+          const actionIdx = cursor - fieldCount;
+          if (key.type === "enter") {
+            if (actionIdx === 0) {
+              // Start review
+              const options: CliOptions = {
+                repo: ".",
+                head: state.head,
+                base: state.base,
+                pr: state.target === "pr" ? (state.pr ?? "current") : undefined,
+                post: state.post,
+                scout: state.scout,
+                force: state.force,
+                full: state.full,
+                dryRun: state.dryRun,
+                hopBudget: DEFAULT_HOP_BUDGET,
+                yes: false,
+                twoDot: false,
+                onPush: false,
+                all: false,
+                fixes: false,
+                incidents: false,
+                issues: false,
+                proximity: false,
+                threads: false,
+              };
+              return { action: "launch", options };
+            }
+            return { action: "back" };
+          }
+          continue;
+        }
+
+        // Field toggles / cycles
+        if (
+          key.type === "enter" ||
+          key.type === "left" ||
+          key.type === "right" ||
+          (key.type === "char" &&
+            (key.char === " " || key.char === "h" || key.char === "l"))
+        ) {
           if (cursor === 0) {
             state.target = state.target === "branch" ? "pr" : "branch";
             if (state.target === "branch") state.post = false;
-          } else if (cursor === 3 && state.target === "pr") {
-            state.post = !state.post;
-          } else if (cursor === 4) {
+          } else if (cursor === 1) {
+            state.base = cycleStringPreset(state.base, [
+              "main",
+              "master",
+              "develop",
+            ]);
+          } else if (cursor === 2) {
+            if (state.target === "branch") {
+              state.target = "pr";
+              state.post = true;
+            } else {
+              state.post = !state.post;
+            }
+          } else if (cursor === 3) {
             state.scout = !state.scout;
-          } else if (cursor === 5) {
+          } else if (cursor === 4) {
             state.force = !state.force;
-          } else if (cursor === 6) {
+          } else if (cursor === 5) {
             state.full = !state.full;
-          } else if (cursor === 7) {
+          } else if (cursor === 6) {
             state.dryRun = !state.dryRun;
           }
           render(false);
@@ -227,6 +304,8 @@ export async function runReviewMenu(
       }
     }
   } finally {
+    clearDrawnLines(io, drawn, repaint);
+    drawn = 0;
     if (repaint) io.write(`${ESC}[?25h`);
     reader.close();
   }
