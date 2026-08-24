@@ -5587,7 +5587,15 @@ async function engineIdentity(): Promise<{
 // Only when executed, never on import — the pure helpers stay importable from
 // tests without the CLI trying to run a review.
 if (import.meta.main) {
+  const restoreCursor = () => {
+    try {
+      process.stderr.write("\x1b[?25h");
+    } catch {
+      // Ignore
+    }
+  };
   process.on("SIGTERM", async () => {
+    restoreCursor();
     try {
       killAllChildProcesses();
       await unregisterActiveRun(process.pid);
@@ -5595,6 +5603,19 @@ if (import.meta.main) {
       // Ignore
     }
     process.exit(143);
+  });
+  process.on("SIGINT", async () => {
+    restoreCursor();
+    try {
+      killAllChildProcesses();
+      await unregisterActiveRun(process.pid);
+    } catch {
+      // Ignore
+    }
+    process.exit(130);
+  });
+  process.on("exit", () => {
+    restoreCursor();
   });
   process.exit(await main(Bun.argv.slice(2)));
 }
