@@ -102,9 +102,12 @@ export function renderRunHistory(
   }
 
   for (const item of history) {
-    const isOk = item.run_status === "ok";
+    const isOk = item.run_status === "complete" || item.run_status === "ok";
     const statusIcon = isOk ? green("✓", st) : red("✗", st);
-    const target = item.pr !== undefined ? `PR #${item.pr}` : "Branch review";
+    const target =
+      item.pr !== undefined && item.pr !== null
+        ? `PR #${item.pr}`
+        : "Branch review";
     const findings = formatFindingsSummary(item.blocking, item.advisory);
     const duration = formatDuration(item.wall_ms);
     const cost = formatCost(item.cost_usd_est);

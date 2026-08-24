@@ -221,7 +221,11 @@ export async function killActiveRun(
   const sendSignal =
     options.sendSignal ??
     ((p: number, s: string | number) => {
-      process.kill(p, s);
+      try {
+        process.kill(p, s);
+      } catch {
+        // Process may have already exited
+      }
     });
   const sleep =
     options.sleep ??
@@ -250,7 +254,15 @@ export async function killActiveRun(
   }
 
   // 3. Send SIGTERM
-  sendSignal(pid, "SIGTERM");
+  try {
+    sendSignal(pid, "SIGTERM");
+  } catch {
+    await unregister(pid);
+    return {
+      status: "not_found",
+      message: `Process ${pid} exited before signal could be delivered.`,
+    };
+  }
 
   // 4. Bounded wait up to timeoutMs
   const startMs = Date.now();
@@ -268,7 +280,11 @@ export async function killActiveRun(
   }
 
   // 5. Escalate to SIGKILL if still alive
-  sendSignal(pid, "SIGKILL");
+  try {
+    sendSignal(pid, "SIGKILL");
+  } catch {
+    // Process exited during escalation
+  }
   await sleep(100);
   await unregister(pid);
 
@@ -285,7 +301,7 @@ export async function killActiveRun(
 export interface GetWatcherSpendOptions {
   home?: string;
   countLaunchedToday?: () => Promise<number>;
-  readConfig?: () => Promise<{ dailyCap?: number }>;
+  readConfig?: () => Promise<{ daily_cap?: number; dailyCap?: number }>;
 }
 
 export async function getWatcherSpend(
@@ -303,7 +319,7 @@ export async function getWatcherSpend(
       const todayIso = new Date().toISOString().slice(0, 10);
       const lines = raw.split("\n");
       launchedToday = lines.filter(
-        (l) => l.startsWith(todayIso) && l.includes("tick start"),
+        (l) => l.startsWith(todayIso) && l.includes("launched"),
       ).length;
     } catch {
       launchedToday = 0;
@@ -313,12 +329,14 @@ export async function getWatcherSpend(
   let dailyCap = 8;
   if (options.readConfig) {
     const cfg = await options.readConfig();
-    if (cfg?.dailyCap !== undefined) dailyCap = cfg.dailyCap;
+    if (cfg?.daily_cap !== undefined) dailyCap = cfg.daily_cap;
+    else if (cfg?.dailyCap !== undefined) dailyCap = cfg.dailyCap;
   } else if (existsSync(layout.watchConfigPath)) {
     try {
       const raw = readFileSync(layout.watchConfigPath, "utf-8");
       const cfg = JSON.parse(raw);
-      if (cfg?.dailyCap !== undefined) dailyCap = cfg.dailyCap;
+      if (cfg?.daily_cap !== undefined) dailyCap = cfg.daily_cap;
+      else if (cfg?.dailyCap !== undefined) dailyCap = cfg.dailyCap;
     } catch {
       dailyCap = 8;
     }

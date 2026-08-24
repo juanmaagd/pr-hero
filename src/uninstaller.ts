@@ -389,8 +389,38 @@ export async function executeUninstallPlan(
           break;
 
         case "unregister_mcp":
+          if (step.targetPath && exists(step.targetPath)) {
+            const raw = readFile(step.targetPath);
+            if (raw) {
+              try {
+                const config = JSON.parse(raw);
+                if (config.mcpServers?.["pr-hero"]) {
+                  delete config.mcpServers["pr-hero"];
+                  await writeFile(
+                    step.targetPath,
+                    `${JSON.stringify(config, null, 2)}\n`,
+                  );
+                }
+              } catch {
+                // Ignore parse errors if file is invalid
+              }
+            }
+          }
+          executedSteps.push(step.desc);
+          break;
+
         case "remove_skills":
-          // Agent-env specific handlers executed dynamically
+          if (step.targetPath && exists(step.targetPath)) {
+            try {
+              if (options.rmdir) {
+                options.rmdir(step.targetPath, { recursive: true });
+              } else {
+                rmSync(step.targetPath, { recursive: true, force: true });
+              }
+            } catch {
+              // Ignore if already deleted
+            }
+          }
           executedSteps.push(step.desc);
           break;
       }
