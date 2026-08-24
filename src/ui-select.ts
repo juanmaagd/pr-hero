@@ -21,10 +21,12 @@ export type ConfirmResult =
 
 // What a keypress MEANS, decided once. "char" carries the lowercased
 // character so shortcut matching never re-derives it.
-type Key =
+export type Key =
   | { type: "up" }
   | { type: "down" }
   | { type: "enter" }
+  | { type: "escape" }
+  | { type: "ctrl-c" }
   | { type: "cancel" }
   | { type: "char"; char: string }
   | { type: "ignore" };
@@ -59,9 +61,8 @@ export function parseKey(key: string): Key {
   // \r is what a raw-mode terminal sends for Enter; \n only ever arrives from
   // a cooked stream. Both count — a menu that ignored one would look dead.
   if (key === "\r" || key === "\n") return { type: "enter" };
-  // Ctrl-C never reaches the default SIGINT handler while stdin is raw, so it
-  // is OUR job to honour it. A bare ESC is the same intent.
-  if (key === CTRL_C || key === ESC) return { type: "cancel" };
+  if (key === CTRL_C) return { type: "ctrl-c" };
+  if (key === ESC) return { type: "escape" };
   // Any other control byte (backspace, tab, Ctrl-anything) is noise, not a
   // shortcut: matching it against option letters would fire a $6 review on a
   // stray keystroke.
@@ -247,7 +248,11 @@ export async function runConfirm(
     for (const rawKey of splitKeys(chunk)) {
       const key = parseKey(rawKey);
       if (key.type === "ignore") continue;
-      if (key.type === "cancel") {
+      if (
+        key.type === "cancel" ||
+        key.type === "escape" ||
+        key.type === "ctrl-c"
+      ) {
         // Loud, never swallowed: a Ctrl-C that produced silence looks like a
         // hang, and the caller's "aborted" line lands under this.
         io.line();
@@ -416,7 +421,11 @@ export async function runSizeGateConfirm(
     for (const rawKey of splitKeys(chunk)) {
       const key = parseKey(rawKey);
       if (key.type === "ignore") continue;
-      if (key.type === "cancel") {
+      if (
+        key.type === "cancel" ||
+        key.type === "escape" ||
+        key.type === "ctrl-c"
+      ) {
         io.line();
         io.line("^C");
         return { kind: "cancel" };

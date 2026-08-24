@@ -74,13 +74,13 @@ describe("splitKeys", () => {
 });
 
 describe("parseKey", () => {
-  test("arrows, enter in both flavours, and cancel", () => {
+  test("arrows, enter in both flavours, escape and ctrl-c", () => {
     expect(parseKey(`${ESC}[A`)).toEqual({ type: "up" });
     expect(parseKey(`${ESC}[B`)).toEqual({ type: "down" });
     expect(parseKey("\r")).toEqual({ type: "enter" });
     expect(parseKey("\n")).toEqual({ type: "enter" });
-    expect(parseKey("\x03")).toEqual({ type: "cancel" });
-    expect(parseKey(ESC)).toEqual({ type: "cancel" });
+    expect(parseKey("\x03")).toEqual({ type: "ctrl-c" });
+    expect(parseKey(ESC)).toEqual({ type: "escape" });
   });
 
   test("characters are lowercased, control bytes are ignored", () => {
