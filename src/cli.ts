@@ -514,7 +514,10 @@ async function main(argv: string[]): Promise<number> {
     return parsed.command === "init"
       ? await init(parsed.options)
       : parsed.command === "setup"
-        ? await runWizard({ cwd: await resolveRepoRoot(parsed.options.repo) })
+        ? await runWizard({
+            cwd:
+              (await resolveOptionalRepoRoot(parsed.options)) ?? process.cwd(),
+          })
         : parsed.command === "doctor"
           ? await doctorCommand(parsed.options)
           : parsed.command === "activity"
@@ -688,13 +691,15 @@ export async function loadGlobalConfigLayer(home: string): Promise<{
 }
 
 export async function loadEffectiveConfig(input: {
-  root: string;
+  root?: string | undefined;
   home: string;
   configFlag?: string | undefined;
 }): Promise<EffectiveConfig> {
   const repoConfigPath = input.configFlag
     ? path.resolve(input.configFlag)
-    : path.join(input.root, ".prhero", "config.json");
+    : input.root
+      ? path.join(input.root, ".prhero", "config.json")
+      : path.join(input.home, ".prhero", "config.json");
   if (input.configFlag && !existsSync(repoConfigPath)) {
     throw new CliError(`config file not found: ${repoConfigPath}`);
   }
@@ -705,9 +710,10 @@ export async function loadEffectiveConfig(input: {
   // `global_present` cannot disagree with what was actually loaded — which is
   // the property the field was added for.
   const globalPresent = global !== undefined;
-  const repo = existsSync(repoConfigPath)
-    ? parseLocalConfig(await Bun.file(repoConfigPath).text())
-    : {};
+  const repo =
+    (input.configFlag || input.root) && existsSync(repoConfigPath)
+      ? parseLocalConfig(await Bun.file(repoConfigPath).text())
+      : {};
   return {
     ...mergeConfig(global, repo),
     repoConfigPath,
@@ -3896,8 +3902,17 @@ async function usageCommand(options: CliOptions): Promise<number> {
 // so it stays pipeable. Everything human-facing elsewhere in this CLI goes to
 // stderr via log(), which is what reserves the channel — and the style flag is
 // therefore sniffed off stdout, the stream actually being written.
+async function resolveOptionalRepoRoot(
+  options: CliOptions,
+): Promise<string | undefined> {
+  if (options.repoExplicit) {
+    return await resolveRepoRoot(options.repo);
+  }
+  return await resolveRepoRoot(process.cwd()).catch(() => undefined);
+}
+
 async function configCommand(options: CliOptions): Promise<number> {
-  const repoRoot = await resolveRepoRoot(options.repo);
+  const repoRoot = await resolveOptionalRepoRoot(options);
   const loaded = await loadEffectiveConfig({
     root: repoRoot,
     home: os.homedir(),
@@ -3906,11 +3921,13 @@ async function configCommand(options: CliOptions): Promise<number> {
   const lines = renderConfig({
     effective: loaded.effective,
     sources: loaded.sources,
-    repoConfigPath: loaded.repoConfigPath,
+    repoConfigPath: repoRoot
+      ? loaded.repoConfigPath
+      : path.join(process.cwd(), ".prhero", "config.json"),
     // Not carried on EffectiveConfig: the review path has no use for it (an
     // absent repo file is simply an absent layer), and widening a type six
     // callers share to serve one renderer is how shared shapes rot.
-    repoPresent: existsSync(loaded.repoConfigPath),
+    repoPresent: repoRoot ? existsSync(loaded.repoConfigPath) : false,
     globalConfigPath: loaded.globalConfigPath,
     globalPresent: loaded.globalPresent,
     styles: styleEnabled(process.stdout),
@@ -3921,8 +3938,11 @@ async function configCommand(options: CliOptions): Promise<number> {
 }
 
 async function doctorCommand(options: CliOptions): Promise<number> {
-  const repoRoot = await resolveRepoRoot(options.repo);
-  const report = await runDoctor({ cwd: repoRoot });
+  const repoRoot = await resolveOptionalRepoRoot(options);
+  const report = await runDoctor({
+    repoRoot: repoRoot ?? undefined,
+    cwd: repoRoot ?? undefined,
+  });
   const lines = renderDoctorReport(report, {
     styles: styleEnabled(process.stdout),
     width: terminalWidth(),

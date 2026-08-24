@@ -37,11 +37,11 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 4: Keyboard Foundations & Repo-Optional Commands
 
-- [ ] 4.1 Write failing tests for the `parseKey` extension in `src/ui-select.ts`: `Esc` and `Ctrl-C` become distinguishable key types; `splitKeys` behavior unchanged; `runConfirm` keeps treating both as cancel (compatible extension; existing tests updated)
-- [ ] 4.2 Write failing tests for repo-optional `pr-hero doctor`: outside a git repository it runs system checks only and exits successfully (today it throws via `resolveRepoRoot`)
-- [ ] 4.3 Write failing tests for repo-optional `pr-hero config`: outside a git repository it reads/writes the global layers only (Person, Watch) and stays pipeable
-- [ ] 4.4 Write failing tests for repo-optional `pr-hero setup`: outside a git repository it runs the machine-level steps only (tools probe, skills sync, MCP registration, `setup.json`) and skips repo steps with a notice
-- [ ] 4.5 Extend `parseKey`; make `doctor`, `config`, and `setup` repo-optional in `src/cli.ts`; make all Phase 4 tests pass
+- [x] 4.1 Write failing tests for the `parseKey` extension in `src/ui-select.ts`: `Esc` and `Ctrl-C` become distinguishable key types; `splitKeys` behavior unchanged; `runConfirm` keeps treating both as cancel (compatible extension; existing tests updated)
+- [x] 4.2 Write failing tests for repo-optional `pr-hero doctor`: outside a git repository it runs system checks only and exits successfully (today it throws via `resolveRepoRoot`)
+- [x] 4.3 Write failing tests for repo-optional `pr-hero config`: outside a git repository it reads/writes the global layers only (Person, Watch) and stays pipeable
+- [x] 4.4 Write failing tests for repo-optional `pr-hero setup`: outside a git repository it runs the machine-level steps only (tools probe, skills sync, MCP registration, `setup.json`) and skips repo steps with a notice
+- [x] 4.5 Extend `parseKey`; make `doctor`, `config`, and `setup` repo-optional in `src/cli.ts`; make all Phase 4 tests pass
 
 ## Phase 5: Root Dispatch, Submenus & Review Submenu
 

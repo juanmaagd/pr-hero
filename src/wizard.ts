@@ -444,23 +444,30 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       const configPath = path.join(dotPrhero, "config.json");
       const gotchasPath = path.join(dotPrhero, "gotchas.md");
 
-      // 1. Write .prhero/config.json if not present
-      if (!exists(configPath)) {
-        const configContent = initConfigTemplate({
-          defaultBase: state.defaultBase || "main",
-        });
-        await writeFile(configPath, configContent);
-      }
+      const isGit = await exec(["git", "rev-parse", "--is-inside-work-tree"], {
+        cwd,
+      });
+      const isRepo = isGit.exitCode === 0;
 
-      // 2. Write .prhero/gotchas.md if not present
-      if (!exists(gotchasPath)) {
-        let gotchasContent: string;
-        if (state.gotchas.entries && state.gotchas.entries.length > 0) {
-          gotchasContent = `# Repository Gotchas & Invariants\n\n${state.gotchas.entries.map((e) => `- ${e}`).join("\n")}\n`;
-        } else {
-          gotchasContent = `<!-- human-attention-required: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Edit this file with project failure modes.)\n`;
+      if (isRepo) {
+        // 1. Write .prhero/config.json if not present
+        if (!exists(configPath)) {
+          const configContent = initConfigTemplate({
+            defaultBase: state.defaultBase || "main",
+          });
+          await writeFile(configPath, configContent);
         }
-        await writeFile(gotchasPath, gotchasContent);
+
+        // 2. Write .prhero/gotchas.md if not present
+        if (!exists(gotchasPath)) {
+          let gotchasContent: string;
+          if (state.gotchas.entries && state.gotchas.entries.length > 0) {
+            gotchasContent = `# Repository Gotchas & Invariants\n\n${state.gotchas.entries.map((e) => `- ${e}`).join("\n")}\n`;
+          } else {
+            gotchasContent = `<!-- human-attention-required: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Edit this file with project failure modes.)\n`;
+          }
+          await writeFile(gotchasPath, gotchasContent);
+        }
       }
 
       // 3. Write ~/.prhero/setup.json (NEVER ~/.prhero/config.json)
@@ -473,7 +480,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
 
       // 4. Handle commitChoice
       let workspaceCommitted = false;
-      if (state.commitChoice === "commit") {
+      if (isRepo && state.commitChoice === "commit") {
         await exec(["git", "add", ".prhero"], { cwd });
         const commitRes = await exec(
           [
@@ -485,7 +492,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
           { cwd },
         );
         workspaceCommitted = commitRes.exitCode === 0;
-      } else if (state.commitChoice === "ignore") {
+      } else if (isRepo && state.commitChoice === "ignore") {
         const gitignorePath = path.join(cwd, ".gitignore");
         const existingGitignore = deps.readFile
           ? deps.readFile(gitignorePath)
@@ -497,7 +504,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       }
 
       return {
-        repoScaffolded: true,
+        repoScaffolded: isRepo,
         setupStateWritten: true,
         workspaceCommitted,
       };
