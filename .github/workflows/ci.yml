@@ -1,0 +1,63 @@
+# Verifies this repository's own suite. Until this file existed,
+# .github/workflows/ held only release.yml, so nothing ran the tests on a
+# pull request and every merge to main was verified by whoever remembered to
+# run the gates by hand.
+#
+# Not to be confused with pr-hero.yml, which runs the *reviewer* on a PR.
+# That one reads the diff and comments; this one proves the code still works.
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+# Read-only: this workflow proves the code, it never writes to the repo.
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push supersedes an in-flight run on the same ref. main is exempt:
+  # every commit that lands there deserves its own recorded verdict.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  verify:
+    name: Test, typecheck & lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pinned, not `latest`: a runtime that changes under you turns an
+          # unrelated upstream release into a red build on an innocent PR.
+          # Matches action.yml's own pin.
+          bun-version: '1.3.14'
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The whole suite is offline by design — fake spawn/runner throughout,
+      # no network, no real agent calls, no API keys. That is precisely why it
+      # can run on every pull request without costing anything.
+      - name: Test
+        run: bun test
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # ./node_modules/.bin/biome, never `bunx biome`. Bare `biome` resolves
+      # to an unrelated abandoned package that ignores the flags, checks
+      # nothing, and exits 0 — docs/research/scout-design.md:344 records this gate sitting
+      # green for 18 days on exactly that while real Biome found 10 errors
+      # over the same commit. A linter that always passes is worse than no
+      # linter, because it is trusted. test/packaging.test.ts pins this line.
+      - name: Lint
+        run: ./node_modules/.bin/biome check src test

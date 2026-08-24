@@ -72,6 +72,41 @@ describe("Packaging & distribution configuration", () => {
     expect(content).toContain("--provenance");
   });
 
+  // Until this workflow existed, .github/workflows/ held only release.yml:
+  // nothing ran this repo's own suite on a pull request, so every merge to
+  // main was verified by whoever happened to run the gates by hand. These
+  // assertions exist so a future edit cannot quietly drop one of the three.
+  test("ci workflow runs all three gates on pull requests", () => {
+    const workflowPath = path.join(rootDir, ".github", "workflows", "ci.yml");
+    expect(existsSync(workflowPath)).toBe(true);
+    const content = readFileSync(workflowPath, "utf-8");
+    expect(content).toContain("pull_request");
+    expect(content).toContain("bun install --frozen-lockfile");
+    expect(content).toContain("bun test");
+    expect(content).toContain("bun run typecheck");
+  });
+
+  // The scar this assertion guards: `bunx biome` resolves to an unrelated
+  // abandoned package that ignores the flags, checks nothing, and exits 0.
+  // docs/research/scout-design.md:344 records the CI gate sitting green for 18 days on
+  // exactly that while real Biome found 10 errors over the same commit. A
+  // linter that always passes is worse than no linter, because it is trusted.
+  test("ci workflow invokes the real biome binary, never the bunx shim", () => {
+    const workflowPath = path.join(rootDir, ".github", "workflows", "ci.yml");
+    const content = readFileSync(workflowPath, "utf-8");
+    expect(content).toContain("./node_modules/.bin/biome check src test");
+
+    // Comments are stripped before the negative assertion on purpose: the
+    // workflow SHOULD name the antipattern to explain why the long path is
+    // there, and a whole-file substring check would make documenting the
+    // hazard indistinguishable from committing it.
+    const commands = content
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    expect(commands).not.toContain("bunx biome");
+  });
+
   test("build script produces standalone bundle without error", async () => {
     const proc = Bun.spawn(["bun", "run", "build"], {
       cwd: rootDir,
