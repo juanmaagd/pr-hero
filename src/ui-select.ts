@@ -24,6 +24,8 @@ export type ConfirmResult =
 export type Key =
   | { type: "up" }
   | { type: "down" }
+  | { type: "left" }
+  | { type: "right" }
   | { type: "enter" }
   | { type: "escape" }
   | { type: "ctrl-c" }
@@ -58,6 +60,8 @@ export function splitKeys(chunk: string): string[] {
 export function parseKey(key: string): Key {
   if (key === `${ESC}[A`) return { type: "up" };
   if (key === `${ESC}[B`) return { type: "down" };
+  if (key === `${ESC}[C`) return { type: "right" };
+  if (key === `${ESC}[D`) return { type: "left" };
   // \r is what a raw-mode terminal sends for Enter; \n only ever arrives from
   // a cooked stream. Both count — a menu that ignored one would look dead.
   if (key === "\r" || key === "\n") return { type: "enter" };
@@ -271,7 +275,9 @@ export async function runConfirm(
       const chosen =
         key.type === "enter"
           ? withHint[cursor]
-          : withHint.find((option) => option.shortcuts.includes(key.char));
+          : key.type === "char"
+            ? withHint.find((option) => option.shortcuts.includes(key.char))
+            : undefined;
       if (chosen === undefined) continue;
       if (chosen.action === "details") {
         // A VIEW, not a decision: print and fall back into the same loop. The
@@ -438,7 +444,9 @@ export async function runSizeGateConfirm(
       const chosen =
         key.type === "enter"
           ? options[cursor]
-          : options.find((option) => option.shortcuts.includes(key.char));
+          : key.type === "char"
+            ? options.find((option) => option.shortcuts.includes(key.char))
+            : undefined;
       if (chosen === undefined) continue;
       io.line();
       return chosen.action === "cancel"

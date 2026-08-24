@@ -11,6 +11,14 @@ import {
   resolveMenuContext,
 } from "./menu-context";
 import { bold, box, cyan, dim, sanitizeText, terminalWidth } from "./ui";
+import {
+  cycleStringPreset,
+  DEFAULT_CARD_ACTIONS,
+  getEditableLayerEntries,
+  renderConfigEditCard,
+  saveLayerConfig,
+  stepNumericValue,
+} from "./ui-config-edit";
 import { type KeyReader, parseKey, splitKeys } from "./ui-select";
 
 const SOLID_BANNER_LINES = [
@@ -216,6 +224,21 @@ export function createDefaultStdinReader(): KeyReader {
   };
 }
 
+export function clearDrawnLines(
+  io: MenuLoopIo,
+  drawn: number,
+  repaint: boolean,
+): void {
+  if (!repaint || drawn <= 0) return;
+  const ESC = "\x1b";
+  let eraseBuf = `${ESC}[${drawn}A`;
+  for (let i = 0; i < drawn; i++) {
+    eraseBuf += `${ESC}[2K\n`;
+  }
+  eraseBuf += `${ESC}[${drawn}A`;
+  io.write(eraseBuf);
+}
+
 export async function runMenuLoop(
   options: MenuLoopOptions = {},
 ): Promise<number> {
@@ -395,6 +418,8 @@ export async function runMenuLoop(
       needsClear = true;
     }
   } finally {
+    clearDrawnLines(io, drawn, repaint);
+    drawn = 0;
     if (repaint) io.write(`${ESC}[?25h`);
     process.off("SIGWINCH", onResize);
   }
@@ -558,6 +583,8 @@ export async function runLifecycleSubmenu(deps: {
       }
     }
   } finally {
+    clearDrawnLines(io, drawn, repaint);
+    drawn = 0;
     if (repaint) io.write(`${ESC}[?25h`);
   }
 }
@@ -568,6 +595,7 @@ export async function runWatcherSubmenu(deps: {
   styles?: boolean;
   width?: number;
   inRepo?: boolean;
+  home?: string;
   dispatch?: (subcommand: string) => Promise<number>;
 }): Promise<number | "back"> {
   const io = deps.io ?? {
@@ -577,6 +605,7 @@ export async function runWatcherSubmenu(deps: {
   const styles = deps.styles ?? false;
   const width = deps.width ?? 80;
   const inRepo = deps.inRepo ?? true;
+  const home = deps.home ?? os.homedir();
   const createReader = deps.createReader ?? createDefaultStdinReader;
 
   const items = [
@@ -584,6 +613,11 @@ export async function runWatcherSubmenu(deps: {
       id: "status",
       label: "Watcher status",
       desc: "View watcher daemon status and enrolled repos",
+    },
+    {
+      id: "config",
+      label: "Configure limits & window",
+      desc: "Edit daily review cap and active time window (~/.prhero/watch.json)",
     },
     {
       id: "install",
@@ -711,6 +745,23 @@ export async function runWatcherSubmenu(deps: {
       }
 
       if (!chosen || chosen.id === "back") return "back";
+
+      if (chosen.id === "config") {
+        drawn = 0;
+        await runLayerConfigCardEditor({
+          layer: "watch",
+          title: `Watcher Daemon Configuration (${path.join(home, ".prhero", "watch.json")})`,
+          createReader,
+          io,
+          styles,
+          width,
+          home,
+        });
+        drawn = 0;
+        needsClear = true;
+        continue;
+      }
+
       if (deps.dispatch) {
         drawn = 0;
         if (repaint) io.write(`${ESC}[?25h`);
@@ -733,6 +784,513 @@ export async function runWatcherSubmenu(deps: {
       }
     }
   } finally {
+    clearDrawnLines(io, drawn, repaint);
+    drawn = 0;
+    if (repaint) io.write(`${ESC}[?25h`);
+  }
+}
+
+export async function runLayerConfigCardEditor(deps: {
+  layer: "team" | "person" | "watch";
+  title: string;
+  createReader: () => KeyReader;
+  io: MenuLoopIo;
+  styles: boolean;
+  width: number;
+  repoRoot?: string;
+  home?: string;
+}): Promise<void> {
+  const home = deps.home ?? os.homedir();
+  const repoRoot = deps.repoRoot;
+  const ESC = "\x1b";
+  const repaint = deps.styles;
+  let drawn = 0;
+  let editCursor = 0;
+  let annotation: string | undefined;
+
+  const readLayerData = (): Record<string, unknown> => {
+    let filePath: string | undefined;
+    if (deps.layer === "team") {
+      if (!repoRoot) return {};
+      filePath = path.join(repoRoot, ".prhero", "config.json");
+    } else if (deps.layer === "person") {
+      filePath = path.join(home, ".prhero", "config.json");
+    } else if (deps.layer === "watch") {
+      filePath = path.join(home, ".prhero", "watch.json");
+    }
+    if (filePath && existsSync(filePath)) {
+      try {
+        return JSON.parse(readFileSync(filePath, "utf-8"));
+      } catch {
+        return {};
+      }
+    }
+    return {};
+  };
+
+  const draft: Record<string, unknown> = readLayerData();
+  const actions = DEFAULT_CARD_ACTIONS;
+
+  const render = (clearScreen = false) => {
+    const entries = getEditableLayerEntries(deps.layer, draft);
+    const lines: string[] = [
+      "",
+      ...renderConfigEditCard(
+        deps.title,
+        entries,
+        editCursor,
+        deps.width,
+        deps.styles,
+        annotation,
+        actions,
+      ),
+      dim(
+        "j/k: move • space: toggle • ←/→: adjust • enter: select/save • u: reset • q/esc: discard",
+        deps.styles,
+      ),
+    ];
+
+    let buf = "";
+    if (repaint && clearScreen) {
+      buf += `${ESC}[2J${ESC}[H`;
+      drawn = 0;
+    } else if (repaint && drawn > 0) {
+      buf += `${ESC}[${drawn}A`;
+    }
+    for (const l of lines) {
+      if (repaint && drawn > 0) buf += `${ESC}[2K`;
+      buf += `${l}\n`;
+    }
+    deps.io.write(buf);
+    drawn = lines.length;
+  };
+
+  try {
+    if (repaint) deps.io.write(`${ESC}[?25l`);
+    let needsClear = true;
+    for (;;) {
+      render(needsClear);
+      needsClear = false;
+
+      const entries = getEditableLayerEntries(deps.layer, draft);
+      const totalItems = entries.length + actions.length;
+      if (entries.length === 0) return;
+
+      const reader = deps.createReader();
+      let shouldExit = false;
+
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk === undefined) {
+            shouldExit = true;
+            break;
+          }
+          let actionTaken = false;
+          for (const raw of splitKeys(chunk)) {
+            const key = parseKey(raw);
+            if (
+              key.type === "escape" ||
+              key.type === "ctrl-c" ||
+              (key.type === "char" && key.char === "q")
+            ) {
+              shouldExit = true;
+              break;
+            }
+            if (
+              key.type === "up" ||
+              (key.type === "char" && key.char === "k")
+            ) {
+              editCursor = (editCursor - 1 + totalItems) % totalItems;
+              annotation = undefined;
+              render(false);
+              continue;
+            }
+            if (
+              key.type === "down" ||
+              (key.type === "char" && key.char === "j")
+            ) {
+              editCursor = (editCursor + 1) % totalItems;
+              annotation = undefined;
+              render(false);
+              continue;
+            }
+            if (key.type === "char" && /^[1-9]$/.test(key.char)) {
+              const idx = Number(key.char) - 1;
+              if (idx < totalItems) {
+                editCursor = idx;
+                annotation = undefined;
+                render(false);
+              }
+              continue;
+            }
+
+            // If cursor is on Action buttons:
+            if (editCursor >= entries.length) {
+              const actionIdx = editCursor - entries.length;
+              if (key.type === "enter") {
+                if (actionIdx === 0) {
+                  // Save changes
+                  const res = await saveLayerConfig({
+                    layer: deps.layer,
+                    draft,
+                    home,
+                    repoRoot,
+                  });
+                  annotation = res.annotation;
+                  shouldExit = true;
+                  break;
+                }
+                if (actionIdx === 1) {
+                  // Discard & back
+                  shouldExit = true;
+                  break;
+                }
+                if (actionIdx === 2) {
+                  // Clear all (unset)
+                  for (const k of Object.keys(draft)) delete draft[k];
+                  annotation =
+                    "✓ Cleared draft overrides to (not set) (hit Save changes to apply)";
+                  actionTaken = true;
+                  break;
+                }
+              }
+              continue;
+            }
+
+            // Cursor is on a field:
+            const currentEntry = entries[editCursor];
+            if (!currentEntry) continue;
+
+            // Space: Boolean toggle in draft
+            if (key.type === "char" && key.char === " ") {
+              if (
+                currentEntry.type === "boolean" ||
+                currentEntry.key === "summary.enabled"
+              ) {
+                const currentBool = currentEntry.currentRaw === true;
+                const nextBool = !currentBool;
+                if (currentEntry.key === "summary.enabled") {
+                  draft.summary = {
+                    ...(typeof draft.summary === "object" &&
+                    draft.summary !== null
+                      ? (draft.summary as Record<string, unknown>)
+                      : {}),
+                    enabled: nextBool,
+                  };
+                } else {
+                  draft[currentEntry.key] = nextBool;
+                }
+                actionTaken = true;
+                break;
+              }
+            }
+
+            // Left: Decrement numeric in draft
+            if (
+              key.type === "left" ||
+              (key.type === "char" && key.char === "h")
+            ) {
+              if (currentEntry.type === "number") {
+                let delta = -1;
+                let min = 0;
+                if (currentEntry.key === "max_changed_lines") delta = -250;
+                else if (currentEntry.key === "max_changed_files") delta = -25;
+                else if (currentEntry.key === "daily_cap") {
+                  delta = -1;
+                  min = 1;
+                }
+
+                const currentNum =
+                  typeof currentEntry.currentRaw === "number"
+                    ? currentEntry.currentRaw
+                    : currentEntry.key === "max_changed_lines"
+                      ? 1500
+                      : currentEntry.key === "max_changed_files"
+                        ? 150
+                        : currentEntry.key === "max_verification_steps"
+                          ? 8
+                          : 10;
+
+                const nextNum = stepNumericValue(currentNum, delta, min);
+                draft[currentEntry.key] = nextNum;
+                actionTaken = true;
+                break;
+              }
+            }
+
+            // Right: Increment numeric in draft
+            if (
+              key.type === "right" ||
+              (key.type === "char" && key.char === "l")
+            ) {
+              if (currentEntry.type === "number") {
+                let delta = 1;
+                let min = 0;
+                if (currentEntry.key === "max_changed_lines") delta = 250;
+                else if (currentEntry.key === "max_changed_files") delta = 25;
+                else if (currentEntry.key === "daily_cap") {
+                  delta = 1;
+                  min = 1;
+                }
+
+                const currentNum =
+                  typeof currentEntry.currentRaw === "number"
+                    ? currentEntry.currentRaw
+                    : currentEntry.key === "max_changed_lines"
+                      ? 1500
+                      : currentEntry.key === "max_changed_files"
+                        ? 150
+                        : currentEntry.key === "max_verification_steps"
+                          ? 8
+                          : 10;
+
+                const nextNum = stepNumericValue(currentNum, delta, min);
+                draft[currentEntry.key] = nextNum;
+                actionTaken = true;
+                break;
+              }
+            }
+
+            // Enter: Cycle presets or boolean toggle
+            if (key.type === "enter") {
+              if (
+                currentEntry.type === "boolean" ||
+                currentEntry.key === "summary.enabled"
+              ) {
+                const currentBool = currentEntry.currentRaw === true;
+                const nextBool = !currentBool;
+                if (currentEntry.key === "summary.enabled") {
+                  draft.summary = {
+                    ...(typeof draft.summary === "object" &&
+                    draft.summary !== null
+                      ? (draft.summary as Record<string, unknown>)
+                      : {}),
+                    enabled: nextBool,
+                  };
+                } else {
+                  draft[currentEntry.key] = nextBool;
+                }
+                actionTaken = true;
+                break;
+              }
+              if (currentEntry.key === "default_base") {
+                const currentStr =
+                  typeof currentEntry.currentRaw === "string"
+                    ? currentEntry.currentRaw
+                    : "main";
+                const nextStr = cycleStringPreset(currentStr, [
+                  "main",
+                  "master",
+                  "develop",
+                ]);
+                draft.default_base = nextStr;
+                actionTaken = true;
+                break;
+              }
+            }
+
+            // u: Reset key in draft
+            if (key.type === "char" && key.char === "u") {
+              if (currentEntry.key.startsWith("summary.")) {
+                if (
+                  typeof draft.summary === "object" &&
+                  draft.summary !== null
+                ) {
+                  delete (draft.summary as Record<string, unknown>).enabled;
+                }
+              } else {
+                delete draft[currentEntry.key];
+              }
+              annotation = `✓ Draft reset ${currentEntry.key} to default`;
+              actionTaken = true;
+              break;
+            }
+          }
+          if (shouldExit || actionTaken) break;
+        }
+      } finally {
+        reader.close();
+      }
+
+      if (shouldExit) return;
+    }
+  } finally {
+    clearDrawnLines(deps.io, drawn, repaint);
+    drawn = 0;
+    if (repaint) deps.io.write(`${ESC}[?25h`);
+  }
+}
+
+export async function runConfigSubmenu(deps: {
+  createReader?: () => KeyReader;
+  io?: MenuLoopIo;
+  styles?: boolean;
+  width?: number;
+  repoRoot?: string;
+  home?: string;
+}): Promise<number | "back"> {
+  const io = deps.io ?? {
+    write: (t) => process.stderr.write(t),
+    line: (t = "") => process.stderr.write(`${t}\n`),
+  };
+  const styles = deps.styles ?? false;
+  const width = deps.width ?? 80;
+  const home = deps.home ?? os.homedir();
+  const repoRoot = deps.repoRoot;
+  const inRepo = Boolean(repoRoot);
+  const createReader = deps.createReader ?? createDefaultStdinReader;
+
+  const ESC = "\x1b";
+  const repaint = styles;
+  let drawn = 0;
+  let layerCursor = 0;
+
+  const layerItems = [
+    {
+      id: "team" as const,
+      label: "Repository configuration",
+      file: repoRoot
+        ? path.join(repoRoot, ".prhero", "config.json")
+        : ".prhero/config.json",
+      disabled: !inRepo,
+    },
+    {
+      id: "person" as const,
+      label: "Global configuration",
+      file: path.join(home, ".prhero", "config.json"),
+      disabled: false,
+    },
+    {
+      id: "back" as const,
+      label: "Back",
+      file: "Return to main menu",
+      disabled: false,
+    },
+  ];
+
+  const render = (clearScreen = false) => {
+    const cardLines = layerItems.map((item, idx) => {
+      const isSelected = idx === layerCursor;
+      const prefix = isSelected ? "▸ " : "  ";
+      const suffix = item.disabled
+        ? " (disabled outside git repository)"
+        : ` (${item.file})`;
+      const line = sanitizeText(`${prefix}${idx + 1}. ${item.label}${suffix}`);
+      return isSelected
+        ? bold(cyan(line, styles), styles)
+        : item.disabled
+          ? dim(line, styles)
+          : line;
+    });
+    const lines = [
+      "",
+      ...box("Select Configuration Layer", cardLines, {
+        width,
+        styles,
+        borderStyle: "double",
+      }),
+      dim("j/k: move • enter: select • q/esc: back", styles),
+    ];
+
+    let buf = "";
+    if (repaint && clearScreen) {
+      buf += `${ESC}[2J${ESC}[H`;
+      drawn = 0;
+    } else if (repaint && drawn > 0) {
+      buf += `${ESC}[${drawn}A`;
+    }
+    for (const l of lines) {
+      if (repaint && drawn > 0) buf += `${ESC}[2K`;
+      buf += `${l}\n`;
+    }
+    io.write(buf);
+    drawn = lines.length;
+  };
+
+  try {
+    if (repaint) io.write(`${ESC}[?25l`);
+    let needsClear = true;
+    for (;;) {
+      render(needsClear);
+      needsClear = false;
+
+      const reader = createReader();
+      let selectedNext: "team" | "person" | "back" | undefined;
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk === undefined) return "back";
+          let shouldBreak = false;
+          for (const raw of splitKeys(chunk)) {
+            const key = parseKey(raw);
+            if (
+              key.type === "escape" ||
+              key.type === "ctrl-c" ||
+              (key.type === "char" && key.char === "q")
+            ) {
+              return "back";
+            }
+            if (
+              key.type === "up" ||
+              (key.type === "char" && key.char === "k")
+            ) {
+              layerCursor =
+                (layerCursor - 1 + layerItems.length) % layerItems.length;
+              render(false);
+              continue;
+            }
+            if (
+              key.type === "down" ||
+              (key.type === "char" && key.char === "j")
+            ) {
+              layerCursor = (layerCursor + 1) % layerItems.length;
+              render(false);
+              continue;
+            }
+            if (key.type === "char" && /^[1-3]$/.test(key.char)) {
+              layerCursor = Number(key.char) - 1;
+              render(false);
+              continue;
+            }
+            if (key.type === "enter") {
+              const item = layerItems[layerCursor];
+              if (item.disabled) continue;
+              selectedNext = item.id;
+              shouldBreak = true;
+              break;
+            }
+          }
+          if (shouldBreak) break;
+        }
+      } finally {
+        reader.close();
+      }
+
+      if (selectedNext === "back" || !selectedNext) return "back";
+
+      const title =
+        selectedNext === "team"
+          ? `Repository Configuration (${path.join(repoRoot ?? ".", ".prhero", "config.json")})`
+          : `Global Configuration (${path.join(home, ".prhero", "config.json")})`;
+
+      drawn = 0;
+      await runLayerConfigCardEditor({
+        layer: selectedNext,
+        title,
+        createReader,
+        io,
+        styles,
+        width,
+        repoRoot,
+        home,
+      });
+      drawn = 0;
+      needsClear = true;
+    }
+  } finally {
+    clearDrawnLines(io, drawn, repaint);
+    drawn = 0;
     if (repaint) io.write(`${ESC}[?25h`);
   }
 }

@@ -307,6 +307,29 @@ describe("sizeGateConfig", () => {
     });
   });
 
+  test("config layer values are picked up before falling back to defaults", () => {
+    expect(
+      sizeGateConfig({}, { max_changed_lines: 2000, max_changed_files: 80 }),
+    ).toEqual({
+      ...DEFAULT_SIZE_GATE,
+      maxChangedLines: 2000,
+      maxChangedFiles: 80,
+    });
+  });
+
+  test("CLI overrides take precedence over config layer values", () => {
+    expect(
+      sizeGateConfig(
+        { maxChangedLines: 500 },
+        { max_changed_lines: 2000, max_changed_files: 80 },
+      ),
+    ).toEqual({
+      ...DEFAULT_SIZE_GATE,
+      maxChangedLines: 500,
+      maxChangedFiles: 80,
+    });
+  });
+
   // Pins the shipped numbers to the README's profile table. Moving a default
   // must be a deliberate edit here, not a drift. The number moved 1500 → 2500
   // → 1500: this repo's own PR #1 (1603 lines) was refused while its cost
