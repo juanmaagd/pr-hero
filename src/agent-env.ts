@@ -539,3 +539,162 @@ export function inspectMcpRegistration(
     return false;
   }
 }
+
+export interface UnregisterMcpOptions {
+  readFile?: (path: string) => string | undefined;
+  writeFile?: (path: string, content: string) => Promise<void> | void;
+  exists?: (path: string) => boolean;
+}
+
+export interface UnregisterMcpResult {
+  unregistered: boolean;
+  configFile?: string;
+  error?: string;
+}
+
+export async function unregisterMcpServer(
+  env: AgentEnvDetection,
+  serverName = "pr-hero",
+  options: UnregisterMcpOptions = {},
+): Promise<UnregisterMcpResult> {
+  if (!env.mcpConfigFile) {
+    return {
+      unregistered: false,
+      error: "No MCP config file resolved for environment",
+    };
+  }
+
+  const exists = options.exists ?? existsSync;
+  const readFile =
+    options.readFile ??
+    ((p: string) => {
+      try {
+        return readFileSync(p, "utf-8");
+      } catch {
+        return undefined;
+      }
+    });
+  const writeFile =
+    options.writeFile ??
+    ((p: string, c: string) => {
+      writeFileSync(p, c, "utf-8");
+    });
+
+  if (!exists(env.mcpConfigFile)) {
+    return { unregistered: true, configFile: env.mcpConfigFile };
+  }
+
+  try {
+    const raw = readFile(env.mcpConfigFile);
+    if (!raw) return { unregistered: true, configFile: env.mcpConfigFile };
+    const config = JSON.parse(raw);
+    if (config.mcpServers?.[serverName]) {
+      delete config.mcpServers[serverName];
+      await writeFile(
+        env.mcpConfigFile,
+        `${JSON.stringify(config, null, 2)}\n`,
+      );
+    }
+    return { unregistered: true, configFile: env.mcpConfigFile };
+  } catch (error) {
+    return {
+      unregistered: false,
+      configFile: env.mcpConfigFile,
+      error: `Failed to update MCP config: ${(error as Error).message}`,
+    };
+  }
+}
+
+export interface RemoveSkillsOptions {
+  exists?: (path: string) => boolean;
+  readFile?: (path: string) => string | undefined;
+  unlink?: (path: string) => void;
+}
+
+export interface RemoveSkillsResult {
+  removed: string[];
+  skippedModified: string[];
+  errors: string[];
+}
+
+export async function removeSkills(
+  env: AgentEnvDetection,
+  options: RemoveSkillsOptions = {},
+): Promise<RemoveSkillsResult> {
+  if (!env.skillsDir) {
+    return {
+      removed: [],
+      skippedModified: [],
+      errors: ["No skills directory resolved for environment"],
+    };
+  }
+
+  const exists = options.exists ?? existsSync;
+  const readFile =
+    options.readFile ??
+    ((p: string) => {
+      try {
+        return readFileSync(p, "utf-8");
+      } catch {
+        return undefined;
+      }
+    });
+  const unlink = options.unlink ?? unlinkSync;
+
+  const targetDir = path.join(env.skillsDir, "pr-hero-triage");
+  const digestFile = path.join(targetDir, "digest.json");
+
+  if (!exists(targetDir)) {
+    return { removed: [], skippedModified: [], errors: [] };
+  }
+
+  let digest: { files?: Record<string, string> } | undefined;
+  if (exists(digestFile)) {
+    try {
+      const raw = readFile(digestFile);
+      if (raw) digest = JSON.parse(raw);
+    } catch {
+      // Ignored
+    }
+  }
+
+  const removed: string[] = [];
+  const skippedModified: string[] = [];
+  const errors: string[] = [];
+
+  if (digest?.files) {
+    for (const [logicalName, expectedHash] of Object.entries(digest.files)) {
+      const filePath = path.join(targetDir, logicalName);
+      if (!exists(filePath)) continue;
+
+      const content = readFile(filePath);
+      if (content === undefined) continue;
+
+      const fileHash = sha256(content);
+      if (fileHash === expectedHash) {
+        try {
+          unlink(filePath);
+          removed.push(logicalName);
+        } catch (err) {
+          errors.push(
+            `Failed to remove ${filePath}: ${(err as Error).message}`,
+          );
+        }
+      } else {
+        skippedModified.push(logicalName);
+      }
+    }
+  }
+
+  // Remove digest if no files were skipped due to modification
+  if (skippedModified.length === 0 && exists(digestFile)) {
+    try {
+      unlink(digestFile);
+      removed.push("digest.json");
+    } catch (err) {
+      errors.push(`Failed to remove ${digestFile}: ${(err as Error).message}`);
+    }
+  }
+
+  return { removed, skippedModified, errors };
+}

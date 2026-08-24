@@ -38,6 +38,7 @@ describe("prheroLayout", () => {
       metricsDbPath: "/Users/x/.prhero/metrics.db",
       prheroDbPath: "/Users/x/.prhero/prhero.db",
       storeSocketPath: "/Users/x/.prhero/store.sock",
+      upgradeCheckPath: "/Users/x/.prhero/upgrade-check.json",
     });
   });
 

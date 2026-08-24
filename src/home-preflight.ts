@@ -43,6 +43,8 @@ export interface PrheroLayout {
   prheroDbPath: string;
   // Local store server Unix domain socket
   storeSocketPath: string;
+  // Upgrade check TTL cache
+  upgradeCheckPath: string;
 }
 
 export function prheroLayout(home: string): PrheroLayout {
@@ -58,6 +60,7 @@ export function prheroLayout(home: string): PrheroLayout {
     metricsDbPath: path.join(dir, "metrics.db"),
     prheroDbPath: path.join(dir, "prhero.db"),
     storeSocketPath: path.join(dir, "store.sock"),
+    upgradeCheckPath: path.join(dir, "upgrade-check.json"),
   };
 }
 

@@ -277,4 +277,89 @@ describe("Agent environment detector and sync", () => {
       expect(status.drift).toBe(false);
     });
   });
+
+  describe("1.6 Inverse lifecycle functions: unregisterMcpServer & removeSkills", () => {
+    test("unregisterMcpServer removes pr-hero entry from mcpConfigFile", async () => {
+      const written: Record<string, string> = {};
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        mcpConfigFile: "/home/user/.claude/mcp.json",
+      };
+
+      const initialConfig = JSON.stringify({
+        mcpServers: {
+          "pr-hero": { command: "pr-hero", args: ["mcp"] },
+          "other-server": { command: "other", args: [] },
+        },
+      });
+
+      const res = await (await import("../src/agent-env")).unregisterMcpServer(
+        env,
+        "pr-hero",
+        {
+          exists: () => true,
+          readFile: () => initialConfig,
+          writeFile: (p, c) => {
+            written[p] = c;
+          },
+        },
+      );
+
+      expect(res.unregistered).toBe(true);
+      const content = written["/home/user/.claude/mcp.json"] || "{}";
+      const parsed = JSON.parse(content);
+      expect(parsed.mcpServers["pr-hero"]).toBeUndefined();
+      expect(parsed.mcpServers["other-server"]).toBeDefined();
+    });
+
+    test("removeSkills removes only unmodified files matching digest.json", async () => {
+      const deleted: string[] = [];
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        skillsDir: "/home/user/.claude/skills",
+      };
+
+      const skillDir = "/home/user/.claude/skills/pr-hero-triage";
+      const crypto = await import("node:crypto");
+      const hashUnmodified = crypto
+        .createHash("sha256")
+        .update("unmodified content")
+        .digest("hex");
+
+      const digest = {
+        files: {
+          "SKILL.md": hashUnmodified,
+          "custom.md": "hash_different_from_actual_content",
+        },
+      };
+
+      const filesOnDisk: Record<string, string> = {
+        [`${skillDir}/digest.json`]: JSON.stringify(digest),
+        [`${skillDir}/SKILL.md`]: "unmodified content",
+        [`${skillDir}/custom.md`]: "locally edited content",
+      };
+
+      const res = await (await import("../src/agent-env")).removeSkills(env, {
+        exists: (p) => p === skillDir || p in filesOnDisk,
+        readFile: (p) => filesOnDisk[p],
+        unlink: (p) => {
+          deleted.push(p);
+          delete filesOnDisk[p];
+        },
+      });
+
+      expect(res.removed).toContain("SKILL.md");
+      expect(res.skippedModified).toContain("custom.md");
+      expect(deleted).toContain(`${skillDir}/SKILL.md`);
+      expect(deleted).not.toContain(`${skillDir}/custom.md`);
+    });
+  });
 });

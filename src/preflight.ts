@@ -188,6 +188,10 @@ export interface CliOptions {
   // mcp only (Canonical Store / MCP): optional socket or db path overrides.
   socket?: string;
   db?: string;
+  // upgrade & uninstall only
+  purge?: boolean;
+  check?: boolean;
+  reconcile?: boolean;
 }
 
 export interface ParsedCli {
@@ -206,6 +210,8 @@ export interface ParsedCli {
     | "corpus"
     | "config"
     | "mcp"
+    | "upgrade"
+    | "uninstall"
     | "help";
   options: CliOptions;
 }
@@ -217,6 +223,8 @@ Usage:
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero setup [options]    Run interactive onboarding wizard
   pr-hero doctor [options]   Check system tools and environment readiness
+  pr-hero upgrade [options]  Upgrade pr-hero to latest version & sync agent assets
+  pr-hero uninstall [opts]   Remove pr-hero daemons, MCP registrations & skills
   pr-hero ledger [options]   Accumulate every run's comparison.json into one
                              markdown ledger (the three buckets as a rate)
   pr-hero mcp [options]      Start the read-only Model Context Protocol (MCP)
@@ -511,6 +519,8 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "corpus"
     | "config"
     | "mcp"
+    | "upgrade"
+    | "uninstall"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -611,6 +621,18 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.all = true;
       continue;
     }
+    if (arg === "--purge") {
+      options.purge = true;
+      continue;
+    }
+    if (arg === "--check") {
+      options.check = true;
+      continue;
+    }
+    if (arg === "--reconcile") {
+      options.reconcile = true;
+      continue;
+    }
     // The five corpus sources, size-gate-style booleans — no values, and the
     // post-loop corpus block owns their cross-command rules (required-set,
     // --proximity implies --fixes, --issues needs a classified-set source).
@@ -686,15 +708,18 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "reverts" &&
       arg !== "corpus" &&
       arg !== "config" &&
-      arg !== "mcp"
+      arg !== "mcp" &&
+      arg !== "upgrade" &&
+      arg !== "update" &&
+      arg !== "uninstall"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "review", "init", "setup", "doctor", ` +
           '"ledger", "watch", "post", "triage", "gc", "usage", "reverts", ' +
-          '"corpus", "config" and "mcp")',
+          '"corpus", "config", "mcp", "upgrade" and "uninstall")',
       );
     }
-    command = arg;
+    command = arg === "update" ? "upgrade" : arg;
   }
   if (command === undefined) {
     throw new CliUsageError(
