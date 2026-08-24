@@ -6,7 +6,7 @@ context: |
   Architecture: Multi-agent PR review engine with parallel hunter agents, dedupe, adversarial refuters, tier derivation, and CLI/PR workflows
   Testing: bun test (offline unit and integration suites)
   Quality: Biome check (linter/formatter: ./node_modules/.bin/biome check src test), TypeScript tsc --noEmit
-  Active changes: interactive-config-tui, pillar2-tui-lifecycle
+  Active changes: pillar2-tui-lifecycle, pillar3-github-actions-ci
 
 strict_tdd: true
 
