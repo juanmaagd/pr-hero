@@ -15,12 +15,12 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 2: CI Spend & Budget Gate Protection
 
-- [ ] 2.1 Write failing tests in `test/ci-gates.test.ts`:
+- [x] 2.1 Write failing tests in `test/ci-gates.test.ts`:
   - Budget gate evaluation: `evaluateBudgetGate(estimatedCostUsd, budgetUsd)` returning `{ allowed: boolean, reason?: string }`
   - CI size-gate handling: when `isCi` is true and diff exceeds limits, format the skip PR comment markdown and summary payload without throwing fatal errors
   - CI budget-gate handling: when `isCi` is true and estimated cost exceeds budget, generate the budget skip PR comment and step summary payload
-- [ ] 2.2 Implement budget gate evaluation and CI skip payload builders in `src/ci-gates.ts`
-- [ ] 2.3 Make all Phase 2 tests pass with `bun test test/ci-gates.test.ts`
+- [x] 2.2 Implement budget gate evaluation and CI skip payload builders in `src/ci-gates.ts`
+- [x] 2.3 Make all Phase 2 tests pass with `bun test test/ci-gates.test.ts`
 
 ## Phase 3: Review CLI Integration & CI Headless Shell
 

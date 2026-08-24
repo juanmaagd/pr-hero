@@ -67,9 +67,13 @@
   - If `post` is enabled, a single PR comment **MUST** note the budget limit skip.
   - The step summary **MUST** record the budget skip reason.
   - The process **MUST** exit with code 0.
+- A non-positive `--budget-usd` (`<= 0`) **MUST** disable the budget ceiling rather than reject every review, matching the documented convention for the sibling spend knobs (`size-gate.ts`: "`<= 0` disables the limit. Both knobs, independently."). All three knobs are configured together in `action.yml` and evaluated in the same preflight, so they **MUST NOT** carry opposite zero-semantics.
+  - When the ceiling is disabled, no budget skip comment or summary is produced; the size gate still applies independently.
+  - Because a silent disable is indistinguishable from a passing gate, the CI shell **MUST** emit a `::warning::` workflow command noting that the budget ceiling is disabled.
 
 ### 3.2 Scenarios
 - **GIVEN** `--budget-usd 5.00` and an estimated cost of `$7.50`, **WHEN** the CI review preflights, **THEN** agents are not spawned, a skip notice is generated, and the job succeeds with exit code 0.
+- **GIVEN** `--budget-usd 0` and any estimated cost, **WHEN** the CI review preflights, **THEN** the budget ceiling is treated as disabled, the review proceeds subject to the size gate alone, and a `::warning::` records the disabled ceiling.
 
 ## 4. CI Workflow Scaffolding & Setup
 
