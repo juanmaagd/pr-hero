@@ -64,7 +64,7 @@ over** (found while wiring C5, 2026-08-23):
 
 - **`bunx biome check <file>` checks nothing and exits 0.** The repo's linter is `@biomejs/biome`; bare
   `biome` resolves to an unrelated abandoned package that ignores the flags. This is not hypothetical —
-  `docs/scout-design.md:344` records the CI gate sitting green for 18 days on exactly this while real
+  `docs/research/scout-design.md:344` records the CI gate sitting green for 18 days on exactly this while real
   Biome found 10 errors over the same commit. Use `./node_modules/.bin/biome check <file>`.
 - **`bunx tsc --noEmit <file>` ignores `tsconfig.json`.** Naming files on the command line switches tsc
   out of project mode, so strictness and paths silently differ from the real gate. Reconstruct the

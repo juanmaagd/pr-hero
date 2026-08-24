@@ -10,7 +10,7 @@ On disk. **$0 to re-read.** Do not overwrite these dirs for a new arm.
 
 | Artifact | Path |
 |---|---|
-| Ledger / how to read the number | `docs/martian-bench.md` § Cal.com 10 results |
+| Ledger / how to read the number | `docs/benchmarks/martian-bench.md` § Cal.com 10 results |
 | Judge JSON | `~/Desktop/martian-cal/runs/martian-judge.json` |
 | Per-PR runs | `~/Desktop/martian-cal/runs/cal-<pr>-hunters/` |
 | Adapter tests | `test/martian-adapter.test.ts` (offline) |
@@ -42,7 +42,7 @@ A new arm is a delta against **this** table, not against vibes.
 
 ## 3. M6 scout A/B — DoorDash track
 
-`scripts/m6.ts`, `docs/m6-floor-cases.json`, `src/floor-test.ts`. Frozen musive control set. Scout on vs off. Paused 2026-08-19 for calibration. **Different corpus, different question.** Do not mix a Martian weekend with an M6 variable. Scout-led on Cal.com is a **new Martian arm** (one variable: scout), not an M6 substitute.
+`scripts/m6.ts`, `docs/benchmarks/m6-floor-cases.json`, `src/floor-test.ts`. Frozen musive control set. Scout on vs off. Paused 2026-08-19 for calibration. **Different corpus, different question.** Do not mix a Martian weekend with an M6 variable. Scout-led on Cal.com is a **new Martian arm** (one variable: scout), not an M6 substitute.
 
 Pilot learning (n=12 musive): scout concentrated instead of widening; prompt-set sha was identical across arms. See Engram / M6 notes before assuming scout helps Martian recall.
 

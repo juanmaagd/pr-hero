@@ -31,9 +31,9 @@ const LAB_AGENTS_DIR =
   "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
 
 const ROOT = path.join(import.meta.dir, "..");
-const CASES_PATH = path.join(ROOT, "docs", "martian-cal-cases.json");
-const GOLDENS_PATH = path.join(ROOT, "docs", "martian-cal-goldens.json");
-const GOTCHAS_PATH = path.join(ROOT, "docs", "martian-cal-gotchas.md");
+const CASES_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-cases.json");
+const GOLDENS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-goldens.json");
+const GOTCHAS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-gotchas.md");
 const DEFAULT_REPO = path.join(homedir(), "Desktop", "martian-cal", "cal.com");
 const DEFAULT_RUNS = path.join(homedir(), "Desktop", "martian-cal", "runs");
 const HUNTERS = 3;

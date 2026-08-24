@@ -58,6 +58,7 @@ const CASES_PATH = path.join(
   import.meta.dir,
   "..",
   "docs",
+  "benchmarks",
   "m6-floor-cases.json",
 );
 // The musive checkout the reviews run against, and the one the control set was

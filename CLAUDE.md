@@ -69,7 +69,7 @@ over** (found while wiring C5, 2026-08-23):
 
 - **`bunx biome check <file>` checks nothing and exits 0.** The repo's linter is `@biomejs/biome`; bare
   `biome` resolves to an unrelated abandoned package that ignores the flags. This is not hypothetical —
-  `docs/scout-design.md:344` records the CI gate sitting green for 18 days on exactly this while real
+  `docs/research/scout-design.md:344` records the CI gate sitting green for 18 days on exactly this while real
   Biome found 10 errors over the same commit. Use `./node_modules/.bin/biome check <file>`.
 - **`bunx tsc --noEmit <file>` ignores `tsconfig.json`.** Naming files on the command line switches tsc
   out of project mode, so strictness and paths silently differ from the real gate. Reconstruct the
@@ -96,7 +96,7 @@ over** (found while wiring C5, 2026-08-23):
 - `src/floor-test.ts` — M6's primary instrument, pure: the case list's validator, the per-case gate (a
   refuter-CORROBORATED finding within compare.ts's ±25 of the site), the per-arm tally, the table. Arm
   identity is read off `pipeline.json`'s `scout.enabled`, never a directory name. Cases live in
-  `docs/m6-floor-cases.json`, transcribed from `docs/scout-design.md` §2.4septies and drift-guarded by a
+  `docs/benchmarks/m6-floor-cases.json`, transcribed from `docs/research/scout-design.md` §2.4septies and drift-guarded by a
   test that re-derives the markdown table.
 - `src/scout.ts` — the diff-only pre-hunter stage's PURE half (DoorDash M4/M5): output contract, lead
   validation, the four caps, the leads block, the hunk-coverage metric. Its impure half is `runScout` in

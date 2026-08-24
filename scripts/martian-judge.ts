@@ -19,7 +19,7 @@ import { lookupGolden, type MartianGoldenPr } from "../src/martian-adapter";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
 const ROOT = path.join(import.meta.dir, "..");
-const GOLDENS_PATH = path.join(ROOT, "docs", "martian-cal-goldens.json");
+const GOLDENS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-goldens.json");
 const DEFAULT_RUNS = path.join(homedir(), "Desktop", "martian-cal", "runs");
 const JUDGE_MODEL = "sonnet";
 

@@ -28,9 +28,16 @@ const CASES_PATH = path.join(
   import.meta.dir,
   "..",
   "docs",
+  "benchmarks",
   "m6-floor-cases.json",
 );
-const DESIGN_PATH = path.join(import.meta.dir, "..", "docs", "scout-design.md");
+const DESIGN_PATH = path.join(
+  import.meta.dir,
+  "..",
+  "docs",
+  "research",
+  "scout-design.md",
+);
 
 function floorCase(over: Partial<FloorCase> = {}): FloorCase {
   return {
@@ -421,7 +428,7 @@ describe("the clean pair", () => {
 // cost of drift here is scoring the wrong sites with ~$224 already spent.
 // ---------------------------------------------------------------------------
 
-describe("docs/m6-floor-cases.json matches §2.4septies", () => {
+describe("docs/benchmarks/m6-floor-cases.json matches §2.4septies", () => {
   test("every row of the canonical table is re-derived and compared", async () => {
     const design = await Bun.file(DESIGN_PATH).text();
     const cases = parseFloorCases(await Bun.file(CASES_PATH).text());

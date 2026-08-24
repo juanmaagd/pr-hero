@@ -1,6 +1,6 @@
 # Martian bench — operational flow
 
-Canonical protocol: `docs/martian-bench.md`. This file is the runbook.
+Canonical protocol: `docs/benchmarks/martian-bench.md`. This file is the runbook.
 
 ## Layout on disk
 
@@ -9,9 +9,9 @@ Canonical protocol: `docs/martian-bench.md`. This file is the runbook.
 | `~/Desktop/martian-cal/cal.com` | Blobless clone (`git clone --filter=blob:none`). GitHub renamed the repo `calcom/cal.diy`; clone via `cal.com` still works |
 | `~/Desktop/martian-cal/runs/cal-<pr>-hunters/` | Baseline arm (`hunters`). Sacred until a **new** arm id is chosen |
 | `~/Desktop/martian-cal/runs/martian-judge.json` | Surface A scores for the dirs the judge scanned |
-| `docs/martian-cal-cases.json` | SHAs + GitHub size stats (captured 2026-08-19). All ten PRs are MERGED |
-| `docs/martian-cal-goldens.json` | Vendored Martian Cal.com goldens (10 PRs, 41 issues) |
-| `docs/martian-cal-gotchas.md` | Intentionally thin. No gold, no vendor comments |
+| `docs/benchmarks/martian-cal-cases.json` | SHAs + GitHub size stats (captured 2026-08-19). All ten PRs are MERGED |
+| `docs/benchmarks/martian-cal-goldens.json` | Vendored Martian Cal.com goldens (10 PRs, 41 issues) |
+| `docs/benchmarks/martian-cal-gotchas.md` | Intentionally thin. No gold, no vendor comments |
 
 A new arm **must** use a new suffix (`cal-<pr>-scout`, `cal-<pr>-hunters-v2`, …). `run` skips a dir that already has `findings.json` — that is how the baseline stays intact.
 
@@ -25,7 +25,7 @@ Required flags (the harness already passes them):
 pr-hero review --repo <clone> --base <baseSha> --head <headSha>
   --two-dot --yes --no-summary
   --agents <SUGGESTED_AGENTS_DIR>
-  --gotchas docs/martian-cal-gotchas.md
+  --gotchas docs/benchmarks/martian-cal-gotchas.md
   --out ~/Desktop/martian-cal/runs/<arm-dir>
 ```
 
@@ -102,7 +102,7 @@ Injecting `tool: "pr-hero"` into a **copy** of `benchmark_data.json` and running
 
 ```bash
 git clone --filter=blob:none https://github.com/calcom/cal.com.git ~/Desktop/martian-cal/cal.com
-# SHAs are in docs/martian-cal-cases.json — do not guess
+# SHAs are in docs/benchmarks/martian-cal-cases.json — do not guess
 git -C ~/Desktop/martian-cal/cal.com fetch --filter=blob:none origin <baseSha> <headSha>
 ```
 
@@ -114,7 +114,7 @@ Harness checks out `headSha` detached + `--force` per PR. Do not leave the clone
 - [ ] `findings.json` + `martian-review.json` per PR
 - [ ] Surface A artifact (`martian-judge.json`) with gateway + model labelled
 - [ ] Surface B named ran or not
-- [ ] Ledger in `docs/martian-bench.md` with cost
+- [ ] Ledger in `docs/benchmarks/martian-bench.md` with cost
 - [ ] High+Critical recall reported
 - [ ] Compared to corpus.md baseline when this is a new arm
 - [ ] Engram `topic_key: eval/martian-code-review-bench`
