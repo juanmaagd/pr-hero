@@ -1406,8 +1406,8 @@ describe("parseArgs watch add/remove/status", () => {
     expect(options.repo).toBe("/x");
   });
 
-  test("--post defaults to false on add", () => {
-    expect(parseArgs(["watch", "add"]).options.post).toBe(false);
+  test("--post defaults to undefined on add", () => {
+    expect(parseArgs(["watch", "add"]).options.post).toBeUndefined();
   });
 
   test("--on-push parses on add and defaults to false", () => {

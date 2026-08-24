@@ -3545,7 +3545,7 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         suspicion_priors: [],
         summary: { enabled: false },
       });
-      // Table-driven over all six keys: with no global layer every one of
+      // Table-driven over all keys: with no global layer every one of
       // them is the repo's or a default, and NOTHING says `global`/`capped`.
       expect(loaded.sources).toEqual({
         agents_dir: "repo",
@@ -3554,6 +3554,10 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         suspicion_priors: "repo",
         summary: { enabled: "repo", model: "default" },
         max_verification_steps: "default",
+        max_changed_lines: "default",
+        max_changed_files: "default",
+        scout: "default",
+        post: "default",
       });
       expect(loaded.globalPresent).toBe(false);
       expect(loaded.globalConfigPath).toBe(
@@ -3586,7 +3590,7 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         home: home.home,
       });
       expect(loaded.effective).toEqual(EMPTY_LOCAL_CONFIG);
-      // …and says so honestly: `default` for all six, never `repo` for two
+      // …and says so honestly: `default` for all keys, never `repo` for two
       // arrays no file ever named (O-14 at the shell layer).
       expect(loaded.sources).toEqual({
         agents_dir: "default",
@@ -3595,6 +3599,10 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         suspicion_priors: "default",
         summary: { enabled: "default", model: "default" },
         max_verification_steps: "default",
+        max_changed_lines: "default",
+        max_changed_files: "default",
+        scout: "default",
+        post: "default",
       });
     } finally {
       await home.cleanup();
@@ -3862,6 +3870,10 @@ describe("pipelineConfigInput — O-6", () => {
         suspicion_priors: "default" as const,
         summary: { enabled: "default" as const, model: "default" as const },
         max_verification_steps: "default" as const,
+        max_changed_lines: "default" as const,
+        max_changed_files: "default" as const,
+        scout: "default" as const,
+        post: "default" as const,
       },
       repoConfigPath: "/repo/.prhero/config.json",
       globalConfigPath: "/home/.prhero/config.json",

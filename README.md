@@ -79,6 +79,10 @@ never be able to enlarge *your* bill: on the two keys that spend, the team can o
 | `summary.enabled` | both — team may only turn it **off** | Whether the engine-owned summarizer runs. Defaults to `true`, because it spends money and a silent opt-out would make the bill differ from the plan. |
 | `summary.model` | both | Model for that step. Defaults to whatever `prompts/summarizer.md` declares (`haiku`). |
 | `max_verification_steps` | both — team may only **lower** it | Cap on re-review verification spawns (item 7). Defaults to `8`; `0` is legal and pauses verification. |
+| `max_changed_lines` | both — team may only **lower** it | Line budget threshold before the size gate skips a review. Defaults to `1500`; `0` disables line budget check. |
+| `max_changed_files` | both — team may only **lower** it | File count budget threshold before the size gate skips a review. Defaults to `150`; `0` disables file budget check. |
+| `scout` | both — team may only turn it **off** | Whether the reconnaissance scout hunter runs before review. Defaults to `false`. |
+| `post` | both — team may only turn it **off** | Whether review reports publish as GitHub PR comments by default. Defaults to `false`. |
 
 **Why `default_base` is repo-only, since it is the one restriction that looks arbitrary:** the
 resolver checks the config value *before* the remote head. A global `default_base` would therefore
@@ -114,7 +118,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero config` | Read-only, $0: every config key with its value and **which layer decided it** (`repo` / `global` / `capped` / `default`), plus both file paths whether or not they exist. |
 | `pr-hero config set <key> <val> [--person\|--team\|--watch]` | Set a scalar configuration value in the selected layer (defaults to `--person`). Capped team keys accept and annotate over-ceiling values. |
 | `pr-hero config unset <key> [--person\|--team\|--watch]` | Remove a configuration value from the selected layer. |
-| `pr-hero config --edit` | Open the interactive configuration editor across Person, Team, and Watcher layers. |
+| `pr-hero config --edit` | Open the interactive configuration editor across Person, Team, and Watcher layers with buffered draft editing, Save/Discard/Clear actions, and capped ceiling annotations. |
 | `pr-hero upgrade [--check]` | Upgrade `pr-hero` to the latest release and reconcile installed skills and MCP registrations. `--check` checks for updates without installing. |
 | `pr-hero uninstall [--purge]` | Managed uninstallation: unloads launchd background daemons, cleans up skills, unregisters MCPs, and optionally purges `~/.prhero` with `--purge`. |
 | `pr-hero init` | Scaffold `.prhero/` in the current repo. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. |
@@ -131,8 +135,12 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero usage [--all]` | Read-only, $0: print the observability store's per-run rows (cost, tokens, findings) — every completed review, local and PR, auto-ingests into one global `~/.prhero/metrics.db`. Scoped to the current checkout's origin by default; `--all` shows every origin instead. |
 
 Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `--model <m>`,
+`--scout` / `--no-scout` (toggle pre-hunt reconnaissance scout),
+`--post` / `--no-post` (toggle PR comment publishing),
+`--force` (bypass size gate thresholds for this run),
+`--full` (run un-capped refuter verification steps),
 `--no-summary` (skip the summarizer; see `summary` in config above),
-`--out <dir>` (run dir for `review`, output file for `ledger`), `--runs <dir>` (ledger's runs root),
+`--out <dir>` (run dir for `review`), `--runs <dir>` (ledger's runs root),
 `--all` (`usage` only: every origin instead of just this checkout's).
 `pr-hero --help` lists everything.
 

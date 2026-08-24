@@ -486,15 +486,25 @@ export function evaluateSizeGateAggregate(
 // The CLI's own knobs on top of the defaults. Undefined means "not asked
 // for", never 0 — 0 is a real value here (it DISABLES the limit), so the
 // two cannot be collapsed.
-export function sizeGateConfig(overrides: {
-  maxChangedLines?: number;
-  maxChangedFiles?: number;
-}): SizeGateConfig {
+export function sizeGateConfig(
+  overrides: {
+    maxChangedLines?: number;
+    maxChangedFiles?: number;
+  },
+  config?: {
+    max_changed_lines?: number;
+    max_changed_files?: number;
+  },
+): SizeGateConfig {
   return {
     maxChangedLines:
-      overrides.maxChangedLines ?? DEFAULT_SIZE_GATE.maxChangedLines,
+      overrides.maxChangedLines ??
+      config?.max_changed_lines ??
+      DEFAULT_SIZE_GATE.maxChangedLines,
     maxChangedFiles:
-      overrides.maxChangedFiles ?? DEFAULT_SIZE_GATE.maxChangedFiles,
+      overrides.maxChangedFiles ??
+      config?.max_changed_files ??
+      DEFAULT_SIZE_GATE.maxChangedFiles,
     excludeGlobs: DEFAULT_SIZE_GATE.excludeGlobs,
   };
 }

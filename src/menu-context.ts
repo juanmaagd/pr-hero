@@ -141,16 +141,6 @@ export function getMenuOptions(
     action: "activity",
   });
 
-  if (context.kind === "configured-repo") {
-    items.push({
-      id: "ledger",
-      label: "Ledger",
-      desc: "View and update comparison ledger",
-      cliHint: "ledger",
-      action: "ledger",
-    });
-  }
-
   items.push({
     id: "watcher",
     label: "Watcher daemon",

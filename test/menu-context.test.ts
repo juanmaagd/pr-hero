@@ -81,7 +81,7 @@ describe("menu-context", () => {
       expect(ids).toContain("lifecycle");
     });
 
-    test("in configured-repo: Review is first item; Ledger is present; Init is omitted", () => {
+    test("in configured-repo: Review is first item; Init and Ledger omitted", () => {
       const ctx: RepoContext = {
         kind: "configured-repo",
         root: "/Users/x/proj",
@@ -92,7 +92,7 @@ describe("menu-context", () => {
       const ids = options.map((o) => o.id);
 
       expect(options[0].id).toBe("review");
-      expect(ids).toContain("ledger");
+      expect(ids).not.toContain("ledger");
       expect(ids).not.toContain("init");
       expect(ids).toContain("activity");
       expect(ids).toContain("lifecycle");

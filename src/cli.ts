@@ -157,6 +157,8 @@ import {
   resolveAgentsDirSetting,
   resolveBaseRef,
   resolveMaxVerificationSteps,
+  resolvePost,
+  resolveScout,
   resolveSummary,
   runDirCandidate,
   type SummarySettings,
@@ -252,7 +254,12 @@ import {
   setConfigValue,
   unsetConfigValue,
 } from "./ui-config-edit";
-import { runLifecycleSubmenu, runMenuLoop, runWatcherSubmenu } from "./ui-menu";
+import {
+  runConfigSubmenu,
+  runLifecycleSubmenu,
+  runMenuLoop,
+  runWatcherSubmenu,
+} from "./ui-menu";
 import { type ResultLinks, renderResult } from "./ui-result";
 import { runReviewMenu } from "./ui-review-menu";
 import {
@@ -800,6 +807,9 @@ async function review(options: CliOptions): Promise<number> {
   });
   const config = loaded.effective;
   const summary = resolveSummary(options, config);
+  const scout = resolveScout(options, config);
+  const post = resolvePost(options, config);
+  options = { ...options, scout, post };
 
   // 3 — the base ref, then the canonical refs and the range.
   const baseRef = await resolveBase(repoRoot, options, config);
@@ -914,7 +924,7 @@ async function review(options: CliOptions): Promise<number> {
   // the reviewed diff itself, or the gate discounts a lockfile the bill still
   // pays for in full (see filterDiffByGlobs). diff.raw.patch keeps the
   // unfiltered bytes for audit, and only when there is a difference to audit.
-  const gateConfig = sizeGateConfig(options);
+  const gateConfig = sizeGateConfig(options, loaded.effective);
   const effectiveDiff = filterDiffByGlobs(diff.stdout, gateConfig.excludeGlobs);
   if (effectiveDiff.patch.trim().length === 0) {
     throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
@@ -1270,6 +1280,9 @@ async function reviewPr(
   });
   const config = loaded.effective;
   const summary = resolveSummary(options, config);
+  const scout = resolveScout(options, config);
+  const post = resolvePost(options, config);
+  options = { ...options, scout, post };
   const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
     options,
     loaded,
@@ -1359,7 +1372,7 @@ async function reviewPr(
     // decision block, so nobody reads it as the verdict.
     const estimated = evaluateSizeGateAggregate(
       target.ghDiffStat,
-      sizeGateConfig(options),
+      sizeGateConfig(options, config),
     );
     const dryRunPlan: PrPlanContext = {
       options,
@@ -1482,7 +1495,7 @@ async function reviewPr(
     if (shouldAbortEmptyDiscovery(prepared.plan, rawDiff)) {
       throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
     }
-    const gateConfig = sizeGateConfig(options);
+    const gateConfig = sizeGateConfig(options, config);
     const effectiveDiff = skipPlannedDiscovery
       ? { patch: "", droppedPaths: [] as string[] }
       : filterDiffByGlobs(rawDiff, gateConfig.excludeGlobs);
@@ -1747,12 +1760,12 @@ async function reviewPr(
     // What this run will actually publish. `options` is never mutated: the plan
     // card and the details view print what was ASKED FOR, and only the run
     // itself follows the answer given here.
-    let postEnabled = options.post;
+    let postEnabled = options.post ?? false;
     if (!options.yes) {
       const choice = await confirm(
         estimate.low,
         estimate.high,
-        options.post,
+        options.post ?? false,
         () => prPlanDetails(planContext, styleEnabled()),
       );
       if (choice.kind === "cancel") {
@@ -5675,9 +5688,23 @@ async function menuCommand(options: CliOptions): Promise<number> {
     dispatchAction: async (action) => {
       switch (action) {
         case "review": {
+          let effectiveConfig: LocalConfig | undefined;
+          if (repoRoot) {
+            try {
+              const loaded = await loadEffectiveConfig({
+                root: repoRoot,
+                home: os.homedir(),
+                configFlag: options.config,
+              });
+              effectiveConfig = loaded.effective;
+            } catch {
+              // ignore
+            }
+          }
           const res = await runReviewMenu({
             styles: styleEnabled(process.stderr),
             width: terminalWidth(),
+            effectiveConfig,
             defaultBase:
               context.kind === "configured-repo"
                 ? context.defaultBase
@@ -5701,13 +5728,19 @@ async function menuCommand(options: CliOptions): Promise<number> {
           return await doctorCommand(options);
         }
         case "config": {
-          return await configCommand(options);
+          return await runConfigSubmenu({
+            styles: styleEnabled(process.stderr),
+            width: terminalWidth(),
+            repoRoot: repoRoot ?? undefined,
+            home: os.homedir(),
+          });
         }
         case "watcher": {
           return await runWatcherSubmenu({
             styles: styleEnabled(process.stderr),
             width: terminalWidth(),
             inRepo: context.kind !== "not-a-repo",
+            home: os.homedir(),
             dispatch: async (subcmd) => {
               if (subcmd === "status")
                 return await watchCommand({ ...options, watch: "status" });

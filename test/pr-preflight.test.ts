@@ -216,9 +216,9 @@ describe("resolveCurrentPrNumber", () => {
 });
 
 describe("parseArgs --post", () => {
-  test("defaults to false", () => {
-    expect(parseArgs(["review"]).options.post).toBe(false);
-    expect(parseArgs(["review", "--pr", "5"]).options.post).toBe(false);
+  test("defaults to undefined", () => {
+    expect(parseArgs(["review"]).options.post).toBeUndefined();
+    expect(parseArgs(["review", "--pr", "5"]).options.post).toBeUndefined();
   });
 
   test("parses beside --pr, in either flag order", () => {
@@ -321,7 +321,7 @@ describe("parseArgs post command", () => {
       "--dry-run",
     ]);
     expect(options.dryRun).toBe(true);
-    expect(options.post).toBe(false);
+    expect(options.post).toBeUndefined();
   });
 });
 

@@ -74,13 +74,9 @@ export interface CliOptions {
   // Summary activation is tri-state at parse time: undefined means no flag,
   // so review can apply flag > config > the default-on setting.
   summary?: boolean;
-  // The scout (ROADMAP-DOORDASH M5). A plain boolean, NOT the summary's
-  // tri-state, because there is no config seat to resolve against yet: the
-  // milestone ships the flag alone, default OFF, and `.prhero/config.json`
-  // stays closed to it until M6 says whether the scout is worth defaulting
-  // on. `parseLocalConfig` rejects unknown keys, so a `scout` key added to a
-  // config today fails loudly rather than being silently ignored.
-  scout: boolean;
+  // The scout is tri-state at parse time: undefined means no flag,
+  // so review can apply flag > config > default (false).
+  scout?: boolean;
   // Independent model knob (§3.7), and NOT exercised by M6 — the whole
   // control corpus is sonnet, so ratifying this is ratifying a flag, not a
   // second variable. `--model` still outranks it (the JD override rule).
@@ -100,10 +96,10 @@ export interface CliOptions {
   // local mode.
   pr?: number | "current";
   // Publish the review as ONE marked PR comment (ROADMAP B2) — created the
-  // first time, updated in place after, never stacked. Explicit and never a
-  // default: posting is a public side effect. Requires --pr (parseArgs
-  // enforces it): a comment needs a PR to land on.
-  post: boolean;
+  // first time, updated in place after, never stacked. Tri-state at parse time:
+  // undefined means no flag, resolved via flag > config > default (false).
+  // Requires --pr (parseArgs enforces it): a comment needs a PR to land on.
+  post?: boolean;
   // ledger only (ROADMAP B4): the runs root to scan for comparison.json
   // files. Unset means defaultRunRoot(home, repoId) — the shell resolves it,
   // because the default needs origin + ~/.prhero and parseArgs stays pure.
@@ -503,14 +499,9 @@ export function parseArgs(argv: string[]): ParsedCli {
     repo: ".",
     head: DEFAULT_HEAD_REF,
     hopBudget: DEFAULT_HOP_BUDGET,
-    // Default OFF is the milestone's exit criterion, not a preference: M6
-    // compares an arm against a control, and a control that quietly grew a
-    // stage is not a control.
-    scout: false,
     full: false,
     dryRun: false,
     yes: false,
-    post: false,
     twoDot: false,
     onPush: false,
     force: false,
@@ -601,10 +592,12 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.summary = false;
       continue;
     }
-    // No `--no-scout`: the flag is off unless asked for, so the negation
-    // would only ever restate the default.
     if (arg === "--scout") {
       options.scout = true;
+      continue;
+    }
+    if (arg === "--no-scout") {
+      options.scout = false;
       continue;
     }
     if (arg === "--full") {
@@ -617,6 +610,10 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--post") {
       options.post = true;
+      continue;
+    }
+    if (arg === "--no-post") {
+      options.post = false;
       continue;
     }
     if (arg === "--two-dot") {
@@ -838,7 +835,10 @@ export function parseArgs(argv: string[]): ParsedCli {
   // Rejected elsewhere rather than ignored, the --from guard's reasoning: a
   // flag that parses and then does nothing is an operator believing they
   // changed a run they did not.
-  if (command !== "review" && (options.scout || options.scoutModel)) {
+  if (
+    command !== "review" &&
+    (options.scout !== undefined || options.scoutModel)
+  ) {
     throw new CliUsageError(
       "--scout and --scout-model only apply to the review command",
     );
@@ -1703,6 +1703,10 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   // descends into it rather than folding the object whole.
   summary: "capped",
   max_verification_steps: "capped",
+  max_changed_lines: "capped",
+  max_changed_files: "capped",
+  scout: "capped",
+  post: "capped",
 };
 
 // The ONE nested key, so this is a second table and not a pattern. `enabled`
@@ -1727,6 +1731,10 @@ export interface LocalConfig {
   // DEFAULT_MAX_VERIFICATION_STEPS. 0 is legal — every queued prior lands
   // `unconfirmed` (the pause switch, same shape as watch daily_cap).
   max_verification_steps?: number;
+  max_changed_lines?: number;
+  max_changed_files?: number;
+  scout?: boolean;
+  post?: boolean;
 }
 
 export interface SummaryConfig {
@@ -1816,6 +1824,18 @@ function given(value: unknown): boolean {
   return value !== undefined && value !== null;
 }
 
+function parseOptionalBoolean(
+  value: unknown,
+  key: string,
+  file: string,
+): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new CliUsageError(`${file} ${key} must be a boolean`);
+  }
+  return value;
+}
+
 function parseConfigLayer(
   raw: string,
   file: string,
@@ -1878,10 +1898,23 @@ function parseConfigLayer(
     }
   }
   const summary = parseSummaryConfig(config.summary, file);
-  const maxVerificationSteps = parseMaxVerificationSteps(
+  const maxVerificationSteps = parseNonNegativeInteger(
     config.max_verification_steps,
+    "max_verification_steps",
     file,
   );
+  const maxChangedLines = parseNonNegativeInteger(
+    config.max_changed_lines,
+    "max_changed_lines",
+    file,
+  );
+  const maxChangedFiles = parseNonNegativeInteger(
+    config.max_changed_files,
+    "max_changed_files",
+    file,
+  );
+  const scout = parseOptionalBoolean(config.scout, "scout", file);
+  const post = parseOptionalBoolean(config.post, "post", file);
   return {
     ...(given(config.parity_trigger_paths)
       ? { parity_trigger_paths: triggers as string[] }
@@ -1895,6 +1928,14 @@ function parseConfigLayer(
     ...(maxVerificationSteps === undefined
       ? {}
       : { max_verification_steps: maxVerificationSteps }),
+    ...(maxChangedLines === undefined
+      ? {}
+      : { max_changed_lines: maxChangedLines }),
+    ...(maxChangedFiles === undefined
+      ? {}
+      : { max_changed_files: maxChangedFiles }),
+    ...(scout === undefined ? {} : { scout }),
+    ...(post === undefined ? {} : { post }),
   };
 }
 
@@ -1929,15 +1970,14 @@ function parseSummaryConfig(
 
 export const DEFAULT_MAX_VERIFICATION_STEPS = 8;
 
-function parseMaxVerificationSteps(
+function parseNonNegativeInteger(
   value: unknown,
+  key: string,
   file: string,
 ): number | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new CliUsageError(
-      `${file} max_verification_steps must be a non-negative integer`,
-    );
+    throw new CliUsageError(`${file} ${key} must be a non-negative integer`);
   }
   return value;
 }
@@ -1962,6 +2002,20 @@ export function resolveSummary(
     enabled: options.summary ?? config.summary?.enabled ?? true,
     ...(model === undefined ? {} : { model }),
   };
+}
+
+export function resolveScout(
+  options: Pick<CliOptions, "scout">,
+  config: Pick<ConfigLayer, "scout">,
+): boolean {
+  return options.scout ?? config.scout ?? false;
+}
+
+export function resolvePost(
+  options: Pick<CliOptions, "post">,
+  config: Pick<ConfigLayer, "post">,
+): boolean {
+  return options.post ?? config.post ?? false;
 }
 
 // Which layer produced each effective value. `capped` is deliberately NOT the
@@ -2090,6 +2144,35 @@ export function mergeConfig(
     (layer) => layer.max_verification_steps,
     Math.min,
   );
+  const narrowSizeLimit = (a: number, b: number): number => {
+    if (a === 0) return b;
+    if (b === 0) return a;
+    return Math.min(a, b);
+  };
+  const maxLines = foldKey(
+    layers,
+    CONFIG_DIRECTION.max_changed_lines,
+    (layer) => layer.max_changed_lines,
+    narrowSizeLimit,
+  );
+  const maxFiles = foldKey(
+    layers,
+    CONFIG_DIRECTION.max_changed_files,
+    (layer) => layer.max_changed_files,
+    narrowSizeLimit,
+  );
+  const scout = foldKey(
+    layers,
+    CONFIG_DIRECTION.scout,
+    (layer) => layer.scout,
+    (a, b) => a && b,
+  );
+  const post = foldKey(
+    layers,
+    CONFIG_DIRECTION.post,
+    (layer) => layer.post,
+    (a, b) => a && b,
+  );
 
   const summary: SummaryConfig = {
     ...(summaryEnabled.value === undefined
@@ -2116,6 +2199,14 @@ export function mergeConfig(
     ...(maxSteps.value === undefined
       ? {}
       : { max_verification_steps: maxSteps.value }),
+    ...(maxLines.value === undefined
+      ? {}
+      : { max_changed_lines: maxLines.value }),
+    ...(maxFiles.value === undefined
+      ? {}
+      : { max_changed_files: maxFiles.value }),
+    ...(scout.value === undefined ? {} : { scout: scout.value }),
+    ...(post.value === undefined ? {} : { post: post.value }),
   };
 
   const sources: ConfigSources = {
@@ -2125,6 +2216,10 @@ export function mergeConfig(
     suspicion_priors: priors.source,
     summary: { enabled: summaryEnabled.source, model: summaryModel.source },
     max_verification_steps: maxSteps.source,
+    max_changed_lines: maxLines.source,
+    max_changed_files: maxFiles.source,
+    scout: scout.source,
+    post: post.source,
   };
 
   return { effective, sources };

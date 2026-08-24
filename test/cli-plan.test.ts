@@ -681,6 +681,10 @@ const provenance = (
     suspicion_priors: "repo",
     summary: { enabled: "repo", model: "default" },
     max_verification_steps: "default",
+    max_changed_lines: "default",
+    max_changed_files: "default",
+    scout: "default",
+    post: "default",
     ...sources,
   },
 });
