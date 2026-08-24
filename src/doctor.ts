@@ -7,7 +7,12 @@ import {
   inspectSkillsSync,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
-import { type CheckSystemToolsOptions, checkSystemTools } from "./system-tools";
+import { isCiEnvironment } from "./preflight";
+import {
+  type CheckSystemToolsOptions,
+  checkCiConfiguration,
+  checkSystemTools,
+} from "./system-tools";
 
 export type DoctorSeverity = "healthy" | "degraded" | "blocking";
 
@@ -332,6 +337,25 @@ export async function runDoctor(
       }
     }
   }
+
+  // 6. CI configuration (Pillar 3). Reuses checkToolsOptions.env rather than
+  // adding a separate top-level env field — one injectable env source for
+  // both "is claude authenticated" and "is this a GitHub Actions run",
+  // matching how doctor.test.ts already threads env through today.
+  const env = options.checkToolsOptions?.env ?? process.env;
+  const isCi = isCiEnvironment({}, env);
+  const ciStatus = checkCiConfiguration({
+    cwd: repoDir ?? process.cwd(),
+    isCi,
+    env,
+    exists,
+  });
+  checks.push({
+    name: "ci",
+    severity: ciStatus.configured ? "healthy" : isCi ? "blocking" : "degraded",
+    message: ciStatus.message,
+    hint: ciStatus.hint,
+  });
 
   return evaluateDoctorReport(checks);
 }

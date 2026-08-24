@@ -36,13 +36,13 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 4: CI Scaffolding & Doctor Diagnostics
 
-- [ ] 4.1 Write failing tests in `test/ci-setup.test.ts`:
+- [x] 4.1 Write failing tests in `test/ci-setup.test.ts`:
   - `generateCiWorkflowTemplate`: returns valid YAML string containing triggers, permissions (`pull-requests: write`, `contents: read`), checkout with `fetch-depth: 0`, and `uses: juanmaagd/pr-hero@v1`
   - `runCiSetup`: creates `.github/workflows/pr-hero.yml`; refuses to overwrite existing file unless `--force` is passed
   - `doctor` CI check: verifies CI configuration in repo context and presence of required secrets/tokens when running inside GitHub Actions
-- [ ] 4.2 Implement `src/ci-setup.ts` and wire `pr-hero setup --ci` (and `pr-hero ci init`)
-- [ ] 4.3 Update `src/doctor.ts` and `src/system-tools.ts` with CI diagnostics
-- [ ] 4.4 Make all Phase 4 tests pass with `bun test test/ci-setup.test.ts`
+- [x] 4.2 Implement `src/ci-setup.ts` and wire `pr-hero setup --ci` (and `pr-hero ci init`)
+- [x] 4.3 Update `src/doctor.ts` and `src/system-tools.ts` with CI diagnostics
+- [x] 4.4 Make all Phase 4 tests pass with `bun test test/ci-setup.test.ts`
 
 ## Phase 5: Official Action Definition, Documentation & Verification
 

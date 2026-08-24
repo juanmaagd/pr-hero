@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { selfInvocation } from "../src/assets";
+import { CI_WORKFLOW_RELATIVE_PATH } from "../src/ci-setup";
 import {
   type DoctorReport,
   renderDoctorReport,
@@ -18,6 +19,7 @@ describe("doctor tri-state evaluation", () => {
         if (p === "/home/user/.prhero/setup.json") return true;
         if (p === "/home/user/.claude/mcp.json") return true;
         if (p.includes(".claude/skills/pr-hero-triage")) return true;
+        if (p === `/repo/${CI_WORKFLOW_RELATIVE_PATH}`) return true;
         return false;
       },
       readFile: (p) => {

@@ -105,10 +105,13 @@ describe("parseArgs — --ci", () => {
     expect(() => parseArgs(["review", "--ci"])).toThrow(/--pr/);
   });
 
-  test("--ci only applies to the review command", () => {
+  test("--ci only applies to the review or setup command", () => {
+    // Phase 4 (CI Scaffolding) gave --ci a second, command-scoped meaning on
+    // `setup`; the "which commands accept it" error message widened to
+    // match. Every other command is still rejected.
     expect(() =>
       parseArgs(["post", "--pr", "5", "--from", "run1", "--ci"]),
-    ).toThrow(/review command/);
+    ).toThrow(/review or setup command/);
   });
 });
 

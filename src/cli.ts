@@ -41,6 +41,7 @@ import {
   formatWorkflowCommand,
   renderStepSummary,
 } from "./ci-reporter";
+import { runCiSetup } from "./ci-setup";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
 import { renderDoctorReport, runDoctor } from "./doctor";
@@ -591,39 +592,44 @@ async function main(argv: string[]): Promise<number> {
     return parsed.command === "init"
       ? await init(parsed.options)
       : parsed.command === "setup"
-        ? await runWizard({
-            cwd:
-              (await resolveOptionalRepoRoot(parsed.options)) ?? process.cwd(),
-          })
-        : parsed.command === "doctor"
-          ? await doctorCommand(parsed.options)
-          : parsed.command === "activity"
-            ? await activityCommand(parsed.options)
-            : parsed.command === "ledger"
-              ? await ledgerCommand(parsed.options)
-              : parsed.command === "watch"
-                ? await watchCommand(parsed.options)
-                : parsed.command === "post"
-                  ? await postCommand(parsed.options)
-                  : parsed.command === "triage"
-                    ? await triageCommand(parsed.options)
-                    : parsed.command === "gc"
-                      ? await gcCommand(parsed.options)
-                      : parsed.command === "usage"
-                        ? await usageCommand(parsed.options)
-                        : parsed.command === "reverts"
-                          ? await revertsCommand(parsed.options)
-                          : parsed.command === "corpus"
-                            ? await corpusCommand(parsed.options)
-                            : parsed.command === "config"
-                              ? await configCommand(parsed.options)
-                              : parsed.command === "mcp"
-                                ? await mcpCommand(parsed.options)
-                                : parsed.command === "upgrade"
-                                  ? await upgradeCommand(parsed.options)
-                                  : parsed.command === "uninstall"
-                                    ? await uninstallCommand(parsed.options)
-                                    : await review(parsed.options);
+        ? parsed.options.ci
+          ? await ciSetupCommand(parsed.options)
+          : await runWizard({
+              cwd:
+                (await resolveOptionalRepoRoot(parsed.options)) ??
+                process.cwd(),
+            })
+        : parsed.command === "ci"
+          ? await ciSetupCommand(parsed.options)
+          : parsed.command === "doctor"
+            ? await doctorCommand(parsed.options)
+            : parsed.command === "activity"
+              ? await activityCommand(parsed.options)
+              : parsed.command === "ledger"
+                ? await ledgerCommand(parsed.options)
+                : parsed.command === "watch"
+                  ? await watchCommand(parsed.options)
+                  : parsed.command === "post"
+                    ? await postCommand(parsed.options)
+                    : parsed.command === "triage"
+                      ? await triageCommand(parsed.options)
+                      : parsed.command === "gc"
+                        ? await gcCommand(parsed.options)
+                        : parsed.command === "usage"
+                          ? await usageCommand(parsed.options)
+                          : parsed.command === "reverts"
+                            ? await revertsCommand(parsed.options)
+                            : parsed.command === "corpus"
+                              ? await corpusCommand(parsed.options)
+                              : parsed.command === "config"
+                                ? await configCommand(parsed.options)
+                                : parsed.command === "mcp"
+                                  ? await mcpCommand(parsed.options)
+                                  : parsed.command === "upgrade"
+                                    ? await upgradeCommand(parsed.options)
+                                    : parsed.command === "uninstall"
+                                      ? await uninstallCommand(parsed.options)
+                                      : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
@@ -4360,6 +4366,37 @@ async function doctorCommand(options: CliOptions): Promise<number> {
   });
   process.stdout.write(`${lines.join("\n")}\n`);
   return report.exitCode;
+}
+
+// Shared shell for `pr-hero setup --ci` and `pr-hero ci init` — both are the
+// same scaffolding action (runCiSetup), reached by two different command
+// spellings. The refusal-without-force branch is a safety property (see
+// spec.md §4.1 / ci-setup.ts's header comment), not a usage error, so it
+// returns 1 rather than throwing CliUsageError: the invocation was valid,
+// the outcome is just "nothing was written".
+async function ciSetupCommand(options: CliOptions): Promise<number> {
+  const repoRoot = (await resolveOptionalRepoRoot(options)) ?? process.cwd();
+  const result = await runCiSetup({ cwd: repoRoot, force: options.force });
+
+  if (result.status === "skipped-existing") {
+    log(`${result.path} already exists.`);
+    log(result.hint);
+    return 1;
+  }
+
+  log(
+    result.status === "overwritten"
+      ? `Overwrote ${result.path}`
+      : `Created ${result.path}`,
+  );
+  log();
+  log("Next steps:");
+  log("  1. Commit .github/workflows/pr-hero.yml");
+  log(
+    "  2. Add a repository secret: ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)",
+  );
+  log("  3. Open a pull request to trigger the workflow");
+  return 0;
 }
 
 export async function mcpCommand(options: CliOptions): Promise<number> {

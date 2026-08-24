@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { CI_WORKFLOW_RELATIVE_PATH } from "./ci-setup";
 
 export type SystemTool = "git" | "claude" | "gh" | "codegraph";
 
@@ -252,5 +253,78 @@ export async function installSystemTool(
   return {
     ok: false,
     manualCommand: manualCommands[tool],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pillar 3 Phase 4: CI diagnostics. Useful in BOTH contexts a `doctor` run
+// can happen in — see spec.md §4.1's two scenarios:
+//   - Inside GitHub Actions: are the required secrets present? Presence
+//     only, NEVER a value, a prefix, or a length — see CLAUDE.md's "Never
+//     leak secrets into generated output" rule.
+//   - In a local repo: is a pr-hero workflow configured at all?
+// Deliberately does NOT verify the workflow file is git-committed (spec's
+// "present and committed" local scenario) — that needs a git call, and the
+// existence check alone already answers the actionable question ("do I have
+// one?") within Phase 4's line budget. Flagged as a scoped deviation, not a
+// silent gap.
+// ---------------------------------------------------------------------------
+
+export interface CiConfigurationStatus {
+  configured: boolean;
+  message: string;
+  hint?: string;
+}
+
+export interface CheckCiConfigurationOptions {
+  cwd?: string;
+  isCi: boolean;
+  env?: Record<string, string | undefined>;
+  exists?: (p: string) => boolean;
+}
+
+export function checkCiConfiguration(
+  options: CheckCiConfigurationOptions,
+): CiConfigurationStatus {
+  const env = options.env ?? process.env;
+
+  if (options.isCi) {
+    const hasGithubToken = Boolean(env.GITHUB_TOKEN?.trim());
+    const hasClaudeAuth =
+      Boolean(env.ANTHROPIC_API_KEY?.trim()) ||
+      Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
+
+    const missing: string[] = [];
+    if (!hasGithubToken) missing.push("GITHUB_TOKEN");
+    if (!hasClaudeAuth) missing.push("ANTHROPIC_API_KEY");
+
+    if (missing.length === 0) {
+      return {
+        configured: true,
+        message:
+          "Required CI secrets are present (GITHUB_TOKEN, Anthropic/Claude auth)",
+      };
+    }
+    return {
+      configured: false,
+      message: `Missing required CI secret(s): ${missing.join(", ")}`,
+      hint: "Configure the missing secret(s) as repository secrets and pass them in the workflow's `with:` block — never echo their values.",
+    };
+  }
+
+  const cwd = options.cwd ?? process.cwd();
+  const exists = options.exists ?? existsSync;
+  const workflowPath = path.join(cwd, CI_WORKFLOW_RELATIVE_PATH);
+
+  if (exists(workflowPath)) {
+    return {
+      configured: true,
+      message: `CI workflow configured (${CI_WORKFLOW_RELATIVE_PATH})`,
+    };
+  }
+  return {
+    configured: false,
+    message: "No CI workflow configured",
+    hint: "Run 'pr-hero setup --ci' (or 'pr-hero ci init') to scaffold .github/workflows/pr-hero.yml",
   };
 }
