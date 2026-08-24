@@ -236,31 +236,37 @@ export async function runMenuLoop(
   const createReader = options.createReader ?? createDefaultStdinReader;
 
   let isInteractive = true;
+  const ESC = "\x1b";
+  const repaint = styles;
+  let drawn = 0;
+
+  const render = () => {
+    const lines: string[] = [];
+    lines.push("");
+    lines.push(...renderSolidHeader(width, styles));
+    lines.push("");
+    lines.push(...renderContextBox(context, width, styles));
+    lines.push("");
+    lines.push(...renderMenuCard(items, cursor, width, styles));
+    lines.push("");
+    lines.push(...renderPersistentFooter(items[cursor], width, styles));
+
+    if (repaint && drawn > 0) {
+      io.write(`${ESC}[${drawn}A`);
+    }
+    for (const line of lines) {
+      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
+      io.line(line);
+    }
+    drawn = lines.length;
+  };
+
   const onResize = () => {
     if (!isInteractive) return;
     width = terminalWidth();
     render();
   };
   process.on("SIGWINCH", onResize);
-
-  const render = () => {
-    io.line();
-    for (const line of renderSolidHeader(width, styles)) {
-      io.line(line);
-    }
-    io.line();
-    for (const line of renderContextBox(context, width, styles)) {
-      io.line(line);
-    }
-    io.line();
-    for (const line of renderMenuCard(items, cursor, width, styles)) {
-      io.line(line);
-    }
-    io.line();
-    for (const line of renderPersistentFooter(items[cursor], width, styles)) {
-      io.line(line);
-    }
-  };
 
   try {
     for (;;) {
@@ -417,20 +423,33 @@ export async function runLifecycleSubmenu(deps: {
   ];
 
   let cursor = 0;
+  const ESC = "\x1b";
+  const repaint = styles;
+  let drawn = 0;
+
   const render = () => {
-    io.line();
-    const lines = items.map((item, idx) => {
+    const cardLines = items.map((item, idx) => {
       const prefix = idx === cursor ? "▸ " : "  ";
       return `${prefix}${idx + 1}. ${item.label} - ${item.desc}`;
     });
-    for (const l of box("Lifecycle & Maintenance", lines, {
-      width,
-      styles,
-      borderStyle: "double",
-    })) {
+    const lines: string[] = [
+      "",
+      ...box("Lifecycle & Maintenance", cardLines, {
+        width,
+        styles,
+        borderStyle: "double",
+      }),
+      dim("j/k: move • enter: select • q/esc: back", styles),
+    ];
+
+    if (repaint && drawn > 0) {
+      io.write(`${ESC}[${drawn}A`);
+    }
+    for (const l of lines) {
+      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
       io.line(l);
     }
-    io.line(dim("j/k: move • enter: select • q/esc: back", styles));
+    drawn = lines.length;
   };
 
   for (;;) {
@@ -545,20 +564,33 @@ export async function runWatcherSubmenu(deps: {
   ];
 
   let cursor = 0;
+  const ESC = "\x1b";
+  const repaint = styles;
+  let drawn = 0;
+
   const render = () => {
-    io.line();
-    const lines = items.map((item, idx) => {
+    const cardLines = items.map((item, idx) => {
       const prefix = idx === cursor ? "▸ " : "  ";
       return `${prefix}${idx + 1}. ${item.label} - ${item.desc}`;
     });
-    for (const l of box("Watcher Daemon Submenu", lines, {
-      width,
-      styles,
-      borderStyle: "double",
-    })) {
+    const lines: string[] = [
+      "",
+      ...box("Watcher Daemon Submenu", cardLines, {
+        width,
+        styles,
+        borderStyle: "double",
+      }),
+      dim("j/k: move • enter: select • q/esc: back", styles),
+    ];
+
+    if (repaint && drawn > 0) {
+      io.write(`${ESC}[${drawn}A`);
+    }
+    for (const l of lines) {
+      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
       io.line(l);
     }
-    io.line(dim("j/k: move • enter: select • q/esc: back", styles));
+    drawn = lines.length;
   };
 
   for (;;) {

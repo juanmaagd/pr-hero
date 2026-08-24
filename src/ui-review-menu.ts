@@ -129,15 +129,25 @@ export async function runReviewMenu(
 
   let cursor = 0;
   const itemCount = 8;
+  const ESC = "\x1b";
+  const repaint = styles;
+  let drawn = 0;
 
   const render = () => {
-    io.line();
-    for (const l of renderReviewMenuCard(state, cursor, width, styles)) {
+    const lines: string[] = [
+      "",
+      ...renderReviewMenuCard(state, cursor, width, styles),
+      dim("j/k: move • space/enter: toggle / start • q/esc: back", styles),
+    ];
+
+    if (repaint && drawn > 0) {
+      io.write(`${ESC}[${drawn}A`);
+    }
+    for (const l of lines) {
+      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
       io.line(l);
     }
-    io.line(
-      dim("j/k: move • space/enter: toggle / start • q/esc: back", styles),
-    );
+    drawn = lines.length;
   };
 
   const reader = createReader();
