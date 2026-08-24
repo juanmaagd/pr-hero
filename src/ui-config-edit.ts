@@ -385,7 +385,11 @@ export async function saveLayerConfig(input: {
     }
   }
 
-  return { status: "ok", annotation };
+  const saveAnnotation = annotation
+    ? `✓ Saved ${targetFile} (${annotation})`
+    : `✓ Saved ${targetFile}`;
+
+  return { status: "ok", annotation: saveAnnotation };
 }
 
 const TIME_WINDOW_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;

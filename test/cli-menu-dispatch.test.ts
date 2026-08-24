@@ -120,6 +120,11 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
   });
 
   test("config submenu allows layer selection, editing, and returning back", async () => {
+    const tmpHome = path.join(
+      os.tmpdir(),
+      `prhero-home-test-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(tmpHome, { recursive: true });
     const out: string[] = [];
     // Key sequence:
     // 1. In layer selection: down ('j') to select Global (index 1), then Enter ('\r')
@@ -132,6 +137,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
       styles: false,
       width: 80,
       repoRoot: "/repo",
+      home: tmpHome,
       io: {
         write: (t) => out.push(t),
         line: (t = "") => out.push(`${t}\n`),
@@ -145,6 +151,11 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
   });
 
   test("config submenu disables repository layer outside git repo", async () => {
+    const tmpHome = path.join(
+      os.tmpdir(),
+      `prhero-home-test-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(tmpHome, { recursive: true });
     const out: string[] = [];
     const reader = fakeReader(["q"]);
 
@@ -153,6 +164,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
       styles: false,
       width: 80,
       repoRoot: undefined,
+      home: tmpHome,
       io: {
         write: (t) => out.push(t),
         line: (t = "") => out.push(`${t}\n`),
@@ -164,6 +176,11 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
   });
 
   test("watcher submenu allows editing daily_cap and window via config option", async () => {
+    const tmpHome = path.join(
+      os.tmpdir(),
+      `prhero-home-test-${Math.random().toString(36).slice(2)}`,
+    );
+    mkdirSync(tmpHome, { recursive: true });
     const out: string[] = [];
     // Key sequence:
     // 1. In watcher submenu: down ('j') to select "Configure limits & window" (index 1), then Enter ('\r')
@@ -176,6 +193,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
       styles: false,
       width: 80,
       inRepo: true,
+      home: tmpHome,
       io: {
         write: (t) => out.push(t),
         line: (t = "") => out.push(`${t}\n`),
@@ -197,10 +215,11 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
     const out: string[] = [];
     // Key sequence:
     // 1. In layer selection: Enter on Repo layer (index 0)
-    // 2. In card: Right ('l') to increment max_changed_lines (index 1), then navigate down to [ Save changes ] (index 7: 7 fields) and press Enter ('\r')
-    // 3. Back in layer selection: 'q' to exit
+    // 2. In card: Right ('l') to increment max_changed_lines, then navigate down to [ Save changes ] (index 7: 7 fields = 7 'j's from index 0) and press Enter ('\r')
+    // 3. 'q' to exit back to layer selection, 'q' to exit submenu
     const reader = fakeReader([
       "\r",
+      "j",
       "l",
       "j",
       "j",
@@ -209,6 +228,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
       "j",
       "j",
       "\r",
+      "q",
       "q",
     ]);
 
@@ -225,6 +245,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
 
     expect(outcome).toBe("back");
     const output = out.join("");
+    expect(output).toContain("Saved");
     expect(output).toContain("[ Save changes ]");
     expect(output).toContain("[ Discard & back ]");
     expect(output).toContain("[ Clear all (unset) ]");

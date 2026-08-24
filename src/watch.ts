@@ -834,7 +834,7 @@ async function watchAdd(options: CliOptions): Promise<number> {
   await mkdir(paths.dir, { recursive: true });
   await Bun.write(paths.watchConfigPath, result.config);
   log(
-    `${result.action} ${result.storedPath} (post=${options.post} ` +
+    `${result.action} ${result.storedPath} (post=${options.post ?? false} ` +
       `on_push=${options.onPush} ` +
       `max_changed_lines=${options.maxChangedLines ?? DEFAULT_SIZE_GATE.maxChangedLines} ` +
       `max_changed_files=${options.maxChangedFiles ?? DEFAULT_SIZE_GATE.maxChangedFiles}` +

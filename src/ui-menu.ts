@@ -938,7 +938,7 @@ export async function runLayerConfigCardEditor(deps: {
                     repoRoot,
                   });
                   annotation = res.annotation;
-                  shouldExit = true;
+                  actionTaken = true;
                   break;
                 }
                 if (actionIdx === 1) {

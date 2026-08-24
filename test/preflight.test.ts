@@ -1292,6 +1292,11 @@ describe("mergeConfig", () => {
     expect(linesMerge(1500, 1000).sources.max_changed_lines).toBe("repo");
     expect(linesMerge(1000, 2000).effective.max_changed_lines).toBe(1000);
     expect(linesMerge(1000, 2000).sources.max_changed_lines).toBe("capped");
+    // Sentinel 0 means 'disabled/infinite' — personal ceiling binds over repo 0
+    expect(linesMerge(500, 0).effective.max_changed_lines).toBe(500);
+    expect(linesMerge(500, 0).sources.max_changed_lines).toBe("capped");
+    expect(linesMerge(0, 500).effective.max_changed_lines).toBe(500);
+    expect(linesMerge(0, 500).sources.max_changed_lines).toBe("repo");
     expect(linesMerge(1500, undefined).sources.max_changed_lines).toBe(
       "global",
     );

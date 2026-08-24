@@ -2144,17 +2144,22 @@ export function mergeConfig(
     (layer) => layer.max_verification_steps,
     Math.min,
   );
+  const narrowSizeLimit = (a: number, b: number): number => {
+    if (a === 0) return b;
+    if (b === 0) return a;
+    return Math.min(a, b);
+  };
   const maxLines = foldKey(
     layers,
     CONFIG_DIRECTION.max_changed_lines,
     (layer) => layer.max_changed_lines,
-    Math.min,
+    narrowSizeLimit,
   );
   const maxFiles = foldKey(
     layers,
     CONFIG_DIRECTION.max_changed_files,
     (layer) => layer.max_changed_files,
-    Math.min,
+    narrowSizeLimit,
   );
   const scout = foldKey(
     layers,
