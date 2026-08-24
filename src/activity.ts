@@ -10,6 +10,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { prheroLayout } from "./home-preflight";
+import { countLaunchedToday } from "./watch-preflight";
 
 export interface ActiveRunRecord {
   pid: number;
@@ -221,11 +222,7 @@ export async function killActiveRun(
   const sendSignal =
     options.sendSignal ??
     ((p: number, s: string | number) => {
-      try {
-        process.kill(p, s);
-      } catch {
-        // Process may have already exited
-      }
+      process.kill(p, s);
     });
   const sleep =
     options.sleep ??
@@ -317,10 +314,7 @@ export async function getWatcherSpend(
     try {
       const raw = readFileSync(layout.logPath, "utf-8");
       const todayIso = new Date().toISOString().slice(0, 10);
-      const lines = raw.split("\n");
-      launchedToday = lines.filter(
-        (l) => l.startsWith(todayIso) && l.includes("launched"),
-      ).length;
+      launchedToday = countLaunchedToday(raw, todayIso);
     } catch {
       launchedToday = 0;
     }
