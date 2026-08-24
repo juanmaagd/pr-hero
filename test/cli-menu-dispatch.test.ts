@@ -324,7 +324,12 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
       os.tmpdir(),
       `prhero-menu-dispatch-test-${Math.random().toString(36).slice(2)}`,
     );
+    const tmpHome = path.join(
+      os.tmpdir(),
+      `prhero-home-dispatch-test-${Math.random().toString(36).slice(2)}`,
+    );
     mkdirSync(path.join(tmpRepo, ".prhero"), { recursive: true });
+    mkdirSync(tmpHome, { recursive: true });
     await Bun.write(
       path.join(tmpRepo, ".prhero", "config.json"),
       JSON.stringify({
@@ -339,7 +344,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
     const { runReviewMenu } = await import("../src/ui-review-menu");
     const loaded = await loadEffectiveConfig({
       root: tmpRepo,
-      home: os.tmpdir(),
+      home: tmpHome,
     });
 
     const reader = fakeReader(["j", "j", "j", "j", "j", "j", "j", "\r"]);

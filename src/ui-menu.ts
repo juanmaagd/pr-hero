@@ -10,6 +10,8 @@ import {
   type RepoContext,
   resolveMenuContext,
 } from "./menu-context";
+import { DEFAULT_MAX_VERIFICATION_STEPS } from "./preflight";
+import { DEFAULT_SIZE_GATE } from "./size-gate";
 import { bold, box, cyan, dim, sanitizeText, terminalWidth } from "./ui";
 import {
   cycleStringPreset,
@@ -20,6 +22,7 @@ import {
   stepNumericValue,
 } from "./ui-config-edit";
 import { type KeyReader, parseKey, splitKeys } from "./ui-select";
+import { DEFAULT_DAILY_CAP } from "./watch-preflight";
 
 const SOLID_BANNER_LINES = [
   "██████╗ ██████╗       ██╗  ██╗███████╗██████╗  ██████╗ ",
@@ -690,6 +693,7 @@ export async function runWatcherSubmenu(deps: {
     if (repaint) io.write(`${ESC}[?25l`);
     let needsClear = true;
     for (;;) {
+      if (repaint) io.write(`${ESC}[?25l`);
       render(needsClear);
       needsClear = false;
       const reader = createReader();
@@ -1005,12 +1009,14 @@ export async function runLayerConfigCardEditor(deps: {
                   typeof currentEntry.currentRaw === "number"
                     ? currentEntry.currentRaw
                     : currentEntry.key === "max_changed_lines"
-                      ? 1500
+                      ? DEFAULT_SIZE_GATE.maxChangedLines
                       : currentEntry.key === "max_changed_files"
-                        ? 150
+                        ? DEFAULT_SIZE_GATE.maxChangedFiles
                         : currentEntry.key === "max_verification_steps"
-                          ? 8
-                          : 10;
+                          ? DEFAULT_MAX_VERIFICATION_STEPS
+                          : currentEntry.key === "daily_cap"
+                            ? DEFAULT_DAILY_CAP
+                            : 1;
 
                 const nextNum = stepNumericValue(currentNum, delta, min);
                 draft[currentEntry.key] = nextNum;
@@ -1038,12 +1044,14 @@ export async function runLayerConfigCardEditor(deps: {
                   typeof currentEntry.currentRaw === "number"
                     ? currentEntry.currentRaw
                     : currentEntry.key === "max_changed_lines"
-                      ? 1500
+                      ? DEFAULT_SIZE_GATE.maxChangedLines
                       : currentEntry.key === "max_changed_files"
-                        ? 150
+                        ? DEFAULT_SIZE_GATE.maxChangedFiles
                         : currentEntry.key === "max_verification_steps"
-                          ? 8
-                          : 10;
+                          ? DEFAULT_MAX_VERIFICATION_STEPS
+                          : currentEntry.key === "daily_cap"
+                            ? DEFAULT_DAILY_CAP
+                            : 1;
 
                 const nextNum = stepNumericValue(currentNum, delta, min);
                 draft[currentEntry.key] = nextNum;
@@ -1212,6 +1220,7 @@ export async function runConfigSubmenu(deps: {
     if (repaint) io.write(`${ESC}[?25l`);
     let needsClear = true;
     for (;;) {
+      if (repaint) io.write(`${ESC}[?25l`);
       render(needsClear);
       needsClear = false;
 
