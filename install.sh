@@ -58,17 +58,29 @@ CHECKSUMS_URL="https://github.com/${REPO}/releases/download/v${VERSION}/SHA256SU
 
 echo "Downloading pr-hero binary from ${BINARY_URL}..."
 if curl -sSL --fail "${BINARY_URL}" -o "${TMP_DIR}/pr-hero"; then
-  # Download and verify checksum if available
-  if curl -sSL --fail "${CHECKSUMS_URL}" -o "${TMP_DIR}/SHA256SUMS"; then
-    echo "Verifying SHA256 checksum..."
-    cd "${TMP_DIR}"
-    if command -v sha256sum >/dev/null 2>&1; then
-      grep "pr-hero-${TARGET}" SHA256SUMS | sed "s/pr-hero-${TARGET}/pr-hero/" | sha256sum -c -
-    elif command -v shasum >/dev/null 2>&1; then
-      grep "pr-hero-${TARGET}" SHA256SUMS | sed "s/pr-hero-${TARGET}/pr-hero/" | shasum -a 256 -c -
-    fi
-    cd - >/dev/null
+  # Download and verify checksum
+  if ! curl -sSL --fail "${CHECKSUMS_URL}" -o "${TMP_DIR}/SHA256SUMS"; then
+    echo "Failed to download SHA256SUMS from ${CHECKSUMS_URL}" >&2
+    exit 1
   fi
+
+  echo "Verifying SHA256 checksum..."
+  cd "${TMP_DIR}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    grep "pr-hero-${TARGET}" SHA256SUMS | sed "s/pr-hero-${TARGET}/pr-hero/" | sha256sum -c - || {
+      echo "SHA256 checksum verification failed!" >&2
+      exit 1
+    }
+  elif command -v shasum >/dev/null 2>&1; then
+    grep "pr-hero-${TARGET}" SHA256SUMS | sed "s/pr-hero-${TARGET}/pr-hero/" | shasum -a 256 -c - || {
+      echo "SHA256 checksum verification failed!" >&2
+      exit 1
+    }
+  else
+    echo "Neither sha256sum nor shasum is available on your system for verification." >&2
+    exit 1
+  fi
+  cd - >/dev/null
 
   chmod +x "${TMP_DIR}/pr-hero"
   mv "${TMP_DIR}/pr-hero" "${BIN_PATH}"

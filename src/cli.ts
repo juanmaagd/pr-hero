@@ -465,9 +465,17 @@ async function localResultLinks(
 }
 
 async function main(argv: string[]): Promise<number> {
-  // Bare zero-argument entry: launch wizard if un-onboarded, otherwise default to review
-  if (argv.length === 0 && !isMachineOnboarded()) {
-    return await runWizard();
+  // Bare zero-argument entry: launch wizard if un-onboarded in a TTY, otherwise error in non-TTY
+  if (argv.length === 0) {
+    if (!process.stdin.isTTY) {
+      log(HELP_TEXT);
+      log();
+      log("error: no command given");
+      return 2;
+    }
+    if (!isMachineOnboarded()) {
+      return await runWizard();
+    }
   }
 
   let parsed: ReturnType<typeof parseArgs>;

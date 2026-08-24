@@ -41,19 +41,42 @@ export interface InstallResult {
 
 async function defaultExec(
   cmd: string[],
-  options?: { cwd?: string },
+  options?: { cwd?: string; timeoutMs?: number },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
+    const timeoutMs = options?.timeoutMs ?? 10_000;
     const proc = Bun.spawn(cmd, {
       cwd: options?.cwd,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        try {
+          proc.kill();
+        } catch {
+          // ignore
+        }
+        reject(
+          new Error(`Command timed out after ${timeoutMs}ms: ${cmd.join(" ")}`),
+        );
+      }, timeoutMs);
+    });
+
+    const executionPromise = Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
+
+    const [stdout, stderr, exitCode] = await Promise.race([
+      executionPromise,
+      timeoutPromise,
+    ]);
+    if (timer) clearTimeout(timer);
     return { exitCode, stdout, stderr };
   } catch (error) {
     return { exitCode: 1, stdout: "", stderr: (error as Error).message };

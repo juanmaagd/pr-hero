@@ -1268,7 +1268,7 @@ export function resolveAgentsDirSetting(input: {
   }
   const assets = resolveEngineAssets();
   return {
-    dir: assets.defaultAgentsDir ?? "",
+    dir: assets.defaultAgentsDir,
     source: "default",
   };
 }

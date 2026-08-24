@@ -15,7 +15,7 @@ export type AssetMode = "dev" | "npm" | "compiled";
 export interface EngineAssets {
   mode: AssetMode;
   bundledAgentFiles: Record<string, string>; // logical filename → path, from the manifest (every mode)
-  defaultAgentsDir?: string; // the real prompts/default dir in dev/npm; absent when compiled
+  defaultAgentsDir: string; // the prompts/default dir in dev/npm, or embedded asset directory when compiled
   scoutPromptPath: string;
   summarizerPromptPath: string;
   triageSkillFiles: Record<string, string>; // logical filename → path, from the manifest
@@ -71,7 +71,7 @@ export function resolveEngineAssets(): EngineAssets {
   const mode = detectAssetMode();
   const version = resolveVersion();
 
-  let defaultAgentsDir: string | undefined;
+  let defaultAgentsDir = path.dirname(BUNDLED_AGENT_FILES["review-refuter.md"]);
   if (mode !== "compiled") {
     const fsDefaultDir = path.resolve(import.meta.dir, "../prompts/default");
     if (existsSync(fsDefaultDir)) {
@@ -82,7 +82,7 @@ export function resolveEngineAssets(): EngineAssets {
   return {
     mode,
     bundledAgentFiles: BUNDLED_AGENT_FILES,
-    ...(defaultAgentsDir ? { defaultAgentsDir } : {}),
+    defaultAgentsDir,
     scoutPromptPath: SCOUT_PROMPT_PATH,
     summarizerPromptPath: SUMMARIZER_PROMPT_PATH,
     triageSkillFiles: TRIAGE_SKILL_FILES,

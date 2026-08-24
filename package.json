@@ -30,7 +30,7 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/cli.ts src/index.ts --target=bun --outdir=dist",
+    "build": "bun build src/cli.ts src/index.ts --target=bun --outdir=dist --define __PRHERO_VERSION__=\"\\\"0.1.0\\\"\"",
     "review": "bun run src/cli.ts",
     "fixture-eval": "bun run scripts/fixture-eval.ts",
     "refuter-probe": "bun run scripts/refuter-probe.ts",

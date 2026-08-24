@@ -1,5 +1,12 @@
 import crypto from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { EngineAssets } from "./assets";
@@ -408,8 +415,25 @@ export async function registerMcpServer(
     options.writeFile ??
     ((p: string, c: string) => {
       mkdirSync(path.dirname(p), { recursive: true });
-      writeFileSync(p, c, "utf-8");
+      const tmpPath = `${p}.tmp.${Date.now()}`;
+      writeFileSync(tmpPath, c, "utf-8");
+      renameSync(tmpPath, p);
     });
+
+  if (exists(configFile)) {
+    try {
+      const stat = lstatSync(configFile);
+      if (stat.isSymbolicLink()) {
+        return {
+          registered: false,
+          configFile,
+          error: `Refusing to edit symlinked MCP config file: ${configFile}`,
+        };
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   let config: {
     mcpServers?: Record<string, { command: string; args: string[] }>;

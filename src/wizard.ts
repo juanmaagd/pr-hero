@@ -44,6 +44,7 @@ export interface WizardState {
   commitChoice: "commit" | "ignore" | undefined;
   workspaceCommitted: boolean;
   preexistingDirt: boolean;
+  defaultBase?: string;
   dryRun: WizardDryRunState;
   completed: boolean;
   errorMessage?: string;
@@ -57,7 +58,7 @@ export interface WizardDeps {
   writeFile?: (p: string, content: string) => Promise<void> | void;
   exec?: (
     cmd: string[],
-    options?: { cwd?: string },
+    options?: { cwd?: string; timeoutMs?: number },
   ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
   checkToolsOptions?: CheckSystemToolsOptions;
 }
@@ -97,6 +98,7 @@ export function createInitialWizardState(): WizardState {
     commitChoice: undefined,
     workspaceCommitted: false,
     preexistingDirt: false,
+    defaultBase: "main",
     dryRun: {
       outcome: "not-run",
       proven: [],
@@ -110,6 +112,12 @@ export type WizardAction =
   | { type: "SET_SELECTED_INDEX"; index: number }
   | { type: "NEXT_STEP" }
   | { type: "PREV_STEP" }
+  | { type: "SET_COMMIT_CHOICE"; choice: "commit" | "ignore" | undefined }
+  | { type: "SET_GOTCHAS_ENTRIES"; entries: string[] }
+  | { type: "SET_GOTCHAS_SKIP"; informed: boolean; truncate: boolean }
+  | { type: "SET_DEFAULT_BASE"; base: string }
+  | { type: "COMPLETE" }
+  | { type: "CANCEL" }
   | { type: "UPDATE_STATE"; updates: Partial<WizardState> };
 
 export function wizardReducer(
@@ -131,6 +139,35 @@ export function wizardReducer(
         stepIndex: Math.max(state.stepIndex - 1, 0),
         selectedIndex: 0,
       };
+    case "SET_COMMIT_CHOICE":
+      return { ...state, commitChoice: action.choice };
+    case "SET_GOTCHAS_ENTRIES":
+      return {
+        ...state,
+        gotchas: {
+          ...state.gotchas,
+          entries: action.entries,
+          collected: action.entries.length,
+          informedSkip: false,
+        },
+      };
+    case "SET_GOTCHAS_SKIP":
+      return {
+        ...state,
+        gotchas: {
+          ...state.gotchas,
+          entries: [],
+          collected: 0,
+          informedSkip: action.informed,
+          truncatedOnSkip: action.truncate,
+        },
+      };
+    case "SET_DEFAULT_BASE":
+      return { ...state, defaultBase: action.base };
+    case "COMPLETE":
+      return { ...state, completed: true };
+    case "CANCEL":
+      return { ...state, completed: false };
     case "UPDATE_STATE":
       return { ...state, ...action.updates };
     default:
@@ -172,19 +209,42 @@ export function isMachineOnboarded(
 
 async function defaultExec(
   cmd: string[],
-  options?: { cwd?: string },
+  options?: { cwd?: string; timeoutMs?: number },
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   try {
+    const timeoutMs = options?.timeoutMs ?? 10_000;
     const proc = Bun.spawn(cmd, {
       cwd: options?.cwd,
+      stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        try {
+          proc.kill();
+        } catch {
+          // ignore
+        }
+        reject(
+          new Error(`Command timed out after ${timeoutMs}ms: ${cmd.join(" ")}`),
+        );
+      }, timeoutMs);
+    });
+
+    const executionPromise = Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ]);
+
+    const [stdout, stderr, exitCode] = await Promise.race([
+      executionPromise,
+      timeoutPromise,
+    ]);
+    if (timer) clearTimeout(timer);
     return { exitCode, stdout, stderr };
   } catch (error) {
     return { exitCode: 1, stdout: "", stderr: (error as Error).message };
@@ -340,7 +400,25 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       const exec = deps.exec ?? defaultExec;
       const statusRes = await exec(["git", "status", "--porcelain"], { cwd });
       const preexistingDirt = statusRes.stdout.trim().length > 0;
-      return { preexistingDirt };
+
+      let defaultBase = "main";
+      const branchRes = await exec(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        { cwd },
+      );
+      if (branchRes.exitCode === 0 && branchRes.stdout.trim()) {
+        defaultBase = branchRes.stdout
+          .trim()
+          .replace(/^refs\/remotes\/origin\//, "");
+      } else {
+        const localHead = await exec(["git", "branch", "--show-current"], {
+          cwd,
+        });
+        if (localHead.exitCode === 0 && localHead.stdout.trim()) {
+          defaultBase = localHead.stdout.trim();
+        }
+      }
+      return { preexistingDirt, defaultBase };
     },
     async apply(
       state: WizardState,
@@ -348,6 +426,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
     ): Promise<Partial<WizardState>> {
       const cwd = deps.cwd ?? process.cwd();
       const home = deps.home ?? os.homedir();
+      const exists = deps.exists ?? existsSync;
       const writeFile =
         deps.writeFile ??
         ((p: string, c: string) => {
@@ -360,20 +439,24 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       const configPath = path.join(dotPrhero, "config.json");
       const gotchasPath = path.join(dotPrhero, "gotchas.md");
 
-      // 1. Write .prhero/config.json (omitting agents_dir to use bundled default)
-      const configContent = initConfigTemplate({
-        defaultBase: "main",
-      });
-      await writeFile(configPath, configContent);
-
-      // 2. Write .prhero/gotchas.md
-      let gotchasContent: string;
-      if (state.gotchas.entries && state.gotchas.entries.length > 0) {
-        gotchasContent = `# Repository Gotchas & Invariants\n\n${state.gotchas.entries.map((e) => `- ${e}`).join("\n")}\n`;
-      } else {
-        gotchasContent = `<!-- human-attention-required: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Edit this file with project failure modes.)\n`;
+      // 1. Write .prhero/config.json if not present
+      if (!exists(configPath)) {
+        const configContent = initConfigTemplate({
+          defaultBase: state.defaultBase || "main",
+        });
+        await writeFile(configPath, configContent);
       }
-      await writeFile(gotchasPath, gotchasContent);
+
+      // 2. Write .prhero/gotchas.md if not present
+      if (!exists(gotchasPath)) {
+        let gotchasContent: string;
+        if (state.gotchas.entries && state.gotchas.entries.length > 0) {
+          gotchasContent = `# Repository Gotchas & Invariants\n\n${state.gotchas.entries.map((e) => `- ${e}`).join("\n")}\n`;
+        } else {
+          gotchasContent = `<!-- human-attention-required: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Edit this file with project failure modes.)\n`;
+        }
+        await writeFile(gotchasPath, gotchasContent);
+      }
 
       // 3. Write ~/.prhero/setup.json (NEVER ~/.prhero/config.json)
       const setupPath = path.join(home, ".prhero", "setup.json");
