@@ -173,4 +173,41 @@ describe("5.1 / 5.2 Menu Input Loop & Keyboard Ownership", () => {
     expect(readers.length).toBeGreaterThanOrEqual(2);
     expect(readers.every((r) => r.closed)).toBe(true);
   });
+
+  test("clears screen on initial render and on return from action when styles are true", async () => {
+    const readers: (KeyReader & { closed: boolean })[] = [];
+    const io = testIo();
+
+    const createReader = () => {
+      const r = fakeReader(
+        readers.length === 0
+          ? ["j", "\r"]
+          : readers.length === 1
+            ? [" "]
+            : ["q"],
+      );
+      readers.push(r);
+      return r;
+    };
+
+    const exitCode = await runMenuLoop({
+      context: dummyContext,
+      status: dummyStatus,
+      createReader,
+      io,
+      styles: true,
+      width: 80,
+      dispatchAction: async () => {
+        io.write("Doctor output\n");
+        return 0;
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    const raw = io.text();
+    // \x1b[2J\x1b[H should appear at least twice: initial render + return after pause
+    const clearSeq = `${ESC}[2J${ESC}[H`;
+    const clearMatches = raw.split(clearSeq).length - 1;
+    expect(clearMatches).toBeGreaterThanOrEqual(2);
+  });
 });

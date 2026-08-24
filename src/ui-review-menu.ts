@@ -133,7 +133,7 @@ export async function runReviewMenu(
   const repaint = styles;
   let drawn = 0;
 
-  const render = () => {
+  const render = (clearScreen = false) => {
     const lines: string[] = [
       "",
       ...renderReviewMenuCard(state, cursor, width, styles),
@@ -141,7 +141,10 @@ export async function runReviewMenu(
     ];
 
     let buf = "";
-    if (repaint && drawn > 0) {
+    if (repaint && clearScreen) {
+      buf += `${ESC}[2J${ESC}[H`;
+      drawn = 0;
+    } else if (repaint && drawn > 0) {
       buf += `${ESC}[${drawn}A`;
     }
     for (const l of lines) {
@@ -155,7 +158,7 @@ export async function runReviewMenu(
   const reader = createReader();
   try {
     if (repaint) io.write(`${ESC}[?25l`);
-    render();
+    render(true);
     for (;;) {
       const chunk = await reader.read();
       if (chunk === undefined) return { action: "back" };
@@ -171,12 +174,12 @@ export async function runReviewMenu(
         }
         if (key.type === "up" || (key.type === "char" && key.char === "k")) {
           cursor = (cursor - 1 + itemCount) % itemCount;
-          render();
+          render(false);
           continue;
         }
         if (key.type === "down" || (key.type === "char" && key.char === "j")) {
           cursor = (cursor + 1) % itemCount;
-          render();
+          render(false);
           continue;
         }
         if (key.type === "enter" || (key.type === "char" && key.char === " ")) {
@@ -219,7 +222,7 @@ export async function runReviewMenu(
           } else if (cursor === 7) {
             state.dryRun = !state.dryRun;
           }
-          render();
+          render(false);
         }
       }
     }

@@ -240,7 +240,7 @@ export async function runMenuLoop(
   const repaint = styles;
   let drawn = 0;
 
-  const render = () => {
+  const render = (clearScreen = false) => {
     const lines: string[] = [];
     lines.push("");
     lines.push(...renderSolidHeader(width, styles));
@@ -252,7 +252,10 @@ export async function runMenuLoop(
     lines.push(...renderPersistentFooter(items[cursor], width, styles));
 
     let buf = "";
-    if (repaint && drawn > 0) {
+    if (repaint && clearScreen) {
+      buf += `${ESC}[2J${ESC}[H`;
+      drawn = 0;
+    } else if (repaint && drawn > 0) {
       buf += `${ESC}[${drawn}A`;
     }
     for (const line of lines) {
@@ -266,14 +269,16 @@ export async function runMenuLoop(
   const onResize = () => {
     if (!isInteractive) return;
     width = terminalWidth();
-    render();
+    render(true);
   };
   process.on("SIGWINCH", onResize);
 
   try {
     if (repaint) io.write(`${ESC}[?25l`);
+    let needsClear = true;
     for (;;) {
-      render();
+      render(needsClear);
+      needsClear = false;
       const reader = createReader();
       let chosenItem: MenuItem | undefined;
 
@@ -301,7 +306,7 @@ export async function runMenuLoop(
               (key.type === "char" && key.char === "k")
             ) {
               cursor = (cursor - 1 + items.length) % items.length;
-              render();
+              render(false);
               continue;
             }
             if (
@@ -309,14 +314,14 @@ export async function runMenuLoop(
               (key.type === "char" && key.char === "j")
             ) {
               cursor = (cursor + 1) % items.length;
-              render();
+              render(false);
               continue;
             }
             if (key.type === "char" && /^[1-9]$/.test(key.char)) {
               const numIdx = Number(key.char) - 1;
               if (numIdx >= 0 && numIdx < items.length) {
                 cursor = numIdx;
-                render();
+                render(false);
               }
               continue;
             }
@@ -355,6 +360,7 @@ export async function runMenuLoop(
           status = await gatherMenuStatus(home, cwd);
           items = getMenuOptions(context, status);
           cursor = Math.min(cursor, items.length - 1);
+          needsClear = true;
           continue;
         }
         if (
@@ -386,6 +392,7 @@ export async function runMenuLoop(
       status = await gatherMenuStatus(home, cwd);
       items = getMenuOptions(context, status);
       cursor = Math.min(cursor, items.length - 1);
+      needsClear = true;
     }
   } finally {
     if (repaint) io.write(`${ESC}[?25h`);
@@ -440,7 +447,7 @@ export async function runLifecycleSubmenu(deps: {
   const repaint = styles;
   let drawn = 0;
 
-  const render = () => {
+  const render = (clearScreen = false) => {
     const cardLines = items.map((item, idx) => {
       const prefix = idx === cursor ? "▸ " : "  ";
       return `${prefix}${idx + 1}. ${item.label} - ${item.desc}`;
@@ -456,7 +463,10 @@ export async function runLifecycleSubmenu(deps: {
     ];
 
     let buf = "";
-    if (repaint && drawn > 0) {
+    if (repaint && clearScreen) {
+      buf += `${ESC}[2J${ESC}[H`;
+      drawn = 0;
+    } else if (repaint && drawn > 0) {
       buf += `${ESC}[${drawn}A`;
     }
     for (const l of lines) {
@@ -469,8 +479,10 @@ export async function runLifecycleSubmenu(deps: {
 
   try {
     if (repaint) io.write(`${ESC}[?25l`);
+    let needsClear = true;
     for (;;) {
-      render();
+      render(needsClear);
+      needsClear = false;
       const reader = createReader();
       let chosen: (typeof items)[0] | undefined;
       try {
@@ -492,7 +504,7 @@ export async function runLifecycleSubmenu(deps: {
               (key.type === "char" && key.char === "k")
             ) {
               cursor = (cursor - 1 + items.length) % items.length;
-              render();
+              render(false);
               continue;
             }
             if (
@@ -500,12 +512,12 @@ export async function runLifecycleSubmenu(deps: {
               (key.type === "char" && key.char === "j")
             ) {
               cursor = (cursor + 1) % items.length;
-              render();
+              render(false);
               continue;
             }
             if (key.type === "char" && /^[1-4]$/.test(key.char)) {
               cursor = Number(key.char) - 1;
-              render();
+              render(false);
               continue;
             }
             if (key.type === "enter") {
@@ -532,6 +544,17 @@ export async function runLifecycleSubmenu(deps: {
           if (repaint) io.write(`${ESC}[?25l`);
         }
         if (chosen.isTerminal) return code;
+
+        io.line();
+        io.line(dim("Press any key to return to menu...", styles));
+        const pauseReader = createReader();
+        try {
+          await pauseReader.read();
+        } finally {
+          pauseReader.close();
+          if (repaint) io.write(`${ESC}[?25l`);
+        }
+        needsClear = true;
       }
     }
   } finally {
@@ -599,7 +622,7 @@ export async function runWatcherSubmenu(deps: {
   const repaint = styles;
   let drawn = 0;
 
-  const render = () => {
+  const render = (clearScreen = false) => {
     const cardLines = items.map((item, idx) => {
       const prefix = idx === cursor ? "▸ " : "  ";
       return `${prefix}${idx + 1}. ${item.label} - ${item.desc}`;
@@ -615,7 +638,10 @@ export async function runWatcherSubmenu(deps: {
     ];
 
     let buf = "";
-    if (repaint && drawn > 0) {
+    if (repaint && clearScreen) {
+      buf += `${ESC}[2J${ESC}[H`;
+      drawn = 0;
+    } else if (repaint && drawn > 0) {
       buf += `${ESC}[${drawn}A`;
     }
     for (const l of lines) {
@@ -628,8 +654,10 @@ export async function runWatcherSubmenu(deps: {
 
   try {
     if (repaint) io.write(`${ESC}[?25l`);
+    let needsClear = true;
     for (;;) {
-      render();
+      render(needsClear);
+      needsClear = false;
       const reader = createReader();
       let chosen: (typeof items)[0] | undefined;
       try {
@@ -651,7 +679,7 @@ export async function runWatcherSubmenu(deps: {
               (key.type === "char" && key.char === "k")
             ) {
               cursor = (cursor - 1 + items.length) % items.length;
-              render();
+              render(false);
               continue;
             }
             if (
@@ -659,14 +687,14 @@ export async function runWatcherSubmenu(deps: {
               (key.type === "char" && key.char === "j")
             ) {
               cursor = (cursor + 1) % items.length;
-              render();
+              render(false);
               continue;
             }
             if (key.type === "char" && /^[1-9]$/.test(key.char)) {
               const idx = Number(key.char) - 1;
               if (idx >= 0 && idx < items.length) {
                 cursor = idx;
-                render();
+                render(false);
               }
               continue;
             }
@@ -692,6 +720,16 @@ export async function runWatcherSubmenu(deps: {
           drawn = 0;
           if (repaint) io.write(`${ESC}[?25l`);
         }
+        io.line();
+        io.line(dim("Press any key to return to menu...", styles));
+        const pauseReader = createReader();
+        try {
+          await pauseReader.read();
+        } finally {
+          pauseReader.close();
+          if (repaint) io.write(`${ESC}[?25l`);
+        }
+        needsClear = true;
       }
     }
   } finally {
