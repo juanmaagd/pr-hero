@@ -5351,7 +5351,7 @@ async function upgradeCommand(options: CliOptions): Promise<number> {
     const expectedLine = sumsText
       .split("\n")
       .find((l) => l.includes(targetFileName));
-    if (expectedLine && !expectedLine.startsWith(actualHash)) {
+    if (!expectedLine?.startsWith(actualHash)) {
       throw new CliError(
         `SHA256 checksum verification failed for ${targetFileName}!`,
       );
@@ -5360,21 +5360,29 @@ async function upgradeCommand(options: CliOptions): Promise<number> {
     await Bun.write(tempBinary, binBuffer);
     chmodSync(tempBinary, 0o755);
 
+    if (existsSync(bakBinary)) {
+      try {
+        unlinkSync(bakBinary);
+      } catch {
+        // ignore
+      }
+    }
+
     if (existsSync(targetBinary)) {
       renameSync(targetBinary, bakBinary);
     }
     renameSync(tempBinary, targetBinary);
 
-    log("Running reconciliation via upgraded binary...");
-    const proc = Bun.spawn([targetBinary, "upgrade", "--reconcile"], {
-      stdout: "inherit",
-      stderr: "inherit",
+    // Smoke test that the upgraded binary can execute before removing backup
+    const smokeProc = Bun.spawn([targetBinary, "--help"], {
+      stdout: "ignore",
+      stderr: "ignore",
     });
-    const exitCode = await proc.exited;
+    const smokeExit = await smokeProc.exited;
 
-    if (exitCode !== 0) {
+    if (smokeExit !== 0) {
       log(
-        "warning: upgraded binary failed to start. Restoring previous version...",
+        "warning: upgraded binary failed to execute. Restoring previous version...",
       );
       if (existsSync(bakBinary)) {
         renameSync(bakBinary, targetBinary);
@@ -5388,6 +5396,18 @@ async function upgradeCommand(options: CliOptions): Promise<number> {
       unlinkSync(bakBinary);
     }
 
+    log("Running reconciliation via upgraded binary...");
+    const proc = Bun.spawn([targetBinary, "upgrade", "--reconcile"], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      log(
+        "warning: reconciliation reported errors. Run 'pr-hero upgrade --reconcile' to retry.",
+      );
+    }
+
     log(`✓ Successfully upgraded pr-hero to v${latestVersion}!`);
     return 0;
   }
@@ -5399,7 +5419,7 @@ async function uninstallCommand(options: CliOptions): Promise<number> {
   const home = os.homedir();
   const repoRoot = options.repo
     ? await resolveRepoRoot(options.repo).catch(() => undefined)
-    : undefined;
+    : await resolveRepoRoot(process.cwd()).catch(() => undefined);
 
   const plan = await planUninstallation({
     home,
