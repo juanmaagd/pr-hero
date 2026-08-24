@@ -53,31 +53,36 @@ async function defaultExec(
     });
 
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        try {
-          proc.kill();
-        } catch {
-          // ignore
-        }
-        reject(
-          new Error(`Command timed out after ${timeoutMs}ms: ${cmd.join(" ")}`),
-        );
-      }, timeoutMs);
-    });
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            proc.kill();
+          } catch {
+            // ignore
+          }
+          reject(
+            new Error(
+              `Command timed out after ${timeoutMs}ms: ${cmd.join(" ")}`,
+            ),
+          );
+        }, timeoutMs);
+      });
 
-    const executionPromise = Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
+      const executionPromise = Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
 
-    const [stdout, stderr, exitCode] = await Promise.race([
-      executionPromise,
-      timeoutPromise,
-    ]);
-    if (timer) clearTimeout(timer);
-    return { exitCode, stdout, stderr };
+      const [stdout, stderr, exitCode] = await Promise.race([
+        executionPromise,
+        timeoutPromise,
+      ]);
+      return { exitCode, stdout, stderr };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   } catch (error) {
     return { exitCode: 1, stdout: "", stderr: (error as Error).message };
   }

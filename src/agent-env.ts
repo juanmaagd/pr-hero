@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -417,7 +418,18 @@ export async function registerMcpServer(
       mkdirSync(path.dirname(p), { recursive: true });
       const tmpPath = `${p}.tmp.${Date.now()}`;
       writeFileSync(tmpPath, c, "utf-8");
-      renameSync(tmpPath, p);
+      try {
+        renameSync(tmpPath, p);
+      } catch (err) {
+        try {
+          if (existsSync(tmpPath)) {
+            unlinkSync(tmpPath);
+          }
+        } catch {
+          // ignore cleanup error
+        }
+        throw err;
+      }
     });
 
   if (exists(configFile)) {
