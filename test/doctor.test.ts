@@ -228,7 +228,8 @@ describe("doctor tri-state evaluation", () => {
       expect(report.exitCode).toBe(0);
       const cgCheck = report.checks.find((c) => c.name === "codegraph");
       expect(cgCheck?.severity).toBe("degraded");
-      expect(cgCheck?.hint).toContain("codegraph init");
+      // The exact upstream command, opening quote included (see system-tools.test.ts).
+      expect(cgCheck?.hint).toContain("Run 'codegraph init'");
     });
 
     test("setup.json missing is degraded with init hint", async () => {

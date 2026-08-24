@@ -192,7 +192,9 @@ describe("checkSystemTools (offline with injected fakes)", () => {
 
       expect(status.codegraph.installed).toBe(true);
       expect(status.codegraph.repoIndexed).toBe(false);
-      expect(status.codegraph.hint).toContain("codegraph init");
+      // The exact upstream command, opening quote included: a hint that names
+      // a wrapper CLI instead ("Run 'some-tool codegraph init'") must fail.
+      expect(status.codegraph.hint).toContain("Run 'codegraph init'");
     });
 
     test("installed: false, repoIndexed: true", async () => {

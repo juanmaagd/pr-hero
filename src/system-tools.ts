@@ -195,7 +195,7 @@ export async function checkSystemTools(
       repoIndexed,
       hint: repoIndexed
         ? undefined
-        : "Run 'gentle-ai codegraph init' in this repository to index for code intelligence",
+        : "Run 'codegraph init' in this repository to index for code intelligence",
     };
   }
 

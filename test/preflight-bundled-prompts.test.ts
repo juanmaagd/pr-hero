@@ -105,3 +105,28 @@ describe("Repo hygiene and O-15 productization scan", () => {
     }
   });
 });
+
+describe("bundled prompts carry no tool-injected content", () => {
+  // The prompt set is frozen from agent files that live under a developer's
+  // `~/.claude/agents/`, where machine-local tooling appends its own guidance
+  // as HTML-comment-delimited blocks. Those blocks name commands that exist
+  // only on that developer's machine and would ship to every user inside the
+  // npm package. A prompt is a system prompt and never needs an HTML comment,
+  // so the guard forbids the delimiter itself: a freeze must strip such
+  // blocks, and this keeps a future freeze from importing them again.
+  test("no prompt file contains an HTML comment", () => {
+    const promptsRoot = path.resolve(import.meta.dir, "../prompts");
+    const files = readdirSync(promptsRoot, { recursive: true })
+      .map(String)
+      // PROVENANCE.md is the ledger, not a prompt: it describes what was
+      // stripped and is never sent to a model.
+      .filter((f) => f.endsWith(".md") && path.basename(f) !== "PROVENANCE.md")
+      .sort();
+    expect(files.length).toBeGreaterThan(0);
+
+    const offenders = files.filter((f) =>
+      readFileSync(path.join(promptsRoot, f), "utf8").includes("<!--"),
+    );
+    expect(offenders).toEqual([]);
+  });
+});
