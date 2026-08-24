@@ -3,6 +3,7 @@ import {
   box,
   labelColumnWidth,
   row,
+  sanitizeText,
   section,
   severityLabel,
   shortPath,
@@ -282,5 +283,45 @@ describe("section", () => {
   test("plain when unstyled, bold when styled", () => {
     expect(section("plan", false)).toBe("plan");
     expect(section("plan", true)).toBe("\x1b[1mplan\x1b[0m");
+  });
+});
+
+describe("3.3 box borderStyle", () => {
+  test("default round borders draw ╭ ╮ ╰ ╯ ─ │", () => {
+    const lines = box("title", ["content"], {
+      width: 30,
+      borderStyle: "round",
+    });
+    expect(lines[0].startsWith("╭─ title ")).toBe(true);
+    expect(lines[0].endsWith("─╮")).toBe(true);
+    expect(lines.at(-1)).toBe(`╰${"─".repeat(28)}╯`);
+  });
+
+  test("double borders draw ╔ ╗ ╚ ╝ ═ ║", () => {
+    const lines = box("title", ["content"], {
+      width: 30,
+      borderStyle: "double",
+    });
+    expect(lines[0].startsWith("╔═ title ")).toBe(true);
+    expect(lines[0].endsWith("═╗")).toBe(true);
+    expect(lines[1].startsWith("║ ")).toBe(true);
+    expect(lines[1].endsWith(" ║")).toBe(true);
+    expect(lines.at(-1)).toBe(`╚${"═".repeat(28)}╝`);
+  });
+});
+
+describe("3.4 sanitizeText", () => {
+  test("strips control bytes 0x00-0x1F, 0x7F, and ANSI escape sequences", () => {
+    const raw = "\x1b[31mRed Text\x1b[0m\x00\x07\x1b\x7f\x0bHello\x1eWorld";
+    const cleaned = sanitizeText(raw);
+    expect(cleaned).toBe("Red TextHelloWorld");
+    expect(cleaned).not.toContain("\x1b");
+    expect(cleaned).not.toContain("\x00");
+    expect(cleaned).not.toContain("\x7f");
+  });
+
+  test("preserves normal printable ASCII and unicode characters", () => {
+    const text = "PR-HERO · 🚀 ╔═╗ 123 abc";
+    expect(sanitizeText(text)).toBe(text);
   });
 });
