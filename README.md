@@ -183,7 +183,7 @@ Reviews launch two ways: **by hand**, or through the opt-in local watcher (`pr-h
 | --- | --- |
 | Manual CLI (`review`, `--pr`, `--post`, `ledger`) | **Available now** — this README. |
 | Auto-trigger on new PRs / new pushes (local watcher) | **Available now** — `pr-hero watch`, below. Deliberately opt-in: every review spends real money, so nothing fires until you `watch add` a repo AND `watch install` the agent. |
-| CI mode (GitHub Actions) | Roadmap (Phase E). Needs Claude auth in the runner and a per-PR budget decision. |
+| CI mode (GitHub Actions) | **Available now** — official `action.yml` at the repo root, canonical `.github/workflows/pr-hero.yml`, full setup in [`docs/github-actions.md`](docs/github-actions.md). Assistant posture (exit 0 on findings), the size/budget gates, and `pr-hero setup --ci` scaffolding all apply. |
 | Required status check that blocks merges | **Deliberately deferred.** At the engine's measured recall it has no business gating a merge — the disclaimer in every report is the contract. |
 
 ## Watching PRs automatically — `pr-hero watch`

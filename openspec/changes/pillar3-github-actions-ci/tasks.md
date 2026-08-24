@@ -46,8 +46,8 @@ Ordering rule (openspec `strict_tdd`): every phase starts by writing that phase'
 
 ## Phase 5: Official Action Definition, Documentation & Verification
 
-- [ ] 5.1 Create official `action.yml` at repository root with complete inputs, outputs, Bun setup, and execution step
-- [ ] 5.2 Create canonical example workflow in `.github/workflows/pr-hero.yml`
-- [ ] 5.3 Author `docs/github-actions.md` detailing GitHub Action setup, authentication secrets, trigger configurations, and budget controls
-- [ ] 5.4 Update `README.md` and `ROADMAP.md` ticking the distribution pillar 3 requirements
-- [ ] 5.5 Run full verification: `bun test`, `bun run typecheck`, `./node_modules/.bin/biome check src test`
+- [x] 5.1 Create official `action.yml` at repository root with complete inputs, outputs, Bun setup, and execution step
+- [x] 5.2 Create canonical example workflow in `.github/workflows/pr-hero.yml`
+- [x] 5.3 Author `docs/github-actions.md` detailing GitHub Action setup, authentication secrets, trigger configurations, and budget controls
+- [x] 5.4 Update `README.md` and `ROADMAP.md` ticking the distribution pillar 3 requirements
+- [x] 5.5 Run full verification: `bun test`, `bun run typecheck`, `./node_modules/.bin/biome check src test`

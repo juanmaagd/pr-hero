@@ -32,6 +32,7 @@ import {
   postInlineFindings,
   postInlineIfEligible,
   postingExitCode,
+  reportFatalCiError,
   runPostCommand,
   runTriageCommand,
   runTriageReplyCommand,
@@ -3892,5 +3893,109 @@ describe("pipelineConfigInput — O-6", () => {
       pipelineConfigInput({ ...loaded, globalPresent: false }).config
         .global_present,
     ).toBe(false);
+  });
+});
+
+// Pillar 3 Phase 5, gap closure: spec 1.1's `status` output enum listed
+// `error` from the start, but nothing ever wrote it — a fatal, unhandled
+// failure crashed the process with no $GITHUB_OUTPUT at all, so a workflow
+// branching on `steps.x.outputs.status == 'error'` could never fire.
+// reportFatalCiError is runCli()'s last-resort catch-all: it writes
+// status=error (with zeroed counters — there is no completed review to
+// report numbers for) and emits a `::error::` workflow command, so the
+// contract's fifth enum member finally has a real emitter.
+describe("reportFatalCiError — spec 1.1's fatal `error` status, finally wired", () => {
+  test("writes status=error with zeroed counters to $GITHUB_OUTPUT", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-fatal-ci-error-"));
+    const outputPath = path.join(dir, "github_output");
+    try {
+      await reportFatalCiError(new Error("boom"), outputPath);
+      const written = await Bun.file(outputPath).text();
+      expect(written).toContain("status=error\n");
+      expect(written).toContain("findings_count=0\n");
+      expect(written).toContain("blocking_count=0\n");
+      expect(written).toContain("advisory_count=0\n");
+      expect(written).toContain("cost_usd_est=0.00\n");
+      expect(written).toContain("run_dir=\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("emits a ::error:: workflow command carrying the error message", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-fatal-ci-error-"));
+    const outputPath = path.join(dir, "github_output");
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await reportFatalCiError(new Error("authentication failed"), outputPath);
+      const logged = chunks.join("");
+      expect(logged).toContain("::error::authentication failed");
+    } finally {
+      process.stderr.write = origWrite;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-Error thrown value is stringified rather than crashing the reporter", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-fatal-ci-error-"));
+    const outputPath = path.join(dir, "github_output");
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await reportFatalCiError("a plain string rejection", outputPath);
+      expect(chunks.join("")).toContain("::error::a plain string rejection");
+    } finally {
+      process.stderr.write = origWrite;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does nothing when there is no $GITHUB_OUTPUT path (not a real CI job step)", async () => {
+    // Must not throw — this is the branch a genuinely local crash takes.
+    await expect(
+      reportFatalCiError(new Error("boom"), undefined),
+    ).resolves.toBeUndefined();
+  });
+
+  test("an unwritable $GITHUB_OUTPUT does not mask the ::error:: annotation", async () => {
+    // A path under a nonexistent directory: appendCiOutputs's appendFile
+    // rejects. The original fatal error still has to reach the log — a
+    // broken output file is not a reason to lose the ::error:: annotation
+    // that is the ONLY signal a local dev/CI operator gets otherwise.
+    const unwritablePath = path.join(
+      tmpdir(),
+      "pr-hero-does-not-exist",
+      "nested",
+      "github_output",
+    );
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await expect(
+        reportFatalCiError(new Error("boom"), unwritablePath),
+      ).resolves.toBeUndefined();
+      expect(chunks.join("")).toContain("::error::boom");
+    } finally {
+      process.stderr.write = origWrite;
+    }
   });
 });

@@ -517,6 +517,10 @@ async function localResultLinks(
   return { webUrl, headSha };
 }
 
+// NOT exported: bin/pr-hero.js and the `import.meta.main` guard both go
+// through the exported runCli() below, which is the single shared caller of
+// this function — an export here with no importer of its own would be an
+// export for a hypothetical consumer (project rule 3).
 async function main(argv: string[]): Promise<number> {
   // Bare zero-argument entry
   if (argv.length === 0) {
@@ -6202,9 +6206,50 @@ async function engineIdentity(): Promise<{
   return deriveEngineIdentity(pkg, revision);
 }
 
-// Only when executed, never on import — the pure helpers stay importable from
-// tests without the CLI trying to run a review.
-if (import.meta.main) {
+// Spec 1.1's `status` output enum names `error` alongside `reviewed` /
+// `skipped-size` / `skipped-budget`, but before this function nothing ever
+// wrote it: main()'s own catch only handles CliError/CliUsageError (exit 1,
+// no $GITHUB_OUTPUT write); every OTHER thrown error — a genuine fatal
+// failure, e.g. bad credentials deep inside reviewPr() — was simply
+// rethrown, crashing the process with no output at all. A workflow branching
+// on `steps.x.outputs.status == 'error'` could then never fire.
+//
+// $GITHUB_OUTPUT existing at all is itself the CI signal here: GitHub sets it
+// unconditionally for every job step, before any of this repo's own flags
+// are parsed, so this needs no separate isCiEnvironment() computation — and
+// it fails closed for a genuinely local crash (outputPath undefined), which
+// runCli()'s caller rethrows so the developer still sees a full stack trace
+// instead of a swallowed one-line message.
+export async function reportFatalCiError(
+  error: unknown,
+  outputPath: string | undefined,
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (outputPath !== undefined && outputPath.length > 0) {
+    // Best-effort: an unwritable $GITHUB_OUTPUT must not mask the original
+    // fatal error or suppress the ::error:: annotation below.
+    await appendCiOutputs(outputPath, {
+      status: "error",
+      findings_count: 0,
+      blocking_count: 0,
+      advisory_count: 0,
+      cost_usd_est: 0,
+      run_dir: "",
+    }).catch(() => {});
+  }
+  log(formatWorkflowCommand("error", message));
+}
+
+// Exported so bin/pr-hero.js can drive the exact same signal-handling +
+// exit-code path as a direct `bun run src/cli.ts` invocation. `bun bin/pr-hero.js
+// ...` (the npm-installed entrypoint) reaches this file through `import`, and
+// `import.meta.main` is false for every imported module — only the directly
+// executed entry file gets `true` — so the guard below never ran for it and the
+// installed `pr-hero` command was a silent, zero-output, exit-0 no-op. Covered
+// by packaging.test.ts's subprocess spawn of bin/pr-hero.js.
+export async function runCli(
+  argv: string[] = Bun.argv.slice(2),
+): Promise<void> {
   const restoreCursor = () => {
     try {
       process.stderr.write("\x1b[?25h");
@@ -6235,5 +6280,26 @@ if (import.meta.main) {
   process.on("exit", () => {
     restoreCursor();
   });
-  process.exit(await main(Bun.argv.slice(2)));
+  let exitCode: number;
+  try {
+    exitCode = await main(argv);
+  } catch (error) {
+    const outputPath = process.env.GITHUB_OUTPUT;
+    if (outputPath === undefined || outputPath.length === 0) {
+      // Not a real GitHub Actions job step — preserve the original
+      // uncaught-exception path so a local `bun run src/cli.ts` crash still
+      // prints its full stack trace instead of a swallowed one-line message.
+      throw error;
+    }
+    await reportFatalCiError(error, outputPath);
+    exitCode = 1;
+  }
+  process.exit(exitCode);
+}
+
+// Only when executed, never on import — the pure helpers (and runCli itself)
+// stay importable from tests / bin/pr-hero.js without the CLI trying to run a
+// review as a side effect of the import.
+if (import.meta.main) {
+  await runCli();
 }
