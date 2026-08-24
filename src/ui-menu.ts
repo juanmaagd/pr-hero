@@ -235,7 +235,9 @@ export async function runMenuLoop(
 
   const createReader = options.createReader ?? createDefaultStdinReader;
 
+  let isInteractive = true;
   const onResize = () => {
+    if (!isInteractive) return;
     width = terminalWidth();
     render();
   };
@@ -327,9 +329,24 @@ export async function runMenuLoop(
 
       // Dispatch action
       if (options.dispatchAction) {
-        const exit = await options.dispatchAction(chosenItem.id, chosenItem);
-        if (exit === "back") continue;
-        if (typeof exit === "number" && chosenItem.id === "review") {
+        isInteractive = false;
+        let exit: number | "back";
+        try {
+          exit = await options.dispatchAction(chosenItem.id, chosenItem);
+        } finally {
+          isInteractive = true;
+        }
+        if (exit === "back") {
+          context = await resolveMenuContext(cwd);
+          status = await gatherMenuStatus(home, cwd);
+          items = getMenuOptions(context, status);
+          cursor = Math.min(cursor, items.length - 1);
+          continue;
+        }
+        if (
+          typeof exit === "number" &&
+          (chosenItem.id === "review" || chosenItem.id === "lifecycle")
+        ) {
           return exit;
         }
       } else {
@@ -511,6 +528,11 @@ export async function runWatcherSubmenu(deps: {
             id: "add",
             label: "Add current repo to watcher",
             desc: "Enroll this repository in background watcher",
+          },
+          {
+            id: "add-on-push",
+            label: "Add repo with on-push re-reviews",
+            desc: "Enroll repository and trigger review on each push",
           },
         ]
       : []),

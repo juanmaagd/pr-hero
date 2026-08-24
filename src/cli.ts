@@ -5643,13 +5643,19 @@ async function menuCommand(options: CliOptions): Promise<number> {
             inRepo: context.kind !== "not-a-repo",
             dispatch: async (subcmd) => {
               if (subcmd === "status")
-                return await watchCommand({ ...options, watch: undefined });
+                return await watchCommand({ ...options, watch: "status" });
               if (subcmd === "install")
                 return await watchCommand({ ...options, watch: "install" });
               if (subcmd === "uninstall")
                 return await watchCommand({ ...options, watch: "uninstall" });
               if (subcmd === "add")
                 return await watchCommand({ ...options, watch: "add" });
+              if (subcmd === "add-on-push")
+                return await watchCommand({
+                  ...options,
+                  watch: "add",
+                  onPush: true,
+                });
               if (subcmd === "remove")
                 return await watchCommand({ ...options, watch: "remove" });
               return 0;
