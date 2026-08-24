@@ -394,7 +394,12 @@ export async function executeUninstallPlan(
             if (raw) {
               try {
                 const config = JSON.parse(raw);
-                if (config.mcpServers?.["pr-hero"]) {
+                if (
+                  config &&
+                  typeof config === "object" &&
+                  !Array.isArray(config) &&
+                  config.mcpServers?.["pr-hero"]
+                ) {
                   delete config.mcpServers["pr-hero"];
                   await writeFile(
                     step.targetPath,

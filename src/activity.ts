@@ -10,7 +10,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { prheroLayout } from "./home-preflight";
-import { countLaunchedToday } from "./watch-preflight";
+import { countLaunchedToday, localIsoTimestamp } from "./watch-preflight";
 
 export interface ActiveRunRecord {
   pid: number;
@@ -313,7 +313,7 @@ export async function getWatcherSpend(
   } else if (existsSync(layout.logPath)) {
     try {
       const raw = readFileSync(layout.logPath, "utf-8");
-      const todayIso = new Date().toISOString().slice(0, 10);
+      const todayIso = localIsoTimestamp(new Date()).slice(0, 10);
       launchedToday = countLaunchedToday(raw, todayIso);
     } catch {
       launchedToday = 0;

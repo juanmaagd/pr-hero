@@ -251,13 +251,15 @@ export async function runMenuLoop(
     lines.push("");
     lines.push(...renderPersistentFooter(items[cursor], width, styles));
 
+    let buf = "";
     if (repaint && drawn > 0) {
-      io.write(`${ESC}[${drawn}A`);
+      buf += `${ESC}[${drawn}A`;
     }
     for (const line of lines) {
-      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
-      io.line(line);
+      if (repaint && drawn > 0) buf += `${ESC}[2K`;
+      buf += `${line}\n`;
     }
+    io.write(buf);
     drawn = lines.length;
   };
 
@@ -269,6 +271,7 @@ export async function runMenuLoop(
   process.on("SIGWINCH", onResize);
 
   try {
+    if (repaint) io.write(`${ESC}[?25l`);
     for (;;) {
       render();
       const reader = createReader();
@@ -336,6 +339,8 @@ export async function runMenuLoop(
       // Dispatch action
       if (options.dispatchAction) {
         isInteractive = false;
+        drawn = 0;
+        if (repaint) io.write(`${ESC}[?25h`);
         let exit: number | "back";
         try {
           exit = await options.dispatchAction(chosenItem.id, chosenItem);
@@ -343,6 +348,7 @@ export async function runMenuLoop(
           isInteractive = true;
           width = terminalWidth();
           drawn = 0;
+          if (repaint) io.write(`${ESC}[?25l`);
         }
         if (exit === "back") {
           context = await resolveMenuContext(cwd);
@@ -362,6 +368,8 @@ export async function runMenuLoop(
       }
 
       // Pause before returning to menu
+      drawn = 0;
+      if (repaint) io.write(`${ESC}[?25h`);
       io.line();
       io.line(dim("Press any key to return to menu...", styles));
       const pauseReader = createReader();
@@ -369,15 +377,18 @@ export async function runMenuLoop(
         await pauseReader.read();
       } finally {
         pauseReader.close();
+        if (repaint) io.write(`${ESC}[?25l`);
       }
 
       // Refresh context and status on return
+      drawn = 0;
       context = await resolveMenuContext(cwd);
       status = await gatherMenuStatus(home, cwd);
       items = getMenuOptions(context, status);
       cursor = Math.min(cursor, items.length - 1);
     }
   } finally {
+    if (repaint) io.write(`${ESC}[?25h`);
     process.off("SIGWINCH", onResize);
   }
 }
@@ -444,69 +455,87 @@ export async function runLifecycleSubmenu(deps: {
       dim("j/k: move • enter: select • q/esc: back", styles),
     ];
 
+    let buf = "";
     if (repaint && drawn > 0) {
-      io.write(`${ESC}[${drawn}A`);
+      buf += `${ESC}[${drawn}A`;
     }
     for (const l of lines) {
-      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
-      io.line(l);
+      if (repaint && drawn > 0) buf += `${ESC}[2K`;
+      buf += `${l}\n`;
     }
+    io.write(buf);
     drawn = lines.length;
   };
 
-  for (;;) {
-    render();
-    const reader = createReader();
-    let chosen: (typeof items)[0] | undefined;
-    try {
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk === undefined) return "back";
-        let done = false;
-        for (const raw of splitKeys(chunk)) {
-          const key = parseKey(raw);
-          if (
-            key.type === "escape" ||
-            key.type === "ctrl-c" ||
-            (key.type === "char" && key.char === "q")
-          ) {
-            return "back";
+  try {
+    if (repaint) io.write(`${ESC}[?25l`);
+    for (;;) {
+      render();
+      const reader = createReader();
+      let chosen: (typeof items)[0] | undefined;
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk === undefined) return "back";
+          let done = false;
+          for (const raw of splitKeys(chunk)) {
+            const key = parseKey(raw);
+            if (
+              key.type === "escape" ||
+              key.type === "ctrl-c" ||
+              (key.type === "char" && key.char === "q")
+            ) {
+              return "back";
+            }
+            if (
+              key.type === "up" ||
+              (key.type === "char" && key.char === "k")
+            ) {
+              cursor = (cursor - 1 + items.length) % items.length;
+              render();
+              continue;
+            }
+            if (
+              key.type === "down" ||
+              (key.type === "char" && key.char === "j")
+            ) {
+              cursor = (cursor + 1) % items.length;
+              render();
+              continue;
+            }
+            if (key.type === "char" && /^[1-4]$/.test(key.char)) {
+              cursor = Number(key.char) - 1;
+              render();
+              continue;
+            }
+            if (key.type === "enter") {
+              chosen = items[cursor];
+              done = true;
+              break;
+            }
           }
-          if (key.type === "up" || (key.type === "char" && key.char === "k")) {
-            cursor = (cursor - 1 + items.length) % items.length;
-            render();
-            continue;
-          }
-          if (
-            key.type === "down" ||
-            (key.type === "char" && key.char === "j")
-          ) {
-            cursor = (cursor + 1) % items.length;
-            render();
-            continue;
-          }
-          if (key.type === "char" && /^[1-4]$/.test(key.char)) {
-            cursor = Number(key.char) - 1;
-            render();
-            continue;
-          }
-          if (key.type === "enter") {
-            chosen = items[cursor];
-            done = true;
-            break;
-          }
+          if (done) break;
         }
-        if (done) break;
+      } finally {
+        reader.close();
       }
-    } finally {
-      reader.close();
-    }
 
-    if (!chosen || chosen.id === "back") return "back";
-    if (deps.dispatch) {
-      const code = await deps.dispatch(chosen.id);
-      if (chosen.isTerminal) return code;
+      if (!chosen || chosen.id === "back") return "back";
+      if (deps.dispatch) {
+        drawn = 0;
+        if (repaint) io.write(`${ESC}[?25h`);
+        let code = 0;
+        try {
+          code = await deps.dispatch(chosen.id);
+        } finally {
+          drawn = 0;
+          if (repaint) io.write(`${ESC}[?25l`);
+        }
+        if (chosen.isTerminal) return code;
+      }
     }
+  } finally {
+    if (repaint) io.write(`${ESC}[?25h`);
   }
 }
 
@@ -524,7 +553,7 @@ export async function runWatcherSubmenu(deps: {
   };
   const styles = deps.styles ?? false;
   const width = deps.width ?? 80;
-  const inRepo = deps.inRepo ?? false;
+  const inRepo = deps.inRepo ?? true;
   const createReader = deps.createReader ?? createDefaultStdinReader;
 
   const items = [
@@ -555,13 +584,13 @@ export async function runWatcherSubmenu(deps: {
             label: "Add repo with on-push re-reviews",
             desc: "Enroll repository and trigger review on each push",
           },
+          {
+            id: "remove",
+            label: "Remove repo from watcher",
+            desc: "Unenroll a repository",
+          },
         ]
       : []),
-    {
-      id: "remove",
-      label: "Remove repo from watcher",
-      desc: "Unenroll a repository",
-    },
     { id: "back", label: "Back", desc: "Return to main menu" },
   ];
 
@@ -585,70 +614,87 @@ export async function runWatcherSubmenu(deps: {
       dim("j/k: move • enter: select • q/esc: back", styles),
     ];
 
+    let buf = "";
     if (repaint && drawn > 0) {
-      io.write(`${ESC}[${drawn}A`);
+      buf += `${ESC}[${drawn}A`;
     }
     for (const l of lines) {
-      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
-      io.line(l);
+      if (repaint && drawn > 0) buf += `${ESC}[2K`;
+      buf += `${l}\n`;
     }
+    io.write(buf);
     drawn = lines.length;
   };
 
-  for (;;) {
-    render();
-    const reader = createReader();
-    let chosen: (typeof items)[0] | undefined;
-    try {
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk === undefined) return "back";
-        let done = false;
-        for (const raw of splitKeys(chunk)) {
-          const key = parseKey(raw);
-          if (
-            key.type === "escape" ||
-            key.type === "ctrl-c" ||
-            (key.type === "char" && key.char === "q")
-          ) {
-            return "back";
-          }
-          if (key.type === "up" || (key.type === "char" && key.char === "k")) {
-            cursor = (cursor - 1 + items.length) % items.length;
-            render();
-            continue;
-          }
-          if (
-            key.type === "down" ||
-            (key.type === "char" && key.char === "j")
-          ) {
-            cursor = (cursor + 1) % items.length;
-            render();
-            continue;
-          }
-          if (key.type === "char" && /^[1-9]$/.test(key.char)) {
-            const idx = Number(key.char) - 1;
-            if (idx >= 0 && idx < items.length) {
-              cursor = idx;
-              render();
+  try {
+    if (repaint) io.write(`${ESC}[?25l`);
+    for (;;) {
+      render();
+      const reader = createReader();
+      let chosen: (typeof items)[0] | undefined;
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk === undefined) return "back";
+          let done = false;
+          for (const raw of splitKeys(chunk)) {
+            const key = parseKey(raw);
+            if (
+              key.type === "escape" ||
+              key.type === "ctrl-c" ||
+              (key.type === "char" && key.char === "q")
+            ) {
+              return "back";
             }
-            continue;
+            if (
+              key.type === "up" ||
+              (key.type === "char" && key.char === "k")
+            ) {
+              cursor = (cursor - 1 + items.length) % items.length;
+              render();
+              continue;
+            }
+            if (
+              key.type === "down" ||
+              (key.type === "char" && key.char === "j")
+            ) {
+              cursor = (cursor + 1) % items.length;
+              render();
+              continue;
+            }
+            if (key.type === "char" && /^[1-9]$/.test(key.char)) {
+              const idx = Number(key.char) - 1;
+              if (idx >= 0 && idx < items.length) {
+                cursor = idx;
+                render();
+              }
+              continue;
+            }
+            if (key.type === "enter") {
+              chosen = items[cursor];
+              done = true;
+              break;
+            }
           }
-          if (key.type === "enter") {
-            chosen = items[cursor];
-            done = true;
-            break;
-          }
+          if (done) break;
         }
-        if (done) break;
+      } finally {
+        reader.close();
       }
-    } finally {
-      reader.close();
-    }
 
-    if (!chosen || chosen.id === "back") return "back";
-    if (deps.dispatch) {
-      await deps.dispatch(chosen.id);
+      if (!chosen || chosen.id === "back") return "back";
+      if (deps.dispatch) {
+        drawn = 0;
+        if (repaint) io.write(`${ESC}[?25h`);
+        try {
+          await deps.dispatch(chosen.id);
+        } finally {
+          drawn = 0;
+          if (repaint) io.write(`${ESC}[?25l`);
+        }
+      }
     }
+  } finally {
+    if (repaint) io.write(`${ESC}[?25h`);
   }
 }

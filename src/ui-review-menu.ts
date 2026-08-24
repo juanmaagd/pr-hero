@@ -140,18 +140,21 @@ export async function runReviewMenu(
       dim("j/k: move • space/enter: toggle / start • q/esc: back", styles),
     ];
 
+    let buf = "";
     if (repaint && drawn > 0) {
-      io.write(`${ESC}[${drawn}A`);
+      buf += `${ESC}[${drawn}A`;
     }
     for (const l of lines) {
-      if (repaint && drawn > 0) io.write(`${ESC}[2K`);
-      io.line(l);
+      if (repaint && drawn > 0) buf += `${ESC}[2K`;
+      buf += `${l}\n`;
     }
+    io.write(buf);
     drawn = lines.length;
   };
 
   const reader = createReader();
   try {
+    if (repaint) io.write(`${ESC}[?25l`);
     render();
     for (;;) {
       const chunk = await reader.read();
@@ -221,6 +224,7 @@ export async function runReviewMenu(
       }
     }
   } finally {
+    if (repaint) io.write(`${ESC}[?25h`);
     reader.close();
   }
 }
