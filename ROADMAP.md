@@ -252,10 +252,8 @@ Distribution — on a machine that is not this one:
 - [ ] `pr-hero review --dry-run` and one `--pr --post` succeed on a stranger's repo
 - [ ] a second push on that PR exercises item 7, not a full re-hunt dressed as a delta
 - [ ] the Action runs on an open PR, posts, and respects the cap
-      - [x] `action.yml`, the canonical `.github/workflows/pr-hero.yml`, and `docs/github-actions.md`
-            shipped and offline-tested — Pillar 3 Phase 5, 2026-08-24
-      - [ ] still open: no `v1` tag published yet (the workflow's own `uses: juanmaagd/pr-hero@v1`
-            cannot resolve until one is), and no live open-PR run has verified the Action end-to-end
+      - [x] `v1` and `v1.0.0` tags published — 2026-08-25 (`aff0324`)
+      - [ ] still open: live open-PR run on stranger's repo (landing page) to verify the Action end-to-end
 - [ ] every report still says assistant, not merge gate
 
 ### Explicitly after launch
