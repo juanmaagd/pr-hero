@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   build-binaries:
@@ -13,12 +13,16 @@ jobs:
         include:
           - os: macos-latest
             target: darwin-arm64
-          - os: macos-13
+            bun_target: bun-darwin-arm64
+          - os: macos-latest
             target: darwin-x64
+            bun_target: bun-darwin-x64
           - os: ubuntu-latest
             target: linux-x64
+            bun_target: bun-linux-x64
           - os: ubuntu-24.04-arm
             target: linux-arm64
+            bun_target: bun-linux-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -41,7 +45,7 @@ jobs:
       - name: Compile standalone binary
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          bun build --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define __PRHERO_VERSION__="\"${VERSION}\"" src/cli.ts --outfile pr-hero-${{ matrix.target }}
+          bun build --compile --target=${{ matrix.bun_target }} --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define __PRHERO_VERSION__="\"${VERSION}\"" src/cli.ts --outfile pr-hero-${{ matrix.target }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
@@ -98,6 +102,7 @@ jobs:
           generate_release_notes: true
 
       - name: Publish to NPM
+        if: env.NODE_AUTH_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
