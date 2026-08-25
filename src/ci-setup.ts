@@ -65,6 +65,9 @@ permissions:
 
 jobs:
   review:
+    # Fork PRs do not have access to repository secrets in GitHub Actions.
+    # Restricting to same-repo PRs prevents false-negative authentication failures.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,11 +107,22 @@ The workflow's `permissions:` block needs four scopes, each for a specific reaso
   conversation as an issue thread, so this scope is required even though nothing here touches an issue.
 - **`statuses: write`** — updating the PR commit status context (pending, success, error).
 
-## Triggers
+## Security considerations
 
-The canonical workflow fires on `pull_request: [opened, synchronize, reopened]`. `synchronize` is what
-makes pr-hero re-review every new push to an open PR — omitting it means the review only ever runs once,
-on open.
+### Fork pull requests
+In GitHub Actions, pull requests originating from forks do not receive repository secrets (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`). This is GitHub's intentional security boundary to prevent untrusted pull requests from exfiltrating credentials or consuming API budget.
+
+The generated workflow includes:
+```yaml
+if: github.event.pull_request.head.repo.full_name == github.repository
+```
+This ensures the review job only runs on internal branch PRs where credentials are present, skipping cleanly on fork PRs instead of failing with missing credential errors.
+
+### Action version pinning
+The default workflow targets the floating major tag `uses: juanmaagd/pr-hero@v1` to automatically receive backward-compatible bug fixes and optimizations. If your organization enforces strict immutable SHA pinning, you can pin the full commit SHA directly:
+```yaml
+- uses: juanmaagd/pr-hero@aff0324cd8c6a0c5fbf97ddbf3e6d234c9c612e4 # v1.0.0
+```
 
 ## Spend controls
 
