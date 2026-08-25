@@ -155,13 +155,18 @@ export async function planUninstallation(
         desc: `Unregister pr-hero MCP server from ${env.displayName} (${env.mcpConfigFile})`,
       });
     }
-    if (env.skillsDir && exists(path.join(env.skillsDir, "pr-hero-triage"))) {
-      agentEnvCleanups.push(`${env.displayName} Skills`);
-      programSteps.push({
-        type: "remove_skills",
-        targetPath: path.join(env.skillsDir, "pr-hero-triage"),
-        desc: `Remove digest-verified pr-hero skills from ${env.displayName}`,
-      });
+    if (env.skillsDir) {
+      for (const skillName of ["pr-hero-triage", "pr-hero-ci-setup"]) {
+        const skillPath = path.join(env.skillsDir, skillName);
+        if (exists(skillPath)) {
+          agentEnvCleanups.push(`${env.displayName} Skill: ${skillName}`);
+          programSteps.push({
+            type: "remove_skills",
+            targetPath: skillPath,
+            desc: `Remove digest-verified ${skillName} skill from ${env.displayName}`,
+          });
+        }
+      }
     }
   }
 

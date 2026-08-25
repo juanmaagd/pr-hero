@@ -390,7 +390,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       lines.push(bold("Step 3/5: Skills Sync & MCP Server Registration"));
       lines.push("");
       lines.push(
-        "  Syncing pr-hero-triage skill and registering Model Context Protocol server...",
+        "  Syncing pr-hero skills (triage, ci-setup) and registering Model Context Protocol server...",
       );
       return lines;
     },

@@ -298,7 +298,7 @@ export async function runDoctor(
           checks.push({
             name: `skills:${env.id}`,
             severity: "healthy",
-            message: `pr-hero-triage skill synced for ${env.displayName} (${env.skillsDir})`,
+            message: `pr-hero skills (triage, ci-setup) synced for ${env.displayName} (${env.skillsDir})`,
           });
         } else if (syncStatus.drift) {
           checks.push({
@@ -311,7 +311,7 @@ export async function runDoctor(
           checks.push({
             name: `skills:${env.id}`,
             severity: "degraded",
-            message: `pr-hero-triage skill not synced to ${env.displayName}`,
+            message: `pr-hero skills not synced to ${env.displayName}`,
             hint: "Run 'pr-hero setup' or 'pr-hero init' to sync skills.",
           });
         }
