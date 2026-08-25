@@ -23,6 +23,7 @@
   "bin": {
     "pr-hero": "./bin/pr-hero.js"
   },
+  "preferGlobal": true,
   "files": [
     "bin",
     "dist",
