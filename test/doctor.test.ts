@@ -18,7 +18,7 @@ describe("doctor tri-state evaluation", () => {
         if (p === "/repo/.codegraph") return true;
         if (p === "/home/user/.prhero/setup.json") return true;
         if (p === "/home/user/.claude/mcp.json") return true;
-        if (p.includes(".claude/skills/pr-hero-triage")) return true;
+        if (p.includes(".claude/skills/")) return true;
         if (p === `/repo/${CI_WORKFLOW_RELATIVE_PATH}`) return true;
         return false;
       },
@@ -39,10 +39,15 @@ describe("doctor tri-state evaluation", () => {
             files: {
               "SKILL.md": "mock_hash",
               "adjudicator.md": "mock_hash",
+              "assets/workflow.yml": "mock_hash",
             },
           });
         }
-        if (p.endsWith("SKILL.md") || p.endsWith("adjudicator.md")) {
+        if (
+          p.endsWith("SKILL.md") ||
+          p.endsWith("adjudicator.md") ||
+          p.endsWith("workflow.yml")
+        ) {
           // If reading either the upstream asset or the synced copy, return the same content
           return "same mock content";
         }

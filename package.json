@@ -20,6 +20,7 @@
     "dist",
     "prompts",
     "skills/pr-hero-triage",
+    "skills/pr-hero-ci-setup",
     "src",
     "LICENSE",
     "README.md"

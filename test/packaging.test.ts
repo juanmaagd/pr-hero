@@ -28,6 +28,7 @@ describe("Packaging & distribution configuration", () => {
     expect(pkg.files).toBeDefined();
     expect(pkg.files).toContain("prompts");
     expect(pkg.files).toContain("skills/pr-hero-triage");
+    expect(pkg.files).toContain("skills/pr-hero-ci-setup");
     expect(pkg.files).toContain("dist");
     expect(pkg.files).not.toContain("docs");
     expect(pkg.files).not.toContain("scripts");
@@ -258,6 +259,19 @@ describe("Packaging & distribution configuration", () => {
     expect(existsSync(workflowPath)).toBe(true);
     const committed = readFileSync(workflowPath, "utf-8");
     expect(committed).toBe(generateCiWorkflowTemplate({ actionRef: "./" }));
+  });
+
+  test("skills/pr-hero-ci-setup/assets/workflow.yml never drifts from generateCiWorkflowTemplate()", () => {
+    const assetPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow.yml",
+    );
+    expect(existsSync(assetPath)).toBe(true);
+    const assetContent = readFileSync(assetPath, "utf-8");
+    expect(assetContent).toBe(generateCiWorkflowTemplate());
   });
 
   // A consumer repo has no copy of this action's source, so it must resolve

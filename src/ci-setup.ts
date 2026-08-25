@@ -86,8 +86,8 @@ jobs:
           # the one you do not use in place costs nothing. Deleting the line
           # for the secret you DID set is what breaks — the credential never
           # reaches the action, and it fails to authenticate silently.
-          #   ANTHROPIC_API_KEY       — a standard Anthropic API key, or
-          #   CLAUDE_CODE_OAUTH_TOKEN — a Claude Code OAuth token
+          #   ANTHROPIC_API_KEY       — pay-as-you-go key (billed per token via Anthropic Console), or
+          #   CLAUDE_CODE_OAUTH_TOKEN — Claude Code OAuth token (uses Claude subscription directly, no API cost)
           anthropic-api-key: \${{ secrets.ANTHROPIC_API_KEY }}
           claude-token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 `;

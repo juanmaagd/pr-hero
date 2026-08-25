@@ -16,6 +16,7 @@ describe("Agent environment detector and sync", () => {
       "SKILL.md": "/abs/skills/pr-hero-triage/SKILL.md",
       "adjudicator.md": "/abs/skills/pr-hero-triage/adjudicator.md",
     },
+    ciSetupSkillFiles: {},
   };
 
   describe("detectAgentEnvironments", () => {
@@ -164,6 +165,63 @@ describe("Agent environment detector and sync", () => {
       expect(written["/home/user/.claude/skills/pr-hero-triage/SKILL.md"]).toBe(
         "new upstream content",
       );
+    });
+
+    test("syncSkills syncs multiple skills (triage and ci-setup)", async () => {
+      const written: Record<string, string> = {};
+      const env: AgentEnvDetection = {
+        id: "claude",
+        displayName: "Claude Code",
+        status: "active",
+        binaryFound: true,
+        auth: { authenticated: true, message: "ok" },
+        skillsDir: "/home/user/.claude/skills",
+      };
+
+      const multiSkillAssets = {
+        ...fakeAssets,
+        ciSetupSkillFiles: {
+          "SKILL.md": "/abs/skills/pr-hero-ci-setup/SKILL.md",
+          "assets/workflow.yml":
+            "/abs/skills/pr-hero-ci-setup/assets/workflow.yml",
+        },
+      };
+
+      const result = await syncSkills(env, multiSkillAssets, {
+        readFile: (p) => {
+          if (p === "/abs/skills/pr-hero-triage/SKILL.md")
+            return "triage skill content";
+          if (p === "/abs/skills/pr-hero-triage/adjudicator.md")
+            return "triage adjudicator content";
+          if (p === "/abs/skills/pr-hero-ci-setup/SKILL.md")
+            return "ci-setup skill content";
+          if (p === "/abs/skills/pr-hero-ci-setup/assets/workflow.yml")
+            return "ci-setup workflow template content";
+          return written[p];
+        },
+        writeFile: async (p, content) => {
+          written[p] = content;
+        },
+        exists: (p) => Boolean(written[p]),
+      });
+
+      expect(result.synced).toEqual([
+        "SKILL.md",
+        "adjudicator.md",
+        "SKILL.md",
+        "assets/workflow.yml",
+      ]);
+      expect(written["/home/user/.claude/skills/pr-hero-triage/SKILL.md"]).toBe(
+        "triage skill content",
+      );
+      expect(
+        written["/home/user/.claude/skills/pr-hero-ci-setup/SKILL.md"],
+      ).toBe("ci-setup skill content");
+      expect(
+        written[
+          "/home/user/.claude/skills/pr-hero-ci-setup/assets/workflow.yml"
+        ],
+      ).toBe("ci-setup workflow template content");
     });
   });
 

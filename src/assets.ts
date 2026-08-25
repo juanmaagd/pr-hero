@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
   BUNDLED_AGENT_FILES,
+  CI_SETUP_SKILL_FILES,
   SCOUT_PROMPT_PATH,
   SUMMARIZER_PROMPT_PATH,
   TRIAGE_SKILL_FILES,
@@ -19,6 +20,7 @@ export interface EngineAssets {
   scoutPromptPath: string;
   summarizerPromptPath: string;
   triageSkillFiles: Record<string, string>; // logical filename → path, from the manifest
+  ciSetupSkillFiles: Record<string, string>; // logical filename → path, from the manifest
   version: string; // baked at compile; package.json otherwise
 }
 
@@ -86,6 +88,7 @@ export function resolveEngineAssets(): EngineAssets {
     scoutPromptPath: SCOUT_PROMPT_PATH,
     summarizerPromptPath: SUMMARIZER_PROMPT_PATH,
     triageSkillFiles: TRIAGE_SKILL_FILES,
+    ciSetupSkillFiles: CI_SETUP_SKILL_FILES,
     version,
   };
 }

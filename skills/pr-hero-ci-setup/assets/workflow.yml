@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run pr-hero
-        uses: ./
+        uses: juanmaagd/pr-hero@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Provide ONE of the two secrets below (never leave both blank).

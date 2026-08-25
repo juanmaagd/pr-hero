@@ -56,12 +56,44 @@ trim it.
 | Secret | Required | Notes |
 |---|---|---|
 | `GITHUB_TOKEN` | Yes (auto-provided) | GitHub injects this automatically; the action's `github-token` input defaults to it — you rarely need to set it explicitly. |
-| `ANTHROPIC_API_KEY` | One of these two | A standard Anthropic API key. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | One of these two | A Claude Code OAuth token, if you use one instead of a raw API key. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | One of these two | A Claude Code OAuth token. Consumes directly from your Claude subscription (Pro/Team/Enterprise) with **zero extra API billing/costs**. |
+| `ANTHROPIC_API_KEY` | One of these two | A standard Anthropic API key, billed per token via your Anthropic Console account. |
 
 Reference every secret **by name** (`${{ secrets.ANTHROPIC_API_KEY }}`) — never paste a literal key into
 the workflow file, a log line, or a PR comment. The action itself follows the same rule: it never echoes,
 logs, or truncates a secret value anywhere in its output.
+
+### How to obtain and configure credentials
+
+#### Option 1: Claude Subscription OAuth Token (`CLAUDE_CODE_OAUTH_TOKEN`)
+*Best for developers with Claude Pro, Team, or Enterprise subscriptions.*
+
+1. In your local terminal where Claude Code CLI is installed, run:
+   ```bash
+   claude setup-token
+   ```
+2. Authorize via the browser login window.
+3. Copy the resulting token string.
+
+#### Option 2: Anthropic API Key (`ANTHROPIC_API_KEY`)
+*Best for pay-as-you-go per-token billing on an Anthropic Console account.*
+
+1. Go to [Anthropic Console Keys](https://console.anthropic.com/settings/keys).
+2. Click **Create Key**, assign a name (e.g. `pr-hero-ci`), and copy the `sk-ant-...` key.
+
+#### Setting the secret in GitHub
+
+* **Via GitHub CLI (Fast):**
+  ```bash
+  gh secret set CLAUDE_CODE_OAUTH_TOKEN # or ANTHROPIC_API_KEY
+  ```
+  Paste the token when prompted.
+* **Via GitHub Web UI:**
+  1. Go to `https://github.com/<owner>/<repo>/settings/secrets/actions`.
+  2. Click **New repository secret**.
+  3. Enter Name (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`).
+  4. Paste the token into Secret and click **Add secret**.
+
 
 ## Token permissions
 

@@ -33,6 +33,15 @@ describe("resolveEngineAssets", () => {
       expect(existsSync(filePath)).toBe(true);
     }
 
+    // CI setup skill files all exist on disk
+    expect(Object.keys(assets.ciSetupSkillFiles).length).toBe(2);
+    for (const [logicalName, filePath] of Object.entries(
+      assets.ciSetupSkillFiles,
+    )) {
+      expect(typeof logicalName).toBe("string");
+      expect(existsSync(filePath)).toBe(true);
+    }
+
     // defaultAgentsDir is populated in dev mode and points to existing directory
     expect(assets.defaultAgentsDir).toBeDefined();
     expect(existsSync(assets.defaultAgentsDir ?? "")).toBe(true);

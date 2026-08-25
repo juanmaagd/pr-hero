@@ -22,6 +22,12 @@ import refuterPrompt from "../prompts/default/review-refuter.md" with {
 
 import scoutPrompt from "../prompts/scout.md" with { type: "file" };
 import summarizerPrompt from "../prompts/summarizer.md" with { type: "file" };
+import ciSetupWorkflow from "../skills/pr-hero-ci-setup/assets/workflow.yml" with {
+  type: "file",
+};
+import ciSetupSkill from "../skills/pr-hero-ci-setup/SKILL.md" with {
+  type: "file",
+};
 import triageAdjudicator from "../skills/pr-hero-triage/adjudicator.md" with {
   type: "file",
 };
@@ -43,4 +49,9 @@ export const SUMMARIZER_PROMPT_PATH = summarizerPrompt;
 export const TRIAGE_SKILL_FILES: Record<string, string> = {
   "SKILL.md": triageSkill,
   "adjudicator.md": triageAdjudicator,
+};
+
+export const CI_SETUP_SKILL_FILES: Record<string, string> = {
+  "SKILL.md": ciSetupSkill,
+  "assets/workflow.yml": ciSetupWorkflow,
 };

@@ -238,92 +238,114 @@ export async function syncSkills(
       writeFileSync(p, c, "utf-8");
     });
 
-  const targetDir = path.join(env.skillsDir, "pr-hero-triage");
-  const digestFile = path.join(targetDir, "digest.json");
-
-  // 1. Read existing digest
-  let existingDigest:
-    | { files?: Record<string, string>; engine_version?: string }
-    | undefined;
-  if (exists(digestFile)) {
-    try {
-      const raw = readFile(digestFile);
-      if (raw) existingDigest = JSON.parse(raw);
-    } catch {
-      // Ignored
-    }
+  const skillsToSync: Array<{ name: string; files: Record<string, string> }> = [
+    { name: "pr-hero-triage", files: assets.triageSkillFiles },
+  ];
+  if (
+    assets.ciSetupSkillFiles &&
+    Object.keys(assets.ciSetupSkillFiles).length > 0
+  ) {
+    skillsToSync.push({
+      name: "pr-hero-ci-setup",
+      files: assets.ciSetupSkillFiles,
+    });
   }
 
-  // 2. Read upstream assets and check hashes
-  const upstreamContents: Record<string, string> = {};
-  const upstreamHashes: Record<string, string> = {};
+  const allSynced: string[] = [];
+  const allErrors: string[] = [];
+  let allUpToDate = true;
 
-  for (const [logicalName, srcPath] of Object.entries(
-    assets.triageSkillFiles,
-  )) {
-    const content = readFile(srcPath);
-    if (content === undefined) {
-      return {
-        synced: [],
-        errors: [`Missing upstream asset for ${logicalName} at ${srcPath}`],
-      };
-    }
-    upstreamContents[logicalName] = content;
-    upstreamHashes[logicalName] = sha256(content);
-  }
+  for (const skill of skillsToSync) {
+    const targetDir = path.join(env.skillsDir, skill.name);
+    const digestFile = path.join(targetDir, "digest.json");
 
-  // 3. Drift detection
-  let isUpToDate = true;
-  for (const [logicalName, upstreamHash] of Object.entries(upstreamHashes)) {
-    const destFile = path.join(targetDir, logicalName);
-    if (!exists(destFile)) {
-      isUpToDate = false;
-      continue;
-    }
-
-    const diskContent = readFile(destFile);
-    if (diskContent === undefined) {
-      isUpToDate = false;
-      continue;
-    }
-
-    const diskHash = sha256(diskContent);
-    if (diskHash !== upstreamHash) {
-      isUpToDate = false;
-      const recordedHash = existingDigest?.files?.[logicalName];
-      if (recordedHash && diskHash !== recordedHash && !options.force) {
-        return {
-          synced: [],
-          driftDetected: true,
-          errors: [
-            `Local edits detected in ${destFile}. Pass force to overwrite.`,
-          ],
-        };
+    // 1. Read existing digest
+    let existingDigest:
+      | { files?: Record<string, string>; engine_version?: string }
+      | undefined;
+    if (exists(digestFile)) {
+      try {
+        const raw = readFile(digestFile);
+        if (raw) existingDigest = JSON.parse(raw);
+      } catch {
+        // Ignored
       }
     }
+
+    // 2. Read upstream assets and check hashes
+    const upstreamContents: Record<string, string> = {};
+    const upstreamHashes: Record<string, string> = {};
+
+    for (const [logicalName, srcPath] of Object.entries(skill.files)) {
+      const content = readFile(srcPath);
+      if (content === undefined) {
+        return {
+          synced: [],
+          errors: [`Missing upstream asset for ${logicalName} at ${srcPath}`],
+        };
+      }
+      upstreamContents[logicalName] = content;
+      upstreamHashes[logicalName] = sha256(content);
+    }
+
+    // 3. Drift detection
+    let isUpToDate = true;
+    for (const [logicalName, upstreamHash] of Object.entries(upstreamHashes)) {
+      const destFile = path.join(targetDir, logicalName);
+      if (!exists(destFile)) {
+        isUpToDate = false;
+        continue;
+      }
+
+      const diskContent = readFile(destFile);
+      if (diskContent === undefined) {
+        isUpToDate = false;
+        continue;
+      }
+
+      const diskHash = sha256(diskContent);
+      if (diskHash !== upstreamHash) {
+        isUpToDate = false;
+        const recordedHash = existingDigest?.files?.[logicalName];
+        if (recordedHash && diskHash !== recordedHash && !options.force) {
+          return {
+            synced: [],
+            driftDetected: true,
+            errors: [
+              `Local edits detected in ${destFile}. Pass force to overwrite.`,
+            ],
+          };
+        }
+      }
+    }
+
+    if (isUpToDate && existingDigest) {
+      continue;
+    }
+
+    allUpToDate = false;
+
+    // 4. Write synced files
+    for (const [logicalName, content] of Object.entries(upstreamContents)) {
+      const destFile = path.join(targetDir, logicalName);
+      await writeFile(destFile, content);
+      allSynced.push(logicalName);
+    }
+
+    // Write digest
+    const newDigest = {
+      files: upstreamHashes,
+      synced_at: new Date().toISOString(),
+      engine_version: assets.version,
+    };
+    await writeFile(digestFile, `${JSON.stringify(newDigest, null, 2)}\n`);
   }
 
-  if (isUpToDate && existingDigest) {
+  if (allUpToDate && allSynced.length === 0) {
     return { synced: [], upToDate: true, errors: [] };
   }
 
-  // 4. Write synced files
-  const synced: string[] = [];
-  for (const [logicalName, content] of Object.entries(upstreamContents)) {
-    const destFile = path.join(targetDir, logicalName);
-    await writeFile(destFile, content);
-    synced.push(logicalName);
-  }
-
-  // Write digest
-  const newDigest = {
-    files: upstreamHashes,
-    synced_at: new Date().toISOString(),
-    engine_version: assets.version,
-  };
-  await writeFile(digestFile, `${JSON.stringify(newDigest, null, 2)}\n`);
-
-  return { synced, errors: [] };
+  return { synced: allSynced, errors: allErrors };
 }
 
 export function inspectSkillsSync(
@@ -346,42 +368,54 @@ export function inspectSkillsSync(
       }
     });
 
-  const targetDir = path.join(env.skillsDir, "pr-hero-triage");
-  const digestFile = path.join(targetDir, "digest.json");
-
-  if (!exists(digestFile)) return { synced: false, drift: false };
-
-  let existingDigest: { files?: Record<string, string> } | undefined;
-  try {
-    const raw = readFile(digestFile);
-    if (raw) existingDigest = JSON.parse(raw);
-  } catch {
-    return { synced: false, drift: false };
+  const skillsToCheck: Array<{ name: string; files: Record<string, string> }> =
+    [{ name: "pr-hero-triage", files: assets.triageSkillFiles }];
+  if (
+    assets.ciSetupSkillFiles &&
+    Object.keys(assets.ciSetupSkillFiles).length > 0
+  ) {
+    skillsToCheck.push({
+      name: "pr-hero-ci-setup",
+      files: assets.ciSetupSkillFiles,
+    });
   }
 
-  for (const [logicalName, srcPath] of Object.entries(
-    assets.triageSkillFiles,
-  )) {
-    const destFile = path.join(targetDir, logicalName);
-    if (!exists(destFile)) return { synced: false, drift: false };
+  for (const skill of skillsToCheck) {
+    const targetDir = path.join(env.skillsDir, skill.name);
+    const digestFile = path.join(targetDir, "digest.json");
 
-    const srcContent = readFile(srcPath);
-    const destContent = readFile(destFile);
-    if (!srcContent || !destContent) return { synced: false, drift: false };
+    if (!exists(digestFile)) return { synced: false, drift: false };
 
-    const diskHash = sha256(destContent);
-    const upstreamHash = sha256(srcContent);
-    const recordedHash = existingDigest?.files?.[logicalName];
-
-    if (
-      recordedHash &&
-      diskHash !== recordedHash &&
-      diskHash !== upstreamHash
-    ) {
-      return { synced: false, drift: true };
-    }
-    if (diskHash !== upstreamHash) {
+    let existingDigest: { files?: Record<string, string> } | undefined;
+    try {
+      const raw = readFile(digestFile);
+      if (raw) existingDigest = JSON.parse(raw);
+    } catch {
       return { synced: false, drift: false };
+    }
+
+    for (const [logicalName, srcPath] of Object.entries(skill.files)) {
+      const destFile = path.join(targetDir, logicalName);
+      if (!exists(destFile)) return { synced: false, drift: false };
+
+      const srcContent = readFile(srcPath);
+      const destContent = readFile(destFile);
+      if (!srcContent || !destContent) return { synced: false, drift: false };
+
+      const diskHash = sha256(destContent);
+      const upstreamHash = sha256(srcContent);
+      const recordedHash = existingDigest?.files?.[logicalName];
+
+      if (
+        recordedHash &&
+        diskHash !== recordedHash &&
+        diskHash !== upstreamHash
+      ) {
+        return { synced: false, drift: true };
+      }
+      if (diskHash !== upstreamHash) {
+        return { synced: false, drift: false };
+      }
     }
   }
 
@@ -641,58 +675,63 @@ export async function removeSkills(
     });
   const unlink = options.unlink ?? unlinkSync;
 
-  const targetDir = path.join(env.skillsDir, "pr-hero-triage");
-  const digestFile = path.join(targetDir, "digest.json");
-
-  if (!exists(targetDir)) {
-    return { removed: [], skippedModified: [], errors: [] };
-  }
-
-  let digest: { files?: Record<string, string> } | undefined;
-  if (exists(digestFile)) {
-    try {
-      const raw = readFile(digestFile);
-      if (raw) digest = JSON.parse(raw);
-    } catch {
-      // Ignored
-    }
-  }
-
+  const skillNames = ["pr-hero-triage", "pr-hero-ci-setup"];
   const removed: string[] = [];
   const skippedModified: string[] = [];
   const errors: string[] = [];
 
-  if (digest?.files) {
-    for (const [logicalName, expectedHash] of Object.entries(digest.files)) {
-      const filePath = path.join(targetDir, logicalName);
-      if (!exists(filePath)) continue;
+  for (const skillName of skillNames) {
+    const targetDir = path.join(env.skillsDir, skillName);
+    const digestFile = path.join(targetDir, "digest.json");
 
-      const content = readFile(filePath);
-      if (content === undefined) continue;
+    if (!exists(targetDir)) continue;
 
-      const fileHash = sha256(content);
-      if (fileHash === expectedHash) {
-        try {
-          unlink(filePath);
-          removed.push(logicalName);
-        } catch (err) {
-          errors.push(
-            `Failed to remove ${filePath}: ${(err as Error).message}`,
-          );
-        }
-      } else {
-        skippedModified.push(logicalName);
+    let digest: { files?: Record<string, string> } | undefined;
+    if (exists(digestFile)) {
+      try {
+        const raw = readFile(digestFile);
+        if (raw) digest = JSON.parse(raw);
+      } catch {
+        // Ignored
       }
     }
-  }
 
-  // Remove digest if no files were skipped due to modification
-  if (skippedModified.length === 0 && exists(digestFile)) {
-    try {
-      unlink(digestFile);
-      removed.push("digest.json");
-    } catch (err) {
-      errors.push(`Failed to remove ${digestFile}: ${(err as Error).message}`);
+    let skillSkippedModified = false;
+    if (digest?.files) {
+      for (const [logicalName, expectedHash] of Object.entries(digest.files)) {
+        const filePath = path.join(targetDir, logicalName);
+        if (!exists(filePath)) continue;
+
+        const content = readFile(filePath);
+        if (content === undefined) continue;
+
+        const fileHash = sha256(content);
+        if (fileHash === expectedHash) {
+          try {
+            unlink(filePath);
+            removed.push(logicalName);
+          } catch (err) {
+            errors.push(
+              `Failed to remove ${filePath}: ${(err as Error).message}`,
+            );
+          }
+        } else {
+          skippedModified.push(logicalName);
+          skillSkippedModified = true;
+        }
+      }
+    }
+
+    // Remove digest if no files were skipped due to modification
+    if (!skillSkippedModified && exists(digestFile)) {
+      try {
+        unlink(digestFile);
+        removed.push("digest.json");
+      } catch (err) {
+        errors.push(
+          `Failed to remove ${digestFile}: ${(err as Error).message}`,
+        );
+      }
     }
   }
 
