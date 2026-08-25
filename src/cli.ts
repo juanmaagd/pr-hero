@@ -202,6 +202,7 @@ import {
 import {
   buildPhaseBQueue,
   collapseTargets,
+  decideLastHeadDelta,
   enrichPriorsFromThreads,
   parseNameOnly,
   parseNameStatus,
@@ -212,6 +213,7 @@ import {
   readRereviewProvenance,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
+  unreachableLastHeadMessage,
 } from "./rereview-prepare";
 import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
@@ -1578,9 +1580,26 @@ async function reviewPr(
           priors: ReturnType<typeof priorsFromStateFindings>;
         }
       | undefined;
-    if (prepared.case !== "A" && prepared.last.L !== null) {
+    const lastHeadDelta = decideLastHeadDelta({
+      case: prepared.case,
+      L: prepared.last.L,
+    });
+    if (lastHeadDelta.kind !== "none") {
+      // A force-pushed L is gone from this clone, so there is no L..H delta to
+      // read and asking git for one is the crash this branch exists to avoid.
+      // Case E already planned a FULL review; an empty name-status keeps Phase
+      // B running over it, and classifyPrior's D/E branch queues every prior
+      // for verification before it would ever consult `touched`. Losing the
+      // deletion/rename settling that a real name-status buys therefore costs
+      // a verify spawn, never a dropped prior.
+      if (lastHeadDelta.kind === "unreachable") {
+        const degraded = unreachableLastHeadMessage(lastHeadDelta.sha);
+        log(isCi ? formatWorkflowCommand("notice", degraded) : degraded);
+      }
       const nameStatus = parseNameStatus(
-        await gitNameStatus(gitDirOwner, prepared.last.L, headSha),
+        lastHeadDelta.kind === "diff"
+          ? await gitNameStatus(gitDirOwner, lastHeadDelta.from, headSha)
+          : "",
       );
       const summaryComment =
         existingSummaryId === null

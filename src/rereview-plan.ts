@@ -60,6 +60,48 @@ export function decideRereviewCase(input: {
   return "D";
 }
 
+// What the re-review's Phase B gate may ask git for, given the case the
+// machine landed in. `unreachable` is the force-push case, and it is the whole
+// reason this decision is a function instead of an inline condition.
+//
+// A rebase of a stacked PR orphans the previously-reviewed head L recorded in
+// the `<!-- pr-hero-state head=... -->` marker on the PR. A CI runner's fresh
+// clone never fetched that object, so `git diff --name-status L..H` dies with
+// "Invalid revision range" and takes the entire review down with it. Case E
+// already plans a FULL review for exactly this situation — but the gate that
+// guarded the L..H delta asked only "is this a first review?", a question case
+// E answers "no", so it ran the diff anyway. Found by pr-hero's own Action on
+// PR #68 (2026-08-25): red in 8 seconds, and rebasing is routine.
+//
+// Reachability is read off the case rather than re-probed: inside
+// `prepareDiscovery` (rereview-prepare.ts) — the only production caller of
+// `decideRereviewCase`, and one that always runs `git cat-file -e L^{commit}`
+// when L is non-null — case "E" means exactly "L is non-null and that probe
+// said no".
+export type LastHeadDelta =
+  | { kind: "none" }
+  | { kind: "diff"; from: string }
+  | { kind: "unreachable"; sha: string };
+
+export function decideLastHeadDelta(input: {
+  case: RereviewCase;
+  L: string | null;
+}): LastHeadDelta {
+  if (input.case === "A" || input.L === null) return { kind: "none" };
+  if (input.case === "E") return { kind: "unreachable", sha: input.L };
+  return { kind: "diff", from: input.L };
+}
+
+// Degrading silently would be indistinguishable from a review that was always
+// full, which is how a truncated re-review hides. Said once, in CI and out.
+export function unreachableLastHeadMessage(sha: string): string {
+  return (
+    `The previously-reviewed commit ${sha} is not present in this clone ` +
+    "(very likely a force-push or rebase). This run is a full review of the " +
+    "PR range rather than a delta, and every prior finding is re-verified."
+  );
+}
+
 export function planDiscovery(input: {
   case: RereviewCase;
   full: boolean;
