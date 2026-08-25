@@ -90,6 +90,13 @@ runs:
           cd "${{ github.action_path }}" && bun install --frozen-lockfile
         fi
 
+    - name: Install Claude Code CLI
+      shell: bash
+      run: |
+        if ! command -v claude >/dev/null 2>&1; then
+          npm install -g @anthropic-ai/claude-code
+        fi
+
     - name: Run pr-hero
       id: run-pr-hero
       shell: bash

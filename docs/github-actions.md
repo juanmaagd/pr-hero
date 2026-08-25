@@ -27,6 +27,7 @@ permissions:
   contents: read # actions/checkout
   pull-requests: write # inline comments + review + step summary
   issues: write # resolving/replying on review threads (GitHub models PR conversations as issues)
+  statuses: write # commit status updates
 
 jobs:
   review:
@@ -97,12 +98,13 @@ logs, or truncates a secret value anywhere in its output.
 
 ## Token permissions
 
-The workflow's `permissions:` block needs exactly three scopes, each for a specific reason:
+The workflow's `permissions:` block needs four scopes, each for a specific reason:
 
 - **`contents: read`** — `actions/checkout` needs to read repository contents.
 - **`pull-requests: write`** — posting inline findings, the summary review, and the step summary.
 - **`issues: write`** — resolving and replying on review threads. GitHub's API models every PR
   conversation as an issue thread, so this scope is required even though nothing here touches an issue.
+- **`statuses: write`** — updating the PR commit status context (pending, success, error).
 
 ## Triggers
 
