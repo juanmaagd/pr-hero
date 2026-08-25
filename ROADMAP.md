@@ -248,13 +248,13 @@ Distribution — on a machine that is not this one:
 - [x] `npm i -g pr-hero` installs the command (package is not `"private": true`, builds to `dist/`, has `bin/pr-hero.js`, `engines`, Apache-2.0)
 - [x] `pr-hero init` does not mention `deep-review` or a path under `/Users/juanma` (bundled default prompt assets via `import ... with { type: "file" }` manifest)
 - [x] dependency preflight names whatever is missing (`claude` / `gh` / codegraph) instead of failing mute (`src/system-tools.ts` + `pr-hero doctor` tri-state)
-- [ ] every knob in the table above is settable from the TUI/menus (flags remain for scripts)
-- [ ] `pr-hero review --dry-run` and one `--pr --post` succeed on a stranger's repo
-- [ ] a second push on that PR exercises item 7, not a full re-hunt dressed as a delta
-- [ ] the Action runs on an open PR, posts, and respects the cap
+- [x] every knob in the table above is settable from the TUI/menus (flags remain for scripts)
+- [x] `pr-hero review --dry-run` and one `--pr --post` succeed on a stranger's repo — **2026-08-25**, verified on `juanmaagd/pr-hero-landing#1`
+- [x] a second push on that PR exercises item 7, not a full re-hunt dressed as a delta — **2026-08-25**, verified on `juanmaagd/pr-hero-landing#1` (Case C restricted re-review in 8s, updated in-place with `pr-hero-state`)
+- [x] the Action runs on an open PR, posts, and respects the cap
       - [x] `v1` and `v1.0.0` tags published — 2026-08-25 (`aff0324`)
-      - [ ] still open: live open-PR run on stranger's repo (landing page) to verify the Action end-to-end
-- [ ] every report still says assistant, not merge gate
+      - [x] live open-PR run on stranger's repo (`juanmaagd/pr-hero-landing#1`) verified end-to-end via `uses: juanmaagd/pr-hero@v1`
+- [x] every report still says assistant, not merge gate (verified footer & exit code 0)
 
 ### Explicitly after launch
 
