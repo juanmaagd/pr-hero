@@ -197,6 +197,38 @@ export interface CliOptions {
   configLayer?: "person" | "team" | "watch";
   edit?: boolean;
   repoExplicit?: boolean;
+  // ROADMAP Pillar 3 (GitHub Actions CI). `ci` is the EXPLICIT flag only —
+  // `isCiEnvironment()` ORs it with the GITHUB_ACTIONS/CI env vars, which
+  // parseArgs (pure, no process.env read) cannot see. Both `budgetUsd` and
+  // `stepSummary` require `--ci` at parse time (the `--post`-requires-`--pr`
+  // precedent above): a spend ceiling or a summary toggle for a mode that
+  // never activates would be exactly the "silently dropped intention" the
+  // --bug-labels/--scout-model guards already refuse elsewhere in this file.
+  ci?: boolean;
+  // Unset means "no ceiling configured" (no gate, no disabled-ceiling
+  // warning — there is nothing to disable). <= 0, GIVEN explicitly, disables
+  // the ceiling too, but DOES warn: see ci-gates.ts's
+  // budgetDisabledWarningMessage for why the two are not the same state.
+  budgetUsd?: number;
+  // Tri-state like `summary`/`scout`: unset means "the shell's own default
+  // (on)", so `--step-summary` and `--no-step-summary` stay distinguishable
+  // from "nobody said".
+  stepSummary?: boolean;
+}
+
+// design.md 3.1's literal formula: Boolean(GITHUB_ACTIONS || CI || --ci).
+// Pure — env arrives as a parameter (reviewPr's shell reads
+// process.env.GITHUB_ACTIONS/CI and passes them in), so this stays offline-
+// testable without process.env being a hidden dependency the way parseArgs
+// itself refuses to have one. There is no `src/ci.ts` (design's proposed
+// home for this function) — Phases 1-2 already folded the CI surface into
+// ci-reporter.ts/ci-gates.ts instead, and this joins that same deviation
+// rather than starting a third file for one function.
+export function isCiEnvironment(
+  options: { ci?: boolean },
+  env: { GITHUB_ACTIONS?: string; CI?: string },
+): boolean {
+  return Boolean(env.GITHUB_ACTIONS || env.CI || options.ci);
 }
 
 export interface ParsedCli {
@@ -481,6 +513,7 @@ const VALUE_FLAGS = new Set([
   "--interval",
   "--max-changed-lines",
   "--max-changed-files",
+  "--budget-usd",
   "--finding",
   "--tag",
   "--body-file",
@@ -598,6 +631,18 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--no-scout") {
       options.scout = false;
+      continue;
+    }
+    if (arg === "--ci") {
+      options.ci = true;
+      continue;
+    }
+    if (arg === "--step-summary") {
+      options.stepSummary = true;
+      continue;
+    }
+    if (arg === "--no-step-summary") {
+      options.stepSummary = false;
       continue;
     }
     if (arg === "--full") {
@@ -829,6 +874,29 @@ export function parseArgs(argv: string[]): ParsedCli {
   ) {
     throw new CliUsageError(
       "--post publishes the review as a PR comment, so it requires --pr",
+    );
+  }
+  // ROADMAP Pillar 3 (GitHub Actions CI). `--ci` runs the CI headless shell
+  // (skip comments, step summary, structured outputs) against a PR — the
+  // official action always passes both together, and nothing else in this
+  // CLI has a CI-mode surface to activate.
+  if (options.ci && command !== "review") {
+    throw new CliUsageError("--ci only applies to the review command");
+  }
+  if (options.ci && options.pr === undefined) {
+    throw new CliUsageError(
+      "--ci runs the CI headless shell against a PR, so it requires --pr",
+    );
+  }
+  // Same "silently dropped intention" reasoning as --post/--pr above: a
+  // spend ceiling or a summary toggle for a mode that never turns on would
+  // be a flag the operator believes changed a run it did not.
+  if (options.budgetUsd !== undefined && !options.ci) {
+    throw new CliUsageError("--budget-usd only applies with --ci");
+  }
+  if (options.stepSummary !== undefined && !options.ci) {
+    throw new CliUsageError(
+      "--step-summary and --no-step-summary only apply with --ci",
     );
   }
   // The scout is a `review` stage and nothing else reads either flag.
@@ -1117,6 +1185,18 @@ function applyValueFlag(
     case "--max-changed-files":
       options.maxChangedFiles = parseLimit(flag, value);
       return;
+    // Unlike parseLimit (integer-only, size-gate's line/file counts):
+    // spend is a float ($7.50), and <= 0 is a real, meaningful value (see
+    // ci-gates.ts's evaluateBudgetGate) rather than a rejected input, so this
+    // only refuses non-numbers, never negatives.
+    case "--budget-usd": {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) {
+        throw new CliUsageError(`--budget-usd must be a number, got: ${value}`);
+      }
+      options.budgetUsd = parsed;
+      return;
+    }
     case "--finding":
       options.finding = value;
       return;
