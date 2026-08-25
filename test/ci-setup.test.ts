@@ -76,6 +76,27 @@ describe("generateCiWorkflowTemplate (pure)", () => {
     expect(template).not.toMatch(/sk-ant-[a-z0-9-]+/i);
   });
 
+  test("wires BOTH documented credential inputs, not just the API key", () => {
+    // The `with:` comment tells the reader to provide EITHER secret. A repo
+    // that follows it and sets only CLAUDE_CODE_OAUTH_TOKEN used to send an
+    // empty credential and never authenticate, while `pr-hero doctor` — which
+    // accepts either variable — reported a healthy CI configuration. Silent
+    // auth failure behind a green diagnostic; the template has to pass the
+    // path it documents.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    const step = parsed.jobs.review.steps.find(
+      (s) => s.uses === "juanmaagd/pr-hero@v1",
+    ) as { with?: Record<string, string> } | undefined;
+    expect(step?.with?.["anthropic-api-key"]).toBe(
+      `\${{ secrets.ANTHROPIC_API_KEY }}`,
+    );
+    expect(step?.with?.["claude-token"]).toBe(
+      `\${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`,
+    );
+  });
+
   test("is deterministic — calling it twice returns byte-identical output", () => {
     expect(generateCiWorkflowTemplate()).toBe(generateCiWorkflowTemplate());
   });
@@ -211,6 +232,29 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
     expect(ciCheck?.severity).toBe("degraded");
+    expect(ciCheck?.hint).toMatch(/setup --ci|ci init/);
+  });
+
+  test("generic non-GitHub CI (CI=true) is degraded, never blocking", async () => {
+    // `CI=true` is the near-universal convention — GitLab, CircleCI, Jenkins,
+    // Travis, Buildkite, and plenty of container builds all set it. The
+    // secrets this check looks for (GITHUB_TOKEN plus Anthropic/Claude auth)
+    // only ever exist inside a GitHub Actions job, so on any of those it found
+    // nothing, marked the check blocking, and flipped report.overall — which
+    // makes `pr-hero upgrade --reconcile` push an error and exit 1, and a bare
+    // `pr-hero doctor` exit 1, on a machine where nothing is wrong.
+    const report = await runDoctor({
+      cwd: "/repo",
+      repoRoot: "/repo",
+      home: "/home/user",
+      exists: () => false,
+      readFile: () => undefined,
+      checkToolsOptions: { env: { CI: "true" } },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("degraded");
+    // And it is asked the question a non-GitHub machine can actually answer:
+    // "do you have a workflow?", not "where are your GitHub Actions secrets?"
     expect(ciCheck?.hint).toMatch(/setup --ci|ci init/);
   });
 
