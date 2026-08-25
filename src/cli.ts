@@ -1955,78 +1955,90 @@ async function reviewPr(
       // Spec 2.1: "Progress updates MUST use GitHub Actions log workflow
       // groups (`::group::` / `::endgroup::`) to structure runner logs
       // cleanly." One group around the whole hunt+refute run is the minimum
-      // that satisfies it — `::endgroup::` closes in the SAME finally as
-      // progress.stop() below, so an error path can't leave the group open.
-      if (isCi) log(formatWorkflowCommand("group", "pr-hero review"));
-      log(
-        `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-          `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
-          "comparable trees have taken " +
-          "8–25 minutes",
-      );
-      const started = performance.now();
-      const progress = startProgressRenderer(
-        started,
-        `PR #${prNumber}`,
-        activeHunters.map((a) => a.key),
-        spec.agents.some((a) => a.role === "refuter"),
-        summary.enabled,
-      );
-      await registerActiveRun({
-        pid: process.pid,
-        repo: repoHome.paths.repoId ?? path.basename(gitDirOwner),
-        pr: prNumber,
-        runDir,
-        startedAt: new Date().toISOString(),
-      });
-      try {
-        result = await runPipeline(
-          {
-            pr: prNumber,
-            // Same rule as local mode: record the commit the diff was actually
-            // computed against, or nothing downstream can reproduce the range.
-            baseSha: diffFromSha,
-            headSha,
-            worktree: worktreePath,
-            diffPath,
-            excludedPaths: effectiveDiff.droppedPaths,
-            gotchasPath,
-            agentsDir,
-            runDir,
-            outPath: path.join(runDir, "findings.json"),
-            mcpConfigPath,
-            hopBudget: options.hopBudget,
-            ...(options.model ? { model: options.model } : {}),
-            parityTriggerPaths: config.parity_trigger_paths,
-            suspicionPriors: config.suspicion_priors,
-            ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
-            ...(skipDiscovery ? {} : pipelineScoutInput(options)),
-            // NOT gated on skipDiscovery: an empty-delta re-review still
-            // classifies and verifies against this config, and a run whose
-            // artifact cannot name its config inputs is the unpoolable case
-            // D7 exists to prevent — whether or not hunters fanned out.
-            ...pipelineConfigInput(loaded),
-            engine: await engineIdentity(),
-            promptSet,
-            spec,
-            ...(skipDiscovery ? { skipDiscovery: true } : {}),
-            ...(rereview === undefined ? {} : { rereview }),
-            ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
-            ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
-            maxVerificationSteps,
-            ...(phaseB === undefined ? {} : { phaseB }),
-          },
-          { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+      // that satisfies it. The arm and the close both live inside
+      // withCiWorkflowGroup rather than at this call site, and EVERY
+      // statement of the setup below sits inside its body: the progress
+      // renderer and registerActiveRun (whose mkdirSync/writeFileSync are
+      // unguarded) can throw on a read-only or full runner filesystem, and
+      // anything armed-but-not-yet-guarded there folds the whole rest of the
+      // job log — the `::error::` annotation naming the cause included —
+      // into a group nothing ever closes.
+      let started = 0;
+      await withCiWorkflowGroup(isCi, "pr-hero review", log, async () => {
+        log(
+          `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+            `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
+            "comparable trees have taken " +
+            "8–25 minutes",
         );
-      } finally {
-        // try/finally, never success-only: a leaked interval keeps the event
-        // loop alive and hangs process exit on the error path. `::endgroup::`
-        // rides the same guarantee — an error inside runPipeline must not
-        // leave a `::group::` open in the runner log.
-        progress.stop();
-        if (isCi) log(formatWorkflowCommand("endgroup"));
-        await unregisterActiveRun(process.pid);
-      }
+        started = performance.now();
+        const progress = startProgressRenderer(
+          started,
+          `PR #${prNumber}`,
+          activeHunters.map((a) => a.key),
+          spec.agents.some((a) => a.role === "refuter"),
+          summary.enabled,
+        );
+        try {
+          // registerActiveRun rides INSIDE this try, not before it: the
+          // renderer is already ticking by now, and a throw here used to
+          // leak its 250ms interval — which keeps the event loop alive and
+          // hangs process exit, the exact failure the finally below exists
+          // to prevent.
+          await registerActiveRun({
+            pid: process.pid,
+            repo: repoHome.paths.repoId ?? path.basename(gitDirOwner),
+            pr: prNumber,
+            runDir,
+            startedAt: new Date().toISOString(),
+          });
+          result = await runPipeline(
+            {
+              pr: prNumber,
+              // Same rule as local mode: record the commit the diff was actually
+              // computed against, or nothing downstream can reproduce the range.
+              baseSha: diffFromSha,
+              headSha,
+              worktree: worktreePath,
+              diffPath,
+              excludedPaths: effectiveDiff.droppedPaths,
+              gotchasPath,
+              agentsDir,
+              runDir,
+              outPath: path.join(runDir, "findings.json"),
+              mcpConfigPath,
+              hopBudget: options.hopBudget,
+              ...(options.model ? { model: options.model } : {}),
+              parityTriggerPaths: config.parity_trigger_paths,
+              suspicionPriors: config.suspicion_priors,
+              ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
+              ...(skipDiscovery ? {} : pipelineScoutInput(options)),
+              // NOT gated on skipDiscovery: an empty-delta re-review still
+              // classifies and verifies against this config, and a run whose
+              // artifact cannot name its config inputs is the unpoolable case
+              // D7 exists to prevent — whether or not hunters fanned out.
+              ...pipelineConfigInput(loaded),
+              engine: await engineIdentity(),
+              promptSet,
+              spec,
+              ...(skipDiscovery ? { skipDiscovery: true } : {}),
+              ...(rereview === undefined ? {} : { rereview }),
+              ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
+              ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
+              maxVerificationSteps,
+              ...(phaseB === undefined ? {} : { phaseB }),
+            },
+            { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+          );
+        } finally {
+          // try/finally, never success-only: a leaked interval keeps the
+          // event loop alive and hangs process exit on the error path.
+          // `::endgroup::` is no longer emitted here — it rides
+          // withCiWorkflowGroup's own finally, which wraps this whole block.
+          progress.stop();
+          await unregisterActiveRun(process.pid);
+        }
+      });
       if (result === undefined) {
         throw new CliError("internal: pipeline returned no result");
       }
@@ -2286,7 +2298,10 @@ async function reviewPr(
       // with what the terminal (and the PR comments, via step 14's posted
       // outcome) already reported. `posted?.delta` reuses postInlineFindings'
       // own re-review delta — no separate computation.
-      if (isCi) {
+      // The gate is shouldPublishCiReview, never a bare `isCi`: design D6's
+      // "a failed session publishes nothing" binds this channel exactly as it
+      // binds postInlineIfEligible above. See that predicate for why.
+      if (shouldPublishCiReview(isCi, result.sessionFailed)) {
         const ciPlan = planCiReview({
           prNumber,
           headSha,
@@ -3135,6 +3150,47 @@ export function planCiReview(input: {
       run_dir: input.runDir,
     },
   };
+}
+
+// Spec 2.1's `::group::` / `::endgroup::` pairing, owned by ONE function so
+// the arm and the close cannot drift apart. An unclosed group is not
+// cosmetic: GitHub folds every line logged after it into a collapsed section,
+// so a crash mid-review hides its own `::error::` annotation from the reader
+// who most needs it. Putting the arm at the call site and the close in some
+// later `finally` leaves a window — whatever runs in between — where a throw
+// escapes with the group still open; here there is no in-between.
+//
+// `emit` is a parameter rather than this module's `log`: a guarantee nothing
+// can observe is a guarantee nobody can test, and the failure path is exactly
+// the one that has to be proven.
+export async function withCiWorkflowGroup<T>(
+  isCi: boolean,
+  name: string,
+  emit: (line: string) => void,
+  body: () => Promise<T>,
+): Promise<T> {
+  if (!isCi) return await body();
+  emit(formatWorkflowCommand("group", name));
+  try {
+    return await body();
+  } finally {
+    emit(formatWorkflowCommand("endgroup"));
+  }
+}
+
+// Design D6, applied to the CI headless channel: a failed session publishes
+// NOTHING. `sessionFailed` means every hunter died, which leaves the merged
+// document with zero findings — so the "reviewed" payload built from it would
+// claim `status=reviewed` + a "No findings detected" step summary for a review
+// that never ran. The job exits non-zero either way, but a human reads the job
+// summary, not the exit code, and postInlineIfEligible already suppresses PR
+// posting on exactly this condition; the CI channel must not be the one place
+// a crashed run still asserts a clean tree.
+export function shouldPublishCiReview(
+  isCi: boolean,
+  sessionFailed: boolean,
+): boolean {
+  return isCi && !sessionFailed;
 }
 
 // Spec 1.1: "Output parameter writing when $GITHUB_OUTPUT is provided" —

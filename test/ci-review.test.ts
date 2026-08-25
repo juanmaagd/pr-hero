@@ -23,8 +23,10 @@ import {
 import type { CiOutputs } from "../src/ci-reporter";
 import {
   planCiReview,
+  shouldPublishCiReview,
   shouldWriteCiOutputs,
   shouldWriteStepSummary,
+  withCiWorkflowGroup,
 } from "../src/cli";
 import type { Finding } from "../src/findings";
 import { isCiEnvironment, parseArgs } from "../src/preflight";
@@ -503,5 +505,82 @@ describe("shouldWriteStepSummary", () => {
 
   test("false when the path is undefined", () => {
     expect(shouldWriteStepSummary(true, undefined, undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldPublishCiReview — design D6's "a failed session publishes nothing",
+// applied to the CI headless channel. `sessionFailed` means EVERY hunter
+// died, which leaves `doc.findings` empty; publishing that as
+// `status=reviewed` + a "No findings detected" step summary would tell a
+// human the PR came back clean from a review that never ran. The job still
+// exits non-zero, but a red job whose own artifacts assert a clean review is
+// worse than a red job with no artifacts at all.
+// ---------------------------------------------------------------------------
+
+describe("shouldPublishCiReview", () => {
+  test("true for a CI run whose session completed", () => {
+    expect(shouldPublishCiReview(true, false)).toBe(true);
+  });
+
+  test("a crashed CI session publishes NO reviewed outputs or step summary", () => {
+    expect(shouldPublishCiReview(true, true)).toBe(false);
+  });
+
+  test("false outside CI, session outcome notwithstanding", () => {
+    expect(shouldPublishCiReview(false, false)).toBe(false);
+    expect(shouldPublishCiReview(false, true)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withCiWorkflowGroup — spec 2.1's `::group::` / `::endgroup::` pairing.
+// An unclosed group is not a cosmetic defect: everything the runner logs
+// afterwards, the `::error::` annotation explaining the crash included, stays
+// folded inside a collapsed section. The pairing therefore has to hold on the
+// FAILURE path, which is the only path where reading the log matters.
+// ---------------------------------------------------------------------------
+
+describe("withCiWorkflowGroup", () => {
+  test("wraps the body in a matched group/endgroup pair", async () => {
+    const lines: string[] = [];
+    const result = await withCiWorkflowGroup(
+      true,
+      "pr-hero review",
+      (line) => lines.push(line),
+      async () => {
+        lines.push("body");
+        return "value";
+      },
+    );
+    expect(result).toBe("value");
+    expect(lines).toEqual(["::group::pr-hero review", "body", "::endgroup::"]);
+  });
+
+  test("emits ::endgroup:: even when the body throws, and rethrows", async () => {
+    const lines: string[] = [];
+    await expect(
+      withCiWorkflowGroup(
+        true,
+        "pr-hero review",
+        (line) => lines.push(line),
+        async () => {
+          throw new Error("EROFS: read-only file system");
+        },
+      ),
+    ).rejects.toThrow("EROFS: read-only file system");
+    expect(lines).toEqual(["::group::pr-hero review", "::endgroup::"]);
+  });
+
+  test("emits no workflow commands at all outside CI", async () => {
+    const lines: string[] = [];
+    const result = await withCiWorkflowGroup(
+      false,
+      "pr-hero review",
+      (line) => lines.push(line),
+      async () => "value",
+    );
+    expect(result).toBe("value");
+    expect(lines).toEqual([]);
   });
 });
