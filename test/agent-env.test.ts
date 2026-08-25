@@ -114,7 +114,7 @@ describe("Agent environment detector and sync", () => {
             "SKILL.md": "original_hash",
             "adjudicator.md": "content_hash",
           },
-          engine_version: "0.1.0",
+          engine_version: "1.0.0",
         }),
       };
 

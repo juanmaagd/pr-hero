@@ -3288,10 +3288,10 @@ describe("deriveEngineIdentity", () => {
     // annotated. A field that never changes annotates nothing.
     expect(
       deriveEngineIdentity(
-        { name: "pr-hero", version: "0.1.0" },
+        { name: "pr-hero", version: "1.0.0" },
         { ok: true, stdout: "961acef\n" },
       ),
-    ).toEqual({ name: "pr-hero", version: "0.1.0", revision: "961acef" });
+    ).toEqual({ name: "pr-hero", version: "1.0.0", revision: "961acef" });
   });
 
   test("omits revision rather than inventing one when git cannot answer", () => {
@@ -3301,10 +3301,10 @@ describe("deriveEngineIdentity", () => {
     // real commit.
     expect(
       deriveEngineIdentity(
-        { name: "pr-hero", version: "0.1.0" },
+        { name: "pr-hero", version: "1.0.0" },
         { ok: false, stdout: "" },
       ),
-    ).toEqual({ name: "pr-hero", version: "0.1.0" });
+    ).toEqual({ name: "pr-hero", version: "1.0.0" });
   });
 
   test("treats an empty stdout on a zero exit as no revision", () => {
@@ -3312,7 +3312,7 @@ describe("deriveEngineIdentity", () => {
     // reads as a commit whose name is the empty string.
     expect(
       deriveEngineIdentity(
-        { name: "pr-hero", version: "0.1.0" },
+        { name: "pr-hero", version: "1.0.0" },
         {
           ok: true,
           stdout: "  \n",

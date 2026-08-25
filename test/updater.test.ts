@@ -27,7 +27,7 @@ describe("updater (lifecycle foundations)", () => {
       const method = detectInstallMethod({
         execPath: standaloneBin,
         home,
-        version: "0.1.0",
+        version: "1.0.0",
       });
       expect(method.kind).toBe("standalone");
       if (method.kind === "standalone") {
@@ -49,7 +49,7 @@ describe("updater (lifecycle foundations)", () => {
       const method = detectInstallMethod({
         execPath: "/usr/local/bin/node",
         home,
-        version: "0.1.0",
+        version: "1.0.0",
         isDev: false,
       });
       expect(method.kind).toBe("package_manager");
@@ -76,8 +76,8 @@ describe("updater (lifecycle foundations)", () => {
     test("source checkout yields informative no-op plan", async () => {
       const plan = await planUpgrade({
         installMethod: { kind: "source" },
-        currentVersion: "0.1.0",
-        targetVersion: "0.2.0",
+        currentVersion: "1.0.0",
+        targetVersion: "1.1.0",
         home,
       });
       expect(plan.action).toBe("noop_source");
@@ -88,8 +88,8 @@ describe("updater (lifecycle foundations)", () => {
     test("standalone binary plans download to sibling temp, sha256 check, and .bak rename", async () => {
       const plan = await planUpgrade({
         installMethod: { kind: "standalone", binaryPath: standaloneBin },
-        currentVersion: "0.1.0",
-        targetVersion: "0.2.0",
+        currentVersion: "1.0.0",
+        targetVersion: "1.1.0",
         home,
         platform: "darwin",
         arch: "arm64",
@@ -102,15 +102,15 @@ describe("updater (lifecycle foundations)", () => {
         path.dirname(standaloneBin),
       );
       expect(plan.bakBinary).toBe(`${standaloneBin}.bak`);
-      expect(plan.downloadUrl).toContain("v0.2.0/pr-hero-darwin-arm64");
-      expect(plan.checksumsUrl).toContain("v0.2.0/SHA256SUMS");
+      expect(plan.downloadUrl).toContain("v1.1.0/pr-hero-darwin-arm64");
+      expect(plan.checksumsUrl).toContain("v1.1.0/SHA256SUMS");
     });
 
     test("already up-to-date standalone plan yields up_to_date action", async () => {
       const plan = await planUpgrade({
         installMethod: { kind: "standalone", binaryPath: standaloneBin },
-        currentVersion: "0.2.0",
-        targetVersion: "0.2.0",
+        currentVersion: "1.1.0",
+        targetVersion: "1.1.0",
         home,
       });
       expect(plan.action).toBe("up_to_date");
@@ -121,10 +121,10 @@ describe("updater (lifecycle foundations)", () => {
     test("reads and writes upgrade cache to upgradeCheckPath", () => {
       const cache: UpgradeCheckCache = {
         checked_at: "2026-08-24T12:00:00.000Z",
-        current_version: "0.1.0",
-        latest_version: "0.2.0",
-        reconciled_version: "0.1.0",
-        release_url: "https://github.com/juanmaagd/pr-hero/releases/tag/v0.2.0",
+        current_version: "1.0.0",
+        latest_version: "1.1.0",
+        reconciled_version: "1.0.0",
+        release_url: "https://github.com/juanmaagd/pr-hero/releases/tag/v1.1.0",
       };
 
       const storage: Record<string, string> = {};
@@ -145,13 +145,13 @@ describe("updater (lifecycle foundations)", () => {
       const now = new Date("2026-08-24T12:00:00.000Z").getTime();
       const fresh = {
         checked_at: new Date(now - 12 * 3600 * 1000).toISOString(),
-        current_version: "0.1.0",
-        latest_version: "0.2.0",
+        current_version: "1.0.0",
+        latest_version: "1.1.0",
       };
       const stale = {
         checked_at: new Date(now - 25 * 3600 * 1000).toISOString(),
-        current_version: "0.1.0",
-        latest_version: "0.2.0",
+        current_version: "1.0.0",
+        latest_version: "1.1.0",
       };
 
       expect(isCheckCacheFresh(fresh, now)).toBe(true);

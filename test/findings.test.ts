@@ -94,7 +94,7 @@ describe("findings schema round-trip", () => {
   test("accepts an optional engine envelope field", () => {
     const doc = {
       ...baseDocument(),
-      engine: { name: "pr-hero", version: "0.1.0" },
+      engine: { name: "pr-hero", version: "1.0.0" },
     };
     expect(() => validateFindingsDocument(doc)).not.toThrow();
   });

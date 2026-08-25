@@ -9,7 +9,7 @@ import type { Tier } from "./findings";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 export const MCP_SERVER_NAME = "pr-hero-store";
-export const MCP_SERVER_VERSION = "0.1.0";
+export const MCP_SERVER_VERSION = "1.0.0";
 
 export interface McpToolDefinition {
   name: string;
