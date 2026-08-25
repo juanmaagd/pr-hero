@@ -6,6 +6,7 @@ import {
   bindPriorsToPosted,
   buildPhaseBQueue,
   collapseTargets,
+  decideLastHeadDelta,
   enrichPriorsFromThreads,
   parseNameOnly,
   parseNameStatus,
@@ -195,6 +196,38 @@ describe("prepareDiscovery", () => {
     expect(toRereviewProvenance(prepared)?.case).toBe("D");
   });
 
+  // Coverage for the case the force-push fix depends on: D4 had a test, E did
+  // not. `commitExists: false` is the whole force-push simulation — no network,
+  // no real orphaned commit, just the seam prepareDiscovery already owns.
+  test("case E — L orphaned by a force-push → full B..H, verify-all", async () => {
+    const prepared = await prepareDiscovery({
+      B,
+      H,
+      full: false,
+      summaryHead: MISSING,
+      findingMarkers: [],
+      git: git({
+        commitExists: async () => false,
+        isAncestor: async () => {
+          throw new Error("a missing object must never be probed for ancestry");
+        },
+        nameOnly: async () => {
+          throw new Error("case E must not ask git for an L..H file list");
+        },
+      }),
+    });
+    expect(prepared.case).toBe("E");
+    expect(prepared.last.L).toBe(MISSING);
+    expect(prepared.plan.discovery).toBe("full");
+    expect(prepared.plan.verifyAll).toBe(true);
+    expect(prepared.plan.emptyDeltaIsError).toBe(false);
+    expect(prepared.discoveryPaths).toBeNull();
+    expect(prepared.discoveryFrom).toBe(B);
+    expect(
+      decideLastHeadDelta({ case: prepared.case, L: prepared.last.L }),
+    ).toEqual({ kind: "unreachable", sha: MISSING });
+  });
+
   test("W-prov — a first review carries no rereview block", async () => {
     const prepared = await prepareDiscovery({
       B,
@@ -209,6 +242,15 @@ describe("prepareDiscovery", () => {
 });
 
 describe("parseNameStatus", () => {
+  // The empty string is what an unreachable L feeds Phase B instead of a diff
+  // that cannot be taken: it must parse to "nothing touched", not throw.
+  test("empty stdout is an empty delta, not a parse failure", () => {
+    const parsed = parseNameStatus("");
+    expect(parsed.files).toEqual([]);
+    expect(parsed.deleted).toEqual([]);
+    expect(parsed.renameMap.size).toBe(0);
+  });
+
   test("S-revert — a deleted path is still a touched file", () => {
     const parsed = parseNameStatus("M\tsrc/a.ts\nD\tsrc/gone.ts\n");
     expect(parsed.deleted).toEqual(["src/gone.ts"]);

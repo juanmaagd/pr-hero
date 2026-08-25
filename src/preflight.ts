@@ -197,6 +197,52 @@ export interface CliOptions {
   configLayer?: "person" | "team" | "watch";
   edit?: boolean;
   repoExplicit?: boolean;
+  // ROADMAP Pillar 3 (GitHub Actions CI). `ci` is the EXPLICIT flag only —
+  // `isCiEnvironment()` ORs it with the GITHUB_ACTIONS/CI env vars, which
+  // parseArgs (pure, no process.env read) cannot see. Both `budgetUsd` and
+  // `stepSummary` require `--ci` at parse time (the `--post`-requires-`--pr`
+  // precedent above): a spend ceiling or a summary toggle for a mode that
+  // never activates would be exactly the "silently dropped intention" the
+  // --bug-labels/--scout-model guards already refuse elsewhere in this file.
+  //
+  // Phase 4 (CI Scaffolding) gave `--ci` a SECOND, command-scoped meaning:
+  // on `review` it activates the CI headless shell (requires --pr); on
+  // `setup` it means "scaffold .github/workflows/pr-hero.yml instead of
+  // running the interactive wizard" — see `ci init`'s dedicated command
+  // below for the same scaffolding without touching `setup`'s wizard
+  // default. `budgetUsd`/`stepSummary` still require the REVIEW reading of
+  // `--ci` specifically (checked below), since neither means anything to
+  // scaffolding.
+  ci?: boolean;
+  // `ci init` — the same scaffolding as `setup --ci`, as its own command.
+  // Unset on every other command. "init" is the only sub-word today; kept
+  // as a literal union (not a bare boolean) so a future `ci status` has
+  // somewhere to go without a breaking change.
+  ciSubcommand?: "init";
+  // Unset means "no ceiling configured" (no gate, no disabled-ceiling
+  // warning — there is nothing to disable). <= 0, GIVEN explicitly, disables
+  // the ceiling too, but DOES warn: see ci-gates.ts's
+  // budgetDisabledWarningMessage for why the two are not the same state.
+  budgetUsd?: number;
+  // Tri-state like `summary`/`scout`: unset means "the shell's own default
+  // (on)", so `--step-summary` and `--no-step-summary` stay distinguishable
+  // from "nobody said".
+  stepSummary?: boolean;
+}
+
+// design.md 3.1's literal formula: Boolean(GITHUB_ACTIONS || CI || --ci).
+// Pure — env arrives as a parameter (reviewPr's shell reads
+// process.env.GITHUB_ACTIONS/CI and passes them in), so this stays offline-
+// testable without process.env being a hidden dependency the way parseArgs
+// itself refuses to have one. There is no `src/ci.ts` (design's proposed
+// home for this function) — Phases 1-2 already folded the CI surface into
+// ci-reporter.ts/ci-gates.ts instead, and this joins that same deviation
+// rather than starting a third file for one function.
+export function isCiEnvironment(
+  options: { ci?: boolean },
+  env: { GITHUB_ACTIONS?: string; CI?: string },
+): boolean {
+  return Boolean(env.GITHUB_ACTIONS || env.CI || options.ci);
 }
 
 export interface ParsedCli {
@@ -219,6 +265,7 @@ export interface ParsedCli {
     | "mcp"
     | "upgrade"
     | "uninstall"
+    | "ci"
     | "help";
   options: CliOptions;
 }
@@ -231,6 +278,12 @@ Usage:
   pr-hero review [options]   Review a branch (zero flags inside a configured repo)
   pr-hero init [options]     Scaffold <repo>/.prhero/ (config.json + gotchas.md)
   pr-hero setup [options]    Run interactive onboarding wizard
+  pr-hero setup --ci [--force]
+                             Scaffold .github/workflows/pr-hero.yml instead
+                             of the wizard. Refuses to overwrite an existing
+                             workflow unless --force is passed
+  pr-hero ci init [--force]  Same scaffolding as "setup --ci", as its own
+                             command
   pr-hero doctor [options]   Check system tools and environment readiness
   pr-hero activity [options] View currently running reviews and recent store history
   pr-hero activity --kill <pid> [--yes]
@@ -447,7 +500,9 @@ Options:
   --force             Review the diff even when the size gate would skip it.
                       An interactive TTY already offers the same choice as a
                       menu; this flag is the unattended hatch. Does NOT imply
-                      --yes — the cost band still asks
+                      --yes — the cost band still asks. With setup --ci /
+                      ci init: overwrite an existing
+                      .github/workflows/pr-hero.yml instead of refusing
   --all               usage only: show every origin's rows instead of just
                       the current checkout's
   --yes               Skip the confirmation prompt
@@ -481,6 +536,7 @@ const VALUE_FLAGS = new Set([
   "--interval",
   "--max-changed-lines",
   "--max-changed-files",
+  "--budget-usd",
   "--finding",
   "--tag",
   "--body-file",
@@ -531,6 +587,7 @@ export function parseArgs(argv: string[]): ParsedCli {
     | "mcp"
     | "upgrade"
     | "uninstall"
+    | "ci"
     | "help"
     | undefined;
   // --head carries a baked-in default, so "was it explicitly given" cannot
@@ -598,6 +655,18 @@ export function parseArgs(argv: string[]): ParsedCli {
     }
     if (arg === "--no-scout") {
       options.scout = false;
+      continue;
+    }
+    if (arg === "--ci") {
+      options.ci = true;
+      continue;
+    }
+    if (arg === "--step-summary") {
+      options.stepSummary = true;
+      continue;
+    }
+    if (arg === "--no-step-summary") {
+      options.stepSummary = false;
       continue;
     }
     if (arg === "--full") {
@@ -754,6 +823,18 @@ export function parseArgs(argv: string[]): ParsedCli {
       options.triage = "reply";
       continue;
     }
+    // `ci init` — see the CliOptions.ciSubcommand comment. "init" is the
+    // only sub-word today; anything else falls through to the
+    // `command !== undefined` unexpected-argument guard right below, same
+    // as an unrecognized `watch`/`gc` sub-word would.
+    if (
+      command === "ci" &&
+      options.ciSubcommand === undefined &&
+      arg === "init"
+    ) {
+      options.ciSubcommand = "init";
+      continue;
+    }
     if (command !== undefined) {
       throw new CliUsageError(`unexpected argument: ${arg}`);
     }
@@ -776,12 +857,13 @@ export function parseArgs(argv: string[]): ParsedCli {
       arg !== "mcp" &&
       arg !== "upgrade" &&
       arg !== "update" &&
-      arg !== "uninstall"
+      arg !== "uninstall" &&
+      arg !== "ci"
     ) {
       throw new CliUsageError(
         `unknown command: ${arg} (the commands are "menu", "review", "init", "setup", "doctor", ` +
           '"activity", "ledger", "watch", "post", "triage", "gc", "usage", ' +
-          '"reverts", "corpus", "config", "mcp", "upgrade" and "uninstall")',
+          '"reverts", "corpus", "config", "mcp", "upgrade", "uninstall" and "ci")',
       );
     }
     command = arg === "update" ? "upgrade" : arg;
@@ -829,6 +911,47 @@ export function parseArgs(argv: string[]): ParsedCli {
   ) {
     throw new CliUsageError(
       "--post publishes the review as a PR comment, so it requires --pr",
+    );
+  }
+  // ROADMAP Pillar 3 (GitHub Actions CI). `--ci` runs the CI headless shell
+  // (skip comments, step summary, structured outputs) against a PR — the
+  // official action always passes both together, and nothing else in this
+  // CLI has a CI-mode surface to activate. Phase 4 added a SECOND reading on
+  // `setup`: scaffold the workflow file instead of running the wizard (see
+  // the CliOptions.ci comment) — `setup --ci` never touches --pr.
+  if (options.ci && command !== "review" && command !== "setup") {
+    throw new CliUsageError("--ci only applies to the review or setup command");
+  }
+  if (options.ci && command === "review" && options.pr === undefined) {
+    throw new CliUsageError(
+      "--ci runs the CI headless shell against a PR, so it requires --pr",
+    );
+  }
+  // Same "silently dropped intention" reasoning as --post/--pr above: a
+  // spend ceiling or a summary toggle for a mode that never turns on would
+  // be a flag the operator believes changed a run it did not. Scoped to
+  // `review`'s reading of --ci specifically now that `setup --ci` exists —
+  // neither flag means anything to scaffolding.
+  if (
+    options.budgetUsd !== undefined &&
+    !(options.ci && command === "review")
+  ) {
+    throw new CliUsageError("--budget-usd only applies with review --ci");
+  }
+  if (
+    options.stepSummary !== undefined &&
+    !(options.ci && command === "review")
+  ) {
+    throw new CliUsageError(
+      "--step-summary and --no-step-summary only apply with review --ci",
+    );
+  }
+  // `ci` (the command) has exactly one sub-word today: `init`. A bare
+  // `pr-hero ci` has no scaffolding action to fall into — same reasoning as
+  // watch's `options.watch === undefined` guard below.
+  if (command === "ci" && options.ciSubcommand === undefined) {
+    throw new CliUsageError(
+      'the "ci" command requires a subcommand: "ci init"',
     );
   }
   // The scout is a `review` stage and nothing else reads either flag.
@@ -1117,6 +1240,18 @@ function applyValueFlag(
     case "--max-changed-files":
       options.maxChangedFiles = parseLimit(flag, value);
       return;
+    // Unlike parseLimit (integer-only, size-gate's line/file counts):
+    // spend is a float ($7.50), and <= 0 is a real, meaningful value (see
+    // ci-gates.ts's evaluateBudgetGate) rather than a rejected input, so this
+    // only refuses non-numbers, never negatives.
+    case "--budget-usd": {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) {
+        throw new CliUsageError(`--budget-usd must be a number, got: ${value}`);
+      }
+      options.budgetUsd = parsed;
+      return;
+    }
     case "--finding":
       options.finding = value;
       return;

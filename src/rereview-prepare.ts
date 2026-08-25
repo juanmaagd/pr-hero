@@ -20,6 +20,7 @@ import {
 } from "./rereview-identity";
 import {
   type DiscoveryPlan,
+  decideLastHeadDelta,
   decideRereviewCase,
   type LastHeadSource,
   type LastReviewedHead,
@@ -27,10 +28,17 @@ import {
   planDiscovery,
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
+  unreachableLastHeadMessage,
 } from "./rereview-plan";
 import type { LiveFinding, StateFinding } from "./rereview-state";
 import type { VerifyQueueEntry } from "./rereview-verify";
 import { parseTriageMarker } from "./triage";
+
+// cli.ts reaches the whole re-review surface through this module and never
+// imports rereview-plan.ts directly; these two travel with `prepareDiscovery`'s
+// output, so they ride the same facade. The return type stays unexported here
+// — cli.ts infers it, and nothing names it across this boundary.
+export { decideLastHeadDelta, unreachableLastHeadMessage };
 
 export interface RereviewGit {
   commitExists(sha: string): Promise<boolean>;

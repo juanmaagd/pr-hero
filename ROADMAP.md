@@ -169,10 +169,17 @@ a scheduled block before launch, and promoting it to a gate is Juanma's call, no
 
    Commands that already work and are not launch blockers stay CLI: `ledger`, `triage`, `gc`,
    `reverts`, `corpus`.
-3. **GitHub Actions CI.** A thin Action wrapping `pr-hero review --pr --post --yes`. Documented
+3. **GitHub Actions CI.** A thin Action wrapping `pr-hero review --pr --ci --post --yes`. Documented
    `CLAUDE_CODE_OAUTH_TOKEN` (or the equivalent) in repo secrets. Unattended spend is bounded: the
    size gate plus an explicit cap (per-PR / daily). It comments; it does **not** install a required
    status check. The local watcher remains the Mac-side adapter — same product, two triggers.
+   **Shipped 2026-08-24** (5 phases, `openspec/changes/pillar3-github-actions-ci/`): `action.yml`
+   (composite action, repo root), the canonical `.github/workflows/pr-hero.yml`, and
+   `docs/github-actions.md`. Assistant posture, the size/budget gates (including `budget-usd <= 0`
+   disabling the ceiling with a loud `::warning::`), and `$GITHUB_OUTPUT`/`$GITHUB_STEP_SUMMARY`
+   wiring are all implemented and offline-tested. **Not yet live-verified**: no `v1` tag exists, so
+   this repo's own `.github/workflows/pr-hero.yml` (`uses: juanmaagd/pr-hero@v1`) cannot resolve the
+   action until one is published — see the checklist below.
 
 ### Launch is done when
 
@@ -245,6 +252,10 @@ Distribution — on a machine that is not this one:
 - [ ] `pr-hero review --dry-run` and one `--pr --post` succeed on a stranger's repo
 - [ ] a second push on that PR exercises item 7, not a full re-hunt dressed as a delta
 - [ ] the Action runs on an open PR, posts, and respects the cap
+      - [x] `action.yml`, the canonical `.github/workflows/pr-hero.yml`, and `docs/github-actions.md`
+            shipped and offline-tested — Pillar 3 Phase 5, 2026-08-24
+      - [ ] still open: no `v1` tag published yet (the workflow's own `uses: juanmaagd/pr-hero@v1`
+            cannot resolve until one is), and no live open-PR run has verified the Action end-to-end
 - [ ] every report still says assistant, not merge gate
 
 ### Explicitly after launch

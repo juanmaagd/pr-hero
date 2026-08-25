@@ -631,16 +631,28 @@ export async function writeComparison(input: {
 // of patching the first. Omitted (the ordinary re-run path, where the
 // existing comment came from a PREVIOUS run, not this one), the lookup runs
 // exactly as before.
+// `markerPrefix` defaults inside findMarkedCommentId itself (undefined here
+// triggers ITS default, PR_COMMENT_MARKER_PREFIX), so every existing caller
+// — both of which always pass a `knownCommentId` and never reach the lookup
+// at all — stays byte-identical. ROADMAP Pillar 3's CI skip-comment posting
+// is the first caller to exercise the lookup fallback for real, passing
+// ci-gates.ts's SKIP_SIZE_COMMENT_MARKER / SKIP_BUDGET_COMMENT_MARKER so a
+// repeat CI run finds and updates its own prior skip comment instead of
+// stacking a new one.
 export async function postPrComment(
   operatorRoot: string,
   pr: number,
   body: string,
   spawnFn?: typeof Bun.spawn,
   knownCommentId?: number,
+  markerPrefix?: string,
 ): Promise<{ action: "created" | "updated"; commentId: number }> {
   const existingId =
     knownCommentId ??
-    findMarkedCommentId(await fetchPrComments(operatorRoot, pr, { spawnFn }));
+    findMarkedCommentId(
+      await fetchPrComments(operatorRoot, pr, { spawnFn }),
+      markerPrefix,
+    );
   const action = existingId === null ? "created" : "updated";
   // The body travels on stdin via `-F body=@-` (see gh()); PATCH updates the
   // found comment in place, POST creates the first one.

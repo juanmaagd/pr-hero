@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  decideLastHeadDelta,
   decideRereviewCase,
   planDiscovery,
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
+  unreachableLastHeadMessage,
 } from "../src/rereview-plan";
 
 const L = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -198,5 +200,49 @@ describe("restrictedDiscoveryFiles — S-merge / D9", () => {
     expect(
       restrictedDiscoveryFiles(["src/app.ts"], ["vendor/upstream.ts"]),
     ).toEqual([]);
+  });
+});
+
+describe("decideLastHeadDelta — the force-push gate", () => {
+  test("case E (L orphaned by a force-push) never asks git for an L..H diff", () => {
+    expect(decideLastHeadDelta({ case: "E", L })).toEqual({
+      kind: "unreachable",
+      sha: L,
+    });
+  });
+
+  test("a reachable prior head still gets its L..H delta", () => {
+    expect(decideLastHeadDelta({ case: "C", L })).toEqual({
+      kind: "diff",
+      from: L,
+    });
+    expect(decideLastHeadDelta({ case: "D", L })).toEqual({
+      kind: "diff",
+      from: L,
+    });
+    expect(decideLastHeadDelta({ case: "B", L })).toEqual({
+      kind: "diff",
+      from: L,
+    });
+  });
+
+  test("a first review has no prior head to diff against", () => {
+    expect(decideLastHeadDelta({ case: "A", L: null })).toEqual({
+      kind: "none",
+    });
+    // Defensive: case A with a stray L is still a first review.
+    expect(decideLastHeadDelta({ case: "A", L })).toEqual({ kind: "none" });
+    expect(decideLastHeadDelta({ case: "E", L: null })).toEqual({
+      kind: "none",
+    });
+  });
+});
+
+describe("unreachableLastHeadMessage", () => {
+  test("names the orphaned commit, the likely cause, and the consequence", () => {
+    const message = unreachableLastHeadMessage(L);
+    expect(message).toContain(L);
+    expect(message).toContain("force-push");
+    expect(message).toContain("full review");
   });
 });

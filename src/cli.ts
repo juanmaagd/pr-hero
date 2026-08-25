@@ -26,6 +26,22 @@ import {
   unregisterActiveRun,
 } from "./activity";
 import { resolveEngineAssets } from "./assets";
+import {
+  budgetDisabledWarningMessage,
+  type CiGateSkipPlan,
+  ciExitCode,
+  planCiBudgetSkip,
+  planCiSizeSkip,
+} from "./ci-gates";
+import {
+  appendCiOutputs,
+  appendStepSummary,
+  type CiOutputs,
+  type CiSummaryData,
+  formatWorkflowCommand,
+  renderStepSummary,
+} from "./ci-reporter";
+import { runCiSetup } from "./ci-setup";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
 import { renderDoctorReport, runDoctor } from "./doctor";
@@ -143,6 +159,7 @@ import {
   INIT_GIT_REMINDER,
   initConfigTemplate,
   initTemplateOmissions,
+  isCiEnvironment,
   isFullCommitId,
   type LocalConfig,
   listPaths,
@@ -185,6 +202,7 @@ import {
 import {
   buildPhaseBQueue,
   collapseTargets,
+  decideLastHeadDelta,
   enrichPriorsFromThreads,
   parseNameOnly,
   parseNameStatus,
@@ -195,6 +213,7 @@ import {
   readRereviewProvenance,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
+  unreachableLastHeadMessage,
 } from "./rereview-prepare";
 import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
@@ -500,7 +519,13 @@ async function localResultLinks(
   return { webUrl, headSha };
 }
 
-async function main(argv: string[]): Promise<number> {
+// bin/pr-hero.js and the `import.meta.main` guard both go through the exported
+// runCli() below, which is this function's only production caller. It is
+// exported all the same because cli.test.ts drives it directly — a test IS a
+// real consumer (project rule 3), and it is the only way to prove the two
+// internal catches below write `status=error` without spawning a subprocess
+// and guessing at its exit code.
+export async function main(argv: string[]): Promise<number> {
   // Bare zero-argument entry
   if (argv.length === 0) {
     if (process.env.PRHERO_NO_TUI !== undefined) {
@@ -550,6 +575,7 @@ async function main(argv: string[]): Promise<number> {
     log(HELP_TEXT);
     log();
     log(`error: ${(error as Error).message}`);
+    await reportFatalCiErrorIfInJobStep(error);
     return 2;
   }
   if (parsed.command === "help") {
@@ -575,42 +601,48 @@ async function main(argv: string[]): Promise<number> {
     return parsed.command === "init"
       ? await init(parsed.options)
       : parsed.command === "setup"
-        ? await runWizard({
-            cwd:
-              (await resolveOptionalRepoRoot(parsed.options)) ?? process.cwd(),
-          })
-        : parsed.command === "doctor"
-          ? await doctorCommand(parsed.options)
-          : parsed.command === "activity"
-            ? await activityCommand(parsed.options)
-            : parsed.command === "ledger"
-              ? await ledgerCommand(parsed.options)
-              : parsed.command === "watch"
-                ? await watchCommand(parsed.options)
-                : parsed.command === "post"
-                  ? await postCommand(parsed.options)
-                  : parsed.command === "triage"
-                    ? await triageCommand(parsed.options)
-                    : parsed.command === "gc"
-                      ? await gcCommand(parsed.options)
-                      : parsed.command === "usage"
-                        ? await usageCommand(parsed.options)
-                        : parsed.command === "reverts"
-                          ? await revertsCommand(parsed.options)
-                          : parsed.command === "corpus"
-                            ? await corpusCommand(parsed.options)
-                            : parsed.command === "config"
-                              ? await configCommand(parsed.options)
-                              : parsed.command === "mcp"
-                                ? await mcpCommand(parsed.options)
-                                : parsed.command === "upgrade"
-                                  ? await upgradeCommand(parsed.options)
-                                  : parsed.command === "uninstall"
-                                    ? await uninstallCommand(parsed.options)
-                                    : await review(parsed.options);
+        ? parsed.options.ci
+          ? await ciSetupCommand(parsed.options)
+          : await runWizard({
+              cwd:
+                (await resolveOptionalRepoRoot(parsed.options)) ??
+                process.cwd(),
+            })
+        : parsed.command === "ci"
+          ? await ciSetupCommand(parsed.options)
+          : parsed.command === "doctor"
+            ? await doctorCommand(parsed.options)
+            : parsed.command === "activity"
+              ? await activityCommand(parsed.options)
+              : parsed.command === "ledger"
+                ? await ledgerCommand(parsed.options)
+                : parsed.command === "watch"
+                  ? await watchCommand(parsed.options)
+                  : parsed.command === "post"
+                    ? await postCommand(parsed.options)
+                    : parsed.command === "triage"
+                      ? await triageCommand(parsed.options)
+                      : parsed.command === "gc"
+                        ? await gcCommand(parsed.options)
+                        : parsed.command === "usage"
+                          ? await usageCommand(parsed.options)
+                          : parsed.command === "reverts"
+                            ? await revertsCommand(parsed.options)
+                            : parsed.command === "corpus"
+                              ? await corpusCommand(parsed.options)
+                              : parsed.command === "config"
+                                ? await configCommand(parsed.options)
+                                : parsed.command === "mcp"
+                                  ? await mcpCommand(parsed.options)
+                                  : parsed.command === "upgrade"
+                                    ? await upgradeCommand(parsed.options)
+                                    : parsed.command === "uninstall"
+                                      ? await uninstallCommand(parsed.options)
+                                      : await review(parsed.options);
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
+      await reportFatalCiErrorIfInJobStep(error);
       return 1;
     }
     throw error;
@@ -1282,7 +1314,29 @@ async function reviewPr(
   const summary = resolveSummary(options, config);
   const scout = resolveScout(options, config);
   const post = resolvePost(options, config);
-  options = { ...options, scout, post };
+  // ROADMAP Pillar 3 (GitHub Actions CI). isCi folds in HERE, alongside
+  // scout/post, so `options.yes` carries the headless bypass (spec 2.1:
+  // "MUST run headlessly ... equivalent to --yes") through every downstream
+  // read of `options.yes` in one move — the confirm gate below, the in-flight
+  // TOCTOU check (`if (options.yes) return 0` is the correct CI answer to a
+  // stuck pending), and applySizeGate's own `opts.yes` read. A parallel
+  // `effectiveYes` local would miss whichever of those reads came later.
+  const isCi = isCiEnvironment(options, {
+    GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+    CI: process.env.CI,
+  });
+  options = { ...options, scout, post, yes: options.yes || isCi };
+  // Spec 3.1: a silent disable is indistinguishable from a passing gate, so
+  // an EXPLICIT `--budget-usd <= 0` warns even though it never skips a run.
+  // Emitted here (once, as soon as isCi/budgetUsd are both known) rather
+  // than beside the budget-gate check below, which only runs at all when
+  // there IS an estimate to compare against.
+  if (isCi) {
+    const disabledWarning = budgetDisabledWarningMessage(options.budgetUsd);
+    if (disabledWarning !== null) {
+      log(formatWorkflowCommand("warning", disabledWarning));
+    }
+  }
   const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
     options,
     loaded,
@@ -1526,9 +1580,26 @@ async function reviewPr(
           priors: ReturnType<typeof priorsFromStateFindings>;
         }
       | undefined;
-    if (prepared.case !== "A" && prepared.last.L !== null) {
+    const lastHeadDelta = decideLastHeadDelta({
+      case: prepared.case,
+      L: prepared.last.L,
+    });
+    if (lastHeadDelta.kind !== "none") {
+      // A force-pushed L is gone from this clone, so there is no L..H delta to
+      // read and asking git for one is the crash this branch exists to avoid.
+      // Case E already planned a FULL review; an empty name-status keeps Phase
+      // B running over it, and classifyPrior's D/E branch queues every prior
+      // for verification before it would ever consult `touched`. Losing the
+      // deletion/rename settling that a real name-status buys therefore costs
+      // a verify spawn, never a dropped prior.
+      if (lastHeadDelta.kind === "unreachable") {
+        const degraded = unreachableLastHeadMessage(lastHeadDelta.sha);
+        log(isCi ? formatWorkflowCommand("notice", degraded) : degraded);
+      }
       const nameStatus = parseNameStatus(
-        await gitNameStatus(gitDirOwner, prepared.last.L, headSha),
+        lastHeadDelta.kind === "diff"
+          ? await gitNameStatus(gitDirOwner, lastHeadDelta.from, headSha)
+          : "",
       );
       const summaryComment =
         existingSummaryId === null
@@ -1605,6 +1676,37 @@ async function reviewPr(
         parseNumstatFiles(gateNumstat.stdout),
         gateConfig,
       );
+    }
+
+    // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
+    // CI, a hard skip in non-interactive mode THROWS a CliError (see
+    // applySizeGate below), which the top-level catch turns into exit 1 —
+    // exactly the "blocks CI" behavior spec 2.1 forbids. `--force` bypasses
+    // here too, same as the non-CI path just below, since it answers the
+    // same question ("is this diff too big to be worth its cost") either
+    // way. planCiSizeSkip (ci-gates.ts) is the ONE call: it is null unless
+    // isCi && the gate actually failed, so no separate isCi guard is needed
+    // around it beyond --force.
+    if (!options.force) {
+      const sizePlan = planCiSizeSkip({
+        isCi,
+        verdict: sizeGate,
+        prNumber,
+        maxChangedLines: gateConfig.maxChangedLines,
+        maxChangedFiles: gateConfig.maxChangedFiles,
+      });
+      if (sizePlan !== null) {
+        return await publishCiSkip({
+          operatorRoot,
+          prNumber,
+          post: options.post === true,
+          isCi,
+          stepSummaryFlag: options.stepSummary,
+          plan: sizePlan,
+          noticeMessage:
+            "pr-hero review skipped — diff exceeds the configured size gate",
+        });
+      }
     }
 
     // 5b — the size gate, on the REAL per-file numstat and placed here on
@@ -1721,6 +1823,44 @@ async function reviewPr(
       options.scout && !skipDiscovery,
       queuedVerification,
     );
+    // 7b(CI) — the budget gate, immediately after the estimate it reads and
+    // BEFORE the plan card/confirm/"committed to spending" commit-status
+    // block below: spec 3.1 ("Review MUST halt before agent spawning") is
+    // satisfied at any point before runPipeline, and this is the earliest
+    // point the REAL (parity-narrowed) estimate exists — the same one the
+    // plan card is about to show, so the skip comment's number and the
+    // (unrendered) plan's number can never have disagreed. `estimate.high`,
+    // not `.low`: report.ts's own doctrine (~97-98) is that every recorded
+    // overrun was an UNDER-estimate, so the generous side is the cheap one
+    // to be wrong on. Unlike the size gate above, this is NOT gated on
+    // `--force` — `--force`'s own doc comment (preflight.ts CliOptions)
+    // scopes it to the size gate's "is this diff too big" question, not
+    // spend. Tradeoff accepted: unlike the size gate, this runs AFTER
+    // createPrRunDir (step 6), so a budget skip can leave a near-empty run
+    // dir behind — the tidiness rationale that placement protects against
+    // (the watcher's attempt counter) does not apply to an ephemeral CI
+    // runner, and restructuring the cost estimate earlier is out of Phase
+    // 3's scope.
+    if (isCi && options.budgetUsd !== undefined) {
+      const budgetPlan = planCiBudgetSkip({
+        isCi,
+        estimatedCostUsd: estimate.high,
+        budgetUsd: options.budgetUsd,
+        prNumber,
+      });
+      if (budgetPlan !== null) {
+        return await publishCiSkip({
+          operatorRoot,
+          prNumber,
+          post: options.post === true,
+          isCi,
+          stepSummaryFlag: options.stepSummary,
+          plan: budgetPlan,
+          noticeMessage:
+            "pr-hero review skipped — estimated cost exceeds the configured CI budget ceiling",
+        });
+      }
+    }
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
     const planContext: PrPlanContext = {
@@ -1845,72 +1985,93 @@ async function reviewPr(
       // 11 — run, with live progress (same shape as local mode's leg). The
       // pipeline is untouched beyond the observational tap: it gets the worktree
       // as its cwd and the PR's real number for the envelope.
-      log(
-        `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-          `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
-          "comparable trees have taken " +
-          "8–25 minutes",
-      );
-      const started = performance.now();
-      const progress = startProgressRenderer(
-        started,
-        `PR #${prNumber}`,
-        activeHunters.map((a) => a.key),
-        spec.agents.some((a) => a.role === "refuter"),
-        summary.enabled,
-      );
-      await registerActiveRun({
-        pid: process.pid,
-        repo: repoHome.paths.repoId ?? path.basename(gitDirOwner),
-        pr: prNumber,
-        runDir,
-        startedAt: new Date().toISOString(),
-      });
-      try {
-        result = await runPipeline(
-          {
-            pr: prNumber,
-            // Same rule as local mode: record the commit the diff was actually
-            // computed against, or nothing downstream can reproduce the range.
-            baseSha: diffFromSha,
-            headSha,
-            worktree: worktreePath,
-            diffPath,
-            excludedPaths: effectiveDiff.droppedPaths,
-            gotchasPath,
-            agentsDir,
-            runDir,
-            outPath: path.join(runDir, "findings.json"),
-            mcpConfigPath,
-            hopBudget: options.hopBudget,
-            ...(options.model ? { model: options.model } : {}),
-            parityTriggerPaths: config.parity_trigger_paths,
-            suspicionPriors: config.suspicion_priors,
-            ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
-            ...(skipDiscovery ? {} : pipelineScoutInput(options)),
-            // NOT gated on skipDiscovery: an empty-delta re-review still
-            // classifies and verifies against this config, and a run whose
-            // artifact cannot name its config inputs is the unpoolable case
-            // D7 exists to prevent — whether or not hunters fanned out.
-            ...pipelineConfigInput(loaded),
-            engine: await engineIdentity(),
-            promptSet,
-            spec,
-            ...(skipDiscovery ? { skipDiscovery: true } : {}),
-            ...(rereview === undefined ? {} : { rereview }),
-            ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
-            ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
-            maxVerificationSteps,
-            ...(phaseB === undefined ? {} : { phaseB }),
-          },
-          { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+      // Spec 2.1: "Progress updates MUST use GitHub Actions log workflow
+      // groups (`::group::` / `::endgroup::`) to structure runner logs
+      // cleanly." One group around the whole hunt+refute run is the minimum
+      // that satisfies it. The arm and the close both live inside
+      // withCiWorkflowGroup rather than at this call site, and EVERY
+      // statement of the setup below sits inside its body: the progress
+      // renderer and registerActiveRun (whose mkdirSync/writeFileSync are
+      // unguarded) can throw on a read-only or full runner filesystem, and
+      // anything armed-but-not-yet-guarded there folds the whole rest of the
+      // job log — the `::error::` annotation naming the cause included —
+      // into a group nothing ever closes.
+      let started = 0;
+      await withCiWorkflowGroup(isCi, "pr-hero review", log, async () => {
+        log(
+          `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+            `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
+            "comparable trees have taken " +
+            "8–25 minutes",
         );
-      } finally {
-        // try/finally, never success-only: a leaked interval keeps the event
-        // loop alive and hangs process exit on the error path.
-        progress.stop();
-        await unregisterActiveRun(process.pid);
-      }
+        started = performance.now();
+        const progress = startProgressRenderer(
+          started,
+          `PR #${prNumber}`,
+          activeHunters.map((a) => a.key),
+          spec.agents.some((a) => a.role === "refuter"),
+          summary.enabled,
+        );
+        try {
+          // registerActiveRun rides INSIDE this try, not before it: the
+          // renderer is already ticking by now, and a throw here used to
+          // leak its 250ms interval — which keeps the event loop alive and
+          // hangs process exit, the exact failure the finally below exists
+          // to prevent.
+          await registerActiveRun({
+            pid: process.pid,
+            repo: repoHome.paths.repoId ?? path.basename(gitDirOwner),
+            pr: prNumber,
+            runDir,
+            startedAt: new Date().toISOString(),
+          });
+          result = await runPipeline(
+            {
+              pr: prNumber,
+              // Same rule as local mode: record the commit the diff was actually
+              // computed against, or nothing downstream can reproduce the range.
+              baseSha: diffFromSha,
+              headSha,
+              worktree: worktreePath,
+              diffPath,
+              excludedPaths: effectiveDiff.droppedPaths,
+              gotchasPath,
+              agentsDir,
+              runDir,
+              outPath: path.join(runDir, "findings.json"),
+              mcpConfigPath,
+              hopBudget: options.hopBudget,
+              ...(options.model ? { model: options.model } : {}),
+              parityTriggerPaths: config.parity_trigger_paths,
+              suspicionPriors: config.suspicion_priors,
+              ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
+              ...(skipDiscovery ? {} : pipelineScoutInput(options)),
+              // NOT gated on skipDiscovery: an empty-delta re-review still
+              // classifies and verifies against this config, and a run whose
+              // artifact cannot name its config inputs is the unpoolable case
+              // D7 exists to prevent — whether or not hunters fanned out.
+              ...pipelineConfigInput(loaded),
+              engine: await engineIdentity(),
+              promptSet,
+              spec,
+              ...(skipDiscovery ? { skipDiscovery: true } : {}),
+              ...(rereview === undefined ? {} : { rereview }),
+              ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
+              ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
+              maxVerificationSteps,
+              ...(phaseB === undefined ? {} : { phaseB }),
+            },
+            { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+          );
+        } finally {
+          // try/finally, never success-only: a leaked interval keeps the
+          // event loop alive and hangs process exit on the error path.
+          // `::endgroup::` is no longer emitted here — it rides
+          // withCiWorkflowGroup's own finally, which wraps this whole block.
+          progress.stop();
+          await unregisterActiveRun(process.pid);
+        }
+      });
       if (result === undefined) {
         throw new CliError("internal: pipeline returned no result");
       }
@@ -2164,8 +2325,59 @@ async function reviewPr(
       })) {
         log(line);
       }
+      // 16 — CI headless publishing (ROADMAP Pillar 3): the "reviewed"
+      // outcome's step summary + $GITHUB_OUTPUT, built from the SAME `doc`
+      // renderResult just printed from above, so nothing here can disagree
+      // with what the terminal (and the PR comments, via step 14's posted
+      // outcome) already reported. `posted?.delta` reuses postInlineFindings'
+      // own re-review delta — no separate computation.
+      // The gate is shouldPublishCiReview, never a bare `isCi`: design D6's
+      // "a failed session publishes nothing" binds this channel exactly as it
+      // binds postInlineIfEligible above. See that predicate for why.
+      if (shouldPublishCiReview(isCi, result.sessionFailed)) {
+        const ciPlan = planCiReview({
+          prNumber,
+          headSha,
+          findings: doc.findings,
+          costUsdEst: result.usage.cost_usd_est,
+          wallMs,
+          model: envelopeModel(options, agentFiles),
+          ...(webUrl === undefined ? {} : { repoWebUrl: webUrl }),
+          ...(posted?.delta === undefined ? {} : { delta: posted.delta }),
+          runDir,
+        });
+        const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+        if (shouldWriteStepSummary(isCi, options.stepSummary, summaryPath)) {
+          await appendStepSummary(
+            summaryPath as string,
+            ciPlan.summaryMarkdown,
+          );
+        }
+        const outputPath = process.env.GITHUB_OUTPUT;
+        if (shouldWriteCiOutputs(isCi, outputPath)) {
+          await appendCiOutputs(outputPath as string, ciPlan.outputs);
+        }
+        log(
+          formatWorkflowCommand(
+            "notice",
+            `pr-hero review complete — ${ciPlan.outputs.findings_count} ` +
+              `finding(s) (${ciPlan.outputs.blocking_count} blocking)`,
+          ),
+        );
+      }
       if (result.sessionFailed) return 1;
-      return postingExitCode(posted);
+      // Assistant posture (spec 2.1): in CI mode, exit 0 even with blocking
+      // findings — ciExitCode only fails on a fatal session failure (already
+      // returned above) or a genuine posting drop (design D6). Outside CI,
+      // postingExitCode keeps its existing behavior unchanged.
+      return isCi
+        ? ciExitCode({
+            sessionFailed: result.sessionFailed,
+            droppedFindingIds: posted?.droppedFindingIds.length ?? 0,
+            blockingCount: doc.findings.filter((f) => f.tier === "blocking")
+              .length,
+          })
+        : postingExitCode(posted);
     } finally {
       const phase = commitStatusCompletion({
         pipelineFinished: result !== undefined,
@@ -2918,6 +3130,127 @@ export async function postInlineIfEligible(input: {
 export function postingExitCode(outcome: InlinePostOutcome | null): 0 | 1 {
   if (outcome === null) return 0;
   return outcome.droppedFindingIds.length > 0 ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// CI headless shell (ROADMAP Pillar 3, GitHub Actions) — the "reviewed"
+// (non-skip) outcome's summary + outputs, and the two pure "should I write"
+// gates the shell checks before touching $GITHUB_STEP_SUMMARY/$GITHUB_OUTPUT.
+// planCiSizeSkip/planCiBudgetSkip (ci-gates.ts) cover the two gate-skip
+// outcomes the same way; this is their sibling for a review that actually
+// ran. Kept here, not ci-gates.ts/ci-reporter.ts: this is reviewPr's own
+// single-consumer composition (the exact `postingExitCode` precedent above),
+// not a spend-gate decision or a report-formatting primitive.
+// ---------------------------------------------------------------------------
+
+// Spec 2.1's "reviewed" step-summary + spec 1.1's $GITHUB_OUTPUT contract,
+// from the SAME findings array — so the two can never disagree on counts.
+// `delta`/`repoWebUrl` are optional pass-throughs (posted.delta when a run
+// posted; undefined renders plain code spans / omits the delta line).
+export function planCiReview(input: {
+  prNumber: number;
+  headSha: string;
+  findings: readonly Finding[];
+  costUsdEst: number;
+  wallMs: number;
+  model: string;
+  repoWebUrl?: string;
+  delta?: PrCommentDelta;
+  runDir: string;
+}): { summaryMarkdown: string; outputs: CiOutputs } {
+  const blockingCount = input.findings.filter(
+    (f) => f.tier === "blocking",
+  ).length;
+  const summary: CiSummaryData = {
+    kind: "reviewed",
+    prNumber: input.prNumber,
+    headSha: input.headSha,
+    findings: input.findings,
+    costUsdEst: input.costUsdEst,
+    wallMs: input.wallMs,
+    model: input.model,
+    ...(input.repoWebUrl === undefined ? {} : { repoWebUrl: input.repoWebUrl }),
+    ...(input.delta === undefined ? {} : { delta: input.delta }),
+  };
+  return {
+    summaryMarkdown: renderStepSummary(summary),
+    outputs: {
+      status: "reviewed",
+      findings_count: input.findings.length,
+      blocking_count: blockingCount,
+      advisory_count: input.findings.length - blockingCount,
+      cost_usd_est: input.costUsdEst,
+      run_dir: input.runDir,
+    },
+  };
+}
+
+// Spec 2.1's `::group::` / `::endgroup::` pairing, owned by ONE function so
+// the arm and the close cannot drift apart. An unclosed group is not
+// cosmetic: GitHub folds every line logged after it into a collapsed section,
+// so a crash mid-review hides its own `::error::` annotation from the reader
+// who most needs it. Putting the arm at the call site and the close in some
+// later `finally` leaves a window — whatever runs in between — where a throw
+// escapes with the group still open; here there is no in-between.
+//
+// `emit` is a parameter rather than this module's `log`: a guarantee nothing
+// can observe is a guarantee nobody can test, and the failure path is exactly
+// the one that has to be proven.
+export async function withCiWorkflowGroup<T>(
+  isCi: boolean,
+  name: string,
+  emit: (line: string) => void,
+  body: () => Promise<T>,
+): Promise<T> {
+  if (!isCi) return await body();
+  emit(formatWorkflowCommand("group", name));
+  try {
+    return await body();
+  } finally {
+    emit(formatWorkflowCommand("endgroup"));
+  }
+}
+
+// Design D6, applied to the CI headless channel: a failed session publishes
+// NOTHING. `sessionFailed` means every hunter died, which leaves the merged
+// document with zero findings — so the "reviewed" payload built from it would
+// claim `status=reviewed` + a "No findings detected" step summary for a review
+// that never ran. The job exits non-zero either way, but a human reads the job
+// summary, not the exit code, and postInlineIfEligible already suppresses PR
+// posting on exactly this condition; the CI channel must not be the one place
+// a crashed run still asserts a clean tree.
+export function shouldPublishCiReview(
+  isCi: boolean,
+  sessionFailed: boolean,
+): boolean {
+  return isCi && !sessionFailed;
+}
+
+// Spec 1.1: "Output parameter writing when $GITHUB_OUTPUT is provided" —
+// the outputs are core to the Action's own contract (declared unconditionally
+// in action.yml), so nothing beyond CI mode + a real path gates them.
+export function shouldWriteCiOutputs(
+  isCi: boolean,
+  outputPath: string | undefined,
+): boolean {
+  return isCi && outputPath !== undefined && outputPath.length > 0;
+}
+
+// Spec 2.1: step-summary writing is additionally gated on the tri-state
+// `--step-summary`/`--no-step-summary` flag (`stepSummary`), unset meaning
+// the shell's own default of on — mirroring `summary`/`scout`'s own
+// unset-means-default convention (preflight.ts's CliOptions).
+export function shouldWriteStepSummary(
+  isCi: boolean,
+  stepSummaryFlag: boolean | undefined,
+  summaryPath: string | undefined,
+): boolean {
+  return (
+    isCi &&
+    (stepSummaryFlag ?? true) &&
+    summaryPath !== undefined &&
+    summaryPath.length > 0
+  );
 }
 
 // post.json — the receipt (design's File Changes table): channel, comment
@@ -4060,6 +4393,37 @@ async function doctorCommand(options: CliOptions): Promise<number> {
   });
   process.stdout.write(`${lines.join("\n")}\n`);
   return report.exitCode;
+}
+
+// Shared shell for `pr-hero setup --ci` and `pr-hero ci init` — both are the
+// same scaffolding action (runCiSetup), reached by two different command
+// spellings. The refusal-without-force branch is a safety property (see
+// spec.md §4.1 / ci-setup.ts's header comment), not a usage error, so it
+// returns 1 rather than throwing CliUsageError: the invocation was valid,
+// the outcome is just "nothing was written".
+async function ciSetupCommand(options: CliOptions): Promise<number> {
+  const repoRoot = (await resolveOptionalRepoRoot(options)) ?? process.cwd();
+  const result = await runCiSetup({ cwd: repoRoot, force: options.force });
+
+  if (result.status === "skipped-existing") {
+    log(`${result.path} already exists.`);
+    log(result.hint);
+    return 1;
+  }
+
+  log(
+    result.status === "overwritten"
+      ? `Overwrote ${result.path}`
+      : `Created ${result.path}`,
+  );
+  log();
+  log("Next steps:");
+  log("  1. Commit .github/workflows/pr-hero.yml");
+  log(
+    "  2. Add a repository secret: ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)",
+  );
+  log("  3. Open a pull request to trigger the workflow");
+  return 0;
 }
 
 export async function mcpCommand(options: CliOptions): Promise<number> {
@@ -5311,6 +5675,45 @@ async function applySizeGate(
   return "proceed";
 }
 
+// ROADMAP Pillar 3 (GitHub Actions CI). The mechanical glue behind a gate
+// skip in CI mode: every DECISION (what to say, which marker, what the
+// outputs are) already happened in `plan` (planCiSizeSkip/planCiBudgetSkip,
+// ci-gates.ts) — this function has nothing left to decide, only three
+// straight-line I/O calls gated by shouldWriteStepSummary/shouldWriteCiOutputs.
+// `postPrComment`'s own `markerPrefix` (Phase 3's parameterization) makes
+// this idempotent: a repeat CI run on the same still-failing PR updates its
+// own prior skip comment rather than stacking a new one on every push.
+async function publishCiSkip(input: {
+  operatorRoot: string;
+  prNumber: number;
+  post: boolean;
+  isCi: boolean;
+  stepSummaryFlag: boolean | undefined;
+  plan: CiGateSkipPlan;
+  noticeMessage: string;
+}): Promise<number> {
+  log(formatWorkflowCommand("notice", input.noticeMessage));
+  if (input.post) {
+    await postPrComment(
+      input.operatorRoot,
+      input.prNumber,
+      input.plan.comment,
+      undefined,
+      undefined,
+      input.plan.markerPrefix,
+    );
+  }
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (shouldWriteStepSummary(input.isCi, input.stepSummaryFlag, summaryPath)) {
+    await appendStepSummary(summaryPath as string, input.plan.summaryMarkdown);
+  }
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (shouldWriteCiOutputs(input.isCi, outputPath)) {
+    await appendCiOutputs(outputPath as string, input.plan.outputs);
+  }
+  return 0;
+}
+
 // The envelope needs ONE model string. With no --model override each agent
 // carries its own frontmatter model, so report what actually ran rather than
 // inventing a single value: identical models collapse to one name, a mixed
@@ -5826,9 +6229,74 @@ async function engineIdentity(): Promise<{
   return deriveEngineIdentity(pkg, revision);
 }
 
-// Only when executed, never on import — the pure helpers stay importable from
-// tests without the CLI trying to run a review.
-if (import.meta.main) {
+// Spec 1.1's `status` output enum names `error` alongside `reviewed` /
+// `skipped-size` / `skipped-budget`, but before this function nothing ever
+// wrote it: main()'s own catch only handles CliError/CliUsageError (exit 1,
+// no $GITHUB_OUTPUT write); every OTHER thrown error — a genuine fatal
+// failure, e.g. bad credentials deep inside reviewPr() — was simply
+// rethrown, crashing the process with no output at all. A workflow branching
+// on `steps.x.outputs.status == 'error'` could then never fire.
+//
+// $GITHUB_OUTPUT existing at all is itself the CI signal here: GitHub sets it
+// unconditionally for every job step, before any of this repo's own flags
+// are parsed, so this needs no separate isCiEnvironment() computation — and
+// it fails closed for a genuinely local crash (outputPath undefined), which
+// runCli()'s caller rethrows so the developer still sees a full stack trace
+// instead of a swallowed one-line message.
+export async function reportFatalCiError(
+  error: unknown,
+  outputPath: string | undefined,
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (outputPath !== undefined && outputPath.length > 0) {
+    // Best-effort: an unwritable $GITHUB_OUTPUT must not mask the original
+    // fatal error or suppress the ::error:: annotation below.
+    await appendCiOutputs(outputPath, {
+      status: "error",
+      findings_count: 0,
+      blocking_count: 0,
+      advisory_count: 0,
+      cost_usd_est: 0,
+      run_dir: "",
+    }).catch(() => {});
+  }
+  log(formatWorkflowCommand("error", message));
+}
+
+// main()'s two internal catches RETURN rather than throw, so runCli()'s catch
+// — the only thing that has ever written `status=error` — never saw them. Both
+// are failures docs/github-actions.md names as reasons the job goes red: a
+// malformed argument (parseArgs, exit 2) and a CliError/CliUsageError from a
+// command body (exit 1) — which is precisely what a missing or expired
+// GITHUB_TOKEN produces, since pr.ts raises CliError for `gh not found on
+// PATH` and for a failed `gh pr view`. A consumer branching on
+// `outputs.status == 'error'` therefore never saw it fire for the two most
+// common failures; it saw `status` unset, indistinguishable from a step whose
+// outputs were never read.
+//
+// $GITHUB_OUTPUT's mere presence is the CI signal here, exactly as it is for
+// reportFatalCiError: GitHub sets it for every job step before any of this
+// repo's own flags are parsed. Guarding the CALL rather than only the write is
+// deliberate — reportFatalCiError also emits an `::error::` annotation, and
+// printing workflow-command syntax on a developer's terminal after a plain
+// typo is noise, not diagnostics. Exit codes are untouched; only the write is
+// new.
+async function reportFatalCiErrorIfInJobStep(error: unknown): Promise<void> {
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (outputPath === undefined || outputPath.length === 0) return;
+  await reportFatalCiError(error, outputPath);
+}
+
+// Exported so bin/pr-hero.js can drive the exact same signal-handling +
+// exit-code path as a direct `bun run src/cli.ts` invocation. `bun bin/pr-hero.js
+// ...` (the npm-installed entrypoint) reaches this file through `import`, and
+// `import.meta.main` is false for every imported module — only the directly
+// executed entry file gets `true` — so the guard below never ran for it and the
+// installed `pr-hero` command was a silent, zero-output, exit-0 no-op. Covered
+// by packaging.test.ts's subprocess spawn of bin/pr-hero.js.
+export async function runCli(
+  argv: string[] = Bun.argv.slice(2),
+): Promise<void> {
   const restoreCursor = () => {
     try {
       process.stderr.write("\x1b[?25h");
@@ -5859,5 +6327,26 @@ if (import.meta.main) {
   process.on("exit", () => {
     restoreCursor();
   });
-  process.exit(await main(Bun.argv.slice(2)));
+  let exitCode: number;
+  try {
+    exitCode = await main(argv);
+  } catch (error) {
+    const outputPath = process.env.GITHUB_OUTPUT;
+    if (outputPath === undefined || outputPath.length === 0) {
+      // Not a real GitHub Actions job step — preserve the original
+      // uncaught-exception path so a local `bun run src/cli.ts` crash still
+      // prints its full stack trace instead of a swallowed one-line message.
+      throw error;
+    }
+    await reportFatalCiError(error, outputPath);
+    exitCode = 1;
+  }
+  process.exit(exitCode);
+}
+
+// Only when executed, never on import — the pure helpers (and runCli itself)
+// stay importable from tests / bin/pr-hero.js without the CLI trying to run a
+// review as a side effect of the import.
+if (import.meta.main) {
+  await runCli();
 }

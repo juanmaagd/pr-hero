@@ -7,7 +7,11 @@ import {
   inspectSkillsSync,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
-import { type CheckSystemToolsOptions, checkSystemTools } from "./system-tools";
+import {
+  type CheckSystemToolsOptions,
+  checkCiConfiguration,
+  checkSystemTools,
+} from "./system-tools";
 
 export type DoctorSeverity = "healthy" | "degraded" | "blocking";
 
@@ -332,6 +336,47 @@ export async function runDoctor(
       }
     }
   }
+
+  // 6. CI configuration (Pillar 3). Reuses checkToolsOptions.env rather than
+  // adding a separate top-level env field — one injectable env source for
+  // both "is claude authenticated" and "is this a GitHub Actions run",
+  // matching how doctor.test.ts already threads env through today.
+  const env = options.checkToolsOptions?.env ?? process.env;
+  // GITHUB_ACTIONS, deliberately NOT isCiEnvironment(). That helper is
+  // Boolean(GITHUB_ACTIONS || CI || --ci) and stays that way — its other
+  // callers want exactly that generic meaning. This check does not: spec.md
+  // §4.1 scopes it to "When run inside GitHub Actions", and everything it
+  // looks for downstream (GITHUB_TOKEN, secrets passed through a workflow's
+  // `with:` block) exists only there. `CI=true` alone is the near-universal
+  // convention — GitLab, CircleCI, Jenkins, Travis, Buildkite, countless
+  // container builds — so treating it as GitHub Actions meant asking a
+  // GitLab runner for GitHub secrets, finding none, and reporting `blocking`.
+  // That is not cosmetic: report.overall goes blocking, `pr-hero upgrade
+  // --reconcile` pushes an error and exits 1, and a bare `pr-hero doctor`
+  // exits 1, on a machine where nothing whatsoever is wrong.
+  //
+  // A non-GitHub CI therefore gets the SAME treatment as a local machine, in
+  // both halves of this check: the answerable question ("do you have a
+  // workflow file?") and `degraded` for "not configured, nothing broken".
+  // Reserving `blocking` for a real Actions run keeps it meaning what it says
+  // — a review that genuinely cannot authenticate.
+  const isGithubActions = Boolean(env.GITHUB_ACTIONS);
+  const ciStatus = checkCiConfiguration({
+    cwd: repoDir ?? process.cwd(),
+    isCi: isGithubActions,
+    env,
+    exists,
+  });
+  checks.push({
+    name: "ci",
+    severity: ciStatus.configured
+      ? "healthy"
+      : isGithubActions
+        ? "blocking"
+        : "degraded",
+    message: ciStatus.message,
+    hint: ciStatus.hint,
+  });
 
   return evaluateDoctorReport(checks);
 }
