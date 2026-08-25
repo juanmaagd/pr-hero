@@ -210,6 +210,18 @@ describe("checkCiConfiguration (pure diagnostic, system-tools.ts)", () => {
 });
 
 describe("doctor CI diagnostics (Pillar 3)", () => {
+  // Both "local repo context" tests inject `env: {}` explicitly. Without it
+  // `runDoctor` falls back to the real `process.env`, and the CI check is the
+  // one check in the report whose severity is decided BY the environment — so
+  // these two would assert one thing on a developer laptop and another inside
+  // a GitHub Actions runner, where `GITHUB_ACTIONS=true` is always set and the
+  // secrets this check looks for are not.
+  //
+  // Verified, not theorised: `GITHUB_ACTIONS=true bun test test/ci-setup.test.ts`
+  // failed both of these before the injection was added. That matters now that
+  // .github/workflows/ci.yml runs this suite on every pull request — a gate
+  // that goes red for a reason unrelated to any defect is how a team learns to
+  // ignore the gate. A test that asserts on the environment has to supply it.
   test("local repo context: healthy when a CI workflow is configured", async () => {
     const report = await runDoctor({
       cwd: "/repo",
@@ -217,6 +229,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       home: "/home/user",
       exists: (p) => p === path.join("/repo", CI_WORKFLOW_RELATIVE_PATH),
       readFile: () => undefined,
+      checkToolsOptions: { env: {} },
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
     expect(ciCheck?.severity).toBe("healthy");
@@ -229,6 +242,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       home: "/home/user",
       exists: () => false,
       readFile: () => undefined,
+      checkToolsOptions: { env: {} },
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
     expect(ciCheck?.severity).toBe("degraded");
