@@ -11,7 +11,7 @@
 // capture stdin (needed to tell a leftover W1 finding issue comment from
 // the summary comment — both hit the same `issues/<pr>/comments` endpoint).
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -24,6 +24,7 @@ import {
   ingestReviewMetrics,
   loadEffectiveConfig,
   loadGlobalConfigLayer,
+  main,
   originUsageScope,
   persistCanonicalReview,
   pipelineConfigInput,
@@ -3996,6 +3997,100 @@ describe("reportFatalCiError — spec 1.1's fatal `error` status, finally wired"
       expect(chunks.join("")).toContain("::error::boom");
     } finally {
       process.stderr.write = origWrite;
+    }
+  });
+});
+
+// Pillar 3 Phase 5, gap closure #2: reportFatalCiError above is only reached
+// from runCli()'s catch, which fires only for errors that ESCAPE main(). But
+// main() catches and RETURNS for the two failures docs/github-actions.md
+// names as the reasons this job can go red — a malformed argument (parseArgs
+// throws, exit 2) and a CliError/CliUsageError from a command body (exit 1,
+// which is exactly what a bad or expired GITHUB_TOKEN produces, since pr.ts
+// raises CliError for `gh not found` and for a failed `gh pr view`). Neither
+// ever reached runCli's catch, so a consumer workflow branching on
+// `outputs.status == 'error'` saw `status` completely unset — indistinguishable
+// from a step whose outputs were never read.
+describe("main — status=error on the exits that never reached runCli's catch", () => {
+  let savedOutput: string | undefined;
+  let savedStderrWrite: typeof process.stderr.write;
+
+  beforeEach(() => {
+    savedOutput = process.env.GITHUB_OUTPUT;
+    // main() prints HELP_TEXT and error lines; swallow them so the suite's
+    // output stays readable. Restored in afterEach.
+    savedStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+  });
+
+  afterEach(() => {
+    process.stderr.write = savedStderrWrite;
+    // The suite itself may be RUNNING inside GitHub Actions, where
+    // GITHUB_OUTPUT is genuinely set — restore exactly, and delete when it
+    // was absent, or the "not a job step" case below silently tests nothing.
+    if (savedOutput === undefined) {
+      process.env.GITHUB_OUTPUT = undefined;
+      delete process.env.GITHUB_OUTPUT;
+    } else {
+      process.env.GITHUB_OUTPUT = savedOutput;
+    }
+  });
+
+  test("a malformed argument writes status=error and still exits 2", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-main-parse-"));
+    const outputPath = path.join(dir, "github_output");
+    process.env.GITHUB_OUTPUT = outputPath;
+    try {
+      const code = await main(["review", "--no-such-flag"]);
+      expect(code).toBe(2);
+      expect(await Bun.file(outputPath).text()).toContain("status=error\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a CliError from a command body writes status=error and still exits 1", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-main-clierror-"));
+    const outputPath = path.join(dir, "github_output");
+    const notARepo = path.join(dir, "not-a-repo");
+    await mkdir(notARepo, { recursive: true });
+    process.env.GITHUB_OUTPUT = outputPath;
+    try {
+      // resolveRepoRoot is postCommand's first statement and throws CliError
+      // ("not a git repository") — no network, no agent spawn, one failing
+      // `git rev-parse`.
+      const code = await main([
+        "post",
+        "--pr",
+        "5",
+        "--from",
+        dir,
+        "--repo",
+        notARepo,
+      ]);
+      expect(code).toBe(1);
+      expect(await Bun.file(outputPath).text()).toContain("status=error\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("outside a job step ($GITHUB_OUTPUT unset) neither exit writes anything", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-main-local-"));
+    const notARepo = path.join(dir, "not-a-repo");
+    await mkdir(notARepo, { recursive: true });
+    process.env.GITHUB_OUTPUT = undefined;
+    delete process.env.GITHUB_OUTPUT;
+    try {
+      expect(await main(["review", "--no-such-flag"])).toBe(2);
+      expect(
+        await main(["post", "--pr", "5", "--from", dir, "--repo", notARepo]),
+      ).toBe(1);
+      // Nothing to assert a file against — the point is that the local exit
+      // codes are untouched and no write is attempted at all.
+      expect(process.env.GITHUB_OUTPUT).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

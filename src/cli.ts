@@ -517,11 +517,13 @@ async function localResultLinks(
   return { webUrl, headSha };
 }
 
-// NOT exported: bin/pr-hero.js and the `import.meta.main` guard both go
-// through the exported runCli() below, which is the single shared caller of
-// this function — an export here with no importer of its own would be an
-// export for a hypothetical consumer (project rule 3).
-async function main(argv: string[]): Promise<number> {
+// bin/pr-hero.js and the `import.meta.main` guard both go through the exported
+// runCli() below, which is this function's only production caller. It is
+// exported all the same because cli.test.ts drives it directly — a test IS a
+// real consumer (project rule 3), and it is the only way to prove the two
+// internal catches below write `status=error` without spawning a subprocess
+// and guessing at its exit code.
+export async function main(argv: string[]): Promise<number> {
   // Bare zero-argument entry
   if (argv.length === 0) {
     if (process.env.PRHERO_NO_TUI !== undefined) {
@@ -571,6 +573,7 @@ async function main(argv: string[]): Promise<number> {
     log(HELP_TEXT);
     log();
     log(`error: ${(error as Error).message}`);
+    await reportFatalCiErrorIfInJobStep(error);
     return 2;
   }
   if (parsed.command === "help") {
@@ -637,6 +640,7 @@ async function main(argv: string[]): Promise<number> {
   } catch (error) {
     if (error instanceof CliError || error instanceof CliUsageError) {
       log(`error: ${error.message}`);
+      await reportFatalCiErrorIfInJobStep(error);
       return 1;
     }
     throw error;
@@ -6238,6 +6242,30 @@ export async function reportFatalCiError(
     }).catch(() => {});
   }
   log(formatWorkflowCommand("error", message));
+}
+
+// main()'s two internal catches RETURN rather than throw, so runCli()'s catch
+// — the only thing that has ever written `status=error` — never saw them. Both
+// are failures docs/github-actions.md names as reasons the job goes red: a
+// malformed argument (parseArgs, exit 2) and a CliError/CliUsageError from a
+// command body (exit 1) — which is precisely what a missing or expired
+// GITHUB_TOKEN produces, since pr.ts raises CliError for `gh not found on
+// PATH` and for a failed `gh pr view`. A consumer branching on
+// `outputs.status == 'error'` therefore never saw it fire for the two most
+// common failures; it saw `status` unset, indistinguishable from a step whose
+// outputs were never read.
+//
+// $GITHUB_OUTPUT's mere presence is the CI signal here, exactly as it is for
+// reportFatalCiError: GitHub sets it for every job step before any of this
+// repo's own flags are parsed. Guarding the CALL rather than only the write is
+// deliberate — reportFatalCiError also emits an `::error::` annotation, and
+// printing workflow-command syntax on a developer's terminal after a plain
+// typo is noise, not diagnostics. Exit codes are untouched; only the write is
+// new.
+async function reportFatalCiErrorIfInJobStep(error: unknown): Promise<void> {
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (outputPath === undefined || outputPath.length === 0) return;
+  await reportFatalCiError(error, outputPath);
 }
 
 // Exported so bin/pr-hero.js can drive the exact same signal-handling +

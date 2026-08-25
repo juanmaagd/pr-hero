@@ -101,9 +101,20 @@ disable it.
 ## Assistant posture: it never blocks your merge
 
 pr-hero is a reviewer, not a merge gate. The job exits `0` even when it finds blocking-tier issues —
-findings are published as comments and a summary, and the decision to act on them is yours. The **only**
-way this job exits non-zero is a genuinely fatal failure: missing/invalid credentials, a crashed process,
-or a malformed argument. `status=error` is set for exactly that case (see below).
+findings are published as comments and a summary, and the decision to act on them is yours. Nothing
+about *what* a review found can turn the job red.
+
+Three things can. Only the first sets `status=error`:
+
+| Cause | Exit | `status` |
+|---|---|---|
+| A genuinely fatal failure — missing/invalid credentials, a crashed process, a malformed argument | `2` for a bad argument, `1` otherwise | `error`, plus an `::error::` annotation naming it |
+| Every hunter died, so nothing was reviewed | `1` | **unset** — see the known gaps below |
+| The review ran, but some findings could not be posted to the PR | `1` | `reviewed`, describing the findings that did land |
+
+The middle case publishes no outputs and no step summary on purpose: a run where nothing was hunted has
+no result to report, and emitting `reviewed` with `findings-count=0` for it would read to a human as a
+PR that came back clean.
 
 ## Outputs
 
@@ -120,15 +131,23 @@ A **clean** review (nothing found) still reports `status=reviewed`, just with `f
 is no separate "clean" status. If you need `if:` logic that reacts to a clean PR, branch on
 `findings-count == 0`, not on `status`.
 
-### Known gap: a concurrent review leaves `status` empty
+### Known gaps: two cases leave `status` empty
 
-If two runs land on the exact same commit in quick succession (e.g. two rapid pushes), the second one
-detects the first is still in-flight and exits `0` **without setting any output at all** — the one case
-in this whole surface where `status` is neither one of the four values above nor present. This is a
-pre-existing behavior, not new in this release, and is tracked as an open follow-up rather than silently
-absorbed into the enum (see `openspec/changes/pillar3-github-actions-ci/spec.md` §1.1's Phase 5
-amendment for the full reasoning). If your workflow branches on `steps.<id>.outputs.status`, treat an
-**empty** value as "no review outcome yet — a concurrent run owns this head", not as a failure.
+**A concurrent review.** If two runs land on the exact same commit in quick succession (e.g. two rapid
+pushes), the second one detects the first is still in-flight and exits `0` **without setting any output
+at all**. This is a pre-existing behavior, not new in this release, and is tracked as an open follow-up
+rather than silently absorbed into the enum (see
+`openspec/changes/pillar3-github-actions-ci/spec.md` §1.1's Phase 5 amendment for the full reasoning).
+
+**A review where every hunter died.** The job exits `1` and writes nothing, for the reason given under
+"Assistant posture" above: there is no outcome to report, and the alternative — a step summary reading
+"No findings detected" over a review that never ran — is worse than silence. Giving this case a status
+of its own is an open follow-up.
+
+The two are told apart by the exit code: green with an empty `status` is the concurrent run, red with an
+empty `status` is the dead one. If your workflow branches on `steps.<id>.outputs.status`, treat an
+**empty** value on a green job as "no review outcome yet — a concurrent run owns this head", not as a
+failure.
 
 ## Optional inputs
 
@@ -146,5 +165,7 @@ amendment for the full reasoning). If your workflow branches on `steps.<id>.outp
   reports whether the required secrets are present (never their values).
 - **No comment appears on the PR** — check `permissions: pull-requests: write` is present, and that at
   least one of the two auth secrets is set.
-- **The review job is red** — that means a fatal failure (`status=error`, a `::error::` annotation in the
-  logs), never findings. Read the log annotation for the actual cause.
+- **The review job is red** — never because of findings. Read `status` to tell the three causes apart:
+  `error` is a fatal failure and the `::error::` annotation in the log names it; an **empty** `status`
+  means every hunter died (the log shows their failures); `reviewed` means the review itself succeeded
+  but some comments could not be posted. See "Assistant posture" above.

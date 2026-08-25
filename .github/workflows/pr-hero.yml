@@ -33,7 +33,13 @@ jobs:
         uses: ./
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Provide ONE of the two secrets below (never leave both blank):
+          # Provide ONE of the two secrets below (never leave both blank).
+          # BOTH inputs are wired unconditionally: an unset secret expands to
+          # the empty string, which the action treats as absent, so leaving
+          # the one you do not use in place costs nothing. Deleting the line
+          # for the secret you DID set is what breaks — the credential never
+          # reaches the action, and it fails to authenticate silently.
           #   ANTHROPIC_API_KEY       — a standard Anthropic API key, or
           #   CLAUDE_CODE_OAUTH_TOKEN — a Claude Code OAuth token
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

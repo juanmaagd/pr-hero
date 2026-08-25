@@ -170,6 +170,37 @@ describe("Packaging & distribution configuration", () => {
       );
     });
 
+    test("every `with:` key the generated workflow emits is a declared input", () => {
+      // The drift this guards is not hypothetical: the template's `with:`
+      // block told readers to set EITHER ANTHROPIC_API_KEY or
+      // CLAUDE_CODE_OAUTH_TOKEN and wired only the first, so the documented
+      // OAuth path sent an empty credential and never authenticated — while
+      // `pr-hero doctor`, which accepts either variable, called the setup
+      // healthy. A `with:` key with no matching input is silently ignored by
+      // GitHub Actions; nothing else in this repo would notice.
+      const declared = Object.keys(parsedAction().inputs);
+      const workflow = Bun.YAML.parse(
+        generateCiWorkflowTemplate({ actionRef: "./" }),
+      ) as {
+        jobs: {
+          review: { steps: Array<{ with?: Record<string, string> }> };
+        };
+      };
+      const passed = workflow.jobs.review.steps.flatMap((step) =>
+        step.with === undefined ? [] : Object.keys(step.with),
+      );
+      // Only the pr-hero step's keys are ours; actions/checkout contributes
+      // `fetch-depth`, which is not a pr-hero input.
+      const ours = passed.filter((key) => key !== "fetch-depth");
+      expect(ours.length).toBeGreaterThan(0);
+      for (const key of ours) {
+        expect(declared).toContain(key);
+      }
+      // And both credential paths are actually wired, not just declared.
+      expect(ours).toContain("anthropic-api-key");
+      expect(ours).toContain("claude-token");
+    });
+
     test("run step invokes bin/pr-hero.js — the entrypoint verified to actually run", () => {
       const action = parsedAction();
       const runStep = action.runs.steps.find(
