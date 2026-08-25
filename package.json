@@ -3,6 +3,14 @@
   "version": "1.0.0",
   "private": false,
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juanmaagd/pr-hero.git"
+  },
+  "homepage": "https://github.com/juanmaagd/pr-hero#readme",
+  "bugs": {
+    "url": "https://github.com/juanmaagd/pr-hero/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "module": "src/index.ts",
