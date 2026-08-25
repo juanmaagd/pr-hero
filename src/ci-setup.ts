@@ -54,6 +54,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Avoid redundant spend on rapid pushes — cancel in-flight reviews when a newer commit arrives.
+concurrency:
+  group: pr-hero-\${{ github.workflow }}-\${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 # pull-requests: write lets pr-hero post inline comments and a step summary.
 # contents: read is enough for actions/checkout. issues: write lets it
 # resolve/reply on review threads (GitHub models PR conversations as issues).
