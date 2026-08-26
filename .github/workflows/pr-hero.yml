@@ -25,7 +25,17 @@ jobs:
   review:
     # Fork PRs do not have access to repository secrets in GitHub Actions.
     # Restricting to same-repo PRs prevents false-negative authentication failures.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Secretless same-repo PRs SKIP instead of failing: the capability gate
+    # would otherwise abort the run in seconds (correctly — zero spend), but a
+    # permanent red X on every PR before credentials are wired (see issue #72,
+    # durable Claude credential strategy) is noise, not signal. The job shows
+    # as "skipped", which IS the notice.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        secrets.ANTHROPIC_API_KEY != '' ||
+        secrets.CLAUDE_CODE_OAUTH_TOKEN != ''
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
