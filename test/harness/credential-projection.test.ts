@@ -188,9 +188,7 @@ describe("harness with a CredentialBroker", () => {
     // CLI's credential store moves; the fallback is the pre-D1-05 enumerated
     // environment, loudly announced.
     expect(result.stderrTail).toContain("source_read_failed");
-    expect(result.stderrTail).toContain(
-      "child runs with operator environment",
-    );
+    expect(result.stderrTail).toContain("child runs with operator environment");
     expect(result.stderrTail).not.toContain("AT-");
     // The child saw the operator HOME, not a synthetic one.
     expect(requests.length).toBe(1);
