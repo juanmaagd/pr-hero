@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ExecutableAllowlistEntry } from "./provider-capabilities";
+import { KeychainCredentialBroker } from "./security/credential-broker";
 
 export interface RunnerAuthorityOptions {
   readonly binaryPath?: string;
@@ -70,11 +71,21 @@ export async function resolveRunnerAuthority(
     const hasher = new Bun.CryptoHasher("sha256");
     hasher.update(bytes);
     const sha256 = hasher.digest("hex");
+    // §6.1: on macOS the subscription OAuth record lives in the Keychain, so
+    // production projects it into an ephemeral 0700/0600 synthetic home
+    // instead of handing the child the real HOME. Elsewhere (Linux CI reads a
+    // plain credentials file) there is nothing to project yet — the broker is
+    // omitted and the enumerated-passthrough env applies.
+    const credentialBroker =
+      process.platform === "darwin" && exists("/usr/bin/security")
+        ? new KeychainCredentialBroker()
+        : undefined;
     return {
       runnerOptions: {
         binaryPath: canonical,
         workspaceRoot: options.workspaceRoot,
         executableAllowlist: [{ absolutePath: canonical, sha256 }],
+        ...(credentialBroker ? { credentialBroker } : {}),
       },
     };
   } catch (error) {

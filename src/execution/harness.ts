@@ -4,6 +4,11 @@ import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
 } from "../provider-capabilities";
+import type {
+  CredentialBroker,
+  CredentialProjection,
+} from "../security/credential-broker";
+import { CredentialProjectionError } from "../security/credential-broker";
 import { redactDiagnostic } from "../security/redact";
 import { WorkspaceReadBroker } from "../security/workspace-read-broker";
 import {
@@ -34,6 +39,9 @@ export interface StepExecutionHarnessOptions {
   readonly transport?: ProviderTransport;
   readonly onAuthEvent?: (event: AuthEvent) => void;
   readonly spawnFn?: typeof Bun.spawn;
+  // §6.1 D1-05: when set, credentials are projected per run and the child's
+  // HOME/TMPDIR/config identity come from the ephemeral projection.
+  readonly credentialBroker?: CredentialBroker;
   // Source for child-env projection; injectable so tests never touch the
   // real process environment.
   readonly childEnv?: Readonly<Record<string, string | undefined>>;
@@ -148,6 +156,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly onAuthEvent?: (event: AuthEvent) => void;
   private readonly isTestFake: boolean;
   private readonly projectedEnv: Record<string, string>;
+  private readonly credentialBroker?: CredentialBroker;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -160,6 +169,7 @@ export class StepExecutionHarness implements StepRunner {
     this.onAuthEvent = options.onAuthEvent;
     this.isTestFake = Boolean(options.spawnFn);
     this.projectedEnv = projectChildEnv(options.childEnv ?? process.env);
+    this.credentialBroker = options.credentialBroker;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -247,6 +257,105 @@ export class StepExecutionHarness implements StepRunner {
       };
     }
 
+    // §6.1 D1-05: project credentials ONCE per run, BEFORE admission or
+    // spawn — a projection failure must never reach a provider or leak into
+    // an attempt count.
+    let projection: CredentialProjection | undefined;
+    if (this.credentialBroker) {
+      try {
+        projection = await this.credentialBroker.project({
+          sessionId: step.name,
+          credentialRef: "claude-code-credentials",
+          kind: "claude_subscription_oauth",
+          verifiedBinaryPath,
+        });
+      } catch (error) {
+        // Class names only the failure class; broker error text is never
+        // echoed because third-party brokers may embed arbitrary content.
+        const failureClass =
+          error instanceof CredentialProjectionError
+            ? error.failureClass
+            : "broker_error";
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `Credential projection failed (${failureClass}); step failed before any spawn`,
+          resultText: "",
+        };
+      }
+    }
+
+    try {
+      const result = await this.admitAndExecute({
+        step,
+        canonicalCwd,
+        verifiedBinaryPath,
+        childEnv: this.buildChildEnv(projection),
+        projection,
+      });
+      // §6.1: destroy() runs after settlement on EVERY return path; its
+      // failure is a warning appended to stderrTail, never a thrown error
+      // and never a replacement for the step's own outcome.
+      this.appendDestroyFailure(
+        await this.destroyProjection(projection),
+        result,
+      );
+      return result;
+    } catch (error) {
+      this.appendDestroyFailure(await this.destroyProjection(projection));
+      throw error;
+    }
+  }
+
+  private buildChildEnv(
+    projection: CredentialProjection | undefined,
+  ): Record<string, string> {
+    if (projection === undefined) return this.projectedEnv;
+    // The projection owns HOME/TMPDIR/config identity (§6.1); strip the
+    // enumerated-passthrough copies first so real values cannot survive.
+    const stripped = { ...this.projectedEnv };
+    delete stripped.HOME;
+    delete stripped.TMPDIR;
+    delete stripped.CLAUDE_CONFIG_DIR;
+    return { ...stripped, ...projection.env };
+  }
+
+  // Returns true when destruction failed (caller annotates the result).
+  private async destroyProjection(
+    projection: CredentialProjection | undefined,
+  ): Promise<boolean> {
+    if (projection === undefined) return false;
+    try {
+      await projection.destroy();
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
+  private appendDestroyFailure(
+    destroyFailed: boolean,
+    result?: StepResult,
+  ): void {
+    if (!destroyFailed) return;
+    const line = "[pr-hero] credential projection destroy failed";
+    if (result !== undefined) {
+      result.stderrTail += `${result.stderrTail}\n${line}`;
+    }
+  }
+
+  private async admitAndExecute(args: {
+    readonly step: StepSpec;
+    readonly canonicalCwd: string;
+    readonly verifiedBinaryPath: string;
+    readonly childEnv: Readonly<Record<string, string>>;
+    readonly projection?: CredentialProjection;
+  }): Promise<StepResult> {
+    const { step, canonicalCwd, verifiedBinaryPath, childEnv, projection } =
+      args;
+
     // 3. Admission gate: called once after successful authorization
     if (this.admissionGate) {
       await this.admissionGate.admit(step);
@@ -313,14 +422,23 @@ export class StepExecutionHarness implements StepRunner {
         tools: step.tools,
         mcpConfigPath: step.mcpConfigPath,
         timeoutMs: step.timeoutMs,
-        isolation: {
-          credentialProjectionId: "ephemeral",
-          env: this.projectedEnv,
-          syntheticHome: "/tmp",
-          syntheticConfigHome: "/tmp",
-          syntheticTmp: "/tmp",
-          verifiedBinaryPath,
-        },
+        isolation: projection
+          ? {
+              credentialProjectionId: projection.projectionId,
+              env: childEnv,
+              syntheticHome: projection.syntheticHome,
+              syntheticConfigHome: projection.syntheticConfigHome,
+              syntheticTmp: projection.syntheticTmp,
+              verifiedBinaryPath,
+            }
+          : {
+              credentialProjectionId: "ephemeral",
+              env: childEnv,
+              syntheticHome: "/tmp",
+              syntheticConfigHome: "/tmp",
+              syntheticTmp: "/tmp",
+              verifiedBinaryPath,
+            },
       };
 
       const outcome = await this.transport.execute(request, {

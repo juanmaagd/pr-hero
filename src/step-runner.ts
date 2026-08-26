@@ -12,6 +12,7 @@ import type {
   StepAdmissionGate,
 } from "./execution/contracts";
 import { StepExecutionHarness } from "./execution/harness";
+import type { CredentialBroker } from "./security/credential-broker";
 import type { SessionUsage } from "./usage";
 
 export interface StepSpec {
@@ -165,6 +166,8 @@ export interface ClaudeCodeRunnerOptions {
   binaryPath?: string;
   admissionGate?: StepAdmissionGate;
   onAuthEvent?: (event: AuthEvent) => void;
+  // §6.1 D1-05 credential projection; forwarded to the harness.
+  credentialBroker?: CredentialBroker;
 }
 
 export class ClaudeCodeRunner implements StepRunner {
@@ -177,6 +180,7 @@ export class ClaudeCodeRunner implements StepRunner {
       binaryPath: options.binaryPath,
       admissionGate: options.admissionGate,
       onAuthEvent: options.onAuthEvent,
+      credentialBroker: options.credentialBroker,
       spawnFn: options.spawnFn,
     });
   }
