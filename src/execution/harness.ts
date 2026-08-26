@@ -402,10 +402,17 @@ export class StepExecutionHarness implements StepRunner {
   // erase the evidence that late data-plane events were refused.
   private async persistSettlement(
     outPath: string,
+    session: ActiveSession,
     receipt: SettlementReceipt,
   ): Promise<void> {
+    // Per-attempt filename (§422): every retry receives its own settlement
+    // receipt — a later attempt must never clobber an earlier attempt's
+    // audit record of rejected events / fence closure.
     await writeArtifactAtomically(
-      path.join(path.dirname(outPath), "settlement.json"),
+      path.join(
+        path.dirname(outPath),
+        `settlement.attempt${session.attempt}.json`,
+      ),
       receipt,
     );
   }
@@ -584,7 +591,7 @@ export class StepExecutionHarness implements StepRunner {
                 "transport promise settled without producing an outcome (§5.1 invariant conversion)",
             }),
           );
-          await this.persistSettlement(step.outPath, receipt);
+          await this.persistSettlement(step.outPath, session, receipt);
           this.onSessionSettled?.({ session, settlement, receipt });
           return { session, settlement, cancelled: true };
         }
@@ -597,8 +604,32 @@ export class StepExecutionHarness implements StepRunner {
           settlement.markTerminationConfirmed();
         }
         // Data-plane delivery runs while the lease is still valid; settle
-        // (sink closure + fence) happens strictly after it.
-        const delivery = await onData(resolved, settlement);
+        // (sink closure + fence) happens strictly after it. A throw here
+        // (e.g. an attempt-log I/O failure) must NOT skip settlement: §5.1
+        // requires settled to always resolve, so the catch below settles a
+        // failed session instead of leaving the lease valid forever.
+        let delivery: AttemptDelivery;
+        try {
+          delivery = await onData(resolved, settlement);
+        } catch (error) {
+          if (lease.valid) {
+            lease.invalidate("data-plane write failure");
+          }
+          fenceClosed = true;
+          sink.close();
+          settlement.acceptTerminal("harness", "failed");
+          const receipt = finalize(() =>
+            synthesizeInternalFailure(settlement, error),
+          );
+          await this.persistSettlement(step.outPath, session, receipt);
+          this.onSessionSettled?.({ session, settlement, receipt });
+          return {
+            session,
+            settlement,
+            outcome: resolved,
+            cancelled: false,
+          };
+        }
         sink.close();
         const receipt = finalize(() =>
           settlement.receipt(
@@ -613,7 +644,7 @@ export class StepExecutionHarness implements StepRunner {
             },
           ),
         );
-        await this.persistSettlement(step.outPath, receipt);
+        await this.persistSettlement(step.outPath, session, receipt);
         this.onSessionSettled?.({ session, settlement, receipt });
         return {
           session,
@@ -673,7 +704,7 @@ export class StepExecutionHarness implements StepRunner {
         );
       }
 
-      await this.persistSettlement(step.outPath, receipt);
+      await this.persistSettlement(step.outPath, session, receipt);
       this.onSessionSettled?.({ session, settlement, receipt });
       return { session, settlement, cancelled: true };
     } finally {
@@ -803,6 +834,9 @@ export class StepExecutionHarness implements StepRunner {
               resultText: outcome.finalText,
               timedOut: Boolean(outcome.timedOut),
             });
+            // A failing diagnostic log must never escape the failure handler
+            // itself — that second throw is what left settlements unwritten
+            // (pr-hero F001 on this very PR).
             await this.guardedDataPlaneWrite(settlement, () =>
               writeAttemptLog(
                 step,
@@ -811,7 +845,7 @@ export class StepExecutionHarness implements StepRunner {
                 outcome,
                 classification,
               ),
-            );
+            ).catch(() => {});
             // Transient cleanup of the stale artifact is data-plane too, so it
             // runs under the same lease guard while it is still valid.
             if (classification === "transient") {

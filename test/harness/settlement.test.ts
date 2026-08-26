@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -282,7 +283,7 @@ describe("StepExecutionHarness settlement integration", () => {
   }
 
   const settlementPath = (spec: StepSpec) =>
-    path.join(path.dirname(spec.outPath), "settlement.json");
+    path.join(path.dirname(spec.outPath), "settlement.attempt1.json");
 
   test("§13 line 738 — success resolves a completed receipt with process-group confirmation from the transport's terminalProof", async () => {
     const captured: {
@@ -419,7 +420,7 @@ describe("StepExecutionHarness settlement integration", () => {
     expect(settlement.rejectedEvents).toBeGreaterThanOrEqual(1);
     // No artifact was ever written from the late delivery...
     expect(await Bun.file(spec().outPath).exists()).toBe(false);
-    // ...and settlement.json was written exactly once (byte-identical).
+    // ...and settlement.attempt1.json was written exactly once (byte-identical).
     expect(await Bun.file(settlementPath(spec())).text()).toBe(persistedBefore);
     // §5.1: even this path resolved its settled promise.
     await expect(session.settled).resolves.toBe(receipt);
@@ -554,5 +555,94 @@ describe("StepExecutionHarness settlement integration", () => {
     expect(captured.session?.writeLease.valid).toBe(false);
     expect(captured.session?.controller.signal.aborted).toBe(false);
     expect(HARNESS_GRACE_MARGIN_MS).toBe(1000);
+  });
+
+  test("§5.1 — a data-plane write failure still settles: lease closed, receipt persisted, run terminates", async () => {
+    const transport = makeTransport("claude-code", async () => okOutcome());
+    // A directory at outPath makes writeArtifactAtomically's rename fail —
+    // the data-plane failure class pr-hero F001 flagged on this PR.
+    const specObj = spec();
+    await mkdir(specObj.outPath, { recursive: true });
+    const settled: {
+      receipt?: SettlementReceipt;
+      session?: ActiveSession;
+    } = {};
+    const result = await harnessWith(transport, {
+      onSessionSettled: (info) => {
+        settled.receipt = info.receipt;
+        settled.session = info.session;
+      },
+    }).run(specObj);
+
+    expect(result.status).toBe("failed");
+    const receipt = settled.receipt;
+    if (!receipt) throw new Error("session did not settle");
+    expect(settled.session?.writeLease.valid).toBe(false);
+    const persisted = JSON.parse(
+      await readFile(
+        path.join(
+          path.dirname(specObj.outPath),
+          `settlement.attempt${settled.session?.attempt ?? 1}.json`,
+        ),
+        "utf-8",
+      ),
+    ) as SettlementReceipt;
+    expect(persisted.timestamps.settledAt).toBe(receipt.timestamps.settledAt);
+  });
+
+  test("per-attempt settlement files — a retry never clobbers the previous attempt's receipt (§422)", async () => {
+    let calls = 0;
+    const transport = makeTransport("claude-code", async (_req, ctx) => {
+      calls++;
+      if (calls === 1) {
+        await ctx.events.push({
+          sessionId: "s",
+          attempt: 1,
+          seq: 1,
+          observedAt: new Date().toISOString(),
+          type: "terminal",
+          origin: "transport",
+          status: "failed",
+          integrity: "verified",
+        });
+        return {
+          completion: "failed" as const,
+          protocolIntegrity: "verified" as const,
+          finalText: "",
+          usage: USAGE,
+          stderrTail: "transient network error ECONNRESET",
+          timedOut: false,
+          exitCode: 1,
+        };
+      }
+      return okOutcome();
+    });
+    const specObj = spec({ maxAttempts: 2 });
+    const settledReceipts: SettlementReceipt[] = [];
+    await harnessWith(transport, {
+      onSessionSettled: ({ receipt }) => {
+        settledReceipts.push(receipt);
+      },
+    }).run(specObj);
+
+    expect(settledReceipts.length).toBe(2);
+    const attempt1 = JSON.parse(
+      await readFile(
+        path.join(path.dirname(specObj.outPath), "settlement.attempt1.json"),
+        "utf-8",
+      ),
+    ) as SettlementReceipt;
+    const attempt2 = JSON.parse(
+      await readFile(
+        path.join(path.dirname(specObj.outPath), "settlement.attempt2.json"),
+        "utf-8",
+      ),
+    ) as SettlementReceipt;
+    // Attempt 1's audit record survives attempt 2's success.
+    expect(attempt1.outcome === "completed").toBe(false);
+    expect(attempt2.outcome).toBe("completed");
+    expect(
+      existsSync(path.join(path.dirname(specObj.outPath), "settlement.json")),
+    ).toBe(false);
   });
 });
