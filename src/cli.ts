@@ -191,6 +191,10 @@ import {
   promptSetIdentity,
 } from "./prompt-set";
 import {
+  capabilityGateDecision,
+  produceClaudeCapabilityReport,
+} from "./provider-capabilities";
+import {
   type DiffStat,
   estimateCost,
   formatElapsed,
@@ -1076,6 +1080,24 @@ async function review(options: CliOptions): Promise<number> {
     return 0;
   }
 
+  // 12.5 — the capability gate (§11/D1-09): doctor, preflight and execution
+  // consume the same ProviderCapabilityReport, and ANY blocking issue stops
+  // the route here — before the size gate's prompt and the cost band's
+  // confirm, so nothing spendable can start. Degraded items proceed because
+  // each is irrelevant to a local claude-code run: pricingReady=false (the
+  // cost band comes from the static estimate table, not a pricing table),
+  // boundedEvents=false (usage rides --output-format json snapshots),
+  // codegraphPolicy=false (isolation is enforced by --strict-mcp-config with
+  // a codegraph-only mcp.json), credential_projection_unavailable only off
+  // darwin (runner-authority then runs enumerated-passthrough env).
+  const capabilityReport = await produceClaudeCapabilityReport({});
+  const capabilityGate = capabilityGateDecision(capabilityReport);
+  if (!capabilityGate.ok) {
+    throw new CliError(
+      `provider capability gate failed: ${capabilityGate.reason}`,
+    );
+  }
+
   // 13 — the size gate, BEFORE the cost band's confirm() for the unattended
   // path. The watcher spawns with --yes, so a gate that lived only inside
   // that confirmation would never fire in the one place — unattended spend
@@ -1690,6 +1712,21 @@ async function reviewPr(
       sizeGate = evaluateSizeGate(
         parseNumstatFiles(gateNumstat.stdout),
         gateConfig,
+      );
+    }
+
+    // Capability gate (§11/D1-09), BEFORE the size-gate/skip flow and any
+    // spend: same report doctor and preflight consume; blocking issues fail
+    // loud as CliError (the top-level catch turns that into exit 1 — the
+    // correct CI outcome for "this route cannot execute"). Degraded items
+    // proceed for the same irrelevance reasons as local mode: pricingReady
+    // rides the static estimate table, usage arrives via json snapshots, and
+    // isolation is enforced by --strict-mcp-config + codegraph-only mcp.json.
+    const capabilityReport = await produceClaudeCapabilityReport({});
+    const capabilityGate = capabilityGateDecision(capabilityReport);
+    if (!capabilityGate.ok) {
+      throw new CliError(
+        `provider capability gate failed: ${capabilityGate.reason}`,
       );
     }
 
@@ -4414,6 +4451,7 @@ async function doctorCommand(options: CliOptions): Promise<number> {
   const report = await runDoctor({
     repoRoot: repoRoot ?? undefined,
     cwd: repoRoot ?? undefined,
+    produceCapabilityReport: () => produceClaudeCapabilityReport({}),
   });
   const lines = renderDoctorReport(report, {
     styles: styleEnabled(process.stdout),

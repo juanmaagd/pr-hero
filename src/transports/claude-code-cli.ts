@@ -8,6 +8,7 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../execution/contracts";
+import { CLAUDE_CAPABILITY_STATICS } from "../provider-capabilities";
 import { ACTIVE_CHILD_PROCS, type SpawnedProcess } from "../step-runner";
 import { parseUsage } from "../usage";
 
@@ -156,34 +157,62 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     return undefined;
   }
 
+  // §11/D1-09: static report built from the SAME constants the report
+  // producer reads (CLAUDE_CAPABILITY_STATICS), so transport and producer can
+  // never contradict each other. projectionReady/syntheticHome are
+  // contractual here, not probed: every execute() request must carry an
+  // IsolationProjection (credentialProjectionId + syntheticHome) or admission
+  // denies it. Unproven features are claimed false with a
+  // non-blocking issue, never assumed green: no bounded event sink is wired
+  // yet, no dedicated codegraph policy is enforced, and no pricing table
+  // exists — hence status "degraded", not "ready".
   async capabilities(): Promise<ProviderCapabilityReport> {
     return {
       backend: "claude-code",
-      status: "ready",
+      status: "degraded",
       auth: {
-        kind: "claude_subscription_oauth",
+        kind: CLAUDE_CAPABILITY_STATICS.authKind,
         projectionReady: true,
-        probe: "passed",
+        probe: "not_run",
       },
       isolation: {
         syntheticHome: true,
-        workspaceReadBroker: true,
-        codegraphPolicy: true,
+        workspaceReadBroker: CLAUDE_CAPABILITY_STATICS.workspaceReadBroker,
+        codegraphPolicy: false,
       },
       protocol: {
-        terminalProof: true,
-        boundedEvents: true,
-        usageMode: "snapshot",
+        terminalProof: CLAUDE_CAPABILITY_STATICS.terminalProof,
+        boundedEvents: false,
+        usageMode: CLAUDE_CAPABILITY_STATICS.usageMode,
       },
       cancellation: {
-        deadlineMs: 7500,
-        conformance: "passed",
+        deadlineMs: CLAUDE_CAPABILITY_STATICS.cancellationDeadlineMs,
+        conformance: CLAUDE_CAPABILITY_STATICS.cancellationConformance,
       },
       billing: {
-        mode: "subscription",
-        pricingReady: true,
+        mode: CLAUDE_CAPABILITY_STATICS.billingMode,
+        pricingReady: false,
       },
-      issues: [],
+      issues: [
+        {
+          code: "codegraph_policy_unenforced",
+          message:
+            "no dedicated codegraph sensitive-file policy is enforced yet; isolation relies on --strict-mcp-config with a codegraph-only mcp.json",
+          blocking: false,
+        },
+        {
+          code: "bounded_events_sink_missing",
+          message:
+            "bounded event streaming is not wired: the event sink is currently a no-op and usage arrives as a final snapshot",
+          blocking: false,
+        },
+        {
+          code: "pricing_table_missing",
+          message:
+            "no per-model pricing table is bundled, so cash-cost estimates cannot be derived from usage snapshots",
+          blocking: false,
+        },
+      ],
     };
   }
 

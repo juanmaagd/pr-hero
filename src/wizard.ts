@@ -9,6 +9,7 @@ import {
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
 import { initConfigTemplate } from "./preflight";
+import { claudeCredentialProjectionReady } from "./provider-capabilities";
 import {
   type CheckSystemToolsOptions,
   checkSystemTools,
@@ -35,6 +36,9 @@ export interface WizardState {
   stepIndex: number;
   selectedIndex: number;
   toolStatuses: Record<string, SystemToolStatus>;
+  // §11/D1-09: init consumes the capability report's projection readiness —
+  // surfaced on the wizard's claude line (one existsSync probe, no spawn).
+  claudeProjectionReady?: boolean;
   envDetections: AgentEnvDetection[];
   skillsSynced: boolean;
   mcpRegistered: boolean;
@@ -268,7 +272,10 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         exists: deps.exists,
         ...deps.checkToolsOptions,
       });
-      return { toolStatuses };
+      const claudeProjectionReady = claudeCredentialProjectionReady({
+        existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
+      });
+      return { toolStatuses, claudeProjectionReady };
     },
     async apply(state: WizardState): Promise<Partial<WizardState>> {
       return state;
@@ -291,8 +298,14 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
             ? yellow("[!]")
             : green("[✓]")
           : red("[✗]");
+        // §11/D1-09: the claude line also reports auth-projection readiness
+        // from the same capability predicate execution uses.
+        const detail =
+          name === "claude" && st.installed
+            ? ` (auth projection: ${state.claudeProjectionReady ? "ready" : "unavailable"})`
+            : "";
         lines.push(
-          `  ${icon} ${bold(name)}: ${st.installed ? (st.version ? `v${st.version}` : "installed") : "missing"}`,
+          `  ${icon} ${bold(name)}: ${st.installed ? (st.version ? `v${st.version}` : "installed") : "missing"}${detail}`,
         );
         if (st.hint) {
           lines.push(`      ${st.hint}`);
