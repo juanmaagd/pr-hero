@@ -37,10 +37,24 @@ been burned by a manual match that inflated a score by 50%.
   harness whose hunter/review pipelines and ops layer are the pattern library for this engine. Study
   notes with file:line refs: `../deep-review/intel/convoy.md`. Read the notes first, the source second.
 
+## Branch and PR workflow (mandatory since 2026-08-26)
+
+Every slice lands through a feature branch and a pull request — never direct
+pushes to `main`. This is deliberate dogfooding: `pr-hero.yml` runs this
+engine's own review on every PR, so each slice gets self-reviewed by pr-hero
+before it merges.
+
+1. Branch per slice off latest `main` (`feat/d1-09-capability-report`, ...).
+2. Work-unit commits on the branch (one purpose each, tests included).
+3. Open the PR, let the pr-hero review post, triage its findings with
+   `skills/pr-hero-triage/SKILL.md`, then merge.
+4. `ci.yml` runs on both PRs and main pushes; `release.yml` fires only on
+   semver tags, so merging to main never publishes a release.
+
 ## Commands
 
 ```bash
-bun test               # 2019 tests, all offline (fake spawn/runner)
+bun test               # 2122 tests, all offline (fake spawn/runner)
 bun run typecheck      # tsc --noEmit, strict — covers src/test/fixtures, NOT scripts/
 bun run check          # biome — covers src+test only, NOT fixtures/ or scripts/
 bun run refuter-probe  # LIVE: refuter verdict-vocabulary matrix, 4 arms (~$0.11/step, ~$1.3 at 3 replicates)
