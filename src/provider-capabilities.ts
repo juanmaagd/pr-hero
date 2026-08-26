@@ -362,13 +362,29 @@ export function claudeCredentialProjectionReady(
   return platform === "darwin" && exists("/usr/bin/security");
 }
 
-// Mirrors system-tools' claude auth predicate (env token or on-disk session)
-// so the default probe never spawns claude — offline tests inject `authProbe`
-// instead, and production gets the same answer without a subprocess.
+// Mirrors system-tools' claude auth predicate (env token or on-disk session),
+// extended with the two routes that predicate misses and §6.1's own table
+// names: the macOS Keychain item (the subscription path this project targets
+// — pr-hero found its own gate refusing exactly that machine class) and the
+// Linux-style ~/.claude/.credentials.json. The default probe never spawns
+// claude; the keychain query is metadata-only (no -w), proven non-interactive.
+function defaultKeychainCredentialPresent(): boolean {
+  return (
+    Bun.spawnSync([
+      "/usr/bin/security",
+      "find-generic-password",
+      "-s",
+      "Claude Code-credentials",
+    ]).exitCode === 0
+  );
+}
+
 function defaultClaudeAuthProbe(
   env: Record<string, string | undefined>,
   home: string,
   exists: (p: string) => boolean,
+  platform: NodeJS.Platform,
+  keychainProbe: () => boolean,
 ): "passed" | "failed" {
   const hasToken =
     Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) ||
@@ -376,8 +392,13 @@ function defaultClaudeAuthProbe(
   if (hasToken) return "passed";
   const hasSessionFile =
     exists(path.join(home, ".claude.json")) ||
-    exists(path.join(home, ".claude", "session.json"));
-  return hasSessionFile ? "passed" : "failed";
+    exists(path.join(home, ".claude", "session.json")) ||
+    exists(path.join(home, ".claude", ".credentials.json"));
+  if (hasSessionFile) return "passed";
+  if (platform === "darwin" && exists("/usr/bin/security")) {
+    return keychainProbe() ? "passed" : "failed";
+  }
+  return "failed";
 }
 
 export interface ProduceClaudeCapabilityReportOptions {
@@ -391,6 +412,9 @@ export interface ProduceClaudeCapabilityReportOptions {
   readonly version?: string;
   // Injectable so offline tests never spawn claude (§11).
   readonly authProbe?: () => "passed" | "failed";
+  // Injectable keychain presence check backing the default auth probe's
+  // macOS subscription route; offline tests stub it.
+  readonly keychainProbe?: () => boolean;
 }
 
 // §11/D1-09: the REAL claude-code report. Every gap becomes an issue entry;
@@ -422,15 +446,21 @@ export async function produceClaudeCapabilityReport(
   const probeResult =
     options.authProbe !== undefined
       ? options.authProbe()
-      : defaultClaudeAuthProbe(env, home, existsFn);
-  if (probeResult === "failed") {
-    issues.push({
-      code: "auth_failed",
-      message:
-        "claude authentication not detected (no OAuth token env var and no session credentials)",
-      blocking: true,
-    });
-  }
+      : defaultClaudeAuthProbe(
+          env,
+          home,
+          existsFn,
+          options.platform ?? process.platform,
+          options.keychainProbe ?? defaultKeychainCredentialPresent,
+        );
+      if (probeResult === "failed") {
+        issues.push({
+          code: "auth_failed",
+          message:
+            "claude authentication not detected (no OAuth token env var, no session credentials, no keychain entry)",
+          blocking: true,
+        });
+      }
 
   if (!projectionReady) {
     issues.push({

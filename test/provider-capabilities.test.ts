@@ -135,6 +135,7 @@ describe("produceClaudeCapabilityReport", () => {
       ...greenOptions(),
       authProbe: undefined,
       env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk" },
+      keychainProbe: () => false,
     });
     expect(tokenReport.auth.probe).toBe("passed");
 
@@ -144,14 +145,38 @@ describe("produceClaudeCapabilityReport", () => {
       env: { PATH: "/bin" },
       home: "/home/user",
       existsFn: (p) => p === "/home/user/.claude.json",
+      keychainProbe: () => false,
     });
     expect(sessionReport.auth.probe).toBe("passed");
+
+    // §6.1's Linux-style credentials file is a valid session signal.
+    const fileReport = await produceClaudeCapabilityReport({
+      ...greenOptions(),
+      authProbe: undefined,
+      env: { PATH: "/bin" },
+      home: "/home/user",
+      existsFn: (p) => p === "/home/user/.claude/.credentials.json",
+      keychainProbe: () => false,
+    });
+    expect(fileReport.auth.probe).toBe("passed");
+
+    // macOS subscription route: no files at all, but the Keychain item exists
+    // (metadata-only check, never -w — proven non-interactive).
+    const keychainReport = await produceClaudeCapabilityReport({
+      ...greenOptions(),
+      authProbe: undefined,
+      env: { PATH: "/bin" },
+      home: "/home/user",
+      keychainProbe: () => true,
+    });
+    expect(keychainReport.auth.probe).toBe("passed");
 
     const failedReport = await produceClaudeCapabilityReport({
       ...greenOptions(),
       authProbe: undefined,
       env: { PATH: "/bin" },
       home: "/home/user",
+      keychainProbe: () => false,
     });
     expect(failedReport.auth.probe).toBe("failed");
     expect(failedReport.status).toBe("blocking");
