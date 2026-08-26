@@ -42,6 +42,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runPipeline } from "../src/pipeline";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import type { ReviewSpec } from "../src/spec";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
@@ -80,6 +81,13 @@ function narrowPatch(patch: string, file: string): string {
 const fullPatch = await Bun.file(FULL_DIFF).text();
 const narrowedPatch = narrowPatch(fullPatch, GOLDEN_FILE);
 const agentSource = await Bun.file(AGENT_SOURCE).text();
+
+const runnerAuthority = await resolveRunnerAuthority({
+  workspaceRoot: WORKTREE,
+});
+if (runnerAuthority.error !== undefined) {
+  throw new Error(`execution authority unavailable: ${runnerAuthority.error}`);
+}
 
 const PROBE_SPEC: ReviewSpec = {
   agents: [
@@ -164,7 +172,7 @@ async function runOnce(scope: Scope, replicate: number): Promise<Attempt> {
       stepTimeoutMs: 15 * 60 * 1000,
       spec: PROBE_SPEC,
     },
-    { runner: new ClaudeCodeRunner() },
+    { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
   );
 
   const { skillOutput } = result;

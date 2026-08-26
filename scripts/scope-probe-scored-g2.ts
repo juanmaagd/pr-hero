@@ -112,6 +112,7 @@ import {
   scoreTree,
 } from "../../deep-review/runner/scorer";
 import { runPipeline } from "../src/pipeline";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import type { ReviewSpec } from "../src/spec";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
@@ -169,6 +170,13 @@ const narrowedPatch = narrowPatch(fullPatch, GOLDEN_FILE);
 const agentSource = await Bun.file(AGENT_SOURCE).text();
 const treeGoldens = await loadTreeGoldens();
 const goldenKeys = treeGoldens.map(goldenKey);
+
+const runnerAuthority = await resolveRunnerAuthority({
+  workspaceRoot: WORKTREE,
+});
+if (runnerAuthority.error !== undefined) {
+  throw new Error(`execution authority unavailable: ${runnerAuthority.error}`);
+}
 
 const PROBE_SPEC: ReviewSpec = {
   agents: [
@@ -248,7 +256,7 @@ async function runOnce(scope: Scope, replicate: number): Promise<Attempt> {
       stepTimeoutMs: 15 * 60 * 1000,
       spec: PROBE_SPEC,
     },
-    { runner: new ClaudeCodeRunner() },
+    { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
   );
 
   const { skillOutput } = result;

@@ -7,6 +7,7 @@ import path from "node:path";
 import { buildPlantedFixture } from "../fixtures/setup";
 import { validateFinding } from "../src/findings";
 import { runPipeline } from "../src/pipeline";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
 const SUMMARIZER_PROMPT_PATH = path.join(
@@ -39,6 +40,15 @@ const customModel =
   modelArgIndex !== -1 ? Bun.argv[modelArgIndex + 1] : undefined;
 
 const fixture = await buildPlantedFixture();
+
+// Resolved only after the disposable repo exists: its root is where every
+// step below executes, so that is the root the authority must name.
+const runnerAuthority = await resolveRunnerAuthority({
+  workspaceRoot: fixture.repoDir,
+});
+if (runnerAuthority.error !== undefined) {
+  throw new Error(`execution authority unavailable: ${runnerAuthority.error}`);
+}
 
 // Empty MCP registry + the runner's --strict-mcp-config: the fixture repo has
 // no codegraph index, so the steps run on Read/Grep/Glob alone and no other
@@ -77,7 +87,7 @@ const result = await runPipeline(
     ],
     stepTimeoutMs: 10 * 60 * 1000,
   },
-  { runner: new ClaudeCodeRunner() },
+  { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
 );
 const wallMs = Math.round(performance.now() - started);
 

@@ -16,6 +16,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type { Finding, FindingsDocument } from "../src/findings";
 import { lookupGolden, type MartianGoldenPr } from "../src/martian-adapter";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
 const ROOT = path.join(import.meta.dir, "..");
@@ -158,7 +159,6 @@ function parsePairs(
 
 const runsRoot = argValue("--runs") ?? DEFAULT_RUNS;
 const goldens = (await Bun.file(GOLDENS_PATH).json()) as MartianGoldenPr[];
-const runner = new ClaudeCodeRunner();
 
 const dirs: string[] = [];
 for await (const entry of new Bun.Glob("cal-*-hunters").scan({
@@ -224,7 +224,17 @@ for (const dir of dirs) {
   const mcpConfigPath = path.join(tmp, "mcp.json");
   writeFileSync(systemPromptPath, JUDGE_SYSTEM);
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
-  const result = await runner.run({
+  // Re-resolved per PR: workspaceRoot must name the tmp dir this judge
+  // actually runs in, and that dir is recreated every iteration.
+  const runnerAuthority = await resolveRunnerAuthority({
+    workspaceRoot: tmp,
+  });
+  if (runnerAuthority.error !== undefined) {
+    fail(`execution authority unavailable: ${runnerAuthority.error}`);
+  }
+  const result = await new ClaudeCodeRunner(
+    runnerAuthority.runnerOptions,
+  ).run({
     name: `judge-${pr}`,
     systemPromptPath,
     prompt,

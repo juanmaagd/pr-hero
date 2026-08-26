@@ -61,9 +61,11 @@
 
 import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
+import { selectBoundaryNonce } from "../src/boundary";
 import { DEFAULT_LINE_WINDOW, normalizePath } from "../src/compare";
 import { extractJsonObject } from "../src/drafts";
 import { parseAgentFile } from "../src/prompt-set";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import {
   capScoutLeads,
   type HunkCoverage,
@@ -419,7 +421,13 @@ const scratchDir = path.join(runDir, SCRATCH_DIR_NAME);
 // EMPTY, so leaving a `.keep` in it would undercut the only thing it asserts.
 await mkdir(scratchDir, { recursive: true });
 
-const runner = new ClaudeCodeRunner();
+const runnerAuthority = await resolveRunnerAuthority({
+  workspaceRoot: scratchDir,
+});
+if (runnerAuthority.error !== undefined) {
+  throw new Error(`execution authority unavailable: ${runnerAuthority.error}`);
+}
+const runner = new ClaudeCodeRunner(runnerAuthority.runnerOptions);
 
 interface RunRecord {
   pr: number;
@@ -460,7 +468,9 @@ async function runOnce(input: PrInput, replicate: number): Promise<RunRecord> {
     // methodologically and buys back the diagnostic.
     name: `scout-${input.pr}-r${replicate}`,
     systemPromptPath,
-    prompt: scoutPrompt(input.patch),
+    // One nonce per run (O-3.3), drawn against the only block this prompt
+    // wraps — the patch. Each replicate is its own run, so it draws its own.
+    prompt: scoutPrompt(input.patch, selectBoundaryNonce([input.patch])),
     tools: agent.tools,
     mcpConfigPath,
     model,

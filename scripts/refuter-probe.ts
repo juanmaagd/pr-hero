@@ -88,6 +88,7 @@ import {
 import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
 import type { RefuterVerdict } from "../src/findings";
 import { runPipeline } from "../src/pipeline";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import type { ReviewSpec } from "../src/spec";
 import {
   ClaudeCodeRunner,
@@ -200,6 +201,15 @@ async function runOnce(arm: ProbeArm, replicate: number): Promise<Attempt> {
   const mcpConfigPath = path.join(fixture.runDir, "mcp.json");
   await Bun.write(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
+  const runnerAuthority = await resolveRunnerAuthority({
+    workspaceRoot: fixture.repoDir,
+  });
+  if (runnerAuthority.error !== undefined) {
+    throw new Error(
+      `execution authority unavailable: ${runnerAuthority.error}`,
+    );
+  }
+
   const result = await runPipeline(
     {
       pr: 0,
@@ -221,7 +231,12 @@ async function runOnce(arm: ProbeArm, replicate: number): Promise<Attempt> {
       stepTimeoutMs: 10 * 60 * 1000,
       spec: PROBE_SPEC,
     },
-    { runner: new PlantedDraftRunner(fixture.draft, new ClaudeCodeRunner()) },
+    {
+      runner: new PlantedDraftRunner(
+        fixture.draft,
+        new ClaudeCodeRunner(runnerAuthority.runnerOptions),
+      ),
+    },
   );
 
   // `refuted` findings LEAVE findings[] for debug.refuted; every other verdict

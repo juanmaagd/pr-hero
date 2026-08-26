@@ -13,6 +13,7 @@
 import path from "node:path";
 import { buildScaleFixture, type Density } from "../fixtures/scale-probe";
 import { runPipeline } from "../src/pipeline";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import type { ReviewSpec } from "../src/spec";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
@@ -43,6 +44,15 @@ async function runOnce(density: Density, replicate: number): Promise<Attempt> {
   const mcpConfigPath = path.join(fixture.runDir, "mcp.json");
   await Bun.write(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
+  const runnerAuthority = await resolveRunnerAuthority({
+    workspaceRoot: fixture.repoDir,
+  });
+  if (runnerAuthority.error !== undefined) {
+    throw new Error(
+      `execution authority unavailable: ${runnerAuthority.error}`,
+    );
+  }
+
   const result = await runPipeline(
     {
       pr: 0,
@@ -70,7 +80,7 @@ async function runOnce(density: Density, replicate: number): Promise<Attempt> {
       stepTimeoutMs: 10 * 60 * 1000,
       spec: PROBE_SPEC,
     },
-    { runner: new ClaudeCodeRunner() },
+    { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
   );
 
   const { skillOutput } = result;

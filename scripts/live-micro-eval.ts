@@ -4,7 +4,9 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { selectBoundaryNonce } from "../src/boundary";
 import { parseAgentFile } from "../src/prompt-set";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 import { scoutPrompt, validateScoutLeads } from "../src/scout";
 import { ClaudeCodeRunner } from "../src/step-runner";
 
@@ -60,12 +62,18 @@ if (scoutMode) {
 const mcpConfigPath = path.join(dir, "mcp.json");
 writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
-const runner = new ClaudeCodeRunner();
+const runnerAuthority = await resolveRunnerAuthority({ workspaceRoot: dir });
+if (runnerAuthority.error !== undefined) {
+  throw new Error(`execution authority unavailable: ${runnerAuthority.error}`);
+}
+const runner = new ClaudeCodeRunner(runnerAuthority.runnerOptions);
 const started = performance.now();
 const result = await runner.run({
   name: scoutMode ? "scout" : "micro-eval",
   systemPromptPath,
-  prompt: scoutMode ? scoutPrompt(MICRO_PATCH) : "Produce your output now.",
+  prompt: scoutMode
+    ? scoutPrompt(MICRO_PATCH, selectBoundaryNonce([MICRO_PATCH]))
+    : "Produce your output now.",
   // The load-bearing difference. Empty, not omitted.
   tools: scoutMode ? [] : ["Read"],
   mcpConfigPath,
