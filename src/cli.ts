@@ -217,6 +217,7 @@ import {
 } from "./rereview-prepare";
 import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
+import { resolveRunnerAuthority } from "./runner-authority";
 import {
   effectiveDiffStat,
   evaluateSizeGate,
@@ -1119,6 +1120,17 @@ async function review(options: CliOptions): Promise<number> {
     runDir,
     startedAt: new Date().toISOString(),
   });
+  // Resolve execution authority ONCE per run: the harness fails closed when
+  // no allowlist is configured, so a bare ClaudeCodeRunner would deny every
+  // step and burn the run at step one.
+  const runnerAuthority = await resolveRunnerAuthority({
+    workspaceRoot: repoRoot,
+  });
+  if (runnerAuthority.error !== undefined) {
+    throw new CliError(
+      `execution authority unavailable: ${runnerAuthority.error}`,
+    );
+  }
   try {
     result = await runPipeline(
       {
@@ -1149,7 +1161,10 @@ async function review(options: CliOptions): Promise<number> {
         promptSet,
         spec,
       },
-      { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+      {
+        runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions),
+        onProgress: progress.onProgress,
+      },
     );
   } finally {
     // try/finally, never success-only: a leaked interval keeps the event
@@ -2004,6 +2019,16 @@ async function reviewPr(
             "comparable trees have taken " +
             "8–25 minutes",
         );
+        // Same once-per-run authority resolution as local mode, bound to the
+        // review root the steps actually run in: this PR's worktree.
+        const runnerAuthority = await resolveRunnerAuthority({
+          workspaceRoot: worktreePath,
+        });
+        if (runnerAuthority.error !== undefined) {
+          throw new CliError(
+            `execution authority unavailable: ${runnerAuthority.error}`,
+          );
+        }
         started = performance.now();
         const progress = startProgressRenderer(
           started,
@@ -2061,7 +2086,10 @@ async function reviewPr(
               maxVerificationSteps,
               ...(phaseB === undefined ? {} : { phaseB }),
             },
-            { runner: new ClaudeCodeRunner(), onProgress: progress.onProgress },
+            {
+              runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions),
+              onProgress: progress.onProgress,
+            },
           );
         } finally {
           // try/finally, never success-only: a leaked interval keeps the
