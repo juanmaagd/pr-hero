@@ -45,7 +45,11 @@ Load this skill when the user asks to:
      * **Option A: `CLAUDE_CODE_OAUTH_TOKEN` (Claude Subscription - Zero API Costs):**
        1. Run `claude setup-token` in terminal (with Claude Code CLI installed).
        2. Follow the browser login prompt to authorize your Claude Pro/Team/Enterprise account.
-       3. Copy the output OAuth token.
+       3. Copy the output OAuth token — it is long-lived (~1 year).
+       4. NEVER substitute the session token from `~/.claude/.credentials.json`
+          or the macOS keychain. It expires in hours and the CLI keeps it alive
+          with a refresh token CI does not have, so it breaks reviews silently
+          after about a day. Only `claude setup-token` output belongs here.
      * **Option B: `ANTHROPIC_API_KEY` (Pay-As-You-Go API Key):**
        1. Navigate to [Anthropic Console Settings](https://console.anthropic.com/settings/keys).
        2. Click **Create Key**, name it `pr-hero-ci`, and copy the `sk-ant-...` key.

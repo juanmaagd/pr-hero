@@ -17,6 +17,7 @@ import {
   runCiSetup,
 } from "../src/ci-setup";
 import { runDoctor } from "../src/doctor";
+import { DEFAULT_PIPELINE_TIMEOUT_MS } from "../src/pipeline";
 import { parseArgs } from "../src/preflight";
 import { checkCiConfiguration } from "../src/system-tools";
 
@@ -94,6 +95,90 @@ describe("generateCiWorkflowTemplate (pure)", () => {
     );
     expect(step?.with?.["claude-token"]).toBe(
       `\${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`,
+    );
+  });
+
+  test("a secretless same-repo PR gets a LOUD notice, not a silent skip", () => {
+    // The defect this pins is not hypothetical: this repo shipped five PRs
+    // (D1-09, D1-03, D1-06, credential-projection, D1-07) whose review job
+    // was skipped for missing credentials. A skipped job does not fail its
+    // workflow, so `gh run list` reported "success" on every one and nobody
+    // noticed the engine had never reviewed its own code. Silence read as
+    // approval. The skip itself is correct — a permanent red X before
+    // credentials are wired teaches people to stop reading CI — so the fix is
+    // to make the skip SAY something, not to make it fail.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: {
+        credentials: { steps: Array<Record<string, string>> };
+      };
+    };
+    const notice = parsed.jobs.credentials.steps.find(
+      (step) => step.id === "notice",
+    );
+    expect(notice).toBeDefined();
+    // Gated on BOTH conditions: fork PRs never receive secrets by design, so
+    // a notice on every fork PR would be noise. The actionable case is a
+    // same-repo PR whose owner simply has not wired a secret yet.
+    expect(notice?.if).toContain("has_creds == 'false'");
+    expect(notice?.if).toContain(
+      "github.event.pull_request.head.repo.full_name == github.repository",
+    );
+    // Both surfaces: an annotation on the run AND a line in the job summary.
+    expect(notice?.run).toContain("::notice");
+    expect(notice?.run).toContain("GITHUB_STEP_SUMMARY");
+    // It must name the fix, not just the symptom.
+    expect(notice?.run).toContain("claude setup-token");
+  });
+
+  test("the notice script never lets bash run a backtick as a command", () => {
+    // Backticks inside a DOUBLE-quoted bash string are command substitution,
+    // not literal text. The notice body documents `gh run rerun` in prose, so
+    // an echo that wrapped it in double quotes would actually invoke gh on the
+    // runner and fail the step that exists to explain a failure. Every line
+    // carrying a backtick must be single-quoted.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { credentials: { steps: Array<Record<string, string>> } };
+    };
+    const script =
+      parsed.jobs.credentials.steps.find((step) => step.id === "notice")?.run ??
+      "";
+    expect(script).toContain("`");
+    for (const line of script.split("\n")) {
+      if (!line.includes("`")) continue;
+      expect(line.trim()).toMatch(/^echo '/);
+    }
+  });
+
+  test("the review job is bounded ABOVE the pipeline's own ceiling", () => {
+    // DEFAULT_PIPELINE_TIMEOUT_MS is 75 minutes (src/pipeline.ts). A CI
+    // timeout at or below that steals the salvage path: GitHub kills the job
+    // before the pipeline's own ceiling can fire, close its artifacts and
+    // report. The CI bound is a backstop for a HUNG runner, not a second
+    // review budget — so it sits above the internal one with room for
+    // checkout and action setup.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { "timeout-minutes"?: number } };
+    };
+    const ceiling = parsed.jobs.review["timeout-minutes"];
+    expect(typeof ceiling).toBe("number");
+    expect(ceiling as number).toBeGreaterThan(
+      DEFAULT_PIPELINE_TIMEOUT_MS / 60_000,
+    );
+  });
+
+  test("the OAuth comment names setup-token, the only token that survives CI", () => {
+    // Two different credentials wear the name "Claude OAuth token" and only
+    // one works here. `claude setup-token` mints a long-lived (~1 year)
+    // token meant for headless use; the `/login` session token in the
+    // keychain expires in HOURS and is silently rotated by the CLI's refresh
+    // token, which CI does not have. A reader who extracts the session token
+    // gets a secret that works for a day and then breaks CI with no signal.
+    // The template is where that distinction has to be stated, because it is
+    // what the reader has open when they choose.
+    const template = generateCiWorkflowTemplate();
+    expect(template).toContain("claude setup-token");
+    expect(template).toMatch(
+      /never .*\/login|not the .*\/login|\/login.*expires/i,
     );
   });
 

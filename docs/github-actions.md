@@ -62,7 +62,7 @@ trim it.
 | Secret | Required | Notes |
 |---|---|---|
 | `GITHUB_TOKEN` | Yes (auto-provided) | GitHub injects this automatically; the action's `github-token` input defaults to it — you rarely need to set it explicitly. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | One of these two | A Claude Code OAuth token. Consumes directly from your Claude subscription (Pro/Team/Enterprise) with **zero extra API billing/costs**. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | One of these two | The long-lived token printed by `claude setup-token` (valid ~1 year). Consumes directly from your Claude subscription (Pro/Team/Enterprise) with **zero extra API billing/costs**. Must come from that command — see the warning under Option 1. |
 | `ANTHROPIC_API_KEY` | One of these two | A standard Anthropic API key, billed per token via your Anthropic Console account. |
 
 Reference every secret **by name** (`${{ secrets.ANTHROPIC_API_KEY }}`) — never paste a literal key into
@@ -79,7 +79,15 @@ logs, or truncates a secret value anywhere in its output.
    claude setup-token
    ```
 2. Authorize via the browser login window.
-3. Copy the resulting token string.
+3. Copy the resulting token string. The command prints it once and reports its
+   validity period (~1 year); regenerate it the same way before it lapses.
+
+> **Use only the token this command prints.** Two different credentials are both
+> called a "Claude OAuth token", and only this one survives in CI. The session
+> token that `/login` leaves in your keychain (or `~/.claude/.credentials.json`)
+> expires in **hours** — the CLI hides that locally by silently rotating it with
+> a refresh token, which CI does not have. Paste that one into the secret and
+> reviews work for about a day, then stop with no error you will notice.
 
 #### Option 2: Anthropic API Key (`ANTHROPIC_API_KEY`)
 *Best for pay-as-you-go per-token billing on an Anthropic Console account.*
