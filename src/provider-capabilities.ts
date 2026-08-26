@@ -453,14 +453,14 @@ export async function produceClaudeCapabilityReport(
           options.platform ?? process.platform,
           options.keychainProbe ?? defaultKeychainCredentialPresent,
         );
-      if (probeResult === "failed") {
-        issues.push({
-          code: "auth_failed",
-          message:
-            "claude authentication not detected (no OAuth token env var, no session credentials, no keychain entry)",
-          blocking: true,
-        });
-      }
+  if (probeResult === "failed") {
+    issues.push({
+      code: "auth_failed",
+      message:
+        "claude authentication not detected (no OAuth token env var, no session credentials, no keychain entry)",
+      blocking: true,
+    });
+  }
 
   if (!projectionReady) {
     issues.push({
