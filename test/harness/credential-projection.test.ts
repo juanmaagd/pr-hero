@@ -164,11 +164,11 @@ describe("harness with a CredentialBroker", () => {
     }
   });
 
-  test("projection failure fails BEFORE admission with attempts 0 and no secret material", async () => {
+  test("projection failure degrades to operator env with a stated warning instead of killing the step", async () => {
     let admitted = false;
     const requests: TransportRequest[] = [];
     const broker = new FakeBroker(
-      new CredentialProjectionError("source_read_failed"),
+      new CredentialProjectionError("missing_subscription_record"),
     );
     const harness = new StepExecutionHarness({
       transport: recordingTransport(requests),
@@ -184,14 +184,56 @@ describe("harness with a CredentialBroker", () => {
       credentialBroker: broker,
     });
     const result = await runStep(harness);
+    // Deliberate degradation (2026-08-26): reviews must keep working when the
+    // CLI's credential store moves; the fallback is the pre-D1-05 enumerated
+    // environment, loudly announced.
+    expect(result.stderrTail).toContain("missing_subscription_record");
+    expect(result.stderrTail).toContain("child runs with operator environment");
+    expect(result.stderrTail).not.toContain("AT-");
+    // The child saw the operator HOME, not a synthetic one.
+    expect(requests.length).toBe(1);
+    expect(requests[0]?.isolation.env.HOME).toBe("/Users/juanma-real-home");
+    // The isolation record describes what ACTUALLY ran — no false synthetic
+    // identity (§6.1 invariant env.HOME === syntheticHome).
+    expect(requests[0]?.isolation.credentialProjectionId).toBe(
+      "operator-env-fallback",
+    );
+    expect(requests[0]?.isolation.syntheticHome).toBe(
+      "/Users/juanma-real-home",
+    );
+    expect(admitted).toBe(true);
+    expect(broker.destroyCalls).toBe(0);
+  });
+
+  test("attack-signal projection failures still fail closed before admission", async () => {
+    let admitted = false;
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker(
+      new CredentialProjectionError("projection_layout_invalid"),
+    );
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: { HOME: "/Users/juanma-real-home" },
+      admissionGate: {
+        admit: () => {
+          admitted = true;
+        },
+      },
+      credentialBroker: broker,
+    });
+    const result = await runStep(harness);
+    // A symlinked projection layout is an attack signal, not a moved store:
+    // running an adversarial-diff agent with operator credentials precisely
+    // when the defense tripped would be worse than no review.
     expect(result.status).toBe("failed");
     expect(result.attempts).toBe(0);
     expect(admitted).toBe(false);
-    expect(broker.destroyCalls).toBe(0);
     expect(requests.length).toBe(0);
-    expect(result.stderrTail).toContain("source_read_failed");
-    expect(result.stderrTail).not.toContain("AT-");
-    expect(result.stderrTail).not.toContain("/Users/");
+    expect(result.stderrTail).toContain("projection_layout_invalid");
+    expect(result.stderrTail).not.toContain("operator environment");
   });
 
   test("destroy failure is appended to stderrTail instead of thrown or replacing the outcome", async () => {

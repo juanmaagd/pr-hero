@@ -298,6 +298,7 @@ export class StepExecutionHarness implements StepRunner {
     // spawn — a projection failure must never reach a provider or leak into
     // an attempt count.
     let projection: CredentialProjection | undefined;
+    let projectionWarning: string | undefined;
     if (this.credentialBroker) {
       try {
         projection = await this.credentialBroker.project({
@@ -313,14 +314,29 @@ export class StepExecutionHarness implements StepRunner {
           error instanceof CredentialProjectionError
             ? error.failureClass
             : "broker_error";
-        return {
-          name: step.name,
-          status: "failed",
-          usage: zeroUsage(),
-          attempts: 0,
-          stderrTail: `Credential projection failed (${failureClass}); step failed before any spawn`,
-          resultText: "",
-        };
+        // Deliberate degradation, scoped to exactly ONE failure class
+        // (operator decision 2026-08-26): Claude desktop 2.1.246 moved the
+        // subscription OAuth record out of the keychain item into its own
+        // encrypted store, so missing_subscription_record now means "the CLI
+        // keeps its credential somewhere we cannot read" — killing every
+        // step made reviews impossible. Every OTHER class is an attack or
+        // integrity signal (symlinked layout, tampered payload, unreadable
+        // source) and still fails closed: degrading on those would run an
+        // adversarial-diff agent with operator credentials precisely when
+        // something suspicious happened. The degradation is stated on the
+        // result, never silent.
+        if (failureClass !== "missing_subscription_record") {
+          return {
+            name: step.name,
+            status: "failed",
+            usage: zeroUsage(),
+            attempts: 0,
+            stderrTail: `Credential projection failed (${failureClass}); step failed before any spawn`,
+            resultText: "",
+          };
+        }
+        projection = undefined;
+        projectionWarning = `credential projection unavailable (${failureClass}); child runs with operator environment`;
       }
     }
 
@@ -339,6 +355,9 @@ export class StepExecutionHarness implements StepRunner {
         await this.destroyProjection(projection),
         result,
       );
+      if (projectionWarning !== undefined) {
+        result.stderrTail = `${result.stderrTail}\n[pr-hero] ${projectionWarning}`;
+      }
       return result;
     } catch (error) {
       this.appendDestroyFailure(await this.destroyProjection(projection));
@@ -802,11 +821,17 @@ export class StepExecutionHarness implements StepRunner {
               verifiedBinaryPath,
             }
           : {
-              credentialProjectionId: "ephemeral",
+              // Degraded mode must describe what ACTUALLY ran, not claim a
+              // synthetic identity the env contradicts (§6.1 invariant:
+              // env.HOME === syntheticHome). The marker id makes the
+              // fallback auditable in artifacts.
+              credentialProjectionId: "operator-env-fallback",
               env: childEnv,
-              syntheticHome: "/tmp",
-              syntheticConfigHome: "/tmp",
-              syntheticTmp: "/tmp",
+              syntheticHome: childEnv.HOME ?? "",
+              syntheticConfigHome:
+                childEnv.CLAUDE_CONFIG_DIR ??
+                path.join(childEnv.HOME ?? "", ".claude"),
+              syntheticTmp: childEnv.TMPDIR ?? "",
               verifiedBinaryPath,
             },
       };
