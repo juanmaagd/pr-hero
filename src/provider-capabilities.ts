@@ -3,6 +3,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -11,7 +12,7 @@ import {
   writeSync,
 } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 export type RunnerBackend =
@@ -259,4 +260,279 @@ export interface ProviderCapabilityReport {
     message: string;
     blocking: boolean;
   }[];
+}
+
+// §13 ("Preflight and execution use the same verified absolute binary"):
+// extracted from resolveRunnerAuthority so the capability-report producer and
+// the execution authority share ONE resolution rule instead of two copies
+// that can drift. Same lookup order, same error strings.
+export interface ClaudeBinaryLookup {
+  readonly binaryPath?: string;
+  readonly env?: { PATH?: string };
+}
+
+export interface ClaudeBinaryResolutionDeps {
+  readonly existsFn?: (p: string) => boolean;
+  readonly realpathFn?: (p: string) => Promise<string>;
+  readonly readFileFn?: (p: string) => Promise<Uint8Array>;
+}
+
+export type ClaudeCanonicalBinary =
+  | {
+      readonly canonicalPath: string;
+      readonly sha256: string;
+      readonly error?: undefined;
+    }
+  | { readonly canonicalPath?: undefined; readonly error: string };
+
+const CLAUDE_BINARY_NAME = "claude";
+
+export async function resolveClaudeCanonicalBinary(
+  lookup: ClaudeBinaryLookup,
+  deps: ClaudeBinaryResolutionDeps = {},
+): Promise<ClaudeCanonicalBinary> {
+  const exists = deps.existsFn ?? existsSync;
+  const toRealpath = deps.realpathFn ?? realpath;
+  const readBytes =
+    deps.readFileFn ?? ((p: string) => readFile(p) as Promise<Uint8Array>);
+
+  let candidate: string;
+  if (lookup.binaryPath !== undefined) {
+    if (!path.isAbsolute(lookup.binaryPath)) {
+      return {
+        error: `binary override must be an absolute path: ${lookup.binaryPath}`,
+      };
+    }
+    candidate = lookup.binaryPath;
+  } else {
+    const searchDirs = (lookup.env?.PATH ?? process.env.PATH ?? "")
+      .split(path.delimiter)
+      .filter((dir) => dir.length > 0);
+    candidate = "";
+    for (const dir of searchDirs) {
+      const probe = path.join(dir, CLAUDE_BINARY_NAME);
+      if (exists(probe)) {
+        candidate = probe;
+        break;
+      }
+    }
+    if (candidate === "") {
+      return { error: "claude binary not found on PATH" };
+    }
+  }
+
+  try {
+    const canonical = await toRealpath(candidate);
+    const bytes = await readBytes(canonical);
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const sha256 = hasher.digest("hex");
+    return { canonicalPath: canonical, sha256 };
+  } catch (error) {
+    return {
+      error: `failed to resolve claude binary ${candidate}: ${(error as Error).message}`,
+    };
+  }
+}
+
+// §11/D1-09: fields every claude-code route claims independent of host
+// environment. The transport's capabilities() and the report producer both
+// read these constants, so the two surfaces cannot contradict each other.
+export const CLAUDE_CAPABILITY_STATICS = {
+  authKind: "claude_subscription_oauth",
+  workspaceReadBroker: true,
+  terminalProof: true,
+  usageMode: "snapshot",
+  cancellationDeadlineMs: 7500,
+  cancellationConformance: "passed",
+  billingMode: "subscription",
+} as const;
+
+// Same predicate runner-authority applies when deciding whether to wire the
+// KeychainCredentialBroker (§6.1): macOS subscription OAuth projects out of
+// the Keychain via /usr/bin/security; elsewhere there is nothing to project.
+export function claudeCredentialProjectionReady(
+  options: {
+    platform?: NodeJS.Platform;
+    existsFn?: (p: string) => boolean;
+  } = {},
+): boolean {
+  const platform = options.platform ?? process.platform;
+  const exists = options.existsFn ?? existsSync;
+  return platform === "darwin" && exists("/usr/bin/security");
+}
+
+// Mirrors system-tools' claude auth predicate (env token or on-disk session)
+// so the default probe never spawns claude — offline tests inject `authProbe`
+// instead, and production gets the same answer without a subprocess.
+function defaultClaudeAuthProbe(
+  env: Record<string, string | undefined>,
+  home: string,
+  exists: (p: string) => boolean,
+): "passed" | "failed" {
+  const hasToken =
+    Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim()) ||
+    Boolean(env.ANTHROPIC_API_KEY?.trim());
+  if (hasToken) return "passed";
+  const hasSessionFile =
+    exists(path.join(home, ".claude.json")) ||
+    exists(path.join(home, ".claude", "session.json"));
+  return hasSessionFile ? "passed" : "failed";
+}
+
+export interface ProduceClaudeCapabilityReportOptions {
+  readonly binaryPath?: string;
+  readonly env?: Record<string, string | undefined>;
+  readonly platform?: NodeJS.Platform;
+  readonly home?: string;
+  readonly existsFn?: (p: string) => boolean;
+  readonly realpathFn?: (p: string) => Promise<string>;
+  readonly readFileFn?: (p: string) => Promise<Uint8Array>;
+  readonly version?: string;
+  // Injectable so offline tests never spawn claude (§11).
+  readonly authProbe?: () => "passed" | "failed";
+}
+
+// §11/D1-09: the REAL claude-code report. Every gap becomes an issue entry;
+// missing binary or failed auth are blocking, everything unproven is claimed
+// false and non-blocking rather than assumed green.
+export async function produceClaudeCapabilityReport(
+  options: ProduceClaudeCapabilityReportOptions = {},
+): Promise<ProviderCapabilityReport> {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const existsFn = options.existsFn ?? existsSync;
+
+  const issues: { code: string; message: string; blocking: boolean }[] = [];
+
+  const resolved = await resolveClaudeCanonicalBinary(
+    { binaryPath: options.binaryPath, env },
+    {
+      existsFn,
+      realpathFn: options.realpathFn,
+      readFileFn: options.readFileFn,
+    },
+  );
+
+  const projectionReady = claudeCredentialProjectionReady({
+    platform: options.platform,
+    existsFn,
+  });
+
+  const probeResult =
+    options.authProbe !== undefined
+      ? options.authProbe()
+      : defaultClaudeAuthProbe(env, home, existsFn);
+  if (probeResult === "failed") {
+    issues.push({
+      code: "auth_failed",
+      message:
+        "claude authentication not detected (no OAuth token env var and no session credentials)",
+      blocking: true,
+    });
+  }
+
+  if (!projectionReady) {
+    issues.push({
+      code: "credential_projection_unavailable",
+      message:
+        "credential projection broker unavailable (needs darwin + /usr/bin/security); child runs with enumerated-passthrough env instead of a synthetic home",
+      blocking: false,
+    });
+  }
+
+  // Honest until enforced: no codegraph-specific read policy exists in
+  // src/security/ today, so the report must not claim one (§11).
+  issues.push({
+    code: "codegraph_policy_unenforced",
+    message:
+      "no dedicated codegraph sensitive-file policy is enforced yet; isolation relies on --strict-mcp-config with a codegraph-only mcp.json",
+    blocking: false,
+  });
+
+  // The AsyncEventSink contract exists but the pipeline still consumes usage
+  // from the CLI's json snapshot, not bounded events (§12 D1-08 residual).
+  issues.push({
+    code: "bounded_events_sink_missing",
+    message:
+      "bounded event streaming is not wired: the event sink is currently a no-op and usage arrives as a final snapshot",
+    blocking: false,
+  });
+
+  issues.push({
+    code: "pricing_table_missing",
+    message:
+      "no per-model pricing table is bundled, so cash-cost estimates cannot be derived from usage snapshots",
+    blocking: false,
+  });
+
+  if (resolved.error !== undefined) {
+    issues.unshift({
+      code: "binary_unresolved",
+      message: resolved.error,
+      blocking: true,
+    });
+  }
+
+  const hasBlocking = issues.some((issue) => issue.blocking);
+
+  return {
+    backend: "claude-code",
+    status: hasBlocking ? "blocking" : "degraded",
+    ...(resolved.error === undefined
+      ? {
+          binary: {
+            absolutePath: resolved.canonicalPath,
+            sha256: resolved.sha256,
+            version: options.version ?? "unknown",
+          },
+        }
+      : {}),
+    auth: {
+      kind: CLAUDE_CAPABILITY_STATICS.authKind,
+      projectionReady,
+      probe: probeResult,
+    },
+    isolation: {
+      syntheticHome: projectionReady,
+      workspaceReadBroker: CLAUDE_CAPABILITY_STATICS.workspaceReadBroker,
+      codegraphPolicy: false,
+    },
+    protocol: {
+      terminalProof: CLAUDE_CAPABILITY_STATICS.terminalProof,
+      boundedEvents: false,
+      usageMode: CLAUDE_CAPABILITY_STATICS.usageMode,
+    },
+    cancellation: {
+      deadlineMs: CLAUDE_CAPABILITY_STATICS.cancellationDeadlineMs,
+      conformance: CLAUDE_CAPABILITY_STATICS.cancellationConformance,
+    },
+    billing: {
+      mode: CLAUDE_CAPABILITY_STATICS.billingMode,
+      pricingReady: false,
+    },
+    issues,
+  };
+}
+
+// §11: "Any blocking issue prevents the route from executing." Pure decision
+// so cli.ts's review paths gate on it without their own issue-parsing logic.
+export interface CapabilityGateDecision {
+  readonly ok: boolean;
+  readonly reason?: string;
+}
+
+export function capabilityGateDecision(
+  report: ProviderCapabilityReport,
+): CapabilityGateDecision {
+  const blocking = report.issues.filter((issue) => issue.blocking);
+  if (blocking.length === 0) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: blocking
+      .map((issue) => `${issue.code}: ${issue.message}`)
+      .join("; "),
+  };
 }

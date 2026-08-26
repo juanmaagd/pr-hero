@@ -320,6 +320,137 @@ describe("doctor tri-state evaluation", () => {
     });
   });
 
+  describe("provider capability section (§11/D1-09)", () => {
+    test("blocking report issue propagates to overall blocking and exitCode 1", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md" ? "## Gotchas\nContent" : undefined,
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        produceCapabilityReport: async () => ({
+          backend: "claude-code",
+          status: "blocking",
+          auth: {
+            kind: "claude_subscription_oauth",
+            projectionReady: false,
+            probe: "failed",
+          },
+          isolation: {
+            syntheticHome: false,
+            workspaceReadBroker: true,
+            codegraphPolicy: false,
+          },
+          protocol: {
+            terminalProof: true,
+            boundedEvents: false,
+            usageMode: "snapshot",
+          },
+          cancellation: { deadlineMs: 7500, conformance: "passed" },
+          billing: { mode: "subscription", pricingReady: false },
+          issues: [
+            {
+              code: "auth_failed",
+              message: "claude authentication not detected",
+              blocking: true,
+            },
+          ],
+        }),
+      });
+
+      expect(report.overall).toBe("blocking");
+      expect(report.exitCode).toBe(1);
+      const providerCheck = report.checks.find(
+        (c) => c.name === "provider:auth_failed",
+      );
+      expect(providerCheck?.severity).toBe("blocking");
+    });
+
+    test("non-blocking issues render degraded with a hint and do not fail the run", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md" ? "## Gotchas\nContent" : undefined,
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        produceCapabilityReport: async () => ({
+          backend: "claude-code",
+          status: "degraded",
+          binary: {
+            absolutePath: "/bin/claude",
+            sha256: "a".repeat(64),
+            version: "1.0.0",
+          },
+          auth: {
+            kind: "claude_subscription_oauth",
+            projectionReady: true,
+            probe: "passed",
+          },
+          isolation: {
+            syntheticHome: true,
+            workspaceReadBroker: true,
+            codegraphPolicy: false,
+          },
+          protocol: {
+            terminalProof: true,
+            boundedEvents: false,
+            usageMode: "snapshot",
+          },
+          cancellation: { deadlineMs: 7500, conformance: "passed" },
+          billing: { mode: "subscription", pricingReady: false },
+          issues: [
+            {
+              code: "pricing_table_missing",
+              message: "no per-model pricing table is bundled",
+              blocking: false,
+            },
+          ],
+        }),
+      });
+
+      expect(report.overall).toBe("degraded");
+      expect(report.exitCode).toBe(0);
+      const providerCheck = report.checks.find(
+        (c) => c.name === "provider:pricing_table_missing",
+      );
+      expect(providerCheck?.severity).toBe("degraded");
+      expect(providerCheck?.hint).toBeDefined();
+    });
+
+    test("a throwing producer fails loud as blocking", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md" ? "## Gotchas\nContent" : undefined,
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        produceCapabilityReport: async () => {
+          throw new Error("boom");
+        },
+      });
+
+      expect(report.overall).toBe("blocking");
+      const providerCheck = report.checks.find((c) => c.name === "provider");
+      expect(providerCheck?.severity).toBe("blocking");
+      expect(providerCheck?.message).toContain("boom");
+    });
+  });
+
   describe("renderDoctorReport", () => {
     test("renders report lines with styles: false containing zero ANSI escape bytes", () => {
       const report: DoctorReport = {

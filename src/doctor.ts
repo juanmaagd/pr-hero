@@ -7,6 +7,7 @@ import {
   inspectSkillsSync,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
+import type { ProviderCapabilityReport } from "./provider-capabilities";
 import {
   type CheckSystemToolsOptions,
   checkCiConfiguration,
@@ -35,7 +36,27 @@ export interface RunDoctorOptions {
   checkToolsOptions?: CheckSystemToolsOptions;
   exists?: (p: string) => boolean;
   readFile?: (p: string) => string | undefined;
+  // §11/D1-09: doctor consumes the SAME ProviderCapabilityReport execution
+  // gates on. Injectable so offline tests stay deterministic; the CLI's
+  // doctor command passes the real producer. Opt-in rather than default-on
+  // because the report always carries non-blocking gaps (no pricing table,
+  // no bounded event sink), which would flip every existing "healthy"
+  // fixture to "degraded" for reasons unrelated to what those tests probe.
+  produceCapabilityReport?: () => Promise<ProviderCapabilityReport>;
 }
+
+// Remediation hints for the report's known non-blocking codes; blocking
+// issues carry their own actionable message from the producer.
+const PROVIDER_HINTS: Record<string, string> = {
+  credential_projection_unavailable:
+    "Credential projection requires macOS with /usr/bin/security; on other platforms the child runs with enumerated-passthrough env.",
+  codegraph_policy_unenforced:
+    "Await the dedicated codegraph sensitive-file policy (D1-05 residual); isolation currently relies on --strict-mcp-config with a codegraph-only mcp.json.",
+  bounded_events_sink_missing:
+    "Usage arrives as a final snapshot until the bounded event sink is wired (D1-08 residual).",
+  pricing_table_missing:
+    "Cash-cost estimates need a bundled per-model pricing table; notional estimates remain available.",
+};
 
 export function evaluateDoctorReport(checks: DoctorCheckItem[]): DoctorReport {
   let overall: DoctorSeverity = "healthy";
@@ -377,6 +398,29 @@ export async function runDoctor(
     message: ciStatus.message,
     hint: ciStatus.hint,
   });
+
+  // 7. Provider capability report (§11/D1-09) — one check item per issue:
+  // blocking report issues block the doctor verdict exactly as they block
+  // execution; non-blocking gaps render as degraded with a remediation hint.
+  if (options.produceCapabilityReport !== undefined) {
+    try {
+      const capability = await options.produceCapabilityReport();
+      for (const issue of capability.issues) {
+        checks.push({
+          name: `provider:${issue.code}`,
+          severity: issue.blocking ? "blocking" : "degraded",
+          message: issue.message,
+          ...(issue.blocking ? {} : { hint: PROVIDER_HINTS[issue.code] }),
+        });
+      }
+    } catch (error) {
+      checks.push({
+        name: "provider",
+        severity: "blocking",
+        message: `capability report production failed: ${(error as Error).message}`,
+      });
+    }
+  }
 
   return evaluateDoctorReport(checks);
 }
