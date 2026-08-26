@@ -298,6 +298,7 @@ export class StepExecutionHarness implements StepRunner {
     // spawn — a projection failure must never reach a provider or leak into
     // an attempt count.
     let projection: CredentialProjection | undefined;
+    let projectionWarning: string | undefined;
     if (this.credentialBroker) {
       try {
         projection = await this.credentialBroker.project({
@@ -313,14 +314,16 @@ export class StepExecutionHarness implements StepRunner {
           error instanceof CredentialProjectionError
             ? error.failureClass
             : "broker_error";
-        return {
-          name: step.name,
-          status: "failed",
-          usage: zeroUsage(),
-          attempts: 0,
-          stderrTail: `Credential projection failed (${failureClass}); step failed before any spawn`,
-          resultText: "",
-        };
+        // Deliberate degradation (operator decision 2026-08-26): Claude
+        // desktop 2.1.246 moved the subscription OAuth record out of the
+        // keychain item into its own encrypted store, so projection now fails
+        // on machines that authenticate perfectly well. Killing every step
+        // made reviews impossible; running with the operator environment is
+        // the pre-D1-05 behavior, and every other isolation layer (workspace
+        // broker, git pinning, binary snapshot, PGID cascade) still applies.
+        // The degradation is stated on the result, never silent.
+        projection = undefined;
+        projectionWarning = `credential projection unavailable (${failureClass}); child runs with operator environment`;
       }
     }
 
@@ -339,6 +342,9 @@ export class StepExecutionHarness implements StepRunner {
         await this.destroyProjection(projection),
         result,
       );
+      if (projectionWarning !== undefined) {
+        result.stderrTail = `${result.stderrTail}\n[pr-hero] ${projectionWarning}`;
+      }
       return result;
     } catch (error) {
       this.appendDestroyFailure(await this.destroyProjection(projection));

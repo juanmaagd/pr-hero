@@ -164,7 +164,7 @@ describe("harness with a CredentialBroker", () => {
     }
   });
 
-  test("projection failure fails BEFORE admission with attempts 0 and no secret material", async () => {
+  test("projection failure degrades to operator env with a stated warning instead of killing the step", async () => {
     let admitted = false;
     const requests: TransportRequest[] = [];
     const broker = new FakeBroker(
@@ -184,14 +184,19 @@ describe("harness with a CredentialBroker", () => {
       credentialBroker: broker,
     });
     const result = await runStep(harness);
-    expect(result.status).toBe("failed");
-    expect(result.attempts).toBe(0);
-    expect(admitted).toBe(false);
-    expect(broker.destroyCalls).toBe(0);
-    expect(requests.length).toBe(0);
+    // Deliberate degradation (2026-08-26): reviews must keep working when the
+    // CLI's credential store moves; the fallback is the pre-D1-05 enumerated
+    // environment, loudly announced.
     expect(result.stderrTail).toContain("source_read_failed");
+    expect(result.stderrTail).toContain(
+      "child runs with operator environment",
+    );
     expect(result.stderrTail).not.toContain("AT-");
-    expect(result.stderrTail).not.toContain("/Users/");
+    // The child saw the operator HOME, not a synthetic one.
+    expect(requests.length).toBe(1);
+    expect(requests[0]?.isolation.env.HOME).toBe("/Users/juanma-real-home");
+    expect(admitted).toBe(true);
+    expect(broker.destroyCalls).toBe(0);
   });
 
   test("destroy failure is appended to stderrTail instead of thrown or replacing the outcome", async () => {
