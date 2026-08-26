@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -96,9 +96,15 @@ function envelope(
 
 async function makeSpec(overrides: Partial<StepSpec> = {}): Promise<StepSpec> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-step-"));
+  // §6.3: the harness hashes the prompt pre-loop and the transport re-verifies
+  // it (0600, non-symlink, hash match) immediately before spawn, so offline
+  // runner tests need a real 0600 file on disk.
+  const systemPromptPath = path.join(dir, "hunter-reliability.system.md");
+  await writeFile(systemPromptPath, "system prompt");
+  await chmod(systemPromptPath, 0o600);
   return {
     name: "hunter-reliability",
-    systemPromptPath: "/runs/1/steps/hunter-reliability.system.md",
+    systemPromptPath,
     prompt: "Review this diff.",
     tools: ["Read", "Grep", "Glob", "mcp__codegraph__codegraph_explore"],
     mcpConfigPath: "/runs/1/mcp.json",

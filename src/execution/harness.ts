@@ -4,6 +4,7 @@ import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
 } from "../provider-capabilities";
+import { redactDiagnostic } from "../security/redact";
 import { WorkspaceReadBroker } from "../security/workspace-read-broker";
 import {
   classifyFailure,
@@ -83,6 +84,10 @@ export function projectChildEnv(
   return projected;
 }
 
+// §6.3: user and system prompt payloads each carry a predeclared 2 MiB byte
+// bound; larger steps fail before provider admission.
+export const MAX_SYSTEM_PROMPT_BYTES = 2 * 1024 * 1024;
+
 function notifyRetry(step: StepSpec, info: RetryInfo): void {
   if (!step.onRetry) return;
   try {
@@ -125,9 +130,10 @@ async function writeAttemptLog(
       `timed_out: ${outcome.timedOut ?? false}`,
       `classification: ${classification}`,
       "--- stderr tail (4096) ---",
-      outcome.stderrTail,
+      // §6.3: redaction before persistence — nothing unredacted hits disk.
+      redactDiagnostic(outcome.stderrTail),
       "--- result tail (8192) ---",
-      outcome.finalText.slice(-8192),
+      redactDiagnostic(outcome.finalText.slice(-8192)),
       "",
     ].join("\n"),
   );
@@ -246,6 +252,37 @@ export class StepExecutionHarness implements StepRunner {
       await this.admissionGate.admit(step);
     }
 
+    // 3.5 §6.3 prompt integrity inputs: read once, bound it, and pin its hash
+    // into every TransportRequest so the transport can re-verify the bytes
+    // immediately before spawn (the gap in between is exactly the TOCTOU the
+    // transport check exists to close).
+    let systemPromptSha256: string;
+    try {
+      const promptBytes = await Bun.file(step.systemPromptPath).bytes();
+      if (promptBytes.byteLength > MAX_SYSTEM_PROMPT_BYTES) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `System prompt exceeds the predeclared ${MAX_SYSTEM_PROMPT_BYTES}-byte bound (${promptBytes.byteLength} bytes); step failed before any spawn`,
+          resultText: "",
+        };
+      }
+      const hasher = new Bun.CryptoHasher("sha256");
+      hasher.update(promptBytes);
+      systemPromptSha256 = hasher.digest("hex");
+    } catch {
+      return {
+        name: step.name,
+        status: "failed",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: `Could not read system prompt at ${step.systemPromptPath}; step failed before any spawn`,
+        resultText: "",
+      };
+    }
+
     // 4. Execution loop with retries
     let totalUsage = zeroUsage();
     let attempts = 0;
@@ -270,7 +307,7 @@ export class StepExecutionHarness implements StepRunner {
           modelSnapshot: step.model,
         },
         systemPromptPath: step.systemPromptPath,
-        systemPromptSha256: "",
+        systemPromptSha256,
         userPrompt: step.prompt,
         cwd: canonicalCwd,
         tools: step.tools,

@@ -9,7 +9,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { WorkspaceReadBroker } from "../../src/security/workspace-read-broker";
+import {
+  DEFAULT_MAX_FILE_BYTES,
+  WorkspaceReadBroker,
+} from "../../src/security/workspace-read-broker";
 
 interface CapturedSpawn {
   argv: string[];
@@ -324,5 +327,160 @@ describe("WorkspaceReadBroker authorization", () => {
     expect(spawns).toHaveLength(1);
     expect(path.isAbsolute(spawns[0].argv[0])).toBe(true);
     expect(spawns[0].argv[0]).not.toBe("git");
+  });
+});
+
+describe("WorkspaceReadBroker hardening (§6.2 items 1, 3, 4, 5)", () => {
+  let rootDir: string;
+
+  const makeBroker = (
+    opts: Partial<{ maxFileBytes: number; maxAggregateBytes: number }> = {},
+  ): WorkspaceReadBroker =>
+    new WorkspaceReadBroker({
+      workspaceRoot: rootDir,
+      ...opts,
+    });
+
+  beforeEach(async () => {
+    rootDir = await mkdtemp(path.join(tmpdir(), "pr-hero-ws-hard-"));
+    rootDir = await realpath(rootDir);
+    await mkdir(path.join(rootDir, "src"), { recursive: true });
+    await writeFile(path.join(rootDir, "src", "plain.txt"), "harmless");
+  });
+
+  afterEach(async () => {
+    await rm(rootDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  test("symlink component below the root is denied even though realpath stays inside", async () => {
+    await writeFile(path.join(rootDir, "vault.txt"), "still inside");
+    await symlink(
+      path.join(rootDir, "vault.txt"),
+      path.join(rootDir, "alias-link"),
+    );
+    const broker = makeBroker();
+
+    const result = broker.readThrough("alias-link", { nonce: "feedface" });
+
+    expect(result.approved).toBe(false);
+    if (!result.approved) {
+      expect(result.code).toBe("path_not_approved");
+      expect(result.reason).toContain("alias-link");
+    }
+  });
+
+  test("each default sensitive pattern is denied through readThrough", async () => {
+    const sensitiveFiles = [
+      ".env",
+      ".env.local",
+      "config/credentials.json",
+      "secrets.txt",
+      "private_key.txt",
+      "server.pem",
+      "id_rsa",
+      "id_ed25519.pem",
+      ".git/config",
+      ".git/credentials",
+    ];
+    for (const rel of sensitiveFiles) {
+      await mkdir(path.dirname(path.join(rootDir, rel)), { recursive: true });
+      await writeFile(path.join(rootDir, rel), "sensitive bytes");
+    }
+    const broker = makeBroker();
+
+    for (const rel of sensitiveFiles) {
+      const result = broker.readThrough(rel, { nonce: "feedface" });
+      expect(result.approved).toBe(false);
+      if (!result.approved) {
+        expect(result.reason).toContain("Sensitive path denied");
+        expect(result.reason.length).toBeGreaterThan(
+          "Sensitive path denied".length,
+        );
+      }
+    }
+
+    // A benign neighbour is still readable.
+    expect(
+      broker.readThrough("src/plain.txt", { nonce: "feedface" }).approved,
+    ).toBe(true);
+  });
+
+  test("per-file byte bound denies oversized reads and never returns bytes", async () => {
+    const bigPath = path.join(rootDir, "blob.bin");
+    await writeFile(bigPath, Buffer.alloc(DEFAULT_MAX_FILE_BYTES + 1, 65));
+    const broker = makeBroker();
+
+    const result = broker.readThrough("blob.bin", { nonce: "feedface" });
+
+    expect(result.approved).toBe(false);
+    if (!result.approved) {
+      expect(result.reason).toContain("per-file byte bound");
+    }
+  });
+
+  test("aggregate byte bound accumulates across reads and resetAggregate clears it", async () => {
+    await writeFile(path.join(rootDir, "a.bin"), Buffer.alloc(10, 97));
+    await writeFile(path.join(rootDir, "b.bin"), Buffer.alloc(10, 98));
+    await writeFile(path.join(rootDir, "c.bin"), Buffer.alloc(10, 99));
+    // 5 bytes: fits only if the DENIED c-read consumed no budget.
+    await writeFile(path.join(rootDir, "d.bin"), Buffer.alloc(5, 100));
+    const broker = makeBroker({ maxFileBytes: 20, maxAggregateBytes: 25 });
+
+    const nonce = "feedface";
+    expect(broker.readThrough("a.bin", { nonce }).approved).toBe(true);
+    expect(broker.readThrough("b.bin", { nonce }).approved).toBe(true);
+
+    const thirdResult = broker.readThrough("c.bin", { nonce });
+    expect(thirdResult.approved).toBe(false);
+    if (!thirdResult.approved) {
+      expect(thirdResult.reason).toContain("Aggregate read bound exceeded");
+    }
+
+    expect(broker.readThrough("d.bin", { nonce }).approved).toBe(true);
+
+    broker.resetAggregate();
+    expect(broker.readThrough("c.bin", { nonce }).approved).toBe(true);
+  });
+
+  test("successful read returns bytes and a nonce-delimited comment_body wrap", async () => {
+    const body = "ordinary workspace bytes";
+    await writeFile(path.join(rootDir, "ok.txt"), body);
+    const broker = makeBroker();
+
+    const result = broker.readThrough("ok.txt", { nonce: "feedface" });
+
+    expect(result.approved).toBe(true);
+    if (result.approved) {
+      expect(result.bytes.toString("utf8")).toBe(body);
+      expect(result.wrapped).toBe(
+        `<comment_body feedface>\n${body}\n</comment_body feedface>`,
+      );
+    }
+  });
+
+  test("readThrough honors injected lstat/readFile fns", async () => {
+    const broker = makeBroker();
+    const result = broker.readThrough("injected.txt", {
+      nonce: "feedface",
+      lstatFn: () =>
+        ({
+          mode: 0o100600,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+          size: 5,
+        }) as never,
+      readFileFn: () => Buffer.from("injected"),
+    });
+
+    expect(result.approved).toBe(true);
+    if (result.approved) {
+      expect(result.bytes.toString("utf8")).toBe("injected");
+    }
+  });
+
+  test("default bounds match §6.2: 512 KiB per file, 8 MiB aggregate", () => {
+    const broker = makeBroker();
+    expect(broker.maxFileBytes).toBe(512 * 1024);
+    expect(broker.maxAggregateBytes).toBe(8 * 1024 * 1024);
   });
 });

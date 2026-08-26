@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
 import type {
   ProviderCapabilityReport,
   ProviderTerminalProof,
@@ -15,6 +17,24 @@ import { parseUsage } from "../usage";
 const TERM_GRACE_MS = 5000;
 const KILL_REAP_MS = 2000;
 
+export interface PromptFileStatus {
+  readonly mode: number;
+  readonly isSymbolicLink: boolean;
+}
+
+function systemPromptStatus(promptPath: string): PromptFileStatus | undefined {
+  try {
+    const stats = lstatSync(promptPath);
+    return { mode: stats.mode, isSymbolicLink: stats.isSymbolicLink() };
+  } catch {
+    return undefined;
+  }
+}
+
+function hashPromptFile(promptPath: string): string {
+  return createHash("sha256").update(readFileSync(promptPath)).digest("hex");
+}
+
 type CliProc = SpawnedProcess & { readonly pid: number };
 
 type CascadeResult =
@@ -29,6 +49,10 @@ export interface ClaudeCodeCliTransportOptions {
   readonly killFn?: (pid: number, signal?: string | number) => unknown;
   readonly termGraceMs?: number;
   readonly killReapMs?: number;
+  // §6.3 pre-spawn prompt verification surface; injectable for offline tests,
+  // production defaults lstat + sha256 over the real file.
+  readonly promptLstatFn?: (path: string) => PromptFileStatus | undefined;
+  readonly promptHashFn?: (path: string) => string | Promise<string>;
 }
 
 // Bun does not (yet) expose process.getpgid; when a future runtime grows one we
@@ -92,6 +116,10 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
   private readonly killFn: (pid: number, signal?: string | number) => unknown;
   private readonly termGraceMs: number;
   private readonly killReapMs: number;
+  private readonly promptLstatFn: (
+    path: string,
+  ) => PromptFileStatus | undefined;
+  private readonly promptHashFn: (path: string) => string | Promise<string>;
 
   constructor(options: ClaudeCodeCliTransportOptions = {}) {
     this.spawnFn = options.spawnFn ?? Bun.spawn;
@@ -99,6 +127,33 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     this.killFn = options.killFn ?? process.kill;
     this.termGraceMs = options.termGraceMs ?? TERM_GRACE_MS;
     this.killReapMs = options.killReapMs ?? KILL_REAP_MS;
+    this.promptLstatFn = options.promptLstatFn ?? systemPromptStatus;
+    this.promptHashFn = options.promptHashFn ?? hashPromptFile;
+  }
+
+  // §6.3: system prompts are 0600, non-symlink files whose hashes are checked
+  // immediately before spawn. Returns the denial reason, or undefined when
+  // verification holds.
+  private async verifyPromptIntegrity(
+    request: TransportRequest,
+  ): Promise<string | undefined> {
+    const status = await this.promptLstatFn(request.systemPromptPath);
+    if (status === undefined) {
+      return `system prompt unreadable: ${request.systemPromptPath}`;
+    }
+    if (status.isSymbolicLink) {
+      return `system prompt is a symlink: ${request.systemPromptPath}`;
+    }
+    // Raw lstat mode carries file-type bits; only the permission bits must be
+    // exactly 0600.
+    if ((status.mode & 0o777) !== 0o600) {
+      return `system prompt mode is ${(status.mode & 0o777).toString(8)}, expected 600`;
+    }
+    const actualSha256 = await this.promptHashFn(request.systemPromptPath);
+    if (actualSha256 !== request.systemPromptSha256) {
+      return "system prompt hash mismatch against request.systemPromptSha256";
+    }
+    return undefined;
   }
 
   async capabilities(): Promise<ProviderCapabilityReport> {
@@ -213,6 +268,25 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     );
 
     const start = performance.now();
+
+    // §6.3: hash/mode/symlink verification happens immediately before spawn;
+    // a failed check never reaches the provider.
+    const promptDenial = await this.verifyPromptIntegrity(request);
+    if (promptDenial !== undefined) {
+      return {
+        completion: "failed",
+        protocolIntegrity: "unverified",
+        finalText: "",
+        usage: {
+          wall_ms: Math.round(performance.now() - start),
+          tokens_in: 0,
+          tokens_out: 0,
+          tokens_total: 0,
+          cost_usd_est: 0,
+        },
+        stderrTail: `[pr-hero] prompt integrity denied: ${promptDenial}; no spawn`,
+      };
+    }
 
     // detached: Bun maps this to setsid() on POSIX, so the child starts a new
     // session and leads its own process group — the precondition for §5.2's

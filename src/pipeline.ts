@@ -4,7 +4,7 @@
 // assembly) deterministic and testable here, and spends model tokens only on
 // the hunts and the refutation themselves.
 
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { blockForgesNonce, selectBoundaryNonce, wrapBlock } from "./boundary";
 import {
@@ -434,6 +434,10 @@ async function writeSystemPrompt(
   body: string,
 ): Promise<void> {
   await Bun.write(systemPromptPath, `${RUNTIME_PREAMBLE}\n${body}`);
+  // §6.3: prompts are 0600 non-symlink files whose hash the transport checks
+  // immediately pre-spawn — the writer must produce the mode the checker
+  // demands, or every real step dies at the integrity gate.
+  await chmod(systemPromptPath, 0o600);
 }
 
 // Prose Step 4/8 phrasing turned into the engine-owned output contract. This

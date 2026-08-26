@@ -1,9 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
+import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
 
 const PID = 424242;
+
+// §6.3 pre-spawn verification stubs: an existing 0600 regular file whose
+// hash matches makeRequest's systemPromptSha256.
+const okPromptFns: Pick<
+  ClaudeCodeCliTransportOptions,
+  "promptLstatFn" | "promptHashFn"
+> = {
+  promptLstatFn: () => ({ mode: 0o100600, isSymbolicLink: false }),
+  promptHashFn: () => "deadbeef",
+};
 
 interface RecordedSignal {
   pid: number;
@@ -95,6 +106,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     const signals: RecordedSignal[] = [];
     const fake = makeFakeProc({});
     const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
       // pgid differs from pid: the child is NOT a group leader
       getPgid: (pid) => pid - 1,
@@ -129,6 +141,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       return fake.proc;
     }) as unknown as typeof Bun.spawn;
     const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn,
       getPgid: (pid) => pid,
       killFn: (pid, signal) => {
@@ -149,6 +162,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     const fake = makeFakeProc({});
     let exitTimer: ReturnType<typeof setTimeout> | undefined;
     const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
       getPgid: (pid) => pid,
       termGraceMs: 50,
@@ -180,6 +194,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     const signals: RecordedSignal[] = [];
     const fake = makeFakeProc({});
     const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
       getPgid: (pid) => pid,
       termGraceMs: 60,
@@ -212,6 +227,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     const signals: RecordedSignal[] = [];
     const fake = makeFakeProc({});
     const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
       getPgid: (pid) => pid,
       termGraceMs: 20,
@@ -244,6 +260,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     });
     const successSignals: RecordedSignal[] = [];
     const successTransport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn: (() => successFake.proc) as unknown as typeof Bun.spawn,
       getPgid: (pid) => pid,
       killFn: (pid, signal) => {
@@ -271,6 +288,7 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       exitCode: 1,
     });
     const failureTransport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
       spawnFn: (() => failureFake.proc) as unknown as typeof Bun.spawn,
       getPgid: (pid) => pid,
       killFn: () => {},

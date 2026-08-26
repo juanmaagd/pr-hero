@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type {
   ProviderTransport,
   TransportOutcome,
@@ -66,9 +69,14 @@ describe("projectChildEnv", () => {
       })) as unknown as typeof Bun.spawn,
       childEnv: { HOME: "/Users/juanma", GIT_DIR: "/evil" },
     });
+    // The harness hashes the system prompt before admitting the step, so it
+    // must exist on disk even in this offline projection probe.
+    const promptDir = await mkdtemp(path.join(tmpdir(), "pr-hero-env-probe-"));
+    const systemPromptPath = path.join(promptDir, "system.md");
+    await writeFile(systemPromptPath, "system prompt");
     await harness.run({
       name: "env-probe",
-      systemPromptPath: "/tmp/system.md",
+      systemPromptPath,
       prompt: "p",
       tools: [],
       model: "sonnet",
