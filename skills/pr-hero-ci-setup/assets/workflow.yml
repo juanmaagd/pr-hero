@@ -12,6 +12,11 @@ concurrency:
   group: pr-hero-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# The secrets context is NOT readable in a job-level `if`, so credential
+# presence is computed once here and consumed by the job condition below.
+env:
+  PRHERO_HAS_CREDS: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+
 # pull-requests: write lets pr-hero post inline comments and a step summary.
 # contents: read is enough for actions/checkout. issues: write lets it
 # resolve/reply on review threads (GitHub models PR conversations as issues).
@@ -25,7 +30,13 @@ jobs:
   review:
     # Fork PRs do not have access to repository secrets in GitHub Actions.
     # Restricting to same-repo PRs prevents false-negative authentication failures.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Secretless same-repo PRs SKIP instead of failing: the provider capability
+    # gate would abort the run in seconds (correctly — zero spend), but a
+    # permanent red X on every PR before credentials are wired is noise, not
+    # signal. A skipped job IS the notice; adding either secret resumes reviews.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      env.PRHERO_HAS_CREDS == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
