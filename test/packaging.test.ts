@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { generateCiWorkflowTemplate } from "../src/ci-setup";
+import {
+  generateCiWorkflowTemplate,
+  OWN_CI_WORKFLOW_OPTIONS,
+} from "../src/ci-setup";
 
 describe("Packaging & distribution configuration", () => {
   const rootDir = path.resolve(__dirname, "..");
@@ -181,7 +184,7 @@ describe("Packaging & distribution configuration", () => {
       // GitHub Actions; nothing else in this repo would notice.
       const declared = Object.keys(parsedAction().inputs);
       const workflow = Bun.YAML.parse(
-        generateCiWorkflowTemplate({ actionRef: "./" }),
+        generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS),
       ) as {
         jobs: {
           review: {
@@ -266,7 +269,7 @@ describe("Packaging & distribution configuration", () => {
     );
     expect(existsSync(workflowPath)).toBe(true);
     const committed = readFileSync(workflowPath, "utf-8");
-    expect(committed).toBe(generateCiWorkflowTemplate({ actionRef: "./" }));
+    expect(committed).toBe(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS));
   });
 
   test("skills/pr-hero-ci-setup/assets/workflow.yml never drifts from generateCiWorkflowTemplate()", () => {
@@ -296,7 +299,7 @@ describe("Packaging & distribution configuration", () => {
   });
 
   test("this repo's own workflow runs the local action, not an unpublished tag", () => {
-    const own = generateCiWorkflowTemplate({ actionRef: "./" });
+    const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
     expect(own).toContain("uses: ./");
     expect(own).not.toContain("juanmaagd/pr-hero@v1");
   });

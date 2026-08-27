@@ -168,6 +168,12 @@ export interface ClaudeCodeRunnerOptions {
   onAuthEvent?: (event: AuthEvent) => void;
   // §6.1 D1-05 credential projection; forwarded to the harness.
   credentialBroker?: CredentialBroker;
+  // §5.3 D1-10b: the pipeline ceiling's cancellation signal. This is the ONLY
+  // entry point to the harness's §5.3 sequence (no new attempts, lease fence,
+  // abort, bounded grace) — the whole sequence shipped implemented and
+  // unreachable because this option was missing here, so nothing in src/ ever
+  // handed the harness a signal.
+  signal?: AbortSignal;
 }
 
 export class ClaudeCodeRunner implements StepRunner {
@@ -182,6 +188,7 @@ export class ClaudeCodeRunner implements StepRunner {
       onAuthEvent: options.onAuthEvent,
       credentialBroker: options.credentialBroker,
       spawnFn: options.spawnFn,
+      signal: options.signal,
     });
   }
 

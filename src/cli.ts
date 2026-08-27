@@ -1153,6 +1153,11 @@ async function review(options: CliOptions): Promise<number> {
       `execution authority unavailable: ${runnerAuthority.error}`,
     );
   }
+  // §5.3 D1-10b: ONE controller shared by the pipeline and the runner. The
+  // pipeline aborts it when the ceiling fires; the runner's harness reads the
+  // same signal and refuses to start another attempt. Two controllers would
+  // leave the ceiling unable to stop the steps it is waiting on.
+  const ceilingController = new AbortController();
   try {
     result = await runPipeline(
       {
@@ -1184,7 +1189,11 @@ async function review(options: CliOptions): Promise<number> {
         spec,
       },
       {
-        runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions),
+        runner: new ClaudeCodeRunner({
+          ...runnerAuthority.runnerOptions,
+          signal: ceilingController.signal,
+        }),
+        ceilingController,
         onProgress: progress.onProgress,
       },
     );
@@ -2066,6 +2075,10 @@ async function reviewPr(
             `execution authority unavailable: ${runnerAuthority.error}`,
           );
         }
+        // §5.3 D1-10b: one controller shared by the pipeline and the runner,
+        // exactly as in local mode — the ceiling aborts it and the harness
+        // reads the same signal.
+        const ceilingController = new AbortController();
         started = performance.now();
         const progress = startProgressRenderer(
           started,
@@ -2124,7 +2137,11 @@ async function reviewPr(
               ...(phaseB === undefined ? {} : { phaseB }),
             },
             {
-              runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions),
+              runner: new ClaudeCodeRunner({
+                ...runnerAuthority.runnerOptions,
+                signal: ceilingController.signal,
+              }),
+              ceilingController,
               onProgress: progress.onProgress,
             },
           );
