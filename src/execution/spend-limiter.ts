@@ -164,6 +164,19 @@ export interface SpendLedger {
   ): Promise<void>;
 }
 
+// D1-08 PR5b (D8): one step's fenced reservation, surfaced at the pipeline
+// and terminal-result boundaries so the cross-run fencing gap (breaker state
+// does not survive a process restart, design decision D7) stays VISIBLE
+// rather than silent. `step` is attached by the caller (pipeline.ts knows
+// step names; this module never does) — everything else is copied verbatim
+// off the terminal `SpendReservation`.
+export interface UnresolvedSpend {
+  readonly step: string;
+  readonly bucketId: string;
+  readonly reservationId: string;
+  readonly knownUsd?: number;
+}
+
 interface LedgerEntry {
   reservation: SpendReservation;
   // Idempotency key of the transition that made this reservation terminal

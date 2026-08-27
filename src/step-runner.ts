@@ -13,6 +13,7 @@ import type {
   StepAdmissionGate,
 } from "./execution/contracts";
 import { StepExecutionHarness } from "./execution/harness";
+import type { SpendReservation } from "./execution/spend-limiter";
 import type { NormalizedUsage } from "./execution/usage-normalized";
 import type { CredentialBroker } from "./security/credential-broker";
 import type { SessionUsage } from "./usage";
@@ -76,6 +77,12 @@ export interface StepResult {
   // (a pre-spawn denial, a construction failure) — those cases are genuine
   // zero cost, not "unavailable", and carry no v2 record at all.
   usageV2?: NormalizedUsage;
+  // D1-08 PR5b (§9.1): one entry per attempt that reached `runAttempt`'s
+  // reserve step, each carrying its own `reservationId` and TERMINAL state
+  // — spec: "every attempt MUST carry a reservationId and terminal state in
+  // pipeline.json". Absent when no `SpendLedger` was configured on the
+  // harness (the ledger-free PR5a shape) or no attempt ever reserved.
+  reservations?: SpendReservation[];
   attempts: number;
   stderrTail: string;
   resultText: string;
