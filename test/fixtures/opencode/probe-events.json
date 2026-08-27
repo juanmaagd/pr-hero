@@ -1,0 +1,478 @@
+[
+  {
+    "id": "evt_041ddb5910015AR4yeea53AHJu",
+    "type": "server.connected",
+    "properties": {}
+  },
+  {
+    "id": "evt_041ddb5a1001M7aBv1J5aNxV9f",
+    "type": "session.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "slug": "proud-wizard",
+        "projectID": "global",
+        "directory": "/tmp/probe",
+        "path": "/tmp/probe",
+        "title": "pr-hero d1-06 probe",
+        "agent": "build",
+        "model": {
+          "id": "gpt-5.6-terra-fast",
+          "providerID": "openai",
+          "variant": "default"
+        },
+        "version": "1.18.23",
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        },
+        "time": {
+          "created": 1787811444104,
+          "updated": 1787811444128
+        }
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb5a50012z7WZorsAXkftE",
+    "type": "message.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "msg_041ddb5a0001orXfEB1f2tRCLO",
+        "role": "user",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "time": {
+          "created": 1787811444128
+        },
+        "tools": {},
+        "agent": "build",
+        "model": {
+          "providerID": "openai",
+          "modelID": "gpt-5.6-terra-fast"
+        },
+        "system": "Answer with one word only."
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb5a7001CX2Qh0bRY2cGQZ",
+    "type": "message.part.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "part": {
+        "type": "text",
+        "text": "Reply with exactly: PONG",
+        "messageID": "msg_041ddb5a0001orXfEB1f2tRCLO",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "id": "prt_041ddb5a5001TPNdUmUXgO1sd2"
+      },
+      "time": 1787811444135
+    }
+  },
+  {
+    "id": "evt_041ddb5a9001Gh43exSvMMdtGG",
+    "type": "session.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "slug": "proud-wizard",
+        "projectID": "global",
+        "directory": "/tmp/probe",
+        "path": "/tmp/probe",
+        "title": "pr-hero d1-06 probe",
+        "agent": "build",
+        "model": {
+          "id": "gpt-5.6-terra-fast",
+          "providerID": "openai",
+          "variant": "default"
+        },
+        "version": "1.18.23",
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        },
+        "time": {
+          "created": 1787811444104,
+          "updated": 1787811444136
+        }
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb5ab001hoh1MaK5o4Ckv9",
+    "type": "session.status",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "status": {
+        "type": "busy"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb5ac001M6O2Adzj330wCB",
+    "type": "message.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "parentID": "msg_041ddb5a0001orXfEB1f2tRCLO",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/tmp/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        },
+        "modelID": "gpt-5.6-terra-fast",
+        "providerID": "openai",
+        "time": {
+          "created": 1787811444140
+        },
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb610001sUEaSGiVODukt4",
+    "type": "session.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "slug": "proud-wizard",
+        "projectID": "global",
+        "directory": "/tmp/probe",
+        "path": "/tmp/probe",
+        "title": "pr-hero d1-06 probe",
+        "agent": "build",
+        "model": {
+          "id": "gpt-5.6-terra-fast",
+          "providerID": "openai",
+          "variant": "default"
+        },
+        "version": "1.18.23",
+        "summary": {
+          "additions": 0,
+          "deletions": 0,
+          "files": 0
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 0,
+          "output": 0,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        },
+        "time": {
+          "created": 1787811444104,
+          "updated": 1787811444239
+        }
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb611001tgKsiSNNyRY4uB",
+    "type": "session.diff",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "diff": []
+    }
+  },
+  {
+    "id": "evt_041ddb611002qgfcndQ5LE8xEd",
+    "type": "message.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1787811444128
+        },
+        "tools": {},
+        "agent": "build",
+        "model": {
+          "providerID": "openai",
+          "modelID": "gpt-5.6-terra-fast"
+        },
+        "system": "Answer with one word only.",
+        "id": "msg_041ddb5a0001orXfEB1f2tRCLO",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "summary": {
+          "diffs": []
+        }
+      }
+    }
+  },
+  {
+    "id": "evt_041ddb873001CcSsFsElB0Kci9",
+    "type": "plugin.added",
+    "properties": {
+      "id": "core/config-reference"
+    }
+  },
+  {
+    "id": "evt_041ddbb03001n8gdF890sDtyf8",
+    "type": "catalog.updated",
+    "properties": {}
+  },
+  {
+    "id": "evt_041ddbb05001FikX4Ys1NjCvGE",
+    "type": "reference.updated",
+    "properties": {}
+  },
+  {
+    "id": "evt_041ddbb0f001nMWkgqb2h8SWi7",
+    "type": "integration.updated",
+    "properties": {}
+  },
+  {
+    "id": "evt_041ddbb390013O5HZSMzLmusGQ",
+    "type": "session.status",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "status": {
+        "type": "busy"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddc69a0017LlfcRpE5B4dPk",
+    "type": "message.part.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "part": {
+        "id": "prt_041ddc6990013UIMMiovc7p0v0",
+        "messageID": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "type": "step-start"
+      },
+      "time": 1787811448473
+    }
+  },
+  {
+    "id": "evt_041ddc69c0019dcUBYtate52Cv",
+    "type": "message.part.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "part": {
+        "id": "prt_041ddc69c0018H5rjpaKNJOsW7",
+        "messageID": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "type": "text",
+        "text": "",
+        "time": {
+          "start": 1787811448476
+        },
+        "metadata": {
+          "openai": {
+            "itemId": "msg_01002d32b551d6a1016a8fd678681087d2b4523f71aaa88ec1",
+            "phase": "final_answer"
+          }
+        }
+      },
+      "time": 1787811448476
+    }
+  },
+  {
+    "id": "evt_041ddc6d6001lVStnf8bAhAjwG",
+    "type": "message.part.delta",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "messageID": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+      "partID": "prt_041ddc69c0018H5rjpaKNJOsW7",
+      "field": "text",
+      "delta": "P"
+    }
+  },
+  {
+    "id": "evt_041ddc6fd0018MMPTPboig3725",
+    "type": "message.part.delta",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "messageID": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+      "partID": "prt_041ddc69c0018H5rjpaKNJOsW7",
+      "field": "text",
+      "delta": "ONG"
+    }
+  },
+  {
+    "id": "evt_041ddc755001dYkuwWlECWoPjO",
+    "type": "message.part.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "part": {
+        "id": "prt_041ddc69c0018H5rjpaKNJOsW7",
+        "messageID": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "type": "text",
+        "text": "PONG",
+        "time": {
+          "start": 1787811448476,
+          "end": 1787811448661
+        },
+        "metadata": {
+          "openai": {
+            "itemId": "msg_01002d32b551d6a1016a8fd678681087d2b4523f71aaa88ec1",
+            "phase": "final_answer"
+          }
+        }
+      },
+      "time": 1787811448661
+    }
+  },
+  {
+    "id": "evt_041ddc77200139sPJ2TN6nZc2U",
+    "type": "message.part.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "part": {
+        "id": "prt_041ddc772001vcieiJzayOmFbh",
+        "reason": "stop",
+        "messageID": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "type": "step-finish",
+        "tokens": {
+          "total": 24018,
+          "input": 24012,
+          "output": 6,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "cost": 0
+      },
+      "time": 1787811448690
+    }
+  },
+  {
+    "id": "evt_041ddc774001yC71p2HgYQMN85",
+    "type": "message.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "parentID": "msg_041ddb5a0001orXfEB1f2tRCLO",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/tmp/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 24018,
+          "input": 24012,
+          "output": 6,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "gpt-5.6-terra-fast",
+        "providerID": "openai",
+        "time": {
+          "created": 1787811444140,
+          "completed": 1787811448694
+        },
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "finish": "stop"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddc776001J1VgvAkNrXSITx",
+    "type": "message.updated",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "info": {
+        "id": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+        "parentID": "msg_041ddb5a0001orXfEB1f2tRCLO",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/tmp/probe",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 24018,
+          "input": 24012,
+          "output": 6,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "gpt-5.6-terra-fast",
+        "providerID": "openai",
+        "time": {
+          "created": 1787811444140,
+          "completed": 1787811448694
+        },
+        "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+        "finish": "stop"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddc7770013EOyHWHixJ8T5d",
+    "type": "session.status",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "status": {
+        "type": "busy"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddc778001u5bxRwlPd0ux5V",
+    "type": "session.status",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O",
+      "status": {
+        "type": "idle"
+      }
+    }
+  },
+  {
+    "id": "evt_041ddc778002ZpzysYIDlOwWci",
+    "type": "session.idle",
+    "properties": {
+      "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O"
+    }
+  }
+]

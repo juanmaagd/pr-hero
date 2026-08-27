@@ -1,0 +1,30 @@
+{
+  "parentID": "msg_041ddb5a0001orXfEB1f2tRCLO",
+  "role": "assistant",
+  "mode": "build",
+  "agent": "build",
+  "path": {
+    "cwd": "/tmp/probe",
+    "root": "/"
+  },
+  "cost": 0,
+  "tokens": {
+    "total": 24018,
+    "input": 24012,
+    "output": 6,
+    "reasoning": 0,
+    "cache": {
+      "write": 0,
+      "read": 0
+    }
+  },
+  "modelID": "gpt-5.6-terra-fast",
+  "providerID": "openai",
+  "time": {
+    "created": 1787811444140,
+    "completed": 1787811448694
+  },
+  "finish": "stop",
+  "id": "msg_041ddb5ac001eVebZd5vjFyhZQ",
+  "sessionID": "ses_fbe224a77ffe7YV1V0Y93Qdh4O"
+}
