@@ -75,6 +75,14 @@ permissions:
 jobs:
   credentials:
     runs-on: ubuntu-latest
+    # Bounded like every other job. This one only echoes two strings, so it
+    # can never legitimately take minutes — but it runs FIRST and gates
+    # \`review\` through \`needs:\`, on the same shared ephemeral runners. Left
+    # unbounded, a runner that hangs here inherits GitHub's 360-minute default
+    # and stalls the whole workflow for six hours while \`review\` never starts.
+    # Bounding only the job that spends money protects the budget, not the
+    # pipeline.
+    timeout-minutes: 5
     outputs:
       has_creds: \${{ steps.detect.outputs.has_creds }}
     steps:
@@ -83,18 +91,57 @@ jobs:
           HAS_CREDS: \${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: echo "has_creds=\${HAS_CREDS}" >> "$GITHUB_OUTPUT"
 
+      # This notice lives HERE, not in the review job, because the review job
+      # is exactly the thing that does not run in this case. It is gated on
+      # same-repo too: fork PRs never receive secrets by design, so warning on
+      # every fork PR would be noise rather than signal.
+      - id: notice
+        if: >-
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          steps.detect.outputs.has_creds == 'false'
+        run: |
+          MSG="pr-hero review SKIPPED: no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN secret is set, so this PR was not reviewed."
+          echo "::notice title=pr-hero review skipped::\${MSG}"
+          {
+            echo "### :warning: pr-hero did not review this PR"
+            echo ""
+            echo "\${MSG}"
+            echo ""
+            echo "Wire ONE secret to turn reviews on:"
+            echo ""
+            echo '\`\`\`bash'
+            echo "claude setup-token   # prints a long-lived token; paste it below"
+            echo "gh secret set CLAUDE_CODE_OAUTH_TOKEN"
+            echo "# ...or, for pay-as-you-go billing:"
+            echo "gh secret set ANTHROPIC_API_KEY"
+            echo '\`\`\`'
+            echo ""
+            echo 'Adding a secret does not re-run past workflows — use \`gh run rerun\` on this run.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   review:
     # Fork PRs do not have access to repository secrets in GitHub Actions.
     # Restricting to same-repo PRs prevents false-negative authentication failures.
     # Secretless same-repo PRs SKIP instead of failing: the provider capability
     # gate would abort the run in seconds (correctly — zero spend), but a
     # permanent red X on every PR before credentials are wired is noise, not
-    # signal. A skipped job IS the notice; adding either secret resumes reviews.
+    # signal.
+    #
+    # The skip is NOT its own notice, and believing it was cost this project
+    # five unreviewed PRs: a skipped job does not fail its workflow, so the run
+    # reports "success" and the absence of a review looks exactly like a clean
+    # review. The \`notice\` step above is what breaks that silence.
     needs: credentials
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       needs.credentials.outputs.has_creds == 'true'
     runs-on: ubuntu-latest
+    # Backstop for a HUNG runner, not a second review budget. pr-hero already
+    # enforces its own 75-minute whole-pipeline ceiling, which closes
+    # artifacts and reports before exiting; a CI bound at or below that would
+    # kill the job first and throw away the salvage. Above it, this only ever
+    # fires when the process is genuinely stuck.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,7 +164,13 @@ jobs:
           # for the secret you DID set is what breaks — the credential never
           # reaches the action, and it fails to authenticate silently.
           #   ANTHROPIC_API_KEY       — pay-as-you-go key (billed per token via Anthropic Console), or
-          #   CLAUDE_CODE_OAUTH_TOKEN — Claude Code OAuth token (uses Claude subscription directly, no API cost)
+          #   CLAUDE_CODE_OAUTH_TOKEN — from \`claude setup-token\`: a long-lived
+          #     (~1 year) token that draws on your Claude subscription at no
+          #     extra API cost. It must come from that command. The session
+          #     token \`/login\` leaves in the keychain expires in HOURS and is
+          #     kept alive by a refresh token CI does not have, so pasting that
+          #     one here yields a secret that works for a day and then breaks
+          #     reviews with no signal.
           anthropic-api-key: \${{ secrets.ANTHROPIC_API_KEY }}
           claude-token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 `;
