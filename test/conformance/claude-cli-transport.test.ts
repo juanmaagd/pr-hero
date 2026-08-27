@@ -382,6 +382,34 @@ describe("ClaudeCodeCliTransport.classifyFailure", () => {
     );
   });
 
+  // The witness includes finalText, which is `JSON.parse(stdout).result` — a
+  // MIXED channel carrying both the CLI's own error text and the model's
+  // final message. pr-hero's model output is code-review prose about exactly
+  // these failure modes, so English phrases like "rate limit" match the tool's
+  // own subject-matter vocabulary. Reported as F003 on PR #74 against the
+  // sibling SDK transport; the same defect reached this file through #78.
+  test("review prose about rate limiting is not a rate limit", () => {
+    for (const prose of [
+      "The endpoint has no rate limit, so a burst of requests goes straight through.",
+      "Consider returning 429 Too Many Requests once the quota is spent.",
+      "This path renders Service Unavailable instead of retrying.",
+      "The worker pool is overloaded under this traffic shape.",
+    ]) {
+      expect(classify(prose, "final")).toBeUndefined();
+    }
+  });
+
+  // Narrowing prose must not cost a single audited witness. These are the v1
+  // observed strings (test/step-runner.test.ts:465-474) — machine tokens and
+  // status codes the provider actually emits, not sentences about them.
+  test("the audited provider witnesses still classify from stderr", () => {
+    expect(classify("upstream returned 529")).toBe("rate_limit");
+    expect(classify("overloaded_error")).toBe("rate_limit");
+    expect(classify("API Error: 529 overloaded_error")).toBe("rate_limit");
+    expect(classify("rate_limit_error")).toBe("rate_limit");
+    expect(classify("HTTP 429")).toBe("rate_limit");
+  });
+
   test("clean prose is not a transport failure at all", () => {
     expect(classify("here are my findings", "final")).toBeUndefined();
   });

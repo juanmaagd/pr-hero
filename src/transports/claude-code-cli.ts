@@ -522,6 +522,9 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     outcome: TransportOutcome,
   ): TransportFailureCause | undefined {
     const witness = `${outcome.stderrTail}\n${outcome.finalText}`;
+    // The child's stderr, with no model output mixed in — see the two-witness
+    // note on the backpressure branch below.
+    const diagnostics = outcome.stderrTail;
     if (/Not logged in\s*[·.]\s*Please run \/login/i.test(witness)) {
       return "auth_invalid";
     }
@@ -536,11 +539,29 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     // server that just said it is saturated deepens the saturation and burns
     // the entire transient budget in milliseconds.
     //
-    // Status codes carry word boundaries so a token count like 15291 or a
-    // job id like 1429 is not read as a status.
+    // Backpressure is read from TWO witnesses, because the two channels do
+    // not carry the same kind of text. `finalText` is
+    // `JSON.parse(stdout).result` — mixed: the CLI's own error text AND the
+    // model's final message. pr-hero's model output is code-review prose
+    // about exactly these failure modes ("this endpoint has no rate limit",
+    // "consider returning 429"), so an English phrase or a bare status code
+    // read from there matches the tool's own subject matter and routes a
+    // healthy failure into a backoff it never earned. `stderrTail` is the
+    // child's diagnostics channel and carries no model prose at all.
+    //
+    // So: provider error TYPES are machine tokens no reviewer writes in a
+    // sentence, and are trusted from either channel — this is what keeps the
+    // real witness "API Error: 529 overloaded_error" classified even when the
+    // CLI surfaces it through `result`.
+    if (/rate_limit_error|overloaded_error/i.test(witness)) {
+      return "rate_limit";
+    }
+    // Everything prose-shaped — bare phrases and bare status codes — is read
+    // from diagnostics ONLY. Word boundaries keep a token count like 15291 or
+    // a job id like 1429 from being read as a status.
     if (
       /\b429\b|\b529\b|\b503\b|overloaded|rate[ _-]?limit|too many requests|service unavailable/i.test(
-        witness,
+        diagnostics,
       )
     ) {
       return "rate_limit";
