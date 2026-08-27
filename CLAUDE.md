@@ -62,6 +62,7 @@ bun run fixture-eval   # LIVE: full pipeline vs a planted bug in a disposable re
 bun run fixture-eval --scout         # LIVE: same, with the scout stage on (~$0.17, ~2 min)
 bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
 bun run scripts/live-micro-eval.ts --scout  # LIVE: the scout's real spawn shape, tools:[] (~$0.05)
+bun run scripts/opencode-probe.ts    # LIVE: records what the OpenCode SDK really emits (~$0, needs the SDK resolvable)
 bun run scripts/m6.ts plan   # $0: prices M6's 56 runs from gh counters + the target repo's config
 bun run scripts/m6.ts score  # $0: the floor table, re-runnable from artifacts forever
 bun run scripts/m6.ts run    # LIVE and the big one: 56 serial reviews, ~$174-374, ~4h44m
