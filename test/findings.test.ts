@@ -307,8 +307,16 @@ describe.skipIf(!existsSync(historicalRunsDir))(
 );
 
 describe("tier derivation (full table)", () => {
+  // The options element is LAST and optional so every pre-truncation case
+  // reads exactly as it did — an omitted element is the default (not
+  // truncated), which is also `deriveTier`'s own default.
   const cases: Array<
-    [string, Parameters<typeof deriveTier>[0], "blocking" | "advisory"]
+    [
+      string,
+      Parameters<typeof deriveTier>[0],
+      "blocking" | "advisory",
+      Parameters<typeof deriveTier>[1]?,
+    ]
   > = [
     [
       "deterministic BLOCKER bypasses the refuter",
@@ -428,11 +436,77 @@ describe("tier derivation (full table)", () => {
       },
       "blocking",
     ],
+    // The truncation axis. A ceiling-truncated run skips the refuter leg
+    // entirely, so its survivors carry `not_submitted` — and blocking tier
+    // would then assert an adversarial check that never happened. Only that
+    // exact pair demotes; the three neighbouring cases below are what keeps
+    // the demotion from swallowing work that DID happen or a configuration
+    // that never asked for a refuter.
+    [
+      "a truncated run demotes an unsubmitted deterministic BLOCKER",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "advisory",
+      { truncated: true },
+    ],
+    [
+      "a truncated run demotes an unsubmitted deterministic CRITICAL",
+      {
+        severity: "CRITICAL",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "advisory",
+      { truncated: true },
+    ],
+    [
+      "a truncated run keeps a CORROBORATED deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "corroborated",
+      },
+      "blocking",
+      { truncated: true },
+    ],
+    [
+      "a truncated run keeps an INCONCLUSIVE deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "inconclusive",
+      },
+      "blocking",
+      { truncated: true },
+    ],
+    [
+      "a NON-truncated run keeps the zero-refuter deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "blocking",
+      { truncated: false },
+    ],
+    [
+      "a truncated run leaves an unrefuted inferential BLOCKER where it already was",
+      {
+        severity: "BLOCKER",
+        evidence_class: "inferential",
+        refuter_verdict: "not_submitted",
+      },
+      "advisory",
+      { truncated: true },
+    ],
   ];
 
-  for (const [name, input, expected] of cases) {
+  for (const [name, input, expected, options] of cases) {
     test(name, () => {
-      expect(deriveTier(input)).toBe(expected);
+      expect(deriveTier(input, options)).toBe(expected);
     });
   }
 });

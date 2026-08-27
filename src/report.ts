@@ -891,9 +891,11 @@ function tierExplanationLines(finding: Finding): string[] {
   // `downgraded-latent` is the one verdict with a documented, human-legible
   // meaning worth spelling out inline (findings.ts's own WHY comment on the
   // type): a real defect the refuter could not currently trigger. The other
-  // verdicts that can also land here (`inconclusive`, or an `insufficient`
-  // evidence_class regardless of verdict) have no equally short gloss, so
-  // they render with just the verdict name rather than a guessed one.
+  // verdicts that can also land here (`inconclusive`; `not_submitted`, either
+  // unrefuted-inferential or demoted because the run was truncated before the
+  // refuter leg ran; or an `insufficient` evidence_class regardless of
+  // verdict) have no equally short gloss, so they render with just the verdict
+  // name rather than a guessed one.
   if (finding.refuter_verdict === "downgraded-latent") {
     lines.push("   (real, but no live trigger today)");
   }

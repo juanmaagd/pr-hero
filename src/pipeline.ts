@@ -632,6 +632,15 @@ interface RunState {
     verify_all: number;
   };
   partial: boolean;
+  // NOT a synonym for `partial`, and conflating the two is a live trap that
+  // was caught in review before it shipped. `partial` means "incomplete for
+  // ANY reason" — it is also set by a failed hunter (twice), a failed verify
+  // step and a failed refuter step. Only THIS flag means "the ceiling fired",
+  // and only this one may feed `deriveTier`'s truncation demotion: keyed off
+  // `partial`, one dead hunter would have demoted every deterministic BLOCKER
+  // the SURVIVING hunters found on a zero-refuter config — silently reversing
+  // the 2026-07-29 AudioTrimmer fix through the back door.
+  ceilingFired: boolean;
   // §5.3 step 7 / §13: exactly ONE partial snapshot per run, and the FIRST
   // writer is the one that counts. `finish()` has two callers that can both
   // reach it in the same run — the ceiling calls it after its bounded grace,
@@ -670,6 +679,7 @@ export async function runPipeline(
       verify_all: 0,
     },
     partial: false,
+    ceilingFired: false,
     snapshotWritten: false,
     perAgent: {},
     usageTotal: zeroUsage(),
@@ -723,6 +733,7 @@ export async function runPipeline(
       // that observes it: a run already inside `finish()` when the ceiling
       // fires must not read `partial` as false and stamp itself complete.
       state.partial = true;
+      state.ceilingFired = true;
       controller.abort();
       resolve(CEILING_FIRED);
     }, input.pipelineTimeoutMs ?? DEFAULT_PIPELINE_TIMEOUT_MS);
@@ -761,9 +772,10 @@ type ExecOutcome =
   | { readonly ok: false; readonly error: unknown };
 
 // §5.3 D1-10b admission: a leg that has not spawned yet must not spawn once the
-// ceiling has aborted. Marking the run partial here is not decoration — a run
-// that silently dropped its refuter leg and still reported `complete` would
-// promote unrefuted BLOCKERs on a truncated run.
+// ceiling has aborted. Marking the run partial here is not decoration — it is
+// the input `deriveTier` reads to demote a survivor the refuter never saw
+// (src/findings.ts). A run that silently dropped its refuter leg and still
+// reported `complete` would promote unrefuted BLOCKERs on a truncated run.
 //
 // RETRIES need no gate of their own: the harness already refuses a new attempt
 // once its cancel signal is aborted (src/execution/harness.ts §5.3 step 1, at
@@ -773,6 +785,7 @@ type ExecOutcome =
 function ceilingAborted(deps: PipelineDeps, state: RunState): boolean {
   if (deps.ceilingController?.signal.aborted !== true) return false;
   state.partial = true;
+  state.ceilingFired = true;
   return true;
 }
 
@@ -1208,26 +1221,30 @@ async function execute(
   // configured absence, not failure: every finding stays not_submitted (so
   // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
   // the run stays complete.
-  // §5.3 admission for the refuter leg — and it is NOT conservative, so say
-  // what it actually leaves standing. `finish()` reads a survivor missing from
-  // `state.verdicts` as `not_submitted`, and `deriveTier` (src/findings.ts)
-  // returns `blocking` for a deterministic BLOCKER/CRITICAL unless the refuter
-  // POSITIVELY returned `downgraded-latent`. Silence is not a demotion. So on a
-  // ceiling-truncated run a deterministic BLOCKER/CRITICAL ships at blocking
-  // tier with no adversarial refutation behind it — the dominant case, not a
-  // corner: the AudioTrimmer data in the batch comment above put 26 of 26
-  // blocking findings in that class. Only `inferential` findings fall back to
-  // advisory when unrefuted, which is what the sibling comment above says.
+  // §5.3 admission for the refuter leg — say what it actually leaves standing.
+  // `finish()` reads a survivor missing from `state.verdicts` as
+  // `not_submitted`, so on a ceiling-truncated run EVERY severe survivor
+  // carries that verdict with no adversarial refutation behind it. This used
+  // to ship at blocking tier — the dominant case, not a corner: the
+  // AudioTrimmer data in the batch comment above put 26 of 26 blocking
+  // findings in the deterministic class, which `deriveTier` blocked on unless
+  // the refuter POSITIVELY returned `downgraded-latent`.
   //
-  // That exposure is PRE-EXISTING, not introduced here. The old ceiling
-  // resolved `finish()` immediately and walked away; the abandoned refuter's
-  // verdicts arrived after the report had already been returned — paid for and
-  // discarded. What this gate changes is the bill, not the report. The run is
-  // marked `partial` so a consumer can see it was truncated, and whether a
-  // truncated run should be allowed to report blocking tier at all is an open
-  // product question this comment must not answer by assertion.
-  // Pinned by "§13 — a ceiling-truncated run ships a deterministic BLOCKER at
-  // blocking tier, unrefuted" in test/pipeline.test.ts.
+  // That open product question — whether a truncated run may report blocking
+  // tier at all — is now answered for this half: it may not. `deriveTier`
+  // (src/findings.ts) takes the run's truncation state and demotes exactly the
+  // truncated + `not_submitted` pair to advisory, so skipping this leg can no
+  // longer promote an unchecked finding into the tier that stops a merge. A
+  // verdict that DID arrive before the ceiling still counts for what it says.
+  //
+  // Still true, and still not closed by any of it: the run is marked `partial`
+  // so a consumer can see it was truncated, and the artifact records only the
+  // fallback verdict, never WHY the check is missing. Distinguishing "no
+  // refuter configured" from "the refuter never got to run" in the artifact
+  // needs a new `refuter_verdict` value — a coordinated schema v1.1 bump with
+  // the sibling lab (ROADMAP C2), not this gate's to make.
+  // Pinned by "§13 — a ceiling-truncated run demotes its unrefuted
+  // deterministic BLOCKER to advisory" in test/pipeline.test.ts.
   if (batch.length > 0 && refuterAgent && !ceilingAborted(deps, state)) {
     emit(deps, {
       kind: "refuter-started",
@@ -1830,11 +1847,27 @@ async function finish(
     findings.push({
       ...survivor,
       refuter_verdict: verdict,
-      tier: deriveTier({
-        severity: survivor.severity,
-        evidence_class: survivor.evidence_class,
-        refuter_verdict: verdict,
-      }),
+      tier: deriveTier(
+        {
+          severity: survivor.severity,
+          evidence_class: survivor.evidence_class,
+          refuter_verdict: verdict,
+        },
+        // `ceilingFired`, NEVER `partial`. Both are true on the ceiling path
+        // and it is tempting to read the one already in hand — but `partial`
+        // is also set by a failed hunter, a failed verify step and a failed
+        // refuter step, and keying the demotion off it would let ONE dead
+        // hunter downgrade every deterministic BLOCKER the surviving hunters
+        // found. On a zero-refuter config that is the 2026-07-29 AudioTrimmer
+        // regression, reintroduced silently. Caught in review; pinned by "a
+        // run made partial by a FAILED HUNTER still blocks" below.
+        //
+        // The value is settled by the time finish() reads it: the ceiling sets
+        // it inside its own timer callback, before aborting and before this
+        // function is reached, precisely so a run mid-`finish()` cannot read
+        // it as false.
+        { truncated: state.ceilingFired },
+      ),
     });
   }
   // Merge losers were never submitted to the refuter — stamp the canonical

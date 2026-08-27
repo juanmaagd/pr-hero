@@ -21,6 +21,7 @@ import {
 import type { PriorRecord } from "../src/rereview-classify";
 import type { RereviewProvenance } from "../src/rereview-prepare";
 import type { ScoutLead } from "../src/scout";
+import { defaultReviewSpec } from "../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
 import type { SessionUsage } from "../src/usage";
 
@@ -2852,18 +2853,21 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
     expect(runner.specs.map((s) => s.name)).toEqual(["scout"]);
   });
 
-  // The exposure the admission gate does NOT close, pinned so no comment can
-  // quietly claim otherwise. `deriveTier` returns `blocking` unconditionally
-  // for a deterministic BLOCKER/CRITICAL unless the refuter POSITIVELY
-  // returned `downgraded-latent` (src/findings.ts) — silence is not a
-  // demotion. The 2026-07-29 AudioTrimmer data put 26 of 26 blocking findings
-  // in exactly that class, so this is the dominant case, not a corner.
+  // This test once pinned the OPPOSITE — "ships a deterministic BLOCKER at
+  // blocking tier, unrefuted" — deliberately, because a comment had denied an
+  // exposure that was really there and the truth deserved a test rather than
+  // prose. It was never a desired behaviour, only an honest one: blocking tier
+  // is the tier that stops a merge, and claiming it for a finding whose
+  // adversarial check never ran asserts scrutiny nobody performed. The
+  // 2026-07-29 AudioTrimmer data put 26 of 26 blocking findings in exactly the
+  // deterministic + unrefuted class, so this was the dominant case.
   //
-  // It is also PRE-EXISTING, not something D1-10b introduced: the old ceiling
-  // resolved `finish()` immediately and the abandoned refuter's verdicts
-  // landed after the report had already been returned — paid for and
-  // discarded. Skipping the leg changes the bill, not the report.
-  test("§13 — a ceiling-truncated run ships a deterministic BLOCKER at blocking tier, unrefuted", async () => {
+  // `deriveTier` now takes the run's truncation state and demotes precisely
+  // that pair (src/findings.ts). What is NOT demoted stays pinned in that
+  // module's own table: a corroborated verdict that arrived before the ceiling
+  // still blocks, an inconclusive one still blocks, and a non-truncated
+  // zero-refuter run still blocks.
+  test("§13 — a ceiling-truncated run demotes its unrefuted deterministic BLOCKER to advisory", async () => {
     // AMPLE_GRACE_MS, not tiny: the run has to reach dedupe inside the grace
     // for there to be a survivor to tier at all. The ceiling still fires
     // mid-hunt, so the refuter leg is still refused admission.
@@ -2893,9 +2897,46 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
       "hunter-reliability",
       "hunter-resilience",
     ]);
-    // And the finding ships at BLOCKING tier anyway, with no adversarial
-    // check behind it. `partial` is the only signal a consumer gets.
+    // The finding is never deleted — it survives, visible, with its verdict
+    // intact. It just cannot block a merge on the strength of a check that
+    // ran out of time before it started.
     expect(result.skillOutput.findings).toHaveLength(1);
+    const finding = result.skillOutput.findings[0];
+    expect(finding?.refuter_verdict).toBe("not_submitted");
+    expect(finding?.tier).toBe("advisory");
+  });
+
+  // The guard on the test above. `state.partial` is true here too — a failed
+  // hunter sets it — so a demotion keyed off `partial` instead of
+  // `ceilingFired` would pass every other test in this file and quietly
+  // downgrade this finding. That is the 2026-07-29 AudioTrimmer regression
+  // arriving through the back door: one dead hunter disarming the blocking
+  // tier for everything the surviving hunters found, on the zero-refuter
+  // config where deterministic BLOCKERs are the only thing holding it up.
+  test("a run made partial by a FAILED HUNTER still blocks — only the ceiling demotes", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => failed(spec),
+    });
+    // A spec with NO refuter: configured absence, which `src/spec.ts` permits
+    // (at most one) and which this test exists to protect. The survivor
+    // therefore stays `not_submitted` with no ceiling involved at all.
+    const base = defaultReviewSpec();
+    const input = await makeInput({
+      spec: {
+        ...base,
+        agents: base.agents.filter((a) => a.role !== "refuter"),
+      },
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("partial");
     const finding = result.skillOutput.findings[0];
     expect(finding?.refuter_verdict).toBe("not_submitted");
     expect(finding?.tier).toBe("blocking");

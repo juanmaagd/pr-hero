@@ -402,11 +402,19 @@ export function validateFindingsDocument(candidate: unknown): FindingsDocument {
 }
 
 // Full tier-assignment rule (spec BR "Full Tier-Assignment Rule"): only
-// corroborated-or-deterministic BLOCKER/CRITICAL findings may block, and even
-// a deterministic one is demoted to advisory when the refuter returns the
-// positive `downgraded-latent` verdict.
+// corroborated-or-deterministic BLOCKER/CRITICAL findings may block; a
+// deterministic one is demoted to advisory when the refuter returns the
+// positive `downgraded-latent` verdict, and also when the run was truncated
+// before the finding was ever submitted (see the `truncated` option below).
 export function deriveTier(
   finding: Pick<Finding, "severity" | "evidence_class" | "refuter_verdict">,
+  options: {
+    // Whether this run ended early (pipeline ceiling / `run_status: "partial"`)
+    // rather than completing its legs. Defaults to FALSE on purpose: a caller
+    // that knows nothing about truncation must never be able to demote by
+    // accident, so the fallback is exactly today's behaviour.
+    truncated?: boolean;
+  } = {},
 ): Tier {
   const isBlockerClass =
     finding.severity === "BLOCKER" || finding.severity === "CRITICAL";
@@ -419,6 +427,28 @@ export function deriveTier(
   // gets this power — `inconclusive` still blocks, mirroring the rule that
   // `refuted` requires positive disproof. Silence is not a demotion.
   if (finding.refuter_verdict === "downgraded-latent") return "advisory";
+  // Blocking tier is the tier that stops a merge, so claiming it asserts that
+  // an adversary looked and failed to knock the claim down. On a truncated run
+  // the refuter leg is refused admission (src/pipeline.ts §5.3) and every
+  // survivor falls back to `not_submitted` — an assertion about a check that
+  // never started. Demote, and ONLY for that exact pair, because each
+  // neighbouring case means something different:
+  //   - `corroborated` on a truncated run WAS adversarially checked before
+  //     time ran out. Truncation is no reason to discard work that happened.
+  //   - `inconclusive` means the refuter RAN and returned no positive
+  //     downgrade — the standing rule above, paid for by AudioTrimmer.
+  //   - `not_submitted` on a COMPLETE run is the supported zero-refuter
+  //     configuration (src/spec.ts allows at most one refuter, so zero is
+  //     configured absence, not failure). Demoting it would empty blocking
+  //     tier for every such user and undo the AudioTrimmer fix — which is
+  //     precisely why this gate keys on truncation and not on the verdict.
+  // An `inferential` finding needs no branch here: unrefuted, it is already
+  // advisory two lines down.
+  // Recording WHY the check is missing IN the artifact needs a new
+  // `refuter_verdict` value, and that is a coordinated schema v1.1 bump with
+  // the sibling lab (ROADMAP C2) — deliberately not this fix.
+  if (options.truncated === true && finding.refuter_verdict === "not_submitted")
+    return "advisory";
   if (finding.evidence_class === "deterministic") return "blocking";
   return finding.refuter_verdict === "corroborated" ? "blocking" : "advisory";
 }
