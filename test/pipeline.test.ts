@@ -1330,7 +1330,7 @@ describe("refuter", () => {
     });
 
   test("skips entirely when nothing reaches BLOCKER/CRITICAL", async () => {
-    // WARNING + SUGGESTION: neither can block a merge, so neither needs the
+    // WARNING + SUGGESTION: neither can reach blocking tier, so neither needs the
     // gate. Severity is now the whole eligibility test (ROADMAP A2).
     const runner = new FakeStepRunner({
       "hunter-reliability": (spec) =>
@@ -2880,8 +2880,10 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
   // blocking tier, unrefuted" — deliberately, because a comment had denied an
   // exposure that was really there and the truth deserved a test rather than
   // prose. It was never a desired behaviour, only an honest one: blocking tier
-  // is the tier that stops a merge, and claiming it for a finding whose
-  // adversarial check never ran asserts scrutiny nobody performed. The
+  // is the report's loudest register — the red badge and the headline count a
+  // human reads first — and claiming it for a finding whose adversarial check
+  // never ran asserts scrutiny nobody performed. (It gates no merge; pr-hero is
+  // an assistant. This comment claimed otherwise until 2026-08-27.) The
   // 2026-07-29 AudioTrimmer data put 26 of 26 blocking findings in exactly the
   // deterministic + unrefuted class, so this was the dominant case.
   //
@@ -2924,8 +2926,8 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
       "hunter-resilience",
     ]);
     // The finding is never deleted — it survives, visible, with its verdict
-    // intact. It just cannot block a merge on the strength of a check that
-    // ran out of time before it started.
+    // intact. It just cannot wear blocking tier on the strength of a check
+    // that ran out of time before it started.
     expect(result.skillOutput.findings).toHaveLength(1);
     const finding = result.skillOutput.findings[0];
     expect(finding?.refuter_verdict).toBe("not_submitted");

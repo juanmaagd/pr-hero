@@ -1292,15 +1292,17 @@ async function execute(
 
   // Step 6 — one refuter batch: every BLOCKER/CRITICAL survivor, whatever its
   // evidence_class. Severity alone is the test, because severity alone decides
-  // whether a finding can block a merge, and the refuter is the gate that
-  // protects merges.
+  // whether a finding can reach blocking tier, and the refuter is what earns
+  // that tier its credibility. (Blocking tier gates no merge — see deriveTier
+  // in src/findings.ts. It is the report's loudest register, which is exactly
+  // why an unchecked claim must not wear it.)
   //
   // This used to also require `evidence_class === "inferential"`, on the theory
   // that a code-provable claim needs no adversary. The 2026-07-29 AudioTrimmer
   // runs killed that theory with data: 26 of 26 blocking findings across six
   // reviews were `deterministic`, so the batch was empty every single time and
-  // the refuter never ran — blocking tier, the one tier that stops a merge,
-  // had no adversarial check at all. The label was not wrong (those defects
+  // the refuter never ran — the loudest tier in the report had no adversarial
+  // check behind it at all. The label was not wrong (those defects
   // really were locally provable); the filter was.
   const batch = survivors.filter(
     (s) => s.severity === "BLOCKER" || s.severity === "CRITICAL",
@@ -1318,16 +1320,27 @@ async function execute(
   // findings in the deterministic class, which `deriveTier` blocked on unless
   // the refuter POSITIVELY returned `downgraded-latent`.
   //
-  // That open product question — whether a truncated run may report blocking
-  // tier at all — is now answered for this half: it may not, WHEN a refuter
-  // was configured and therefore a check really was lost. `finish()` conjoins
-  // exactly that (`ceilingFired && refuterConfigured`) and hands it to
-  // `deriveTier` (src/findings.ts) as `refuterCutShort`, which demotes only
-  // the cut-short + `not_submitted` pair, so skipping THIS leg can no longer
-  // promote an unchecked finding into the tier that stops a merge. A verdict
-  // that DID arrive before the ceiling still counts for what it says, and a
-  // spec that never configured a refuter is untouched by any of it — the
-  // ceiling firing on its hunters cut nothing short.
+  // The open product question — whether a truncated run may report blocking
+  // tier at all — is CLOSED as of 2026-08-27, and in two halves.
+  //
+  // Half one, mechanical: it may not, WHEN a refuter was configured and
+  // therefore a check really was lost. `finish()` conjoins exactly that
+  // (`ceilingFired && refuterConfigured`) and hands it to `deriveTier`
+  // (src/findings.ts) as `refuterCutShort`, which demotes only the cut-short +
+  // `not_submitted` pair, so skipping THIS leg can no longer dress an
+  // unchecked finding in the report's loudest register. A verdict that DID
+  // arrive before the ceiling still counts for what it says, and a spec that
+  // never configured a refuter is untouched by any of it — the ceiling firing
+  // on its hunters cut nothing short.
+  //
+  // Half two, the judgement call that was left hanging: a `deterministic`
+  // finding on a truncated run KEEPS blocking tier. It is locally provable, so
+  // it is true whether or not the clock ran out; the report already states the
+  // run was partial; and suppressing real signal because of a timer would cost
+  // more than the badge is worth. The decision rests on blocking tier gating
+  // no merge — the question read as far weightier while the surrounding
+  // comments wrongly claimed it stopped one, which is the whole reason it sat
+  // open. Revisit this only if that ever stops being true.
   //
   // Still true, and still not closed by any of it: the run is marked `partial`
   // so a consumer can see it was truncated, and the artifact records only the
