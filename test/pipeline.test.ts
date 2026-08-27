@@ -2555,6 +2555,13 @@ describe("pipeline ceiling snapshot", () => {
   // write that THREW would otherwise leave the flag shut and turn the one
   // remaining writer into a no-op — a single transient I/O blip discarding the
   // run's plan artifact for good.
+  //
+  // What this test does NOT prove, stated so the comment cannot overclaim
+  // (pr-hero F001 on the follow-up head): recovery here needs an in-process
+  // caller that stays alive to drain the abandoned run. `runCli` calls
+  // process.exit() as soon as runPipeline rejects, so the CLI itself never
+  // reaches the retry. Closing that is D1-10b's job — the coordinator awaits
+  // the bounded grace and persists ONCE, leaving no orphan to depend on.
   test("a failed snapshot write releases the latch for the second writer", async () => {
     const input = await makeInput({ pipelineTimeoutMs: 50 });
     const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
