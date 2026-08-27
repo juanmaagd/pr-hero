@@ -10,6 +10,8 @@ interface FakeServer {
   env: () => Record<string, string> | undefined;
   emit: (line: string) => void;
   killFn: (pid: number, signal?: string | number) => void;
+  stdoutPulls: () => number;
+  stderrRead: () => boolean;
   signals: () => Array<string | number | undefined>;
   finish: (code: number) => void;
 }
@@ -26,7 +28,15 @@ function fakeServer(options: { pid?: number } = {}): FakeServer {
   });
   const encoder = new TextEncoder();
 
+  let stderrRead = false;
+  // `pull` fires only when a consumer is actually taking chunks. If the
+  // reader returned after startup, this counter stops moving — which is
+  // exactly the defect under test.
+  let pulls = 0;
   const stdout = new ReadableStream<Uint8Array>({
+    pull() {
+      pulls += 1;
+    },
     start(controller) {
       push = (chunk) => controller.enqueue(encoder.encode(chunk));
       closeOut = () => {
@@ -47,6 +57,7 @@ function fakeServer(options: { pid?: number } = {}): FakeServer {
       stdout,
       stderr: new ReadableStream<Uint8Array>({
         start(c) {
+          stderrRead = true;
           c.close();
         },
       }),
@@ -62,6 +73,8 @@ function fakeServer(options: { pid?: number } = {}): FakeServer {
     },
     argv: () => argv,
     env: () => env,
+    stdoutPulls: () => pulls,
+    stderrRead: () => stderrRead,
     emit: (line) => push(line),
     signals: () => signals,
     finish: (code) => {
@@ -176,9 +189,18 @@ describe("launchOpenCodeServer", () => {
       spawnFn: fake.spawnFn,
       killFn: fake.killFn,
       startupTimeoutMs: 5,
+      // Bounded on purpose. The startup timer fires `void close()` and
+      // rejects immediately, so with the 2s production defaults this test
+      // would return while ~4s of real timer-driven cascade kept running
+      // against the shared fake, after the suite had already reported.
+      termGraceMs: 5,
+      killReapMs: 5,
     });
     await expect(pending).rejects.toThrow(/did not announce|timed out/i);
-    expect(fake.signals().length).toBeGreaterThan(0);
+    // Let the fire-and-forget cascade finish INSIDE the test that started it.
+    fake.finish(0);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.signals()).toContain("SIGTERM");
   });
 
   test("a server that exits during startup fails loud", async () => {
@@ -209,6 +231,33 @@ describe("launchOpenCodeServer", () => {
     fake.emit("1234\n");
     const server = await pending;
     expect(server.url).toBe("http://127.0.0.1:61234");
+    fake.finish(0);
+    await server.close();
+  });
+
+  // pr-hero F002 on this PR. The reader returned once the URL was parsed, so
+  // nothing drained proc.stdout for the rest of the child's life — and the
+  // handle exposes no way to resume. A server that logs after startup fills
+  // the ~64 KiB pipe buffer and BLOCKS in write(), stalling with no signal to
+  // the caller. stderr was worse: piped and never read at all.
+  test("both pipes keep a reader after startup", async () => {
+    const fake = fakeServer();
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: {},
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+
+    const pullsAfterStartup = fake.stdoutPulls();
+    // Post-startup chatter must still be consumed, not left in the pipe.
+    for (let i = 0; i < 64; i += 1) fake.emit(`request ${i} served\n`);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fake.stdoutPulls()).toBeGreaterThan(pullsAfterStartup);
+    expect(fake.stderrRead()).toBe(true);
+
     fake.finish(0);
     await server.close();
   });
