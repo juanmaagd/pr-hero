@@ -184,15 +184,23 @@ describe("Packaging & distribution configuration", () => {
         generateCiWorkflowTemplate({ actionRef: "./" }),
       ) as {
         jobs: {
-          review: { steps: Array<{ with?: Record<string, string> }> };
+          review: {
+            steps: Array<{ uses?: string; with?: Record<string, string> }>;
+          };
         };
       };
-      const passed = workflow.jobs.review.steps.flatMap((step) =>
-        step.with === undefined ? [] : Object.keys(step.with),
+      // Select the pr-hero step BY its `uses`, rather than subtracting the
+      // third-party keys we happen to know about today. The subtraction form
+      // of this test (an exclusion list holding just `fetch-depth`) went red
+      // the moment a second third-party step — actions/upload-artifact —
+      // joined the job, though nothing about pr-hero's own inputs had
+      // changed. Only the keys handed to OUR action can drift from
+      // action.yml, so those are the only ones this should look at.
+      const ours = workflow.jobs.review.steps.flatMap((step) =>
+        step.uses === "./" && step.with !== undefined
+          ? Object.keys(step.with)
+          : [],
       );
-      // Only the pr-hero step's keys are ours; actions/checkout contributes
-      // `fetch-depth`, which is not a pr-hero input.
-      const ours = passed.filter((key) => key !== "fetch-depth");
       expect(ours.length).toBeGreaterThan(0);
       for (const key of ours) {
         expect(declared).toContain(key);

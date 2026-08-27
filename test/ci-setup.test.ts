@@ -203,6 +203,108 @@ describe("generateCiWorkflowTemplate (pure)", () => {
   test("is deterministic — calling it twice returns byte-identical output", () => {
     expect(generateCiWorkflowTemplate()).toBe(generateCiWorkflowTemplate());
   });
+
+  // ---------------------------------------------------------------------
+  // Run-directory artifact upload.
+  //
+  // `pr-hero triage reply --from <run-dir>` is the ONLY supported way to
+  // answer a posted finding, and it hard-fails without a run directory on
+  // disk (runTriageCommand needs comparison.json; the reply path needs
+  // findings.json to map F00N onto the posted marker). In CI that directory
+  // is `~/.prhero/.../runs/pr-<n>-<sha>-1` on an EPHEMERAL runner — it dies
+  // with the job. Uploading it is what keeps the triage half of the loop
+  // reachable once reviews move to Actions.
+  // ---------------------------------------------------------------------
+  const uploadStep = () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    return parsed.jobs.review.steps.find((step) =>
+      String(step.uses ?? "").startsWith("actions/upload-artifact@"),
+    ) as
+      | { if?: string; with?: Record<string, string | number | boolean> }
+      | undefined;
+  };
+
+  test("uploads the run directory so `triage reply --from` has an input in CI", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    // The run step must carry an id, or its `run-dir` output is unreadable.
+    const runStep = parsed.jobs.review.steps.find(
+      (step) => step.name === "Run pr-hero",
+    ) as { id?: string } | undefined;
+    expect(runStep?.id).toBe("pr-hero");
+
+    const upload = uploadStep();
+    expect(upload).toBeDefined();
+    expect(String(upload?.with?.path)).toContain(
+      "steps.pr-hero.outputs.run-dir",
+    );
+  });
+
+  test("the upload runs on always(), not only on a green review", () => {
+    // The incident this pins: every hunter died with `Not logged in · Please
+    // run /login` and the per-attempt logs — the only evidence naming the
+    // cause — were on the runner. Recovering them took pushing a throwaway
+    // debug commit to `cat` them off. A failed review is exactly when the run
+    // directory matters most, so the upload must not hang off step success.
+    expect(uploadStep()?.if).toContain("always()");
+  });
+
+  test("a review that wrote no run directory never turns the job red", () => {
+    // A size-gated or budget-gated review exits 0 having written nothing.
+    // `if-no-files-found: error` would fail the job for a skip that worked
+    // exactly as designed, and the empty-output gate keeps upload-artifact
+    // from ever being handed an empty `path:` in the first place.
+    const upload = uploadStep();
+    expect(upload?.with?.["if-no-files-found"]).toBe("warn");
+    expect(upload?.if).toContain("steps.pr-hero.outputs.run-dir != ''");
+  });
+
+  test("the artifact name pins BOTH the PR number and the head sha", () => {
+    // A PR is reviewed once per push. Naming the artifact after the PR alone
+    // makes `gh run download -n <name>` ambiguous the moment a second commit
+    // lands — and the run directory itself is named `pr-<n>-<sha>-1`, so the
+    // artifact that carries it should say which head it reviewed.
+    const name = String(uploadStep()?.with?.name);
+    expect(name).toContain("github.event.pull_request.number");
+    expect(name).toContain("github.event.pull_request.head.sha");
+  });
+
+  test("a re-run overwrites its artifact instead of failing on a name clash", () => {
+    // v4 artifact names are unique per workflow RUN, and `gh run rerun`
+    // reuses the run id — which the credentials job's own notice text tells
+    // people to do. Without `overwrite`, the second attempt's upload 409s,
+    // and under `always()` that turns the job red for a re-run that
+    // otherwise succeeded.
+    expect(uploadStep()?.with?.overwrite).toBe(true);
+  });
+
+  test("retention is bounded — the artifact carries the diff and the prompts", () => {
+    // The run directory holds diff.patch, the rendered system prompts, the
+    // hunter drafts and findings.json. On a PUBLIC repository every workflow
+    // artifact is downloadable by anyone, so this is short-lived by design:
+    // long enough to triage, short enough to limit exposure.
+    const retention = uploadStep()?.with?.["retention-days"];
+    expect(retention).toBe(7);
+  });
+
+  test("uploads hidden files — the run directory lives under a hidden ancestor", () => {
+    // upload-artifact excludes hidden files by default since v4.4, and the
+    // run directory sits under `~/.prhero`. Combined with
+    // `if-no-files-found: warn`, a hidden-file exclusion here would produce
+    // an EMPTY artifact and a warning nobody reads, which is worse than no
+    // artifact at all.
+    expect(uploadStep()?.with?.["include-hidden-files"]).toBe(true);
+  });
+
+  test("explains WHY the run directory is uploaded, not merely that it is", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).toMatch(/triage reply --from/);
+    expect(template).toMatch(/ephemeral/i);
+    expect(template).toMatch(/public repositor/i);
+  });
 });
 
 describe("runCiSetup (impure edge)", () => {
