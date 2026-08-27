@@ -591,6 +591,39 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
   });
 });
 
+// D1-08 PR3 task 3.11 (§9.2): same optional bucket-scope input as the Claude
+// CLI transport — omitted by every existing call site, so behavior stays
+// byte-identical until PR5a's harness wiring supplies real credential scope.
+describe("OpenCodeSdkTransport.capabilities bucket identity (D1-08 PR3)", () => {
+  test("no bucket-scope argument leaves rateLimitBucketId undefined (regression pin)", async () => {
+    const handle = makeClient({});
+    const transport = new OpenCodeSdkTransport({ client: handle.client });
+    const report = await transport.capabilities();
+    expect(report.rateLimitBucketId).toBeUndefined();
+  });
+
+  test("a supplied bucket-scope input yields the same bucketId deriveBucketId would compute", async () => {
+    const { deriveBucketId } = await import("../../src/execution/bucket-id");
+    const handle = makeClient({});
+    const transport = new OpenCodeSdkTransport({ client: handle.client });
+    const localKey = Buffer.from("1".repeat(64), "hex");
+    const report = await transport.capabilities({
+      credentialFingerprint: "fp-opencode-1",
+      bucketScope: { project: "proj-9" },
+      localKey,
+    });
+    const expected = deriveBucketId(
+      {
+        provider: "openai",
+        credentialFingerprint: "fp-opencode-1",
+        scope: { project: "proj-9" },
+      },
+      localKey,
+    );
+    expect(report.rateLimitBucketId).toBe(expected);
+  });
+});
+
 describe("OpenCodeSdkTransport failure surface", () => {
   test("session creation failure is failed/unverified and classifies auth text", async () => {
     const handle = makeClient({

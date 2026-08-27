@@ -1,3 +1,5 @@
+import type { BucketScope } from "../execution/bucket-id";
+import { deriveBucketId } from "../execution/bucket-id";
 import type {
   AsyncEventSink,
   ProviderCapabilityReport,
@@ -44,6 +46,22 @@ const DEFAULT_STALL_DEADLINE_MS = 10_000;
 // deadline is 6,500 ms including margin and is declared via capabilities().
 const SDK_ABORT_CONFIRM_MS = 5000;
 const SDK_CLEANUP_MS = 1000;
+
+// §9.2 non-secret provider label: this credential kind is opencode_chatgpt_
+// oauth (ChatGPT), so "openai" is the correct HMAC input regardless of
+// which model family a given step later routes to over the SDK — bucket
+// identity is about the CREDENTIAL's rate-limit pool, not the model.
+const BUCKET_IDENTITY_PROVIDER = "openai";
+
+// D1-08 PR3 (§9.2): same optional-input shape as ClaudeCliCapabilitiesInput
+// — omitted by every existing call site, so capabilities() stays
+// byte-identical to pre-PR3 behavior until PR5a's harness wiring supplies a
+// real credential's resolved scope.
+export interface OpenCodeCapabilitiesInput {
+  readonly credentialFingerprint: string;
+  readonly bucketScope?: BucketScope;
+  readonly localKey: Uint8Array;
+}
 // The margin the §5.2 row folds in on top of confirm+cleanup. Declared as a
 // term rather than a literal total because harness.ts:425 TRUSTS the number
 // capabilities() reports as the real bound: a constant would let an instance
@@ -253,7 +271,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   // §11/D1-09 honesty: every unimplemented feature is claimed false with a
   // non-blocking issue, never assumed green — hence status "degraded", not
   // "ready". The real adapter, credential route, and pricing table are D1-11.
-  async capabilities(): Promise<ProviderCapabilityReport> {
+  async capabilities(
+    input?: OpenCodeCapabilitiesInput,
+  ): Promise<ProviderCapabilityReport> {
     return {
       backend: "opencode",
       status: "degraded",
@@ -279,8 +299,23 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       },
       billing: {
         mode: "subscription",
+        // D1-08 PR3 does not touch pricing readiness (see the identical note
+        // on ClaudeCodeCliTransport.capabilities) — the real pricing table
+        // is D1-11's job, unrelated to bucketScope.
         pricingReady: false,
       },
+      ...(input !== undefined
+        ? {
+            rateLimitBucketId: deriveBucketId(
+              {
+                provider: BUCKET_IDENTITY_PROVIDER,
+                credentialFingerprint: input.credentialFingerprint,
+                scope: input.bucketScope,
+              },
+              input.localKey,
+            ),
+          }
+        : {}),
       issues: [
         {
           code: "real_sdk_adapter_deferred_to_d1_11",

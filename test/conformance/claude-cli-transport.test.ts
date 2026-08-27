@@ -391,6 +391,51 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
   });
 });
 
+// D1-08 PR3 task 3.11 (§9.2): capabilities() gains an OPTIONAL bucket-scope
+// input so a caller that HAS resolved a credential's scope (PR5a's harness
+// wiring, not yet built) can ask the transport to report the resulting
+// rateLimitBucketId on ProviderCapabilityReport. Calling with no argument —
+// every existing call site — must keep reporting rateLimitBucketId as
+// undefined, byte-identical to pre-PR3 behavior.
+describe("ClaudeCodeCliTransport.capabilities bucket identity (D1-08 PR3)", () => {
+  test("no bucket-scope argument leaves rateLimitBucketId undefined (regression pin)", async () => {
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const report = await transport.capabilities();
+    expect(report.rateLimitBucketId).toBeUndefined();
+  });
+
+  test("a supplied bucket-scope input yields the same bucketId deriveBucketId would compute", async () => {
+    const { deriveBucketId } = await import("../../src/execution/bucket-id");
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const localKey = Buffer.from("e".repeat(64), "hex");
+    const report = await transport.capabilities({
+      credentialFingerprint: "fp-claude-1",
+      bucketScope: { account: "acct-1" },
+      localKey,
+    });
+    const expected = deriveBucketId(
+      {
+        provider: "anthropic",
+        credentialFingerprint: "fp-claude-1",
+        scope: { account: "acct-1" },
+      },
+      localKey,
+    );
+    expect(report.rateLimitBucketId).toBe(expected);
+  });
+
+  test("an unknown (empty) bucket-scope still yields a deterministic bucketId, not undefined", async () => {
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const localKey = Buffer.from("f".repeat(64), "hex");
+    const report = await transport.capabilities({
+      credentialFingerprint: "fp-claude-2",
+      localKey,
+    });
+    expect(report.rateLimitBucketId).toBeDefined();
+    expect(typeof report.rateLimitBucketId).toBe("string");
+  });
+});
+
 describe("ClaudeCodeCliTransport.classifyFailure", () => {
   const transport = new ClaudeCodeCliTransport(okPromptFns);
 

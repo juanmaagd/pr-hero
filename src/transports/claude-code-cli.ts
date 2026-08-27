@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
+import type { BucketScope } from "../execution/bucket-id";
+import { deriveBucketId } from "../execution/bucket-id";
 import type {
   ProviderCapabilityReport,
   ProviderTerminalProof,
@@ -12,6 +14,23 @@ import type { NormalizedUsage } from "../execution/usage-normalized";
 import { normalizeUnavailableUsage } from "../execution/usage-normalized";
 import { CLAUDE_CAPABILITY_STATICS } from "../provider-capabilities";
 import { ACTIVE_CHILD_PROCS, type SpawnedProcess } from "../step-runner";
+
+// §9.2 non-secret provider label this transport's route always resolves to
+// (the only route it drives is Anthropic-via-Claude-CLI). A per-request
+// `route.provider` exists on TransportRequest but capabilities() is called
+// before any specific request, so the identity string is this transport's
+// own fixed provider — never inferred from a request that may not exist yet.
+const BUCKET_IDENTITY_PROVIDER = "anthropic";
+
+// D1-08 PR3 (§9.2): input a caller MAY supply once it has resolved a
+// credential's projection and its bucketScope — none does yet (that wiring
+// is PR5a's job). Omitting this argument keeps capabilities() byte-identical
+// to pre-PR3 behavior: rateLimitBucketId stays undefined.
+export interface ClaudeCliCapabilitiesInput {
+  readonly credentialFingerprint: string;
+  readonly bucketScope?: BucketScope;
+  readonly localKey: Uint8Array;
+}
 
 // §5.2 CLI/POSIX cascade: SIGTERM -> 5,000 ms grace -> SIGKILL -> reap bound
 // 2,000 ms, all inside the harness's 7,500 ms deadline including scheduler
@@ -244,7 +263,9 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
   // non-blocking issue, never assumed green: no bounded event sink is wired
   // yet, no dedicated codegraph policy is enforced, and no pricing table
   // exists — hence status "degraded", not "ready".
-  async capabilities(): Promise<ProviderCapabilityReport> {
+  async capabilities(
+    input?: ClaudeCliCapabilitiesInput,
+  ): Promise<ProviderCapabilityReport> {
     return {
       backend: "claude-code",
       status: "degraded",
@@ -269,8 +290,26 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       },
       billing: {
         mode: CLAUDE_CAPABILITY_STATICS.billingMode,
+        // D1-08 PR3 does not touch pricing readiness: a per-model pricing
+        // table is explicitly out of scope for the whole D1-08 change (the
+        // proposal's Out of Scope list) and unrelated to bucketScope — a
+        // bucket ID says WHICH rate-limit pool a credential shares, not
+        // whether its cost can be priced. Still `false`, tracked by the
+        // pre-existing "pricing_table_missing" issue below.
         pricingReady: false,
       },
+      ...(input !== undefined
+        ? {
+            rateLimitBucketId: deriveBucketId(
+              {
+                provider: BUCKET_IDENTITY_PROVIDER,
+                credentialFingerprint: input.credentialFingerprint,
+                scope: input.bucketScope,
+              },
+              input.localKey,
+            ),
+          }
+        : {}),
       issues: [
         {
           code: "codegraph_policy_unenforced",
