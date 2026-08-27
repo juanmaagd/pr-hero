@@ -151,7 +151,7 @@ jobs:
       # Every hunter died and a fatal error both leave it empty, and a
       # CANCELLED job never writes it at all — the SIGTERM/SIGINT handlers
       # kill the children and exit straight out, never reaching the only code
-      # path that touches . So the emptiness check below
+      # path that touches the job's output file. So the emptiness check below
       # suppresses the upload for exactly the cases `always()` was reached
       # for. Closing it needs the action to publish `run-dir` on those paths.
       # Until then `always()` earns its place on the narrower set: a review

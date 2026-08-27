@@ -272,11 +272,20 @@ Three properties of the upload step are load-bearing:
 - **`overwrite: true`** — artifact names are unique per workflow *run*, and `gh run rerun` reuses the run
   id, so a re-run's upload would otherwise conflict.
 
-> **Known gap.** The two cases that leave `status` empty (see above) also leave `run-dir` empty, so the
-> `steps.pr-hero.outputs.run-dir != ''` condition suppresses the upload for them — including the
-> every-hunter-died case, which is exactly the failure `always()` exists to cover. Closing that requires
-> the action to publish `run-dir` on the failure path; it is an open follow-up, not something to work
-> around in the workflow.
+> **Known gap.** Four outcomes publish no usable `run-dir`, so the `steps.pr-hero.outputs.run-dir != ''`
+> condition suppresses the upload for all of them:
+>
+> - a **concurrent review** and a run where **every hunter died** — the two cases that leave `status`
+>   empty (see above), because no output is written at all;
+> - a **fatal error**, which reports `status=error` but writes `run_dir=""` explicitly;
+> - a **cancelled job**, where the signal handlers kill the child processes and exit without ever
+>   reaching the code that writes the job's output file.
+>
+> The every-hunter-died and cancelled cases are exactly the failures `always()` exists to cover, so the
+> gap bites hardest where the directory would help most. Closing it requires the action to publish
+> `run-dir` on those paths — an open follow-up in the CLI, not something to work around in the workflow.
+> `always()` still earns its place for a review that ran but could not post, and for a later step in the
+> job failing.
 
 ## Optional inputs
 
