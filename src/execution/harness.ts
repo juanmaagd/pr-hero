@@ -13,7 +13,6 @@ import { redactDiagnostic } from "../security/redact";
 import { WorkspaceReadBroker } from "../security/workspace-read-broker";
 import {
   attemptLogPath,
-  classifyFailure,
   type FailureClass,
   FORMAT_RETRY_REMINDER,
   type RetryInfo,
@@ -34,6 +33,14 @@ import type {
   TransportRequest,
 } from "./contracts";
 import {
+  type CauseResolution,
+  decideRetryDisposition,
+  type FailureCause,
+  legacyClassificationFromCause,
+  type RetryState,
+  resolveFailureCause,
+} from "./failure-policy";
+import {
   type ActiveSession,
   createSettlement,
   DEFAULT_CANCELLATION_DEADLINE_MS,
@@ -43,6 +50,12 @@ import {
   synthesizeInternalFailure,
   synthesizeUnconfirmed,
 } from "./settlement";
+
+// §7 line 416: injected sleep for the `rate_limit` capped-exponential
+// backoff — a real timer in production, a recording stub in tests (§13 line
+// 746: no offline test may actually wait out a delay, let alone the 60s cap).
+const DEFAULT_SLEEP = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 export interface StepExecutionHarnessOptions {
   readonly workspaceRoot?: string;
@@ -73,6 +86,9 @@ export interface StepExecutionHarnessOptions {
     readonly settlement: SettlementSession;
     readonly receipt: SettlementReceipt;
   }) => void;
+  // D1-08 PR0 (§7 line 416): backoff delay for a `rate_limit` retry_after
+  // disposition. Defaults to a real timer; tests inject a recording stub.
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -161,6 +177,11 @@ async function writeAttemptLog(
   kind: "attempt" | "format-retry",
   outcome: TransportOutcome,
   classification: "ok" | FailureClass,
+  // D1-08 PR0 (design row 13, additive): the coarse legacy `classification`
+  // above collapses watchdog_timeout into "transient", same as a plain
+  // network failure — this line is what lets incident triage tell them
+  // apart. Absent on a delivered ("ok") attempt.
+  cause?: FailureCause | "legacy_terminal",
 ): Promise<void> {
   const logPath = attemptLogPath(step.outPath, step.name, attempt);
   await mkdir(path.dirname(logPath), { recursive: true });
@@ -173,6 +194,7 @@ async function writeAttemptLog(
       `exit_code: ${outcome.exitCode ?? (outcome.completion === "success" ? 0 : 1)}`,
       `timed_out: ${outcome.timedOut ?? false}`,
       `classification: ${classification}`,
+      ...(cause !== undefined ? [`cause: ${cause}`] : []),
       "--- stderr tail (4096) ---",
       // §6.3: redaction before persistence — nothing unredacted hits disk.
       redactDiagnostic(outcome.stderrTail),
@@ -201,6 +223,7 @@ export class StepExecutionHarness implements StepRunner {
     readonly settlement: SettlementSession;
     readonly receipt: SettlementReceipt;
   }) => void;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -218,6 +241,7 @@ export class StepExecutionHarness implements StepRunner {
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
     this.graceMarginMs = options.graceMarginMs ?? HARNESS_GRACE_MARGIN_MS;
     this.onSessionSettled = options.onSessionSettled;
+    this.sleep = options.sleep ?? DEFAULT_SLEEP;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -795,7 +819,11 @@ export class StepExecutionHarness implements StepRunner {
       };
     }
 
-    // 4. Execution loop with retries
+    // 4. Execution loop with retries — D1-08 PR0 (D1-07 wiring): ONE
+    // `runAttempt` per attempt (transient retry AND format retry are now the
+    // same shape), driven by the live §7 retry decision
+    // (decideRetryDisposition/resolveFailureCause) instead of the legacy
+    // step-runner failure classifier.
     let totalUsage = zeroUsage();
     let attempts = 0;
     let lastOutcome: TransportOutcome | undefined;
@@ -803,17 +831,37 @@ export class StepExecutionHarness implements StepRunner {
 
     const deadlineMs = await this.resolveCancellationDeadlineMs();
 
-    for (let attempt = 1; attempt <= step.maxAttempts; attempt++) {
-      // §5.3 step 1: no new attempts once cancellation is admitted.
+    // D3: bind the new transient budget to the EXISTING per-step knob so a
+    // step's worst-case spawn count stays byte-identical to the legacy loop
+    // (1 initial + up to `maxAttempts - 1` transient retries).
+    // failure-policy's own default (3) would silently raise worst-case
+    // spawns from 3 to 5 per step — a 67% cost increase nobody asked for.
+    const maxTransientAttempts = Math.max(0, step.maxAttempts - 1);
+
+    let retryState: RetryState = {
+      transientAttemptsUsed: 0,
+      formatRetriesUsed: 0,
+    };
+    // Set only by a `retry_format_reminder` disposition; consumed by the
+    // very next iteration, which is what makes that iteration a
+    // "format-retry" rather than a plain "attempt" (row 7).
+    let pendingFormatPrompt: string | undefined;
+
+    for (;;) {
+      // §5.3 step 1: no new attempt starts once cancellation is admitted —
+      // covers both a fresh transient attempt and a format-reminder retry,
+      // which are now the same loop iteration shape (row 6).
       if (this.cancelSignal?.aborted) {
         cancelHit = true;
         break;
       }
       attempts++;
+      const kind: "attempt" | "format-retry" =
+        pendingFormatPrompt === undefined ? "attempt" : "format-retry";
 
       const request: TransportRequest = {
-        sessionId: `${step.name}-${Date.now()}-${attempt}`,
-        attempt,
+        sessionId: `${step.name}-${Date.now()}-${attempts}`,
+        attempt: attempts,
         route: {
           backend: this.transport.backend,
           provider: "anthropic",
@@ -822,7 +870,7 @@ export class StepExecutionHarness implements StepRunner {
         },
         systemPromptPath: step.systemPromptPath,
         systemPromptSha256,
-        userPrompt: step.prompt,
+        userPrompt: pendingFormatPrompt ?? step.prompt,
         cwd: canonicalCwd,
         tools: step.tools,
         mcpConfigPath: step.mcpConfigPath,
@@ -851,67 +899,29 @@ export class StepExecutionHarness implements StepRunner {
               verifiedBinaryPath,
             },
       };
+      pendingFormatPrompt = undefined;
 
-      const execution = await this.executeSession({
+      const attemptResult = await this.runAttempt({
         step,
+        attempt: attempts,
+        kind,
         request,
         deadlineMs,
-        onData: async (outcome, settlement): Promise<AttemptDelivery> => {
-          lastOutcome = outcome;
-          totalUsage = sumUsage(totalUsage, outcome.usage);
-
-          try {
-            const parsed = step.parse(outcome.finalText);
-            await this.guardedDataPlaneWrite(settlement, () =>
-              writeAttemptLog(step, attempts, "attempt", outcome, "ok"),
-            );
-            await this.guardedDataPlaneWrite(settlement, () =>
-              writeJsonAtomically(step.outPath, parsed),
-            );
-            return { delivered: true, parsed };
-          } catch {
-            const classification = classifyFailure({
-              stderrTail: outcome.stderrTail,
-              resultText: outcome.finalText,
-              timedOut: Boolean(outcome.timedOut),
-            });
-            // A failing diagnostic log must never escape the failure handler
-            // itself — that second throw is what left settlements unwritten
-            // (pr-hero F001 on this very PR).
-            await this.guardedDataPlaneWrite(settlement, () =>
-              writeAttemptLog(
-                step,
-                attempts,
-                "attempt",
-                outcome,
-                classification,
-              ),
-            ).catch(() => {});
-            // Transient cleanup of the stale artifact is data-plane too, so it
-            // runs under the same lease guard while it is still valid.
-            if (classification === "transient") {
-              await this.guardedDataPlaneWrite(settlement, () =>
-                Bun.file(step.outPath)
-                  .unlink()
-                  .then(() => {})
-                  .catch(() => {}),
-              );
-            }
-            return { delivered: false, classification };
-          }
-        },
       });
 
-      if (execution.cancelled) {
+      if (attemptResult.kind === "cancelled") {
         cancelHit = true;
         break;
       }
 
-      if (execution.delivery?.delivered) {
+      lastOutcome = attemptResult.outcome;
+      totalUsage = sumUsage(totalUsage, attemptResult.outcome.usage);
+
+      if (attemptResult.kind === "delivered") {
         return {
           name: step.name,
           status: "ok",
-          output: execution.delivery.parsed,
+          output: attemptResult.parsed,
           usage: totalUsage,
           attempts,
           stderrTail: lastOutcome?.stderrTail ?? "",
@@ -919,97 +929,53 @@ export class StepExecutionHarness implements StepRunner {
         };
       }
 
-      const failure = execution.delivery?.classification ?? "format";
+      // attemptResult.kind === "failed"
+      if (attemptResult.resolution.kind === "legacy_terminal") {
+        break;
+      }
 
-      if (failure === "transient") {
-        if (attempt < step.maxAttempts) {
-          notifyRetry(step, {
-            step: step.name,
-            attempt: attempt + 1,
-            maxAttempts: step.maxAttempts,
-            reason: "transient",
-          });
+      const disposition = decideRetryDisposition(
+        attemptResult.resolution.cause,
+        retryState,
+        { maxTransientAttempts },
+      );
+
+      if (
+        disposition.action === "retry_now" ||
+        disposition.action === "retry_after"
+      ) {
+        retryState = {
+          ...retryState,
+          transientAttemptsUsed: retryState.transientAttemptsUsed + 1,
+        };
+        notifyRetry(step, {
+          step: step.name,
+          attempt: attempts + 1,
+          maxAttempts: step.maxAttempts,
+          reason: disposition.budget,
+        });
+        if (disposition.action === "retry_after") {
+          await this.sleep(disposition.delayMs);
         }
         continue;
       }
 
-      if (failure === "terminal") {
-        break;
-      }
-
-      // Format retry (cap 1); §5.3 step 1 forbids starting one after cancel.
-      if (this.cancelSignal?.aborted) {
-        cancelHit = true;
-        break;
-      }
-      attempts++;
-      notifyRetry(step, {
-        step: step.name,
-        attempt: attempts,
-        maxAttempts: step.maxAttempts,
-        reason: "format",
-      });
-
-      const retryRequest: TransportRequest = {
-        ...request,
-        attempt: attempts,
-        userPrompt: step.prompt + FORMAT_RETRY_REMINDER,
-      };
-
-      const retryExecution = await this.executeSession({
-        step,
-        request: retryRequest,
-        deadlineMs,
-        onData: async (outcome, settlement): Promise<AttemptDelivery> => {
-          lastOutcome = outcome;
-          totalUsage = sumUsage(totalUsage, outcome.usage);
-
-          try {
-            const parsed = step.parse(outcome.finalText);
-            await this.guardedDataPlaneWrite(settlement, () =>
-              writeAttemptLog(step, attempts, "format-retry", outcome, "ok"),
-            );
-            await this.guardedDataPlaneWrite(settlement, () =>
-              writeJsonAtomically(step.outPath, parsed),
-            );
-            return { delivered: true, parsed };
-          } catch {
-            const classification = classifyFailure({
-              stderrTail: outcome.stderrTail,
-              resultText: outcome.finalText,
-              timedOut: Boolean(outcome.timedOut),
-            });
-            await this.guardedDataPlaneWrite(settlement, () =>
-              writeAttemptLog(
-                step,
-                attempts,
-                "format-retry",
-                outcome,
-                classification,
-              ),
-            );
-            return { delivered: false, classification };
-          }
-        },
-      });
-
-      if (retryExecution.cancelled) {
-        cancelHit = true;
-        break;
-      }
-
-      if (retryExecution.delivery?.delivered) {
-        return {
-          name: step.name,
-          status: "ok",
-          output: retryExecution.delivery.parsed,
-          usage: totalUsage,
-          attempts,
-          stderrTail: lastOutcome?.stderrTail ?? "",
-          resultText: lastOutcome?.finalText.slice(-8192) ?? "",
+      if (disposition.action === "retry_format_reminder") {
+        retryState = {
+          ...retryState,
+          formatRetriesUsed: retryState.formatRetriesUsed + 1,
         };
+        notifyRetry(step, {
+          step: step.name,
+          attempt: attempts + 1,
+          maxAttempts: step.maxAttempts,
+          reason: disposition.budget,
+        });
+        pendingFormatPrompt = step.prompt + FORMAT_RETRY_REMINDER;
+        continue;
       }
 
+      // disposition.action === "terminal"
       break;
     }
 
@@ -1047,6 +1013,106 @@ export class StepExecutionHarness implements StepRunner {
       resultText: lastOutcome?.finalText.slice(-8192) ?? "",
     };
   }
+
+  // D1-08 PR0: the ONE place a single attempt (transient OR format-retry —
+  // `kind` only affects logging/request framing) executes, gets logged, and
+  // has its failure resolved to a §7 cause. Replaces the two
+  // near-duplicate closures `admitAndExecute` used to run inline, one for
+  // the initial/transient loop and a second, slightly-out-of-sync one for
+  // the format retry (row 9's `.catch` asymmetry was exactly that drift).
+  private async runAttempt(args: {
+    readonly step: StepSpec;
+    readonly attempt: number;
+    readonly kind: "attempt" | "format-retry";
+    readonly request: TransportRequest;
+    readonly deadlineMs: number;
+  }): Promise<AttemptRunResult> {
+    const { step, attempt, kind, request, deadlineMs } = args;
+
+    const execution = await this.executeSession({
+      step,
+      request,
+      deadlineMs,
+      onData: async (outcome, settlement): Promise<AttemptDelivery> => {
+        try {
+          const parsed = step.parse(outcome.finalText);
+          await this.guardedDataPlaneWrite(settlement, () =>
+            writeAttemptLog(step, attempt, kind, outcome, "ok"),
+          );
+          await this.guardedDataPlaneWrite(settlement, () =>
+            writeJsonAtomically(step.outPath, parsed),
+          );
+          return { delivered: true, parsed };
+        } catch {
+          // D1-08 PR0: cause resolution now goes through the transport's OWN
+          // failure classifier first (the second, previously unwired
+          // mechanism this slice closes) before ever falling back to the
+          // legacy step-runner one.
+          const resolution = resolveFailureCause({
+            outcome,
+            classifyFailure: this.transport.classifyFailure,
+            parseThrew: true,
+          });
+          const classification = legacyClassificationFromCause(resolution);
+          // A failing diagnostic log must never escape the failure handler
+          // itself — that second throw is what left settlements unwritten
+          // (pr-hero F001 on this very PR). Unified across BOTH `kind`s now
+          // (row 9: the format-retry twin used to be missing this `.catch`).
+          await this.guardedDataPlaneWrite(settlement, () =>
+            writeAttemptLog(
+              step,
+              attempt,
+              kind,
+              outcome,
+              classification,
+              resolution.kind === "cause"
+                ? resolution.cause
+                : "legacy_terminal",
+            ),
+          ).catch(() => {});
+          // Transient cleanup of the stale artifact is data-plane too, so it
+          // runs under the same lease guard while it is still valid. Scope
+          // widened (row 8) to both transient retry arms — retry_now AND
+          // retry_after mean "another attempt is coming" alike.
+          if (classification === "transient") {
+            await this.guardedDataPlaneWrite(settlement, () =>
+              Bun.file(step.outPath)
+                .unlink()
+                .then(() => {})
+                .catch(() => {}),
+            );
+          }
+          return { delivered: false, resolution };
+        }
+      },
+    });
+
+    if (execution.cancelled) {
+      return { kind: "cancelled" };
+    }
+
+    // Both remaining branches (delivered/failed) always carry `outcome`:
+    // `execution.cancelled` is the only path executeSession takes without
+    // ever invoking `onData`, and `onData` is what both delivery variants
+    // above come from.
+    const outcome = execution.outcome as TransportOutcome;
+
+    if (execution.delivery?.delivered) {
+      return { kind: "delivered", outcome, parsed: execution.delivery.parsed };
+    }
+
+    return {
+      kind: "failed",
+      outcome,
+      // Row 10: `?? format_violation` — the same defensive default the
+      // legacy loop applied (`?? "format"`) for the case `execution.delivery`
+      // itself is somehow absent despite not being cancelled.
+      resolution: execution.delivery?.resolution ?? {
+        kind: "cause",
+        cause: "format_violation",
+      },
+    };
+  }
 }
 
 // TransportOutcome.completion → terminal slot status vocabulary.
@@ -1058,4 +1124,19 @@ function completionToStatus(
 
 type AttemptDelivery =
   | { readonly delivered: true; readonly parsed: unknown }
-  | { readonly delivered: false; readonly classification: FailureClass };
+  | { readonly delivered: false; readonly resolution: CauseResolution };
+
+// D1-08 PR0: `runAttempt`'s result — one attempt's outcome reduced to what
+// the retry loop needs to decide what happens next.
+type AttemptRunResult =
+  | { readonly kind: "cancelled" }
+  | {
+      readonly kind: "delivered";
+      readonly outcome: TransportOutcome;
+      readonly parsed: unknown;
+    }
+  | {
+      readonly kind: "failed";
+      readonly outcome: TransportOutcome;
+      readonly resolution: CauseResolution;
+    };
