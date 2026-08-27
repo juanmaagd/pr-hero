@@ -122,7 +122,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     for (const terminal of terminals) {
       if (terminal.kind !== "terminal") throw new Error("unreachable");
       expect(terminal.proof.eventId).toBe(ASSISTANT.id as string);
-      expect(terminal.proof.providerStatus).toBe("stop");
+      expect(terminal.proof.providerStatus).toBe("completed");
     }
   });
 
@@ -150,7 +150,7 @@ describe("terminalProofFromAssistant", () => {
     const proof = terminalProofFromAssistant(ASSISTANT);
     expect(proof).toBeDefined();
     expect(proof?.eventId).toBe(ASSISTANT.id as string);
-    expect(proof?.providerStatus).toBe("stop");
+    expect(proof?.providerStatus).toBe("completed");
     expect(proof?.providerObservedAt).toBe(
       new Date(1787811448694).toISOString(),
     );
@@ -171,23 +171,46 @@ describe("terminalProofFromAssistant", () => {
     ).toBeUndefined();
   });
 
-  // §3.2: an unrecognised finish must not silently become success. The SDK
-  // declares `finish?: string` with no enumerated value space, so the proof
-  // reports what the provider said and lets the transport's own status
-  // mapping decide — but a message with an ERROR is never a clean stop.
-  test("an errored message reports the error, not the finish", () => {
+  // pr-hero F001 on PR #82, filed BLOCKER, and it was right. providerStatus
+  // is a NORMALISED field: the transport maps "completed" to success,
+  // "cancelled" to cancelled, and EVERYTHING ELSE to failed
+  // (opencode-sdk.ts:781-789). Passing OpenCode's raw finish reason through
+  // meant every successful completion arrived as "stop" and was reported as
+  // a failed transport outcome. The provider's vocabulary is translated here,
+  // not leaked into a field whose meaning is fixed elsewhere.
+  test("a clean stop is normalised to the vocabulary the transport reads", () => {
+    expect(terminalProofFromAssistant(ASSISTANT)?.providerStatus).toBe(
+      "completed",
+    );
+  });
+
+  test("an aborted message is cancelled, not failed", () => {
+    const proof = terminalProofFromAssistant({
+      ...ASSISTANT,
+      error: { name: "MessageAbortedError", data: { message: "aborted" } },
+    });
+    expect(proof?.providerStatus).toBe("cancelled");
+  });
+
+  test("any other error is a failure whatever finish claims", () => {
     const proof = terminalProofFromAssistant({
       ...ASSISTANT,
       finish: "stop",
       error: { name: "ProviderAuthError", data: {} },
     });
-    expect(proof?.providerStatus).toBe("error");
+    expect(proof?.providerStatus).toBe("failed");
   });
 
-  test("a missing finish is reported as unknown, never as completed", () => {
-    const { finish: _dropped, ...withoutFinish } = ASSISTANT;
-    const proof = terminalProofFromAssistant(withoutFinish);
-    expect(proof?.providerStatus).toBe("unknown");
+  // §3.2: an unrecognised outcome must never silently become success. The SDK
+  // declares `finish?: string` with no enumerated value space, so anything
+  // outside the known set stays outside "completed" and the transport's own
+  // else-branch turns it into a failure — which is the safe direction.
+  test("an unknown finish is never laundered into completed", () => {
+    for (const finish of [undefined, "", "length", "tool_calls", "weird"]) {
+      const proof = terminalProofFromAssistant({ ...ASSISTANT, finish });
+      expect(proof?.providerStatus).not.toBe("completed");
+      expect(proof?.providerStatus).not.toBe("cancelled");
+    }
   });
 });
 
