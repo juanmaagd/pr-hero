@@ -307,8 +307,16 @@ describe.skipIf(!existsSync(historicalRunsDir))(
 );
 
 describe("tier derivation (full table)", () => {
+  // The options element is LAST and optional so every case predating the
+  // refuter-cut-short axis reads exactly as it did — an omitted element is the
+  // default (`refuterCutShort: false`), which is also `deriveTier`'s own.
   const cases: Array<
-    [string, Parameters<typeof deriveTier>[0], "blocking" | "advisory"]
+    [
+      string,
+      Parameters<typeof deriveTier>[0],
+      "blocking" | "advisory",
+      Parameters<typeof deriveTier>[1]?,
+    ]
   > = [
     [
       "deterministic BLOCKER bypasses the refuter",
@@ -428,11 +436,101 @@ describe("tier derivation (full table)", () => {
       },
       "blocking",
     ],
+    // The refuter-cut-short axis. When a refuter WAS configured and a
+    // ceiling-truncated run refused its leg admission, the survivors carry
+    // `not_submitted` — and blocking tier would then assert an adversarial
+    // check that never happened. Only that exact pair demotes; the
+    // neighbouring cases below are what keeps the demotion from swallowing
+    // work that DID happen or a configuration that never asked for a refuter.
+    //
+    // Note what this table can and cannot see. `deriveTier` takes ONE boolean,
+    // deliberately: truncation and zero-refuter configuration are orthogonal,
+    // and the caller must conjoin them before calling (src/pipeline.ts
+    // `finish()`). So "the ceiling fired but no refuter was configured"
+    // appears here as `refuterCutShort: false` — cases 5 and 6 below spell out
+    // both ways of arriving at that false, because they are different
+    // statements and both must land on blocking.
+    [
+      "a cut-short refuter demotes an unsubmitted deterministic BLOCKER",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "advisory",
+      { refuterCutShort: true },
+    ],
+    [
+      "a cut-short refuter demotes an unsubmitted deterministic CRITICAL",
+      {
+        severity: "CRITICAL",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "advisory",
+      { refuterCutShort: true },
+    ],
+    [
+      "a cut-short refuter keeps a CORROBORATED deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "corroborated",
+      },
+      "blocking",
+      { refuterCutShort: true },
+    ],
+    [
+      "a cut-short refuter keeps an INCONCLUSIVE deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "inconclusive",
+      },
+      "blocking",
+      { refuterCutShort: true },
+    ],
+    [
+      "a complete run with a refuter configured keeps its deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "blocking",
+      { refuterCutShort: false },
+    ],
+    // The zero-refuter half of that same `false`, and the reason the option is
+    // a conjunction rather than "was the run truncated". With no refuter
+    // configured, `not_submitted` is the designed steady state and blocking is
+    // intended REGARDLESS of how the run ended — a ceiling that fired on the
+    // hunters cut no refuter check short, because none was ever going to
+    // submit. The caller passes false for this run even though it truncated.
+    [
+      "a ceiling-fired run with NO refuter configured keeps its deterministic BLOCKER blocking",
+      {
+        severity: "BLOCKER",
+        evidence_class: "deterministic",
+        refuter_verdict: "not_submitted",
+      },
+      "blocking",
+      { refuterCutShort: false },
+    ],
+    [
+      "a cut-short refuter leaves an unrefuted inferential BLOCKER where it already was",
+      {
+        severity: "BLOCKER",
+        evidence_class: "inferential",
+        refuter_verdict: "not_submitted",
+      },
+      "advisory",
+      { refuterCutShort: true },
+    ],
   ];
 
-  for (const [name, input, expected] of cases) {
+  for (const [name, input, expected, options] of cases) {
     test(name, () => {
-      expect(deriveTier(input)).toBe(expected);
+      expect(deriveTier(input, options)).toBe(expected);
     });
   }
 });

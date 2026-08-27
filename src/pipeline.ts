@@ -632,6 +632,30 @@ interface RunState {
     verify_all: number;
   };
   partial: boolean;
+  // NOT a synonym for `partial`, and conflating the two is a live trap that
+  // was caught in review before it shipped. `partial` means "incomplete for
+  // ANY reason" — it is also set by a failed hunter (twice), a failed verify
+  // step and a failed refuter step. Only THIS flag means "the ceiling fired",
+  // and only this one may feed `deriveTier`'s truncation demotion: keyed off
+  // `partial`, one dead hunter would have demoted every deterministic BLOCKER
+  // the SURVIVING hunters found on a zero-refuter config — silently reversing
+  // the 2026-07-29 AudioTrimmer fix through the back door.
+  ceilingFired: boolean;
+  // The SAME class of trap one level further out, and the same fix: whether
+  // this run's spec actually configures a refuter. `ceilingFired` alone does
+  // not mean an adversarial check was lost, because truncation and
+  // zero-refuter configuration are ORTHOGONAL — a spec with no refuter
+  // (`src/spec.ts` allows at most one, so zero is configured absence, not
+  // failure) can run long on its HUNTERS or its VERIFY legs and trip the
+  // ceiling for reasons that have nothing to do with a refuter. Keyed off
+  // `ceilingFired` on its own, that run would have every deterministic
+  // BLOCKER demoted: AudioTrimmer again, wearing a truncation precondition.
+  // Only the conjunction of the two may feed `deriveTier`.
+  // Set where the spec is validated, which is before any leg — so it is
+  // settled long before a survivor can exist. Its `false` initial value is
+  // therefore reachable by `finish()` only on the ceiling path that fired
+  // before validation, and that run has zero survivors to tier.
+  refuterConfigured: boolean;
   // §5.3 step 7 / §13: exactly ONE partial snapshot per run, and the FIRST
   // writer is the one that counts. `finish()` has two callers that can both
   // reach it in the same run — the ceiling calls it after its bounded grace,
@@ -670,6 +694,8 @@ export async function runPipeline(
       verify_all: 0,
     },
     partial: false,
+    ceilingFired: false,
+    refuterConfigured: false,
     snapshotWritten: false,
     perAgent: {},
     usageTotal: zeroUsage(),
@@ -723,6 +749,7 @@ export async function runPipeline(
       // that observes it: a run already inside `finish()` when the ceiling
       // fires must not read `partial` as false and stamp itself complete.
       state.partial = true;
+      state.ceilingFired = true;
       controller.abort();
       resolve(CEILING_FIRED);
     }, input.pipelineTimeoutMs ?? DEFAULT_PIPELINE_TIMEOUT_MS);
@@ -761,7 +788,11 @@ type ExecOutcome =
   | { readonly ok: false; readonly error: unknown };
 
 // §5.3 D1-10b admission: a leg that has not spawned yet must not spawn once the
-// ceiling has aborted. Marking the run partial here is not decoration — a run
+// ceiling has aborted. Marking the run here is not decoration — `partial` is
+// how a consumer sees the run was cut off, and `ceilingFired` is the flag
+// `finish()` conjoins with `refuterConfigured` to demote a survivor an
+// EXPECTED refuter never saw (src/findings.ts). Both are set, and only the
+// second one may feed that demotion: see the `RunState` fields for why. A run
 // that silently dropped its refuter leg and still reported `complete` would
 // promote unrefuted BLOCKERs on a truncated run.
 //
@@ -773,6 +804,7 @@ type ExecOutcome =
 function ceilingAborted(deps: PipelineDeps, state: RunState): boolean {
   if (deps.ceilingController?.signal.aborted !== true) return false;
   state.partial = true;
+  state.ceilingFired = true;
   return true;
 }
 
@@ -818,6 +850,11 @@ async function execute(
   // The DAG wiring is data (see spec.ts). The default spec is re-validated
   // too — it is cheap and keeps a drifted default failing loudly.
   const reviewSpec = validateReviewSpec(input.spec ?? defaultReviewSpec());
+  // HERE, not beside `refuterAgent` in the refuter leg below: `finish()` needs
+  // this and can be reached by the ceiling path without the refuter leg ever
+  // being entered. Recorded at validation time, which is before every leg, so
+  // it is settled long before a survivor exists to tier.
+  state.refuterConfigured = reviewSpec.agents.some((a) => a.role === "refuter");
 
   // Step 3 — deterministic trigger evaluation. This decision is the driver's
   // alone; a conditional hunter never self-triggers. An unconditional hunter
@@ -1208,26 +1245,34 @@ async function execute(
   // configured absence, not failure: every finding stays not_submitted (so
   // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
   // the run stays complete.
-  // §5.3 admission for the refuter leg — and it is NOT conservative, so say
-  // what it actually leaves standing. `finish()` reads a survivor missing from
-  // `state.verdicts` as `not_submitted`, and `deriveTier` (src/findings.ts)
-  // returns `blocking` for a deterministic BLOCKER/CRITICAL unless the refuter
-  // POSITIVELY returned `downgraded-latent`. Silence is not a demotion. So on a
-  // ceiling-truncated run a deterministic BLOCKER/CRITICAL ships at blocking
-  // tier with no adversarial refutation behind it — the dominant case, not a
-  // corner: the AudioTrimmer data in the batch comment above put 26 of 26
-  // blocking findings in that class. Only `inferential` findings fall back to
-  // advisory when unrefuted, which is what the sibling comment above says.
+  // §5.3 admission for the refuter leg — say what it actually leaves standing.
+  // `finish()` reads a survivor missing from `state.verdicts` as
+  // `not_submitted`, so on a ceiling-truncated run EVERY severe survivor
+  // carries that verdict with no adversarial refutation behind it. This used
+  // to ship at blocking tier — the dominant case, not a corner: the
+  // AudioTrimmer data in the batch comment above put 26 of 26 blocking
+  // findings in the deterministic class, which `deriveTier` blocked on unless
+  // the refuter POSITIVELY returned `downgraded-latent`.
   //
-  // That exposure is PRE-EXISTING, not introduced here. The old ceiling
-  // resolved `finish()` immediately and walked away; the abandoned refuter's
-  // verdicts arrived after the report had already been returned — paid for and
-  // discarded. What this gate changes is the bill, not the report. The run is
-  // marked `partial` so a consumer can see it was truncated, and whether a
-  // truncated run should be allowed to report blocking tier at all is an open
-  // product question this comment must not answer by assertion.
-  // Pinned by "§13 — a ceiling-truncated run ships a deterministic BLOCKER at
-  // blocking tier, unrefuted" in test/pipeline.test.ts.
+  // That open product question — whether a truncated run may report blocking
+  // tier at all — is now answered for this half: it may not, WHEN a refuter
+  // was configured and therefore a check really was lost. `finish()` conjoins
+  // exactly that (`ceilingFired && refuterConfigured`) and hands it to
+  // `deriveTier` (src/findings.ts) as `refuterCutShort`, which demotes only
+  // the cut-short + `not_submitted` pair, so skipping THIS leg can no longer
+  // promote an unchecked finding into the tier that stops a merge. A verdict
+  // that DID arrive before the ceiling still counts for what it says, and a
+  // spec that never configured a refuter is untouched by any of it — the
+  // ceiling firing on its hunters cut nothing short.
+  //
+  // Still true, and still not closed by any of it: the run is marked `partial`
+  // so a consumer can see it was truncated, and the artifact records only the
+  // fallback verdict, never WHY the check is missing. Distinguishing "no
+  // refuter configured" from "the refuter never got to run" in the artifact
+  // needs a new `refuter_verdict` value — a coordinated schema v1.1 bump with
+  // the sibling lab (ROADMAP C2), not this gate's to make.
+  // Pinned by "§13 — a ceiling-truncated run demotes its unrefuted
+  // deterministic BLOCKER to advisory" in test/pipeline.test.ts.
   if (batch.length > 0 && refuterAgent && !ceilingAborted(deps, state)) {
     emit(deps, {
       kind: "refuter-started",
@@ -1830,11 +1875,41 @@ async function finish(
     findings.push({
       ...survivor,
       refuter_verdict: verdict,
-      tier: deriveTier({
-        severity: survivor.severity,
-        evidence_class: survivor.evidence_class,
-        refuter_verdict: verdict,
-      }),
+      tier: deriveTier(
+        {
+          severity: survivor.severity,
+          evidence_class: survivor.evidence_class,
+          refuter_verdict: verdict,
+        },
+        // The conjunction is computed HERE, and both conjuncts are the same
+        // kind of trap one level apart.
+        //
+        // `ceilingFired`, NEVER `partial`. Both are true on the ceiling path
+        // and it is tempting to read the one already in hand — but `partial`
+        // is also set by a failed hunter, a failed verify step and a failed
+        // refuter step, and keying the demotion off it would let ONE dead
+        // hunter downgrade every deterministic BLOCKER the surviving hunters
+        // found. On a zero-refuter config that is the 2026-07-29 AudioTrimmer
+        // regression, reintroduced silently. Caught in review; pinned by "a
+        // run made partial by a FAILED HUNTER still blocks" below.
+        //
+        // AND `refuterConfigured`, because truncation on its own says nothing
+        // about a refuter. The two are ORTHOGONAL: a spec with no refuter can
+        // trip the ceiling on its hunters or its verify legs, and there
+        // `not_submitted` is the designed steady state, not a check that ran
+        // out of time — nothing was ever going to submit. Without this
+        // conjunct that run demotes everything it found, which is the SAME
+        // AudioTrimmer regression arriving through a truncation precondition.
+        // Pinned by "a CEILING-truncated run with NO refuter configured still
+        // blocks" below.
+        //
+        // Both values are settled by the time finish() reads them: the ceiling
+        // sets its flag inside its own timer callback, before aborting and
+        // before this function is reached, precisely so a run mid-`finish()`
+        // cannot read it as false; `refuterConfigured` is set at spec
+        // validation, before any leg and long before a survivor exists.
+        { refuterCutShort: state.ceilingFired && state.refuterConfigured },
+      ),
     });
   }
   // Merge losers were never submitted to the refuter — stamp the canonical

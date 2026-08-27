@@ -402,11 +402,27 @@ export function validateFindingsDocument(candidate: unknown): FindingsDocument {
 }
 
 // Full tier-assignment rule (spec BR "Full Tier-Assignment Rule"): only
-// corroborated-or-deterministic BLOCKER/CRITICAL findings may block, and even
-// a deterministic one is demoted to advisory when the refuter returns the
-// positive `downgraded-latent` verdict.
+// corroborated-or-deterministic BLOCKER/CRITICAL findings may block; a
+// deterministic one is demoted to advisory when the refuter returns the
+// positive `downgraded-latent` verdict, and also when an EXPECTED refuter
+// check was cut short before the finding was ever submitted (see the
+// `refuterCutShort` option below).
 export function deriveTier(
   finding: Pick<Finding, "severity" | "evidence_class" | "refuter_verdict">,
+  options: {
+    // Whether a refuter check this finding was ENTITLED TO never got to
+    // submit its verdict. NOT a synonym for "the run was truncated": the
+    // caller must have already established BOTH halves of that entitlement —
+    // a refuter was configured for this run AND the run ended early (pipeline
+    // ceiling / `run_status: "partial"`) rather than completing its legs.
+    // Those two are orthogonal, and the name says the conjunction so no future
+    // caller can satisfy it with truncation alone (src/pipeline.ts `finish()`
+    // is where the conjunction is computed, and says why).
+    // Defaults to FALSE on purpose: a caller that knows nothing about the
+    // refuter's fate must never be able to demote by accident, so the fallback
+    // is exactly today's behaviour.
+    refuterCutShort?: boolean;
+  } = {},
 ): Tier {
   const isBlockerClass =
     finding.severity === "BLOCKER" || finding.severity === "CRITICAL";
@@ -419,6 +435,44 @@ export function deriveTier(
   // gets this power — `inconclusive` still blocks, mirroring the rule that
   // `refuted` requires positive disproof. Silence is not a demotion.
   if (finding.refuter_verdict === "downgraded-latent") return "advisory";
+  // Blocking tier is the tier that stops a merge, so claiming it asserts that
+  // an adversary looked and failed to knock the claim down. The demotion below
+  // fires on a THREE-part condition, and every part is load-bearing:
+  //   1. a refuter was CONFIGURED for this run, so an adversarial check was
+  //      genuinely owed to this finding;
+  //   2. the run was truncated, so that leg was refused admission
+  //      (src/pipeline.ts §5.3) and never spawned; and
+  //   3. the verdict is `not_submitted`, the fallback `finish()` stamps on a
+  //      survivor no verdict ever arrived for.
+  // Parts 1 and 2 arrive pre-conjoined as `refuterCutShort` — deriveTier never
+  // sees truncation on its own, deliberately, because the two are ORTHOGONAL
+  // and collapsing them is the whole bug this gate was rewritten to close.
+  // Demote for that triple and NOTHING else, because each neighbouring case
+  // means something different:
+  //   - `corroborated` on a cut-short run WAS adversarially checked before
+  //     time ran out. Truncation is no reason to discard work that happened.
+  //   - `inconclusive` means the refuter RAN and returned no positive
+  //     downgrade — the standing rule above, paid for by AudioTrimmer.
+  //   - `not_submitted` with NO refuter configured is the supported
+  //     zero-refuter setup (src/spec.ts allows at most one refuter, so zero is
+  //     configured absence, not failure). There `not_submitted` is the designed
+  //     steady state, blocking is intended, and it stays intended no matter how
+  //     the run ended — a hunter-bound or verify-bound ceiling on such a spec
+  //     cut nothing short, because nothing was ever going to submit. Demoting
+  //     it would empty blocking tier for every such user and undo the
+  //     AudioTrimmer fix, which is exactly why part 1 exists.
+  //   - `not_submitted` on a COMPLETE run with a refuter configured cannot
+  //     occur — the leg either ran or was refused admission by truncation.
+  // An `inferential` finding needs no branch here: unrefuted, it is already
+  // advisory two lines down.
+  // Recording WHY the check is missing IN the artifact needs a new
+  // `refuter_verdict` value, and that is a coordinated schema v1.1 bump with
+  // the sibling lab (ROADMAP C2) — deliberately not this fix.
+  if (
+    options.refuterCutShort === true &&
+    finding.refuter_verdict === "not_submitted"
+  )
+    return "advisory";
   if (finding.evidence_class === "deterministic") return "blocking";
   return finding.refuter_verdict === "corroborated" ? "blocking" : "advisory";
 }
