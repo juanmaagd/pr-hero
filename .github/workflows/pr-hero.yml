@@ -28,6 +28,14 @@ permissions:
 jobs:
   credentials:
     runs-on: ubuntu-latest
+    # Bounded like every other job. This one only echoes two strings, so it
+    # can never legitimately take minutes — but it runs FIRST and gates
+    # `review` through `needs:`, on the same shared ephemeral runners. Left
+    # unbounded, a runner that hangs here inherits GitHub's 360-minute default
+    # and stalls the whole workflow for six hours while `review` never starts.
+    # Bounding only the job that spends money protects the budget, not the
+    # pipeline.
+    timeout-minutes: 5
     outputs:
       has_creds: ${{ steps.detect.outputs.has_creds }}
     steps:

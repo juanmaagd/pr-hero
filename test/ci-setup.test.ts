@@ -130,6 +130,24 @@ describe("generateCiWorkflowTemplate (pure)", () => {
     expect(notice?.run).toContain("claude setup-token");
   });
 
+  test("EVERY job is bounded, not just the one that spends money", () => {
+    // A bound on `review` alone does not deliver the hung-runner protection
+    // its own comment claims. `credentials` runs FIRST and gates `review`
+    // through `needs:`, on the same class of shared ephemeral runners — so a
+    // runner that hangs there falls back to the GitHub default of 360
+    // minutes and stalls the whole workflow for six hours, with `review`
+    // never starting. Bounding the expensive job and leaving the gate
+    // unbounded protects the budget, not the pipeline.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: Record<string, { "timeout-minutes"?: number }>;
+    };
+    const names = Object.keys(parsed.jobs);
+    expect(names.length).toBeGreaterThan(1);
+    for (const name of names) {
+      expect(typeof parsed.jobs[name]?.["timeout-minutes"]).toBe("number");
+    }
+  });
+
   test("the notice script never lets bash run a backtick as a command", () => {
     // Backticks inside a DOUBLE-quoted bash string are command substitution,
     // not literal text. The notice body documents `gh run rerun` in prose, so
