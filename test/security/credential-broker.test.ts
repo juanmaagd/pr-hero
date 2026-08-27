@@ -6,6 +6,8 @@ import {
   CLAUDE_CREDENTIALS_KEYCHAIN_SERVICE,
   CredentialProjectionError,
   KeychainCredentialBroker,
+  OPENCODE_AUTH_RELATIVE_PATH,
+  OpenCodeAuthBroker,
 } from "../../src/security/credential-broker";
 
 // Obviously-fake tokens only — never a real credential value in a fixture.
@@ -208,5 +210,238 @@ describe("KeychainCredentialBroker", () => {
     ).toThrow(/pinned security binary/i);
     const scratch = mkdtempSync(path.join(tmpdir(), "prhero-broker-"));
     rmSync(scratch, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D1-06b: the OpenCode/ChatGPT OAuth route (§6.1). Empirically grounded —
+// `opencode auth list` under a synthetic HOME reads
+// <syntheticHome>/.local/share/opencode/auth.json and reports exactly the
+// projected credential (verified 2026-08-27).
+// ---------------------------------------------------------------------------
+
+// Obviously-fake tokens only — never a real credential value in a fixture.
+// The zai entries are the point of the exclusion test: they are unrelated
+// provider secrets that share the store and must never travel.
+const FAKE_OPENCODE_STORE = JSON.stringify({
+  "zai-coding-plan": { key: "ZAI-KEY-test-fake", type: "api" },
+  zai: { key: "ZAI-KEY-2-test-fake", type: "api" },
+  openai: {
+    type: "oauth",
+    access: "AT-openai-test-fake",
+    refresh: "RT-openai-test-fake",
+    accountId: "acct-test-fake",
+    expires: 1_788_000_000_000,
+  },
+});
+
+function openCodeBroker(readerFn: () => Promise<string>) {
+  return new OpenCodeAuthBroker({ readerFn });
+}
+
+async function projectOpenCode(
+  broker = openCodeBroker(async () => FAKE_OPENCODE_STORE),
+) {
+  return broker.project({
+    sessionId: "session-1",
+    credentialRef: OPENCODE_AUTH_RELATIVE_PATH,
+    kind: "opencode_chatgpt_oauth",
+    verifiedBinaryPath: "/opt/homebrew/bin/opencode",
+  });
+}
+
+function projectedAuthPath(syntheticHome: string): string {
+  return path.join(syntheticHome, ".local", "share", "opencode", "auth.json");
+}
+
+describe("OpenCodeAuthBroker", () => {
+  // The load-bearing one. OpenCode's auth.json is a SHARED store: every
+  // provider the operator ever logged into lives in the same file. Copying it
+  // wholesale would hand an OpenAI-routed step the operator's Z.ai keys.
+  test("carries ONLY the openai record — sibling provider secrets never travel", async () => {
+    const projection = await projectOpenCode();
+    try {
+      const raw = await Bun.file(
+        projectedAuthPath(projection.syntheticHome),
+      ).text();
+      expect(Object.keys(JSON.parse(raw))).toEqual(["openai"]);
+      expect(raw).not.toContain("ZAI-KEY-test-fake");
+      expect(raw).not.toContain("ZAI-KEY-2-test-fake");
+      expect(raw).not.toContain("zai");
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  // The record travels WHOLE. The access token expires (~10 days on the
+  // observed store) and the child rotates it with the refresh token;
+  // projecting only `access` would hand it a credential it cannot renew.
+  test("the whole record travels, refresh token included", async () => {
+    const projection = await projectOpenCode();
+    try {
+      const written = JSON.parse(
+        await Bun.file(projectedAuthPath(projection.syntheticHome)).text(),
+      );
+      expect(Object.keys(written.openai).sort()).toEqual([
+        "access",
+        "accountId",
+        "expires",
+        "refresh",
+        "type",
+      ]);
+      expect(written.openai.refresh).toBe("RT-openai-test-fake");
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("layout: root and every created level are 0700, auth.json is 0600", async () => {
+    const projection = await projectOpenCode();
+    try {
+      for (const dir of [
+        projection.syntheticHome,
+        path.join(projection.syntheticHome, ".local"),
+        path.join(projection.syntheticHome, ".local", "share"),
+        path.join(projection.syntheticHome, ".local", "share", "opencode"),
+        projection.syntheticTmp,
+      ]) {
+        expect(statSync(dir).mode & 0o777).toBe(0o700);
+      }
+      expect(
+        statSync(projectedAuthPath(projection.syntheticHome)).mode & 0o777,
+      ).toBe(0o600);
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("no component of the projection is a symlink (§6.1 lstat defense)", async () => {
+    const projection = await projectOpenCode();
+    try {
+      let cursor = projectedAuthPath(projection.syntheticHome);
+      while (cursor.startsWith(projection.syntheticHome)) {
+        expect(lstatSync(cursor).isSymbolicLink()).toBe(false);
+        cursor = path.dirname(cursor);
+      }
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  // The isolation claim must not rest on the harness's env allowlist staying
+  // XDG-free. OpenCode resolves its store through XDG_DATA_HOME first, so an
+  // inherited value would silently defeat the synthetic home.
+  test("env pins XDG so an inherited value cannot escape the projection", async () => {
+    const projection = await projectOpenCode();
+    try {
+      expect(projection.env.HOME).toBe(projection.syntheticHome);
+      expect(projection.env.XDG_DATA_HOME).toBe(
+        path.join(projection.syntheticHome, ".local", "share"),
+      );
+      expect(projection.env.XDG_CONFIG_HOME).toBe(
+        path.join(projection.syntheticHome, ".config"),
+      );
+      expect(projection.env.TMPDIR).toBe(projection.syntheticTmp);
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("files[] carries the projected path and a sha256 of the real bytes", async () => {
+    const projection = await projectOpenCode();
+    try {
+      expect(projection.files).toHaveLength(1);
+      const entry = projection.files[0];
+      expect(entry.path).toBe(projectedAuthPath(projection.syntheticHome));
+      expect(entry.mode).toBe(0o600);
+      const hasher = new Bun.CryptoHasher("sha256");
+      hasher.update(
+        new TextEncoder().encode(await Bun.file(entry.path).text()),
+      );
+      expect(entry.sha256).toBe(hasher.digest("hex"));
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("destroy removes the tree and is idempotent", async () => {
+    const projection = await projectOpenCode();
+    const root = projection.syntheticHome;
+    await projection.destroy();
+    expect(existsSync(root)).toBe(false);
+    await projection.destroy();
+    expect(existsSync(root)).toBe(false);
+  });
+
+  test("reader failure produces a clean classed error with no source content", async () => {
+    const broker = openCodeBroker(async () => {
+      throw new Error("/Users/someone/.local/share/opencode/auth.json ENOENT");
+    });
+    await expect(projectOpenCode(broker)).rejects.toThrow(
+      CredentialProjectionError,
+    );
+    try {
+      await projectOpenCode(broker);
+    } catch (error) {
+      const err = error as CredentialProjectionError;
+      expect(err.failureClass).toBe("source_read_failed");
+      expect(err.message).not.toContain("/Users/someone");
+    }
+  });
+
+  test("malformed JSON produces a clean classed error without echoing it", async () => {
+    const broker = openCodeBroker(async () => '{"openai": AT-leaked-value');
+    try {
+      await projectOpenCode(broker);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      const err = error as CredentialProjectionError;
+      expect(err.failureClass).toBe("malformed_payload");
+      expect(err.message).not.toContain("AT-leaked-value");
+    }
+  });
+
+  test("a store with no openai record fails loud", async () => {
+    const broker = openCodeBroker(async () =>
+      JSON.stringify({ zai: { key: "ZAI-KEY-test-fake", type: "api" } }),
+    );
+    try {
+      await projectOpenCode(broker);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      expect((error as CredentialProjectionError).failureClass).toBe(
+        "missing_subscription_record",
+      );
+    }
+  });
+
+  // The kind claims ChatGPT OAuth. An `openai` entry holding a pay-as-you-go
+  // API key is a different credential with different billing, and projecting
+  // it under this kind would make the capability report's
+  // `billing.mode: "subscription"` a lie.
+  test("an openai API key is not the OAuth record this kind promises", async () => {
+    const broker = openCodeBroker(async () =>
+      JSON.stringify({ openai: { key: "sk-test-fake", type: "api" } }),
+    );
+    try {
+      await projectOpenCode(broker);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      expect((error as CredentialProjectionError).failureClass).toBe(
+        "missing_subscription_record",
+      );
+    }
+  });
+
+  test("unsupported kinds fail loud naming the kind", async () => {
+    const broker = openCodeBroker(async () => FAKE_OPENCODE_STORE);
+    await expect(
+      broker.project({
+        sessionId: "s",
+        credentialRef: OPENCODE_AUTH_RELATIVE_PATH,
+        kind: "claude_subscription_oauth",
+        verifiedBinaryPath: "/opt/homebrew/bin/opencode",
+      }),
+    ).rejects.toThrow(/claude_subscription_oauth/);
   });
 });

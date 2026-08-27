@@ -13,7 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import type { CredentialKind } from "../provider-capabilities";
 
@@ -222,5 +222,198 @@ export class KeychainCredentialBroker implements CredentialBroker {
       throw new Error("security lookup failed");
     }
     return stdout.trim();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D1-06b §6.1: the OpenCode / ChatGPT OAuth route.
+//
+// Ported from KeychainCredentialBroker rather than rewritten — same threat
+// model, same defenses — with three differences the source forces:
+//
+//  1. The source is a FILE, not the macOS keychain, and OpenCode resolves it
+//     through XDG_DATA_HOME before falling back to ~/.local/share.
+//  2. auth.json is a SHARED store. Every provider the operator ever logged
+//     into lives in it, so carrying it wholesale would hand an OpenAI-routed
+//     step unrelated provider keys. Only the `openai` record travels — the
+//     same rule that keeps mcpOAuth out of the Claude projection.
+//  3. The projection pins XDG_DATA_HOME/XDG_CONFIG_HOME as well as HOME. The
+//     harness env allowlist happens to drop XDG today, but an isolation claim
+//     that depends on a passthrough list staying XDG-free is one edit away
+//     from being false.
+//
+// Empirically proven live (2026-08-27): `opencode auth list` under a synthetic
+// HOME reads <syntheticHome>/.local/share/opencode/auth.json and reports
+// exactly the one projected OAuth credential, with the sibling provider keys
+// absent.
+// ---------------------------------------------------------------------------
+
+export const OPENCODE_AUTH_RELATIVE_PATH = path.join(
+  ".local",
+  "share",
+  "opencode",
+  "auth.json",
+);
+
+export interface OpenCodeAuthBrokerOptions {
+  // Injectable for offline tests; returns the raw auth.json payload.
+  readonly readerFn?: () => Promise<string>;
+  // Overrides the source lookup; production resolves XDG_DATA_HOME ?? ~/.local/share.
+  readonly authFilePath?: string;
+}
+
+interface OpenCodeOauthRecord {
+  [key: string]: unknown;
+}
+
+export function resolveOpenCodeAuthPath(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  homeDir: string = homedir(),
+): string {
+  const dataHome = env.XDG_DATA_HOME;
+  const base =
+    dataHome !== undefined && dataHome.length > 0
+      ? dataHome
+      : path.join(homeDir, ".local", "share");
+  return path.join(base, "opencode", "auth.json");
+}
+
+export class OpenCodeAuthBroker implements CredentialBroker {
+  private readonly readerFn: () => Promise<string>;
+
+  constructor(options: OpenCodeAuthBrokerOptions = {}) {
+    if (options.readerFn !== undefined) {
+      this.readerFn = options.readerFn;
+    } else {
+      const authPath = options.authFilePath ?? resolveOpenCodeAuthPath();
+      this.readerFn = () => Bun.file(authPath).text();
+    }
+  }
+
+  async project(input: {
+    readonly sessionId: string;
+    readonly credentialRef: string;
+    readonly kind: CredentialKind;
+    readonly verifiedBinaryPath: string;
+  }): Promise<CredentialProjection> {
+    void input.sessionId;
+    void input.credentialRef;
+    void input.verifiedBinaryPath;
+    if (input.kind !== "opencode_chatgpt_oauth") {
+      throw new Error(
+        `Unsupported credential kind: ${input.kind} (OpenCodeAuthBroker projects only opencode_chatgpt_oauth)`,
+      );
+    }
+
+    let raw: string;
+    try {
+      raw = await this.readerFn();
+    } catch {
+      throw new CredentialProjectionError("source_read_failed");
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new CredentialProjectionError("malformed_payload");
+    }
+
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new CredentialProjectionError("malformed_payload");
+    }
+
+    const record = (parsed as Record<string, unknown>).openai;
+    if (typeof record !== "object" || record === null) {
+      throw new CredentialProjectionError("missing_subscription_record");
+    }
+    // This kind promises ChatGPT OAuth specifically. An `openai` entry holding
+    // a pay-as-you-go API key is a different credential on different billing,
+    // and projecting it here would make the capability report's
+    // `billing.mode: "subscription"` a lie rather than a claim.
+    if ((record as Record<string, unknown>).type !== "oauth") {
+      throw new CredentialProjectionError("missing_subscription_record");
+    }
+
+    return this.buildProjection(input.kind, record as OpenCodeOauthRecord);
+  }
+
+  private buildProjection(
+    kind: CredentialKind,
+    record: OpenCodeOauthRecord,
+  ): CredentialProjection {
+    const projectionRoot = path.join(
+      tmpdir(),
+      "prhero-cred-projections",
+      randomUUID(),
+    );
+    const xdgDataHome = path.join(projectionRoot, ".local", "share");
+    const xdgConfigHome = path.join(projectionRoot, ".config");
+    const opencodeDataDir = path.join(xdgDataHome, "opencode");
+    const opencodeConfigDir = path.join(xdgConfigHome, "opencode");
+    const syntheticTmp = path.join(projectionRoot, "tmp");
+    const authFile = path.join(opencodeDataDir, "auth.json");
+
+    // Every level is created explicitly at 0700 — `recursive` alone would let
+    // an intermediate directory inherit the umask.
+    for (const dir of [
+      projectionRoot,
+      path.join(projectionRoot, ".local"),
+      xdgDataHome,
+      opencodeDataDir,
+      xdgConfigHome,
+      opencodeConfigDir,
+      syntheticTmp,
+    ]) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+
+    // The record travels WHOLE. Its access token expires (~10 days on the
+    // observed store) and the child renews it with the refresh token; a
+    // projection carrying only `access` would hand the child a credential it
+    // cannot rotate, and it would go stale mid-run with no way back.
+    const payload = `${JSON.stringify({ openai: record }, null, 2)}\n`;
+    writeFileSync(authFile, payload, { mode: 0o600 });
+
+    // §6.1: lstat EVERY component after writing — a pre-planted symlink
+    // anywhere in the chain means the credential landed outside our control.
+    for (const component of [
+      tmpdir(),
+      projectionRoot,
+      path.join(projectionRoot, ".local"),
+      xdgDataHome,
+      opencodeDataDir,
+      authFile,
+    ]) {
+      if (lstatSync(component).isSymbolicLink()) {
+        rmSync(projectionRoot, { recursive: true, force: true });
+        throw new CredentialProjectionError("projection_layout_invalid");
+      }
+    }
+
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(new TextEncoder().encode(payload));
+    const sha256 = hasher.digest("hex");
+
+    return {
+      projectionId: `cred-${randomUUID()}`,
+      kind,
+      syntheticHome: projectionRoot,
+      syntheticConfigHome: opencodeConfigDir,
+      syntheticTmp,
+      env: {
+        HOME: projectionRoot,
+        TMPDIR: syntheticTmp,
+        // Pinned, not merely absent from the harness allowlist: OpenCode reads
+        // XDG_DATA_HOME first, so an inherited value would point the child
+        // straight back at the operator's real store.
+        XDG_DATA_HOME: xdgDataHome,
+        XDG_CONFIG_HOME: xdgConfigHome,
+      },
+      files: [{ path: authFile, mode: 0o600, sha256 }],
+      destroy: async () => {
+        rmSync(projectionRoot, { recursive: true, force: true });
+      },
+    };
   }
 }
