@@ -8,7 +8,7 @@ import type {
 } from "../provider-capabilities";
 import type { WorkspaceDenialCode } from "../security/workspace-read-broker";
 import type { StepSpec } from "../step-runner";
-import type { SessionUsage } from "../usage";
+import type { NormalizedTokens, NormalizedUsage } from "./usage-normalized";
 
 export type {
   CredentialKind,
@@ -75,7 +75,14 @@ export type ProviderEvent =
       readonly type: "usage";
       readonly mode: "snapshot" | "delta";
       readonly final: boolean;
-      readonly usage: Partial<SessionUsage>;
+      // D1-08 PR2 (§8): a streamed usage UPDATE, not a full snapshot — only
+      // the leaves this event actually reports are present. cashCostUsd
+      // carries a per-event cost delta/snapshot alongside the token leaves;
+      // `applyUsageUpdate` (usage-normalized.ts) folds a sequence of these
+      // through the same snapshot/delta state machine as the tokens.
+      readonly usage: Partial<NormalizedTokens> & {
+        readonly cashCostUsd?: number;
+      };
     })
   | (ProviderEventBase & {
       readonly type: "diagnostic";
@@ -106,7 +113,10 @@ export interface TransportOutcome {
     | "unverified";
   readonly terminalProof?: ProviderTerminalProof;
   readonly finalText: string;
-  readonly usage: SessionUsage;
+  // D1-08 PR2 (§8): normalized disjoint usage leaves, not the legacy flat
+  // shape. `projectLegacyUsage` (usage-normalized.ts) is the ONLY bridge back
+  // to `SessionUsage`, applied at the `runPipeline` return boundary.
+  readonly usage: NormalizedUsage;
   readonly stderrTail: string;
   readonly timedOut?: boolean;
   readonly exitCode?: number;

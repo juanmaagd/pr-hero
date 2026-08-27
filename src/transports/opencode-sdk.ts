@@ -9,8 +9,16 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../execution/contracts";
-import type { SessionUsage } from "../usage";
-import { zeroUsage } from "../usage";
+import type {
+  NormalizedTokens,
+  NormalizedUsage,
+  UsageModeState,
+} from "../execution/usage-normalized";
+import {
+  applyUsageUpdate,
+  normalizeUnavailableUsage,
+  UsageModeMismatchError,
+} from "../execution/usage-normalized";
 
 // WHY there is no @opencode-ai dependency here: production enablement over the
 // real SDK is deliberately deferred to D1-11 (§12 D1-06 vs D1-11). This slice
@@ -180,6 +188,20 @@ function boundTailBytes(text: string, maxBytes: number): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Session creation failing means no attempt ever reached the provider —
+// genuine zero cost, not "unavailable" (which would misfile a $0 refusal as
+// an unresolved spend once PR5's spend ledger reads completeness).
+function noSessionUsage(wallMs: number): NormalizedUsage {
+  return {
+    wallMs,
+    tokens: {},
+    completeness: "complete",
+    billingMode: "subscription",
+    costSource: "provider",
+    cashCostUsd: 0,
+  };
 }
 
 // Matching means the poll observes the SAME terminal identity the slot already
@@ -435,7 +457,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         completion: "failed",
         protocolIntegrity: "unverified",
         finalText: "",
-        usage: zeroUsage(),
+        usage: noSessionUsage(Date.now() - startedWall),
         stderrTail: `[pr-hero] opencode sdk: session creation failed: ${errorMessage(error)}`,
       };
     }
@@ -443,8 +465,11 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // ---- mutable attempt state --------------------------------------------
     const finalParts: string[] = [];
     let aggregateBytes = 0;
-    let usageMode: "snapshot" | "delta" | undefined;
-    const usageAccumulator = zeroUsage();
+    // §4.1/§8: the first usage event fixes the attempt's aggregation mode;
+    // `applyUsageUpdate` is the pure snapshot-replaces/delta-accumulates state
+    // machine, shared with every other transport that folds a usage stream.
+    let usageState: UsageModeState | undefined;
+    let cashCostUsd: number | undefined;
     let sinkClosed = false;
     let closedDataPlaneEvents = 0;
     let pollTimeouts = 0;
@@ -557,38 +582,42 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               break;
             }
             case "usage": {
-              if (usageMode === undefined) {
-                // §4.2 line 195: the first usage event fixes the attempt's
-                // aggregation mode.
-                usageMode = event.mode;
-              } else if (usageMode !== event.mode) {
-                settle({
-                  kind: "usage_flip",
-                  detail: `mode changed from ${usageMode} to ${event.mode}`,
+              // §4.2 line 195: the first usage event fixes the attempt's
+              // aggregation mode; a later flip throws rather than silently
+              // mixing snapshot and delta semantics.
+              try {
+                usageState = applyUsageUpdate(usageState, event.mode, {
+                  ...(event.inputTokens !== undefined
+                    ? { inputUncached: event.inputTokens }
+                    : {}),
+                  ...(event.outputTokens !== undefined
+                    ? { outputVisible: event.outputTokens }
+                    : {}),
                 });
-                return;
+              } catch (error) {
+                if (error instanceof UsageModeMismatchError) {
+                  settle({ kind: "usage_flip", detail: error.message });
+                  return;
+                }
+                throw error;
               }
-              if (usageMode === "snapshot") {
-                // §4.2 line 195 / §8: snapshot REPLACES the provider counters.
-                usageAccumulator.tokens_in = event.inputTokens ?? 0;
-                usageAccumulator.tokens_out = event.outputTokens ?? 0;
-                usageAccumulator.cost_usd_est = event.costUsd ?? 0;
-              } else {
-                usageAccumulator.tokens_in += event.inputTokens ?? 0;
-                usageAccumulator.tokens_out += event.outputTokens ?? 0;
-                usageAccumulator.cost_usd_est += event.costUsd ?? 0;
+              if (event.costUsd !== undefined) {
+                cashCostUsd =
+                  event.mode === "snapshot"
+                    ? event.costUsd
+                    : (cashCostUsd ?? 0) + event.costUsd;
               }
-              usageAccumulator.tokens_total =
-                usageAccumulator.tokens_in + usageAccumulator.tokens_out;
-              const usage: Partial<SessionUsage> = {
+              const usage: Partial<NormalizedTokens> & {
+                cashCostUsd?: number;
+              } = {
                 ...(event.inputTokens !== undefined
-                  ? { tokens_in: event.inputTokens }
+                  ? { inputUncached: event.inputTokens }
                   : {}),
                 ...(event.outputTokens !== undefined
-                  ? { tokens_out: event.outputTokens }
+                  ? { outputVisible: event.outputTokens }
                   : {}),
                 ...(event.costUsd !== undefined
-                  ? { cost_usd_est: event.costUsd }
+                  ? { cashCostUsd: event.costUsd }
                   : {}),
               };
               const pushed = await pushGuarded({
@@ -828,10 +857,33 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         ? { terminalProof: slotProof }
         : {}),
       finalText: finalParts.join(""),
-      usage: {
-        ...usageAccumulator,
-        wall_ms: Date.now() - startedWall,
-      },
+      // §8: no usage event ever arriving is a declared capability gap here
+      // (capabilities().protocol.usageMode is "none" until D1-11's real SDK
+      // adapter), not a proven zero — "unavailable" says honestly that the
+      // cost is unknown rather than fabricating a $0 for a session that DID
+      // run. `usageState` defined means at least one usage event landed and
+      // fixed a mode, so the leaves it accumulated are trustworthy.
+      usage:
+        usageState === undefined
+          ? normalizeUnavailableUsage({ wallMs: Date.now() - startedWall })
+          : {
+              wallMs: Date.now() - startedWall,
+              tokens: {
+                ...usageState.tokens,
+                inputKnown: usageState.tokens.inputUncached,
+                outputKnown: usageState.tokens.outputVisible,
+                totalKnown:
+                  usageState.tokens.inputUncached !== undefined ||
+                  usageState.tokens.outputVisible !== undefined
+                    ? (usageState.tokens.inputUncached ?? 0) +
+                      (usageState.tokens.outputVisible ?? 0)
+                    : undefined,
+              },
+              completeness: "complete",
+              billingMode: "subscription",
+              costSource: cashCostUsd !== undefined ? "provider" : "unknown",
+              ...(cashCostUsd !== undefined ? { cashCostUsd } : {}),
+            },
       // The raw fact §7 needs to reach watchdog_timeout: the legacy classifier
       // collapses it into "transient", and the D1-07 bridge recovers the
       // distinction from THIS flag, not from the class.

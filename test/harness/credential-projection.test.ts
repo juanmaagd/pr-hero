@@ -64,11 +64,12 @@ function recordingTransport(requests: TransportRequest[]): ProviderTransport {
         protocolIntegrity: "verified",
         finalText: "{}",
         usage: {
-          wall_ms: 0,
-          tokens_in: 0,
-          tokens_out: 0,
-          tokens_total: 0,
-          cost_usd_est: 0,
+          wallMs: 0,
+          tokens: {},
+          completeness: "complete",
+          billingMode: "subscription",
+          costSource: "provider",
+          cashCostUsd: 0,
         },
         stderrTail: "",
       } satisfies TransportOutcome;

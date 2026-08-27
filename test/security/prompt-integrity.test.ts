@@ -43,12 +43,13 @@ function makeRequest(
   };
 }
 
-const zeroUsage = {
-  wall_ms: 0,
-  tokens_in: 0,
-  tokens_out: 0,
-  tokens_total: 0,
-  cost_usd_est: 0,
+const zeroUsage: TransportOutcome["usage"] = {
+  wallMs: 0,
+  tokens: {},
+  completeness: "complete",
+  billingMode: "subscription",
+  costSource: "provider",
+  cashCostUsd: 0,
 };
 
 describe("§6.3 prompt integrity: transport pre-spawn verification", () => {

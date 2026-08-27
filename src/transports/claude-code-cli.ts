@@ -8,9 +8,10 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../execution/contracts";
+import type { NormalizedUsage } from "../execution/usage-normalized";
+import { normalizeUnavailableUsage } from "../execution/usage-normalized";
 import { CLAUDE_CAPABILITY_STATICS } from "../provider-capabilities";
 import { ACTIVE_CHILD_PROCS, type SpawnedProcess } from "../step-runner";
-import { parseUsage } from "../usage";
 
 // §5.2 CLI/POSIX cascade: SIGTERM -> 5,000 ms grace -> SIGKILL -> reap bound
 // 2,000 ms, all inside the harness's 7,500 ms deadline including scheduler
@@ -34,6 +35,83 @@ function systemPromptStatus(promptPath: string): PromptFileStatus | undefined {
 
 function hashPromptFile(promptPath: string): string {
   return createHash("sha256").update(readFileSync(promptPath)).digest("hex");
+}
+
+// A denial before spawn, or a PGID proof failure that refuses to signal a
+// child we never trust, is genuine zero cost — no attempt reached the
+// provider, so nothing was spent. This is deliberately NOT
+// `normalizeUnavailableUsage`: "unavailable" means an attempt ran and its
+// cost is unknown, which would misfile a $0 refusal as an unresolved spend
+// once PR5's spend ledger reads completeness.
+function noSpawnUsage(wallMs: number): NormalizedUsage {
+  return {
+    wallMs,
+    tokens: {},
+    completeness: "complete",
+    billingMode: "subscription",
+    costSource: "provider",
+    cashCostUsd: 0,
+  };
+}
+
+interface RawClaudeCliResult {
+  readonly total_cost_usd?: number;
+  readonly usage?: {
+    readonly input_tokens?: number;
+    readonly output_tokens?: number;
+    readonly cache_creation_input_tokens?: number;
+    readonly cache_read_input_tokens?: number;
+  };
+}
+
+// §8: `--output-format json`'s usage block is already disjoint-additive —
+// input_tokens (uncached), cache_read_input_tokens, and
+// cache_creation_input_tokens sum to total input (verified against the real
+// CLI); this is NOT OpenAI's "total that includes a subset" shape, so the
+// leaves are read straight across rather than split from a total via
+// `normalizeInclusiveUsage`. Corrupted stdout, and valid JSON carrying no
+// `usage` block at all (a safety-blocked or otherwise usage-less response),
+// both yield `normalizeUnavailableUsage` — never a fabricated zero leaf, the
+// exact "$0 on parse failure" collapse this slice exists to kill.
+function normalizeClaudeCliUsage(
+  rawStdout: string,
+  wallMs: number,
+): NormalizedUsage {
+  let parsed: RawClaudeCliResult;
+  try {
+    parsed = JSON.parse(rawStdout);
+  } catch {
+    return normalizeUnavailableUsage({ wallMs });
+  }
+  const raw = parsed.usage;
+  if (raw === undefined) {
+    return normalizeUnavailableUsage({ wallMs });
+  }
+  const inputUncached = raw.input_tokens ?? 0;
+  const inputCacheRead = raw.cache_read_input_tokens ?? 0;
+  const inputCacheWrite = raw.cache_creation_input_tokens ?? 0;
+  const outputVisible = raw.output_tokens ?? 0;
+  const inputKnown = inputUncached + inputCacheRead + inputCacheWrite;
+  return {
+    wallMs,
+    tokens: {
+      inputUncached,
+      inputCacheRead,
+      inputCacheWrite,
+      outputVisible,
+      inputKnown,
+      outputKnown: outputVisible,
+      totalKnown: inputKnown + outputVisible,
+      providerReportedTotal: inputKnown + outputVisible,
+    },
+    completeness: "complete",
+    billingMode: "subscription",
+    costSource: "provider",
+    // `?? undefined` keeps a genuinely absent `total_cost_usd` from becoming
+    // a fabricated $0 — `projectLegacyUsage` already falls back to 0 for the
+    // legacy `cost_usd_est` reader, so nothing downstream loses precision.
+    cashCostUsd: parsed.total_cost_usd,
+  };
 }
 
 type CliProc = SpawnedProcess & { readonly pid: number };
@@ -306,13 +384,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         completion: "failed",
         protocolIntegrity: "unverified",
         finalText: "",
-        usage: {
-          wall_ms: Math.round(performance.now() - start),
-          tokens_in: 0,
-          tokens_out: 0,
-          tokens_total: 0,
-          cost_usd_est: 0,
-        },
+        usage: noSpawnUsage(Math.round(performance.now() - start)),
         stderrTail: `[pr-hero] prompt integrity denied: ${promptDenial}; no spawn`,
       };
     }
@@ -368,13 +440,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
             completion: "failed",
             protocolIntegrity: "unverified",
             finalText: "",
-            usage: {
-              wall_ms: Math.round(performance.now() - start),
-              tokens_in: 0,
-              tokens_out: 0,
-              tokens_total: 0,
-              cost_usd_est: 0,
-            },
+            usage: noSpawnUsage(Math.round(performance.now() - start)),
             stderrTail:
               pgid === undefined
                 ? `[pr-hero] PGID proof failed: could not read pgid for pid ${kernelPid}; no signal sent`
@@ -461,7 +527,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         // non-json stdout
       }
 
-      const usage = parseUsage(stdout, wallMs);
+      const usage = normalizeClaudeCliUsage(stdout, wallMs);
 
       let stderrTail = stderr.slice(-4096);
       if (unreaped) {

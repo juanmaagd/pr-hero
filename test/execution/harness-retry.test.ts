@@ -18,14 +18,16 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
+import type { NormalizedUsage } from "../../src/execution/usage-normalized";
 import type { StepSpec } from "../../src/step-runner";
 
-const USAGE = {
-  wall_ms: 1,
-  tokens_in: 1,
-  tokens_out: 0,
-  tokens_total: 1,
-  cost_usd_est: 0,
+const USAGE: NormalizedUsage = {
+  wallMs: 1,
+  tokens: { inputUncached: 1 },
+  completeness: "complete",
+  billingMode: "subscription",
+  costSource: "provider",
+  cashCostUsd: 0,
 };
 
 const CAPABILITIES: ProviderCapabilityReport = {

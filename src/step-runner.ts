@@ -13,6 +13,7 @@ import type {
   StepAdmissionGate,
 } from "./execution/contracts";
 import { StepExecutionHarness } from "./execution/harness";
+import type { NormalizedUsage } from "./execution/usage-normalized";
 import type { CredentialBroker } from "./security/credential-broker";
 import type { SessionUsage } from "./usage";
 
@@ -66,7 +67,15 @@ export interface StepResult {
   status: "ok" | "failed";
   denialCode?: DenialCode;
   output?: unknown;
+  // Legacy flat shape (§8's ONLY consumer boundary: `../deep-review/runner/
+  // telemetry.ts` reads `runPipeline()`'s returned `usage` by these field
+  // names). Projected from `usageV2` via `projectLegacyUsage`, never hand-built.
   usage: SessionUsage;
+  // D1-08 PR2: the normalized disjoint leaves this step's attempts actually
+  // reported, summed across attempts. Absent when no attempt ever spawned
+  // (a pre-spawn denial, a construction failure) — those cases are genuine
+  // zero cost, not "unavailable", and carry no v2 record at all.
+  usageV2?: NormalizedUsage;
   attempts: number;
   stderrTail: string;
   resultText: string;
