@@ -12,6 +12,7 @@ import {
 } from "../src/findings";
 import {
   changedPathsFromDiff,
+  PIPELINE_SCHEMA_VERSION,
   type PipelineInput,
   type PipelineProgressEvent,
   parityTriggered,
@@ -2637,6 +2638,7 @@ describe("pipeline ceiling snapshot", () => {
     expect(entries).toContain("pipeline.json");
     expect(entries).not.toContain("pipeline.json.tmp");
     const plan = (await readPlan(input.runDir)) as {
+      schema_version: string;
       pr: number;
       base_sha: string;
       head_sha: string;
@@ -2645,8 +2647,15 @@ describe("pipeline ceiling snapshot", () => {
       parity_hunter_fired: boolean;
       generated_at: string;
       boundary_nonce: string;
-      steps: Array<{ name: string }>;
+      steps: Array<{
+        name: string;
+        status?: string;
+        attempts?: number;
+        attemptLogPath?: string;
+        settlementReceiptPath?: string;
+      }>;
     };
+    expect(plan.schema_version).toBe(PIPELINE_SCHEMA_VERSION);
     expect(plan.pr).toBe(1539);
     expect(plan.base_sha).toBe("06e857b3");
     expect(plan.head_sha).toBe("4609456d");
@@ -2659,6 +2668,20 @@ describe("pipeline ceiling snapshot", () => {
       "hunter-reliability",
       "hunter-resilience",
     ]);
+    // D1-10c widened this test's "same content" property rather than replacing
+    // it: the keys it already pinned still hold, and the ones the slice added
+    // are pinned beside them so a future writer change cannot drop them
+    // silently either.
+    expect(plan.steps[0]).toMatchObject({
+      name: "hunter-reliability",
+      status: "ok",
+      attempts: 1,
+      attemptLogPath: path.join("steps", "logs", "hunter-reliability.1.log"),
+      settlementReceiptPath: path.join(
+        "steps",
+        "settlement.hunter-reliability.attempt1.json",
+      ),
+    });
   });
 });
 
@@ -3035,5 +3058,319 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
       "hunter-reliability",
       "hunter-resilience",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D1-10c — attempt provenance in pipeline.json's `steps[]`.
+//
+// Before this slice `status` was written for exactly two of the nine steps a
+// real run produces (summarizer and scout), so a plan holding three
+// demonstrably-executed hunters said nothing about any of them: the attempt
+// logs were on disk and the artifact that is supposed to index them was silent.
+// Every entry must now answer four questions — did it run, did it succeed, how
+// many attempts did it take, and where is the evidence.
+// ---------------------------------------------------------------------------
+
+interface ProvenanceStep {
+  name: string;
+  status?: string;
+  attempts?: number;
+  attemptLogPath?: string;
+  settlementReceiptPath?: string;
+}
+
+async function readSteps(runDir: string): Promise<ProvenanceStep[]> {
+  const plan = (await readPlan(runDir)) as { steps: ProvenanceStep[] };
+  return plan.steps;
+}
+
+function stepNamed(
+  steps: ProvenanceStep[],
+  name: string,
+): ProvenanceStep | undefined {
+  return steps.find((s) => s.name === name);
+}
+
+describe("D1-10c attempt provenance", () => {
+  test("every hunter carries status, attempts and both pointers", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline(input, { runner });
+
+    const steps = await readSteps(input.runDir);
+    for (const name of ["hunter-reliability", "hunter-resilience"]) {
+      const step = stepNamed(steps, name);
+      expect(step?.status).toBe("ok");
+      expect(step?.attempts).toBe(1);
+      expect(step?.attemptLogPath).toBe(
+        path.join("steps", "logs", `${name}.1.log`),
+      );
+      expect(step?.settlementReceiptPath).toBe(
+        path.join("steps", `settlement.${name}.attempt1.json`),
+      );
+    }
+  });
+
+  test("the pointers are RELATIVE to the run dir, never absolute", async () => {
+    // The whole point: a CI artifact is downloaded onto a machine where the
+    // producing run dir's absolute path does not exist. `systemPromptPath` and
+    // `outPath` are already absolute and are a compatibility break to change —
+    // everything added here is born relative instead.
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline(input, { runner });
+
+    for (const step of await readSteps(input.runDir)) {
+      expect(path.isAbsolute(step.attemptLogPath ?? "steps/x")).toBe(false);
+      expect(path.isAbsolute(step.settlementReceiptPath ?? "steps/x")).toBe(
+        false,
+      );
+      expect(step.attemptLogPath ?? "").not.toContain(input.runDir);
+      expect(step.settlementReceiptPath ?? "").not.toContain(input.runDir);
+    }
+  });
+
+  test("a failed hunter records its failure and its full attempt count", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) => failed(spec),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+    });
+    const input = await makeInput();
+    await runPipeline(input, { runner });
+
+    const steps = await readSteps(input.runDir);
+    const dead = stepNamed(steps, "hunter-reliability");
+    expect(dead?.status).toBe("failed");
+    // `failed()` reports two attempts — the retry budget spent, not one.
+    expect(dead?.attempts).toBe(2);
+    // The pointers name the LAST attempt's files, which is where the failure
+    // that ended the step is recorded.
+    expect(dead?.attemptLogPath).toBe(
+      path.join("steps", "logs", "hunter-reliability.2.log"),
+    );
+    expect(dead?.settlementReceiptPath).toBe(
+      path.join("steps", "settlement.hunter-reliability.attempt2.json"),
+    );
+  });
+
+  test("the summarizer keeps its status and gains attempt provenance", async () => {
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ok(spec, summary()),
+    });
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    await runPipeline(input, { runner });
+
+    const step = stepNamed(await readSteps(input.runDir), "summarizer");
+    expect(step?.status).toBe("ok");
+    expect(step?.attempts).toBe(1);
+    expect(step?.attemptLogPath).toBe(
+      path.join("steps", "logs", "summarizer.1.log"),
+    );
+    expect(step?.settlementReceiptPath).toBe(
+      path.join("steps", "settlement.summarizer.attempt1.json"),
+    );
+  });
+
+  test("the scout records attempts even on the paths that abandon the run", async () => {
+    // A scout that SETTLED and failed is not a scout that never spawned: it
+    // burned a paid attempt and wrote both artifacts. Recording only `failed`
+    // would throw away the one number that tells those two apart.
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      scout: (spec) => failed(spec),
+    });
+    const input = await makeInput({
+      scout: { promptPath: BUNDLED_SCOUT_PROMPT },
+    });
+    await runPipeline(input, { runner });
+
+    const step = stepNamed(await readSteps(input.runDir), "scout");
+    expect(step?.status).toBe("failed");
+    expect(step?.attempts).toBe(2);
+    expect(step?.attemptLogPath).toBe(
+      path.join("steps", "logs", "scout.2.log"),
+    );
+  });
+
+  test("a delivered scout records ok with its attempt count", async () => {
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      scout: (spec) => ok(spec, leads(["src/app.ts", 10, "suspicious"])),
+    });
+    const input = await makeInput({
+      scout: { promptPath: BUNDLED_SCOUT_PROMPT },
+    });
+    await runPipeline(input, { runner });
+
+    const step = stepNamed(await readSteps(input.runDir), "scout");
+    expect(step?.status).toBe("ok");
+    expect(step?.attempts).toBe(1);
+  });
+
+  test("each per-finding refuter step carries its own provenance", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
+    });
+    const input = await makeInput();
+    await runPipeline(input, { runner });
+
+    const step = stepNamed(await readSteps(input.runDir), "refuter-F001");
+    expect(step?.status).toBe("ok");
+    expect(step?.attempts).toBe(1);
+    expect(step?.attemptLogPath).toBe(
+      path.join("steps", "logs", "refuter-F001.1.log"),
+    );
+    expect(step?.settlementReceiptPath).toBe(
+      path.join("steps", "settlement.refuter-F001.attempt1.json"),
+    );
+  });
+
+  test("a verify step's pointers follow its own steps/verify/<V###> dir", async () => {
+    const runner = new FakeStepRunner({
+      verifier: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: "V001",
+              outcome: "refuted",
+              proof_refs: ["src/app.ts:10"],
+            },
+          ],
+        }),
+    });
+    const input = await makeInput({
+      skipDiscovery: true,
+      verifyQueue: [
+        {
+          priorId: "R001",
+          sev: "CRITICAL",
+          trigger: "touched",
+          claim: "a live defect",
+          locs: ["src/app.ts:10"],
+          authorReply: "",
+          commentBody: "",
+          triageTag: "",
+          deltaHunks: "",
+        },
+      ],
+      rereview: {
+        case: "C",
+        last_reviewed_head: "a".repeat(40),
+        last_head_source: "summary_marker",
+        discovery_range: `${"a".repeat(40)}..${"c".repeat(40)}`,
+        discovery_restricted: true,
+        discovery_skipped_empty_delta: true,
+        prior_findings: 1,
+        settled_deterministically: 0,
+        verified: 0,
+        verification_capped: 0,
+        verification_triggers: {
+          applied: 0,
+          touched: 0,
+          overlap: 0,
+          verify_all: 0,
+        },
+        live: [],
+      },
+      phaseB: {
+        settled: [
+          {
+            id: "R001",
+            status: "queued",
+            locs: ["src/app.ts:10"],
+            renamed: false,
+            trigger: "touched",
+          },
+        ],
+        priors: [
+          {
+            id: "R001",
+            sev: "CRITICAL",
+            tier: "blocking",
+            channel: "inline",
+            locs: ["src/app.ts:10"],
+            claim: "a live defect",
+            triage: null,
+            newThreadReply: false,
+          },
+        ],
+      },
+    });
+    await runPipeline(input, { runner });
+
+    const step = stepNamed(await readSteps(input.runDir), "verify-V001");
+    expect(step?.status).toBe("ok");
+    expect(step?.attempts).toBe(1);
+    // Not steps/logs/: the verify leg writes into its own per-finding dir, and
+    // the pointer is derived from the SAME outPath the harness derives from.
+    expect(step?.attemptLogPath).toBe(
+      path.join("steps", "verify", "V001", "logs", "verify-V001.1.log"),
+    );
+    expect(step?.settlementReceiptPath).toBe(
+      path.join(
+        "steps",
+        "verify",
+        "V001",
+        "settlement.verify-V001.attempt1.json",
+      ),
+    );
+  });
+
+  test("a step the ceiling truncated is `unsettled`, not silently statusless", async () => {
+    // The step was pushed into the plan and then abandoned mid-flight when the
+    // ceiling's grace expired. Absence would be indistinguishable from "this
+    // engine version never wrote status at all", which is the exact ambiguity
+    // ScoutRecord's comment exists to refuse.
+    const runner = new SlowStepRunner(HUNTERS_OK, 300);
+    const input = await makeInput({
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: TINY_GRACE_MS,
+    });
+
+    await runPipeline(input, { runner });
+    const steps = await readSteps(input.runDir);
+    for (const name of ["hunter-reliability", "hunter-resilience"]) {
+      const step = stepNamed(steps, name);
+      expect(step?.status).toBe("unsettled");
+      expect(step?.attempts).toBeUndefined();
+      expect(step?.attemptLogPath).toBeUndefined();
+      expect(step?.settlementReceiptPath).toBeUndefined();
+    }
+
+    await drainAbandonedRun(runner);
+  });
+
+  test("a scout whose prompt file never parsed stays `failed` with no attempts", async () => {
+    // Construction failure: the step was asked for and never spawned, so there
+    // is no attempt count and no file to point at. `failed` (not `unsettled`)
+    // because the stage did reach a terminal verdict — it just did so before a
+    // session existed.
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput({
+      scout: { promptPath: path.join(tmpdir(), "pr-hero-no-such-scout.md") },
+    });
+    await runPipeline(input, { runner });
+
+    const step = stepNamed(await readSteps(input.runDir), "scout");
+    expect(step?.status).toBe("failed");
+    expect(step?.attempts).toBeUndefined();
+    expect(step?.attemptLogPath).toBeUndefined();
+    expect(step?.settlementReceiptPath).toBeUndefined();
   });
 });
