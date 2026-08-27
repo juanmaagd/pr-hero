@@ -57,6 +57,13 @@ const mcpConfigPath = path.join(fixture.runDir, "mcp.json");
 await Bun.write(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
 const started = performance.now();
+// §5.3 D1-10b: ONE controller shared by the pipeline and the runner. The
+// pipeline aborts it when the ceiling fires; the runner's harness reads the
+// same signal and refuses to start another attempt, so in-flight steps stop
+// instead of billing on past a report that has already been returned. Two
+// controllers would leave the ceiling unable to stop the steps it is waiting
+// on — and this probe spends real money.
+const ceilingController = new AbortController();
 const result = await runPipeline(
   {
     pr: 0,
@@ -87,7 +94,13 @@ const result = await runPipeline(
     ],
     stepTimeoutMs: 10 * 60 * 1000,
   },
-  { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
+  {
+    runner: new ClaudeCodeRunner({
+      ...runnerAuthority.runnerOptions,
+      signal: ceilingController.signal,
+    }),
+    ceilingController,
+  },
 );
 const wallMs = Math.round(performance.now() - started);
 

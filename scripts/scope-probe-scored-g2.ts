@@ -230,6 +230,13 @@ async function runOnce(scope: Scope, replicate: number): Promise<Attempt> {
   const mcpConfigPath = path.join(runDir, "mcp.json");
   await Bun.write(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
+  // §5.3 D1-10b: ONE controller shared by the pipeline and the runner. The
+  // pipeline aborts it when the ceiling fires; the runner's harness reads the
+  // same signal and refuses to start another attempt, so in-flight steps stop
+  // instead of billing on past a report that has already been returned. Two
+  // controllers would leave the ceiling unable to stop the steps it is waiting
+  // on — and this probe spends real money.
+  const ceilingController = new AbortController();
   const result = await runPipeline(
     {
       pr: PR,
@@ -256,7 +263,13 @@ async function runOnce(scope: Scope, replicate: number): Promise<Attempt> {
       stepTimeoutMs: 15 * 60 * 1000,
       spec: PROBE_SPEC,
     },
-    { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
+    {
+      runner: new ClaudeCodeRunner({
+        ...runnerAuthority.runnerOptions,
+        signal: ceilingController.signal,
+      }),
+      ceilingController,
+    },
   );
 
   const { skillOutput } = result;

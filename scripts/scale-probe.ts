@@ -53,6 +53,13 @@ async function runOnce(density: Density, replicate: number): Promise<Attempt> {
     );
   }
 
+  // §5.3 D1-10b: ONE controller shared by the pipeline and the runner. The
+  // pipeline aborts it when the ceiling fires; the runner's harness reads the
+  // same signal and refuses to start another attempt, so in-flight steps stop
+  // instead of billing on past a report that has already been returned. Two
+  // controllers would leave the ceiling unable to stop the steps it is waiting
+  // on — and this probe spends real money.
+  const ceilingController = new AbortController();
   const result = await runPipeline(
     {
       pr: 0,
@@ -80,7 +87,13 @@ async function runOnce(density: Density, replicate: number): Promise<Attempt> {
       stepTimeoutMs: 10 * 60 * 1000,
       spec: PROBE_SPEC,
     },
-    { runner: new ClaudeCodeRunner(runnerAuthority.runnerOptions) },
+    {
+      runner: new ClaudeCodeRunner({
+        ...runnerAuthority.runnerOptions,
+        signal: ceilingController.signal,
+      }),
+      ceilingController,
+    },
   );
 
   const { skillOutput } = result;

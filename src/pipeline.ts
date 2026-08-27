@@ -690,6 +690,15 @@ export async function runPipeline(
   // now `pipelineTimeoutMs + graceMs`, not `pipelineTimeoutMs`. The CI job
   // bound (90 min) sits above the ceiling (75 min) with far more room than the
   // 8.5 s this adds — see test/ci-setup.test.ts.
+  // The `??` fallback is a DEGRADED mode, not a default — be precise about
+  // what it cannot do. A synthesized controller is held by nobody else: the
+  // runner never sees its signal, so `StepExecutionHarness.cancelSignal` stays
+  // undefined and every in-flight step runs to completion (and keeps billing)
+  // after the ceiling has already returned its partial snapshot. It still
+  // stops the legs below from spawning ANYTHING NEW, which is why the fallback
+  // is better than nothing. A caller that wants the ceiling to actually stop
+  // work passes ONE controller to both `ceilingController` and the runner's
+  // `signal` — see src/cli.ts local and PR modes.
   const controller = deps.ceilingController ?? new AbortController();
   const legDeps: PipelineDeps = { ...deps, ceilingController: controller };
   const graceMs =
@@ -994,6 +1003,28 @@ async function execute(
       durationMs: 0,
     });
   }
+  // A ceiling that fired before admission leaves `hunters-started` naming
+  // nobody and never builds a summarizer spec, so neither leg has a settle
+  // handler to report itself finished. The panel does not know that: it seeds
+  // a row per active hunter and a summarizer row from what the caller resolved
+  // BEFORE the run (src/cli.ts, src/progress.ts createPanelState), so those
+  // rows would sit at "waiting"/"running" through the final draw — a finished
+  // run rendering itself as still going. Terminal events for exactly the rows
+  // that were seeded, with the honest `ok: false`: they never ran. The
+  // `skipDiscovery` path needs none of this because it seeds no rows at all.
+  if (!huntersAdmitted) {
+    for (const hunter of hunters) {
+      emit(deps, {
+        kind: "hunter-finished",
+        hunter: hunter.key as Hunter,
+        ok: false,
+        durationMs: 0,
+      });
+    }
+    if (input.summarizer && !skipDiscovery) {
+      emit(deps, { kind: "summarizer-finished", ok: false, durationMs: 0 });
+    }
+  }
   // hunter-finished is attached PER PROMISE, before the join. The handlers
   // are attached to each step's promise ahead of allSettled's own, so each
   // event fires as ITS step settles — while the others are still running.
@@ -1177,10 +1208,26 @@ async function execute(
   // configured absence, not failure: every finding stays not_submitted (so
   // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
   // the run stays complete.
-  // §5.3 admission for the refuter leg. A skipped batch needs no backfill
-  // either: `finish()` reads a survivor missing from `state.verdicts` as
-  // `not_submitted`, so an unrefuted BLOCKER cannot reach blocking tier — the
-  // conservative direction, and the run is already marked partial.
+  // §5.3 admission for the refuter leg — and it is NOT conservative, so say
+  // what it actually leaves standing. `finish()` reads a survivor missing from
+  // `state.verdicts` as `not_submitted`, and `deriveTier` (src/findings.ts)
+  // returns `blocking` for a deterministic BLOCKER/CRITICAL unless the refuter
+  // POSITIVELY returned `downgraded-latent`. Silence is not a demotion. So on a
+  // ceiling-truncated run a deterministic BLOCKER/CRITICAL ships at blocking
+  // tier with no adversarial refutation behind it — the dominant case, not a
+  // corner: the AudioTrimmer data in the batch comment above put 26 of 26
+  // blocking findings in that class. Only `inferential` findings fall back to
+  // advisory when unrefuted, which is what the sibling comment above says.
+  //
+  // That exposure is PRE-EXISTING, not introduced here. The old ceiling
+  // resolved `finish()` immediately and walked away; the abandoned refuter's
+  // verdicts arrived after the report had already been returned — paid for and
+  // discarded. What this gate changes is the bill, not the report. The run is
+  // marked `partial` so a consumer can see it was truncated, and whether a
+  // truncated run should be allowed to report blocking tier at all is an open
+  // product question this comment must not answer by assertion.
+  // Pinned by "§13 — a ceiling-truncated run ships a deterministic BLOCKER at
+  // blocking tier, unrefuted" in test/pipeline.test.ts.
   if (batch.length > 0 && refuterAgent && !ceilingAborted(deps, state)) {
     emit(deps, {
       kind: "refuter-started",

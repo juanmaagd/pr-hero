@@ -2793,6 +2793,114 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
     expect(plan.steps.map((step) => step.name)).toEqual(["scout"]);
   });
 
+  test("§13 — a ceiling that fires before the fan-out still lands every seeded progress row", async () => {
+    // The panel seeds a row per active hunter and a summarizer row from what
+    // the CLI resolved BEFORE the run, with no knowledge of the ceiling. On
+    // this path the fan-out never happens: `hunters-started` fires naming
+    // nobody and the summarizer spec is never built, so without a deliberate
+    // terminal emit those seeded rows sit at "waiting"/"running" through the
+    // panel's final draw — a finished run that reports itself as still going.
+    const runner = new SlowStepRunner(
+      { scout: (spec) => ok(spec, leads(["src/app.ts", 10, "suspicious"])) },
+      300,
+    );
+    const input = await makeInput({
+      scout: { promptPath: BUNDLED_SCOUT_PROMPT },
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: TINY_GRACE_MS,
+    });
+    const events: PipelineProgressEvent[] = [];
+
+    const result = await runPipeline(input, {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+
+    expect(result.skillOutput.run_status).toBe("partial");
+    // The orphan emits the fan-out's events after the ceiling has already
+    // returned; in a real run those land inside the default 8.5 s grace, well
+    // before the CLI stops its renderer.
+    await drainAbandonedRun(runner);
+
+    // Both seeded hunter rows and the seeded summarizer row get a terminal
+    // event, and `ok: false` is the honest flag: neither ever ran.
+    expect(events.map((e) => e.kind)).toEqual([
+      "scout-started",
+      "scout-finished",
+      "hunters-started",
+      "hunter-finished",
+      "hunter-finished",
+      "summarizer-finished",
+      "dedupe-finished",
+    ]);
+    const finished = events.filter(
+      (e) => e.kind === "hunter-finished",
+    ) as Extract<PipelineProgressEvent, { kind: "hunter-finished" }>[];
+    expect(finished.map((e) => [e.hunter, e.ok])).toEqual([
+      ["reliability", false],
+      ["resilience", false],
+    ]);
+    // Exactly one — the summarizer spec is never constructed on this path, so
+    // the step's own settle handler cannot also fire.
+    const summarizers = events.filter(
+      (e) => e.kind === "summarizer-finished",
+    ) as Extract<PipelineProgressEvent, { kind: "summarizer-finished" }>[];
+    expect(summarizers.map((e) => e.ok)).toEqual([false]);
+    // Still no step: the terminal events are bookkeeping for the panel, never
+    // a reason to spawn what admission just refused.
+    expect(runner.specs.map((s) => s.name)).toEqual(["scout"]);
+  });
+
+  // The exposure the admission gate does NOT close, pinned so no comment can
+  // quietly claim otherwise. `deriveTier` returns `blocking` unconditionally
+  // for a deterministic BLOCKER/CRITICAL unless the refuter POSITIVELY
+  // returned `downgraded-latent` (src/findings.ts) — silence is not a
+  // demotion. The 2026-07-29 AudioTrimmer data put 26 of 26 blocking findings
+  // in exactly that class, so this is the dominant case, not a corner.
+  //
+  // It is also PRE-EXISTING, not something D1-10b introduced: the old ceiling
+  // resolved `finish()` immediately and the abandoned refuter's verdicts
+  // landed after the report had already been returned — paid for and
+  // discarded. Skipping the leg changes the bill, not the report.
+  test("§13 — a ceiling-truncated run ships a deterministic BLOCKER at blocking tier, unrefuted", async () => {
+    // AMPLE_GRACE_MS, not tiny: the run has to reach dedupe inside the grace
+    // for there to be a survivor to tier at all. The ceiling still fires
+    // mid-hunt, so the refuter leg is still refused admission.
+    const runner = new SlowStepRunner(
+      {
+        "hunter-reliability": (spec) =>
+          ok(spec, {
+            findings: [
+              draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+            ],
+          }),
+        "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      },
+      300,
+    );
+    const input = await makeInput({
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: AMPLE_GRACE_MS,
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("partial");
+    // No refuter step was spawned — a `refuter-F001` reaching this runner
+    // would throw `unscripted step`, and `specs` is what proves it never did.
+    expect(runner.specs.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
+    // And the finding ships at BLOCKING tier anyway, with no adversarial
+    // check behind it. `partial` is the only signal a consumer gets.
+    expect(result.skillOutput.findings).toHaveLength(1);
+    const finding = result.skillOutput.findings[0];
+    expect(finding?.refuter_verdict).toBe("not_submitted");
+    expect(finding?.tier).toBe("blocking");
+  });
+
   test("a run that throws before the ceiling ever fires still REJECTS", async () => {
     // The outcome capture that stops a POST-ceiling throw from becoming an
     // unhandled rejection must not also swallow the ordinary failure path: a
