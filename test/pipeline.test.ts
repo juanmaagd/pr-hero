@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
@@ -2549,6 +2549,30 @@ describe("pipeline ceiling snapshot", () => {
       "hunter-resilience",
     ]);
     expect(await readdir(input.runDir)).not.toContain("pipeline.json.tmp");
+  });
+
+  // pr-hero F001 on this PR. The latch is set before the fallible await, so a
+  // write that THREW would otherwise leave the flag shut and turn the one
+  // remaining writer into a no-op — a single transient I/O blip discarding the
+  // run's plan artifact for good.
+  test("a failed snapshot write releases the latch for the second writer", async () => {
+    const input = await makeInput({ pipelineTimeoutMs: 50 });
+    const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
+    const planPath = path.join(input.runDir, "pipeline.json");
+    // A DIRECTORY at the target makes the tmp+rename swap fail — this repo's
+    // own precedent for that failure class is test/harness/settlement.test.ts.
+    await mkdir(planPath, { recursive: true });
+
+    await expect(runPipeline(input, { runner })).rejects.toThrow();
+
+    // The blip clears before the abandoned execute() reaches finish().
+    await rm(planPath, { recursive: true, force: true });
+    await drainAbandonedRun(runner);
+
+    const written = JSON.parse(await Bun.file(planPath).text()) as {
+      pr: number;
+    };
+    expect(written.pr).toBe(1539);
   });
 
   test("a normal run still writes one pipeline.json with the same content", async () => {

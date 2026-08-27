@@ -1762,7 +1762,21 @@ async function writePipelinePlan(
   // so a crash or a concurrent reader catching a half-flushed artifact is a
   // hard parse failure, not a degraded read. tmp+rename makes the swap
   // all-or-nothing.
-  await writeJsonAtomically(path.join(input.runDir, "pipeline.json"), plan);
+  try {
+    await writeJsonAtomically(path.join(input.runDir, "pipeline.json"), plan);
+  } catch (error) {
+    // Release the latch: a write that THREW is not a written snapshot, and
+    // holding the flag would silence the one caller left that could still
+    // save the artifact. The two callers of finish() are independent — if the
+    // ceiling's write dies on a transient mkdir/write/rename failure, the
+    // abandoned execute() reaches here later and must be allowed to try. Held
+    // shut, a single I/O blip discards the run's plan permanently, and every
+    // reader treats its absence as a hard failure (pr-hero F001 on this PR).
+    // The latch still closes the race it exists for: it is set before the
+    // await, so only a FAILED write ever reopens it.
+    state.snapshotWritten = false;
+    throw error;
+  }
 }
 
 function fillRereviewProvenance(
