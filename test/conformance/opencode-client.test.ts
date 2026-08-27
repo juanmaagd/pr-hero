@@ -15,6 +15,7 @@ const SESSION_ID = "ses_test";
 
 interface FakeSdk {
   sdk: OpenCodeSdkLike;
+  iterators: () => number;
   promptCalls: () => Array<Record<string, unknown>>;
   abortCalls: () => number;
   subscribedAt: () => number;
@@ -35,6 +36,7 @@ function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
   let notify: (() => void) | undefined;
   let ended = false;
 
+  let iterators = 0;
   const sdk: OpenCodeSdkLike = {
     createClient: () => ({
       session: {
@@ -57,6 +59,7 @@ function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
           return {
             stream: {
               async *[Symbol.asyncIterator]() {
+                iterators += 1;
                 for (;;) {
                   while (queue.length > 0) yield queue.shift();
                   if (ended) return;
@@ -74,6 +77,7 @@ function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
 
   return {
     sdk,
+    iterators: () => iterators,
     promptCalls: () => prompts,
     abortCalls: () => aborts,
     subscribedAt: () => subscribedAt,
@@ -234,6 +238,153 @@ describe("createOpenCodeClient", () => {
     // observers of one fact, not two facts that happen to look alike — so
     // both paths run through terminalProofFromAssistant.
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
+  });
+
+  // pr-hero F002/F003 on this PR, both BLOCKER, and both right — they are the
+  // same defect seen twice. The background pump and streamEvents() iterated
+  // the SAME subscription.stream. Two consumers on one async iterator race:
+  // the pump consumed the event that flipped `drained` and then dropped it,
+  // and its for-await exit fires an implicit .return() on the SHARED
+  // generator, which can end it under the real consumer. This repo documented
+  // that exact hazard in opencode-sdk.ts and then walked into it.
+  //
+  // Downstream it is worse than a dropped event: execute() builds finalText
+  // from the deltas the STREAM saw, so if the poll recovers the terminal
+  // instead, the attempt is reported success with silently truncated output.
+  test("no event is lost at the buffered-to-live handoff", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const delta = (text: string) => ({
+      type: "message.part.delta",
+      properties: { sessionID: SESSION_ID, field: "text", delta: text },
+    });
+
+    // Two before anyone calls streamEvents (the buffered window)...
+    fake.emit(delta("a"));
+    fake.emit(delta("b"));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const seen: string[] = [];
+    const consuming = (async () => {
+      for await (const event of client.streamEvents(session)) {
+        if (event.kind === "delta") seen.push(event.text);
+      }
+    })();
+
+    // ...and more arriving exactly across the switch to live.
+    await new Promise((r) => setTimeout(r, 5));
+    fake.emit(delta("c"));
+    fake.emit(delta("d"));
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    await consuming;
+
+    expect(seen.join("")).toBe("abcd");
+  });
+
+  test("the subscription has exactly ONE consumer", () => {
+    // The structural guarantee behind the test above: a second for-await on
+    // the same stream is the bug, so the count is the invariant.
+    const fake = fakeSdk();
+    const client = rig(fake);
+    return (async () => {
+      const session = await client.createSession(INPUT);
+      fake.emit({
+        type: "message.part.delta",
+        properties: { sessionID: SESSION_ID, field: "text", delta: "x" },
+      });
+      await new Promise((r) => setTimeout(r, 5));
+      fake.endStream();
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+      expect(fake.iterators()).toBe(1);
+    })();
+  });
+
+  // pr-hero F005. readSystemPrompt was awaited AFTER the server was
+  // launched, the remote session created and the state registered — so a
+  // throw there left a running server, a live remote session and a pump
+  // behind, with the caller never given the id needed to abort any of it.
+  //
+  // The best unwind is the one with nothing to unwind: the prompt read is the
+  // single step that fails on the operator's own filesystem, so it now runs
+  // before anything is spawned at all.
+  test("an unreadable system prompt never spawns anything", async () => {
+    const fake = fakeSdk();
+    let launched = 0;
+    const client = createOpenCodeClient({
+      loadSdk: async () => fake.sdk,
+      launchServer: async () => {
+        launched += 1;
+        return { url: "http://127.0.0.1:1", pid: 1, close: async () => {} };
+      },
+      model: { providerID: "openai", modelID: "test-model" },
+      readSystemPrompt: async () => {
+        throw new Error("system prompt unreadable");
+      },
+    });
+    await expect(client.createSession(INPUT)).rejects.toThrow(/unreadable/);
+    expect(launched).toBe(0);
+  });
+
+  // And for the failures that CAN only happen after the server is up, the
+  // unwind has to actually run.
+  test("a failure after launch closes the server it started", async () => {
+    const fake = fakeSdk();
+    let closed = 0;
+    const broken: OpenCodeSdkLike = {
+      createClient: () => ({
+        ...fake.sdk.createClient({ baseUrl: "" }),
+        session: {
+          ...fake.sdk.createClient({ baseUrl: "" }).session,
+          create: async () => {
+            throw new Error("remote session refused");
+          },
+        },
+      }),
+    };
+    const client = createOpenCodeClient({
+      loadSdk: async () => broken,
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {
+          closed += 1;
+        },
+      }),
+      model: { providerID: "openai", modelID: "test-model" },
+      readSystemPrompt: async () => "SYSTEM",
+    });
+    await expect(client.createSession(INPUT)).rejects.toThrow(/refused/);
+    expect(closed).toBe(1);
+  });
+
+  // pr-hero F004. A server per SESSION means every attempt leaves a spawned
+  // process behind, released only by a whole-client close() that is not even
+  // part of OpenCodeClientLike. One server hosts many sessions; that is what
+  // the API is for.
+  test("one server hosts every session of a client", async () => {
+    const fake = fakeSdk();
+    let launches = 0;
+    const client = createOpenCodeClient({
+      loadSdk: async () => fake.sdk,
+      launchServer: async () => {
+        launches += 1;
+        return {
+          url: "http://127.0.0.1:1",
+          pid: 1,
+          close: async () => {},
+        };
+      },
+      model: { providerID: "openai", modelID: "test-model" },
+      readSystemPrompt: async () => "SYSTEM",
+    });
+    await client.createSession(INPUT);
+    await client.createSession(INPUT);
+    expect(launches).toBe(1);
   });
 
   test("abort reaches the provider", async () => {

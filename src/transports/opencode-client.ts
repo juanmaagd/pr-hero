@@ -265,10 +265,17 @@ const DEFAULT_DENY_FLOOR = ["bash"] as const;
 
 interface SessionState {
   readonly api: OpenCodeSdkClientApi;
-  readonly server: OpenCodeServerHandle;
-  readonly buffered: unknown[];
-  readonly stream: AsyncIterable<unknown>;
-  drained: boolean;
+  // ONE consumer of the subscription, ever. The pump owns the iterator and
+  // hands events over through this queue; streamEvents never touches the
+  // stream itself. Two for-awaits on one async iterator is a race with two
+  // losing sides: the second consumer can miss an event the first already
+  // took, and either one exiting fires an implicit .return() that ends the
+  // SHARED generator under the other. pr-hero found exactly that here
+  // (F002/F003 on PR #84) — in a repo that had already written the hazard
+  // down, in opencode-sdk.ts, and walked into it anyway.
+  readonly queue: unknown[];
+  ended: boolean;
+  wake?: () => void;
 }
 
 export function createOpenCodeClient(
@@ -276,6 +283,13 @@ export function createOpenCodeClient(
 ): OpenCodeClientLike & { close(): Promise<void> } {
   const states = new Map<string, SessionState>();
   const denyFloor = options.denyFloor ?? DEFAULT_DENY_FLOOR;
+  // ONE server for the whole client, launched lazily. A server per SESSION
+  // left a spawned process behind for every attempt, released only by a
+  // whole-client close() that is not even part of OpenCodeClientLike
+  // (pr-hero F004 on PR #84). One server hosts many sessions; that is what
+  // the session API is for.
+  let serverPromise: Promise<OpenCodeServerHandle> | undefined;
+  let server: OpenCodeServerHandle | undefined;
 
   function stateFor(session: OpenCodeClientSession): SessionState {
     const state = states.get(session.id);
@@ -300,83 +314,118 @@ export function createOpenCodeClient(
         );
       }
 
-      const server = await options.launchServer();
-      const api = sdk.createClient({ baseUrl: server.url });
-      const created = await api.session.create({
-        body: { title: "pr-hero review step" },
-      });
-      const session: OpenCodeClientSession = { id: created.data.id };
+      // Read BEFORE anything is spawned. It is the one step that fails on the
+      // operator's filesystem, and doing it first means an unreadable prompt
+      // costs nothing to unwind. pr-hero F005 found it running AFTER the
+      // server, the remote session and the registered state — leaking all
+      // three, with the caller never given the id needed to abort any of them.
+      const systemPrompt = await options.readSystemPrompt(
+        input.systemPromptPath,
+      );
 
-      // Subscribed BEFORE the prompt, and the ordering is not stylistic.
-      // event.subscribe() is live and unbuffered, so a subscription opened
-      // afterwards silently loses the early events — which are exactly the
-      // ones carrying the first deltas. The contract splits createSession and
-      // streamEvents into separate calls, so unless the buffering happens
-      // here that window cannot be closed at all.
-      const subscription = await api.event.subscribe();
-      const buffered: unknown[] = [];
-      const state: SessionState = {
-        api,
-        server,
-        buffered,
-        stream: subscription.stream,
-        drained: false,
-      };
-      states.set(session.id, state);
-
-      // Pump the live stream into the buffer immediately. Without this the
-      // "subscribe before prompt" ordering buys nothing: nobody reads the
-      // stream until streamEvents() is called, and an unread SSE iterator is
-      // not a recording — the events simply have not been pulled yet, and
-      // anything the server pushed meanwhile sits in a socket nobody drains.
-      void (async () => {
-        for await (const raw of subscription.stream) {
-          if (state.drained) return;
-          buffered.push(raw);
+      if (serverPromise === undefined) {
+        serverPromise = options.launchServer();
+        try {
+          server = await serverPromise;
+        } catch (error) {
+          // A failed launch must not poison the client forever.
+          serverPromise = undefined;
+          throw error;
         }
-      })().catch(() => {
-        // A stream that dies is observed by streamEvents/poll, not here.
-      });
+      }
+      const handle = server ?? (await serverPromise);
+      const api = sdk.createClient({ baseUrl: handle.url });
 
-      const tools: Record<string, boolean> = {};
-      for (const tool of denyFloor) tools[tool] = false;
-      for (const tool of input.tools) tools[tool] = true;
-
-      // FIRED, never awaited. session.prompt blocks until the turn finishes —
-      // the probe measured 4.5s — and returns the completed message. The
-      // ROADMAP forbids completing an attempt from one blocking HTTP call, so
-      // this is the trigger and the event stream is the truth. A rejection
-      // here would otherwise become an unhandled rejection that outlives the
-      // attempt.
-      void api.session
-        .prompt({
-          path: { id: session.id },
-          query: { directory: input.cwd },
-          body: {
-            model: { ...options.model },
-            system: await options.readSystemPrompt(input.systemPromptPath),
-            tools,
-            parts: [{ type: "text", text: input.userPrompt }],
-          },
-        })
-        .catch(() => {
-          // The stream and the poll both observe the failure; swallowing it
-          // here keeps a trigger-shaped call from killing the process.
+      let sessionId: string | undefined;
+      try {
+        const created = await api.session.create({
+          body: { title: "pr-hero review step" },
         });
+        sessionId = created.data.id;
 
-      return session;
+        // Subscribed BEFORE the prompt, and the ordering is not stylistic.
+        // event.subscribe() is live and unbuffered, so a subscription opened
+        // afterwards silently loses the early events — the ones carrying the
+        // first deltas. The contract splits createSession and streamEvents
+        // into separate calls, so unless the buffering happens here that
+        // window cannot be closed at all.
+        const subscription = await api.event.subscribe();
+        const state: SessionState = { api, queue: [], ended: false };
+        states.set(sessionId, state);
+
+        // The ONLY consumer of the subscription. Subscribing without pulling
+        // buys nothing — an SSE iterator nobody reads is not a recording, the
+        // events simply have not been requested yet.
+        void (async () => {
+          try {
+            for await (const raw of subscription.stream) {
+              state.queue.push(raw);
+              state.wake?.();
+              state.wake = undefined;
+            }
+          } catch {
+            // A dead stream ends the handoff; the poll still observes the
+            // attempt.
+          } finally {
+            state.ended = true;
+            state.wake?.();
+            state.wake = undefined;
+          }
+        })();
+
+        const tools: Record<string, boolean> = {};
+        for (const tool of denyFloor) tools[tool] = false;
+        for (const tool of input.tools) tools[tool] = true;
+
+        // FIRED, never awaited. session.prompt blocks until the turn finishes
+        // — the probe measured 4.5s — and returns the completed message. The
+        // ROADMAP forbids completing an attempt from one blocking HTTP call,
+        // so this is the trigger and the event stream is the truth.
+        void api.session
+          .prompt({
+            path: { id: sessionId },
+            query: { directory: input.cwd },
+            body: {
+              model: { ...options.model },
+              system: systemPrompt,
+              tools,
+              parts: [{ type: "text", text: input.userPrompt }],
+            },
+          })
+          .catch(() => {
+            // Both observers see the failure; swallowing it here keeps a
+            // trigger-shaped call from becoming an unhandled rejection that
+            // outlives the attempt.
+          });
+
+        return { id: sessionId };
+      } catch (error) {
+        // Unwind whatever this call managed to create. Without this the
+        // caller gets an exception and no id, so nothing can be released by
+        // hand afterwards.
+        if (sessionId !== undefined) states.delete(sessionId);
+        if (states.size === 0) {
+          serverPromise = undefined;
+          server = undefined;
+          await handle.close().catch(() => {});
+        }
+        throw error;
+      }
     },
 
     async *streamEvents(session: OpenCodeClientSession) {
       const state = stateFor(session);
-      // Buffered first, in arrival order, then straight into the live stream.
-      while (state.buffered.length > 0) {
-        const raw = state.buffered.shift();
-        yield* mapOpenCodeEvents(raw, session.id);
-      }
-      state.drained = true;
-      for await (const raw of state.stream) {
-        yield* mapOpenCodeEvents(raw, session.id);
+      // Reads the QUEUE, never the stream. Everything buffered before this
+      // call is already here in arrival order, and everything after arrives
+      // through the same door — so there is no handoff to race.
+      for (;;) {
+        while (state.queue.length > 0) {
+          yield* mapOpenCodeEvents(state.queue.shift(), session.id);
+        }
+        if (state.ended) return;
+        await new Promise<void>((resolve) => {
+          state.wake = resolve;
+        });
       }
     },
 
@@ -406,8 +455,11 @@ export function createOpenCodeClient(
     },
 
     async close(): Promise<void> {
-      for (const state of states.values()) await state.server.close();
       states.clear();
+      const handle = server;
+      server = undefined;
+      serverPromise = undefined;
+      if (handle !== undefined) await handle.close();
     },
   };
 }
