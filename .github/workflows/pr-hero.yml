@@ -146,13 +146,16 @@ jobs:
       # that cause were only on the runner — recovering them took pushing a
       # throwaway debug commit to cat them off.
       #
-      # KNOWN GAP, stated here so this comment does not overclaim: the two
-      # outcomes that publish NO outputs — every hunter died, or a fatal
-      # error — leave `run-dir` empty, so the emptiness check below suppresses
-      # the upload for exactly the case `always()` exists to cover. Closing it
-      # needs the action to publish `run-dir` on the failure path; until then
-      # `always()` covers the rest (a review that ran but could not post, a
-      # later step failing, a cancelled job).
+      # KNOWN GAP, stated here so this comment does not overclaim: THREE
+      # outcomes publish no usable `run-dir` and therefore skip this upload.
+      # Every hunter died and a fatal error both leave it empty, and a
+      # CANCELLED job never writes it at all — the SIGTERM/SIGINT handlers
+      # kill the children and exit straight out, never reaching the only code
+      # path that touches . So the emptiness check below
+      # suppresses the upload for exactly the cases `always()` was reached
+      # for. Closing it needs the action to publish `run-dir` on those paths.
+      # Until then `always()` earns its place on the narrower set: a review
+      # that RAN but could not post, and a later step in this job failing.
       #
       # WHAT IT CONTAINS: the reviewed diff (diff.patch), the rendered agent
       # prompts, every hunter draft, and findings.json. On a PUBLIC repository
