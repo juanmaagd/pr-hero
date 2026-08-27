@@ -2862,11 +2862,14 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
   // 2026-07-29 AudioTrimmer data put 26 of 26 blocking findings in exactly the
   // deterministic + unrefuted class, so this was the dominant case.
   //
-  // `deriveTier` now takes the run's truncation state and demotes precisely
-  // that pair (src/findings.ts). What is NOT demoted stays pinned in that
-  // module's own table: a corroborated verdict that arrived before the ceiling
-  // still blocks, an inconclusive one still blocks, and a non-truncated
-  // zero-refuter run still blocks.
+  // `finish()` now conjoins `ceilingFired && refuterConfigured` and hands it to
+  // `deriveTier` as `refuterCutShort`, which demotes precisely that pair
+  // (src/findings.ts). The default spec is used here on purpose: it CONFIGURES
+  // a refuter, so the ceiling really did cut an owed check short. What is NOT
+  // demoted stays pinned in that module's own table, and in the two guard tests
+  // below: a corroborated verdict that arrived before the ceiling still blocks,
+  // an inconclusive one still blocks, a non-ceiling `partial` still blocks, and
+  // a ceiling on a zero-refuter spec still blocks.
   test("§13 — a ceiling-truncated run demotes its unrefuted deterministic BLOCKER to advisory", async () => {
     // AMPLE_GRACE_MS, not tiny: the run has to reach dedupe inside the grace
     // for there to be a survivor to tier at all. The ceiling still fires
@@ -2937,6 +2940,56 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
     const result = await runPipeline(input, { runner });
 
     expect(result.skillOutput.run_status).toBe("partial");
+    const finding = result.skillOutput.findings[0];
+    expect(finding?.refuter_verdict).toBe("not_submitted");
+    expect(finding?.tier).toBe("blocking");
+  });
+
+  // The SECOND guard, closing the other half of the same trap. Ceiling
+  // truncation and zero-refuter configuration are ORTHOGONAL conditions: a
+  // spec with no refuter (configured absence, which `src/spec.ts` permits) can
+  // run long on its hunters or its verify legs and trip the 75-minute ceiling
+  // for reasons that have nothing to do with a refuter. The guard above only
+  // proves that a NON-ceiling `partial` still blocks; keyed on `ceilingFired`
+  // alone, this run — genuinely truncated, genuinely refuter-less — would have
+  // every deterministic BLOCKER demoted. That is the 2026-07-29 AudioTrimmer
+  // regression again, this time wearing a truncation precondition. The
+  // demotion therefore needs a third conjunct: the refuter check has to have
+  // been EXPECTED before its absence can mean anything.
+  test("a CEILING-truncated run with NO refuter configured still blocks", async () => {
+    // Same construction as the §13 test above — AMPLE_GRACE_MS is load-bearing,
+    // the run must reach dedupe inside the grace for there to be a survivor to
+    // tier at all — with the refuter filtered out of the spec.
+    const runner = new SlowStepRunner(
+      {
+        "hunter-reliability": (spec) =>
+          ok(spec, {
+            findings: [
+              draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+            ],
+          }),
+        "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      },
+      300,
+    );
+    const base = defaultReviewSpec();
+    const input = await makeInput({
+      spec: {
+        ...base,
+        agents: base.agents.filter((a) => a.role !== "refuter"),
+      },
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: AMPLE_GRACE_MS,
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    // Truncated for real — this is not the failed-hunter path repeated.
+    expect(result.skillOutput.run_status).toBe("partial");
+    // Nothing was cut short that was ever going to run: no refuter exists in
+    // this spec, so `not_submitted` is the designed steady state here and not
+    // the fingerprint of a check that ran out of time.
+    expect(result.skillOutput.findings).toHaveLength(1);
     const finding = result.skillOutput.findings[0];
     expect(finding?.refuter_verdict).toBe("not_submitted");
     expect(finding?.tier).toBe("blocking");
