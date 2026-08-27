@@ -202,7 +202,8 @@ describe("createOpenCodeClient", () => {
       kinds.push(event.kind);
       if (event.kind === "terminal") {
         expect(event.proof.eventId).toBe(ASSISTANT.id as string);
-        expect(event.proof.providerStatus).toBe("stop");
+        // Normalised, not the raw finish reason — see PR #82's BLOCKER.
+        expect(event.proof.providerStatus).toBe("completed");
       }
     }
     expect(kinds).toContain("terminal");
