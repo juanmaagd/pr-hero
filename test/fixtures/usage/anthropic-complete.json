@@ -1,0 +1,40 @@
+{
+  "provider": "anthropic",
+  "case": "complete",
+  "description": "Messages API usage block reports uncached input, cache write, and cache read as disjoint counters",
+  "raw": {
+    "input_tokens": 15,
+    "cache_creation_input_tokens": 12,
+    "cache_read_input_tokens": 200,
+    "output_tokens": 30
+  },
+  "input": {
+    "wallMs": 3100,
+    "inputTotal": 227,
+    "inputCacheRead": 200,
+    "inputCacheWrite": 12,
+    "outputTotal": 30,
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0057,
+    "notionalCostUsd": 0.0057
+  },
+  "expected": {
+    "wallMs": 3100,
+    "tokens": {
+      "inputCacheRead": 200,
+      "inputCacheWrite": 12,
+      "inputOther": 15,
+      "outputOther": 30,
+      "inputKnown": 227,
+      "outputKnown": 30,
+      "totalKnown": 257,
+      "providerReportedTotal": 257
+    },
+    "completeness": "complete",
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0057,
+    "notionalCostUsd": 0.0057
+  }
+}

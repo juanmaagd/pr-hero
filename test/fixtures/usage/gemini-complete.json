@@ -1,0 +1,41 @@
+{
+  "provider": "gemini",
+  "case": "complete",
+  "description": "usageMetadata reports prompt/candidates totals that already include cached and thoughts tokens, no cache-write concept",
+  "raw": {
+    "promptTokenCount": 800,
+    "candidatesTokenCount": 150,
+    "cachedContentTokenCount": 300,
+    "thoughtsTokenCount": 50,
+    "totalTokenCount": 950
+  },
+  "input": {
+    "wallMs": 2600,
+    "inputTotal": 800,
+    "inputCacheRead": 300,
+    "outputTotal": 150,
+    "outputReasoning": 50,
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0009,
+    "notionalCostUsd": 0.0009
+  },
+  "expected": {
+    "wallMs": 2600,
+    "tokens": {
+      "inputCacheRead": 300,
+      "inputOther": 500,
+      "outputReasoning": 50,
+      "outputOther": 100,
+      "inputKnown": 800,
+      "outputKnown": 150,
+      "totalKnown": 950,
+      "providerReportedTotal": 950
+    },
+    "completeness": "complete",
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0009,
+    "notionalCostUsd": 0.0009
+  }
+}

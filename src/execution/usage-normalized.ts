@@ -133,6 +133,28 @@ export function normalizePartialUsage(
   };
 }
 
+// spec: "Parse Failure Yields Unavailable Completeness, Never Zero Cost" —
+// used when nothing about an attempt's usage can be trusted (corrupted
+// stdout, a dropped final usage chunk, a safety-blocked response with no
+// usage block at all). No leaf, cost, or total field is ever populated as a
+// fabricated zero; billingMode/costSource fall back to "unknown" rather
+// than guessing which one applied.
+export interface UnavailableUsageInput {
+  readonly wallMs: number;
+}
+
+export function normalizeUnavailableUsage(
+  input: UnavailableUsageInput,
+): NormalizedUsage {
+  return {
+    wallMs: input.wallMs,
+    tokens: {},
+    completeness: "unavailable",
+    billingMode: "unknown",
+    costSource: "unknown",
+  };
+}
+
 const COMPLETENESS_RANK: Record<UsageCompleteness, number> = {
   complete: 0,
   partial: 1,

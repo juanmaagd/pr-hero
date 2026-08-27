@@ -1,0 +1,18 @@
+{
+  "provider": "gemini",
+  "case": "unknown",
+  "description": "safety-blocked response carries promptFeedback but no usageMetadata block at all",
+  "raw": {
+    "promptFeedback": { "blockReason": "SAFETY" }
+  },
+  "input": {
+    "wallMs": 800
+  },
+  "expected": {
+    "wallMs": 800,
+    "tokens": {},
+    "completeness": "unavailable",
+    "billingMode": "unknown",
+    "costSource": "unknown"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "provider": "openai",
+  "case": "partial",
+  "description": "Responses API aggregate-only usage mode reports total_tokens with no prompt/completion breakdown",
+  "raw": {
+    "total_tokens": 850
+  },
+  "input": {
+    "wallMs": 4300,
+    "providerReportedTotal": 850,
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0041
+  },
+  "expected": {
+    "wallMs": 4300,
+    "tokens": {
+      "providerReportedTotal": 850
+    },
+    "completeness": "partial",
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0041
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "provider": "anthropic",
+  "case": "partial",
+  "description": "batch API summary reports only an aggregate total with no per-field cache breakdown",
+  "raw": {
+    "total_tokens": 500
+  },
+  "input": {
+    "wallMs": 1800,
+    "providerReportedTotal": 500,
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0025
+  },
+  "expected": {
+    "wallMs": 1800,
+    "tokens": {
+      "providerReportedTotal": 500
+    },
+    "completeness": "partial",
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0025
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "provider": "gemini",
+  "case": "partial",
+  "description": "grounding/tool-use response reports only totalTokenCount with no prompt/candidates breakdown",
+  "raw": {
+    "totalTokenCount": 420
+  },
+  "input": {
+    "wallMs": 1500,
+    "providerReportedTotal": 420,
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0007
+  },
+  "expected": {
+    "wallMs": 1500,
+    "tokens": {
+      "providerReportedTotal": 420
+    },
+    "completeness": "partial",
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.0007
+  }
+}
