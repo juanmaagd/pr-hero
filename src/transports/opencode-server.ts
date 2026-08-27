@@ -29,6 +29,20 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_TERM_GRACE_MS = 2_000;
 const DEFAULT_KILL_REAP_MS = 2_000;
 
+// A piped stream nobody reads is a time bomb: the OS pipe buffer fills at
+// ~64 KiB and the child BLOCKS in write(), stalling the whole server with no
+// signal to the caller. Both pipes therefore keep a reader for the child's
+// entire life, not just for startup.
+async function drainToNowhere(stream: unknown): Promise<void> {
+  try {
+    for await (const _chunk of stream as AsyncIterable<Uint8Array>) {
+      // Discarded on purpose — the point is to keep the pipe empty.
+    }
+  } catch {
+    // A closed or errored pipe needs no draining.
+  }
+}
+
 export interface OpenCodeServerHandle {
   readonly url: string;
   readonly pid: number;
@@ -102,6 +116,11 @@ export async function launchOpenCodeServer(
     stdin: "ignore",
   }) as SpawnedProcess & { readonly pid: number };
 
+  // stderr is never parsed, so it is drained from the very first byte. It was
+  // piped and then never read at all, which is the same pipe-full stall as
+  // stdout with none of the startup logic to disguise it.
+  void drainToNowhere(proc.stderr);
+
   let closed = false;
   const close = async (): Promise<void> => {
     if (closed) return;
@@ -168,10 +187,18 @@ export async function launchOpenCodeServer(
       // in practice, and a parser that only inspected whole chunks would miss
       // a server that started perfectly well and then time out on it.
       let buffered = "";
+      let announced = false;
       const decoder = new TextDecoder();
       try {
         for await (const chunk of proc.stdout as AsyncIterable<Uint8Array>) {
-          if (settled) return;
+          // Once the URL is out, this loop stops PARSING but keeps READING:
+          // the server logs for the rest of its life, and a pipe with no
+          // reader fills and blocks the child in write().
+          if (announced) continue;
+          if (settled) {
+            announced = true;
+            continue;
+          }
           buffered += decoder.decode(chunk, { stream: true });
           // COMPLETE lines only. A partial one can match both the prefix and
           // the URL pattern while the port is still arriving — "…127.0.0.1:6"
@@ -192,10 +219,12 @@ export async function launchOpenCodeServer(
                   ),
                 );
               });
-              return;
+              announced = true;
+              break;
             }
             finish(() => resolve(match[1]));
-            return;
+            announced = true;
+            break;
           }
         }
       } catch {

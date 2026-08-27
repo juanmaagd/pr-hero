@@ -72,18 +72,33 @@ export function terminalProofFromAssistant(
   // moment the turn starts; only `time.completed` says the turn ended.
   if (completed === undefined) return undefined;
 
-  // §3.2: an unrecognised finish must never silently become success. The SDK
-  // declares `finish?: string` with no enumerated value space, so the proof
-  // reports what the provider said and the transport's own status mapping
-  // decides — but an errored message is not a clean stop whatever `finish`
-  // claims, and a missing finish is unknown, never completed.
-  const errored = message.error !== undefined && message.error !== null;
+  // providerStatus is a NORMALISED field, not a passthrough. The transport
+  // maps "completed" to success, "cancelled" to cancelled and EVERYTHING ELSE
+  // to failed (opencode-sdk.ts:781-789), so handing it OpenCode's raw finish
+  // reason reported every successful completion as a failure — pr-hero found
+  // exactly that, filed BLOCKER, on PR #82. The provider's vocabulary is
+  // translated here rather than leaked into a field whose meaning is fixed
+  // somewhere else.
+  //
+  // §3.2 sets the direction of every uncertain case: an unrecognised outcome
+  // must never become success. `finish` is declared `finish?: string` with no
+  // enumerated value space, so anything outside the known set stays outside
+  // "completed" and the transport's else-branch turns it into a failure.
+  const error = asRecord(message.error);
   const finish = message.finish;
-  const providerStatus = errored
-    ? "error"
-    : typeof finish === "string" && finish.length > 0
-      ? finish
-      : "unknown";
+  const providerStatus =
+    error !== undefined
+      ? // An abort is a cancellation, not a failure — the harness accounts
+        // for those differently (§5.3), and calling one the other loses the
+        // distinction that says whether remote work may still be running.
+        error.name === "MessageAbortedError"
+        ? "cancelled"
+        : "failed"
+      : finish === "stop"
+        ? "completed"
+        : typeof finish === "string" && finish.length > 0
+          ? finish
+          : "unknown";
 
   return {
     eventId: id,
