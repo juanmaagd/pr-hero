@@ -22,6 +22,7 @@ import {
   validateRefuterResult,
   validateSummary,
 } from "./drafts";
+import { writeJsonAtomically } from "./execution/atomic-write";
 import {
   type DebugRefutedFinding,
   deriveTier,
@@ -612,6 +613,17 @@ interface RunState {
     verify_all: number;
   };
   partial: boolean;
+  // §5.3 step 7 / §13: exactly ONE partial snapshot per run, and the FIRST
+  // writer is the one that counts. `finish()` has two callers that can both
+  // reach it in the same run — the pipeline ceiling resolves `finish()` through
+  // `Promise.race` and ABANDONS the still-running `execute()`, which arrives at
+  // the same `finish()` later carrying post-ceiling state and overwrites the
+  // snapshot the run already returned to its caller. The ceiling's snapshot is
+  // the accepted state (assembled from what had settled when the run ended), so
+  // the abandoned writer loses. This freezes `fillRereviewProvenance` with it:
+  // the ceiling's `rereview.live` fill is the one the CLI keeps, not the richer
+  // one the abandoned run would have computed after the fact.
+  snapshotWritten: boolean;
   summary?: RunSummary;
   perAgent: Record<string, PerAgentUsage>;
   usageTotal: SessionUsage;
@@ -639,6 +651,7 @@ export async function runPipeline(
       verify_all: 0,
     },
     partial: false,
+    snapshotWritten: false,
     perAgent: {},
     usageTotal: zeroUsage(),
     steps: [],
@@ -1709,6 +1722,11 @@ async function writePipelinePlan(
   input: PipelineInput,
   state: RunState,
 ): Promise<void> {
+  // Latched BEFORE the first await, not after: the abandoned `execute()` runs
+  // concurrently with the ceiling's write, and a check that yielded first would
+  // let the second caller walk straight past a flag the first had not set yet.
+  if (state.snapshotWritten) return;
+  state.snapshotWritten = true;
   const plan = {
     pr: input.pr,
     base_sha: input.baseSha,
@@ -1739,10 +1757,12 @@ async function writePipelinePlan(
       : { rereview: fillRereviewProvenance(input, state) }),
     steps: state.steps,
   };
-  await Bun.write(
-    path.join(input.runDir, "pipeline.json"),
-    `${JSON.stringify(plan, null, 2)}\n`,
-  );
+  // Atomic, never a plain write: every reader of this file parses it as JSON
+  // (`parsePipelineMeta`, the floor test, the CLI's rereview block, backfill),
+  // so a crash or a concurrent reader catching a half-flushed artifact is a
+  // hard parse failure, not a degraded read. tmp+rename makes the swap
+  // all-or-nothing.
+  await writeJsonAtomically(path.join(input.runDir, "pipeline.json"), plan);
 }
 
 function fillRereviewProvenance(
