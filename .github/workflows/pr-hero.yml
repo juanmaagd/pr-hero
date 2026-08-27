@@ -107,6 +107,9 @@ jobs:
           fetch-depth: 0
 
       - name: Run pr-hero
+        # The id is load-bearing, not decorative: it is the only way to read
+        # this step's `run-dir` output from the upload step below.
+        id: pr-hero
         uses: ./
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -126,3 +129,67 @@ jobs:
           #     reviews with no signal.
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      # Without this step the triage half of the review loop has no input.
+      # `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N` is the
+      # ONLY supported way to answer a posted finding, and `--from` REQUIRES a
+      # completed run directory on disk (comparison.json to open the run,
+      # findings.json to map F00N onto the posted `<!-- pr-hero-finding`
+      # marker). In CI that directory lives at
+      # `~/.prhero/repos/<host>/<owner>/<repo>/runs/pr-<n>-<sha>-1` on an
+      # EPHEMERAL runner and dies with the job — so a PR reviewed in Actions
+      # used to carry findings that literally could not be answered.
+      #
+      # `always()` is the load-bearing part. A review that FAILED is exactly
+      # when this directory matters most: every hunter once died with
+      # "Not logged in · Please run /login", and the per-attempt logs naming
+      # that cause were only on the runner — recovering them took pushing a
+      # throwaway debug commit to cat them off.
+      #
+      # KNOWN GAP, stated here so this comment does not overclaim: THREE
+      # outcomes publish no usable `run-dir` and therefore skip this upload.
+      # Every hunter died and a fatal error both leave it empty, and a
+      # CANCELLED job never writes it at all — the SIGTERM/SIGINT handlers
+      # kill the children and exit straight out, never reaching the only code
+      # path that touches the job's output file. So the emptiness check below
+      # suppresses the upload for exactly the cases `always()` was reached
+      # for. Closing it needs the action to publish `run-dir` on those paths.
+      # Until then `always()` earns its place on the narrower set: a review
+      # that RAN but could not post, and a later step in this job failing.
+      #
+      # WHAT IT CONTAINS: the reviewed diff (diff.patch), the rendered agent
+      # prompts, every hunter draft, and findings.json. On a PUBLIC repository
+      # workflow artifacts are downloadable by anyone, which is why retention
+      # is deliberately short.
+      #
+      # Download it with:
+      #   gh run download <run-id> -n pr-hero-run-<pr>-<head-sha>
+      # then point `pr-hero triage reply --from` at the download directory.
+      - name: Upload pr-hero run directory
+        # A size-gated, budget-gated or concurrent review writes no run
+        # directory and publishes no outputs; the emptiness check keeps
+        # upload-artifact from being handed an empty `path:` in that case.
+        if: always() && steps.pr-hero.outputs.run-dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          # Both the PR number and the head sha, so a download is unambiguous
+          # when a PR is reviewed more than once — the run directory itself is
+          # named `pr-<n>-<sha>-1` for the same reason.
+          name: pr-hero-run-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ steps.pr-hero.outputs.run-dir }}
+          # upload-artifact excludes hidden files by default since v4.4, and
+          # this directory lives under a hidden `~/.prhero` ancestor. Paired
+          # with `if-no-files-found: warn` below, an exclusion here would
+          # produce an EMPTY artifact plus a warning nobody reads.
+          include-hidden-files: true
+          # NEVER `error`: a skipped review is working as designed and must
+          # not turn the job red.
+          if-no-files-found: warn
+          # Artifact names are unique per workflow RUN, and `gh run rerun` —
+          # which the credentials job's own notice tells people to use —
+          # reuses the run id. Without this, the second attempt's upload
+          # conflicts and `always()` turns an otherwise green re-run red.
+          overwrite: true
+          # Long enough to triage, short enough to limit exposure of the diff
+          # and prompts above on a public repository.
+          retention-days: 7

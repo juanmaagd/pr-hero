@@ -4,7 +4,7 @@ description: "Triage pr-hero findings posted as PR comments — for each one, re
 license: Apache-2.0
 metadata:
   author: juanmaagd
-  version: "1.2"
+  version: "1.3"
 ---
 
 ## When to Use
@@ -198,6 +198,22 @@ under Greptile on Musive #1724. Do not do that. Do not reply on
 
 `--from` is the pr-hero run directory that produced these findings (`findings.json`). `--finding`
 is the finding id (`F001`, …) from that file — never a comment id.
+
+**When the review ran in CI, that directory is not on your machine.** A GitHub Actions review
+writes it to `~/.prhero/repos/<host>/<owner>/<repo>/runs/pr-<n>-<sha>-1` on an ephemeral runner
+that is destroyed when the job ends. The workflow uploads it as an artifact; download it before
+you triage:
+
+```bash
+gh run list --workflow "pr-hero Review" --branch <head-branch> --limit 5
+gh run download <run-id> -n pr-hero-run-<pr>-<head-sha> -D pr-hero-run
+```
+
+Then pass `--from pr-hero-run`. `gh run download` unpacks the run directory's *contents*, so the
+`--from` target is the directory you downloaded into — not a `pr-<n>-<sha>-1` path inside it. If
+the artifact is missing (a size- or budget-gated review writes no run directory, and so does a
+run where every hunter died), you have no `--from` input: say so and stop rather than inventing
+one. Full detail: `docs/github-actions.md` → "Triaging a CI review".
 
 The posted body looks like this (driver-owned; shown so you know what a human will see):
 

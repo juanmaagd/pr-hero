@@ -41,10 +41,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # see "Why fetch-depth: 0" below
-      - uses: juanmaagd/pr-hero@v1
+      - name: Run pr-hero
+        id: pr-hero
+        uses: juanmaagd/pr-hero@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Upload pr-hero run directory # see "Triaging a CI review" below
+        if: always() && steps.pr-hero.outputs.run-dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-hero-run-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: ${{ steps.pr-hero.outputs.run-dir }}
+          include-hidden-files: true
+          if-no-files-found: warn
+          overwrite: true
+          retention-days: 7
 ```
 
 `pr-hero setup --ci` generates exactly this shape (see `src/ci-setup.ts`'s `generateCiWorkflowTemplate`).
@@ -206,6 +218,74 @@ The two are told apart by the exit code: green with an empty `status` is the con
 empty `status` is the dead one. If your workflow branches on `steps.<id>.outputs.status`, treat an
 **empty** value on a green job as "no review outcome yet — a concurrent run owns this head", not as a
 failure.
+
+## Triaging a CI review
+
+Answering a posted finding goes through the driver:
+
+```bash
+pr-hero triage reply --pr <n> --from <run-dir> --finding F001 \
+  --tag applied --body-file reasoning.md
+```
+
+`--from` needs the **run directory that produced those findings** — the driver opens
+`comparison.json` there and reads `findings.json` to map `F001` onto the posted
+`<!-- pr-hero-finding` marker. Locally that directory is still on your disk. In Actions it lives on the
+runner at `~/.prhero/repos/<host>/<owner>/<repo>/runs/pr-<n>-<sha>-1` and **dies with the job**, so the
+workflow uploads it as an artifact.
+
+### Downloading the run directory
+
+```bash
+# Find the review run for the PR (or read the run id off the checks tab)
+gh run list --workflow "pr-hero Review" --branch <head-branch> --limit 5
+
+# Download the artifact into ./pr-hero-run/
+gh run download <run-id> \
+  -n pr-hero-run-<pr-number>-<head-sha> \
+  -D pr-hero-run
+
+# Then triage against it
+pr-hero triage reply --pr <n> --from pr-hero-run --finding F001 \
+  --tag applied --body-file reasoning.md
+```
+
+The artifact name carries **both** the PR number and the full head sha (`<head-sha>` is
+`github.event.pull_request.head.sha`, not the 8-character prefix in the directory name), so a PR reviewed
+across several pushes has one unambiguous artifact per reviewed head. `gh run download` unpacks the run
+directory's *contents*, not the directory itself — point `--from` at whatever directory you downloaded
+into (`-D`), not at a `pr-<n>-<sha>-1` path inside it.
+
+### What is in it, and how long it lives
+
+The run directory holds the reviewed diff (`diff.patch`), the rendered agent prompts, every hunter draft,
+`findings.json`, `pipeline.json`, `report.md`, and the per-attempt step logs. **On a public repository,
+workflow artifacts are downloadable by anyone** — which is why `retention-days: 7` is deliberately short:
+long enough to triage, short enough to bound exposure. Lengthen it only if you have weighed that.
+
+Three properties of the upload step are load-bearing:
+
+- **`if: always()`** — a *failed* review is when this directory matters most. When every hunter dies
+  (e.g. bad credentials), the per-attempt logs under `steps/logs/` are the only record naming the cause.
+- **`if-no-files-found: warn`** — a size-gated, budget-gated, or concurrent review writes no run
+  directory. That is correct behavior and must never turn the job red.
+- **`overwrite: true`** — artifact names are unique per workflow *run*, and `gh run rerun` reuses the run
+  id, so a re-run's upload would otherwise conflict.
+
+> **Known gap.** Four outcomes publish no usable `run-dir`, so the `steps.pr-hero.outputs.run-dir != ''`
+> condition suppresses the upload for all of them:
+>
+> - a **concurrent review** and a run where **every hunter died** — the two cases that leave `status`
+>   empty (see above), because no output is written at all;
+> - a **fatal error**, which reports `status=error` but writes `run_dir=""` explicitly;
+> - a **cancelled job**, where the signal handlers kill the child processes and exit without ever
+>   reaching the code that writes the job's output file.
+>
+> The every-hunter-died and cancelled cases are exactly the failures `always()` exists to cover, so the
+> gap bites hardest where the directory would help most. Closing it requires the action to publish
+> `run-dir` on those paths — an open follow-up in the CLI, not something to work around in the workflow.
+> `always()` still earns its place for a review that ran but could not post, and for a later step in the
+> job failing.
 
 ## Optional inputs
 
