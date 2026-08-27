@@ -61,6 +61,8 @@ try {
   process.exit(1);
 }
 
+let stopReader = (): void => {};
+
 await mkdir(outDir, { recursive: true });
 const server = await createOpencodeServer({ hostname: "127.0.0.1", port: 0 });
 console.error(`server: ${server.url}`);
@@ -81,15 +83,27 @@ try {
   // are exactly the ones that decide the adapter's shape.
   const subscription = await client.event.subscribe();
   const events: unknown[] = [];
+  // Explicitly cancellable. Without this the reader outlives every exit path:
+  // on the timeout branch below it keeps iterating a live stream as a dangling
+  // background op, and if the prompt rejects first it is abandoned with no
+  // cancellation and no rejection handler at all.
+  let stopReading = false;
+  stopReader = () => {
+    stopReading = true;
+  };
   const reader = (async () => {
     for await (const raw of subscription.stream) {
+      if (stopReading) return;
       const payload =
         (raw as { payload?: unknown })?.payload ?? (raw as unknown);
       events.push(payload);
       if ((payload as { type?: string })?.type === "session.idle") return;
       if (events.length > 500) return;
     }
-  })();
+  })().catch(() => {
+    // A stream that dies mid-probe is data, not a crash: whatever was
+    // recorded up to that point still gets written out below.
+  });
 
   const response = await client.session.prompt({
     path: { id: session.id },
@@ -103,11 +117,20 @@ try {
     },
   });
 
-  // Bounded so a provider that never goes idle cannot hang the probe.
-  await Promise.race([
-    reader,
-    new Promise((resolve) => setTimeout(resolve, 30_000)),
-  ]);
+  // Bounded so a provider that never goes idle cannot hang the probe — and
+  // then the reader is actually STOPPED, not merely raced past.
+  const timer = setTimeout(() => {
+    stopReading = true;
+  }, 30_000);
+  try {
+    await Promise.race([
+      reader,
+      new Promise((resolve) => setTimeout(resolve, 30_000)),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    stopReading = true;
+  }
 
   const counts: Record<string, number> = {};
   for (const event of events) {
@@ -132,7 +155,10 @@ try {
   console.error(JSON.stringify(counts, null, 2));
   console.error(`artifacts: ${outDir}`);
 } finally {
-  // Always: the server is a spawned child, and leaving it bound outlives the
-  // probe and the port.
+  // Always: stop the event reader and close the server. The reader outlives
+  // every early exit otherwise — a rejecting prompt would abandon it mid-
+  // iteration on a live stream — and a spawned server left bound outlives
+  // the probe and its port.
+  stopReader();
   server.close();
 }
