@@ -15,7 +15,14 @@
 // (§13).
 
 import type { ProviderTerminalProof } from "../execution/contracts";
-import type { OpenCodeClientEvent } from "./opencode-sdk";
+import type {
+  OpenCodeClientEvent,
+  OpenCodeClientLike,
+  OpenCodeClientSession,
+  OpenCodeCreateSessionInput,
+  OpenCodePollResult,
+} from "./opencode-sdk";
+import type { OpenCodeServerHandle } from "./opencode-server";
 
 // Structural, not imported from the SDK: pr-hero ships with ZERO runtime
 // dependencies, and a Claude-only install must not pull an OpenCode SDK it
@@ -200,4 +207,192 @@ export function isSessionIdle(raw: unknown, sessionId: string): boolean {
     (raw as RawEvent)?.type === "session.idle" &&
     props(raw)?.sessionID === sessionId
   );
+}
+
+// ---------------------------------------------------------------------------
+// The impure half: an OpenCodeClientLike over the real SDK.
+//
+// Everything the SDK touches is behind `OpenCodeSdkLike` and reached through
+// an injectable loader. pr-hero ships with ZERO runtime dependencies, so the
+// SDK is an OPTIONAL PEER: a Claude-only install must never pull it, and an
+// install that does route here must be told what to add rather than handed a
+// module-resolution stack trace.
+// ---------------------------------------------------------------------------
+
+export interface OpenCodeSdkClientApi {
+  readonly session: {
+    create(options?: unknown): Promise<{ data: { id: string } }>;
+    prompt(options: unknown): Promise<{ data: unknown }>;
+    messages(options: unknown): Promise<{ data: unknown }>;
+    abort(options?: unknown): Promise<{ data: unknown }>;
+  };
+  readonly event: {
+    subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
+  };
+}
+
+export interface OpenCodeSdkLike {
+  createClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+}
+
+export interface CreateOpenCodeClientOptions {
+  readonly loadSdk: () => Promise<OpenCodeSdkLike>;
+  readonly launchServer: () => Promise<OpenCodeServerHandle>;
+  readonly model: { readonly providerID: string; readonly modelID: string };
+  readonly readSystemPrompt: (promptPath: string) => Promise<string>;
+  // §6 deny floor: tools that stay false unless the spec names them. Absent is
+  // NOT the same as false — an absent key asks for the provider's default, and
+  // the provider's default is not ours to inherit.
+  readonly denyFloor?: readonly string[];
+}
+
+const DEFAULT_DENY_FLOOR = ["bash"] as const;
+
+interface SessionState {
+  readonly api: OpenCodeSdkClientApi;
+  readonly server: OpenCodeServerHandle;
+  readonly buffered: unknown[];
+  readonly stream: AsyncIterable<unknown>;
+  drained: boolean;
+}
+
+export function createOpenCodeClient(
+  options: CreateOpenCodeClientOptions,
+): OpenCodeClientLike & { close(): Promise<void> } {
+  const states = new Map<string, SessionState>();
+  const denyFloor = options.denyFloor ?? DEFAULT_DENY_FLOOR;
+
+  function stateFor(session: OpenCodeClientSession): SessionState {
+    const state = states.get(session.id);
+    if (state === undefined) {
+      throw new Error(`unknown opencode session: ${session.id}`);
+    }
+    return state;
+  }
+
+  return {
+    async createSession(
+      input: OpenCodeCreateSessionInput,
+    ): Promise<OpenCodeClientSession> {
+      let sdk: OpenCodeSdkLike;
+      try {
+        sdk = await options.loadSdk();
+      } catch (error) {
+        throw new Error(
+          "the opencode backend needs @opencode-ai/sdk, which is an optional " +
+            "peer dependency of pr-hero. Install it alongside pr-hero to use " +
+            `this backend. (${(error as Error).message})`,
+        );
+      }
+
+      const server = await options.launchServer();
+      const api = sdk.createClient({ baseUrl: server.url });
+      const created = await api.session.create({
+        body: { title: "pr-hero review step" },
+      });
+      const session: OpenCodeClientSession = { id: created.data.id };
+
+      // Subscribed BEFORE the prompt, and the ordering is not stylistic.
+      // event.subscribe() is live and unbuffered, so a subscription opened
+      // afterwards silently loses the early events — which are exactly the
+      // ones carrying the first deltas. The contract splits createSession and
+      // streamEvents into separate calls, so unless the buffering happens
+      // here that window cannot be closed at all.
+      const subscription = await api.event.subscribe();
+      const buffered: unknown[] = [];
+      const state: SessionState = {
+        api,
+        server,
+        buffered,
+        stream: subscription.stream,
+        drained: false,
+      };
+      states.set(session.id, state);
+
+      // Pump the live stream into the buffer immediately. Without this the
+      // "subscribe before prompt" ordering buys nothing: nobody reads the
+      // stream until streamEvents() is called, and an unread SSE iterator is
+      // not a recording — the events simply have not been pulled yet, and
+      // anything the server pushed meanwhile sits in a socket nobody drains.
+      void (async () => {
+        for await (const raw of subscription.stream) {
+          if (state.drained) return;
+          buffered.push(raw);
+        }
+      })().catch(() => {
+        // A stream that dies is observed by streamEvents/poll, not here.
+      });
+
+      const tools: Record<string, boolean> = {};
+      for (const tool of denyFloor) tools[tool] = false;
+      for (const tool of input.tools) tools[tool] = true;
+
+      // FIRED, never awaited. session.prompt blocks until the turn finishes —
+      // the probe measured 4.5s — and returns the completed message. The
+      // ROADMAP forbids completing an attempt from one blocking HTTP call, so
+      // this is the trigger and the event stream is the truth. A rejection
+      // here would otherwise become an unhandled rejection that outlives the
+      // attempt.
+      void api.session
+        .prompt({
+          path: { id: session.id },
+          query: { directory: input.cwd },
+          body: {
+            model: { ...options.model },
+            system: await options.readSystemPrompt(input.systemPromptPath),
+            tools,
+            parts: [{ type: "text", text: input.userPrompt }],
+          },
+        })
+        .catch(() => {
+          // The stream and the poll both observe the failure; swallowing it
+          // here keeps a trigger-shaped call from killing the process.
+        });
+
+      return session;
+    },
+
+    async *streamEvents(session: OpenCodeClientSession) {
+      const state = stateFor(session);
+      // Buffered first, in arrival order, then straight into the live stream.
+      while (state.buffered.length > 0) {
+        const raw = state.buffered.shift();
+        yield* mapOpenCodeEvents(raw, session.id);
+      }
+      state.drained = true;
+      for await (const raw of state.stream) {
+        yield* mapOpenCodeEvents(raw, session.id);
+      }
+    },
+
+    async pollStatus(
+      session: OpenCodeClientSession,
+    ): Promise<OpenCodePollResult> {
+      const state = stateFor(session);
+      const response = await state.api.session.messages({
+        path: { id: session.id },
+      });
+      const list = Array.isArray(response.data) ? response.data : [];
+      // Last completed assistant message wins; the same helper the stream
+      // uses, on purpose. §197 wants two INDEPENDENT observers of ONE fact,
+      // not two facts that happen to resemble each other — two copies of this
+      // derivation could drift and manufacture a conflict out of nothing.
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const info = (list[i] as { info?: unknown })?.info;
+        const proof = terminalProofFromAssistant(info);
+        if (proof !== undefined) return { kind: "terminal", proof };
+      }
+      return { kind: "pending" };
+    },
+
+    async abort(session: OpenCodeClientSession): Promise<void> {
+      const state = stateFor(session);
+      await state.api.session.abort({ path: { id: session.id } });
+    },
+
+    async close(): Promise<void> {
+      for (const state of states.values()) await state.server.close();
+      states.clear();
+    },
+  };
 }
