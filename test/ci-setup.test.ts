@@ -14,6 +14,7 @@ import path from "node:path";
 import {
   CI_WORKFLOW_RELATIVE_PATH,
   generateCiWorkflowTemplate,
+  OWN_CI_WORKFLOW_OPTIONS,
   runCiSetup,
 } from "../src/ci-setup";
 import { runDoctor } from "../src/doctor";
@@ -202,6 +203,18 @@ describe("generateCiWorkflowTemplate (pure)", () => {
 
   test("is deterministic — calling it twice returns byte-identical output", () => {
     expect(generateCiWorkflowTemplate()).toBe(generateCiWorkflowTemplate());
+  });
+
+  // A scaffolded repo must inherit action.yml's spend ceiling, never one this
+  // repo chose for itself. `budget-usd` is a real money cap on someone else's
+  // account; raising it from a template they did not read is not ours to do.
+  // This repo overrides it only because it reviews itself and its own PRs
+  // outgrew the default — see OWN_CI_WORKFLOW_OPTIONS.
+  test("the scaffolded template never sets budget-usd for a consumer", () => {
+    expect(generateCiWorkflowTemplate()).not.toContain("budget-usd:");
+    expect(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS)).toContain(
+      "budget-usd: 15.00",
+    );
   });
 
   // ---------------------------------------------------------------------
