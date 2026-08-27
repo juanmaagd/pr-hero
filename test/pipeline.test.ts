@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
@@ -47,6 +47,31 @@ class FakeStepRunner implements StepRunner {
       (spec.name.startsWith("verify-") ? this.script.verifier : undefined);
     if (!handler) throw new Error(`unscripted step ${spec.name}`);
     return handler(spec);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SlowStepRunner: the same scripted shape, but every step resolves only after
+// `delayMs`. That is what lets a test fire the pipeline ceiling (§5.3) with a
+// tiny `pipelineTimeoutMs` while real steps are still in flight. `inFlight`
+// keeps every step promise the pipeline started so a test can await the work
+// the ceiling ABANDONED rather than guess at a sleep length.
+// ---------------------------------------------------------------------------
+
+class SlowStepRunner implements StepRunner {
+  readonly specs: StepSpec[] = [];
+  readonly inFlight: Promise<StepResult>[] = [];
+  constructor(
+    private readonly script: StepScript,
+    private readonly delayMs: number,
+  ) {}
+  async run(spec: StepSpec): Promise<StepResult> {
+    this.specs.push(spec);
+    const handler = this.script[spec.name];
+    if (!handler) throw new Error(`unscripted step ${spec.name}`);
+    const settled = Bun.sleep(this.delayMs).then(() => handler(spec));
+    this.inFlight.push(settled);
+    return settled;
   }
 }
 
@@ -2454,5 +2479,139 @@ describe("C4 runtime-safety preamble", () => {
     const b = await nonceOf(second);
     expect(a).toHaveLength(8);
     expect(a).not.toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.3 step 7 / §13 — the pipeline ceiling's partial snapshot
+// ---------------------------------------------------------------------------
+
+describe("pipeline ceiling snapshot", () => {
+  // Both hunters return nothing, on purpose: zero findings means no refuter
+  // fan-out and no verify steps, so the execute() the ceiling abandons cannot
+  // reach a step name this script does not answer.
+  const SLOW_HUNTERS: StepScript = {
+    "hunter-reliability": (spec) => ok(spec, emptyDraft()),
+    "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+  };
+
+  // Drain the work the ceiling walked away from: every step promise, then a
+  // short tick for execute()'s tail (dedupe + finish()) to run to completion.
+  async function drainAbandonedRun(runner: SlowStepRunner): Promise<void> {
+    await Promise.all(runner.inFlight);
+    await Bun.sleep(150);
+  }
+
+  test("§5.3 — the ceiling persists one complete, parseable partial snapshot", async () => {
+    const input = await makeInput({ pipelineTimeoutMs: 50 });
+    const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("partial");
+    const entries = await readdir(input.runDir);
+    expect(entries).toContain("pipeline.json");
+    // A half-written artifact is exactly what the tmp+rename writer exists to
+    // rule out; a surviving .tmp means the rename never happened.
+    expect(entries).not.toContain("pipeline.json.tmp");
+    const plan = await readPlan(input.runDir);
+    expect(plan.pr).toBe(1539);
+    expect(plan.head_sha).toBe("4609456d");
+
+    await drainAbandonedRun(runner);
+  });
+
+  test("§13 — the abandoned execute() never overwrites the ceiling's snapshot", async () => {
+    const input = await makeInput({ pipelineTimeoutMs: 50 });
+    const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
+    const planPath = path.join(input.runDir, "pipeline.json");
+
+    const result = await runPipeline(input, { runner });
+    const ceilingResolvedAt = Date.now();
+    expect(result.skillOutput.run_status).toBe("partial");
+    const atCeiling = await Bun.file(planPath).text();
+
+    // The ceiling resolves the race and abandons execute(), which keeps running
+    // and reaches the SAME finish() ~300 ms later carrying post-ceiling state.
+    // Its snapshot is not the accepted one: the ceiling's is.
+    await drainAbandonedRun(runner);
+
+    expect(await Bun.file(planPath).text()).toBe(atCeiling);
+    // Not a vacuous pass, stated without depending on the byte comparison: the
+    // surviving snapshot was stamped at ceiling time, not by the write the
+    // abandoned run performs a step-delay later.
+    const accepted = JSON.parse(atCeiling) as { generated_at: string };
+    expect(Date.parse(accepted.generated_at)).toBeLessThanOrEqual(
+      ceilingResolvedAt,
+    );
+    // Both hunters really did run to completion after the ceiling fired.
+    expect(runner.specs.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
+    expect(await readdir(input.runDir)).not.toContain("pipeline.json.tmp");
+  });
+
+  // pr-hero F001 on this PR. The latch is set before the fallible await, so a
+  // write that THREW would otherwise leave the flag shut and turn the one
+  // remaining writer into a no-op — a single transient I/O blip discarding the
+  // run's plan artifact for good.
+  //
+  // What this test does NOT prove, stated so the comment cannot overclaim
+  // (pr-hero F001 on the follow-up head): recovery here needs an in-process
+  // caller that stays alive to drain the abandoned run. `runCli` calls
+  // process.exit() as soon as runPipeline rejects, so the CLI itself never
+  // reaches the retry. Closing that is D1-10b's job — the coordinator awaits
+  // the bounded grace and persists ONCE, leaving no orphan to depend on.
+  test("a failed snapshot write releases the latch for the second writer", async () => {
+    const input = await makeInput({ pipelineTimeoutMs: 50 });
+    const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
+    const planPath = path.join(input.runDir, "pipeline.json");
+    // A DIRECTORY at the target makes the tmp+rename swap fail — this repo's
+    // own precedent for that failure class is test/harness/settlement.test.ts.
+    await mkdir(planPath, { recursive: true });
+
+    await expect(runPipeline(input, { runner })).rejects.toThrow();
+
+    // The blip clears before the abandoned execute() reaches finish().
+    await rm(planPath, { recursive: true, force: true });
+    await drainAbandonedRun(runner);
+
+    const written = JSON.parse(await Bun.file(planPath).text()) as {
+      pr: number;
+    };
+    expect(written.pr).toBe(1539);
+  });
+
+  test("a normal run still writes one pipeline.json with the same content", async () => {
+    const input = await makeInput();
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    await runPipeline(input, { runner });
+
+    const entries = await readdir(input.runDir);
+    expect(entries).toContain("pipeline.json");
+    expect(entries).not.toContain("pipeline.json.tmp");
+    const plan = (await readPlan(input.runDir)) as {
+      pr: number;
+      base_sha: string;
+      head_sha: string;
+      out_path: string;
+      excluded_paths: string[];
+      parity_hunter_fired: boolean;
+      generated_at: string;
+      boundary_nonce: string;
+      steps: Array<{ name: string }>;
+    };
+    expect(plan.pr).toBe(1539);
+    expect(plan.base_sha).toBe("06e857b3");
+    expect(plan.head_sha).toBe("4609456d");
+    expect(plan.out_path).toBe(input.outPath);
+    expect(plan.excluded_paths).toEqual([]);
+    expect(plan.parity_hunter_fired).toBe(false);
+    expect(plan.boundary_nonce).toHaveLength(8);
+    expect(Number.isNaN(Date.parse(plan.generated_at))).toBe(false);
+    expect(plan.steps.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
   });
 });

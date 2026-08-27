@@ -1,4 +1,4 @@
-import { mkdir, rename } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
   type ExecutableAllowlistEntry,
@@ -22,6 +22,7 @@ import {
 } from "../step-runner";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { sumUsage, zeroUsage } from "../usage";
+import { writeJsonAtomically } from "./atomic-write";
 import type {
   AsyncEventSink,
   AuthEvent,
@@ -139,16 +140,6 @@ function notifyRetry(step: StepSpec, info: RetryInfo): void {
   } catch {
     // Swallowed
   }
-}
-
-async function writeArtifactAtomically(
-  outPath: string,
-  output: unknown,
-): Promise<void> {
-  const tmpPath = `${outPath}.tmp`;
-  await mkdir(path.dirname(outPath), { recursive: true });
-  await Bun.write(tmpPath, `${JSON.stringify(output, null, 2)}\n`);
-  await rename(tmpPath, outPath);
 }
 
 async function writeAttemptLog(
@@ -438,7 +429,7 @@ export class StepExecutionHarness implements StepRunner {
     // Per-attempt filename (§422): every retry receives its own settlement
     // receipt — a later attempt must never clobber an earlier attempt's
     // audit record of rejected events / fence closure.
-    await writeArtifactAtomically(
+    await writeJsonAtomically(
       path.join(
         path.dirname(outPath),
         `settlement.attempt${session.attempt}.json`,
@@ -861,7 +852,7 @@ export class StepExecutionHarness implements StepRunner {
               writeAttemptLog(step, attempts, "attempt", outcome, "ok"),
             );
             await this.guardedDataPlaneWrite(settlement, () =>
-              writeArtifactAtomically(step.outPath, parsed),
+              writeJsonAtomically(step.outPath, parsed),
             );
             return { delivered: true, parsed };
           } catch {
@@ -965,7 +956,7 @@ export class StepExecutionHarness implements StepRunner {
               writeAttemptLog(step, attempts, "format-retry", outcome, "ok"),
             );
             await this.guardedDataPlaneWrite(settlement, () =>
-              writeArtifactAtomically(step.outPath, parsed),
+              writeJsonAtomically(step.outPath, parsed),
             );
             return { delivered: true, parsed };
           } catch {
