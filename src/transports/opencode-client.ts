@@ -290,6 +290,14 @@ export function createOpenCodeClient(
   // the session API is for.
   let serverPromise: Promise<OpenCodeServerHandle> | undefined;
   let server: OpenCodeServerHandle | undefined;
+  // Calls that have committed to the shared server but have not registered a
+  // session yet. `states` alone cannot answer "is anyone using this?": its
+  // entry appears only after session.create AND event.subscribe both
+  // succeed, so a sibling mid-establishment is invisible to it — and a
+  // failing call would then SIGTERM the server that healthy sibling is using.
+  // Sharing one server is what created this hazard; per-session servers could
+  // not have had it.
+  let establishing = 0;
 
   function stateFor(session: OpenCodeClientSession): SessionState {
     const state = states.get(session.id);
@@ -337,6 +345,7 @@ export function createOpenCodeClient(
       const api = sdk.createClient({ baseUrl: handle.url });
 
       let sessionId: string | undefined;
+      establishing += 1;
       try {
         const created = await api.session.create({
           body: { title: "pr-hero review step" },
@@ -403,13 +412,25 @@ export function createOpenCodeClient(
         // Unwind whatever this call managed to create. Without this the
         // caller gets an exception and no id, so nothing can be released by
         // hand afterwards.
-        if (sessionId !== undefined) states.delete(sessionId);
-        if (states.size === 0) {
-          serverPromise = undefined;
-          server = undefined;
-          await handle.close().catch(() => {});
+        if (sessionId !== undefined) {
+          states.delete(sessionId);
+          // A remote session that WAS created is real work on the provider's
+          // side; dropping the local map entry does not release it.
+          await api.session.abort({ path: { id: sessionId } }).catch(() => {});
         }
         throw error;
+      } finally {
+        establishing -= 1;
+        // Close only when NOBODY is left — no registered session and no call
+        // still establishing one. On a successful call states is non-empty,
+        // so this never fires; on the last failure with no siblings it
+        // releases the subprocess instead of leaking it.
+        if (establishing === 0 && states.size === 0) {
+          const dying = server;
+          serverPromise = undefined;
+          server = undefined;
+          if (dying !== undefined) await dying.close().catch(() => {});
+        }
       }
     },
 

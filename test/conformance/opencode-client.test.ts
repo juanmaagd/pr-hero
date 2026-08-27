@@ -387,6 +387,93 @@ describe("createOpenCodeClient", () => {
     expect(launches).toBe(1);
   });
 
+  // pr-hero's re-review on this PR, and it is a regression the PREVIOUS fix
+  // introduced: sharing one server across sessions created a cross-session
+  // teardown that per-session servers could not have. `states.set` happens
+  // only after session.create AND event.subscribe both succeed, so a sibling
+  // still mid-establishment is invisible to `states.size === 0` — and a
+  // failing call would SIGTERM the server that healthy sibling is using.
+  test("a failing session never kills a sibling's server", async () => {
+    const fake = fakeSdk();
+    let closed = 0;
+    let firstCreate = true;
+    let releaseSecondCreate!: () => void;
+    const secondCreateBlocked = new Promise<void>((r) => {
+      releaseSecondCreate = r;
+    });
+
+    const base = fake.sdk.createClient({ baseUrl: "" });
+    const sdk: OpenCodeSdkLike = {
+      createClient: () => ({
+        ...base,
+        session: {
+          ...base.session,
+          create: async () => {
+            if (firstCreate) {
+              firstCreate = false;
+              throw new Error("remote session refused");
+            }
+            // The sibling is parked exactly in the pre-states.set window.
+            await secondCreateBlocked;
+            return { data: { id: SESSION_ID } };
+          },
+        },
+      }),
+    };
+    const client = createOpenCodeClient({
+      loadSdk: async () => sdk,
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {
+          closed += 1;
+        },
+      }),
+      model: { providerID: "openai", modelID: "test-model" },
+      readSystemPrompt: async () => "SYSTEM",
+    });
+
+    const failing = client.createSession(INPUT);
+    const sibling = client.createSession(INPUT);
+    await expect(failing).rejects.toThrow(/refused/);
+    // The failure has already unwound; the sibling has not registered yet.
+    expect(closed).toBe(0);
+
+    releaseSecondCreate();
+    await sibling;
+    expect(closed).toBe(0);
+  });
+
+  // The other half of the same unwind: a remote session that WAS created
+  // before the failure is real work on the provider's side, and dropping the
+  // local map entry does not release it.
+  test("the unwind releases a remote session it already created", async () => {
+    const fake = fakeSdk();
+    const base = fake.sdk.createClient({ baseUrl: "" });
+    const sdk: OpenCodeSdkLike = {
+      createClient: () => ({
+        ...base,
+        event: {
+          subscribe: async () => {
+            throw new Error("subscribe failed");
+          },
+        },
+      }),
+    };
+    const client = createOpenCodeClient({
+      loadSdk: async () => sdk,
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {},
+      }),
+      model: { providerID: "openai", modelID: "test-model" },
+      readSystemPrompt: async () => "SYSTEM",
+    });
+    await expect(client.createSession(INPUT)).rejects.toThrow(/subscribe/);
+    expect(fake.abortCalls()).toBe(1);
+  });
+
   test("abort reaches the provider", async () => {
     const fake = fakeSdk();
     const client = rig(fake);
