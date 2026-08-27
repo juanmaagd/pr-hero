@@ -304,6 +304,27 @@ describe("Packaging & distribution configuration", () => {
     expect(own).not.toContain("juanmaagd/pr-hero@v1");
   });
 
+  // The byte-equality drift tests above already fail if these lines change, but
+  // they fail by showing a diff — they never say WHICH side is supposed to
+  // carry an override. These two state the rule directly: a scaffolded repo
+  // inherits action.yml's defaults and is never handed spend or size ceilings
+  // it did not choose, while this repo overrides both because it reviews
+  // itself. A future edit that "helpfully" pushes an override into the
+  // scaffolded template breaks this, not just a byte comparison.
+  test("the scaffolded template sets neither spend nor size ceilings", () => {
+    const scaffolded = generateCiWorkflowTemplate();
+    expect(scaffolded).not.toContain("budget-usd:");
+    expect(scaffolded).not.toContain("max-changed-lines:");
+  });
+
+  test("this repo's own workflow overrides both ceilings", () => {
+    const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
+    expect(own).toContain("budget-usd: 15.00");
+    // 1500, not action.yml's 1000: D1-10c was skipped at 1023 changed lines,
+    // and a skipped review reads exactly like a clean one on the checks page.
+    expect(own).toContain("max-changed-lines: 1500");
+  });
+
   test("build script produces standalone bundle without error", async () => {
     const proc = Bun.spawn(["bun", "run", "build"], {
       cwd: rootDir,
