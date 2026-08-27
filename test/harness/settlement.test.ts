@@ -559,7 +559,7 @@ describe("StepExecutionHarness settlement integration", () => {
 
   test("§5.1 — a data-plane write failure still settles: lease closed, receipt persisted, run terminates", async () => {
     const transport = makeTransport("claude-code", async () => okOutcome());
-    // A directory at outPath makes writeArtifactAtomically's rename fail —
+    // A directory at outPath makes writeJsonAtomically's rename fail —
     // the data-plane failure class pr-hero F001 flagged on this PR.
     const specObj = spec();
     await mkdir(specObj.outPath, { recursive: true });
