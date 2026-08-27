@@ -85,11 +85,13 @@ import {
   validateReviewSpec,
 } from "./spec";
 import {
+  attemptLogPath,
   DEFAULT_STEP_MAX_ATTEMPTS,
   DEFAULT_STEP_TIMEOUT_MS,
   type StepResult,
   type StepRunner,
   type StepSpec,
+  settlementReceiptPath,
 } from "./step-runner";
 import { type SessionUsage, sumUsage, zeroUsage } from "./usage";
 
@@ -571,6 +573,23 @@ function triggerPatterns(agent: AgentSpec, input: PipelineInput): string[] {
     : (agent.trigger ?? []);
 }
 
+// The version of the `pipeline.json` SHAPE, stamped by the one writer below.
+//
+// Deliberately NOT `SCHEMA_VERSION` from findings.ts, and deliberately not
+// derived from it: the two artifacts version independently, and reusing that
+// constant would make a future findings v1.1 falsely announce that
+// pipeline.json changed too. It names THIS shape — schema_version plus D1-10c's
+// per-step attempt provenance — and its ABSENCE names a pre-versioning
+// artifact, which every reader must still answer for (test/schema/migrations).
+//
+// The migration mechanism is "versioned writer, tolerant readers", not
+// findings.ts's hard-equality gate. That gate is right for a document the
+// engine is about to publish as a review; it is wrong here, where
+// `parsePipelineMeta` backs the watcher's daily attempt cap and its own WHY
+// comment records that a loud throw on one damaged artifact would brick every
+// future tick.
+export const PIPELINE_SCHEMA_VERSION = "1.0.0";
+
 // pipeline.json row: the resolved plan sans prompts (frozen-plan provenance —
 // which steps ran, with which model and tool surface, writing where).
 interface StepMeta {
@@ -579,7 +598,43 @@ interface StepMeta {
   tools: string[];
   systemPromptPath: string;
   outPath: string;
-  status?: "ok" | "failed";
+  // D1-10c. Stamped at CONSTRUCTION as "unsettled" and overwritten when the
+  // step settles, so every row in a v1.0.0 plan answers "did this run" without
+  // the reader inferring anything from an absent key — ScoutRecord's rule below
+  // ("the key is missing" is indistinguishable from "this run predates the
+  // key"), applied to the eight steps that never had it.
+  //
+  // WHY "unsettled" and not "not-run" or "skipped":
+  //   - "not-run" would LIE about the commonest case. When the pipeline ceiling
+  //     fires, the steps in flight had already been spawned and had already
+  //     burned tokens; they simply never came back before the snapshot. A row
+  //     claiming they never ran contradicts their own attempt logs on disk.
+  //   - "skipped" is taken, three declarations down, and means something else:
+  //     ScoutRecord uses it for "the flag was off, the stage was never asked
+  //     for". Two neighbouring records spelling one word two ways is how a
+  //     reader learns the wrong meaning.
+  // "unsettled" is true of both reachable cases — never spawned, and spawned
+  // but abandoned — and claims nothing beyond "no terminal verdict reached
+  // this artifact".
+  status?: "ok" | "failed" | "unsettled";
+  // Attempts the step actually consumed, from `StepResult.attempts`. Absent
+  // whenever no session settled: an unsettled step, a construction failure, or
+  // a runner that threw. Never defaulted to 0 — 0 attempts and "we do not know"
+  // are different facts, and this artifact is read to price runs.
+  attempts?: number;
+  // Pointers to the FINAL attempt's two artifacts, RELATIVE to the run dir.
+  //
+  // Relative because these are read after `gh run download` on a machine where
+  // the producing run dir's absolute path does not exist — the flaw
+  // `systemPromptPath`/`outPath` above already have and which is a
+  // compatibility break to fix, so every field added since is born relative.
+  //
+  // They are EXPECTED paths, not verified-to-exist ones: the harness writes
+  // both under a data-plane lease that can be revoked mid-attempt, so a pointer
+  // can name a file a lost lease prevented. Naming where it should be still
+  // beats the previous answer, which was silence.
+  attemptLogPath?: string;
+  settlementReceiptPath?: string;
 }
 
 // pipeline.json's `scout` key (§3.9). Written on EVERY run, including one
@@ -917,7 +972,10 @@ async function execute(
   const huntersAdmitted = !ceilingAborted(deps, state);
   // validateReviewSpec pins hunter keys inside the findings-schema Hunter
   // enum (v1.0.0 constraint), so the cast below is checked, not assumed.
-  const hunterSpecs: Array<{ key: Hunter; spec: StepSpec }> = [];
+  // `meta` rides along so the join below can stamp attempt provenance onto the
+  // SAME object already pushed into `state.steps` (D1-10c).
+  const hunterSpecs: Array<{ key: Hunter; spec: StepSpec; meta: StepMeta }> =
+    [];
   for (const hunter of huntersAdmitted ? hunters : []) {
     const agent = await parseAgentFile(path.join(input.agentsDir, hunter.file));
     const name = `hunter-${hunter.key}`;
@@ -965,8 +1023,9 @@ async function execute(
       // Observational tap only; emit() swallows a throwing listener.
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
-    hunterSpecs.push({ key: hunter.key as Hunter, spec });
-    state.steps.push(stepMeta(spec));
+    const meta = stepMeta(spec);
+    hunterSpecs.push({ key: hunter.key as Hunter, spec, meta });
+    state.steps.push(meta);
   }
 
   let summarizerSpec: StepSpec | undefined;
@@ -984,6 +1043,7 @@ async function execute(
       tools: [],
       systemPromptPath,
       outPath,
+      status: "unsettled",
     };
     try {
       const agent = await parseAgentFile(input.summarizer.promptPath);
@@ -1019,7 +1079,7 @@ async function execute(
       };
       state.steps.push(summarizerMeta);
     } catch {
-      summarizerMeta.status = "failed";
+      recordStepFailure(summarizerMeta);
       state.steps.push(summarizerMeta);
       state.perAgent.summary = failedAgentEntry();
       summarizerConstructionFailed = true;
@@ -1075,11 +1135,13 @@ async function execute(
       (result) => {
         state.perAgent.summary = perAgentEntry(result);
         state.usageTotal = sumUsage(state.usageTotal, result.usage);
+        // `recordSettlement` carries the status through from the same result,
+        // so the two verdicts cannot drift the way two assignments could.
+        if (summarizerMeta) {
+          recordSettlement(summarizerMeta, result, input.runDir);
+        }
         if (result.status === "ok") {
           state.summary = result.output as RunSummary;
-          if (summarizerMeta) summarizerMeta.status = "ok";
-        } else {
-          if (summarizerMeta) summarizerMeta.status = "failed";
         }
         emit(deps, {
           kind: "summarizer-finished",
@@ -1089,7 +1151,7 @@ async function execute(
       },
       () => {
         state.perAgent.summary = failedAgentEntry();
-        if (summarizerMeta) summarizerMeta.status = "failed";
+        if (summarizerMeta) recordStepFailure(summarizerMeta);
         emit(deps, {
           kind: "summarizer-finished",
           ok: false,
@@ -1136,12 +1198,14 @@ async function execute(
     const outcome = settled[i];
     if (!outcome || outcome.status === "rejected") {
       state.perAgent[entry.key] = failedAgentEntry();
+      recordStepFailure(entry.meta);
       state.hunterFailures++;
       state.partial = true;
       continue;
     }
     const result = outcome.value;
     state.perAgent[entry.key] = perAgentEntry(result);
+    recordSettlement(entry.meta, result, input.runDir);
     state.usageTotal = sumUsage(state.usageTotal, result.usage);
     if (result.status !== "ok") {
       state.hunterFailures++;
@@ -1364,7 +1428,9 @@ async function runRefuter(
   // same conservative default a dead step already gets — the gate could not be
   // asked, so the finding is neither deleted nor granted blocking tier.
   const forged: string[] = [];
-  const specs: Array<{ id: string; spec: StepSpec }> = [];
+  // `meta` rides along for the same reason as the hunter fan-out: the join
+  // stamps provenance onto the object already in `state.steps` (D1-10c).
+  const specs: Array<{ id: string; spec: StepSpec; meta: StepMeta }> = [];
   for (const survivor of batch) {
     const oneJson = JSON.stringify(
       [
@@ -1410,9 +1476,9 @@ async function runRefuter(
       // through the same loop, and the non-TTY log is where that shows.
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
-    specs.push({ id: survivor.id, spec });
+    specs.push({ id: survivor.id, spec, meta: stepMeta(spec) });
   }
-  for (const { spec } of specs) state.steps.push(stepMeta(spec));
+  for (const { meta } of specs) state.steps.push(meta);
   // Parallel, matching the hunter fan-out: the steps are independent by
   // construction and one slow claim must not gate the rest.
   //
@@ -1464,7 +1530,10 @@ async function runRefuter(
     if (result) {
       usage = usage ? sumUsage(usage, result.usage) : result.usage;
       attempts += result.attempts;
+      recordSettlement(entry.meta, result, input.runDir);
       state.usageTotal = sumUsage(state.usageTotal, result.usage);
+    } else {
+      recordStepFailure(entry.meta);
     }
     if (result?.status === "ok") {
       for (const r of (result.output as RefuterResult).results) {
@@ -1549,7 +1618,11 @@ async function runVerify(
     options.agent.file,
   );
   const forged: VerifySubject[] = [];
-  const specs: Array<{ subject: VerifySubject; spec: StepSpec }> = [];
+  const specs: Array<{
+    subject: VerifySubject;
+    spec: StepSpec;
+    meta: StepMeta;
+  }> = [];
   for (const subject of subjects) {
     const prompt = composeVerifyPrompt(subject, options.nonce);
     if (prompt === null) {
@@ -1578,9 +1651,9 @@ async function runVerify(
       },
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
-    specs.push({ subject, spec });
+    specs.push({ subject, spec, meta: stepMeta(spec) });
   }
-  for (const { spec } of specs) state.steps.push(stepMeta(spec));
+  for (const { meta } of specs) state.steps.push(meta);
   const legStartedAt = Date.now();
   const settled = await Promise.allSettled(
     specs.map(({ subject, spec }) => {
@@ -1622,7 +1695,10 @@ async function runVerify(
     if (result) {
       usage = usage ? sumUsage(usage, result.usage) : result.usage;
       attempts += result.attempts;
+      recordSettlement(entry.meta, result, input.runDir);
       state.usageTotal = sumUsage(state.usageTotal, result.usage);
+    } else {
+      recordStepFailure(entry.meta);
     }
     if (result?.status === "ok") {
       for (const r of (result.output as RefuterResult).results) {
@@ -1729,6 +1805,9 @@ async function runScout(
     tools: [],
     systemPromptPath,
     outPath,
+    // Same construction-time default `stepMeta()` stamps; this meta is built by
+    // hand because the scout resolves its model and tools as it goes.
+    status: "unsettled",
   };
   const record: ScoutRecord = {
     enabled: true,
@@ -1745,7 +1824,15 @@ async function runScout(
   const startedAt = Date.now();
 
   const abandon = (): string => {
-    meta.status = "failed";
+    // Status only. `attempts` and the two pointers are NOT cleared here on
+    // purpose: `abandon` is reached by three different roads — a prompt file
+    // that never parsed, a runner that threw, and a step that SETTLED and then
+    // failed (or delivered leads that forged the nonce). On that third road a
+    // paid attempt really ran and really wrote its log and receipt, and those
+    // are already recorded by the time this runs. Overwriting them with
+    // "nothing happened" would erase the only evidence separating a scout that
+    // burned money from one that never spawned.
+    recordStepFailure(meta);
     state.perAgent.scout ??= failedAgentEntry();
     record.duration_ms = Date.now() - startedAt;
     emit(deps, {
@@ -1820,6 +1907,9 @@ async function runScout(
   // burned tokens, and a run whose bill excludes them under-reports the arm's
   // cost, which is one of the numbers M6 exists to compare.
   state.perAgent.scout = perAgentEntry(result);
+  // BEFORE the verdict branches below, so every road that ends in `abandon`
+  // still carries the attempt count and pointers of the session that ran.
+  recordSettlement(meta, result, input.runDir);
   state.usageTotal = sumUsage(state.usageTotal, result.usage);
   if (result.status !== "ok") return abandon();
 
@@ -1963,6 +2053,9 @@ async function writePipelinePlan(
   if (state.snapshotWritten) return;
   state.snapshotWritten = true;
   const plan = {
+    // FIRST key on purpose: a human opening a truncated or half-read artifact
+    // sees which shape they are holding before anything else.
+    schema_version: PIPELINE_SCHEMA_VERSION,
     pr: input.pr,
     base_sha: input.baseSha,
     head_sha: input.headSha,
@@ -2099,5 +2192,43 @@ function stepMeta(spec: StepSpec): StepMeta {
     tools: spec.tools,
     systemPromptPath: spec.systemPromptPath,
     outPath: spec.outPath,
+    // Pessimistic at construction, exactly like ScoutRecord's `status`: a step
+    // is pushed into the plan BEFORE it is spawned, and the ceiling can
+    // snapshot at any instant after that. Only a settled step overwrites this.
+    status: "unsettled",
   };
+}
+
+// D1-10c. Attaches one settled step's provenance from the SAME `StepResult`
+// the usage join already reads, at the SAME join site — a second pass over the
+// steps would be a parallel mechanism able to disagree with `per_agent`, and
+// this artifact exists so those two cannot.
+function recordSettlement(
+  meta: StepMeta,
+  result: StepResult,
+  runDir: string,
+): void {
+  meta.status = result.status;
+  meta.attempts = result.attempts;
+  // Cancellation before the first admitted attempt, and every preflight
+  // failure, return `attempts: 0` — no session ran, so no log and no receipt
+  // were ever written. Pointing at `attempt0.json` would be the same lie the
+  // harness's own cancellation message was fixed for.
+  if (result.attempts < 1) return;
+  meta.attemptLogPath = path.relative(
+    runDir,
+    attemptLogPath(meta.outPath, meta.name, result.attempts),
+  );
+  meta.settlementReceiptPath = path.relative(
+    runDir,
+    settlementReceiptPath(meta.outPath, meta.name, result.attempts),
+  );
+}
+
+// A step that reached a terminal verdict WITHOUT a StepResult: the spec never
+// got built (a missing prompt file), or the runner's promise rejected outright.
+// "failed", not "unsettled" — the difference is whether the pipeline reached a
+// verdict, not whether a session existed.
+function recordStepFailure(meta: StepMeta): void {
+  meta.status = "failed";
 }
