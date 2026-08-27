@@ -255,6 +255,57 @@ export const OPENCODE_AUTH_RELATIVE_PATH = path.join(
   "auth.json",
 );
 
+// ONE list, used for both creating the tree and guarding it. The gap this
+// closes was real (pr-hero F001 on PR #80): the create loop had seven entries
+// and the lstat walk had six, so three directories the child is handed as
+// XDG_CONFIG_HOME / syntheticConfigHome / TMPDIR were built and never checked.
+// Two hand-maintained copies of the same paths WILL drift; a shared layout
+// cannot.
+export interface OpenCodeProjectionLayout {
+  readonly syntheticHome: string;
+  readonly syntheticConfigHome: string;
+  readonly syntheticTmp: string;
+  readonly xdgDataHome: string;
+  readonly xdgConfigHome: string;
+  readonly authFile: string;
+  readonly directories: readonly string[];
+  // Every path lstat must clear before the projection is handed over —
+  // the tree itself plus the shared parent it was created under.
+  readonly guarded: readonly string[];
+}
+
+export function openCodeProjectionLayout(
+  projectionRoot: string,
+  parentDir: string = tmpdir(),
+): OpenCodeProjectionLayout {
+  const localDir = path.join(projectionRoot, ".local");
+  const xdgDataHome = path.join(localDir, "share");
+  const xdgConfigHome = path.join(projectionRoot, ".config");
+  const opencodeDataDir = path.join(xdgDataHome, "opencode");
+  const opencodeConfigDir = path.join(xdgConfigHome, "opencode");
+  const syntheticTmp = path.join(projectionRoot, "tmp");
+  const authFile = path.join(opencodeDataDir, "auth.json");
+  const directories = [
+    projectionRoot,
+    localDir,
+    xdgDataHome,
+    opencodeDataDir,
+    xdgConfigHome,
+    opencodeConfigDir,
+    syntheticTmp,
+  ];
+  return {
+    syntheticHome: projectionRoot,
+    syntheticConfigHome: opencodeConfigDir,
+    syntheticTmp,
+    xdgDataHome,
+    xdgConfigHome,
+    authFile,
+    directories,
+    guarded: [parentDir, ...directories, authFile],
+  };
+}
+
 export interface OpenCodeAuthBrokerOptions {
   // Injectable for offline tests; returns the raw auth.json payload.
   readonly readerFn?: () => Promise<string>;
@@ -342,29 +393,15 @@ export class OpenCodeAuthBroker implements CredentialBroker {
     kind: CredentialKind,
     record: OpenCodeOauthRecord,
   ): CredentialProjection {
-    const projectionRoot = path.join(
-      tmpdir(),
-      "prhero-cred-projections",
-      randomUUID(),
+    const parentDir = path.join(tmpdir(), "prhero-cred-projections");
+    const layout = openCodeProjectionLayout(
+      path.join(parentDir, randomUUID()),
+      parentDir,
     );
-    const xdgDataHome = path.join(projectionRoot, ".local", "share");
-    const xdgConfigHome = path.join(projectionRoot, ".config");
-    const opencodeDataDir = path.join(xdgDataHome, "opencode");
-    const opencodeConfigDir = path.join(xdgConfigHome, "opencode");
-    const syntheticTmp = path.join(projectionRoot, "tmp");
-    const authFile = path.join(opencodeDataDir, "auth.json");
 
-    // Every level is created explicitly at 0700 — `recursive` alone would let
-    // an intermediate directory inherit the umask.
-    for (const dir of [
-      projectionRoot,
-      path.join(projectionRoot, ".local"),
-      xdgDataHome,
-      opencodeDataDir,
-      xdgConfigHome,
-      opencodeConfigDir,
-      syntheticTmp,
-    ]) {
+    // Every level explicitly at 0700 — `recursive` alone lets an intermediate
+    // directory inherit the umask.
+    for (const dir of layout.directories) {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
 
@@ -373,20 +410,14 @@ export class OpenCodeAuthBroker implements CredentialBroker {
     // projection carrying only `access` would hand the child a credential it
     // cannot rotate, and it would go stale mid-run with no way back.
     const payload = `${JSON.stringify({ openai: record }, null, 2)}\n`;
-    writeFileSync(authFile, payload, { mode: 0o600 });
+    writeFileSync(layout.authFile, payload, { mode: 0o600 });
 
-    // §6.1: lstat EVERY component after writing — a pre-planted symlink
-    // anywhere in the chain means the credential landed outside our control.
-    for (const component of [
-      tmpdir(),
-      projectionRoot,
-      path.join(projectionRoot, ".local"),
-      xdgDataHome,
-      opencodeDataDir,
-      authFile,
-    ]) {
+    // §6.1: lstat every guarded path — a pre-planted symlink anywhere in the
+    // chain means the credential, or a directory the child writes into,
+    // landed outside our control.
+    for (const component of layout.guarded) {
       if (lstatSync(component).isSymbolicLink()) {
-        rmSync(projectionRoot, { recursive: true, force: true });
+        rmSync(layout.syntheticHome, { recursive: true, force: true });
         throw new CredentialProjectionError("projection_layout_invalid");
       }
     }
@@ -398,21 +429,21 @@ export class OpenCodeAuthBroker implements CredentialBroker {
     return {
       projectionId: `cred-${randomUUID()}`,
       kind,
-      syntheticHome: projectionRoot,
-      syntheticConfigHome: opencodeConfigDir,
-      syntheticTmp,
+      syntheticHome: layout.syntheticHome,
+      syntheticConfigHome: layout.syntheticConfigHome,
+      syntheticTmp: layout.syntheticTmp,
       env: {
-        HOME: projectionRoot,
-        TMPDIR: syntheticTmp,
+        HOME: layout.syntheticHome,
+        TMPDIR: layout.syntheticTmp,
         // Pinned, not merely absent from the harness allowlist: OpenCode reads
         // XDG_DATA_HOME first, so an inherited value would point the child
         // straight back at the operator's real store.
-        XDG_DATA_HOME: xdgDataHome,
-        XDG_CONFIG_HOME: xdgConfigHome,
+        XDG_DATA_HOME: layout.xdgDataHome,
+        XDG_CONFIG_HOME: layout.xdgConfigHome,
       },
-      files: [{ path: authFile, mode: 0o600, sha256 }],
+      files: [{ path: layout.authFile, mode: 0o600, sha256 }],
       destroy: async () => {
-        rmSync(projectionRoot, { recursive: true, force: true });
+        rmSync(layout.syntheticHome, { recursive: true, force: true });
       },
     };
   }

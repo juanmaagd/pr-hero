@@ -8,6 +8,7 @@ import {
   KeychainCredentialBroker,
   OPENCODE_AUTH_RELATIVE_PATH,
   OpenCodeAuthBroker,
+  openCodeProjectionLayout,
 } from "../../src/security/credential-broker";
 
 // Obviously-fake tokens only — never a real credential value in a fixture.
@@ -68,6 +69,30 @@ describe("KeychainCredentialBroker", () => {
       expect(statSync(projection.files[0].path).mode & 0o777).toBe(0o600);
     } finally {
       await projection.destroy();
+    }
+  });
+
+  // pr-hero F001 on PR #80. The create list had seven entries and the lstat
+  // walk had six: xdgConfigHome, opencodeConfigDir and syntheticTmp were
+  // built and then handed to the child as XDG_CONFIG_HOME, syntheticConfigHome
+  // and TMPDIR without ever being checked — while the module's own comment
+  // promised EVERY component was. Two hand-maintained lists of the same paths
+  // is the defect; this test pins the single list they now share.
+  test("every path the layout declares is created AND checked", () => {
+    const layout = openCodeProjectionLayout("/tmp/root");
+    expect(layout.directories.length).toBeGreaterThan(0);
+    // Everything the child is handed must appear among the guarded paths.
+    for (const handed of [
+      layout.syntheticHome,
+      layout.syntheticConfigHome,
+      layout.syntheticTmp,
+      layout.xdgDataHome,
+      layout.authFile,
+    ]) {
+      expect(layout.guarded).toContain(handed);
+    }
+    for (const dir of layout.directories) {
+      expect(layout.guarded).toContain(dir);
     }
   });
 
