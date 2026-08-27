@@ -35,6 +35,26 @@ describe("projectChildEnv", () => {
     expect(Object.keys(projected)).toEqual(["HOME"]);
   });
 
+  // The invariant this states is "the gate and the spawn agree about what
+  // counts as a credential". The capability gate accepts EITHER of these two
+  // env vars as proof that claude is authenticated
+  // (defaultClaudeAuthProbe, src/provider-capabilities.ts), so whatever it
+  // accepts, the projection must carry. It did not: pr-hero's first real CI
+  // self-review (2026-08-27) passed the gate on CLAUDE_CODE_OAUTH_TOKEN and
+  // then died in three seconds with every step reporting "Not logged in ·
+  // Please run /login", because the projection dropped that exact variable.
+  // The subscription route the action, the workflow and the docs all
+  // recommend as the zero-API-cost option could never have worked.
+  test("carries every credential the capability gate accepts as proof of auth", () => {
+    const projected = projectChildEnv({
+      HOME: "/h",
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test",
+      ANTHROPIC_API_KEY: "sk-test",
+    });
+    expect(projected.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-test");
+    expect(projected.ANTHROPIC_API_KEY).toBe("sk-test");
+  });
+
   test("the harness hands the projected env to the transport request", async () => {
     let seenEnv: Readonly<Record<string, string>> | undefined;
     const transport: ProviderTransport = {
