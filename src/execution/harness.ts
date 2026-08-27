@@ -142,6 +142,17 @@ function notifyRetry(step: StepSpec, info: RetryInfo): void {
   }
 }
 
+// Settlement receipts are named on BOTH axes — step name and attempt — and the
+// name is derived HERE so the writer and every message that points a human at
+// the file cannot drift apart (a hardcoded "settlement.json" in a cancellation
+// message pointed at a file that never existed for as long as it shipped).
+function settlementReceiptPath(step: StepSpec, attempt: number): string {
+  return path.join(
+    path.dirname(step.outPath),
+    `settlement.${step.name}.attempt${attempt}.json`,
+  );
+}
+
 async function writeAttemptLog(
   step: StepSpec,
   attempt: number,
@@ -422,18 +433,26 @@ export class StepExecutionHarness implements StepRunner {
   // receipt itself records the closed fence, so refusing this write would
   // erase the evidence that late data-plane events were refused.
   private async persistSettlement(
-    outPath: string,
+    step: StepSpec,
     session: ActiveSession,
     receipt: SettlementReceipt,
   ): Promise<void> {
-    // Per-attempt filename (§422): every retry receives its own settlement
-    // receipt — a later attempt must never clobber an earlier attempt's
-    // audit record of rejected events / fence closure.
+    // Per-STEP *and* per-attempt filename (§422). Two independent collisions
+    // are being prevented here and an audit record needs both:
+    //   - attempt vs attempt: every retry receives its own receipt, so a later
+    //     attempt never clobbers an earlier one's rejected-event / fence record.
+    //   - step vs step: every step of a run shares ONE steps/ directory
+    //     (hunters, summarizer, refuters, scout all write beside each other),
+    //     so a name keyed only on the attempt made each step overwrite the
+    //     previous step's receipt. That is not hypothetical — a four-step run
+    //     left four attempt logs and exactly one receipt on disk, and three
+    //     audit records were destroyed silently.
+    // Keying on the step name is what makes the write target unique, which in
+    // turn gives writeJsonAtomically's `${outPath}.tmp` staging file a unique
+    // name — parallel steps otherwise raced on one tmp path and could corrupt
+    // each other mid-rename rather than merely losing the loser.
     await writeJsonAtomically(
-      path.join(
-        path.dirname(outPath),
-        `settlement.attempt${session.attempt}.json`,
-      ),
+      settlementReceiptPath(step, session.attempt),
       receipt,
     );
   }
@@ -612,7 +631,7 @@ export class StepExecutionHarness implements StepRunner {
                 "transport promise settled without producing an outcome (§5.1 invariant conversion)",
             }),
           );
-          await this.persistSettlement(step.outPath, session, receipt);
+          await this.persistSettlement(step, session, receipt);
           this.onSessionSettled?.({ session, settlement, receipt });
           return { session, settlement, cancelled: true };
         }
@@ -642,7 +661,7 @@ export class StepExecutionHarness implements StepRunner {
           const receipt = finalize(() =>
             synthesizeInternalFailure(settlement, error),
           );
-          await this.persistSettlement(step.outPath, session, receipt);
+          await this.persistSettlement(step, session, receipt);
           this.onSessionSettled?.({ session, settlement, receipt });
           return {
             session,
@@ -665,7 +684,7 @@ export class StepExecutionHarness implements StepRunner {
             },
           ),
         );
-        await this.persistSettlement(step.outPath, session, receipt);
+        await this.persistSettlement(step, session, receipt);
         this.onSessionSettled?.({ session, settlement, receipt });
         return {
           session,
@@ -725,7 +744,7 @@ export class StepExecutionHarness implements StepRunner {
         );
       }
 
-      await this.persistSettlement(step.outPath, session, receipt);
+      await this.persistSettlement(step, session, receipt);
       this.onSessionSettled?.({ session, settlement, receipt });
       return { session, settlement, cancelled: true };
     } finally {
@@ -1000,6 +1019,15 @@ export class StepExecutionHarness implements StepRunner {
     }
 
     if (cancelHit) {
+      // Name the receipt that was ACTUALLY written for THIS step and attempt.
+      // The previous text pointed at a bare "settlement.json" that has never
+      // existed on disk. Cancellation before the first attempt admits no
+      // session at all, so there is no receipt to name — saying so beats
+      // naming attempt0.json, which would be the same lie in a new font.
+      const receiptPointer =
+        attempts >= 1
+          ? `see ${settlementReceiptPath(step, attempts)}`
+          : "no attempt was admitted, so no receipt was written";
       return {
         name: step.name,
         status: "failed",
@@ -1007,7 +1035,7 @@ export class StepExecutionHarness implements StepRunner {
         attempts,
         stderrTail: [
           lastOutcome?.stderrTail ?? "",
-          "[pr-hero] step cancelled; settled per §5.3 (see settlement.json)",
+          `[pr-hero] step cancelled; settled per §5.3 (${receiptPointer})`,
         ]
           .filter(Boolean)
           .join("\n"),

@@ -282,8 +282,13 @@ describe("StepExecutionHarness settlement integration", () => {
     });
   }
 
-  const settlementPath = (spec: StepSpec) =>
-    path.join(path.dirname(spec.outPath), "settlement.attempt1.json");
+  // Receipts are keyed on BOTH axes — step name and attempt — because every
+  // step of a run shares one steps/ directory.
+  const settlementPath = (spec: StepSpec, attempt = 1) =>
+    path.join(
+      path.dirname(spec.outPath),
+      `settlement.${spec.name}.attempt${attempt}.json`,
+    );
 
   test("§13 line 738 — success resolves a completed receipt with process-group confirmation from the transport's terminalProof", async () => {
     const captured: {
@@ -420,7 +425,8 @@ describe("StepExecutionHarness settlement integration", () => {
     expect(settlement.rejectedEvents).toBeGreaterThanOrEqual(1);
     // No artifact was ever written from the late delivery...
     expect(await Bun.file(spec().outPath).exists()).toBe(false);
-    // ...and settlement.attempt1.json was written exactly once (byte-identical).
+    // ...and this step's attempt-1 receipt was written exactly once
+    // (byte-identical).
     expect(await Bun.file(settlementPath(spec())).text()).toBe(persistedBefore);
     // §5.1: even this path resolved its settled promise.
     await expect(session.settled).resolves.toBe(receipt);
@@ -521,6 +527,37 @@ describe("StepExecutionHarness settlement integration", () => {
     expect(executed).toBe(0);
     expect(result.status).toBe("failed");
     expect(result.attempts).toBe(0);
+    // No session was admitted, so there is no receipt — the message must not
+    // invent one (naming attempt0.json would repeat the settlement.json lie).
+    expect(result.stderrTail).toContain("no attempt was admitted");
+    expect(result.stderrTail).not.toContain("attempt0.json");
+  });
+
+  test("a cancelled step's stderr names the receipt file that was really written", async () => {
+    const external = new AbortController();
+    const transport = makeTransport("claude-code", async (_req, ctx) => {
+      await abortSignalPromise(ctx.signal);
+      return okOutcome({
+        completion: "cancelled",
+        terminalProof: proof("sigterm"),
+        exitCode: 143,
+      });
+    });
+    const step = spec();
+    const runPromise = harnessWith(transport, {
+      signal: external.signal,
+    }).run(step);
+    await sleep(10);
+    external.abort();
+    const result = await runPromise;
+
+    expect(result.status).toBe("failed");
+    // The pointer must resolve to a file that exists — the string it replaced
+    // ("see settlement.json") named a file this engine has never written.
+    const pointed = settlementPath(step, result.attempts);
+    expect(result.stderrTail).toContain(pointed);
+    expect(existsSync(pointed)).toBe(true);
+    expect(result.stderrTail).not.toContain("(see settlement.json)");
   });
 
   test("deadline defaults to the §5.2 CLI value when capabilities are unusable", async () => {
@@ -582,7 +619,7 @@ describe("StepExecutionHarness settlement integration", () => {
       await readFile(
         path.join(
           path.dirname(specObj.outPath),
-          `settlement.attempt${settled.session?.attempt ?? 1}.json`,
+          `settlement.${specObj.name}.attempt${settled.session?.attempt ?? 1}.json`,
         ),
         "utf-8",
       ),
@@ -627,16 +664,10 @@ describe("StepExecutionHarness settlement integration", () => {
 
     expect(settledReceipts.length).toBe(2);
     const attempt1 = JSON.parse(
-      await readFile(
-        path.join(path.dirname(specObj.outPath), "settlement.attempt1.json"),
-        "utf-8",
-      ),
+      await readFile(settlementPath(specObj, 1), "utf-8"),
     ) as SettlementReceipt;
     const attempt2 = JSON.parse(
-      await readFile(
-        path.join(path.dirname(specObj.outPath), "settlement.attempt2.json"),
-        "utf-8",
-      ),
+      await readFile(settlementPath(specObj, 2), "utf-8"),
     ) as SettlementReceipt;
     // Attempt 1's audit record survives attempt 2's success.
     expect(attempt1.outcome === "completed").toBe(false);
@@ -644,5 +675,62 @@ describe("StepExecutionHarness settlement integration", () => {
     expect(
       existsSync(path.join(path.dirname(specObj.outPath), "settlement.json")),
     ).toBe(false);
+    // Nor the step-less name that used to collide across steps.
+    expect(
+      existsSync(
+        path.join(path.dirname(specObj.outPath), "settlement.attempt1.json"),
+      ),
+    ).toBe(false);
+  });
+
+  test("per-step settlement files — two steps settling at the same attempt in one steps/ dir keep both receipts", async () => {
+    // The steps of a run all share one steps/ directory (hunters, summarizer,
+    // refuters, scout). A receipt keyed only on the attempt number made every
+    // step clobber the previous one's audit record — four real steps left one
+    // file behind. Both axes are load-bearing.
+    const reliability = spec();
+    const resilience = spec({
+      name: "hunter-resilience",
+      outPath: path.join(dir, "hunter-resilience.json"),
+    });
+    expect(path.dirname(reliability.outPath)).toBe(
+      path.dirname(resilience.outPath),
+    );
+
+    const runStep = (step: StepSpec) => {
+      const transport = makeTransport("claude-code", async () => okOutcome());
+      return harnessWith(transport).run(step);
+    };
+
+    // Parallel, as the pipeline really runs them: distinct final paths also
+    // give writeJsonAtomically distinct `${outPath}.tmp` staging paths.
+    const [first, second] = await Promise.all([
+      runStep(reliability),
+      runStep(resilience),
+    ]);
+    expect(first.status).toBe("ok");
+    expect(second.status).toBe("ok");
+
+    // Both receipts survived — neither step clobbered the other.
+    const reliabilityReceipt = JSON.parse(
+      await readFile(settlementPath(reliability, 1), "utf-8"),
+    ) as SettlementReceipt;
+    const resilienceReceipt = JSON.parse(
+      await readFile(settlementPath(resilience, 1), "utf-8"),
+    ) as SettlementReceipt;
+
+    // Existence alone is weak: each file must name its OWN step's session.
+    expect(reliabilityReceipt.attempt).toBe(1);
+    expect(resilienceReceipt.attempt).toBe(1);
+    expect(reliabilityReceipt.sessionId.startsWith("hunter-reliability-")).toBe(
+      true,
+    );
+    expect(resilienceReceipt.sessionId.startsWith("hunter-resilience-")).toBe(
+      true,
+    );
+    expect(reliabilityReceipt.sessionId).not.toBe(resilienceReceipt.sessionId);
+
+    // The step-less name is what the two writes used to collide on.
+    expect(existsSync(path.join(dir, "settlement.attempt1.json"))).toBe(false);
   });
 });
