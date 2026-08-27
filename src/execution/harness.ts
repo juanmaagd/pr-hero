@@ -12,6 +12,7 @@ import { CredentialProjectionError } from "../security/credential-broker";
 import { redactDiagnostic } from "../security/redact";
 import { WorkspaceReadBroker } from "../security/workspace-read-broker";
 import {
+  attemptLogPath,
   classifyFailure,
   type FailureClass,
   FORMAT_RETRY_REMINDER,
@@ -19,6 +20,7 @@ import {
   type StepResult,
   type StepRunner,
   type StepSpec,
+  settlementReceiptPath,
 } from "../step-runner";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { sumUsage, zeroUsage } from "../usage";
@@ -143,14 +145,14 @@ function notifyRetry(step: StepSpec, info: RetryInfo): void {
 }
 
 // Settlement receipts are named on BOTH axes — step name and attempt — and the
-// name is derived HERE so the writer and every message that points a human at
-// the file cannot drift apart (a hardcoded "settlement.json" in a cancellation
-// message pointed at a file that never existed for as long as it shipped).
-function settlementReceiptPath(step: StepSpec, attempt: number): string {
-  return path.join(
-    path.dirname(step.outPath),
-    `settlement.${step.name}.attempt${attempt}.json`,
-  );
+// name is derived from the runner contract's single builder so the writer and
+// every message that points a human at the file cannot drift apart (a hardcoded
+// "settlement.json" in a cancellation message pointed at a file that never
+// existed for as long as it shipped). D1-10c added a second reader of that
+// shape — pipeline.json's per-step pointers — which is why the builder now
+// lives in step-runner.ts rather than here.
+function receiptPathFor(step: StepSpec, attempt: number): string {
+  return settlementReceiptPath(step.outPath, step.name, attempt);
 }
 
 async function writeAttemptLog(
@@ -160,11 +162,7 @@ async function writeAttemptLog(
   outcome: TransportOutcome,
   classification: "ok" | FailureClass,
 ): Promise<void> {
-  const logPath = path.join(
-    path.dirname(step.outPath),
-    "logs",
-    `${step.name}.${attempt}.log`,
-  );
+  const logPath = attemptLogPath(step.outPath, step.name, attempt);
   await mkdir(path.dirname(logPath), { recursive: true });
   await Bun.write(
     logPath,
@@ -451,10 +449,7 @@ export class StepExecutionHarness implements StepRunner {
     // turn gives writeJsonAtomically's `${outPath}.tmp` staging file a unique
     // name — parallel steps otherwise raced on one tmp path and could corrupt
     // each other mid-rename rather than merely losing the loser.
-    await writeJsonAtomically(
-      settlementReceiptPath(step, session.attempt),
-      receipt,
-    );
+    await writeJsonAtomically(receiptPathFor(step, session.attempt), receipt);
   }
 
   // §5.2: deadlines are declared transport capabilities, not request fields;
@@ -1026,7 +1021,7 @@ export class StepExecutionHarness implements StepRunner {
       // naming attempt0.json, which would be the same lie in a new font.
       const receiptPointer =
         attempts >= 1
-          ? `see ${settlementReceiptPath(step, attempts)}`
+          ? `see ${receiptPathFor(step, attempts)}`
           : "no attempt was admitted, so no receipt was written";
       return {
         name: step.name,

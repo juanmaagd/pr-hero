@@ -5,6 +5,7 @@
 // Every isolation flag and retry mechanism here encodes a paid-for failure
 // from v1 — port, don't rewrite.
 
+import path from "node:path";
 import type {
   AuthEvent,
   DenialCode,
@@ -73,6 +74,37 @@ export interface StepResult {
 
 export interface StepRunner {
   run(step: StepSpec): Promise<StepResult>;
+}
+
+// Where a step's per-attempt artifacts land, derived from its `outPath` — part
+// of the RUNNER CONTRACT, not a harness implementation detail, because two
+// modules now depend on the answer: the harness writes the files, and
+// pipeline.ts indexes them from `pipeline.json` (D1-10c). Deriving the names
+// twice is how a pointer starts naming a file that was never written — the
+// exact defect the harness's own comment records ("a hardcoded settlement.json
+// in a cancellation message pointed at a file that never existed for as long as
+// it shipped"), so both callers read the shape from here.
+//
+// `attempt` is the 1-based attempt NUMBER, which for a settled step equals
+// `StepResult.attempts`: the transient loop and the one format retry both
+// increment the same counter, and the format retry always ends the loop.
+export function attemptLogPath(
+  outPath: string,
+  stepName: string,
+  attempt: number,
+): string {
+  return path.join(path.dirname(outPath), "logs", `${stepName}.${attempt}.log`);
+}
+
+export function settlementReceiptPath(
+  outPath: string,
+  stepName: string,
+  attempt: number,
+): string {
+  return path.join(
+    path.dirname(outPath),
+    `settlement.${stepName}.attempt${attempt}.json`,
+  );
 }
 
 export const DEFAULT_STEP_TIMEOUT_MS = 30 * 60 * 1000;
