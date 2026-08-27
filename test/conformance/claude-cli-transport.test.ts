@@ -304,3 +304,89 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     expect(successSignals).toHaveLength(0);
   });
 });
+
+describe("ClaudeCodeCliTransport.classifyFailure", () => {
+  const transport = new ClaudeCodeCliTransport(okPromptFns);
+
+  function classify(witness: string, where: "stderr" | "final" = "stderr") {
+    return transport.classifyFailure({
+      completion: "failed",
+      protocolIntegrity: "verified",
+      finalText: where === "final" ? witness : "",
+      usage: {
+        wall_ms: 1,
+        tokens_in: 1,
+        tokens_out: 0,
+        tokens_total: 1,
+        cost_usd_est: 0,
+      },
+      stderrTail: where === "stderr" ? witness : "",
+    });
+  }
+
+  // §7 gives rate_limit its own disposition — bounded retry with backoff —
+  // precisely because retrying INSTANTLY against a server that just said it
+  // is saturated makes the saturation worse and burns the whole transient
+  // budget in milliseconds. That separation only exists if something actually
+  // classifies backpressure as backpressure.
+  test("server backpressure is rate_limit, not a network blip", () => {
+    for (const witness of [
+      "upstream returned 529",
+      "overloaded_error",
+      "API Error: 529 overloaded_error",
+      "HTTP 429 Too Many Requests",
+      "rate limit exceeded",
+      "rate_limit_error",
+      "503 Service Unavailable",
+    ]) {
+      expect(classify(witness)).toBe("rate_limit");
+    }
+  });
+
+  // The connection-level witnesses stay immediate: nothing upstream asked us
+  // to slow down, and waiting out a reset socket buys nothing.
+  test("connection-level failures stay network_transient", () => {
+    for (const witness of [
+      "API Error: Connection closed mid-response",
+      "read ECONNRESET",
+      "socket hang up",
+      "request timed out",
+      "502 Bad Gateway",
+    ]) {
+      expect(classify(witness)).toBe("network_transient");
+    }
+  });
+
+  // Ordering trap: the real CLI witness for an overload is "API Error: 529
+  // overloaded_error", which matches the network regex too. Whichever test
+  // runs first wins, so backpressure has to be decided BEFORE the generic
+  // network match or the fix silently does nothing for the exact string it
+  // exists to catch.
+  test("a witness carrying BOTH signals is treated as backpressure", () => {
+    expect(classify("API Error: Connection closed · 529 overloaded")).toBe(
+      "rate_limit",
+    );
+  });
+
+  test("a status code embedded in a larger number is not a status code", () => {
+    expect(classify("processed 15291 tokens, then finished")).toBeUndefined();
+    expect(classify("job 1429 completed")).toBeUndefined();
+  });
+
+  test("the login witness still outranks everything else", () => {
+    expect(classify("Not logged in · Please run /login")).toBe("auth_invalid");
+    // Auth is terminal; a 529 in the same witness must not downgrade it into
+    // a retryable cause.
+    expect(classify("529 overloaded\nNot logged in · Please run /login")).toBe(
+      "auth_invalid",
+    );
+  });
+
+  test("clean prose is not a transport failure at all", () => {
+    expect(classify("here are my findings", "final")).toBeUndefined();
+  });
+
+  test("the witness spans stderr AND the final message", () => {
+    expect(classify("overloaded_error", "final")).toBe("rate_limit");
+  });
+});

@@ -525,8 +525,31 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     if (/Not logged in\s*[·.]\s*Please run \/login/i.test(witness)) {
       return "auth_invalid";
     }
+    // Backpressure is tested BEFORE the generic network witness, and the
+    // order is load-bearing: the real CLI string for an overload is
+    // "API Error: 529 overloaded_error", which matches both. Tested second,
+    // rate_limit would never fire for the exact witness it exists to catch.
+    //
+    // §7 gives these two causes different dispositions on purpose —
+    // rate_limit waits (validated Retry-After or capped exponential),
+    // network_transient retries immediately. Retrying instantly against a
+    // server that just said it is saturated deepens the saturation and burns
+    // the entire transient budget in milliseconds.
+    //
+    // Status codes carry word boundaries so a token count like 15291 or a
+    // job id like 1429 is not read as a status.
     if (
-      /API Error|Connection closed|ECONNRESET|socket hang up|timed out|502|503|529|overloaded/i.test(
+      /\b429\b|\b529\b|\b503\b|overloaded|rate[ _-]?limit|too many requests|service unavailable/i.test(
+        witness,
+      )
+    ) {
+      return "rate_limit";
+    }
+    // Connection-level only. Nothing upstream asked us to slow down, and
+    // waiting out a reset socket buys nothing. 502 stays here: a bad gateway
+    // is a proxy failure, not a capacity signal.
+    if (
+      /API Error|Connection closed|ECONNRESET|socket hang up|timed out|\b502\b/i.test(
         witness,
       )
     ) {
