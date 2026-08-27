@@ -494,3 +494,47 @@ describe("failure classification", () => {
     ).toBe("format");
   });
 });
+
+// ---------------------------------------------------------------------------
+// D1-10b — the cancellation signal reaches the harness
+//
+// `StepExecutionHarnessOptions.signal` is the entry point to the whole §5.3
+// sequence (no new attempts, lease fence, abort, bounded grace), and until
+// D1-10b `ClaudeCodeRunnerOptions` dropped it on the floor: the constructor
+// forwarded seven options and never this one, so §5.3 was implemented and
+// unreachable from every production caller. What happens AFTER a signal aborts
+// is already proven in test/harness/settlement.test.ts; these two prove only
+// that the runner hands the signal over, observed through the one thing the
+// §5.3 step-1 gate makes visible without a transport seam — an aborted run
+// spawns nothing at all.
+// ---------------------------------------------------------------------------
+
+describe("ClaudeCodeRunner cancellation signal (§5.3)", () => {
+  test("an already-aborted signal reaches the harness: zero spawns, zero attempts", async () => {
+    const { spawnFn, calls } = makeFakeSpawn([{ stdout: envelope("{}") }]);
+    const spec = await makeSpec();
+    const controller = new AbortController();
+    controller.abort();
+
+    const runner = new ClaudeCodeRunner({ spawnFn, signal: controller.signal });
+    const result = await runner.run(spec);
+
+    expect(calls).toHaveLength(0);
+    expect(result.attempts).toBe(0);
+    expect(result.status).toBe("failed");
+    expect(result.stderrTail).toContain("step cancelled");
+  });
+
+  test("control — the same runner with no signal spawns and delivers", async () => {
+    const { spawnFn, calls } = makeFakeSpawn([
+      { stdout: envelope(JSON.stringify(GOOD_DRAFT)) },
+    ]);
+    const spec = await makeSpec();
+
+    const result = await new ClaudeCodeRunner({ spawnFn }).run(spec);
+
+    expect(calls).toHaveLength(1);
+    expect(result.attempts).toBe(1);
+    expect(result.status).toBe("ok");
+  });
+});

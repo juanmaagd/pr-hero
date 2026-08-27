@@ -24,6 +24,10 @@ import {
 } from "./drafts";
 import { writeJsonAtomically } from "./execution/atomic-write";
 import {
+  DEFAULT_CANCELLATION_DEADLINE_MS,
+  HARNESS_GRACE_MARGIN_MS,
+} from "./execution/settlement";
+import {
   type DebugRefutedFinding,
   deriveTier,
   type Finding,
@@ -121,6 +125,13 @@ export interface PipelineInput {
   stepTimeoutMs?: number;
   // Whole-pipeline ceiling; defaults to DEFAULT_PIPELINE_TIMEOUT_MS.
   pipelineTimeoutMs?: number;
+  // §5.3 step 4 at pipeline scope: how long the ceiling waits for the aborted
+  // run to settle before it snapshots anyway. Defaults to the harness's own
+  // bound (DEFAULT_CANCELLATION_DEADLINE_MS + HARNESS_GRACE_MARGIN_MS = 8.5 s),
+  // which is what an in-flight step needs to reach its own settlement. Sits
+  // beside `pipelineTimeoutMs` and is injectable for the same reason: without
+  // it every ceiling test would sleep 8.5 real seconds.
+  ceilingGraceMs?: number;
   // Optional engine-owned summary step. It is deliberately outside ReviewSpec:
   // this prompt is bundled with pr-hero, not part of the benchmarked agent set.
   summarizer?: { promptPath: string; model?: string };
@@ -201,6 +212,14 @@ export interface PipelineInput {
 
 export interface PipelineDeps {
   runner: StepRunner;
+  // §5.3 D1-10b: the ceiling's cancellation controller, SHARED with the runner
+  // the caller built (the same controller's `signal` goes into
+  // `ClaudeCodeRunnerOptions`). The pipeline needs the controller and not the
+  // signal because it is the thing that ABORTS — the ceiling fires here, and
+  // both this pipeline's admission checks and the harness's per-attempt gate
+  // read the result. Optional so every existing caller keeps compiling;
+  // `runPipeline` defaults one so its own admission checks are never dead code.
+  ceilingController?: AbortController;
   // Live-progress tap, born from a real incident: the CLI went silent for
   // ~10 minutes mid-run and a PAID run died to a Ctrl-C from a user who
   // reasonably believed it hung. OPTIONAL and observational only — absent
@@ -615,14 +634,14 @@ interface RunState {
   partial: boolean;
   // §5.3 step 7 / §13: exactly ONE partial snapshot per run, and the FIRST
   // writer is the one that counts. `finish()` has two callers that can both
-  // reach it in the same run — the pipeline ceiling resolves `finish()` through
-  // `Promise.race` and ABANDONS the still-running `execute()`, which arrives at
-  // the same `finish()` later carrying post-ceiling state and overwrites the
-  // snapshot the run already returned to its caller. The ceiling's snapshot is
-  // the accepted state (assembled from what had settled when the run ended), so
-  // the abandoned writer loses. This freezes `fillRereviewProvenance` with it:
-  // the ceiling's `rereview.live` fill is the one the CLI keeps, not the richer
-  // one the abandoned run would have computed after the fact.
+  // reach it in the same run — the ceiling calls it after its bounded grace,
+  // and `execute()` calls it at the end of its own path. On the ordinary D1-10b
+  // path the grace outlives the run, so `execute()` writes and the ceiling's
+  // call is the no-op. When the grace EXPIRES first the order flips: the
+  // ceiling writes the accepted state and the still-running `execute()` arrives
+  // later carrying post-ceiling state, so that writer loses. This freezes
+  // `fillRereviewProvenance` with it: whichever snapshot landed first is the
+  // `rereview.live` fill the CLI keeps.
   snapshotWritten: boolean;
   summary?: RunSummary;
   perAgent: Record<string, PerAgentUsage>;
@@ -657,21 +676,95 @@ export async function runPipeline(
     steps: [],
     worsenedHits: [],
   };
-  // Pipeline ceiling: on firing, return what is assembled so far with
-  // run_status "partial". The in-flight step promises are abandoned, not
-  // awaited — the runner's own per-step watchdogs will reap the processes.
+  // Pipeline ceiling (§5.3 at pipeline scope, D1-10b). On firing it marks the
+  // run partial, ABORTS the shared controller — which is what stops the legs
+  // below from spawning anything else and what stops the harness from starting
+  // another attempt — then waits out a bounded grace before snapshotting once.
+  //
+  // It used to be a bare `Promise.race` that resolved the caller's promise and
+  // walked away from a still-running `execute()`. That abandoned run went on to
+  // spawn the whole refuter fan-out and the whole verify fan-out: real, paid
+  // steps launched after the ceiling had already reported the run finished.
+  //
+  // The cost of doing it properly, stated out loud: worst-case wall clock is
+  // now `pipelineTimeoutMs + graceMs`, not `pipelineTimeoutMs`. The CI job
+  // bound (90 min) sits above the ceiling (75 min) with far more room than the
+  // 8.5 s this adds — see test/ci-setup.test.ts.
+  const controller = deps.ceilingController ?? new AbortController();
+  const legDeps: PipelineDeps = { ...deps, ceilingController: controller };
+  const graceMs =
+    input.ceilingGraceMs ??
+    DEFAULT_CANCELLATION_DEADLINE_MS + HARNESS_GRACE_MARGIN_MS;
+  // WHY the outcome capture instead of awaiting `execute()` directly: this
+  // promise NEVER rejects, so a run that throws AFTER the ceiling has already
+  // resolved cannot surface as an unhandled rejection — which in Bun takes the
+  // test runner (and a real CLI process) down with it. The hazard existed
+  // before D1-10b and this restructure makes it reachable, because the ceiling
+  // now keeps waiting on that promise instead of dropping it. A pre-ceiling
+  // throw still rejects `runPipeline`: it is rethrown below.
+  const execSettled: Promise<ExecOutcome> = execute(input, legDeps, state).then(
+    (value) => ({ ok: true as const, value }),
+    (error) => ({ ok: false as const, error }),
+  );
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const ceiling = new Promise<PipelineResult>((resolve) => {
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const ceiling = new Promise<typeof CEILING_FIRED>((resolve) => {
     timer = setTimeout(() => {
+      // §5.3 step 3, inside the timer itself rather than in the continuation
+      // that observes it: a run already inside `finish()` when the ceiling
+      // fires must not read `partial` as false and stamp itself complete.
       state.partial = true;
-      resolve(finish(input, state));
+      controller.abort();
+      resolve(CEILING_FIRED);
     }, input.pipelineTimeoutMs ?? DEFAULT_PIPELINE_TIMEOUT_MS);
   });
   try {
-    return await Promise.race([execute(input, deps, state), ceiling]);
+    const raced = await Promise.race([execSettled, ceiling]);
+    if (raced !== CEILING_FIRED) {
+      if (raced.ok) return raced.value;
+      throw raced.error;
+    }
+    // §5.3 step 4: wait out the bounded grace before snapshotting.
+    await Promise.race([
+      execSettled,
+      new Promise<void>((resolve) => {
+        // A `setTimeout` with a handle rather than `Bun.sleep`: the losing side
+        // of this race must still be cancellable, or a run that settles inside
+        // the grace leaves an 8.5 s timer holding the event loop open.
+        graceTimer = setTimeout(resolve, graceMs);
+      }),
+    ]);
+    // §5.3 step 7: exactly one snapshot. If `execute()` finished inside the
+    // grace it already wrote it and `writePipelinePlan`'s latch makes this call
+    // a no-op; if the grace expired, this IS the snapshot.
+    return await finish(input, state);
   } finally {
     clearTimeout(timer);
+    clearTimeout(graceTimer);
   }
+}
+
+// The ceiling's race needs a value that cannot collide with an ExecOutcome.
+const CEILING_FIRED = Symbol("pipeline-ceiling-fired");
+
+type ExecOutcome =
+  | { readonly ok: true; readonly value: PipelineResult }
+  | { readonly ok: false; readonly error: unknown };
+
+// §5.3 D1-10b admission: a leg that has not spawned yet must not spawn once the
+// ceiling has aborted. Marking the run partial here is not decoration — a run
+// that silently dropped its refuter leg and still reported `complete` would
+// promote unrefuted BLOCKERs on a truncated run.
+//
+// RETRIES need no gate of their own: the harness already refuses a new attempt
+// once its cancel signal is aborted (src/execution/harness.ts §5.3 step 1, at
+// both the attempt loop and the format-retry). That is the other half of §13's
+// "no new steps/retries" closure line, and adding a second gate here would only
+// duplicate it.
+function ceilingAborted(deps: PipelineDeps, state: RunState): boolean {
+  if (deps.ceilingController?.signal.aborted !== true) return false;
+  state.partial = true;
+  return true;
 }
 
 async function execute(
@@ -762,16 +855,24 @@ async function execute(
   // composition loop that consumes its leads. It is AWAITED, unlike the
   // summarizer, which puts it on the critical path — the cost this design
   // states out loud (§3.9) rather than hiding.
-  const leadsBlock = skipDiscovery
-    ? ""
-    : await runScout(input, deps, state, patch, stepsDir, boundaryNonce);
+  // A ceiling that fired before the scout was even spawned skips it and hunts
+  // without leads — the control pipeline's shape, which is a degraded run, not
+  // a broken one.
+  const leadsBlock =
+    skipDiscovery || ceilingAborted(deps, state)
+      ? ""
+      : await runScout(input, deps, state, patch, stepsDir, boundaryNonce);
 
   // Step 4 — hunter fan-out.
   const stepTimeoutMs = input.stepTimeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+  // §5.3 admission, checked BEFORE the composition loop and not at the join:
+  // composing writes a system prompt per hunter to the run dir, so an aborted
+  // run should not even build the specs it will never spawn.
+  const huntersAdmitted = !ceilingAborted(deps, state);
   // validateReviewSpec pins hunter keys inside the findings-schema Hunter
   // enum (v1.0.0 constraint), so the cast below is checked, not assumed.
   const hunterSpecs: Array<{ key: Hunter; spec: StepSpec }> = [];
-  for (const hunter of hunters) {
+  for (const hunter of huntersAdmitted ? hunters : []) {
     const agent = await parseAgentFile(path.join(input.agentsDir, hunter.file));
     const name = `hunter-${hunter.key}`;
     const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
@@ -825,7 +926,9 @@ async function execute(
   let summarizerSpec: StepSpec | undefined;
   let summarizerMeta: StepMeta | undefined;
   let summarizerConstructionFailed = false;
-  if (input.summarizer && !skipDiscovery) {
+  // The summarizer rides the hunter fan-out, so it is admitted with it: an
+  // aborted run must not spawn a summary step either.
+  if (input.summarizer && !skipDiscovery && huntersAdmitted) {
     const name = "summarizer";
     const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
     const outPath = path.join(stepsDir, `${name}.summary.json`);
@@ -1027,7 +1130,12 @@ async function execute(
   for (const entry of closed.capped) {
     state.verifyVerdicts.set(entry.priorId, "unconfirmed");
   }
-  if (closed.verify.length > 0) {
+  // §5.3 admission for the verify leg. Absence needs no backfill here:
+  // `assembleLive` already reads a prior id missing from `verifyVerdicts` as
+  // `unconfirmed` (src/rereview-state.ts), which is exactly what "the check
+  // never ran" means — §3.3's "`resolved` is never inferred from absence"
+  // holds without this branch writing anything.
+  if (closed.verify.length > 0 && !ceilingAborted(deps, state)) {
     emit(deps, {
       kind: "verify-started",
       queued: closed.verify.length,
@@ -1069,7 +1177,11 @@ async function execute(
   // configured absence, not failure: every finding stays not_submitted (so
   // inferential BLOCKER/CRITICAL findings can never reach blocking tier) and
   // the run stays complete.
-  if (batch.length > 0 && refuterAgent) {
+  // §5.3 admission for the refuter leg. A skipped batch needs no backfill
+  // either: `finish()` reads a survivor missing from `state.verdicts` as
+  // `not_submitted`, so an unrefuted BLOCKER cannot reach blocking tier — the
+  // conservative direction, and the run is already marked partial.
+  if (batch.length > 0 && refuterAgent && !ceilingAborted(deps, state)) {
     emit(deps, {
       kind: "refuter-started",
       severeFindings: batch.length,
@@ -1722,9 +1834,10 @@ async function writePipelinePlan(
   input: PipelineInput,
   state: RunState,
 ): Promise<void> {
-  // Latched BEFORE the first await, not after: the abandoned `execute()` runs
-  // concurrently with the ceiling's write, and a check that yielded first would
-  // let the second caller walk straight past a flag the first had not set yet.
+  // Latched BEFORE the first await, not after: when the ceiling's grace expires
+  // first, the still-running `execute()` writes concurrently with the ceiling,
+  // and a check that yielded first would let the second caller walk straight
+  // past a flag the first had not set yet.
   if (state.snapshotWritten) return;
   state.snapshotWritten = true;
   const plan = {

@@ -55,7 +55,7 @@ class FakeStepRunner implements StepRunner {
 // `delayMs`. That is what lets a test fire the pipeline ceiling (§5.3) with a
 // tiny `pipelineTimeoutMs` while real steps are still in flight. `inFlight`
 // keeps every step promise the pipeline started so a test can await the work
-// the ceiling ABANDONED rather than guess at a sleep length.
+// an EXPIRED grace left running rather than guess at a sleep length.
 // ---------------------------------------------------------------------------
 
 class SlowStepRunner implements StepRunner {
@@ -74,6 +74,35 @@ class SlowStepRunner implements StepRunner {
     return settled;
   }
 }
+
+// NeverStepRunner: a step that never settles at all. The only way to exercise
+// §5.3 step 4's grace EXPIRY — a SlowStepRunner always settles eventually, so
+// with any generous grace it proves the other branch.
+class NeverStepRunner implements StepRunner {
+  readonly specs: StepSpec[] = [];
+  run(spec: StepSpec): Promise<StepResult> {
+    this.specs.push(spec);
+    return new Promise<StepResult>(() => {});
+  }
+}
+
+// Drain the work an expired grace left running: every step promise the runner
+// started, then a short tick for execute()'s tail (dedupe + finish()) to run to
+// completion. Shared by every ceiling test — after D1-10b an orphan exists ONLY
+// on the grace-expiry path, and that is exactly where these still apply.
+async function drainAbandonedRun(runner: SlowStepRunner): Promise<void> {
+  await Promise.all(runner.inFlight);
+  await Bun.sleep(150);
+}
+
+// A grace short enough that it expires before a 300 ms step settles: what a
+// test injects when it wants the ORPHAN branch of §5.3 step 4.
+const TINY_GRACE_MS = 30;
+// A grace long enough that a 300 ms step always settles first. It costs no wall
+// clock — the grace race resolves the instant execute() does — so a generous
+// bound is strictly better than a tight one, which would only be a CI flake
+// surface.
+const AMPLE_GRACE_MS = 5_000;
 
 function usage(overrides: Partial<SessionUsage> = {}): SessionUsage {
   return {
@@ -2488,22 +2517,22 @@ describe("C4 runtime-safety preamble", () => {
 
 describe("pipeline ceiling snapshot", () => {
   // Both hunters return nothing, on purpose: zero findings means no refuter
-  // fan-out and no verify steps, so the execute() the ceiling abandons cannot
-  // reach a step name this script does not answer.
+  // fan-out and no verify steps, so the run these tests observe reaches
+  // finish() from the hunter leg alone and cannot hit a step name this script
+  // does not answer.
   const SLOW_HUNTERS: StepScript = {
     "hunter-reliability": (spec) => ok(spec, emptyDraft()),
     "hunter-resilience": (spec) => ok(spec, emptyDraft()),
   };
 
-  // Drain the work the ceiling walked away from: every step promise, then a
-  // short tick for execute()'s tail (dedupe + finish()) to run to completion.
-  async function drainAbandonedRun(runner: SlowStepRunner): Promise<void> {
-    await Promise.all(runner.inFlight);
-    await Bun.sleep(150);
-  }
-
   test("§5.3 — the ceiling persists one complete, parseable partial snapshot", async () => {
-    const input = await makeInput({ pipelineTimeoutMs: 50 });
+    // The grace is ample here: execute() settles INSIDE it, which is the
+    // ordinary D1-10b shape — the ceiling aborts, waits, and the run lands
+    // with no orphan behind it.
+    const input = await makeInput({
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: AMPLE_GRACE_MS,
+    });
     const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
     const result = await runPipeline(input, { runner });
 
@@ -2516,12 +2545,23 @@ describe("pipeline ceiling snapshot", () => {
     const plan = await readPlan(input.runDir);
     expect(plan.pr).toBe(1539);
     expect(plan.head_sha).toBe("4609456d");
-
-    await drainAbandonedRun(runner);
+    // No orphan to drain: the grace outlived the steps, so the run this test
+    // returned from is the whole run.
+    expect(runner.specs.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
   });
 
-  test("§13 — the abandoned execute() never overwrites the ceiling's snapshot", async () => {
-    const input = await makeInput({ pipelineTimeoutMs: 50 });
+  test("§13 — a run the expired grace left running never overwrites the ceiling's snapshot", async () => {
+    // TINY_GRACE_MS is what makes an orphan exist at all after D1-10b: the
+    // grace expires ~30 ms after the ceiling fires while the steps need 300 ms,
+    // so execute() is still running when runPipeline returns. This is the exact
+    // premise the pre-D1-10b version of this test got from race-and-abandon.
+    const input = await makeInput({
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: TINY_GRACE_MS,
+    });
     const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
     const planPath = path.join(input.runDir, "pipeline.json");
 
@@ -2530,9 +2570,9 @@ describe("pipeline ceiling snapshot", () => {
     expect(result.skillOutput.run_status).toBe("partial");
     const atCeiling = await Bun.file(planPath).text();
 
-    // The ceiling resolves the race and abandons execute(), which keeps running
-    // and reaches the SAME finish() ~300 ms later carrying post-ceiling state.
-    // Its snapshot is not the accepted one: the ceiling's is.
+    // The orphaned execute() keeps running and reaches the SAME finish()
+    // ~250 ms later carrying post-ceiling state. Its snapshot is not the
+    // accepted one: the ceiling's is.
     await drainAbandonedRun(runner);
 
     expect(await Bun.file(planPath).text()).toBe(atCeiling);
@@ -2558,12 +2598,17 @@ describe("pipeline ceiling snapshot", () => {
   //
   // What this test does NOT prove, stated so the comment cannot overclaim
   // (pr-hero F001 on the follow-up head): recovery here needs an in-process
-  // caller that stays alive to drain the abandoned run. `runCli` calls
+  // caller that stays alive to drain the orphaned run. `runCli` calls
   // process.exit() as soon as runPipeline rejects, so the CLI itself never
-  // reaches the retry. Closing that is D1-10b's job — the coordinator awaits
-  // the bounded grace and persists ONCE, leaving no orphan to depend on.
+  // reaches the retry. D1-10b narrowed the window rather than closing it: on
+  // the ordinary path the ceiling awaits the grace and persists ONCE, with no
+  // orphan to depend on — an orphaned second writer now exists only when the
+  // grace EXPIRES first, which is what TINY_GRACE_MS constructs here.
   test("a failed snapshot write releases the latch for the second writer", async () => {
-    const input = await makeInput({ pipelineTimeoutMs: 50 });
+    const input = await makeInput({
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: TINY_GRACE_MS,
+    });
     const runner = new SlowStepRunner(SLOW_HUNTERS, 300);
     const planPath = path.join(input.runDir, "pipeline.json");
     // A DIRECTORY at the target makes the tmp+rename swap fail — this repo's
@@ -2572,7 +2617,7 @@ describe("pipeline ceiling snapshot", () => {
 
     await expect(runPipeline(input, { runner })).rejects.toThrow();
 
-    // The blip clears before the abandoned execute() reaches finish().
+    // The blip clears before the orphaned execute() reaches finish().
     await rm(planPath, { recursive: true, force: true });
     await drainAbandonedRun(runner);
 
@@ -2610,6 +2655,181 @@ describe("pipeline ceiling snapshot", () => {
     expect(plan.boundary_nonce).toHaveLength(8);
     expect(Number.isNaN(Date.parse(plan.generated_at))).toBe(false);
     expect(plan.steps.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D1-10b — §13's closure line: "no new steps/retries and exactly one atomic
+// partial snapshot after lease invalidation".
+//
+// Before D1-10b the ceiling was a bare `Promise.race` that resolved the
+// caller's promise and ABANDONED execute(), which kept running — and kept
+// spawning. The refuter fan-out and the verify fan-out both sit after the
+// hunter join, so a ceiling that fired during the hunters still paid for every
+// refuter and verify step the run went on to launch. The ceiling now aborts a
+// shared controller BEFORE it waits, and each leg checks that signal before it
+// builds or spawns anything.
+//
+// The "and retries" half of that line needs nothing here: the harness already
+// gates every attempt on its own cancel signal (src/execution/harness.ts §5.3
+// step 1). This is the pipeline-scope half.
+// ---------------------------------------------------------------------------
+
+describe("pipeline ceiling admission (§13 closure line)", () => {
+  // A BLOCKER survivor is what makes the refuter leg reachable, and a queued
+  // prior is what makes the verify leg reachable. Without BOTH, "the leg never
+  // spawned" would be true of every run in this file — vacuously.
+  const script = (): StepScript => ({
+    "hunter-reliability": (spec) =>
+      ok(spec, {
+        findings: [
+          draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+        ],
+      }),
+    "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+    refuter: (spec) =>
+      ok(spec, {
+        results: [
+          { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+        ],
+      } satisfies RefuterResult),
+    verifier: (spec) =>
+      ok(spec, {
+        results: [
+          { finding_id: "V001", outcome: "corroborated", proof_refs: [] },
+        ],
+      } satisfies RefuterResult),
+  });
+
+  const VERIFY_QUEUE = [
+    {
+      priorId: "R001",
+      sev: "CRITICAL" as const,
+      trigger: "touched" as const,
+      claim: "a live defect",
+      locs: ["src/app.ts:10"],
+      authorReply: "",
+      commentBody: "",
+      triageTag: "",
+      deltaHunks: "",
+    },
+  ];
+
+  test("control — with no ceiling this exact run spawns both the verify and the refuter legs", async () => {
+    const runner = new FakeStepRunner(script());
+    const input = await makeInput({ verifyQueue: VERIFY_QUEUE });
+
+    await runPipeline(input, { runner });
+
+    const names = runner.specs.map((s) => s.name);
+    expect(names).toContain("refuter-F001");
+    expect(names.some((name) => name.startsWith("verify-"))).toBe(true);
+  });
+
+  test("§13 — once the ceiling fires, neither the refuter nor the verify leg spawns a step", async () => {
+    // TINY_GRACE_MS on purpose: the grace expires while the hunters are still
+    // in flight, so execute() runs on as an orphan and reaches BOTH fan-outs
+    // after the abort. That is the branch where a missing admission check
+    // would still spend money, and the one this asserts over.
+    const runner = new SlowStepRunner(script(), 300);
+    const input = await makeInput({
+      verifyQueue: VERIFY_QUEUE,
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: TINY_GRACE_MS,
+    });
+    const planPath = path.join(input.runDir, "pipeline.json");
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("partial");
+    const atCeiling = await Bun.file(planPath).text();
+
+    await drainAbandonedRun(runner);
+
+    // The hunters were already in flight when the ceiling fired; nothing after
+    // them was ever built or spawned.
+    expect(runner.specs.map((s) => s.name)).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
+    // Exactly one atomic partial snapshot, unchanged by the orphan.
+    const entries = await readdir(input.runDir);
+    expect(entries).toContain("pipeline.json");
+    expect(entries).not.toContain("pipeline.json.tmp");
+    expect(await Bun.file(planPath).text()).toBe(atCeiling);
+  });
+
+  test("§13 — a ceiling that fires during the scout spawns no hunter at all", async () => {
+    // The hunter admission check sits BEFORE the composition loop, not at the
+    // join: composing writes a system prompt per hunter into the run dir, so an
+    // aborted run should not even build the specs it will never spawn. The
+    // scout is the one stage that can hold a run long enough for a ceiling to
+    // land ahead of the hunters, which is what makes this observable at all.
+    const runner = new SlowStepRunner(
+      { scout: (spec) => ok(spec, leads(["src/app.ts", 10, "suspicious"])) },
+      300,
+    );
+    const input = await makeInput({
+      scout: { promptPath: BUNDLED_SCOUT_PROMPT },
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: TINY_GRACE_MS,
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("partial");
+    await drainAbandonedRun(runner);
+
+    // Only the scout, which was already in flight when the ceiling fired. A
+    // hunter reaching this runner would throw `unscripted step` — but it never
+    // gets that far, and `specs` is what proves it.
+    expect(runner.specs.map((s) => s.name)).toEqual(["scout"]);
+    const plan = (await readPlan(input.runDir)) as {
+      steps: Array<{ name: string }>;
+    };
+    expect(plan.steps.map((step) => step.name)).toEqual(["scout"]);
+  });
+
+  test("a run that throws before the ceiling ever fires still REJECTS", async () => {
+    // The outcome capture that stops a POST-ceiling throw from becoming an
+    // unhandled rejection must not also swallow the ordinary failure path: a
+    // run that dies on its own, with the ceiling still 75 minutes away, is
+    // still the caller's error to handle.
+    const runner = new FakeStepRunner(script());
+    const input = await makeInput({
+      agentsDir: path.join(tmpdir(), "pr-hero-agents-that-do-not-exist"),
+    });
+
+    await expect(runPipeline(input, { runner })).rejects.toThrow();
+  });
+
+  test("§5.3 step 4 — a step that never settles still lands the run at timeout + grace", async () => {
+    // The grace EXPIRY branch in isolation: no step ever settles, so the only
+    // thing that can resolve this run is the bounded wait. Without it the
+    // pipeline would hang forever on its own await.
+    const runner = new NeverStepRunner();
+    const input = await makeInput({
+      pipelineTimeoutMs: 50,
+      ceilingGraceMs: 120,
+    });
+
+    const startedAt = Date.now();
+    const result = await runPipeline(input, { runner });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(result.skillOutput.run_status).toBe("partial");
+    // The ceiling did not resolve early: it waited out the grace it promised.
+    // The bound is loose by design — timers under load fire late, never early
+    // enough to make this a flake.
+    expect(elapsedMs).toBeGreaterThanOrEqual(150);
+    const entries = await readdir(input.runDir);
+    expect(entries).toContain("pipeline.json");
+    expect(entries).not.toContain("pipeline.json.tmp");
+    // Nothing beyond the hunters was ever reached, and nothing retried.
+    expect(runner.specs.map((s) => s.name)).toEqual([
       "hunter-reliability",
       "hunter-resilience",
     ]);
