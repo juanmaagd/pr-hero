@@ -36,7 +36,12 @@ const DEFAULT_STALL_DEADLINE_MS = 10_000;
 // deadline is 6,500 ms including margin and is declared via capabilities().
 const SDK_ABORT_CONFIRM_MS = 5000;
 const SDK_CLEANUP_MS = 1000;
-const SDK_CANCELLATION_DEADLINE_MS = 6500;
+// The margin the §5.2 row folds in on top of confirm+cleanup. Declared as a
+// term rather than a literal total because harness.ts:425 TRUSTS the number
+// capabilities() reports as the real bound: a constant would let an instance
+// configured with larger budgets promise less time than it needs, and the
+// harness would call a still-in-budget cancellation unconfirmed.
+const SDK_DEADLINE_MARGIN_MS = 500;
 
 // §197 names stream/poll arbitration without fixing numbers: the poll cadence
 // and the per-round timeout are transport-declared defaults. A poll round that
@@ -128,6 +133,8 @@ const MARKER_BOUND_AGGREGATE =
   "[pr-hero] opencode sdk: aggregate finalText exceeded the hard aggregate content bound";
 const MARKER_USAGE_FLIP =
   "[pr-hero] opencode sdk: usage aggregation mode changed after the first usage event fixed it";
+const MARKER_TIMEOUT = "[pr-hero] opencode sdk: attempt watchdog expired";
+
 const MARKER_CONFLICT =
   "[pr-hero] opencode sdk: conflicting provider terminal observed after the compare-and-set slot was won";
 
@@ -138,13 +145,37 @@ type SettleReason =
   | { readonly kind: "bound"; readonly target: "delta" | "aggregate" }
   | { readonly kind: "stall" }
   | { readonly kind: "stream_error"; readonly detail: string }
+  | { readonly kind: "timeout"; readonly timeoutMs: number }
   | { readonly kind: "abort_confirmed" }
   | { readonly kind: "abort_unconfirmed" };
 
 type PushResult = "accepted" | "closed" | "stalled";
 
+// Sentinel for the stream watcher's race against settlement.
+const STREAM_SETTLED = "stream_settled" as const;
+
 function utf8Bytes(text: string): number {
   return new TextEncoder().encode(text).length;
+}
+
+// The tail bound is declared in BYTES, so it is enforced in bytes. String
+// .slice counts UTF-16 code units, which lets multi-byte provider text run
+// past the bound the transport claims.
+//
+// Keeping the last maxBytes bytes can tear a multi-byte sequence at the head,
+// and decoding that orphan does not merely lose a character — it GROWS the
+// result: every stray continuation byte becomes a U+FFFD, which is three
+// bytes in UTF-8, so a byte-exact cut can come back over the bound. The head
+// is therefore advanced past any continuation bytes (0b10xxxxxx) to land on a
+// real character boundary, which can only shorten the tail.
+function boundTailBytes(text: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length <= maxBytes) return text;
+  let start = bytes.length - maxBytes;
+  while (start < bytes.length && (bytes[start] & 0b1100_0000) === 0b1000_0000) {
+    start += 1;
+  }
+  return new TextDecoder().decode(bytes.slice(start));
 }
 
 function errorMessage(error: unknown): string {
@@ -220,7 +251,8 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         usageMode: "none",
       },
       cancellation: {
-        deadlineMs: SDK_CANCELLATION_DEADLINE_MS,
+        deadlineMs:
+          this.abortConfirmMs + this.cleanupMs + SDK_DEADLINE_MARGIN_MS,
         conformance: "passed",
       },
       billing: {
@@ -451,10 +483,48 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       context.signal.addEventListener("abort", onAbortSignal, { once: true });
     }
 
+    // §7 / the sibling CLI transport (claude-code-cli.ts:392): the request's
+    // own per-attempt deadline is the transport's to enforce. The harness has
+    // no equivalent — its deadlineMs is the CANCELLATION budget, which only
+    // starts once a cancel is requested — so without this a provider that
+    // streams heartbeats forever while every poll stays pending hangs the
+    // attempt and the pipeline step awaiting it, with no backstop at all.
+    //
+    // It settles on its OWN reason and never through runAbortSequence(). That
+    // path stamps MARKER_ABORT_UNCONFIRMED, which classifyFailure maps to
+    // remote_abort_unconfirmed — a TERMINAL cause. A watchdog timeout is
+    // transient and must stay retryable; laundering it through abort would
+    // make every hung attempt un-retryable, the opposite of what it means.
+    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
+      const timeoutMs = request.timeoutMs;
+      scheduleTracked(timeoutMs, () => settle({ kind: "timeout", timeoutMs }));
+    }
+
     // ---- stream watcher ----------------------------------------------------
     const runStream = async (): Promise<void> => {
+      // NOT `for await`. execute() awaits `done`, never the watchers, so when
+      // settlement is decided by the poll watcher or the attempt watchdog this
+      // loop is parked inside next() — and its `if (settled)` guard only runs
+      // once an event arrives. A provider that then goes quiet leaves the
+      // subscription open forever. The poll watcher escapes because it wakes
+      // on its own delay(); the stream watcher has no timer of its own, so it
+      // is given one thing to race: settlement itself.
+      //
+      // Calling .return() from the outside would not have fixed it either —
+      // on an async generator it queues BEHIND the pending next(), so a parked
+      // watcher stays parked. Racing next() is what actually releases it.
+      const iterator = this.client
+        .streamEvents(session)
+        [Symbol.asyncIterator]();
+      // Attached ONCE: a per-iteration `done.then(...)` would pile a handler
+      // onto `done` for every event a long stream delivers.
+      const settledSignal = done.then(() => STREAM_SETTLED);
       try {
-        for await (const event of this.client.streamEvents(session)) {
+        for (;;) {
+          const step = await Promise.race([iterator.next(), settledSignal]);
+          if (step === STREAM_SETTLED) return;
+          if (step.done === true) break;
+          const event = step.value;
           if (settled) return;
           switch (event.kind) {
             case "delta": {
@@ -586,6 +656,11 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         );
       } catch (error) {
         settle({ kind: "stream_error", detail: errorMessage(error) });
+      } finally {
+        // Best-effort teardown on EVERY exit — settled, EOF, bound, or error.
+        // A provider that never implements return() simply has nothing to
+        // close, and a rejecting one must not take the attempt down with it.
+        void iterator.return?.().catch(() => {});
       }
     };
 
@@ -642,6 +717,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       (reason.kind === "bound" ||
         reason.kind === "stall" ||
         reason.kind === "stream_error" ||
+        reason.kind === "timeout" ||
         reason.kind === "usage_flip") &&
       !abortSequenceStarted
     ) {
@@ -661,6 +737,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       );
     }
     if (reason.kind === "stall") notes.push(MARKER_STALL);
+    if (reason.kind === "timeout") {
+      notes.push(`${MARKER_TIMEOUT} after ${reason.timeoutMs}ms`);
+    }
     if (reason.kind === "stream_error") {
       notes.push(`[pr-hero] opencode sdk: stream errored: ${reason.detail}`);
     }
@@ -724,6 +803,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         protocolIntegrity = "overflow";
         break;
       case "stream_error":
+      case "timeout":
         completion = "failed";
         protocolIntegrity = "unverified";
         break;
@@ -752,7 +832,11 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         ...usageAccumulator,
         wall_ms: Date.now() - startedWall,
       },
-      stderrTail: notes.join("\n").slice(-MAX_STDERR_TAIL_BYTES),
+      // The raw fact §7 needs to reach watchdog_timeout: the legacy classifier
+      // collapses it into "transient", and the D1-07 bridge recovers the
+      // distinction from THIS flag, not from the class.
+      ...(reason.kind === "timeout" ? { timedOut: true } : {}),
+      stderrTail: boundTailBytes(notes.join("\n"), MAX_STDERR_TAIL_BYTES),
     };
 
     // §4.1: the transport normally supplies the attempt's ONE terminal event.
@@ -806,7 +890,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   classifyFailure(
     outcome: TransportOutcome,
   ): TransportFailureCause | undefined {
-    const witness = `${outcome.stderrTail}\n${outcome.finalText}`;
+    // finalText is deliberately NOT part of the witness. It is model-generated
+    // review prose, and pr-hero reviews code for exactly the failure modes
+    // these patterns name — "no rate limit on this endpoint", "unauthorized
+    // access is possible" — so including it makes the tool's own subject
+    // matter look like provider diagnostics. Every violation this transport
+    // detects is stamped into `notes`, and the provider's own stream error is
+    // recorded there too, so stderrTail is the complete diagnostics channel.
+    const witness = outcome.stderrTail;
     if (witness.includes(MARKER_ABORT_UNCONFIRMED)) {
       return "remote_abort_unconfirmed";
     }

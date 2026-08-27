@@ -642,3 +642,242 @@ describe("OpenCodeSdkTransport failure surface", () => {
     ).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// pr-hero findings on PR #74 (head 76cd96c2). All five were confirmed against
+// the repository before any code moved; these tests pin the fixes.
+// ---------------------------------------------------------------------------
+
+describe("OpenCodeSdkTransport per-attempt deadline (F006)", () => {
+  // The sibling ClaudeCodeCliTransport self-enforces request.timeoutMs
+  // (src/transports/claude-code-cli.ts:392). The harness does NOT supply a
+  // per-attempt watchdog — its deadlineMs is the CANCELLATION budget
+  // (harness.ts:769 resolveCancellationDeadlineMs), which only starts once a
+  // cancel is requested. So a provider that streams heartbeats forever while
+  // every poll stays pending would hang the attempt, and the pipeline step
+  // awaiting it, with no internal backstop at all.
+  test("a hung provider is terminated by the request's own timeout", async () => {
+    const handle = makeClient({});
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest({ timeoutMs: 1000 }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.timedOut).toBe(true);
+  });
+
+  // The distinction that makes this fix worth anything: a watchdog timeout is
+  // TRANSIENT and must stay retryable. Settling through the abort path would
+  // stamp MARKER_ABORT_UNCONFIRMED into the notes, which classifyFailure maps
+  // to remote_abort_unconfirmed — a TERMINAL cause under §7. The attempt
+  // would never be retried, which is the opposite of what a timeout means.
+  test("a timeout is not laundered into an unconfirmed remote abort", async () => {
+    const handle = makeClient({});
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest({ timeoutMs: 1000 }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).not.toBe("cancelled");
+    expect(rig.transport.classifyFailure(outcome)).not.toBe(
+      "remote_abort_unconfirmed",
+    );
+    // Paid remote work still gets a best-effort abort — as cleanup after the
+    // settlement, never as the thing that decided it.
+    expect(handle.abortCount()).toBe(1);
+  });
+
+  test("no timeout is armed when the request declares none", async () => {
+    const handle = makeClient({
+      stream: streamOf([{ kind: "terminal", proof: completedProof("e1") }]),
+      polls: [{ kind: "terminal", proof: completedProof("e1") }],
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+    expect(outcome.completion).toBe("success");
+    expect(outcome.timedOut).toBeUndefined();
+  });
+});
+
+describe("OpenCodeSdkTransport stream teardown (F005)", () => {
+  // execute() awaits `done`, not the watchers (opencode-sdk.ts:631-633). The
+  // poll watcher self-terminates because it wakes on its own delay() and
+  // re-checks `settled`; the stream watcher has no timer of its own — it is
+  // parked on next(), and its `if (settled) return` only runs when an event
+  // arrives. When settlement comes from the poll watcher or the timeout, a
+  // provider that then goes quiet leaves that subscription open forever.
+  test("the stream iterator is closed when settlement comes from elsewhere", async () => {
+    let returned = false;
+    let opened = false;
+    const client: OpenCodeClientLike = {
+      createSession: async () => ({ id: "oc-sess-1" }),
+      streamEvents: () =>
+        ({
+          [Symbol.asyncIterator]() {
+            opened = true;
+            return {
+              // Parked forever: the provider went quiet after settlement.
+              next: () => new Promise<never>(() => {}),
+              return: async () => {
+                returned = true;
+                return { done: true as const, value: undefined };
+              },
+            };
+          },
+        }) as AsyncIterable<OpenCodeClientEvent>,
+      pollStatus: async () => ({
+        kind: "terminal" as const,
+        proof: completedProof("e-poll"),
+      }),
+      abort: async () => {},
+    };
+    const rig = makeRig({ client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(opened).toBe(true);
+    expect(outcome.completion).toBe("success");
+    await flush();
+    expect(returned).toBe(true);
+  });
+});
+
+describe("OpenCodeSdkTransport declared capabilities (F001)", () => {
+  // harness.ts:425 reads report.cancellation.deadlineMs and TRUSTS it as the
+  // real bound before treating a cancellation as unconfirmed. Declaring a
+  // fixed module constant while abortConfirmMs/cleanupMs are constructor
+  // options means an instance can be configured to need longer than it
+  // promises, and the harness would give up early on a transport that was
+  // still within its own budget.
+  test("the declared deadline follows the instance's actual budgets", async () => {
+    const handle = makeClient({});
+    const rig = makeRig({
+      client: handle.client,
+      transport: { abortConfirmMs: 500, cleanupMs: 100 },
+    });
+    const report = await rig.transport.capabilities();
+    expect(report.cancellation.deadlineMs).toBe(1100);
+
+    const slow = makeRig({
+      client: handle.client,
+      transport: { abortConfirmMs: 20_000, cleanupMs: 3_000 },
+    });
+    expect((await slow.transport.capabilities()).cancellation.deadlineMs).toBe(
+      23_500,
+    );
+  });
+
+  test("the production defaults still declare the §5.2 SDK row's 6,500 ms", async () => {
+    const transport = new OpenCodeSdkTransport({
+      client: makeClient({}).client,
+    });
+    expect((await transport.capabilities()).cancellation.deadlineMs).toBe(6500);
+  });
+});
+
+describe("OpenCodeSdkTransport stderrTail byte bound (F002)", () => {
+  // MAX_STDERR_TAIL_BYTES is declared and documented as a BYTE bound, and the
+  // file's own utf8Bytes() helper is used correctly for the delta and
+  // aggregate bounds. String.slice counts UTF-16 code units, so multi-byte
+  // provider text sails past the bound the transport claims to enforce.
+  test("a multi-byte tail is bounded in bytes, not code units", async () => {
+    // Each stream error detail is multi-byte; enough of them to blow a
+    // code-unit-based trim well past 64 KiB of actual bytes.
+    const detail = "→".repeat(40_000);
+    const handle = makeClient({ stream: new Error(detail) });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(
+      new TextEncoder().encode(outcome.stderrTail).length,
+    ).toBeLessThanOrEqual(64 * 1024);
+    // Still a usable tail, not an empty string.
+    expect(outcome.stderrTail.length).toBeGreaterThan(0);
+  });
+});
+
+describe("OpenCodeSdkTransport classification witness (F003)", () => {
+  // finalText is model-generated REVIEW PROSE, and pr-hero reviews code for
+  // exactly these failure modes — "no rate limit on this endpoint",
+  // "unauthorized access is possible". Matching generic patterns against it
+  // makes the tool's own subject-matter vocabulary look like provider
+  // diagnostics. Every violation this transport detects is stamped into
+  // `notes` → stderrTail (opencode-sdk.ts:664-672), so stderrTail is the
+  // complete diagnostics channel and finalText has no business in the
+  // witness at all.
+  test("review prose about auth and rate limits is not a transport failure", () => {
+    const transport = new OpenCodeSdkTransport({
+      client: makeClient({}).client,
+    });
+    const prose = [
+      "The handler allows unauthorized access when the token is absent.",
+      "There is no rate limit on this endpoint, so quota exceeded errors are likely.",
+      "Please log in is rendered even after a successful network error retry.",
+    ].join("\n");
+    expect(
+      transport.classifyFailure({
+        completion: "failed",
+        protocolIntegrity: "verified",
+        finalText: prose,
+        usage: {
+          wall_ms: 1,
+          tokens_in: 1,
+          tokens_out: 0,
+          tokens_total: 1,
+          cost_usd_est: 0,
+        },
+        stderrTail: "",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("the same words in the provider's own stderr still classify", () => {
+    const transport = new OpenCodeSdkTransport({
+      client: makeClient({}).client,
+    });
+    const base = {
+      completion: "failed" as const,
+      protocolIntegrity: "verified" as const,
+      finalText: "",
+      usage: {
+        wall_ms: 1,
+        tokens_in: 1,
+        tokens_out: 0,
+        tokens_total: 1,
+        cost_usd_est: 0,
+      },
+    };
+    expect(
+      transport.classifyFailure({ ...base, stderrTail: "401 unauthorized" }),
+    ).toBe("auth_invalid");
+    expect(
+      transport.classifyFailure({ ...base, stderrTail: "rate limit exceeded" }),
+    ).toBe("rate_limit");
+    expect(
+      transport.classifyFailure({ ...base, stderrTail: "socket hang up" }),
+    ).toBe("network_transient");
+  });
+});
