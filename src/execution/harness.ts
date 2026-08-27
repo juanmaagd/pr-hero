@@ -104,6 +104,17 @@ const ENV_PASSTHROUGH = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
+  // The subscription credential, and it was MISSING here while the capability
+  // gate (§11) already accepted it as proof of auth — the gate and the spawn
+  // disagreeing about the same variable. pr-hero's first real CI self-review
+  // (2026-08-27) passed the gate, passed the size gate, then lost all three
+  // hunters and the summarizer in three seconds to "Not logged in · Please run
+  // /login", $0.00 spent, because this projection dropped the token the action
+  // had just handed it. It is the same credential class as ANTHROPIC_API_KEY
+  // directly above, and it is the ONLY route on Linux: credential projection
+  // needs darwin + /usr/bin/security, so every CI runner falls back to exactly
+  // this enumerated passthrough.
+  "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
 
 export function projectChildEnv(
