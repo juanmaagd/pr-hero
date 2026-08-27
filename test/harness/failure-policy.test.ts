@@ -213,6 +213,34 @@ describe("rate_limit backoff", () => {
 });
 
 describe("causeFromLegacyFailureClass", () => {
+  // pr-hero F002 on PR #76: the bridge could not produce "watchdog_timeout"
+  // at all, because step-runner's classifyFailure collapses `timedOut` into
+  // the generic "transient" class BEFORE the bridge sees it
+  // (src/step-runner.ts:111), and the bridge only accepted the collapsed
+  // class. Every watchdog timeout would have been attributed to a network
+  // error in the persisted attempt log the harness writes for incident
+  // triage. The two causes share a disposition today, so nothing would have
+  // failed loudly — it would just have lied in the audit trail.
+  test("a timed-out attempt is attributed to the watchdog, not the network", () => {
+    expect(
+      causeFromLegacyFailureClass("transient", { timedOut: true }),
+    ).toEqual({ kind: "cause", cause: "watchdog_timeout" });
+  });
+
+  test("the watchdog fact is only consulted for the transient class", () => {
+    // A terminal or format ruling is not a timeout even if the outcome also
+    // timed out: the stop authority and the format budget are decided by the
+    // class, and letting `timedOut` override either would hand a format
+    // failure the transient budget.
+    expect(causeFromLegacyFailureClass("terminal", { timedOut: true })).toEqual(
+      { kind: "legacy_terminal" },
+    );
+    expect(causeFromLegacyFailureClass("format", { timedOut: true })).toEqual({
+      kind: "cause",
+      cause: "format_violation",
+    });
+  });
+
   test("transient and format map onto §7 causes", () => {
     expect(causeFromLegacyFailureClass("transient")).toEqual({
       kind: "cause",

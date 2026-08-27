@@ -115,12 +115,30 @@ export function decideRetryDisposition(
 // drift the frozen schema, so the bridge hands the harness a direct terminal
 // ruling instead. The transient/format budget separation (§13 line 759) is
 // untouched either way.
+//
+// WHY the raw `timedOut` fact is a parameter and not read off the class:
+// step-runner's classifyFailure collapses a watchdog kill into the generic
+// "transient" class before anything downstream sees it
+// (`src/step-runner.ts:111`), so the class ALONE can never distinguish a
+// timeout from a network error. §7 declares `watchdog_timeout` a first-class
+// cause; a bridge that only accepted the collapsed class would attribute
+// every timeout to the network in the per-attempt log the harness persists
+// for incident triage. Both causes share a disposition today, so that lie
+// would never have failed loudly — it would just have been wrong.
 export function causeFromLegacyFailureClass(
   legacy: FailureClass,
+  outcome: { readonly timedOut?: boolean } = {},
 ): CauseResolution {
   switch (legacy) {
     case "transient":
-      return { kind: "cause", cause: "network_transient" };
+      return {
+        kind: "cause",
+        // Consulted for this class only: a terminal ruling keeps its stop
+        // authority and a format violation keeps its own budget even when the
+        // same outcome also timed out.
+        cause:
+          outcome.timedOut === true ? "watchdog_timeout" : "network_transient",
+      };
     case "format":
       return { kind: "cause", cause: "format_violation" };
     case "terminal":
