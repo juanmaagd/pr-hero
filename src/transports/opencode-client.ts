@@ -15,7 +15,14 @@
 // (§13).
 
 import type { ProviderTerminalProof } from "../execution/contracts";
-import type { OpenCodeClientEvent } from "./opencode-sdk";
+import type {
+  OpenCodeClientEvent,
+  OpenCodeClientLike,
+  OpenCodeClientSession,
+  OpenCodeCreateSessionInput,
+  OpenCodePollResult,
+} from "./opencode-sdk";
+import type { OpenCodeServerHandle } from "./opencode-server";
 
 // Structural, not imported from the SDK: pr-hero ships with ZERO runtime
 // dependencies, and a Claude-only install must not pull an OpenCode SDK it
@@ -215,4 +222,265 @@ export function isSessionIdle(raw: unknown, sessionId: string): boolean {
     (raw as RawEvent)?.type === "session.idle" &&
     props(raw)?.sessionID === sessionId
   );
+}
+
+// ---------------------------------------------------------------------------
+// The impure half: an OpenCodeClientLike over the real SDK.
+//
+// Everything the SDK touches is behind `OpenCodeSdkLike` and reached through
+// an injectable loader. pr-hero ships with ZERO runtime dependencies, so the
+// SDK is an OPTIONAL PEER: a Claude-only install must never pull it, and an
+// install that does route here must be told what to add rather than handed a
+// module-resolution stack trace.
+// ---------------------------------------------------------------------------
+
+export interface OpenCodeSdkClientApi {
+  readonly session: {
+    create(options?: unknown): Promise<{ data: { id: string } }>;
+    prompt(options: unknown): Promise<{ data: unknown }>;
+    messages(options: unknown): Promise<{ data: unknown }>;
+    abort(options?: unknown): Promise<{ data: unknown }>;
+  };
+  readonly event: {
+    subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
+  };
+}
+
+export interface OpenCodeSdkLike {
+  createClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+}
+
+export interface CreateOpenCodeClientOptions {
+  readonly loadSdk: () => Promise<OpenCodeSdkLike>;
+  readonly launchServer: () => Promise<OpenCodeServerHandle>;
+  readonly model: { readonly providerID: string; readonly modelID: string };
+  readonly readSystemPrompt: (promptPath: string) => Promise<string>;
+  // §6 deny floor: tools that stay false unless the spec names them. Absent is
+  // NOT the same as false — an absent key asks for the provider's default, and
+  // the provider's default is not ours to inherit.
+  readonly denyFloor?: readonly string[];
+}
+
+const DEFAULT_DENY_FLOOR = ["bash"] as const;
+
+interface SessionState {
+  readonly api: OpenCodeSdkClientApi;
+  // ONE consumer of the subscription, ever. The pump owns the iterator and
+  // hands events over through this queue; streamEvents never touches the
+  // stream itself. Two for-awaits on one async iterator is a race with two
+  // losing sides: the second consumer can miss an event the first already
+  // took, and either one exiting fires an implicit .return() that ends the
+  // SHARED generator under the other. pr-hero found exactly that here
+  // (F002/F003 on PR #84) — in a repo that had already written the hazard
+  // down, in opencode-sdk.ts, and walked into it anyway.
+  readonly queue: unknown[];
+  ended: boolean;
+  wake?: () => void;
+}
+
+export function createOpenCodeClient(
+  options: CreateOpenCodeClientOptions,
+): OpenCodeClientLike & { close(): Promise<void> } {
+  const states = new Map<string, SessionState>();
+  const denyFloor = options.denyFloor ?? DEFAULT_DENY_FLOOR;
+  // ONE server for the whole client, launched lazily. A server per SESSION
+  // left a spawned process behind for every attempt, released only by a
+  // whole-client close() that is not even part of OpenCodeClientLike
+  // (pr-hero F004 on PR #84). One server hosts many sessions; that is what
+  // the session API is for.
+  let serverPromise: Promise<OpenCodeServerHandle> | undefined;
+  let server: OpenCodeServerHandle | undefined;
+  // Calls that have committed to the shared server but have not registered a
+  // session yet. `states` alone cannot answer "is anyone using this?": its
+  // entry appears only after session.create AND event.subscribe both
+  // succeed, so a sibling mid-establishment is invisible to it — and a
+  // failing call would then SIGTERM the server that healthy sibling is using.
+  // Sharing one server is what created this hazard; per-session servers could
+  // not have had it.
+  let establishing = 0;
+
+  function stateFor(session: OpenCodeClientSession): SessionState {
+    const state = states.get(session.id);
+    if (state === undefined) {
+      throw new Error(`unknown opencode session: ${session.id}`);
+    }
+    return state;
+  }
+
+  return {
+    async createSession(
+      input: OpenCodeCreateSessionInput,
+    ): Promise<OpenCodeClientSession> {
+      let sdk: OpenCodeSdkLike;
+      try {
+        sdk = await options.loadSdk();
+      } catch (error) {
+        throw new Error(
+          "the opencode backend needs @opencode-ai/sdk, which is an optional " +
+            "peer dependency of pr-hero. Install it alongside pr-hero to use " +
+            `this backend. (${(error as Error).message})`,
+        );
+      }
+
+      // Read BEFORE anything is spawned. It is the one step that fails on the
+      // operator's filesystem, and doing it first means an unreadable prompt
+      // costs nothing to unwind. pr-hero F005 found it running AFTER the
+      // server, the remote session and the registered state — leaking all
+      // three, with the caller never given the id needed to abort any of them.
+      const systemPrompt = await options.readSystemPrompt(
+        input.systemPromptPath,
+      );
+
+      if (serverPromise === undefined) {
+        serverPromise = options.launchServer();
+        try {
+          server = await serverPromise;
+        } catch (error) {
+          // A failed launch must not poison the client forever.
+          serverPromise = undefined;
+          throw error;
+        }
+      }
+      const handle = server ?? (await serverPromise);
+      const api = sdk.createClient({ baseUrl: handle.url });
+
+      let sessionId: string | undefined;
+      establishing += 1;
+      try {
+        const created = await api.session.create({
+          body: { title: "pr-hero review step" },
+        });
+        sessionId = created.data.id;
+
+        // Subscribed BEFORE the prompt, and the ordering is not stylistic.
+        // event.subscribe() is live and unbuffered, so a subscription opened
+        // afterwards silently loses the early events — the ones carrying the
+        // first deltas. The contract splits createSession and streamEvents
+        // into separate calls, so unless the buffering happens here that
+        // window cannot be closed at all.
+        const subscription = await api.event.subscribe();
+        const state: SessionState = { api, queue: [], ended: false };
+        states.set(sessionId, state);
+
+        // The ONLY consumer of the subscription. Subscribing without pulling
+        // buys nothing — an SSE iterator nobody reads is not a recording, the
+        // events simply have not been requested yet.
+        void (async () => {
+          try {
+            for await (const raw of subscription.stream) {
+              state.queue.push(raw);
+              state.wake?.();
+              state.wake = undefined;
+            }
+          } catch {
+            // A dead stream ends the handoff; the poll still observes the
+            // attempt.
+          } finally {
+            state.ended = true;
+            state.wake?.();
+            state.wake = undefined;
+          }
+        })();
+
+        const tools: Record<string, boolean> = {};
+        for (const tool of denyFloor) tools[tool] = false;
+        for (const tool of input.tools) tools[tool] = true;
+
+        // FIRED, never awaited. session.prompt blocks until the turn finishes
+        // — the probe measured 4.5s — and returns the completed message. The
+        // ROADMAP forbids completing an attempt from one blocking HTTP call,
+        // so this is the trigger and the event stream is the truth.
+        void api.session
+          .prompt({
+            path: { id: sessionId },
+            query: { directory: input.cwd },
+            body: {
+              model: { ...options.model },
+              system: systemPrompt,
+              tools,
+              parts: [{ type: "text", text: input.userPrompt }],
+            },
+          })
+          .catch(() => {
+            // Both observers see the failure; swallowing it here keeps a
+            // trigger-shaped call from becoming an unhandled rejection that
+            // outlives the attempt.
+          });
+
+        return { id: sessionId };
+      } catch (error) {
+        // Unwind whatever this call managed to create. Without this the
+        // caller gets an exception and no id, so nothing can be released by
+        // hand afterwards.
+        if (sessionId !== undefined) {
+          states.delete(sessionId);
+          // A remote session that WAS created is real work on the provider's
+          // side; dropping the local map entry does not release it.
+          await api.session.abort({ path: { id: sessionId } }).catch(() => {});
+        }
+        throw error;
+      } finally {
+        establishing -= 1;
+        // Close only when NOBODY is left — no registered session and no call
+        // still establishing one. On a successful call states is non-empty,
+        // so this never fires; on the last failure with no siblings it
+        // releases the subprocess instead of leaking it.
+        if (establishing === 0 && states.size === 0) {
+          const dying = server;
+          serverPromise = undefined;
+          server = undefined;
+          if (dying !== undefined) await dying.close().catch(() => {});
+        }
+      }
+    },
+
+    async *streamEvents(session: OpenCodeClientSession) {
+      const state = stateFor(session);
+      // Reads the QUEUE, never the stream. Everything buffered before this
+      // call is already here in arrival order, and everything after arrives
+      // through the same door — so there is no handoff to race.
+      for (;;) {
+        while (state.queue.length > 0) {
+          yield* mapOpenCodeEvents(state.queue.shift(), session.id);
+        }
+        if (state.ended) return;
+        await new Promise<void>((resolve) => {
+          state.wake = resolve;
+        });
+      }
+    },
+
+    async pollStatus(
+      session: OpenCodeClientSession,
+    ): Promise<OpenCodePollResult> {
+      const state = stateFor(session);
+      const response = await state.api.session.messages({
+        path: { id: session.id },
+      });
+      const list = Array.isArray(response.data) ? response.data : [];
+      // Last completed assistant message wins; the same helper the stream
+      // uses, on purpose. §197 wants two INDEPENDENT observers of ONE fact,
+      // not two facts that happen to resemble each other — two copies of this
+      // derivation could drift and manufacture a conflict out of nothing.
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        const info = (list[i] as { info?: unknown })?.info;
+        const proof = terminalProofFromAssistant(info);
+        if (proof !== undefined) return { kind: "terminal", proof };
+      }
+      return { kind: "pending" };
+    },
+
+    async abort(session: OpenCodeClientSession): Promise<void> {
+      const state = stateFor(session);
+      await state.api.session.abort({ path: { id: session.id } });
+    },
+
+    async close(): Promise<void> {
+      states.clear();
+      const handle = server;
+      server = undefined;
+      serverPromise = undefined;
+      if (handle !== undefined) await handle.close();
+    },
+  };
 }
