@@ -30,7 +30,7 @@ function sampleDoc(
     pr: 10,
     base_sha: "basesha1234567890",
     head_sha: "headsha1234567890",
-    model: "claude-3-7-sonnet",
+    model: "sonnet",
     iteration: 1,
     parity_hunter_fired: false,
     run_status: "complete",
