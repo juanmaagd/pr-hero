@@ -1032,6 +1032,7 @@ export class StepExecutionHarness implements StepRunner {
       const request: TransportRequest = {
         sessionId: `${step.name}-${Date.now()}-${attempts}`,
         attempt: attempts,
+        executionModel: step.model,
         route: step.route ?? {
           backend: transport.backend,
           provider:

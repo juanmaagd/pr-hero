@@ -62,20 +62,20 @@ const CANONICAL_ALIASES: Record<
 > = {
   sonnet: {
     provider: "anthropic",
-    model: "claude-3-7-sonnet",
-    canonical: "anthropic/claude-3-7-sonnet",
+    model: "claude-sonnet-5",
+    canonical: "anthropic/claude-sonnet-5",
     alias: "sonnet",
   },
   opus: {
     provider: "anthropic",
-    model: "claude-3-opus",
-    canonical: "anthropic/claude-3-opus",
+    model: "claude-opus-5",
+    canonical: "anthropic/claude-opus-5",
     alias: "opus",
   },
   haiku: {
     provider: "anthropic",
-    model: "claude-3-5-haiku",
-    canonical: "anthropic/claude-3-5-haiku",
+    model: "claude-haiku-4-5",
+    canonical: "anthropic/claude-haiku-4-5",
     alias: "haiku",
   },
 };
@@ -421,4 +421,15 @@ export function buildResolvedRoutePlan(
     );
   }
   return createResolvedRoutePlan(stepRoutes);
+}
+
+export function spawnModelForClaudeCli(
+  route: ResolvedModelRoute,
+  executionModel: string,
+): string {
+  const gateway = route.gateway ?? "direct";
+  if (gateway === "direct") {
+    return executionModel;
+  }
+  return route.modelSnapshot;
 }

@@ -1255,12 +1255,12 @@ describe("Task 1.3: D2 Routing in preflight and credential rejection", () => {
     const routingConfig: RoutingConfig = {
       mappings: [
         {
-          logical: "anthropic/claude-3-7-sonnet",
+          logical: "anthropic/claude-sonnet-5",
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5",
         },
       ],
       default: {

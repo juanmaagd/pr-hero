@@ -13,6 +13,7 @@ import {
   resolveLogicalModel,
   resolveModelRoute,
   resolveStepRoute,
+  spawnModelForClaudeCli,
   UnauthorizedRouteError,
   UnmappedRouteError,
 } from "../src/model-routing";
@@ -21,23 +22,23 @@ import { ReviewSpecValidationError, validateReviewSpec } from "../src/spec";
 describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
   test("parses explicit aliases: sonnet, opus, haiku", () => {
     const sonnet = parseLogicalIdentity("sonnet");
-    expect(sonnet.canonical).toBe("anthropic/claude-3-7-sonnet");
+    expect(sonnet.canonical).toBe("anthropic/claude-sonnet-5");
     expect(sonnet.provider).toBe("anthropic");
-    expect(sonnet.model).toBe("claude-3-7-sonnet");
+    expect(sonnet.model).toBe("claude-sonnet-5");
     expect(sonnet.alias).toBe("sonnet");
     expect(sonnet.variant).toBeUndefined();
 
     const opus = parseLogicalIdentity("opus");
-    expect(opus.canonical).toBe("anthropic/claude-3-opus");
+    expect(opus.canonical).toBe("anthropic/claude-opus-5");
     expect(opus.provider).toBe("anthropic");
-    expect(opus.model).toBe("claude-3-opus");
+    expect(opus.model).toBe("claude-opus-5");
     expect(opus.alias).toBe("opus");
     expect(opus.variant).toBeUndefined();
 
     const haiku = parseLogicalIdentity("haiku");
-    expect(haiku.canonical).toBe("anthropic/claude-3-5-haiku");
+    expect(haiku.canonical).toBe("anthropic/claude-haiku-4-5");
     expect(haiku.provider).toBe("anthropic");
-    expect(haiku.model).toBe("claude-3-5-haiku");
+    expect(haiku.model).toBe("claude-haiku-4-5");
     expect(haiku.alias).toBe("haiku");
     expect(haiku.variant).toBeUndefined();
   });
@@ -70,7 +71,7 @@ describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
 
   test("trims whitespace from input", () => {
     const sonnet = parseLogicalIdentity("  sonnet  ");
-    expect(sonnet.canonical).toBe("anthropic/claude-3-7-sonnet");
+    expect(sonnet.canonical).toBe("anthropic/claude-sonnet-5");
 
     const slash = parseLogicalIdentity("  openai/gpt-4o#fast  ");
     expect(slash.canonical).toBe("openai/gpt-4o#fast");
@@ -227,8 +228,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-7-sonnet",
-      modelSnapshot: "claude-3-7-sonnet",
+      modelFamily: "claude-sonnet-5",
+      modelSnapshot: "claude-sonnet-5",
     });
 
     const opusRoute = resolveModelRoute("opus");
@@ -236,8 +237,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-opus",
-      modelSnapshot: "claude-3-opus",
+      modelFamily: "claude-opus-5",
+      modelSnapshot: "claude-opus-5",
     });
 
     const haikuRoute = resolveModelRoute("haiku");
@@ -245,8 +246,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-5-haiku",
-      modelSnapshot: "claude-3-5-haiku",
+      modelFamily: "claude-haiku-4-5",
+      modelSnapshot: "claude-haiku-4-5",
     });
   });
 
@@ -254,12 +255,12 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
     const config: RoutingConfig = {
       mappings: [
         {
-          logical: "anthropic/claude-3-7-sonnet",
+          logical: "anthropic/claude-sonnet-5",
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet-20250219",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5-20250219",
         },
         {
           logical: "openai/gpt-4o",
@@ -321,7 +322,7 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       UnmappedRouteError,
     );
     expect(() =>
-      resolveModelRoute("anthropic/claude-3-7-sonnet", { mappings: [] }),
+      resolveModelRoute("anthropic/claude-sonnet-5", { mappings: [] }),
     ).toThrow(UnmappedRouteError);
   });
 
@@ -382,12 +383,12 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           disabled: true,
         },
         {
-          logical: "anthropic/claude-3-7-sonnet",
+          logical: "anthropic/claude-sonnet-5",
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5",
           allowSpend: false,
         },
       ],
@@ -431,8 +432,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5",
           disabled: true,
         },
       },
@@ -456,7 +457,7 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           provider: "anthropic",
           disabled: true,
         },
-        "anthropic/claude-3-7-sonnet": {
+        "anthropic/claude-sonnet-5": {
           backend: "claude-code",
           provider: "anthropic",
           disabled: false,
@@ -468,7 +469,7 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       AmbiguousMappingError,
     );
     expect(() =>
-      resolveModelRoute("anthropic/claude-3-7-sonnet", config),
+      resolveModelRoute("anthropic/claude-sonnet-5", config),
     ).toThrow(AmbiguousMappingError);
   });
 
@@ -503,17 +504,17 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-7-sonnet",
-      modelSnapshot: "claude-3-7-sonnet-20250219",
+      modelFamily: "claude-sonnet-5",
+      modelSnapshot: "claude-sonnet-5-20250219",
       modelVariant: "thinking",
     };
 
     const fp1 = computeRouteFingerprint(
-      "anthropic/claude-3-7-sonnet#thinking",
+      "anthropic/claude-sonnet-5#thinking",
       route,
     );
     const fp2 = computeRouteFingerprint(
-      "anthropic/claude-3-7-sonnet#thinking",
+      "anthropic/claude-sonnet-5#thinking",
       route,
     );
     expect(fp1).toBeString();
@@ -522,7 +523,7 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
 
     // Changing any target dimension changes the fingerprint
     const fpDiff = computeRouteFingerprint(
-      "anthropic/claude-3-7-sonnet#thinking",
+      "anthropic/claude-sonnet-5#thinking",
       {
         ...route,
         gateway: "configured",
@@ -559,13 +560,13 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
     const stepRoute: ResolvedStepRoute = {
       stepKey: "reliability",
       role: "hunter",
-      logicalIdentity: "anthropic/claude-3-7-sonnet",
+      logicalIdentity: "anthropic/claude-sonnet-5",
       route: {
         backend: "claude-code",
         provider: "anthropic",
         gateway: "direct",
-        modelFamily: "claude-3-7-sonnet",
-        modelSnapshot: "claude-3-7-sonnet",
+        modelFamily: "claude-sonnet-5",
+        modelSnapshot: "claude-sonnet-5",
       },
       routeFingerprint: "a".repeat(64),
     };
@@ -596,7 +597,7 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
 
     expect(step.stepKey).toBe("reliability");
     expect(step.role).toBe("hunter");
-    expect(step.logicalIdentity).toBe("anthropic/claude-3-7-sonnet");
+    expect(step.logicalIdentity).toBe("anthropic/claude-sonnet-5");
     expect(step.route.backend).toBe("claude-code");
     expect(step.routeFingerprint).toHaveLength(64);
 
@@ -604,5 +605,37 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
     expect(Object.isFrozen(plan)).toBe(true);
     expect(plan.steps).toHaveLength(1);
     expect(plan.routeFingerprint).toBeString();
+  });
+});
+
+describe("spawnModelForClaudeCli", () => {
+  test("direct gateway passes the logical alias to Claude Code --model", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5",
+        },
+        "sonnet",
+      ),
+    ).toBe("sonnet");
+  });
+
+  test("configured gateway passes the operator snapshot to Claude Code --model", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "configured",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5-20250219",
+        },
+        "sonnet",
+      ),
+    ).toBe("claude-sonnet-5-20250219");
   });
 });

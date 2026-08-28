@@ -196,19 +196,19 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
         expect(step.route?.provider).toBe("anthropic");
       }
 
-      // Check hunter step route
       const hunterStep = runner.executedSteps.find(
         (s) => s.name === "hunter-reliability",
       );
+      expect(hunterStep?.model).toBe("sonnet");
       expect(hunterStep).toBeDefined();
-      expect(hunterStep?.route?.modelFamily).toBe("claude-3-7-sonnet");
+      expect(hunterStep?.route?.modelFamily).toBe("claude-sonnet-5");
 
       // Check refuter step route
       const refuterStep = runner.executedSteps.find((s) =>
         s.name.startsWith("refuter-"),
       );
       expect(refuterStep).toBeDefined();
-      expect(refuterStep?.route?.modelFamily).toBe("claude-3-opus");
+      expect(refuterStep?.route?.modelFamily).toBe("claude-opus-5");
     } finally {
       await env.cleanup();
     }
@@ -224,8 +224,8 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
             backend: "claude-code",
             provider: "anthropic",
             gateway: "direct",
-            modelFamily: "claude-3-opus",
-            modelSnapshot: "claude-3-opus-20240229",
+            modelFamily: "claude-opus-5",
+            modelSnapshot: "claude-opus-5-20240229",
           },
         ],
       };
@@ -240,8 +240,8 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
 
       for (const refuterStep of refuterSteps) {
         expect(refuterStep.route).toBeDefined();
-        expect(refuterStep.route?.modelFamily).toBe("claude-3-opus");
-        expect(refuterStep.route?.modelSnapshot).toBe("claude-3-opus-20240229");
+        expect(refuterStep.route?.modelFamily).toBe("claude-opus-5");
+        expect(refuterStep.route?.modelSnapshot).toBe("claude-opus-5-20240229");
       }
     } finally {
       await env.cleanup();
@@ -282,7 +282,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       expect(hunterMeta.route).toBeDefined();
       expect(hunterMeta.route.backend).toBe("claude-code");
       expect(hunterMeta.route.provider).toBe("anthropic");
-      expect(hunterMeta.route.modelFamily).toBe("claude-3-7-sonnet");
+      expect(hunterMeta.route.modelFamily).toBe("claude-sonnet-5");
     } finally {
       await env.cleanup();
     }
@@ -294,7 +294,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       const routingConfig: RoutingConfig = {
         mappings: [
           {
-            logical: "anthropic/claude-3-7-sonnet",
+            logical: "anthropic/claude-sonnet-5",
             backend: "unregistered" as RunnerBackend,
             provider: "unknown",
           },
@@ -324,7 +324,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       const routingConfig: RoutingConfig = {
         mappings: [
           {
-            logical: "anthropic/claude-3-7-sonnet",
+            logical: "anthropic/claude-sonnet-5",
             backend: "opencode",
             provider: "openai",
           },

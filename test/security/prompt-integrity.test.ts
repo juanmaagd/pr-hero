@@ -26,6 +26,7 @@ function makeRequest(
       modelFamily: "claude",
       modelSnapshot: "claude-test-model",
     },
+    executionModel: "claude-test-model",
     systemPromptPath: "/tmp/pr-hero-prompt-integrity/system.md",
     systemPromptSha256: "deadbeef",
     userPrompt: "review this",

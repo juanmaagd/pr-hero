@@ -15,6 +15,7 @@ import {
   normalizePartialUsage,
   normalizeUnavailableUsage,
 } from "../execution/usage-normalized";
+import { spawnModelForClaudeCli } from "../model-routing";
 import { CLAUDE_CAPABILITY_STATICS } from "../provider-capabilities";
 import { ACTIVE_CHILD_PROCS, type SpawnedProcess } from "../step-runner";
 
@@ -433,7 +434,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       "--permission-mode",
       "bypassPermissions",
       "--model",
-      request.route.modelSnapshot,
+      spawnModelForClaudeCli(request.route, request.executionModel),
     );
 
     const start = performance.now();

@@ -1024,28 +1024,28 @@ describe("plan card and details route dimensions display", () => {
   const routingConfig: RoutingConfig = {
     mappings: [
       {
-        logical: "anthropic/claude-3-7-sonnet",
+        logical: "anthropic/claude-sonnet-5",
         backend: "claude-code",
         provider: "anthropic",
         gateway: "direct",
-        modelFamily: "claude-3-7-sonnet",
-        modelSnapshot: "claude-3-7-sonnet",
+        modelFamily: "claude-sonnet-5",
+        modelSnapshot: "claude-sonnet-5",
       },
       {
-        logical: "anthropic/claude-3-5-haiku",
+        logical: "anthropic/claude-haiku-4-5",
         backend: "claude-code",
         provider: "anthropic",
         gateway: "direct",
-        modelFamily: "claude-3-5-haiku",
-        modelSnapshot: "claude-3-5-haiku",
+        modelFamily: "claude-haiku-4-5",
+        modelSnapshot: "claude-haiku-4-5",
       },
       {
-        logical: "anthropic/claude-3-opus",
+        logical: "anthropic/claude-opus-5",
         backend: "claude-code",
         provider: "anthropic",
         gateway: "direct",
-        modelFamily: "claude-3-opus",
-        modelSnapshot: "claude-3-opus",
+        modelFamily: "claude-opus-5",
+        modelSnapshot: "claude-opus-5",
       },
       {
         logical: "openai/o3-mini",
@@ -1092,7 +1092,7 @@ describe("plan card and details route dimensions display", () => {
 
   test("formatModelRoute formats direct and configured routes with dimensions", () => {
     expect(formatModelRoute(hunter1.route, "sonnet")).toBe(
-      "sonnet -> anthropic/claude-3-7-sonnet [direct, claude-code]",
+      "sonnet -> anthropic/claude-sonnet-5 [direct, claude-code]",
     );
 
     expect(formatModelRoute(refuter.route, "openai/o3-mini")).toBe(
@@ -1100,7 +1100,7 @@ describe("plan card and details route dimensions display", () => {
     );
 
     expect(formatModelRoute(hunter1.route)).toBe(
-      "anthropic/claude-3-7-sonnet [direct, claude-code]",
+      "anthropic/claude-sonnet-5 [direct, claude-code]",
     );
   });
 
@@ -1108,7 +1108,7 @@ describe("plan card and details route dimensions display", () => {
     const lines = planDetails(planContext({ routePlan }), false);
     const text = flat(lines);
     expect(text).toContain("route hunter-reliability");
-    expect(text).toContain("anthropic/claude-3-7-sonnet [direct, claude-code]");
+    expect(text).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
     expect(text).toContain("route refuter");
     expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
   });
@@ -1117,7 +1117,7 @@ describe("plan card and details route dimensions display", () => {
     const lines = renderPlan(planContext({ routePlan }), false);
     const text = flat(lines);
     expect(text).toContain("reliability");
-    expect(text).toContain("anthropic/claude-3-7-sonnet [direct, claude-code]");
+    expect(text).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
     expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
   });
 
@@ -1125,12 +1125,10 @@ describe("plan card and details route dimensions display", () => {
     const lines = prPlanDetails(prPlanContext({ routePlan }), false);
     const text = flat(lines);
     expect(text).toContain("route hunter-reliability");
-    expect(text).toContain("anthropic/claude-3-7-sonnet [direct, claude-code]");
+    expect(text).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
 
     const prLines = renderPrPlan(prPlanContext({ routePlan }), false);
     const prText = flat(prLines);
-    expect(prText).toContain(
-      "anthropic/claude-3-7-sonnet [direct, claude-code]",
-    );
+    expect(prText).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
   });
 });
