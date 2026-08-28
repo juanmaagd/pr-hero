@@ -107,16 +107,12 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
   if (match) {
     const [, provider, model, variant] = match;
     const canonical = `${provider}/${model}${variant ? `#${variant}` : ""}`;
-    const reverseAlias = (
-      Object.keys(CANONICAL_ALIASES) as Array<keyof typeof CANONICAL_ALIASES>
-    ).find((k) => CANONICAL_ALIASES[k].canonical === canonical);
     return {
       raw: trimmed,
       canonical,
       provider,
       model,
       ...(variant !== undefined ? { variant } : {}),
-      ...(reverseAlias !== undefined ? { alias: reverseAlias } : {}),
     };
   }
 
@@ -131,6 +127,9 @@ export function resolveModelRoute(
   config?: RoutingConfig,
 ): ResolvedModelRoute {
   const parsed = parseLogicalIdentity(logicalInput);
+  const reverseAlias = (
+    Object.keys(CANONICAL_ALIASES) as Array<keyof typeof CANONICAL_ALIASES>
+  ).find((k) => CANONICAL_ALIASES[k].canonical === parsed.canonical);
 
   if (config !== undefined) {
     if (config.disabled === true) {
@@ -148,6 +147,7 @@ export function resolveModelRoute(
           if (entry.logical === parsed.canonical) return true;
           if (entry.logical === parsed.raw) return true;
           if (parsed.alias && entry.logical === parsed.alias) return true;
+          if (reverseAlias && entry.logical === reverseAlias) return true;
           return false;
         });
 
@@ -186,7 +186,7 @@ export function resolveModelRoute(
         const record = config.mappings as Record<string, RouteMapping>;
         const candidateKeys = Array.from(
           new Set(
-            [parsed.canonical, parsed.alias, parsed.raw].filter(
+            [parsed.canonical, parsed.alias, reverseAlias, parsed.raw].filter(
               (key): key is string => key !== undefined,
             ),
           ),
