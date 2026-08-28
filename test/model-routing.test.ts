@@ -474,9 +474,9 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
     expect(() => resolveModelRoute("sonnet", config)).toThrow(
       AmbiguousMappingError,
     );
-    expect(() =>
-      resolveModelRoute(aliasCanonical("sonnet"), config),
-    ).toThrow(AmbiguousMappingError);
+    expect(() => resolveModelRoute(aliasCanonical("sonnet"), config)).toThrow(
+      AmbiguousMappingError,
+    );
   });
 
   test("disabled default route throws UnauthorizedRouteError", () => {
@@ -643,5 +643,20 @@ describe("spawnModelForClaudeCli", () => {
         "sonnet",
       ),
     ).toBe(`${aliasModelSnapshot("sonnet")}-20250219`);
+  });
+
+  test("direct gateway maps slash-grammar executionModel back to Claude alias", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
+        },
+        aliasCanonical("sonnet"),
+      ),
+    ).toBe("sonnet");
   });
 });

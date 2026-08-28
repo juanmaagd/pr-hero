@@ -425,6 +425,26 @@ async function buildCliRoutePlan(params: {
   });
 }
 
+// Pre-confirm route resolution: legacy runs without operator routing may omit
+// route provenance when the plan cannot be built, but admission failures must
+// always surface before confirm — never be swallowed into routePlan = undefined.
+export async function resolveRoutePlanAtConfirm(input: {
+  routingConfigured: boolean;
+  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
+  registry?: DefaultTransportRegistry;
+}): Promise<ResolvedRoutePlan | undefined> {
+  const registry = input.registry ?? new DefaultTransportRegistry();
+  let routePlan: ResolvedRoutePlan;
+  try {
+    routePlan = await input.buildRoutePlan();
+  } catch (error) {
+    if (input.routingConfigured) throw error;
+    return undefined;
+  }
+  await admitRoutePlan(routePlan, registry);
+  return routePlan;
+}
+
 // C5 O-6's half of the pipeline input. Unconditional, unlike its two
 // neighbours above: the summarizer and the scout are stages that may not run,
 // while a config ALWAYS resolved to something — and D7's whole point is that
@@ -1104,20 +1124,17 @@ async function review(options: CliOptions): Promise<number> {
     summary.enabled,
     options.scout,
   );
-  let routePlan: ResolvedRoutePlan | undefined;
-  try {
-    routePlan = await buildCliRoutePlan({
-      spec,
-      options,
-      agentFiles,
-      routingConfig: config.routing,
-      summary,
-    });
-    await admitRoutePlan(routePlan, new DefaultTransportRegistry());
-  } catch (error) {
-    if (config.routing !== undefined) throw error;
-    routePlan = undefined;
-  }
+  const routePlan = await resolveRoutePlanAtConfirm({
+    routingConfigured: config.routing !== undefined,
+    buildRoutePlan: () =>
+      buildCliRoutePlan({
+        spec,
+        options,
+        agentFiles,
+        routingConfig: config.routing,
+        summary,
+      }),
+  });
   // Named rather than inlined into renderPlan: the same context is what the
   // confirm menu's "Show details" renders, and building it twice would risk
   // the card and the details view disagreeing about the run they describe.
@@ -2006,22 +2023,19 @@ async function reviewPr(
         });
       }
     }
-    let routePlan: ResolvedRoutePlan | undefined;
-    try {
-      routePlan = await buildCliRoutePlan({
-        spec,
-        options,
-        agentFiles,
-        routingConfig: config.routing,
-        summary,
-        summarizerEnabled: summary.enabled && !skipDiscovery,
-        scoutEnabled: options.scout && !skipDiscovery,
-      });
-      await admitRoutePlan(routePlan, new DefaultTransportRegistry());
-    } catch (error) {
-      if (config.routing !== undefined) throw error;
-      routePlan = undefined;
-    }
+    const routePlan = await resolveRoutePlanAtConfirm({
+      routingConfigured: config.routing !== undefined,
+      buildRoutePlan: () =>
+        buildCliRoutePlan({
+          spec,
+          options,
+          agentFiles,
+          routingConfig: config.routing,
+          summary,
+          summarizerEnabled: summary.enabled && !skipDiscovery,
+          scoutEnabled: options.scout && !skipDiscovery,
+        }),
+    });
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
     const planContext: PrPlanContext = {

@@ -413,8 +413,22 @@ export function spawnModelForClaudeCli(
   executionModel: string,
 ): string {
   const gateway = route.gateway ?? "direct";
-  if (gateway === "direct") {
+  if (gateway !== "direct") {
+    return route.modelSnapshot;
+  }
+  if (isModelAlias(executionModel)) {
     return executionModel;
+  }
+  try {
+    const parsed = parseLogicalIdentity(executionModel);
+    const alias = reverseAliasForCanonical(
+      `${parsed.provider}/${parsed.model}`,
+    );
+    if (alias !== undefined) {
+      return alias;
+    }
+  } catch {
+    // executionModel is not a catalog alias or slash-grammar identity.
   }
   return route.modelSnapshot;
 }
