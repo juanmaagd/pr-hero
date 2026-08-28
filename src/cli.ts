@@ -49,6 +49,7 @@ import {
   parseCiAdmissionBlock,
   renderCiAdmissionBlock,
   resolveCiReviewPolicy,
+  scanPostedFindingTiers,
   stateReviewCount,
   tierCountsFromFindings,
 } from "./ci-review-admission";
@@ -1562,7 +1563,10 @@ async function reviewPr(
   }
 
   if (!options.dryRun && !options.force && isCi) {
-    const issueComments = await fetchPrComments(operatorRoot, prNumber);
+    const [issueComments, reviewComments] = await Promise.all([
+      fetchPrComments(operatorRoot, prNumber),
+      fetchPrReviewComments(operatorRoot, prNumber),
+    ]);
     const existingSummaryId = findMarkedCommentId(issueComments);
     const summaryBody =
       existingSummaryId === null
@@ -1573,6 +1577,13 @@ async function reviewPr(
     const state = summaryBody === null ? null : parseStateBlock(summaryBody);
     const parsedAdmission =
       summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
+    const postedFindings =
+      summaryHead === null
+        ? null
+        : scanPostedFindingTiers({
+            summaryHead,
+            comments: [...reviewComments, ...issueComments],
+          });
     const markerSeen = markerCommentSeen(issueComments);
     const admissionVerdict = evaluateCiReviewAdmission({
       currentHead: target.headSha,
@@ -1581,6 +1592,7 @@ async function reviewPr(
       reviewCount: stateReviewCount(state, markerSeen, parsedAdmission),
       state,
       admission: parsedAdmission,
+      postedFindings,
       policy: resolveCiReviewPolicy(config),
     });
     if (admissionVerdict.action === "skip") {
