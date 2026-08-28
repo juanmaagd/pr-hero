@@ -6,6 +6,10 @@
 
 import path from "node:path";
 import { resolveEngineAssets } from "./assets";
+import {
+  CI_REVIEW_POLICY_MODES,
+  type CiReviewPolicyMode,
+} from "./ci-review-admission";
 import type {
   ModelGateway,
   RouteMapping,
@@ -1850,6 +1854,8 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   max_changed_files: "capped",
   scout: "capped",
   post: "capped",
+  ci_review_policy: "repo",
+  ci_max_attempts: "repo",
   ci_max_reviews: "repo",
   ci_rereview_min_score: "repo",
   ci_blocking_weight: "repo",
@@ -1885,6 +1891,8 @@ export interface LocalConfig {
   scout?: boolean;
   post?: boolean;
   // CI admission: when to spend on a synchronize push (see ci-review-admission.ts).
+  ci_review_policy?: CiReviewPolicyMode;
+  ci_max_attempts?: number;
   ci_max_reviews?: number;
   ci_rereview_min_score?: number;
   ci_blocking_weight?: number;
@@ -2081,6 +2089,13 @@ function parseConfigLayer(
   );
   const scout = parseOptionalBoolean(config.scout, "scout", file);
   const post = parseOptionalBoolean(config.post, "post", file);
+  const ciReviewPolicy = parseCiReviewPolicyMode(config.ci_review_policy, file);
+  const ciMaxAttempts = parseCiAdmissionInteger(
+    config.ci_max_attempts,
+    "ci_max_attempts",
+    file,
+    1,
+  );
   const ciMaxReviews = parseCiAdmissionInteger(
     config.ci_max_reviews,
     "ci_max_reviews",
@@ -2136,6 +2151,10 @@ function parseConfigLayer(
       : { max_changed_files: maxChangedFiles }),
     ...(scout === undefined ? {} : { scout }),
     ...(post === undefined ? {} : { post }),
+    ...(ciReviewPolicy === undefined
+      ? {}
+      : { ci_review_policy: ciReviewPolicy }),
+    ...(ciMaxAttempts === undefined ? {} : { ci_max_attempts: ciMaxAttempts }),
     ...(ciMaxReviews === undefined ? {} : { ci_max_reviews: ciMaxReviews }),
     ...(ciRereviewMinScore === undefined
       ? {}
@@ -2437,6 +2456,24 @@ function parseCiAdmissionInteger(
   return parsed;
 }
 
+function parseCiReviewPolicyMode(
+  value: unknown,
+  file: string,
+): CiReviewPolicyMode | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new CliUsageError(
+      `${file} ci_review_policy must be one of: ${CI_REVIEW_POLICY_MODES.join(", ")}`,
+    );
+  }
+  if (!(CI_REVIEW_POLICY_MODES as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `${file} ci_review_policy must be one of: ${CI_REVIEW_POLICY_MODES.join(", ")}`,
+    );
+  }
+  return value as CiReviewPolicyMode;
+}
+
 // Widened, not weakened. Each of these reads exactly ONE property, so the
 // parameter names that property instead of demanding a whole LocalConfig —
 // which is what lets a caller hand over a raw parsed layer, before the merge
@@ -2633,6 +2670,16 @@ export function mergeConfig(
     CONFIG_DIRECTION.routing,
     (layer) => layer.routing,
   );
+  const ciReviewPolicy = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_review_policy,
+    (layer) => layer.ci_review_policy,
+  );
+  const ciMaxAttempts = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_max_attempts,
+    (layer) => layer.ci_max_attempts,
+  );
   const ciMaxReviews = foldKey(
     layers,
     CONFIG_DIRECTION.ci_max_reviews,
@@ -2694,6 +2741,12 @@ export function mergeConfig(
       : { max_changed_files: maxFiles.value }),
     ...(scout.value === undefined ? {} : { scout: scout.value }),
     ...(post.value === undefined ? {} : { post: post.value }),
+    ...(ciReviewPolicy.value === undefined
+      ? {}
+      : { ci_review_policy: ciReviewPolicy.value }),
+    ...(ciMaxAttempts.value === undefined
+      ? {}
+      : { ci_max_attempts: ciMaxAttempts.value }),
     ...(ciMaxReviews.value === undefined
       ? {}
       : { ci_max_reviews: ciMaxReviews.value }),
@@ -2724,6 +2777,8 @@ export function mergeConfig(
     max_changed_files: maxFiles.source,
     scout: scout.source,
     post: post.source,
+    ci_review_policy: ciReviewPolicy.source,
+    ci_max_attempts: ciMaxAttempts.source,
     ci_max_reviews: ciMaxReviews.source,
     ci_rereview_min_score: ciRereviewMinScore.source,
     ci_blocking_weight: ciBlockingWeight.source,

@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CI_REVIEW_POLICY_SCHEMA_VERSION,
   type CiReviewAdmissionInput,
+  type CiReviewPolicy,
   canonicalAdmissionFindings,
+  ciReviewPolicyHash,
   DEFAULT_CI_ADVISORY_WEIGHT,
   DEFAULT_CI_BLOCKING_WEIGHT,
+  DEFAULT_CI_MAX_ATTEMPTS,
   DEFAULT_CI_REREVIEW_MIN_SCORE,
+  DEFAULT_CI_RESERVATION_TTL_SECONDS,
+  DEFAULT_CI_REVIEW_POLICY_MODE,
   deltaTouchesPriorFindings,
   evaluateCiReviewAdmission,
   parseCiAdmissionBlock,
@@ -26,6 +32,10 @@ const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
 
 const DEFAULT_POLICY = resolveCiReviewPolicy({});
+
+function policy(overrides: Partial<CiReviewPolicy> = {}): CiReviewPolicy {
+  return { ...DEFAULT_POLICY, ...overrides };
+}
 
 function admissionInput(
   input: Omit<CiReviewAdmissionInput, "deltaTouchesPriorFindings"> &
@@ -458,7 +468,7 @@ describe("evaluateCiReviewAdmission", () => {
     ).toEqual({ action: "run" });
   });
 
-  test("max reviews blocks a third run", () => {
+  test("max attempts produces manual-required, not skip", () => {
     const verdict = evaluateCiReviewAdmission(
       admissionInput({
         currentHead: HEAD_B,
@@ -475,9 +485,10 @@ describe("evaluateCiReviewAdmission", () => {
         policy: DEFAULT_POLICY,
       }),
     );
-    expect(verdict.action).toBe("skip");
-    if (verdict.action === "skip") {
-      expect(verdict.reason).toBe("max-reviews");
+    expect(verdict.action).toBe("manual-required");
+    if (verdict.action === "manual-required") {
+      expect(verdict.reason).toBe("max-attempts-exhausted");
+      expect(verdict.maxAttempts).toBe(2);
     }
   });
 });
@@ -504,11 +515,143 @@ describe("stateReviewCount", () => {
 describe("resolveCiReviewPolicy defaults", () => {
   test("matches the agreed floor", () => {
     expect(resolveCiReviewPolicy({})).toEqual({
-      maxReviews: 2,
+      schemaVersion: CI_REVIEW_POLICY_SCHEMA_VERSION,
+      mode: DEFAULT_CI_REVIEW_POLICY_MODE,
+      maxAttempts: DEFAULT_CI_MAX_ATTEMPTS,
       rereviewMinScore: DEFAULT_CI_REREVIEW_MIN_SCORE,
       blockingWeight: DEFAULT_CI_BLOCKING_WEIGHT,
       advisoryWeight: DEFAULT_CI_ADVISORY_WEIGHT,
+      reservationTtlSeconds: DEFAULT_CI_RESERVATION_TTL_SECONDS,
     });
+  });
+
+  test("prefers ci_max_attempts over ci_max_reviews", () => {
+    expect(
+      resolveCiReviewPolicy({ ci_max_attempts: 3, ci_max_reviews: 5 }),
+    ).toMatchObject({ maxAttempts: 3 });
+  });
+
+  test("falls back to ci_max_reviews when ci_max_attempts is absent", () => {
+    expect(resolveCiReviewPolicy({ ci_max_reviews: 5 })).toMatchObject({
+      maxAttempts: 5,
+    });
+  });
+});
+
+describe("ciReviewPolicyHash", () => {
+  test("changes when mode changes", () => {
+    const base = resolveCiReviewPolicy({});
+    const thresholded = policy({ mode: "thresholded" });
+    expect(ciReviewPolicyHash(base)).not.toBe(ciReviewPolicyHash(thresholded));
+  });
+
+  test("is stable for the same policy", () => {
+    const policyValue = resolveCiReviewPolicy({
+      ci_review_policy: "every_push",
+    });
+    expect(ciReviewPolicyHash(policyValue)).toBe(
+      ciReviewPolicyHash(policyValue),
+    );
+    expect(ciReviewPolicyHash(policyValue)).toHaveLength(16);
+  });
+});
+
+describe("evaluateCiReviewAdmission — policy modes", () => {
+  const lowScoreAdmission = parseCiAdmissionBlock(
+    admissionBody({ blocking: 0, advisory: 1 }),
+  );
+
+  test("once_per_pr skips after the first review", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: lowScoreAdmission,
+        postedFindings: null,
+        policy: policy({ mode: "once_per_pr" }),
+      }),
+    );
+    expect(verdict.action).toBe("skip");
+    if (verdict.action === "skip") {
+      expect(verdict.reason).toBe("once-per-pr");
+    }
+  });
+
+  test("manual_only requires manual override after the first review", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: lowScoreAdmission,
+        postedFindings: null,
+        policy: policy({ mode: "manual_only" }),
+      }),
+    );
+    expect(verdict.action).toBe("manual-required");
+    if (verdict.action === "manual-required") {
+      expect(verdict.reason).toBe("manual-only-policy");
+    }
+  });
+
+  test("every_push runs on low score", () => {
+    expect(
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: lowScoreAdmission,
+          postedFindings: null,
+          policy: policy({ mode: "every_push" }),
+        }),
+      ),
+    ).toEqual({ action: "run" });
+  });
+
+  test("thresholded ignores delta bypass", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: lowScoreAdmission,
+        postedFindings: null,
+        policy: policy({ mode: "thresholded" }),
+        deltaTouchesPriorFindings: true,
+      }),
+    );
+    expect(verdict.action).toBe("skip");
+    if (verdict.action === "skip") {
+      expect(verdict.reason).toBe("below-threshold");
+    }
+  });
+
+  test("risk_aware honors delta bypass", () => {
+    expect(
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: lowScoreAdmission,
+          postedFindings: null,
+          policy: policy({ mode: "risk_aware" }),
+          deltaTouchesPriorFindings: true,
+        }),
+      ),
+    ).toEqual({ action: "run" });
   });
 });
 

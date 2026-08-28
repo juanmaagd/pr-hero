@@ -697,6 +697,8 @@ const provenance = (
     max_changed_files: "default",
     scout: "default",
     post: "default",
+    ci_review_policy: "default",
+    ci_max_attempts: "default",
     ci_max_reviews: "default",
     ci_rereview_min_score: "default",
     ci_blocking_weight: "default",

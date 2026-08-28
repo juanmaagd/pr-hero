@@ -161,14 +161,25 @@ interface CiSkipCoverageSummary {
   priorScore: number;
   minScore: number;
   reviewCount: number;
-  maxReviews: number;
+  maxAttempts: number;
+}
+
+interface CiManualRequiredSummary {
+  kind: "manual-required";
+  prNumber: number;
+  reason: string;
+  detail: string;
+  priorScore: number;
+  reviewCount: number;
+  maxAttempts: number;
 }
 
 export type CiSummaryData =
   | CiReviewSummary
   | CiSkipSizeSummary
   | CiSkipBudgetSummary
-  | CiSkipCoverageSummary;
+  | CiSkipCoverageSummary
+  | CiManualRequiredSummary;
 
 // Assistant-posture footer (spec 2.1: "Footer attributing pr-hero as an AI
 // code review assistant"), shared by all three variants — the summary must
@@ -300,7 +311,23 @@ function skipCoverageLines(data: CiSkipCoverageSummary): string[] {
     "| --- | --- |",
     `| Skip reason | ${data.reason} |`,
     `| Prior score | ${data.priorScore} (minimum ${data.minScore}) |`,
-    `| Reviews used | ${data.reviewCount}/${data.maxReviews} |`,
+    `| Attempts used | ${data.reviewCount}/${data.maxAttempts} |`,
+    "",
+    data.detail,
+  ];
+}
+
+function manualRequiredLines(data: CiManualRequiredSummary): string[] {
+  return [
+    `### 🛑 pr-hero Review — Manual Override Required — PR #${data.prNumber}`,
+    "",
+    "**Reason:** automatic review did not run on this push.",
+    "",
+    "| Metric | Value |",
+    "| --- | --- |",
+    `| Block reason | ${data.reason} |`,
+    `| Prior score | ${data.priorScore} |`,
+    `| Attempts used | ${data.reviewCount}/${data.maxAttempts} |`,
     "",
     data.detail,
   ];
@@ -352,7 +379,9 @@ export function renderStepSummary(data: CiSummaryData): string {
         ? skipBudgetLines(data)
         : data.kind === "skipped-coverage"
           ? skipCoverageLines(data)
-          : reviewedLines(data);
+          : data.kind === "manual-required"
+            ? manualRequiredLines(data)
+            : reviewedLines(data);
   const out = [...body, "---", "", FOOTER];
   return `${out.join("\n").trimEnd()}\n`;
 }

@@ -31,6 +31,7 @@ import {
   type CiGateSkipPlan,
   ciExitCode,
   planCiBudgetSkip,
+  planCiReviewManualRequired,
   planCiReviewSkip,
   planCiSizeSkip,
 } from "./ci-gates";
@@ -43,6 +44,7 @@ import {
   renderStepSummary,
 } from "./ci-reporter";
 import {
+  ciReviewManualRequiredDetail,
   ciReviewSkipDetail,
   deltaTouchesPriorFindings,
   evaluateCiReviewAdmission,
@@ -1644,6 +1646,21 @@ async function reviewPr(
         stepSummaryFlag: options.stepSummary,
         plan,
         noticeMessage: `pr-hero review skipped — ${ciReviewSkipDetail(admissionVerdict)}`,
+      });
+    }
+    if (admissionVerdict.action === "manual-required") {
+      const plan = planCiReviewManualRequired({
+        prNumber,
+        verdict: admissionVerdict,
+      });
+      return await publishCiSkip({
+        operatorRoot,
+        prNumber,
+        post: options.post === true,
+        isCi,
+        stepSummaryFlag: options.stepSummary,
+        plan,
+        noticeMessage: `pr-hero review requires manual override — ${ciReviewManualRequiredDetail(admissionVerdict)}`,
       });
     }
   }

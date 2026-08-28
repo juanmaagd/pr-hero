@@ -176,6 +176,14 @@ export function configRows(
     ),
     scout: cell(effective.scout?.toString(), sources.scout),
     post: cell(effective.post?.toString(), sources.post),
+    ci_review_policy: cell(
+      effective.ci_review_policy,
+      sources.ci_review_policy,
+    ),
+    ci_max_attempts: cell(
+      effective.ci_max_attempts?.toString(),
+      sources.ci_max_attempts,
+    ),
     ci_max_reviews: cell(
       effective.ci_max_reviews?.toString(),
       sources.ci_max_reviews,

@@ -3,30 +3,56 @@
 // (case machine, verify leg) are unchanged; when admission says run, they
 // behave exactly as today.
 //
-// Policy default: at most two reviews per PR (initial + one re-review), and
-// a re-review only when prior findings score >= 4 with blocking×2 + advisory×1.
+// Policy default: risk_aware mode, at most two attempts per PR (initial +
+// one re-review), and a re-review when prior findings score >= 4 with
+// blocking×2 + advisory×1 or when the delta touches prior finding paths.
+// Same-head dedup applies per head SHA; maxAttempts applies per PR.
 
+import { createHash } from "node:crypto";
 import type { Tier } from "./findings";
 import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "./pr-preflight";
 import type { LocalConfig } from "./preflight";
 import type { ParsedStateBlock } from "./rereview-state";
 
-export const DEFAULT_CI_MAX_REVIEWS = 2;
+export const CI_REVIEW_POLICY_SCHEMA_VERSION = 1;
+export const DEFAULT_CI_REVIEW_POLICY_MODE = "risk_aware" as const;
+export const DEFAULT_CI_MAX_ATTEMPTS = 2;
+/** @deprecated Use {@link DEFAULT_CI_MAX_ATTEMPTS}. */
+export const DEFAULT_CI_MAX_REVIEWS = DEFAULT_CI_MAX_ATTEMPTS;
 export const DEFAULT_CI_REREVIEW_MIN_SCORE = 4;
 export const DEFAULT_CI_BLOCKING_WEIGHT = 2;
 export const DEFAULT_CI_ADVISORY_WEIGHT = 1;
+export const DEFAULT_CI_RESERVATION_TTL_SECONDS = 3600;
+
+export const CI_REVIEW_POLICY_MODES = [
+  "once_per_pr",
+  "thresholded",
+  "risk_aware",
+  "every_push",
+  "manual_only",
+] as const;
+
+export type CiReviewPolicyMode = (typeof CI_REVIEW_POLICY_MODES)[number];
 
 export interface CiReviewPolicy {
-  maxReviews: number;
+  schemaVersion: typeof CI_REVIEW_POLICY_SCHEMA_VERSION;
+  mode: CiReviewPolicyMode;
+  /** Per-PR automatic attempt budget (same-head dedup is per head SHA). */
+  maxAttempts: number;
   rereviewMinScore: number;
   blockingWeight: number;
   advisoryWeight: number;
+  reservationTtlSeconds: number;
 }
 
 export type CiReviewSkipReason =
   | "same-head"
-  | "max-reviews"
-  | "below-threshold";
+  | "below-threshold"
+  | "once-per-pr";
+
+export type CiReviewManualRequiredReason =
+  | "max-attempts-exhausted"
+  | "manual-only-policy";
 
 export interface PriorTierScore {
   blocking: number;
@@ -58,24 +84,33 @@ export interface CiReviewAdmissionInput {
   postedFindings: PostedFindingAdmissionScan | null;
   policy: CiReviewPolicy;
   // New commits since the prior summary touch a path where a prior finding
-  // was posted — bypass the below-threshold skip (absorbing-skip fix).
+  // was posted — bypass the below-threshold skip in risk_aware mode.
   deltaTouchesPriorFindings: boolean;
 }
 
+type CiReviewAdmissionTerminalFields = {
+  prior: PriorTierScore;
+  reviewCount: number;
+  maxAttempts: number;
+  minScore: number;
+};
+
 export type CiReviewAdmissionVerdict =
   | { action: "run" }
-  | {
+  | ({
       action: "skip";
       reason: CiReviewSkipReason;
-      prior: PriorTierScore;
-      reviewCount: number;
-      maxReviews: number;
-      minScore: number;
-    };
+    } & CiReviewAdmissionTerminalFields)
+  | ({
+      action: "manual-required";
+      reason: CiReviewManualRequiredReason;
+    } & CiReviewAdmissionTerminalFields);
 
 export function resolveCiReviewPolicy(
   config: Pick<
     LocalConfig,
+    | "ci_review_policy"
+    | "ci_max_attempts"
     | "ci_max_reviews"
     | "ci_rereview_min_score"
     | "ci_blocking_weight"
@@ -83,12 +118,23 @@ export function resolveCiReviewPolicy(
   >,
 ): CiReviewPolicy {
   return {
-    maxReviews: config.ci_max_reviews ?? DEFAULT_CI_MAX_REVIEWS,
+    schemaVersion: CI_REVIEW_POLICY_SCHEMA_VERSION,
+    mode: config.ci_review_policy ?? DEFAULT_CI_REVIEW_POLICY_MODE,
+    maxAttempts:
+      config.ci_max_attempts ??
+      config.ci_max_reviews ??
+      DEFAULT_CI_MAX_ATTEMPTS,
     rereviewMinScore:
       config.ci_rereview_min_score ?? DEFAULT_CI_REREVIEW_MIN_SCORE,
     blockingWeight: config.ci_blocking_weight ?? DEFAULT_CI_BLOCKING_WEIGHT,
     advisoryWeight: config.ci_advisory_weight ?? DEFAULT_CI_ADVISORY_WEIGHT,
+    reservationTtlSeconds: DEFAULT_CI_RESERVATION_TTL_SECONDS,
   };
+}
+
+export function ciReviewPolicyHash(policy: CiReviewPolicy): string {
+  const canonical = JSON.stringify(policy, Object.keys(policy).sort());
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }
 
 // GITHUB_ACTOR in Actions plus optional repo-config extras. Undefined when no
@@ -437,6 +483,18 @@ function priorForAdmissionInput(input: CiReviewAdmissionInput): PriorTierScore {
   });
 }
 
+function terminalFields(
+  input: CiReviewAdmissionInput,
+  prior: PriorTierScore,
+): CiReviewAdmissionTerminalFields {
+  return {
+    prior,
+    reviewCount: input.reviewCount,
+    maxAttempts: input.policy.maxAttempts,
+    minScore: input.policy.rereviewMinScore,
+  };
+}
+
 export function evaluateCiReviewAdmission(
   input: CiReviewAdmissionInput,
 ): CiReviewAdmissionVerdict {
@@ -448,38 +506,52 @@ export function evaluateCiReviewAdmission(
     return {
       action: "skip",
       reason: "same-head",
-      prior,
-      reviewCount: input.reviewCount,
-      maxReviews: input.policy.maxReviews,
-      minScore: input.policy.rereviewMinScore,
+      ...terminalFields(input, prior),
     };
   }
-  if (input.reviewCount >= input.policy.maxReviews) {
+  if (input.reviewCount >= input.policy.maxAttempts) {
+    const prior = priorForAdmissionInput(input);
+    return {
+      action: "manual-required",
+      reason: "max-attempts-exhausted",
+      ...terminalFields(input, prior),
+    };
+  }
+  if (input.policy.mode === "manual_only" && input.markerSeen) {
+    const prior = priorForAdmissionInput(input);
+    return {
+      action: "manual-required",
+      reason: "manual-only-policy",
+      ...terminalFields(input, prior),
+    };
+  }
+  if (input.policy.mode === "once_per_pr" && input.reviewCount >= 1) {
     const prior = priorForAdmissionInput(input);
     return {
       action: "skip",
-      reason: "max-reviews",
-      prior,
-      reviewCount: input.reviewCount,
-      maxReviews: input.policy.maxReviews,
-      minScore: input.policy.rereviewMinScore,
+      reason: "once-per-pr",
+      ...terminalFields(input, prior),
     };
   }
   const prior = priorForAdmissionInput(input);
   if (prior.failOpen === true) {
     return { action: "run" };
   }
-  if (input.deltaTouchesPriorFindings) {
+  if (input.policy.mode === "every_push") {
     return { action: "run" };
   }
-  if (prior.score < input.policy.rereviewMinScore) {
+  if (input.policy.mode === "risk_aware" && input.deltaTouchesPriorFindings) {
+    return { action: "run" };
+  }
+  if (
+    (input.policy.mode === "thresholded" ||
+      input.policy.mode === "risk_aware") &&
+    prior.score < input.policy.rereviewMinScore
+  ) {
     return {
       action: "skip",
       reason: "below-threshold",
-      prior,
-      reviewCount: input.reviewCount,
-      maxReviews: input.policy.maxReviews,
-      minScore: input.policy.rereviewMinScore,
+      ...terminalFields(input, prior),
     };
   }
   return { action: "run" };
@@ -488,7 +560,7 @@ export function evaluateCiReviewAdmission(
 export function ciReviewSkipDetail(
   verdict: Extract<CiReviewAdmissionVerdict, { action: "skip" }>,
 ): string {
-  const { prior, reason, reviewCount, maxReviews, minScore } = verdict;
+  const { prior, reason, reviewCount, maxAttempts, minScore } = verdict;
   const counts =
     prior.source === "none"
       ? "no prior findings recorded"
@@ -496,9 +568,29 @@ export function ciReviewSkipDetail(
   switch (reason) {
     case "same-head":
       return "this commit was already reviewed";
-    case "max-reviews":
-      return `review limit reached (${reviewCount}/${maxReviews} reviews on this PR)`;
+    case "once-per-pr":
+      return `once_per_pr policy allows one automatic review (${reviewCount}/${maxAttempts} attempts used on this PR)`;
     case "below-threshold":
       return `${counts}; re-review needs score ≥ ${minScore} to justify another run`;
+  }
+}
+
+export function ciReviewManualRequiredDetail(
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>,
+): string {
+  const { reason, reviewCount, maxAttempts } = verdict;
+  const override =
+    "Run `pr-hero review --pr <n> --post --force` locally to override.";
+  switch (reason) {
+    case "max-attempts-exhausted":
+      return (
+        `automatic review budget exhausted (${reviewCount}/${maxAttempts} attempts on this PR). ` +
+        override
+      );
+    case "manual-only-policy":
+      return (
+        "ci_review_policy is manual_only and this PR already has a review. " +
+        override
+      );
   }
 }
