@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ResolvedModelRoute, RunnerBackend } from "./execution/contracts";
+import {
+  isModelAlias,
+  lookupAlias,
+  type ModelAlias,
+  reverseAliasForCanonical,
+} from "./model-catalog";
 import { redactDiagnostic } from "./security/redact";
 
 export type ModelGateway = "configured" | "direct" | "openrouter";
@@ -29,7 +35,7 @@ export interface ParsedLogicalIdentity {
   readonly provider: string;
   readonly model: string;
   readonly variant?: string;
-  readonly alias?: "sonnet" | "opus" | "haiku";
+  readonly alias?: ModelAlias;
 }
 
 export interface ResolvedStepRoute {
@@ -51,34 +57,15 @@ export class UnmappedRouteError extends ModelRoutingError {}
 export class AmbiguousMappingError extends ModelRoutingError {}
 export class UnauthorizedRouteError extends ModelRoutingError {}
 
-const CANONICAL_ALIASES: Record<
-  "sonnet" | "opus" | "haiku",
-  {
-    provider: string;
-    model: string;
-    canonical: string;
-    alias: "sonnet" | "opus" | "haiku";
-  }
-> = {
-  sonnet: {
-    provider: "anthropic",
-    model: "claude-sonnet-5",
-    canonical: "anthropic/claude-sonnet-5",
-    alias: "sonnet",
-  },
-  opus: {
-    provider: "anthropic",
-    model: "claude-opus-5",
-    canonical: "anthropic/claude-opus-5",
-    alias: "opus",
-  },
-  haiku: {
-    provider: "anthropic",
-    model: "claude-haiku-4-5",
-    canonical: "anthropic/claude-haiku-4-5",
-    alias: "haiku",
-  },
-};
+export type { ModelAlias } from "./model-catalog";
+export {
+  aliasCanonical,
+  aliasModelFamily,
+  aliasModelSnapshot,
+  isModelAlias,
+  lookupAlias,
+  MODEL_CATALOG,
+} from "./model-catalog";
 
 const SLASH_GRAMMAR_REGEX =
   /^([a-zA-Z0-9_-]+)\/([a-zA-Z0-9._-]+)(?:#([a-zA-Z0-9._-]+))?$/;
@@ -92,14 +79,14 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
     throw new ModelRoutingError("Model identity cannot be empty");
   }
 
-  if (trimmed === "sonnet" || trimmed === "opus" || trimmed === "haiku") {
-    const aliasInfo = CANONICAL_ALIASES[trimmed];
+  if (isModelAlias(trimmed)) {
+    const aliasInfo = lookupAlias(trimmed);
     return {
       raw: trimmed,
       canonical: aliasInfo.canonical,
       provider: aliasInfo.provider,
-      model: aliasInfo.model,
-      alias: aliasInfo.alias,
+      model: aliasInfo.modelFamily,
+      alias: trimmed,
     };
   }
 
@@ -127,9 +114,7 @@ export function resolveModelRoute(
   config?: RoutingConfig,
 ): ResolvedModelRoute {
   const parsed = parseLogicalIdentity(logicalInput);
-  const reverseAlias = (
-    Object.keys(CANONICAL_ALIASES) as Array<keyof typeof CANONICAL_ALIASES>
-  ).find((k) => CANONICAL_ALIASES[k].canonical === parsed.canonical);
+  const reverseAlias = reverseAliasForCanonical(parsed.canonical);
 
   if (config !== undefined) {
     if (config.disabled === true) {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerBackend } from "../src/execution/contracts";
 import { armOfRun, scoutFailed } from "../src/floor-test";
+import { aliasCanonical, aliasModelFamily, aliasModelSnapshot } from "../src/model-catalog";
 import type { RoutingConfig } from "../src/model-routing";
 import { type PipelineInput, runPipeline } from "../src/pipeline";
 import { rereviewDeltaFromProvenance } from "../src/report";
@@ -201,14 +202,14 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       );
       expect(hunterStep?.model).toBe("sonnet");
       expect(hunterStep).toBeDefined();
-      expect(hunterStep?.route?.modelFamily).toBe("claude-sonnet-5");
+      expect(hunterStep?.route?.modelFamily).toBe(aliasModelFamily("sonnet"));
 
       // Check refuter step route
       const refuterStep = runner.executedSteps.find((s) =>
         s.name.startsWith("refuter-"),
       );
       expect(refuterStep).toBeDefined();
-      expect(refuterStep?.route?.modelFamily).toBe("claude-opus-5");
+      expect(refuterStep?.route?.modelFamily).toBe(aliasModelFamily("opus"));
     } finally {
       await env.cleanup();
     }
@@ -224,8 +225,8 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
             backend: "claude-code",
             provider: "anthropic",
             gateway: "direct",
-            modelFamily: "claude-opus-5",
-            modelSnapshot: "claude-opus-5-20240229",
+            modelFamily: aliasModelFamily("opus"),
+            modelSnapshot: `${aliasModelSnapshot("opus")}-20240229`,
           },
         ],
       };
@@ -240,8 +241,10 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
 
       for (const refuterStep of refuterSteps) {
         expect(refuterStep.route).toBeDefined();
-        expect(refuterStep.route?.modelFamily).toBe("claude-opus-5");
-        expect(refuterStep.route?.modelSnapshot).toBe("claude-opus-5-20240229");
+        expect(refuterStep.route?.modelFamily).toBe(aliasModelFamily("opus"));
+        expect(refuterStep.route?.modelSnapshot).toBe(
+          `${aliasModelSnapshot("opus")}-20240229`,
+        );
       }
     } finally {
       await env.cleanup();
@@ -282,7 +285,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       expect(hunterMeta.route).toBeDefined();
       expect(hunterMeta.route.backend).toBe("claude-code");
       expect(hunterMeta.route.provider).toBe("anthropic");
-      expect(hunterMeta.route.modelFamily).toBe("claude-sonnet-5");
+      expect(hunterMeta.route.modelFamily).toBe(aliasModelFamily("sonnet"));
     } finally {
       await env.cleanup();
     }
@@ -294,7 +297,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       const routingConfig: RoutingConfig = {
         mappings: [
           {
-            logical: "anthropic/claude-sonnet-5",
+            logical: aliasCanonical("sonnet"),
             backend: "unregistered" as RunnerBackend,
             provider: "unknown",
           },
@@ -324,7 +327,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       const routingConfig: RoutingConfig = {
         mappings: [
           {
-            logical: "anthropic/claude-sonnet-5",
+            logical: aliasCanonical("sonnet"),
             backend: "opencode",
             provider: "openai",
           },

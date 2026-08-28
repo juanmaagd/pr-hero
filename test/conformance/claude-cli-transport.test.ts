@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
+import {
+  aliasModelFamily,
+  aliasModelSnapshot,
+} from "../../src/model-catalog";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
@@ -181,8 +185,8 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-sonnet-5",
-          modelSnapshot: "claude-sonnet-5",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
         },
       }),
       { signal: new AbortController().signal },

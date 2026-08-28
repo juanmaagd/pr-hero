@@ -20,6 +20,12 @@ import {
   renderPrPlan,
 } from "../src/cli";
 import {
+  aliasCanonical,
+  aliasModelFamily,
+  aliasModelSnapshot,
+  lookupAlias,
+} from "../src/model-catalog";
+import {
   createResolvedRoutePlan,
   type RoutingConfig,
   resolveStepRoute,
@@ -1024,28 +1030,28 @@ describe("plan card and details route dimensions display", () => {
   const routingConfig: RoutingConfig = {
     mappings: [
       {
-        logical: "anthropic/claude-sonnet-5",
+        logical: aliasCanonical("sonnet"),
         backend: "claude-code",
-        provider: "anthropic",
+        provider: lookupAlias("sonnet").provider,
         gateway: "direct",
-        modelFamily: "claude-sonnet-5",
-        modelSnapshot: "claude-sonnet-5",
+        modelFamily: aliasModelFamily("sonnet"),
+        modelSnapshot: aliasModelSnapshot("sonnet"),
       },
       {
-        logical: "anthropic/claude-haiku-4-5",
+        logical: aliasCanonical("haiku"),
         backend: "claude-code",
-        provider: "anthropic",
+        provider: lookupAlias("haiku").provider,
         gateway: "direct",
-        modelFamily: "claude-haiku-4-5",
-        modelSnapshot: "claude-haiku-4-5",
+        modelFamily: aliasModelFamily("haiku"),
+        modelSnapshot: aliasModelSnapshot("haiku"),
       },
       {
-        logical: "anthropic/claude-opus-5",
+        logical: aliasCanonical("opus"),
         backend: "claude-code",
-        provider: "anthropic",
+        provider: lookupAlias("opus").provider,
         gateway: "direct",
-        modelFamily: "claude-opus-5",
-        modelSnapshot: "claude-opus-5",
+        modelFamily: aliasModelFamily("opus"),
+        modelSnapshot: aliasModelSnapshot("opus"),
       },
       {
         logical: "openai/o3-mini",
@@ -1090,25 +1096,25 @@ describe("plan card and details route dimensions display", () => {
     summarizer,
   ]);
 
+  const sonnetRouteLabel = `${aliasCanonical("sonnet")} [direct, claude-code]`;
+
   test("formatModelRoute formats direct and configured routes with dimensions", () => {
     expect(formatModelRoute(hunter1.route, "sonnet")).toBe(
-      "sonnet -> anthropic/claude-sonnet-5 [direct, claude-code]",
+      `sonnet -> ${sonnetRouteLabel}`,
     );
 
     expect(formatModelRoute(refuter.route, "openai/o3-mini")).toBe(
       "openai/o3-mini -> openai/o3-mini-2025-01-31 [configured, opencode]",
     );
 
-    expect(formatModelRoute(hunter1.route)).toBe(
-      "anthropic/claude-sonnet-5 [direct, claude-code]",
-    );
+    expect(formatModelRoute(hunter1.route)).toBe(sonnetRouteLabel);
   });
 
   test("planDetails renders route dimensions for each step", () => {
     const lines = planDetails(planContext({ routePlan }), false);
     const text = flat(lines);
     expect(text).toContain("route hunter-reliability");
-    expect(text).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
+    expect(text).toContain(sonnetRouteLabel);
     expect(text).toContain("route refuter");
     expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
   });
@@ -1117,7 +1123,7 @@ describe("plan card and details route dimensions display", () => {
     const lines = renderPlan(planContext({ routePlan }), false);
     const text = flat(lines);
     expect(text).toContain("reliability");
-    expect(text).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
+    expect(text).toContain(sonnetRouteLabel);
     expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
   });
 
@@ -1125,10 +1131,10 @@ describe("plan card and details route dimensions display", () => {
     const lines = prPlanDetails(prPlanContext({ routePlan }), false);
     const text = flat(lines);
     expect(text).toContain("route hunter-reliability");
-    expect(text).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
+    expect(text).toContain(sonnetRouteLabel);
 
     const prLines = renderPrPlan(prPlanContext({ routePlan }), false);
     const prText = flat(prLines);
-    expect(prText).toContain("anthropic/claude-sonnet-5 [direct, claude-code]");
+    expect(prText).toContain(sonnetRouteLabel);
   });
 });
