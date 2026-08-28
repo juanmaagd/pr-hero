@@ -277,4 +277,36 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
     );
     expect(recordedRequests).toHaveLength(0);
   });
+
+  test("harness without registry fails step when step.backend is opencode (without step.route)", async () => {
+    const recordedRequests: TransportRequest[] = [];
+    const transport = createRecordingTransport("claude-code", recordedRequests);
+
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({})) as unknown as typeof Bun.spawn,
+    });
+
+    const opencodeSpec: StepSpec = {
+      name: "opencode-legacy-step",
+      systemPromptPath: sysPromptPath,
+      prompt: "review diff",
+      tools: [],
+      mcpConfigPath: path.join(tmpDir, "mcp.json"),
+      model: "sonnet",
+      backend: "opencode",
+      cwd: tmpDir,
+      outPath: path.join(tmpDir, "out.json"),
+      timeoutMs: 10000,
+      maxAttempts: 1,
+      parse: (text) => JSON.parse(text),
+    };
+
+    const result = await harness.run(opencodeSpec);
+    expect(result.status).toBe("failed");
+    expect(result.stderrTail).toContain(
+      'No transport registry configured to handle backend "opencode"',
+    );
+    expect(recordedRequests).toHaveLength(0);
+  });
 });

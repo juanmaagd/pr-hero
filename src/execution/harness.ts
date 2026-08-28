@@ -339,11 +339,12 @@ export class StepExecutionHarness implements StepRunner {
     let canonicalCwd = step.cwd;
 
     // Resolve transport for this step
+    const effectiveBackend =
+      step.route?.backend ?? step.backend ?? "claude-code";
     let transport: ProviderTransport;
     if (this.registry) {
-      const backend = step.route?.backend ?? step.backend ?? "claude-code";
       try {
-        transport = this.registry.get(backend);
+        transport = this.registry.get(effectiveBackend);
       } catch (err) {
         return {
           name: step.name,
@@ -355,13 +356,13 @@ export class StepExecutionHarness implements StepRunner {
         };
       }
     } else {
-      if (step.route && step.route.backend !== "claude-code") {
+      if (effectiveBackend !== "claude-code") {
         return {
           name: step.name,
           status: "failed",
           usage: zeroUsage(),
           attempts: 0,
-          stderrTail: `No transport registry configured to handle backend "${step.route.backend}" for step "${step.name}"`,
+          stderrTail: `No transport registry configured to handle backend "${effectiveBackend}" for step "${step.name}"`,
           resultText: "",
         };
       }
