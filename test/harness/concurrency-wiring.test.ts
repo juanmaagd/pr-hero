@@ -13,9 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AttemptAdmissionGate } from "../../src/execution/admission";
 import { ConcurrencyAttemptAdmissionGate } from "../../src/execution/admission";
-import {
-  ConcurrencyLimiter,
-} from "../../src/execution/concurrency-limiter";
+import { ConcurrencyLimiter } from "../../src/execution/concurrency-limiter";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,

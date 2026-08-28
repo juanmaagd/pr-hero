@@ -26,12 +26,7 @@
 // injectable for offline tests, defaulting to real fs/crypto in production.
 
 import { createHmac, randomBytes as nodeRandomBytes } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { prheroLayout } from "../home-preflight";
 
 const UNKNOWN_SCOPE_SENTINEL = "unknown";

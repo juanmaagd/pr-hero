@@ -24,11 +24,11 @@ import {
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
 import type { AttemptAdmissionGate, AttemptLease } from "./admission";
+import { writeJsonAtomically } from "./atomic-write";
 import {
   BucketBreakerTrippedError,
   ConcurrencyAdmissionAbortedError,
 } from "./concurrency-limiter";
-import { writeJsonAtomically } from "./atomic-write";
 import type {
   AsyncEventSink,
   AuthEvent,
@@ -59,9 +59,9 @@ import {
   beginStep,
   nextCycle,
   type ReserveToken,
-  SpendReservationFencedError,
   type SpendLedger,
   type SpendReservation,
+  SpendReservationFencedError,
   settlementFromUsage,
 } from "./spend-limiter";
 import type { NormalizedUsage } from "./usage-normalized";

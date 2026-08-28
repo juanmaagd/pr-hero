@@ -2176,7 +2176,9 @@ async function reviewPr(
         tokens_out: result.usage.tokens_out,
         tokens_total: result.usage.tokens_total,
         cost_usd_est: result.usage.cost_usd_est,
-        ...(result.unresolved.length > 0 ? { cost_usd_est_is_floor: true } : {}),
+        ...(result.unresolved.length > 0
+          ? { cost_usd_est_is_floor: true }
+          : {}),
         per_agent: result.perAgent,
       };
       const doc = mergeRunEnvelope({
