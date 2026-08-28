@@ -153,10 +153,51 @@ interface CiSkipBudgetSummary {
   budgetUsd: number;
 }
 
+interface CiSkipCoverageSummary {
+  kind: "skipped-coverage";
+  prNumber: number;
+  reason: string;
+  detail: string;
+  priorScore: number;
+  minScore: number;
+  reviewCount: number;
+  maxAttempts: number;
+  decision?: "skip";
+  admissionReason?: string;
+  currentHead?: string;
+  reviewedHead?: string | null;
+  riskClass?: string;
+  riskReason?: string;
+  remainingBudget?: number;
+  policyMode?: string;
+  policyHash?: string;
+}
+
+interface CiManualRequiredSummary {
+  kind: "manual-required";
+  prNumber: number;
+  reason: string;
+  detail: string;
+  priorScore: number;
+  reviewCount: number;
+  maxAttempts: number;
+  decision?: "manual-required";
+  admissionReason?: string;
+  currentHead?: string;
+  reviewedHead?: string | null;
+  riskClass?: string;
+  riskReason?: string;
+  remainingBudget?: number;
+  policyMode?: string;
+  policyHash?: string;
+}
+
 export type CiSummaryData =
   | CiReviewSummary
   | CiSkipSizeSummary
-  | CiSkipBudgetSummary;
+  | CiSkipBudgetSummary
+  | CiSkipCoverageSummary
+  | CiManualRequiredSummary;
 
 // Assistant-posture footer (spec 2.1: "Footer attributing pr-hero as an AI
 // code review assistant"), shared by all three variants — the summary must
@@ -278,6 +319,80 @@ function skipBudgetLines(data: CiSkipBudgetSummary): string[] {
   ];
 }
 
+function admissionMetricRows(
+  data: CiSkipCoverageSummary | CiManualRequiredSummary,
+): string[] {
+  const rows: string[] = [];
+  if (data.decision !== undefined) {
+    rows.push(`| Decision | ${data.decision} |`);
+  }
+  if (data.admissionReason !== undefined) {
+    rows.push(`| Admission reason | ${data.admissionReason} |`);
+  }
+  if (data.currentHead !== undefined) {
+    rows.push(`| Current head | \`${data.currentHead.slice(0, 8)}\` |`);
+  }
+  if (data.reviewedHead !== undefined) {
+    rows.push(
+      `| Reviewed head | ${
+        data.reviewedHead === null
+          ? "none"
+          : `\`${data.reviewedHead.slice(0, 8)}\``
+      } |`,
+    );
+  }
+  if (data.riskClass !== undefined) {
+    rows.push(`| Risk class | ${data.riskClass} |`);
+  }
+  if (data.riskReason !== undefined && data.riskReason.length > 0) {
+    rows.push(`| Risk detail | ${data.riskReason} |`);
+  }
+  if (data.remainingBudget !== undefined) {
+    rows.push(`| Remaining budget | ${data.remainingBudget} |`);
+  }
+  if (data.policyMode !== undefined) {
+    rows.push(`| Policy mode | ${data.policyMode} |`);
+  }
+  if (data.policyHash !== undefined) {
+    rows.push(`| Policy hash | \`${data.policyHash.slice(0, 8)}\` |`);
+  }
+  return rows;
+}
+
+function skipCoverageLines(data: CiSkipCoverageSummary): string[] {
+  return [
+    `### ⚠️ pr-hero Review Skipped — PR #${data.prNumber}`,
+    "",
+    "**Reason:** this push does not justify another review run.",
+    "",
+    "| Metric | Value |",
+    "| --- | --- |",
+    `| Skip reason | ${data.reason} |`,
+    `| Prior score | ${data.priorScore} (minimum ${data.minScore}) |`,
+    `| Attempts used | ${data.reviewCount}/${data.maxAttempts} |`,
+    ...admissionMetricRows(data),
+    "",
+    data.detail,
+  ];
+}
+
+function manualRequiredLines(data: CiManualRequiredSummary): string[] {
+  return [
+    `### 🛑 pr-hero Review — Manual Override Required — PR #${data.prNumber}`,
+    "",
+    "**Reason:** automatic review did not run on this push.",
+    "",
+    "| Metric | Value |",
+    "| --- | --- |",
+    `| Block reason | ${data.reason} |`,
+    `| Prior score | ${data.priorScore} |`,
+    `| Attempts used | ${data.reviewCount}/${data.maxAttempts} |`,
+    ...admissionMetricRows(data),
+    "",
+    data.detail,
+  ];
+}
+
 function reviewedLines(data: CiReviewSummary): string[] {
   const blocking = data.findings.filter((f) => f.tier === "blocking");
   const advisory = data.findings.filter((f) => f.tier === "advisory");
@@ -322,7 +437,11 @@ export function renderStepSummary(data: CiSummaryData): string {
       ? skipSizeLines(data)
       : data.kind === "skipped-budget"
         ? skipBudgetLines(data)
-        : reviewedLines(data);
+        : data.kind === "skipped-coverage"
+          ? skipCoverageLines(data)
+          : data.kind === "manual-required"
+            ? manualRequiredLines(data)
+            : reviewedLines(data);
   const out = [...body, "---", "", FOOTER];
   return `${out.join("\n").trimEnd()}\n`;
 }

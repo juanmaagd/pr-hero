@@ -6,6 +6,10 @@
 
 import path from "node:path";
 import { resolveEngineAssets } from "./assets";
+import {
+  CI_REVIEW_POLICY_MODES,
+  type CiReviewPolicyMode,
+} from "./ci-review-admission";
 import type {
   ModelGateway,
   RouteMapping,
@@ -1850,6 +1854,14 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   max_changed_files: "capped",
   scout: "capped",
   post: "capped",
+  ci_review_policy: "repo",
+  ci_max_attempts: "repo",
+  ci_max_reviews: "repo",
+  ci_rereview_min_score: "repo",
+  ci_blocking_weight: "repo",
+  ci_advisory_weight: "repo",
+  ci_trusted_actors: "repo",
+  ci_admission_observe_only: "repo",
 };
 
 // The ONE nested key, so this is a second table and not a pattern. `enabled`
@@ -1879,6 +1891,17 @@ export interface LocalConfig {
   max_changed_files?: number;
   scout?: boolean;
   post?: boolean;
+  // CI admission: when to spend on a synchronize push (see ci-review-admission.ts).
+  ci_review_policy?: CiReviewPolicyMode;
+  ci_max_attempts?: number;
+  ci_max_reviews?: number;
+  ci_rereview_min_score?: number;
+  ci_blocking_weight?: number;
+  ci_advisory_weight?: number;
+  ci_trusted_actors?: string[];
+  // When true, admission still evaluates and logs the would-be decision but
+  // never suppresses a review (Phase 1 rollout — observe-only).
+  ci_admission_observe_only?: boolean;
 }
 
 export interface SummaryConfig {
@@ -2070,6 +2093,51 @@ function parseConfigLayer(
   );
   const scout = parseOptionalBoolean(config.scout, "scout", file);
   const post = parseOptionalBoolean(config.post, "post", file);
+  const ciReviewPolicy = parseCiReviewPolicyMode(config.ci_review_policy, file);
+  const ciMaxAttempts = parseCiAdmissionInteger(
+    config.ci_max_attempts,
+    "ci_max_attempts",
+    file,
+    1,
+  );
+  const ciMaxReviews = parseCiAdmissionInteger(
+    config.ci_max_reviews,
+    "ci_max_reviews",
+    file,
+    1,
+  );
+  const ciRereviewMinScore = parseCiAdmissionInteger(
+    config.ci_rereview_min_score,
+    "ci_rereview_min_score",
+    file,
+    0,
+  );
+  const ciBlockingWeight = parseCiAdmissionInteger(
+    config.ci_blocking_weight,
+    "ci_blocking_weight",
+    file,
+    1,
+  );
+  const ciAdvisoryWeight = parseCiAdmissionInteger(
+    config.ci_advisory_weight,
+    "ci_advisory_weight",
+    file,
+    1,
+  );
+  const ciTrustedActors = config.ci_trusted_actors ?? [];
+  if (
+    !Array.isArray(ciTrustedActors) ||
+    !ciTrustedActors.every((a) => typeof a === "string" && a.length > 0)
+  ) {
+    throw new CliUsageError(
+      `${file} ci_trusted_actors must be an array of non-empty strings`,
+    );
+  }
+  const ciAdmissionObserveOnly = parseOptionalBoolean(
+    config.ci_admission_observe_only,
+    "ci_admission_observe_only",
+    file,
+  );
   return {
     ...(given(config.parity_trigger_paths)
       ? { parity_trigger_paths: triggers as string[] }
@@ -2092,6 +2160,26 @@ function parseConfigLayer(
       : { max_changed_files: maxChangedFiles }),
     ...(scout === undefined ? {} : { scout }),
     ...(post === undefined ? {} : { post }),
+    ...(ciReviewPolicy === undefined
+      ? {}
+      : { ci_review_policy: ciReviewPolicy }),
+    ...(ciMaxAttempts === undefined ? {} : { ci_max_attempts: ciMaxAttempts }),
+    ...(ciMaxReviews === undefined ? {} : { ci_max_reviews: ciMaxReviews }),
+    ...(ciRereviewMinScore === undefined
+      ? {}
+      : { ci_rereview_min_score: ciRereviewMinScore }),
+    ...(ciBlockingWeight === undefined
+      ? {}
+      : { ci_blocking_weight: ciBlockingWeight }),
+    ...(ciAdvisoryWeight === undefined
+      ? {}
+      : { ci_advisory_weight: ciAdvisoryWeight }),
+    ...(ciTrustedActors.length > 0
+      ? { ci_trusted_actors: ciTrustedActors as string[] }
+      : {}),
+    ...(ciAdmissionObserveOnly === undefined
+      ? {}
+      : { ci_admission_observe_only: ciAdmissionObserveOnly }),
   };
 }
 
@@ -2365,6 +2453,39 @@ function parseNonNegativeInteger(
   return value;
 }
 
+function parseCiAdmissionInteger(
+  value: unknown,
+  key: string,
+  file: string,
+  min: number,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseNonNegativeInteger(value, key, file);
+  if (parsed === undefined) return undefined;
+  if (parsed < min) {
+    throw new CliUsageError(`${file} ${key} must be an integer >= ${min}`);
+  }
+  return parsed;
+}
+
+function parseCiReviewPolicyMode(
+  value: unknown,
+  file: string,
+): CiReviewPolicyMode | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new CliUsageError(
+      `${file} ci_review_policy must be one of: ${CI_REVIEW_POLICY_MODES.join(", ")}`,
+    );
+  }
+  if (!(CI_REVIEW_POLICY_MODES as readonly string[]).includes(value)) {
+    throw new CliUsageError(
+      `${file} ci_review_policy must be one of: ${CI_REVIEW_POLICY_MODES.join(", ")}`,
+    );
+  }
+  return value as CiReviewPolicyMode;
+}
+
 // Widened, not weakened. Each of these reads exactly ONE property, so the
 // parameter names that property instead of demanding a whole LocalConfig —
 // which is what lets a caller hand over a raw parsed layer, before the merge
@@ -2561,6 +2682,47 @@ export function mergeConfig(
     CONFIG_DIRECTION.routing,
     (layer) => layer.routing,
   );
+  const ciReviewPolicy = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_review_policy,
+    (layer) => layer.ci_review_policy,
+  );
+  const ciMaxAttempts = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_max_attempts,
+    (layer) => layer.ci_max_attempts,
+  );
+  const ciMaxReviews = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_max_reviews,
+    (layer) => layer.ci_max_reviews,
+  );
+  const ciRereviewMinScore = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_rereview_min_score,
+    (layer) => layer.ci_rereview_min_score,
+  );
+  const ciBlockingWeight = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_blocking_weight,
+    (layer) => layer.ci_blocking_weight,
+  );
+  const ciAdvisoryWeight = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_advisory_weight,
+    (layer) => layer.ci_advisory_weight,
+  );
+  const ciTrustedActors = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_trusted_actors,
+    (layer) => layer.ci_trusted_actors,
+    (a, b) => [...(a ?? []), ...(b ?? [])],
+  );
+  const ciAdmissionObserveOnly = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_admission_observe_only,
+    (layer) => layer.ci_admission_observe_only,
+  );
 
   const summary: SummaryConfig = {
     ...(summaryEnabled.value === undefined
@@ -2596,6 +2758,31 @@ export function mergeConfig(
       : { max_changed_files: maxFiles.value }),
     ...(scout.value === undefined ? {} : { scout: scout.value }),
     ...(post.value === undefined ? {} : { post: post.value }),
+    ...(ciReviewPolicy.value === undefined
+      ? {}
+      : { ci_review_policy: ciReviewPolicy.value }),
+    ...(ciMaxAttempts.value === undefined
+      ? {}
+      : { ci_max_attempts: ciMaxAttempts.value }),
+    ...(ciMaxReviews.value === undefined
+      ? {}
+      : { ci_max_reviews: ciMaxReviews.value }),
+    ...(ciRereviewMinScore.value === undefined
+      ? {}
+      : { ci_rereview_min_score: ciRereviewMinScore.value }),
+    ...(ciBlockingWeight.value === undefined
+      ? {}
+      : { ci_blocking_weight: ciBlockingWeight.value }),
+    ...(ciAdvisoryWeight.value === undefined
+      ? {}
+      : { ci_advisory_weight: ciAdvisoryWeight.value }),
+    ...(ciTrustedActors.value === undefined ||
+    ciTrustedActors.value.length === 0
+      ? {}
+      : { ci_trusted_actors: ciTrustedActors.value }),
+    ...(ciAdmissionObserveOnly.value === undefined
+      ? {}
+      : { ci_admission_observe_only: ciAdmissionObserveOnly.value }),
   };
 
   const sources: ConfigSources = {
@@ -2610,6 +2797,14 @@ export function mergeConfig(
     max_changed_files: maxFiles.source,
     scout: scout.source,
     post: post.source,
+    ci_review_policy: ciReviewPolicy.source,
+    ci_max_attempts: ciMaxAttempts.source,
+    ci_max_reviews: ciMaxReviews.source,
+    ci_rereview_min_score: ciRereviewMinScore.source,
+    ci_blocking_weight: ciBlockingWeight.source,
+    ci_advisory_weight: ciAdvisoryWeight.source,
+    ci_trusted_actors: ciTrustedActors.source,
+    ci_admission_observe_only: ciAdmissionObserveOnly.source,
   };
 
   return { effective, sources };

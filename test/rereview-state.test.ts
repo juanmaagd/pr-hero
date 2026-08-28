@@ -103,6 +103,11 @@ describe("render / parse round-trip", () => {
     const body = `${stateish()}\n<!-- {not json} -->`;
     expect(parseStateBlock(body)).toBeNull();
   });
+
+  test("reviews counter round-trips", () => {
+    const body = renderStateBlock(HEAD, [finding("R001")], 2);
+    expect(parseStateBlock(body)?.reviews).toBe(2);
+  });
 });
 
 describe("D5d — rewrite from the merged live set", () => {

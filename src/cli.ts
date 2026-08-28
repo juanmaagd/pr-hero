@@ -27,10 +27,19 @@ import {
 } from "./activity";
 import { resolveEngineAssets } from "./assets";
 import {
+  type AdmissionAttemptStatus,
+  type AdmissionRecord,
+  reserveAdmissionAttempt,
+  settleAdmissionAttempt,
+} from "./ci-admission-ledger";
+import {
+  type AdmissionContext,
   budgetDisabledWarningMessage,
   type CiGateSkipPlan,
   ciExitCode,
   planCiBudgetSkip,
+  planCiReviewManualRequired,
+  planCiReviewSkip,
   planCiSizeSkip,
 } from "./ci-gates";
 import {
@@ -41,6 +50,31 @@ import {
   formatWorkflowCommand,
   renderStepSummary,
 } from "./ci-reporter";
+import {
+  type CiReviewPolicy,
+  canonicalAdmissionFindings,
+  ciReviewManualRequiredDetail,
+  ciReviewPolicyHash,
+  ciReviewSkipDetail,
+  deltaTouchesPriorFindings,
+  evaluateCiReviewAdmission,
+  formatCiAdmissionObserveNotice,
+  nextStateReviewCount,
+  parseCiAdmissionBlock,
+  pathsFromPostedFindingMarkers,
+  renderCiAdmissionBlock,
+  resolveCiAdmissionAttemptCount,
+  resolveCiReviewPolicy,
+  resolveCiTrustedActors,
+  scanPostedFindingTiers,
+  stateReviewCount,
+  tierCountsFromFindings,
+  validateAdmissionAuthority,
+} from "./ci-review-admission";
+import {
+  classifyChangedPaths,
+  type DeltaRiskAssessment,
+} from "./ci-review-risk";
 import { runCiSetup } from "./ci-setup";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
@@ -104,6 +138,7 @@ import {
   runPipeline,
 } from "./pipeline";
 import {
+  CommentsTruncatedError,
   type ComparisonOutcome,
   ensureWorktree,
   fetchCommitStatuses,
@@ -111,17 +146,21 @@ import {
   fetchPrComments,
   fetchPrRefs,
   fetchPrReviewComments,
+  ghCompareChangedFilesWithStatus,
   ghCurrentBranchPr,
   ghPrHeadSha,
+  ghPrHeroWorkflowRunHeads,
   ghPrView,
   ghRepoWebUrl,
   initCodegraphIndex,
+  listAdmissionCheckRuns,
   postCommitStatus,
   postIssueTriageComment,
   postPrComment,
   postPrReview,
   postReviewCommentReply,
   resolveReviewThreadForComment,
+  upsertAdmissionCheckRun,
   writeComparison,
 } from "./pr";
 import {
@@ -313,7 +352,7 @@ import { watchCommand } from "./watch";
 // declaration so the delta line's "since <sha>" clause is free (report.ts's
 // PrCommentDelta.previousHeadSha), the exact reuse watch-preflight.ts's own
 // header describes for the cross-machine guard.
-import { parseMarkerHead } from "./watch-preflight";
+import { markerCommentSeen, parseMarkerHead } from "./watch-preflight";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
@@ -1550,6 +1589,205 @@ async function reviewPr(
     }
   }
 
+  const ciPolicy = resolveCiReviewPolicy(config);
+  const ciPolicyHash = ciReviewPolicyHash(ciPolicy);
+  let ledgerRecords: AdmissionRecord[] = [];
+  let ciAdmissionLedger: CiAdmissionLedgerState | null = null;
+
+  if (!options.dryRun && isCi) {
+    ledgerRecords = await listAdmissionCheckRuns(operatorRoot, target.headSha);
+  }
+
+  if (!options.dryRun && !options.force && isCi) {
+    let issueComments: Awaited<ReturnType<typeof fetchPrComments>>;
+    let reviewComments: Awaited<ReturnType<typeof fetchPrReviewComments>>;
+    let authorityFailOpen = false;
+    try {
+      [issueComments, reviewComments] = await Promise.all([
+        fetchPrComments(operatorRoot, prNumber),
+        fetchPrReviewComments(operatorRoot, prNumber),
+      ]);
+    } catch (error) {
+      if (error instanceof CommentsTruncatedError) {
+        authorityFailOpen = true;
+        issueComments = [];
+        reviewComments = [];
+      } else {
+        throw error;
+      }
+    }
+    const existingSummaryId = findMarkedCommentId(issueComments);
+    const summaryBody =
+      existingSummaryId === null
+        ? null
+        : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? null);
+    const summaryHead =
+      summaryBody === null ? null : parseMarkerHead(summaryBody);
+    const state = summaryBody === null ? null : parseStateBlock(summaryBody);
+    const parsedAdmission =
+      summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
+    const authority = validateAdmissionAuthority({
+      summaryHead,
+      reportMarkerHead: summaryHead,
+      state,
+      admission: parsedAdmission,
+    });
+    if (!authority.ok) {
+      authorityFailOpen = true;
+    }
+    const trustedActors = resolveCiTrustedActors({
+      githubActor: process.env.GITHUB_ACTOR,
+      extra: config.ci_trusted_actors,
+    });
+    const allComments = [...reviewComments, ...issueComments];
+    const postedFindings =
+      summaryHead === null
+        ? null
+        : scanPostedFindingTiers({
+            summaryHead,
+            comments: allComments,
+            trustedActors,
+          });
+    const markerSeen = markerCommentSeen(issueComments);
+    const stateCount = stateReviewCount(state, markerSeen, parsedAdmission);
+    const headBranch = process.env.GITHUB_HEAD_REF;
+    const workflowHeads =
+      headBranch === undefined || headBranch.length === 0
+        ? new Set<string>()
+        : await ghPrHeroWorkflowRunHeads(operatorRoot, headBranch);
+    const reviewCount = resolveCiAdmissionAttemptCount({
+      stateCount,
+      workflowHeads,
+      ledgerRecords,
+    });
+    let deltaTouchesPriorFindingsFlag = false;
+    let deltaRisk: DeltaRiskAssessment | null = null;
+    if (summaryHead !== null && summaryHead !== target.headSha) {
+      const compareFiles = await ghCompareChangedFilesWithStatus(
+        operatorRoot,
+        summaryHead,
+        target.headSha,
+      );
+      const changedPaths = compareFiles.map((entry) => entry.path);
+      deltaRisk = classifyChangedPaths(
+        changedPaths,
+        compareFiles.map((entry) => ({
+          path: entry.path,
+          status: entry.status,
+        })),
+      );
+      const priorPaths = pathsFromPostedFindingMarkers(
+        allComments,
+        summaryHead,
+        trustedActors,
+      );
+      if (priorPaths.length > 0) {
+        deltaTouchesPriorFindingsFlag = deltaTouchesPriorFindings(
+          changedPaths,
+          priorPaths,
+        );
+      }
+    }
+    const admissionVerdict = evaluateCiReviewAdmission({
+      currentHead: target.headSha,
+      summaryHead,
+      markerSeen,
+      reviewCount,
+      state,
+      admission: parsedAdmission,
+      postedFindings,
+      policy: ciPolicy,
+      deltaTouchesPriorFindings: deltaTouchesPriorFindingsFlag,
+      deltaRisk,
+      authorityFailOpen,
+    });
+    const admissionContext: AdmissionContext = {
+      currentHead: target.headSha,
+      reviewedHead: summaryHead,
+      policyMode: ciPolicy.mode,
+      policyHash: ciPolicyHash,
+      deltaRisk,
+    };
+    const observeOnly = config.ci_admission_observe_only === true;
+    if (
+      observeOnly &&
+      (admissionVerdict.action === "skip" ||
+        admissionVerdict.action === "manual-required")
+    ) {
+      log(
+        formatWorkflowCommand(
+          "notice",
+          formatCiAdmissionObserveNotice({
+            verdict: admissionVerdict,
+            currentHead: target.headSha,
+            reviewedHead: summaryHead,
+            policyMode: ciPolicy.mode,
+            policyHash: ciPolicyHash,
+            deltaRisk,
+          }),
+        ),
+      );
+    }
+    if (!observeOnly && admissionVerdict.action === "skip") {
+      const skipReason = ciReviewSkipDetail(admissionVerdict);
+      await recordCiAdmissionGateSkip({
+        operatorRoot,
+        prNumber,
+        headSha: target.headSha,
+        policy: ciPolicy,
+        policyHash: ciPolicyHash,
+        existing: ledgerRecords,
+        reason: skipReason,
+        priorScore: admissionVerdict.prior.score,
+        blockingCount: admissionVerdict.prior.blocking,
+        advisoryCount: admissionVerdict.prior.advisory,
+      });
+      const plan = planCiReviewSkip({
+        prNumber,
+        verdict: admissionVerdict,
+        admission: admissionContext,
+      });
+      return await publishCiSkip({
+        operatorRoot,
+        prNumber,
+        post: options.post === true,
+        isCi,
+        stepSummaryFlag: options.stepSummary,
+        plan,
+        noticeMessage: `pr-hero review skipped — ${skipReason}`,
+      });
+    }
+    if (!observeOnly && admissionVerdict.action === "manual-required") {
+      const manualReason = ciReviewManualRequiredDetail(admissionVerdict);
+      await recordCiAdmissionGateSkip({
+        operatorRoot,
+        prNumber,
+        headSha: target.headSha,
+        policy: ciPolicy,
+        policyHash: ciPolicyHash,
+        existing: ledgerRecords,
+        reason: manualReason,
+        priorScore: admissionVerdict.prior.score,
+        blockingCount: admissionVerdict.prior.blocking,
+        advisoryCount: admissionVerdict.prior.advisory,
+      });
+      const plan = planCiReviewManualRequired({
+        prNumber,
+        verdict: admissionVerdict,
+        admission: admissionContext,
+      });
+      return await publishCiSkip({
+        operatorRoot,
+        prNumber,
+        post: options.post === true,
+        isCi,
+        stepSummaryFlag: options.stepSummary,
+        plan,
+        noticeMessage: `pr-hero review requires manual override — ${manualReason}`,
+      });
+    }
+  }
+
   // 3 — the free exit, BEFORE the fetch: a PR-mode dry run creates NOTHING —
   // no fetch, no run dir, no worktree — so the cost band rides on GitHub's
   // own counters instead of a local numstat.
@@ -1614,6 +1852,26 @@ async function reviewPr(
     }
     log("dry run: nothing was fetched, created, or spent.");
     return 0;
+  }
+
+  if (isCi) {
+    try {
+      ciAdmissionLedger = await reserveCiAdmissionLedger({
+        operatorRoot,
+        prNumber,
+        headSha: target.headSha,
+        policy: ciPolicy,
+        policyHash: ciPolicyHash,
+        existing: ledgerRecords,
+        decisionReason: options.force
+          ? "manual override (--force)"
+          : "admission: run",
+      });
+    } catch (error) {
+      throw new CliError(
+        `CI admission reservation failed: ${(error as Error).message}`,
+      );
+    }
   }
 
   const lockPath = worktreeLockPath(home, repoHome.repoId, prNumber);
@@ -1858,6 +2116,11 @@ async function reviewPr(
         maxChangedFiles: gateConfig.maxChangedFiles,
       });
       if (sizePlan !== null) {
+        await settleCiAdmissionLedger(
+          ciAdmissionLedger,
+          "skipped",
+          "diff exceeds the configured size gate",
+        );
         return await publishCiSkip({
           operatorRoot,
           prNumber,
@@ -2011,6 +2274,11 @@ async function reviewPr(
         prNumber,
       });
       if (budgetPlan !== null) {
+        await settleCiAdmissionLedger(
+          ciAdmissionLedger,
+          "skipped",
+          "estimated cost exceeds the configured CI budget ceiling",
+        );
         return await publishCiSkip({
           operatorRoot,
           prNumber,
@@ -2215,6 +2483,11 @@ async function reviewPr(
             runDir,
             startedAt: new Date().toISOString(),
           });
+          await settleCiAdmissionLedger(
+            ciAdmissionLedger,
+            "provider-started",
+            "pipeline starting",
+          );
           result = await runPipeline(
             {
               pr: prNumber,
@@ -2569,7 +2842,19 @@ async function reviewPr(
           ),
         );
       }
-      if (result.sessionFailed) return 1;
+      if (result.sessionFailed) {
+        await settleCiAdmissionLedger(
+          ciAdmissionLedger,
+          "failed",
+          "every hunter failed",
+        );
+        return 1;
+      }
+      await settleCiAdmissionLedger(
+        ciAdmissionLedger,
+        "completed",
+        "review complete",
+      );
       // Assistant posture (spec 2.1): in CI mode, exit 0 even with blocking
       // findings — ciExitCode only fails on a fatal session failure (already
       // returned above) or a genuine posting drop (design D6). Outside CI,
@@ -2596,8 +2881,32 @@ async function reviewPr(
           targetUrl: statusTargetUrl,
         }),
       );
+      // Best-effort: SIGTERM/SIGINT handlers cannot reach this state, but any
+      // throw or early return that skipped explicit settlement still lands here.
+      if (
+        ciAdmissionLedger !== null &&
+        (ciAdmissionLedger.record.status === "reserved" ||
+          ciAdmissionLedger.record.status === "provider-started")
+      ) {
+        await settleCiAdmissionLedger(
+          ciAdmissionLedger,
+          "failed",
+          "review path exited without terminal settlement",
+        );
+      }
     }
   } finally {
+    if (
+      ciAdmissionLedger !== null &&
+      (ciAdmissionLedger.record.status === "reserved" ||
+        ciAdmissionLedger.record.status === "provider-started")
+    ) {
+      await settleCiAdmissionLedger(
+        ciAdmissionLedger,
+        "failed",
+        "review path exited without terminal settlement",
+      );
+    }
     await releasePidLock(lockPath);
     await runGc({
       home,
@@ -2702,6 +3011,7 @@ async function resolveInlinePostPlan(input: {
   // timeline; see postInlineFindings's own WHY) or leave a pre-existing one
   // alone until the closing PATCH.
   existingSummaryId: number | null;
+  summaryBody: string | null;
   // The FULL finding list the plan matched against — threaded through to
   // postPrReview's 422 recovery so it can re-match with the SAME finding
   // set the plan used, never a narrower one (CRIT-A, verify-report-pr3
@@ -2714,12 +3024,11 @@ async function resolveInlinePostPlan(input: {
     spawnFn: input.spawnFn,
   });
   const existingSummaryId = findMarkedCommentId(issueComments);
+  const summaryBody = summaryBodyForId(issueComments, existingSummaryId);
   const previousHeadSha =
-    existingSummaryId === null
+    summaryBody === null
       ? undefined
-      : (parseMarkerHead(
-          issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
-        ) ?? undefined);
+      : (parseMarkerHead(summaryBody) ?? undefined);
   const posted = await fetchPostedFindingComments(
     input.operatorRoot,
     input.pr,
@@ -2750,7 +3059,22 @@ async function resolveInlinePostPlan(input: {
     posted,
     headSha: input.headSha,
   });
-  return { plan, previousHeadSha, existingSummaryId, findingRefs, posted };
+  return {
+    plan,
+    previousHeadSha,
+    existingSummaryId,
+    summaryBody,
+    findingRefs,
+    posted,
+  };
+}
+
+function summaryBodyForId(
+  comments: { id: number; body: string }[],
+  summaryId: number | null,
+): string | null {
+  if (summaryId === null) return null;
+  return comments.find((c) => c.id === summaryId)?.body ?? null;
 }
 
 // A finding's own posted comment, as a clickable link for the summary's
@@ -2905,8 +3229,19 @@ export async function postInlineFindings(input: {
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
   const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
-  const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
-    await resolveInlinePostPlan(input);
+  const {
+    plan,
+    previousHeadSha,
+    existingSummaryId,
+    summaryBody,
+    findingRefs,
+    posted,
+  } = await resolveInlinePostPlan(input);
+  const postedReviewCount = nextStateReviewCount({
+    existingSummaryId,
+    state: summaryBody === null ? null : parseStateBlock(summaryBody),
+    summaryBody,
+  });
 
   // Before the create-first POST and before the review submission — the last
   // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
@@ -2995,8 +3330,13 @@ export async function postInlineFindings(input: {
       moved,
       urls,
     );
-    if (framing === undefined) return body;
-    return `${body}${renderStateBlock(doc.head_sha, framing.live)}`;
+    if (framing === undefined) {
+      const counts = tierCountsFromFindings(
+        canonicalAdmissionFindings(doc.findings),
+      );
+      return `${body}${renderCiAdmissionBlock(doc.head_sha, counts, postedReviewCount)}`;
+    }
+    return `${body}${renderStateBlock(doc.head_sha, framing.live, postedReviewCount)}`;
   };
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));
@@ -5945,6 +6285,124 @@ async function applySizeGate(
 // `postPrComment`'s own `markerPrefix` (Phase 3's parameterization) makes
 // this idempotent: a repeat CI run on the same still-failing PR updates its
 // own prior skip comment rather than stacking a new one on every push.
+type CiAdmissionLedgerState = {
+  record: AdmissionRecord;
+  checkRunId: number;
+  headSha: string;
+  operatorRoot: string;
+};
+
+async function persistCiAdmissionLedger(
+  state: CiAdmissionLedgerState,
+): Promise<void> {
+  state.checkRunId = await upsertAdmissionCheckRun(state.operatorRoot, {
+    headSha: state.headSha,
+    record: state.record,
+    checkRunId: state.checkRunId,
+  });
+}
+
+async function tryPersistCiAdmissionLedger(
+  state: CiAdmissionLedgerState | null,
+): Promise<void> {
+  if (state === null) return;
+  try {
+    await persistCiAdmissionLedger(state);
+  } catch {
+    // Best-effort: settlement must not mask the underlying review failure.
+  }
+}
+
+async function settleCiAdmissionLedger(
+  state: CiAdmissionLedgerState | null,
+  status: AdmissionAttemptStatus,
+  reason: string,
+): Promise<void> {
+  if (state === null) return;
+  const terminal = new Set<AdmissionAttemptStatus>([
+    "completed",
+    "failed",
+    "cancelled",
+    "skipped",
+  ]);
+  if (
+    terminal.has(state.record.status) &&
+    state.record.status !== "provider-started"
+  ) {
+    return;
+  }
+  state.record = settleAdmissionAttempt(state.record, status, reason);
+  await tryPersistCiAdmissionLedger(state);
+}
+
+async function reserveCiAdmissionLedger(input: {
+  operatorRoot: string;
+  prNumber: number;
+  headSha: string;
+  policy: CiReviewPolicy;
+  policyHash: string;
+  existing: readonly AdmissionRecord[];
+  decisionReason: string;
+  priorScore?: number | null;
+  blockingCount?: number | null;
+  advisoryCount?: number | null;
+}): Promise<CiAdmissionLedgerState> {
+  const { record } = reserveAdmissionAttempt({
+    existing: input.existing,
+    prNumber: input.prNumber,
+    headSha: input.headSha,
+    policyHash: input.policyHash,
+    workflowRunId: process.env.GITHUB_RUN_ID ?? null,
+    decisionReason: input.decisionReason,
+    priorScore: input.priorScore ?? null,
+    blockingCount: input.blockingCount ?? null,
+    advisoryCount: input.advisoryCount ?? null,
+    reservationTtlSeconds: input.policy.reservationTtlSeconds,
+  });
+  const checkRunId = await upsertAdmissionCheckRun(input.operatorRoot, {
+    headSha: input.headSha,
+    record,
+  });
+  return {
+    record,
+    checkRunId,
+    headSha: input.headSha,
+    operatorRoot: input.operatorRoot,
+  };
+}
+
+async function recordCiAdmissionGateSkip(input: {
+  operatorRoot: string;
+  prNumber: number;
+  headSha: string;
+  policy: CiReviewPolicy;
+  policyHash: string;
+  existing: readonly AdmissionRecord[];
+  reason: string;
+  priorScore: number | null;
+  blockingCount: number | null;
+  advisoryCount: number | null;
+}): Promise<void> {
+  try {
+    const state = await reserveCiAdmissionLedger({
+      operatorRoot: input.operatorRoot,
+      prNumber: input.prNumber,
+      headSha: input.headSha,
+      policy: input.policy,
+      policyHash: input.policyHash,
+      existing: input.existing,
+      decisionReason: input.reason,
+      priorScore: input.priorScore,
+      blockingCount: input.blockingCount,
+      advisoryCount: input.advisoryCount,
+    });
+    await settleCiAdmissionLedger(state, "skipped", input.reason);
+  } catch {
+    // The skip notice is the operator-facing outcome; a check-run write must
+    // not block publishing it.
+  }
+}
+
 async function publishCiSkip(input: {
   operatorRoot: string;
   prNumber: number;

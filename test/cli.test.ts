@@ -16,6 +16,14 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  type AdmissionRecord,
+  serializeAdmissionRecord,
+} from "../src/ci-admission-ledger";
+import {
+  evaluateCiReviewAdmission,
+  resolveCiAdmissionAttemptCount,
+} from "../src/ci-review-admission";
+import {
   assertRunMatchesPr,
   computeDroppedFindingIds,
   createRunDir,
@@ -42,19 +50,21 @@ import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import type { StoredComparison } from "../src/ledger";
+import { ADMISSION_CHECK_RUN_NAME, listAdmissionCheckRuns } from "../src/pr";
 import {
   claimFingerprint,
   findingMarker,
   PR_FINDING_MARKER_PREFIX,
 } from "../src/pr-preflight";
-import type { CliOptions, SummarySettings } from "../src/preflight";
 import {
   CliError,
+  type CliOptions,
   CliUsageError,
   DEFAULT_MAX_VERIFICATION_STEPS,
   EMPTY_LOCAL_CONFIG,
   resolveMaxVerificationSteps,
   resolveSummary,
+  type SummarySettings,
 } from "../src/preflight";
 import type { RereviewProvenance } from "../src/rereview-prepare";
 import { triageMarker } from "../src/triage";
@@ -3561,6 +3571,14 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         max_changed_files: "default",
         scout: "default",
         post: "default",
+        ci_review_policy: "default",
+        ci_max_attempts: "default",
+        ci_max_reviews: "default",
+        ci_rereview_min_score: "default",
+        ci_blocking_weight: "default",
+        ci_advisory_weight: "default",
+        ci_trusted_actors: "default",
+        ci_admission_observe_only: "default",
       });
       expect(loaded.globalPresent).toBe(false);
       expect(loaded.globalConfigPath).toBe(
@@ -3607,6 +3625,14 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         max_changed_files: "default",
         scout: "default",
         post: "default",
+        ci_review_policy: "default",
+        ci_max_attempts: "default",
+        ci_max_reviews: "default",
+        ci_rereview_min_score: "default",
+        ci_blocking_weight: "default",
+        ci_advisory_weight: "default",
+        ci_trusted_actors: "default",
+        ci_admission_observe_only: "default",
       });
     } finally {
       await home.cleanup();
@@ -3879,6 +3905,14 @@ describe("pipelineConfigInput — O-6", () => {
         max_changed_files: "default" as const,
         scout: "default" as const,
         post: "default" as const,
+        ci_review_policy: "default" as const,
+        ci_max_attempts: "default" as const,
+        ci_max_reviews: "default" as const,
+        ci_rereview_min_score: "default" as const,
+        ci_blocking_weight: "default" as const,
+        ci_advisory_weight: "default" as const,
+        ci_trusted_actors: "repo" as const,
+        ci_admission_observe_only: "default" as const,
       },
       repoConfigPath: "/repo/.prhero/config.json",
       globalConfigPath: "/home/.prhero/config.json",
@@ -4095,5 +4129,77 @@ describe("main — status=error on the exits that never reached runCli's catch",
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("CI admission reviewCount — ledger check runs feed admission", () => {
+  test("resolveCiAdmissionAttemptCount uses terminal ledger rows from check-runs", async () => {
+    const head = "e".repeat(40);
+    const policyHash = "policyhash123456";
+    const record: AdmissionRecord = {
+      schemaVersion: 1,
+      prNumber: 42,
+      headSha: head,
+      policyHash,
+      reservationId: "reservation123456",
+      attemptNumber: 1,
+      status: "failed",
+      decisionReason: "provider failed",
+      priorScore: null,
+      blockingCount: null,
+      advisoryCount: null,
+      workflowRunId: null,
+      createdAt: "2026-08-28T12:00:00.000Z",
+      settledAt: "2026-08-28T12:05:00.000Z",
+    };
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["check-runs"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 77,
+              name: ADMISSION_CHECK_RUN_NAME,
+              status: "completed",
+              output: { text: serializeAdmissionRecord(record) },
+            },
+          ]),
+        },
+      },
+    ]);
+    const ledgerRecords = await listAdmissionCheckRuns(OPERATOR_ROOT, head, {
+      spawnFn,
+    });
+    expect(ledgerRecords).toEqual([record]);
+    expect(calls[0]?.argv.join(" ")).toContain(`commits/${head}/check-runs`);
+
+    const reviewCount = resolveCiAdmissionAttemptCount({
+      stateCount: 0,
+      workflowHeads: new Set<string>(),
+      ledgerRecords,
+    });
+    expect(reviewCount).toBe(1);
+
+    const exhausted = evaluateCiReviewAdmission({
+      currentHead: "f".repeat(40),
+      summaryHead: OLD_HEAD,
+      markerSeen: true,
+      reviewCount: 2,
+      state: null,
+      admission: null,
+      postedFindings: null,
+      policy: {
+        schemaVersion: 1,
+        mode: "risk_aware",
+        maxAttempts: 2,
+        rereviewMinScore: 4,
+        blockingWeight: 2,
+        advisoryWeight: 1,
+        reservationTtlSeconds: 3600,
+      },
+      deltaTouchesPriorFindings: false,
+      deltaRisk: null,
+    });
+    expect(exhausted.action).toBe("manual-required");
   });
 });

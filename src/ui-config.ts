@@ -176,6 +176,38 @@ export function configRows(
     ),
     scout: cell(effective.scout?.toString(), sources.scout),
     post: cell(effective.post?.toString(), sources.post),
+    ci_review_policy: cell(
+      effective.ci_review_policy,
+      sources.ci_review_policy,
+    ),
+    ci_max_attempts: cell(
+      effective.ci_max_attempts?.toString(),
+      sources.ci_max_attempts,
+    ),
+    ci_max_reviews: cell(
+      effective.ci_max_reviews?.toString(),
+      sources.ci_max_reviews,
+    ),
+    ci_rereview_min_score: cell(
+      effective.ci_rereview_min_score?.toString(),
+      sources.ci_rereview_min_score,
+    ),
+    ci_blocking_weight: cell(
+      effective.ci_blocking_weight?.toString(),
+      sources.ci_blocking_weight,
+    ),
+    ci_advisory_weight: cell(
+      effective.ci_advisory_weight?.toString(),
+      sources.ci_advisory_weight,
+    ),
+    ci_trusted_actors: listCell(
+      effective.ci_trusted_actors ?? [],
+      sources.ci_trusted_actors,
+    ),
+    ci_admission_observe_only: cell(
+      effective.ci_admission_observe_only?.toString(),
+      sources.ci_admission_observe_only,
+    ),
   };
   const summaryCells: Record<keyof SummaryConfig, ConfigCell> = {
     enabled: cell(

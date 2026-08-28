@@ -32,6 +32,7 @@ permissions:
   pull-requests: write # inline comments + review + step summary
   issues: write # resolving/replying on review threads (GitHub models PR conversations as issues)
   statuses: write # commit status updates
+  checks: write # admission attempt ledger
 
 jobs:
   review:
@@ -130,6 +131,7 @@ The workflow's `permissions:` block needs four scopes, each for a specific reaso
 - **`issues: write`** — resolving and replying on review threads. GitHub's API models every PR
   conversation as an issue thread, so this scope is required even though nothing here touches an issue.
 - **`statuses: write`** — updating the PR commit status context (pending, success, error).
+- **`checks: write`** — durable CI admission ledger (attempt reservations and terminal outcomes on Check Runs).
 
 ## Security considerations
 
@@ -167,6 +169,73 @@ other way ("always skip") would make pr-hero silently stop reviewing every PR wh
 green. Because a disabled ceiling is otherwise indistinguishable from a passing one, a disabled budget
 emits a `::warning::` workflow annotation on every run — check your job logs if you did not mean to
 disable it.
+
+## CI review admission
+
+On every `synchronize` push, pr-hero decides whether another review is worth the spend **before**
+fetching the worktree or spawning agents. The decision is deterministic, logged in the job summary,
+and backed by a durable attempt ledger stored in GitHub Check Runs (`checks: write` permission).
+
+### Policy configuration (`.prhero/config.json`)
+
+These keys live in the **repository** config (not the PR branch worktree). A PR author cannot change
+them to suppress review of their own PR.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ci_review_policy` | `risk_aware` | Admission mode — see table below. |
+| `ci_max_attempts` | `2` | Automatic attempt budget per PR (same-head dedup is per head SHA). |
+| `ci_rereview_min_score` | `4` | Prior findings score at or above this triggers re-review (`blocking×weight + advisory×weight`). |
+| `ci_blocking_weight` | `2` | Score weight for blocking-tier findings. |
+| `ci_advisory_weight` | `1` | Score weight for advisory-tier findings. |
+| `ci_trusted_actors` | `[]` (+ `GITHUB_ACTOR`) | GitHub logins whose finding markers count as authoritative. |
+| `ci_admission_observe_only` | `false` | When `true`, admission still evaluates and emits a `::notice::` with the would-be decision but **always runs** the review. Use during rollout. |
+
+#### `ci_review_policy` modes
+
+| Mode | Behavior |
+|---|---|
+| `once_per_pr` | One automatic review per PR; later pushes are reported as not reviewed. |
+| `thresholded` | Re-review when the prior score reaches `ci_rereview_min_score`. |
+| `risk_aware` | Re-review when the delta touches risky paths **or** the prior score reaches the threshold. Recommended default. |
+| `every_push` | Review every push (still bounded by `ci_max_attempts`). |
+| `manual_only` | No automatic re-review; explicit override required. |
+
+Example:
+
+```json
+{
+  "ci_review_policy": "risk_aware",
+  "ci_max_attempts": 2,
+  "ci_rereview_min_score": 4,
+  "ci_blocking_weight": 2,
+  "ci_advisory_weight": 1,
+  "ci_trusted_actors": ["my-org-bot"],
+  "ci_admission_observe_only": false
+}
+```
+
+### Manual override
+
+When automatic admission skips a push or the attempt budget is exhausted, run locally:
+
+```bash
+pr-hero review --pr <n> --post --force
+```
+
+`--force` bypasses admission (and the size gate) for that run only. It does not reset the durable
+ledger — it is an explicit operator override, not a silent retry loop.
+
+### Check Runs ledger
+
+Admission attempts are persisted as Check Runs named `pr-hero/ci-admission` on the reviewed commit.
+The workflow needs **`checks: write`** in addition to the four scopes listed above so pr-hero can
+reserve attempts before provider spend and record failed/cancelled outcomes. PR comments remain
+presentation only; the Check Run ledger is authoritative.
+
+Skipped and manual-required outcomes include admission metadata in the step summary: decision, reason,
+current head, reviewed head, risk class, score, attempt count, remaining budget, policy mode, and a
+short policy hash.
 
 ## Assistant posture: it never blocks your merge
 

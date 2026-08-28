@@ -12,6 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   SKIP_BUDGET_COMMENT_MARKER,
+  SKIP_COVERAGE_COMMENT_MARKER,
   SKIP_SIZE_COMMENT_MARKER,
 } from "../src/ci-gates";
 import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
@@ -652,6 +653,7 @@ describe("marker prefix disjointness", () => {
     ["TRIAGE_MARKER_PREFIX", TRIAGE_MARKER_PREFIX],
     ["SKIP_SIZE_COMMENT_MARKER", SKIP_SIZE_COMMENT_MARKER],
     ["SKIP_BUDGET_COMMENT_MARKER", SKIP_BUDGET_COMMENT_MARKER],
+    ["SKIP_COVERAGE_COMMENT_MARKER", SKIP_COVERAGE_COMMENT_MARKER],
   ];
 
   test("neither marker prefix is a prefix of the other (legacy pair, kept for regression pinning)", () => {

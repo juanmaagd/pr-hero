@@ -43,6 +43,7 @@ export interface LiveFinding extends StateFinding {
 export interface ParsedStateBlock {
   headSha: string;
   findings: StateFinding[];
+  reviews?: number;
 }
 
 const STATE_HEADER = /^<!-- pr-hero-state v=1 head=([0-9a-f]{40}) -->/;
@@ -69,7 +70,9 @@ export function parseStateBlock(body: string): ParsedStateBlock | null {
     const parsed: unknown = JSON.parse(jsonComment[1].trim());
     const findings = asStateFindings(parsed);
     if (findings === null) return null;
-    return { headSha, findings };
+    const reviews = asStateReviews(parsed);
+    if (reviews === null) return null;
+    return { headSha, findings, ...(reviews === undefined ? {} : { reviews }) };
   } catch {
     return null;
   }
@@ -78,8 +81,9 @@ export function parseStateBlock(body: string): ParsedStateBlock | null {
 export function renderStateBlock(
   headSha: string,
   findings: readonly StateFinding[],
+  reviews?: number,
 ): string {
-  const payload = encodeStateJson({
+  const payload: Record<string, unknown> = {
     findings: findings.map((f) => ({
       id: f.id,
       sev: f.sev,
@@ -89,8 +93,11 @@ export function renderStateBlock(
       c: f.c,
       claim: f.claim,
     })),
-  });
-  return `${stateMarker(headSha)}\n<!-- ${payload} -->`;
+  };
+  if (reviews !== undefined && Number.isInteger(reviews) && reviews >= 1) {
+    payload.reviews = reviews;
+  }
+  return `${stateMarker(headSha)}\n<!-- ${encodeStateJson(payload)} -->`;
 }
 
 export function stateFinding(input: {
@@ -227,6 +234,20 @@ function asStateFindings(parsed: unknown): StateFinding[] | null {
     out.push(finding);
   }
   return out;
+}
+
+function asStateReviews(parsed: unknown): number | undefined | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const reviews = (parsed as { reviews?: unknown }).reviews;
+  if (reviews === undefined) return undefined;
+  if (
+    typeof reviews !== "number" ||
+    !Number.isInteger(reviews) ||
+    reviews < 1
+  ) {
+    return null;
+  }
+  return reviews;
 }
 
 function asStateFinding(row: unknown): StateFinding | null {

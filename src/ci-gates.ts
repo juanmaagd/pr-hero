@@ -65,6 +65,14 @@ import {
   type CiSummaryData,
   renderStepSummary,
 } from "./ci-reporter";
+import {
+  type CiReviewAdmissionVerdict,
+  type CiReviewPolicyMode,
+  ciAdmissionRemainingBudget,
+  ciReviewManualRequiredDetail,
+  ciReviewSkipDetail,
+} from "./ci-review-admission";
+import type { DeltaRiskAssessment } from "./ci-review-risk";
 import type { SizeGateVerdict } from "./size-gate";
 
 function usd(amount: number): string {
@@ -144,6 +152,9 @@ export interface CiGateSkip {
 // `head=` declaration to, and no fields to encode — see the module header.
 export const SKIP_SIZE_COMMENT_MARKER = "<!-- pr-hero-skip-size -->";
 export const SKIP_BUDGET_COMMENT_MARKER = "<!-- pr-hero-skip-budget -->";
+export const SKIP_COVERAGE_COMMENT_MARKER = "<!-- pr-hero-skip-coverage -->";
+export const MANUAL_REQUIRED_COMMENT_MARKER =
+  "<!-- pr-hero-manual-required -->";
 
 // Same register as ci-reporter.ts's `skipSizeLines`/`skipBudgetLines` and
 // project rule 4 (assistant posture): a gate skip is a courteous notice
@@ -151,6 +162,11 @@ export const SKIP_BUDGET_COMMENT_MARKER = "<!-- pr-hero-skip-budget -->";
 // as a practical option, not a correction.
 type SkipSizeSummary = Extract<CiSummaryData, { kind: "skipped-size" }>;
 type SkipBudgetSummary = Extract<CiSummaryData, { kind: "skipped-budget" }>;
+type SkipCoverageSummary = Extract<CiSummaryData, { kind: "skipped-coverage" }>;
+type ManualRequiredSummary = Extract<
+  CiSummaryData,
+  { kind: "manual-required" }
+>;
 
 function buildSizeSkipComment(data: SkipSizeSummary): string {
   const lines = [
@@ -285,7 +301,11 @@ export interface CiGateSkipPlan {
 // comment and summary already show (this module's own "same numbers"
 // doctrine, see the module header).
 export function ciGateSkipOutputs(
-  status: "skipped-size" | "skipped-budget",
+  status:
+    | "skipped-size"
+    | "skipped-budget"
+    | "skipped-coverage"
+    | "manual-required",
   estimatedCostUsd: number,
 ): CiOutputs {
   return {
@@ -321,6 +341,155 @@ export function planCiBudgetSkip(
     markerPrefix: SKIP_BUDGET_COMMENT_MARKER,
     summaryMarkdown: renderStepSummary(skip.summary),
     outputs: ciGateSkipOutputs("skipped-budget", input.estimatedCostUsd),
+  };
+}
+
+const COVERAGE_REASON_LABEL: Record<
+  Extract<CiReviewAdmissionVerdict, { action: "skip" }>["reason"],
+  string
+> = {
+  "same-head": "already reviewed at this commit",
+  "once-per-pr": "once_per_pr policy allows one automatic review",
+  "below-threshold": "prior findings below the re-review score floor",
+  "low-risk-delta": "delta touches only low-risk paths",
+};
+
+function buildCoverageSkipComment(data: SkipCoverageSummary): string {
+  const lines = [
+    SKIP_COVERAGE_COMMENT_MARKER,
+    "## pr-hero review skipped",
+    "",
+    "⚠️ This push did not justify another review run.",
+    "",
+    `**${data.detail}**`,
+    "",
+    `Prior score: ${data.priorScore} (re-review needs ≥ ${data.minScore}). ` +
+      `Attempts on this PR: ${data.reviewCount}/${data.maxAttempts}.`,
+    "",
+    "The existing review comment still describes the last head pr-hero " +
+      "reviewed. Push a fix for the posted findings, or run " +
+      "`pr-hero review --pr <n> --post --force` locally to override.",
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function buildManualRequiredComment(data: ManualRequiredSummary): string {
+  const lines = [
+    MANUAL_REQUIRED_COMMENT_MARKER,
+    "## pr-hero review requires manual override",
+    "",
+    "🛑 Automatic review did not run on this push.",
+    "",
+    `**${data.detail}**`,
+    "",
+    `Attempts on this PR: ${data.reviewCount}/${data.maxAttempts}.`,
+    "",
+    "The existing review comment still describes the last head pr-hero " +
+      "reviewed. To force another review, run " +
+      "`pr-hero review --pr <n> --post --force` locally.",
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+export interface AdmissionContext {
+  currentHead: string;
+  reviewedHead: string | null;
+  policyMode: CiReviewPolicyMode;
+  policyHash: string;
+  deltaRisk?: DeltaRiskAssessment | null;
+}
+
+function skipAdmissionSummaryFields(
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "skip" }>,
+  context?: AdmissionContext,
+): Partial<SkipCoverageSummary> {
+  if (context === undefined) return {};
+  return {
+    decision: "skip",
+    admissionReason: verdict.reason,
+    currentHead: context.currentHead,
+    reviewedHead: context.reviewedHead,
+    riskClass: context.deltaRisk?.class,
+    riskReason: context.deltaRisk?.reason,
+    remainingBudget: ciAdmissionRemainingBudget(
+      verdict.reviewCount,
+      verdict.maxAttempts,
+    ),
+    policyMode: context.policyMode,
+    policyHash: context.policyHash,
+  };
+}
+
+function manualAdmissionSummaryFields(
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>,
+  context?: AdmissionContext,
+): Partial<ManualRequiredSummary> {
+  if (context === undefined) return {};
+  return {
+    decision: "manual-required",
+    admissionReason: verdict.reason,
+    currentHead: context.currentHead,
+    reviewedHead: context.reviewedHead,
+    riskClass: context.deltaRisk?.class,
+    riskReason: context.deltaRisk?.reason,
+    remainingBudget: ciAdmissionRemainingBudget(
+      verdict.reviewCount,
+      verdict.maxAttempts,
+    ),
+    policyMode: context.policyMode,
+    policyHash: context.policyHash,
+  };
+}
+
+export function planCiReviewSkip(input: {
+  prNumber: number;
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "skip" }>;
+  admission?: AdmissionContext;
+}): CiGateSkipPlan {
+  const detail = ciReviewSkipDetail(input.verdict);
+  const summary: SkipCoverageSummary = {
+    kind: "skipped-coverage",
+    prNumber: input.prNumber,
+    reason: COVERAGE_REASON_LABEL[input.verdict.reason],
+    detail,
+    priorScore: input.verdict.prior.score,
+    minScore: input.verdict.minScore,
+    reviewCount: input.verdict.reviewCount,
+    maxAttempts: input.verdict.maxAttempts,
+    ...skipAdmissionSummaryFields(input.verdict, input.admission),
+  };
+  return {
+    comment: buildCoverageSkipComment(summary),
+    markerPrefix: SKIP_COVERAGE_COMMENT_MARKER,
+    summaryMarkdown: renderStepSummary(summary),
+    outputs: ciGateSkipOutputs("skipped-coverage", 0),
+  };
+}
+
+export function planCiReviewManualRequired(input: {
+  prNumber: number;
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>;
+  admission?: AdmissionContext;
+}): CiGateSkipPlan {
+  const detail = ciReviewManualRequiredDetail(input.verdict);
+  const summary: ManualRequiredSummary = {
+    kind: "manual-required",
+    prNumber: input.prNumber,
+    reason:
+      input.verdict.reason === "max-attempts-exhausted"
+        ? "automatic attempt budget exhausted"
+        : "manual_only policy",
+    detail,
+    priorScore: input.verdict.prior.score,
+    reviewCount: input.verdict.reviewCount,
+    maxAttempts: input.verdict.maxAttempts,
+    ...manualAdmissionSummaryFields(input.verdict, input.admission),
+  };
+  return {
+    comment: buildManualRequiredComment(summary),
+    markerPrefix: MANUAL_REQUIRED_COMMENT_MARKER,
+    summaryMarkdown: renderStepSummary(summary),
+    outputs: ciGateSkipOutputs("manual-required", 0),
   };
 }
 

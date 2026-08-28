@@ -189,9 +189,9 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       { signal: new AbortController().signal },
     );
 
-    const modelIndex = spawnArgs?.indexOf("--model");
+    const modelIndex = spawnArgs?.indexOf("--model") ?? -1;
     expect(modelIndex).toBeGreaterThanOrEqual(0);
-    expect(spawnArgs?.[modelIndex! + 1]).toBe("sonnet");
+    expect(spawnArgs?.[modelIndex + 1]).toBe("sonnet");
   });
 
   test("abort sends SIGTERM to negative pgid first; group exiting during grace receives no SIGKILL", async () => {

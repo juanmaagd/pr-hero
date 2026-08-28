@@ -23,11 +23,19 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import {
+  ADMISSION_CHECK_RUN_NAME,
+  type AdmissionAttemptStatus,
+  type AdmissionRecord,
+  parseAdmissionRecord,
+  serializeAdmissionRecord,
+} from "./ci-admission-ledger";
+import {
   type ComparisonResult,
   compareFindings,
   type PrHeroFindingRef,
 } from "./compare";
 import { renderComparison } from "./compare-report";
+import { THREAD_PAGE_SIZE } from "./corpus-preflight";
 import type { Finding, RunStatus } from "./findings";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
@@ -44,6 +52,11 @@ import {
   worktreeDirty,
 } from "./pr-preflight";
 import { CliError, isFullCommitId } from "./preflight";
+
+export const GRAPHQL_COMMENT_MAX_PAGES = 50;
+
+export class CommentsTruncatedError extends CliError {}
+
 import { renderInlineComment, renderIssueFindingComment } from "./report";
 
 // Same helper as cli.ts's git, duplicated rather than shared so neither
@@ -923,16 +936,179 @@ function is404(stderr: string): boolean {
 // produces. Variable names are repoOwner/repoName so they cannot collide
 // with gh -f name= interpolating $name inside the query document.
 const PR_ISSUE_COMMENTS_QUERY =
-  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "query($repoOwner:String!,$repoName:String!,$number:Int!,$cursor:String){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
-  "comments(first:100){nodes{databaseId body createdAt updatedAt author{login}}}}}}";
+  "comments(first:100,after:$cursor){" +
+  "pageInfo{endCursor hasNextPage}" +
+  "nodes{databaseId body createdAt updatedAt author{login}}}}}}";
 
 const PR_REVIEW_COMMENTS_QUERY =
-  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "query($repoOwner:String!,$repoName:String!,$number:Int!,$cursor:String){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
-  "reviewThreads(first:100){nodes{comments(first:100){nodes{" +
+  `reviewThreads(first:${THREAD_PAGE_SIZE},after:$cursor){` +
+  "pageInfo{endCursor hasNextPage}" +
+  "nodes{comments(first:100){nodes{" +
   "fullDatabaseId body createdAt author{login} path line originalLine " +
   "replyTo{fullDatabaseId}}}}}}}}";
+
+// Parses `gh api repos/.../compare/{base}...{head}` — filenames only.
+export function parseCompareChangedFiles(stdout: string): string[] {
+  return parseCompareChangedFilesWithStatus(stdout).map((entry) => entry.path);
+}
+
+export type CompareChangedFileStatus =
+  | "added"
+  | "modified"
+  | "removed"
+  | "renamed";
+
+export interface CompareChangedFile {
+  path: string;
+  status: CompareChangedFileStatus;
+}
+
+const COMPARE_CHANGED_FILE_STATUSES = new Set<CompareChangedFileStatus>([
+  "added",
+  "modified",
+  "removed",
+  "renamed",
+]);
+
+function asCompareChangedFileStatus(
+  value: unknown,
+): CompareChangedFileStatus | null {
+  if (typeof value !== "string") return null;
+  return (COMPARE_CHANGED_FILE_STATUSES as ReadonlySet<string>).has(value)
+    ? (value as CompareChangedFileStatus)
+    : null;
+}
+
+// Parses `gh api repos/.../compare/{base}...{head}` — filenames and status.
+export function parseCompareChangedFilesWithStatus(
+  stdout: string,
+): CompareChangedFile[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      `gh api compare returned invalid JSON: ${stdout.slice(0, 120)}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new CliError("gh api compare returned no object");
+  }
+  const files = (parsed as { files?: unknown }).files;
+  if (!Array.isArray(files)) {
+    throw new CliError("gh api compare returned no files list");
+  }
+  const paths: CompareChangedFile[] = [];
+  for (const entry of files) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as { filename?: unknown; status?: unknown };
+    const filename = record.filename;
+    const status = asCompareChangedFileStatus(record.status) ?? "modified";
+    if (typeof filename === "string" && filename.length > 0) {
+      paths.push({ path: filename, status });
+    }
+  }
+  return paths;
+}
+
+export async function ghCompareChangedFiles(
+  operatorRoot: string,
+  base: string,
+  head: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<string[]> {
+  const files = await ghCompareChangedFilesWithStatus(
+    operatorRoot,
+    base,
+    head,
+    options,
+  );
+  return files.map((entry) => entry.path);
+}
+
+export async function ghCompareChangedFilesWithStatus(
+  operatorRoot: string,
+  base: string,
+  head: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<CompareChangedFile[]> {
+  const repo = await ghRepoOwnerName(operatorRoot, options?.spawnFn);
+  const result = await gh(
+    operatorRoot,
+    ["api", `repos/${repo.owner}/${repo.name}/compare/${base}...${head}`],
+    undefined,
+    options?.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(`gh api compare failed: ${result.stderr.trim()}`);
+  }
+  return parseCompareChangedFilesWithStatus(result.stdout);
+}
+
+const PR_HERO_WORKFLOW_FILE = "pr-hero.yml";
+const COMPLETED_WORKFLOW_CONCLUSIONS = new Set(["success", "failure"]);
+
+// Distinct head SHAs from completed pr-hero workflow runs on a branch.
+export function parsePrHeroWorkflowRunHeads(stdout: string): Set<string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      `gh run list returned invalid JSON: ${stdout.slice(0, 120)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new CliError("gh run list must return a JSON array");
+  }
+  const heads = new Set<string>();
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as { headSha?: unknown; conclusion?: unknown };
+    const conclusion = record.conclusion;
+    if (
+      typeof conclusion !== "string" ||
+      !COMPLETED_WORKFLOW_CONCLUSIONS.has(conclusion)
+    ) {
+      continue;
+    }
+    const headSha = record.headSha;
+    if (typeof headSha === "string" && isFullCommitId(headSha)) {
+      heads.add(headSha);
+    }
+  }
+  return heads;
+}
+
+export async function ghPrHeroWorkflowRunHeads(
+  operatorRoot: string,
+  branch: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<Set<string>> {
+  const result = await gh(
+    operatorRoot,
+    [
+      "run",
+      "list",
+      "--workflow",
+      PR_HERO_WORKFLOW_FILE,
+      "--branch",
+      branch,
+      "--json",
+      "headSha,conclusion",
+    ],
+    undefined,
+    options?.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(`gh run list failed: ${result.stderr.trim()}`);
+  }
+  return parsePrHeroWorkflowRunHeads(result.stdout);
+}
 
 async function ghGraphql(
   operatorRoot: string,
@@ -962,50 +1138,13 @@ function graphqlLogin(value: unknown): string {
   return typeof login === "string" ? login : "";
 }
 
-async function fetchPrCommentsGraphql(
-  operatorRoot: string,
-  pr: number,
-  spawnFn?: typeof Bun.spawn,
-): Promise<
-  {
-    id: number;
-    user: string;
-    body: string;
-    created_at?: string;
-    updated_at?: string;
-  }[]
-> {
-  const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
-  const stdout = await ghGraphql(
-    operatorRoot,
-    PR_ISSUE_COMMENTS_QUERY,
-    { repoOwner: repo.owner, repoName: repo.name, number: pr },
-    "issueComments",
-    spawnFn,
-  );
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    throw new CliError(
-      "gh api graphql (issueComments) returned invalid JSON: " +
-        stdout.slice(0, 120),
-    );
-  }
-  const nodes = (
-    parsed as {
-      data?: {
-        repository?: {
-          pullRequest?: { comments?: { nodes?: unknown } };
-        };
-      };
-    } | null
-  )?.data?.repository?.pullRequest?.comments?.nodes;
-  if (!Array.isArray(nodes)) {
-    throw new CliError(
-      "gh api graphql (issueComments) returned no comment list",
-    );
-  }
+function issueCommentsFromNodes(nodes: unknown[]): {
+  id: number;
+  user: string;
+  body: string;
+  created_at?: string;
+  updated_at?: string;
+}[] {
   const comments: {
     id: number;
     user: string;
@@ -1039,19 +1178,128 @@ async function fetchPrCommentsGraphql(
   return comments;
 }
 
-async function fetchPrReviewCommentsGraphql(
+interface IssueCommentsGraphqlPage {
+  nodes: unknown[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+function parseIssueCommentsGraphqlPage(
+  stdout: string,
+): IssueCommentsGraphqlPage {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      "gh api graphql (issueComments) returned invalid JSON: " +
+        stdout.slice(0, 120),
+    );
+  }
+  const connection = (
+    parsed as {
+      data?: {
+        repository?: {
+          pullRequest?: { comments?: unknown };
+        };
+      };
+    } | null
+  )?.data?.repository?.pullRequest?.comments;
+  if (typeof connection !== "object" || connection === null) {
+    throw new CliError(
+      "gh api graphql (issueComments) returned no comment list",
+    );
+  }
+  const record = connection as Record<string, unknown>;
+  const nodes = record.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new CliError(
+      "gh api graphql (issueComments) returned no comment list",
+    );
+  }
+  const pageInfo = record.pageInfo;
+  if (typeof pageInfo !== "object" || pageInfo === null) {
+    throw new CliError("gh api graphql (issueComments) returned no pageInfo");
+  }
+  const hasNextPage =
+    (pageInfo as { hasNextPage?: unknown }).hasNextPage === true;
+  const endCursorRaw = (pageInfo as { endCursor?: unknown }).endCursor;
+  const endCursor =
+    typeof endCursorRaw === "string" && endCursorRaw.length > 0
+      ? endCursorRaw
+      : null;
+  if (hasNextPage && endCursor === null) {
+    throw new CliError(
+      "gh api graphql (issueComments) hasNextPage is true but endCursor is missing",
+    );
+  }
+  return { nodes, hasNextPage, endCursor };
+}
+
+async function fetchPrCommentsGraphql(
   operatorRoot: string,
   pr: number,
   spawnFn?: typeof Bun.spawn,
-): Promise<PrReviewComment[]> {
+): Promise<
+  {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[]
+> {
+  assertBalancedGraphql(PR_ISSUE_COMMENTS_QUERY, "issueComments");
   const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
-  const stdout = await ghGraphql(
-    operatorRoot,
-    PR_REVIEW_COMMENTS_QUERY,
-    { repoOwner: repo.owner, repoName: repo.name, number: pr },
-    "reviewComments",
-    spawnFn,
-  );
+  const comments: {
+    id: number;
+    user: string;
+    body: string;
+    created_at?: string;
+    updated_at?: string;
+  }[] = [];
+  let cursor: string | null = null;
+  let hasNextPage = true;
+  let pageCount = 0;
+  while (hasNextPage) {
+    pageCount++;
+    const variables: Record<string, string | number> = {
+      repoOwner: repo.owner,
+      repoName: repo.name,
+      number: pr,
+    };
+    if (cursor !== null) {
+      variables.cursor = cursor;
+    }
+    const stdout = await ghGraphql(
+      operatorRoot,
+      PR_ISSUE_COMMENTS_QUERY,
+      variables,
+      "issueComments",
+      spawnFn,
+    );
+    const page = parseIssueCommentsGraphqlPage(stdout);
+    comments.push(...issueCommentsFromNodes(page.nodes));
+    hasNextPage = page.hasNextPage;
+    cursor = page.endCursor;
+    if (hasNextPage && pageCount >= GRAPHQL_COMMENT_MAX_PAGES) {
+      throw new CommentsTruncatedError(
+        `gh api graphql (issueComments) exceeded ${GRAPHQL_COMMENT_MAX_PAGES} pages`,
+      );
+    }
+  }
+  return comments;
+}
+
+interface ReviewCommentsGraphqlPage {
+  nodes: unknown[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+function parseReviewCommentsGraphqlPage(
+  stdout: string,
+): ReviewCommentsGraphqlPage {
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(stdout);
@@ -1061,20 +1309,49 @@ async function fetchPrReviewCommentsGraphql(
         stdout.slice(0, 120),
     );
   }
-  const threadNodes = (
+  const connection = (
     parsed as {
       data?: {
         repository?: {
-          pullRequest?: { reviewThreads?: { nodes?: unknown } };
+          pullRequest?: { reviewThreads?: unknown };
         };
       };
     } | null
-  )?.data?.repository?.pullRequest?.reviewThreads?.nodes;
-  if (!Array.isArray(threadNodes)) {
+  )?.data?.repository?.pullRequest?.reviewThreads;
+  if (typeof connection !== "object" || connection === null) {
     throw new CliError(
       "gh api graphql (reviewComments) returned no thread list",
     );
   }
+  const record = connection as Record<string, unknown>;
+  const nodes = record.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new CliError(
+      "gh api graphql (reviewComments) returned no thread list",
+    );
+  }
+  const pageInfo = record.pageInfo;
+  if (typeof pageInfo !== "object" || pageInfo === null) {
+    throw new CliError("gh api graphql (reviewComments) returned no pageInfo");
+  }
+  const hasNextPage =
+    (pageInfo as { hasNextPage?: unknown }).hasNextPage === true;
+  const endCursorRaw = (pageInfo as { endCursor?: unknown }).endCursor;
+  const endCursor =
+    typeof endCursorRaw === "string" && endCursorRaw.length > 0
+      ? endCursorRaw
+      : null;
+  if (hasNextPage && endCursor === null) {
+    throw new CliError(
+      "gh api graphql (reviewComments) hasNextPage is true but endCursor is missing",
+    );
+  }
+  return { nodes, hasNextPage, endCursor };
+}
+
+function reviewCommentsFromThreadNodes(
+  threadNodes: unknown[],
+): PrReviewComment[] {
   const comments: PrReviewComment[] = [];
   for (const thread of threadNodes) {
     if (typeof thread !== "object" || thread === null) continue;
@@ -1117,6 +1394,47 @@ async function fetchPrReviewCommentsGraphql(
           ? { created_at: record.createdAt }
           : {}),
       });
+    }
+  }
+  return comments;
+}
+
+async function fetchPrReviewCommentsGraphql(
+  operatorRoot: string,
+  pr: number,
+  spawnFn?: typeof Bun.spawn,
+): Promise<PrReviewComment[]> {
+  assertBalancedGraphql(PR_REVIEW_COMMENTS_QUERY, "reviewComments");
+  const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
+  const comments: PrReviewComment[] = [];
+  let cursor: string | null = null;
+  let hasNextPage = true;
+  let pageCount = 0;
+  while (hasNextPage) {
+    pageCount++;
+    const variables: Record<string, string | number> = {
+      repoOwner: repo.owner,
+      repoName: repo.name,
+      number: pr,
+    };
+    if (cursor !== null) {
+      variables.cursor = cursor;
+    }
+    const stdout = await ghGraphql(
+      operatorRoot,
+      PR_REVIEW_COMMENTS_QUERY,
+      variables,
+      "reviewComments",
+      spawnFn,
+    );
+    const page = parseReviewCommentsGraphqlPage(stdout);
+    comments.push(...reviewCommentsFromThreadNodes(page.nodes));
+    hasNextPage = page.hasNextPage;
+    cursor = page.endCursor;
+    if (hasNextPage && pageCount >= GRAPHQL_COMMENT_MAX_PAGES) {
+      throw new CommentsTruncatedError(
+        `gh api graphql (reviewComments) exceeded ${GRAPHQL_COMMENT_MAX_PAGES} pages`,
+      );
     }
   }
   return comments;
@@ -1592,4 +1910,162 @@ export async function resolveReviewThreadForComment(input: {
     );
   }
   return "resolved";
+}
+
+// Re-export for callers that already import check-run constants from pr.ts.
+export { ADMISSION_CHECK_RUN_NAME };
+
+const ADMISSION_CHECK_RUN_TIMEOUT_MS = 15_000;
+
+function admissionCheckRunConclusion(
+  status: AdmissionAttemptStatus,
+): "success" | "failure" | "neutral" | "cancelled" | "skipped" {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "failed":
+      return "failure";
+    case "cancelled":
+      return "cancelled";
+    case "skipped":
+      return "skipped";
+    default:
+      return "neutral";
+  }
+}
+
+function admissionCheckRunStatus(
+  status: AdmissionAttemptStatus,
+): "queued" | "in_progress" | "completed" {
+  if (
+    status === "reserved" ||
+    status === "provider-started" ||
+    status === "unknown"
+  ) {
+    return "in_progress";
+  }
+  return "completed";
+}
+
+function parseAdmissionCheckRunRow(line: string): AdmissionRecord | null {
+  if (line.trim() === "") return null;
+  try {
+    const row = JSON.parse(line) as {
+      id?: number;
+      name?: string;
+      status?: string;
+      output?: { text?: string | null };
+    };
+    if (row.name !== ADMISSION_CHECK_RUN_NAME) return null;
+    const text = row.output?.text;
+    if (typeof text !== "string") return null;
+    return parseAdmissionRecord(text);
+  } catch {
+    return null;
+  }
+}
+
+// Authoritative durable ledger for CI admission attempts on a ref. Fail-open:
+// a missing `checks: read` scope must not abort a review that already passed
+// the pure admission gate — an empty read underestimates attempts (more spend,
+// never silent skip).
+export async function listAdmissionCheckRuns(
+  operatorRoot: string,
+  ref: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<AdmissionRecord[]> {
+  if (!isFullCommitId(ref) && ref.trim().length === 0) return [];
+  try {
+    const result = await gh(
+      operatorRoot,
+      [
+        "api",
+        `repos/{owner}/{repo}/commits/${ref}/check-runs`,
+        "--paginate",
+        "--jq",
+        `.check_runs[] | select(.name == "${ADMISSION_CHECK_RUN_NAME}") | {id: .id, name: .name, status: .status, output: {text: .output.text}}`,
+      ],
+      undefined,
+      options?.spawnFn,
+      ADMISSION_CHECK_RUN_TIMEOUT_MS,
+    );
+    if (!result.ok) return [];
+    const records: AdmissionRecord[] = [];
+    for (const line of result.stdout.split("\n")) {
+      const record = parseAdmissionCheckRunRow(line);
+      if (record !== null) records.push(record);
+    }
+    return records;
+  } catch {
+    return [];
+  }
+}
+
+export async function upsertAdmissionCheckRun(
+  operatorRoot: string,
+  input: {
+    headSha: string;
+    record: AdmissionRecord;
+    checkRunId?: number;
+  },
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<number> {
+  if (!isFullCommitId(input.headSha)) {
+    throw new CliError(
+      `admission check run: head sha is not a full 40-char id: ${input.headSha.slice(0, 16)}`,
+    );
+  }
+  const serialized = serializeAdmissionRecord(input.record);
+  const checkStatus = admissionCheckRunStatus(input.record.status);
+  const args = [
+    "api",
+    "--method",
+    input.checkRunId === undefined ? "POST" : "PATCH",
+    input.checkRunId === undefined
+      ? "repos/{owner}/{repo}/check-runs"
+      : `repos/{owner}/{repo}/check-runs/${input.checkRunId}`,
+    "-f",
+    `name=${ADMISSION_CHECK_RUN_NAME}`,
+    "-f",
+    `head_sha=${input.headSha}`,
+    "-f",
+    `external_id=${input.record.reservationId}`,
+    "-f",
+    `status=${checkStatus}`,
+    "-f",
+    "output[title]=pr-hero CI admission",
+    "-f",
+    `output[summary]=${input.record.status} (attempt ${input.record.attemptNumber})`,
+    "-f",
+    `output[text]=${serialized}`,
+  ];
+  if (checkStatus === "completed") {
+    args.push(
+      "-f",
+      `conclusion=${admissionCheckRunConclusion(input.record.status)}`,
+    );
+  }
+  let lastStderr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await gh(
+      operatorRoot,
+      args,
+      undefined,
+      options?.spawnFn,
+      ADMISSION_CHECK_RUN_TIMEOUT_MS,
+    );
+    if (result.ok) {
+      try {
+        const parsed = JSON.parse(result.stdout) as { id?: number };
+        if (typeof parsed.id === "number") return parsed.id;
+      } catch {
+        if (input.checkRunId !== undefined) return input.checkRunId;
+      }
+      throw new CliError(
+        "gh api upserted an admission check run but returned no check run id",
+      );
+    }
+    lastStderr = result.stderr.trim();
+  }
+  throw new CliError(`gh api (admission check run) failed: ${lastStderr}`);
 }

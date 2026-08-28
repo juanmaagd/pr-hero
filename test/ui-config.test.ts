@@ -252,9 +252,10 @@ const WRAP_REPO = {
   summary: { enabled: true, model: "haiku" },
 };
 // Value column starts at 25 (indent 2 + the 23 `max_verification_steps` needs),
-// so 60 leaves 35 columns — narrow enough that the escape bytes decide the
-// wrap, wide enough that nothing hits row()'s MIN_VALUE_WIDTH floor.
-const WRAP_WIDTH = 60;
+// so 64 leaves enough columns after `ci_admission_observe_only` widened the
+// label column — narrow enough that escape bytes decide the wrap, wide enough
+// that nothing hits row()'s MIN_VALUE_WIDTH floor.
+const WRAP_WIDTH = 64;
 
 describe("pr-hero config wraps the same way painted and unpainted", () => {
   test("every line of a wrapped, styled row closes the colours it opens", () => {
