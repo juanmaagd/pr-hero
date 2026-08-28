@@ -13,6 +13,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -198,6 +199,45 @@ describe("loadOrCreateBucketKey", () => {
   // gets written by loadOrCreateBucketKey, and the raw bytes never appear as
   // readable text in the key file (they are random bytes, not a serialized
   // struct that could carry a stray copy elsewhere).
+  test("a concurrent first-use race reads the winner's key on EEXIST instead of overwriting", () => {
+    const home = tmpHome();
+    let created = false;
+    try {
+      const keyA = loadOrCreateBucketKey(home, {
+        writeFileFn: (_p, data) => {
+          if (created) {
+            const err = new Error("file exists") as NodeJS.ErrnoException;
+            err.code = "EEXIST";
+            throw err;
+          }
+          created = true;
+          writeFileSync(prheroLayout(home).bucketKeyPath, data, {
+            mode: 0o600,
+          });
+        },
+        readFileFn: (p) => readFileSync(p),
+      });
+      const keyB = loadOrCreateBucketKey(home, {
+        writeFileFn: (_p, data) => {
+          if (created) {
+            const err = new Error("file exists") as NodeJS.ErrnoException;
+            err.code = "EEXIST";
+            throw err;
+          }
+          created = true;
+          writeFileSync(prheroLayout(home).bucketKeyPath, data, {
+            mode: 0o600,
+          });
+        },
+        readFileFn: (p) => readFileSync(p),
+      });
+      expect(keyA.equals(keyB)).toBe(true);
+      expect(keyA.length).toBe(32);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("no artifact besides the key file itself is written under the home", () => {
     const home = tmpHome();
     try {

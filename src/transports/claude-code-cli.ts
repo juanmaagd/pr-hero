@@ -11,7 +11,10 @@ import type {
   TransportRequest,
 } from "../execution/contracts";
 import type { NormalizedUsage } from "../execution/usage-normalized";
-import { normalizeUnavailableUsage } from "../execution/usage-normalized";
+import {
+  normalizePartialUsage,
+  normalizeUnavailableUsage,
+} from "../execution/usage-normalized";
 import { CLAUDE_CAPABILITY_STATICS } from "../provider-capabilities";
 import { ACTIVE_CHILD_PROCS, type SpawnedProcess } from "../step-runner";
 
@@ -106,10 +109,30 @@ function normalizeClaudeCliUsage(
   if (raw === undefined) {
     return normalizeUnavailableUsage({ wallMs });
   }
-  const inputUncached = raw.input_tokens ?? 0;
-  const inputCacheRead = raw.cache_read_input_tokens ?? 0;
-  const inputCacheWrite = raw.cache_creation_input_tokens ?? 0;
-  const outputVisible = raw.output_tokens ?? 0;
+  const leafValues = [
+    raw.input_tokens,
+    raw.cache_read_input_tokens,
+    raw.cache_creation_input_tokens,
+    raw.output_tokens,
+  ];
+  const allLeavesDefined = leafValues.every((v) => typeof v === "number");
+  if (!allLeavesDefined) {
+    const providerReportedTotal = leafValues.reduce<number>(
+      (sum, v) => sum + (typeof v === "number" ? v : 0),
+      0,
+    );
+    return normalizePartialUsage({
+      wallMs,
+      providerReportedTotal,
+      billingMode: "subscription",
+      costSource: "provider",
+      cashCostUsd: parsed.total_cost_usd,
+    });
+  }
+  const inputUncached = leafValues[0] as number;
+  const inputCacheRead = leafValues[1] as number;
+  const inputCacheWrite = leafValues[2] as number;
+  const outputVisible = leafValues[3] as number;
   const inputKnown = inputUncached + inputCacheRead + inputCacheWrite;
   return {
     wallMs,

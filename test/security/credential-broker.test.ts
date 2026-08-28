@@ -479,57 +479,72 @@ describe("OpenCodeAuthBroker", () => {
 describe("CredentialProjection.bucketScope", () => {
   test("today's Keychain projection carries no bucketScope (honest, not populated)", async () => {
     const projection = await project();
-    expect(projection.bucketScope).toBeUndefined();
+    try {
+      expect(projection.bucketScope).toBeUndefined();
+    } finally {
+      await projection.destroy();
+    }
   });
 
   test("an absent bucketScope and an explicit all-undefined one derive the identical bucketId", async () => {
     const { deriveBucketId } = await import("../../src/execution/bucket-id");
     const key = Buffer.from("c".repeat(64), "hex");
     const projection = await project();
-    const withoutScope = deriveBucketId(
-      {
-        provider: "anthropic",
-        credentialFingerprint: projection.projectionId,
-        scope: projection.bucketScope,
-      },
-      key,
-    );
-    const withExplicitUnknownScope = deriveBucketId(
-      {
-        provider: "anthropic",
-        credentialFingerprint: projection.projectionId,
-        scope: {
-          account: undefined,
-          project: undefined,
-          rateLimitGroup: undefined,
+    try {
+      const withoutScope = deriveBucketId(
+        {
+          provider: "anthropic",
+          credentialFingerprint: projection.projectionId,
+          scope: projection.bucketScope,
         },
-      },
-      key,
-    );
-    expect(withoutScope).toBe(withExplicitUnknownScope);
+        key,
+      );
+      const withExplicitUnknownScope = deriveBucketId(
+        {
+          provider: "anthropic",
+          credentialFingerprint: projection.projectionId,
+          scope: {
+            account: undefined,
+            project: undefined,
+            rateLimitGroup: undefined,
+          },
+        },
+        key,
+      );
+      expect(withoutScope).toBe(withExplicitUnknownScope);
+    } finally {
+      await projection.destroy();
+    }
   });
 
   test("a projection MAY carry a populated bucketScope (type accepts it) and it changes the derived bucket", async () => {
     const { deriveBucketId } = await import("../../src/execution/bucket-id");
     const key = Buffer.from("d".repeat(64), "hex");
     const base = await project();
-    const scoped: typeof base = { ...base, bucketScope: { account: "acct-9" } };
-    const bucketWithoutScope = deriveBucketId(
-      {
-        provider: "anthropic",
-        credentialFingerprint: base.projectionId,
-        scope: base.bucketScope,
-      },
-      key,
-    );
-    const bucketWithScope = deriveBucketId(
-      {
-        provider: "anthropic",
-        credentialFingerprint: scoped.projectionId,
-        scope: scoped.bucketScope,
-      },
-      key,
-    );
-    expect(bucketWithScope).not.toBe(bucketWithoutScope);
+    try {
+      const scoped: typeof base = {
+        ...base,
+        bucketScope: { account: "acct-9" },
+      };
+      const bucketWithoutScope = deriveBucketId(
+        {
+          provider: "anthropic",
+          credentialFingerprint: base.projectionId,
+          scope: base.bucketScope,
+        },
+        key,
+      );
+      const bucketWithScope = deriveBucketId(
+        {
+          provider: "anthropic",
+          credentialFingerprint: scoped.projectionId,
+          scope: scoped.bucketScope,
+        },
+        key,
+      );
+      expect(bucketWithScope).not.toBe(bucketWithoutScope);
+    } finally {
+      await base.destroy();
+    }
   });
 });

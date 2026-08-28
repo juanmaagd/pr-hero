@@ -167,7 +167,7 @@ class SpyLedger implements SpendLedger {
 
 describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
   // 5b.1 RED→GREEN
-  test("a SpendLedger that refuses reserve() prevents the transport from ever being invoked", async () => {
+  test("a SpendLedger that refuses reserve() fails the step without invoking the transport, preserving prior reservations", async () => {
     const dir = await tempDir();
     let transportCalls = 0;
     const transport: ProviderTransport = {
@@ -175,29 +175,48 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
       capabilities: async () => capabilities(),
       execute: async () => {
         transportCalls++;
-        return okOutcome();
+        return {
+          completion: "failed" as const,
+          protocolIntegrity: "verified" as const,
+          finalText: "not json",
+          usage: {
+            ...USAGE,
+            completeness: "partial" as const,
+            tokens: { providerReportedTotal: 100 },
+          },
+          stderrTail: "boom",
+        };
       },
       classifyFailure: () => undefined,
     };
-    const refusingLedger: SpendLedger = {
-      reserve: async (input) => {
-        throw new SpendReservationFencedError(input.bucketId);
+    let reserveCalls = 0;
+    const inner = new InMemorySpendLedger();
+    const ledger: SpendLedger = {
+      reserve: async (input, token) => {
+        reserveCalls++;
+        if (reserveCalls > 1) {
+          throw new SpendReservationFencedError(input.bucketId);
+        }
+        return inner.reserve(input, token);
       },
-      settle: async () => {},
-      releaseUnstarted: async () => {},
-      markUnresolvedRemote: async () => {},
+      settle: (id, decision, key) => inner.settle(id, decision, key),
+      releaseUnstarted: (id, key) => inner.releaseUnstarted(id, key),
+      markUnresolvedRemote: (id, known, key) =>
+        inner.markUnresolvedRemote(id, known, key),
     };
     const harness = new StepExecutionHarness({
       transport,
-      spendLedger: refusingLedger,
+      spendLedger: ledger,
       spawnFn: fakeSpawn,
     });
-    const step = await makeStep(dir);
+    const step = await makeStep(dir, { maxAttempts: 3 });
 
-    await expect(harness.run(step)).rejects.toBeInstanceOf(
-      SpendReservationFencedError,
-    );
-    expect(transportCalls).toBe(0);
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("failed");
+    expect(transportCalls).toBe(1);
+    expect(result.reservations?.length).toBe(1);
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
   });
 
   // 5b.2 RED→GREEN

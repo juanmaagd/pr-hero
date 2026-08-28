@@ -33,6 +33,11 @@ function importedModuleSpecifiers(src: string): string[] {
     const specifier = match[1];
     if (specifier !== undefined) specifiers.push(specifier);
   }
+  const dynamicImportRe = /import\s*\(\s*["']([^"']+)["']\s*\)/g;
+  for (const match of src.matchAll(dynamicImportRe)) {
+    const specifier = match[1];
+    if (specifier !== undefined) specifiers.push(specifier);
+  }
   return specifiers;
 }
 

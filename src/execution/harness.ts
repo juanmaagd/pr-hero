@@ -24,6 +24,10 @@ import {
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
 import type { AttemptAdmissionGate, AttemptLease } from "./admission";
+import {
+  BucketBreakerTrippedError,
+  ConcurrencyAdmissionAbortedError,
+} from "./concurrency-limiter";
 import { writeJsonAtomically } from "./atomic-write";
 import type {
   AsyncEventSink,
@@ -55,18 +59,40 @@ import {
   beginStep,
   nextCycle,
   type ReserveToken,
+  SpendReservationFencedError,
   type SpendLedger,
   type SpendReservation,
   settlementFromUsage,
 } from "./spend-limiter";
 import type { NormalizedUsage } from "./usage-normalized";
-import { projectLegacyUsage, sumNormalizedUsage } from "./usage-normalized";
+import {
+  normalizeUnavailableUsage,
+  projectLegacyUsage,
+  sumNormalizedUsage,
+} from "./usage-normalized";
 
 // §7 line 416: injected sleep for the `rate_limit` capped-exponential
 // backoff — a real timer in production, a recording stub in tests (§13 line
 // 746: no offline test may actually wait out a delay, let alone the 60s cap).
 const DEFAULT_SLEEP = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+const DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS = 30 * 60 * 1000;
+
+function cancellableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onDone = () => {
+      signal?.removeEventListener("abort", onAbort);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(onDone, ms);
+    const onAbort = () => onDone();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 // D1-08 PR5a (§9.2 Open Question): deriving a real bucket id from a
 // resolved CredentialProjection's bucketScope is a caller concern (PR3's
@@ -134,6 +160,10 @@ export interface StepExecutionHarnessOptions {
   // whoever composes the run, not to this harness). Defaults to 0 so an
   // unconfigured caller reserves nothing rather than an invented ceiling.
   readonly reservedUsdPerAttempt?: number;
+  // When `attemptAdmissionGate` is configured but no pipeline cancel
+  // `signal` is wired, acquire() uses AbortSignal.timeout(ms) so a stuck
+  // FIFO queue cannot hang the run forever.
+  readonly attemptAdmissionTimeoutMs?: number;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -273,6 +303,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly rateLimitBucketId: string;
   private readonly spendLedger?: SpendLedger;
   private readonly reservedUsdPerAttempt: number;
+  private readonly attemptAdmissionTimeoutMs: number;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -296,6 +327,8 @@ export class StepExecutionHarness implements StepRunner {
       options.rateLimitBucketId ?? DEFAULT_RATE_LIMIT_BUCKET_ID;
     this.spendLedger = options.spendLedger;
     this.reservedUsdPerAttempt = options.reservedUsdPerAttempt ?? 0;
+    this.attemptAdmissionTimeoutMs =
+      options.attemptAdmissionTimeoutMs ?? DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -1052,7 +1085,11 @@ export class StepExecutionHarness implements StepRunner {
           reason: disposition.budget,
         });
         if (disposition.action === "retry_after") {
-          await this.sleep(disposition.delayMs);
+          if (this.cancelSignal) {
+            await cancellableSleep(disposition.delayMs, this.cancelSignal);
+          } else {
+            await this.sleep(disposition.delayMs);
+          }
         }
         // Non-null: `nextCycle` only returns `undefined` for a `terminal`
         // disposition, and this branch is reached only on `retry_now`/
@@ -1152,16 +1189,20 @@ export class StepExecutionHarness implements StepRunner {
     // concurrency slot but NOT the spend reservation) — this is why the
     // ledger's own finalization lives in the `try` body below, never in the
     // outer `finally` beside `lease?.release()`.
-    const lease: AttemptLease | undefined = this.attemptAdmissionGate
-      ? await this.attemptAdmissionGate.acquire({
+    let lease: AttemptLease | undefined;
+    try {
+      if (this.attemptAdmissionGate) {
+        const acquireSignal =
+          this.cancelSignal ??
+          AbortSignal.timeout(this.attemptAdmissionTimeoutMs);
+        lease = await this.attemptAdmissionGate.acquire({
           sessionId: request.sessionId,
           attempt,
           rateLimitBucketId: this.rateLimitBucketId,
-          signal: this.cancelSignal ?? new AbortController().signal,
-        })
-      : undefined;
+          signal: acquireSignal,
+        });
+      }
 
-    try {
       // Step 2: reserve spend transactionally. Left unconfigured, no
       // `SpendLedger` call is made at all — attempts reserve nothing,
       // exactly the ledger-free shape PR5a shipped. A refusing ledger
@@ -1215,6 +1256,27 @@ export class StepExecutionHarness implements StepRunner {
         result,
       );
       return { ...result, reservation: finalReservation };
+    } catch (error) {
+      if (
+        error instanceof ConcurrencyAdmissionAbortedError ||
+        error instanceof BucketBreakerTrippedError
+      ) {
+        return { kind: "cancelled" };
+      }
+      if (error instanceof SpendReservationFencedError) {
+        return {
+          kind: "failed",
+          outcome: {
+            completion: "failed",
+            protocolIntegrity: "unverified",
+            finalText: "",
+            usage: normalizeUnavailableUsage({ wallMs: 0 }),
+            stderrTail: error.message,
+          },
+          resolution: { kind: "legacy_terminal" },
+        };
+      }
+      throw error;
     } finally {
       lease?.release();
     }

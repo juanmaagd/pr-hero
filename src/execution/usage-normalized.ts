@@ -63,6 +63,10 @@ function sumIfAnyDefined(
     : sumOrZero(...values);
 }
 
+function attemptTotalKnown(tokens: NormalizedTokens): number | undefined {
+  return tokens.totalKnown ?? tokens.providerReportedTotal;
+}
+
 // §8 line 455: "If a provider total includes detailed cache/reasoning
 // values, split the total into leaves and store only the non-negative
 // residual in inputOther/outputOther; never add the detail to the inclusive
@@ -205,7 +209,10 @@ export function sumNormalizedUsage(
       outputOther: sumIfAnyDefined(a.tokens.outputOther, b.tokens.outputOther),
       inputKnown: sumIfAnyDefined(a.tokens.inputKnown, b.tokens.inputKnown),
       outputKnown: sumIfAnyDefined(a.tokens.outputKnown, b.tokens.outputKnown),
-      totalKnown: sumIfAnyDefined(a.tokens.totalKnown, b.tokens.totalKnown),
+      totalKnown: sumIfAnyDefined(
+        attemptTotalKnown(a.tokens),
+        attemptTotalKnown(b.tokens),
+      ),
       providerReportedTotal: sumIfAnyDefined(
         a.tokens.providerReportedTotal,
         b.tokens.providerReportedTotal,
