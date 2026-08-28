@@ -39,17 +39,19 @@ been burned by a manual match that inflated a score by 50%.
 
 ## Branch and PR workflow (mandatory since 2026-08-26)
 
-Every slice lands through a feature branch and a pull request — never direct
-pushes to `main`. This is deliberate dogfooding: `pr-hero.yml` runs this
+Every slice lands through a feature branch and a pull request targeting `dev` —
+never push directly to `dev`. This is deliberate dogfooding: `pr-hero.yml` runs this
 engine's own review on every PR, so each slice gets self-reviewed by pr-hero
 before it merges.
 
-1. Branch per slice off latest `main` (`feat/d1-09-capability-report`, ...).
+1. Branch per slice off latest `dev` (`feat/d1-09-capability-report`, ...).
 2. Work-unit commits on the branch (one purpose each, tests included).
-3. Open the PR, let the pr-hero review post, triage its findings with
-   `skills/pr-hero-triage/SKILL.md`, then merge.
-4. `ci.yml` runs on both PRs and main pushes; `release.yml` fires only on
-   semver tags, so merging to main never publishes a release.
+3. Open the PR targeting `dev`, let the pr-hero review post, triage its findings
+   with `skills/pr-hero-triage/SKILL.md`, then merge into `dev`.
+4. `ci.yml` runs on every PR and on pushes to `main` only. Merging into `dev`
+   does not trigger a separate push CI run, so the PR run is the required verification.
+5. `release.yml` fires only on semver tags, so merging into `dev` never publishes
+   a release.
 
 ## Commands
 
