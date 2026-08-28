@@ -38,8 +38,11 @@ import {
   ciReviewSkipDetail,
   evaluateCiReviewAdmission,
   nextStateReviewCount,
+  parseCiAdmissionBlock,
+  renderCiAdmissionBlock,
   resolveCiReviewPolicy,
   stateReviewCount,
+  tierCountsFromFindings,
 } from "./ci-review-admission";
 import {
   appendCiOutputs,
@@ -1570,18 +1573,20 @@ async function reviewPr(
       summaryBody === null ? null : parseMarkerHead(summaryBody);
     const state =
       summaryBody === null ? null : parseStateBlock(summaryBody);
+    const parsedAdmission =
+      summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
     const markerSeen = markerCommentSeen(issueComments);
-    const admission = evaluateCiReviewAdmission({
+    const admissionVerdict = evaluateCiReviewAdmission({
       currentHead: target.headSha,
       summaryHead,
-      summaryBody,
       markerSeen,
-      reviewCount: stateReviewCount(state, markerSeen),
+      reviewCount: stateReviewCount(state, markerSeen, parsedAdmission),
       state,
+      admission: parsedAdmission,
       policy: resolveCiReviewPolicy(config),
     });
-    if (admission.action === "skip") {
-      const plan = planCiReviewSkip({ prNumber, verdict: admission });
+    if (admissionVerdict.action === "skip") {
+      const plan = planCiReviewSkip({ prNumber, verdict: admissionVerdict });
       return await publishCiSkip({
         operatorRoot,
         prNumber,
@@ -1589,7 +1594,7 @@ async function reviewPr(
         isCi,
         stepSummaryFlag: options.stepSummary,
         plan,
-        noticeMessage: `pr-hero review skipped — ${ciReviewSkipDetail(admission)}`,
+        noticeMessage: `pr-hero review skipped — ${ciReviewSkipDetail(admissionVerdict)}`,
       });
     }
   }
@@ -2967,6 +2972,7 @@ export async function postInlineFindings(input: {
   const postedReviewCount = nextStateReviewCount({
     existingSummaryId,
     state: summaryBody === null ? null : parseStateBlock(summaryBody),
+    summaryBody,
   });
 
   // Before the create-first POST and before the review submission — the last
@@ -3056,7 +3062,10 @@ export async function postInlineFindings(input: {
       moved,
       urls,
     );
-    if (framing === undefined) return body;
+    if (framing === undefined) {
+      const counts = tierCountsFromFindings([...doc.findings, ...outside]);
+      return `${body}${renderCiAdmissionBlock(doc.head_sha, counts, postedReviewCount)}`;
+    }
     return `${body}${renderStateBlock(doc.head_sha, framing.live, postedReviewCount)}`;
   };
 

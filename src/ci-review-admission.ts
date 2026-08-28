@@ -31,16 +31,16 @@ export interface PriorTierScore {
   blocking: number;
   advisory: number;
   score: number;
-  source: "state" | "summary" | "none";
+  source: "state" | "admission" | "none";
 }
 
 export interface CiReviewAdmissionInput {
   currentHead: string;
   summaryHead: string | null;
-  summaryBody: string | null;
   markerSeen: boolean;
   reviewCount: number;
   state: ParsedStateBlock | null;
+  admission: ParsedCiAdmissionBlock | null;
   policy: CiReviewPolicy;
 }
 
@@ -76,6 +76,7 @@ export function resolveCiReviewPolicy(
 export function stateReviewCount(
   state: ParsedStateBlock | null,
   markerSeen: boolean,
+  admission: ParsedCiAdmissionBlock | null = null,
 ): number {
   if (
     state?.reviews !== undefined &&
@@ -84,16 +85,25 @@ export function stateReviewCount(
   ) {
     return state.reviews;
   }
+  if (admission !== null) {
+    return admission.reviews;
+  }
   return markerSeen ? 1 : 0;
 }
 
 export function nextStateReviewCount(input: {
   existingSummaryId: number | null;
   state: ParsedStateBlock | null;
+  summaryBody?: string | null;
 }): number {
+  const admission =
+    input.summaryBody === undefined || input.summaryBody === null
+      ? null
+      : parseCiAdmissionBlock(input.summaryBody);
   const current = stateReviewCount(
     input.state,
     input.existingSummaryId !== null,
+    admission,
   );
   return current + 1;
 }
@@ -116,42 +126,109 @@ export function priorTierScore(
   };
 }
 
-// Headline uses hunter severity glyphs, not tier — close enough for admission
-// when the state block is absent (first-review posts before item-7 framing).
-const SUMMARY_TIER_COUNTS =
-  /🔴 (\d+) critical · 🟡 (\d+) warning/;
+// First reviews carry no item-7 `pr-hero-state` block (W-prov), but CI admission
+// still needs true tier counts. A separate marker keeps item-7 semantics intact
+// while giving the gate tier-accurate data on every post.
+export const PR_CI_ADMISSION_PREFIX = "<!-- pr-hero-ci-admission ";
+const CI_ADMISSION_HEADER =
+  /^<!-- pr-hero-ci-admission v=1 head=([0-9a-f]{40}) -->/;
+const HTML_COMMENT = /<!--([\s\S]*?)-->/;
 
-export function parsePostedSummaryTierCounts(
-  body: string,
-): { blocking: number; advisory: number } | null {
-  const match = SUMMARY_TIER_COUNTS.exec(body);
-  if (match?.[1] === undefined || match[2] === undefined) return null;
-  const blocking = Number(match[1]);
-  const advisory = Number(match[2]);
-  if (!Number.isFinite(blocking) || !Number.isFinite(advisory)) return null;
+export interface ParsedCiAdmissionBlock {
+  headSha: string;
+  blocking: number;
+  advisory: number;
+  reviews: number;
+}
+
+export function tierCountsFromFindings(
+  findings: readonly { tier: Tier }[],
+): { blocking: number; advisory: number } {
+  let blocking = 0;
+  let advisory = 0;
+  for (const finding of findings) {
+    if (finding.tier === "blocking") blocking++;
+    else advisory++;
+  }
   return { blocking, advisory };
+}
+
+export function renderCiAdmissionBlock(
+  headSha: string,
+  counts: { blocking: number; advisory: number },
+  reviews: number,
+): string {
+  const payload = JSON.stringify({
+    blocking: counts.blocking,
+    advisory: counts.advisory,
+    reviews,
+  });
+  return (
+    `${PR_CI_ADMISSION_PREFIX}v=1 head=${headSha} -->\n` +
+    `<!-- ${encodeCiAdmissionJson(payload)} -->`
+  );
+}
+
+export function parseCiAdmissionBlock(body: string): ParsedCiAdmissionBlock | null {
+  const start = body.indexOf(PR_CI_ADMISSION_PREFIX);
+  if (start === -1) return null;
+  const fromMarker = body.slice(start);
+  const headerLine = fromMarker.split("\n", 1)[0] ?? "";
+  const header = CI_ADMISSION_HEADER.exec(headerLine);
+  if (header?.[1] === undefined) return null;
+  const afterHeader = fromMarker.slice(headerLine.length);
+  const jsonComment = HTML_COMMENT.exec(afterHeader);
+  if (jsonComment?.[1] === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(jsonComment[1].trim());
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const row = parsed as Record<string, unknown>;
+    const blocking = row.blocking;
+    const advisory = row.advisory;
+    const reviews = row.reviews;
+    if (
+      typeof blocking !== "number" ||
+      !Number.isInteger(blocking) ||
+      blocking < 0 ||
+      typeof advisory !== "number" ||
+      !Number.isInteger(advisory) ||
+      advisory < 0 ||
+      typeof reviews !== "number" ||
+      !Number.isInteger(reviews) ||
+      reviews < 1
+    ) {
+      return null;
+    }
+    return { headSha: header[1], blocking, advisory, reviews };
+  } catch {
+    return null;
+  }
+}
+
+function encodeCiAdmissionJson(value: string): string {
+  return value
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029")
+    .replaceAll("-->", "--\\u003e");
 }
 
 export function priorScoreForAdmission(input: {
   state: ParsedStateBlock | null;
-  summaryBody: string | null;
+  admission: ParsedCiAdmissionBlock | null;
   policy: CiReviewPolicy;
 }): PriorTierScore {
   if (input.state !== null && input.state.findings.length > 0) {
     return priorTierScore(input.state.findings, input.policy);
   }
-  if (input.summaryBody !== null) {
-    const counts = parsePostedSummaryTierCounts(input.summaryBody);
-    if (counts !== null) {
-      return {
-        blocking: counts.blocking,
-        advisory: counts.advisory,
-        score:
-          counts.blocking * input.policy.blockingWeight +
-          counts.advisory * input.policy.advisoryWeight,
-        source: "summary",
-      };
-    }
+  if (input.admission !== null) {
+    return {
+      blocking: input.admission.blocking,
+      advisory: input.admission.advisory,
+      score:
+        input.admission.blocking * input.policy.blockingWeight +
+        input.admission.advisory * input.policy.advisoryWeight,
+      source: "admission",
+    };
   }
   return { blocking: 0, advisory: 0, score: 0, source: "none" };
 }
@@ -166,7 +243,11 @@ export function evaluateCiReviewAdmission(
     input.summaryHead !== null &&
     input.summaryHead === input.currentHead
   ) {
-    const prior = priorScoreForAdmission(input);
+    const prior = priorScoreForAdmission({
+      state: input.state,
+      admission: input.admission,
+      policy: input.policy,
+    });
     return {
       action: "skip",
       reason: "same-head",
@@ -177,7 +258,11 @@ export function evaluateCiReviewAdmission(
     };
   }
   if (input.reviewCount >= input.policy.maxReviews) {
-    const prior = priorScoreForAdmission(input);
+    const prior = priorScoreForAdmission({
+      state: input.state,
+      admission: input.admission,
+      policy: input.policy,
+    });
     return {
       action: "skip",
       reason: "max-reviews",
@@ -187,7 +272,11 @@ export function evaluateCiReviewAdmission(
       minScore: input.policy.rereviewMinScore,
     };
   }
-  const prior = priorScoreForAdmission(input);
+  const prior = priorScoreForAdmission({
+    state: input.state,
+    admission: input.admission,
+    policy: input.policy,
+  });
   if (prior.score < input.policy.rereviewMinScore) {
     return {
       action: "skip",

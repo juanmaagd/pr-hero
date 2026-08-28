@@ -5,8 +5,9 @@ import {
   DEFAULT_CI_BLOCKING_WEIGHT,
   DEFAULT_CI_REREVIEW_MIN_SCORE,
   evaluateCiReviewAdmission,
-  parsePostedSummaryTierCounts,
+  parseCiAdmissionBlock,
   priorTierScore,
+  renderCiAdmissionBlock,
   resolveCiReviewPolicy,
   stateReviewCount,
 } from "../src/ci-review-admission";
@@ -26,6 +27,16 @@ function finding(tier: Tier) {
     locs: ["src/a.ts:1"],
     claim: "x",
   });
+}
+
+function admissionBody(
+  counts: { blocking: number; advisory: number },
+  reviews = 1,
+): string {
+  return (
+    `<!-- pr-hero-report head=${HEAD_A} -->\n` +
+    renderCiAdmissionBlock(HEAD_A, counts, reviews)
+  );
 }
 
 describe("priorTierScore", () => {
@@ -61,13 +72,22 @@ describe("priorTierScore", () => {
   });
 });
 
-describe("parsePostedSummaryTierCounts", () => {
-  test("reads the summary headline counts", () => {
+describe("parseCiAdmissionBlock", () => {
+  test("reads tier counts from the admission marker", () => {
+    expect(parseCiAdmissionBlock(admissionBody({ blocking: 1, advisory: 2 }))).toEqual({
+      headSha: HEAD_A,
+      blocking: 1,
+      advisory: 2,
+      reviews: 1,
+    });
+  });
+
+  test("ignores severity headline counts", () => {
     expect(
-      parsePostedSummaryTierCounts(
-        `<!-- pr-hero-report head=${HEAD_A} -->\n🔴 1 critical · 🟡 2 warning — head`,
+      parseCiAdmissionBlock(
+        `<!-- pr-hero-report head=${HEAD_A} -->\n🔴 9 critical · 🟡 0 warning`,
       ),
-    ).toEqual({ blocking: 1, advisory: 2 });
+    ).toBeNull();
   });
 });
 
@@ -77,23 +97,26 @@ describe("evaluateCiReviewAdmission", () => {
       evaluateCiReviewAdmission({
         currentHead: HEAD_A,
         summaryHead: null,
-        summaryBody: null,
         markerSeen: false,
         reviewCount: 0,
         state: null,
+        admission: null,
         policy: DEFAULT_POLICY,
       }),
     ).toEqual({ action: "run" });
   });
 
   test("same head skips", () => {
+    const admission = parseCiAdmissionBlock(
+      admissionBody({ blocking: 2, advisory: 0 }),
+    );
     const verdict = evaluateCiReviewAdmission({
       currentHead: HEAD_A,
       summaryHead: HEAD_A,
-      summaryBody: `🔴 2 critical · 🟡 0 warning`,
       markerSeen: true,
       reviewCount: 1,
       state: null,
+      admission,
       policy: DEFAULT_POLICY,
     });
     expect(verdict.action).toBe("skip");
@@ -102,14 +125,17 @@ describe("evaluateCiReviewAdmission", () => {
     }
   });
 
-  test("2 warnings on prior review skips re-review", () => {
+  test("2 advisory-tier findings on prior review skips re-review", () => {
+    const admission = parseCiAdmissionBlock(
+      admissionBody({ blocking: 0, advisory: 2 }),
+    );
     const verdict = evaluateCiReviewAdmission({
       currentHead: HEAD_B,
       summaryHead: HEAD_A,
-      summaryBody: `🔴 0 critical · 🟡 2 warning`,
       markerSeen: true,
       reviewCount: 1,
       state: null,
+      admission,
       policy: DEFAULT_POLICY,
     });
     expect(verdict.action).toBe("skip");
@@ -119,12 +145,28 @@ describe("evaluateCiReviewAdmission", () => {
     }
   });
 
-  test("2 warnings + 1 blocking triggers re-review", () => {
+  test("severity headline alone does not inflate the score", () => {
+    const verdict = evaluateCiReviewAdmission({
+      currentHead: HEAD_B,
+      summaryHead: HEAD_A,
+      markerSeen: true,
+      reviewCount: 1,
+      state: null,
+      admission: null,
+      policy: DEFAULT_POLICY,
+    });
+    expect(verdict.action).toBe("skip");
+    if (verdict.action === "skip") {
+      expect(verdict.reason).toBe("below-threshold");
+      expect(verdict.prior.score).toBe(0);
+    }
+  });
+
+  test("2 advisory + 1 blocking triggers re-review", () => {
     expect(
       evaluateCiReviewAdmission({
         currentHead: HEAD_B,
         summaryHead: HEAD_A,
-        summaryBody: null,
         markerSeen: true,
         reviewCount: 1,
         state: {
@@ -135,6 +177,7 @@ describe("evaluateCiReviewAdmission", () => {
             finding("blocking"),
           ],
         },
+        admission: null,
         policy: DEFAULT_POLICY,
       }),
     ).toEqual({ action: "run" });
@@ -144,7 +187,6 @@ describe("evaluateCiReviewAdmission", () => {
     const verdict = evaluateCiReviewAdmission({
       currentHead: HEAD_B,
       summaryHead: HEAD_A,
-      summaryBody: null,
       markerSeen: true,
       reviewCount: 2,
       state: {
@@ -152,6 +194,7 @@ describe("evaluateCiReviewAdmission", () => {
         findings: [finding("blocking"), finding("blocking")],
         reviews: 2,
       },
+      admission: null,
       policy: DEFAULT_POLICY,
     });
     expect(verdict.action).toBe("skip");
@@ -169,6 +212,13 @@ describe("stateReviewCount", () => {
         true,
       ),
     ).toBe(2);
+  });
+
+  test("reads reviews from admission block when state has no counter", () => {
+    const admission = parseCiAdmissionBlock(
+      admissionBody({ blocking: 0, advisory: 1 }, 2),
+    );
+    expect(stateReviewCount(null, true, admission)).toBe(2);
   });
 
   test("falls back to 1 when a marker exists but state has no counter", () => {
