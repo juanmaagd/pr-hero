@@ -336,7 +336,9 @@ describe("pipeline with a custom spec", () => {
   });
 
   test("model precedence: input.model > spec.model > frontmatter", async () => {
-    const agentsDir = await makeAgentsDir({ model: "frontmatter-model" });
+    const agentsDir = await makeAgentsDir({
+      model: "anthropic/frontmatter-model",
+    });
     const specWith = (model?: string): ReviewSpec => ({
       agents: [hunter("reliability", model ? { model } : {}), REFUTER],
     });
@@ -346,27 +348,27 @@ describe("pipeline with a custom spec", () => {
     // spec.model beats frontmatter...
     const specWins = new FakeStepRunner(script);
     await runPipeline(
-      await makeInput({ agentsDir, spec: specWith("spec-model") }),
+      await makeInput({ agentsDir, spec: specWith("anthropic/spec-model") }),
       { runner: specWins },
     );
-    expect(specWins.specs[0]?.model).toBe("spec-model");
+    expect(specWins.specs[0]?.model).toBe("anthropic/spec-model");
     // ...input.model beats both...
     const inputWins = new FakeStepRunner(script);
     await runPipeline(
       await makeInput({
         agentsDir,
-        model: "cli-model",
-        spec: specWith("spec-model"),
+        model: "anthropic/cli-model",
+        spec: specWith("anthropic/spec-model"),
       }),
       { runner: inputWins },
     );
-    expect(inputWins.specs[0]?.model).toBe("cli-model");
+    expect(inputWins.specs[0]?.model).toBe("anthropic/cli-model");
     // ...frontmatter is the fallback when neither override exists.
     const frontmatter = new FakeStepRunner(script);
     await runPipeline(await makeInput({ agentsDir, spec: specWith() }), {
       runner: frontmatter,
     });
-    expect(frontmatter.specs[0]?.model).toBe("frontmatter-model");
+    expect(frontmatter.specs[0]?.model).toBe("anthropic/frontmatter-model");
   });
 
   test("a spec without a refuter skips the leg, findings not_submitted", async () => {

@@ -6,7 +6,14 @@
 
 import path from "node:path";
 import { resolveEngineAssets } from "./assets";
+import type {
+  ModelGateway,
+  RouteMapping,
+  RoutingConfig,
+  RunnerBackend,
+} from "./model-routing";
 import type { SuspicionPrior } from "./prompt-set";
+import { redactDiagnostic } from "./security/redact";
 // size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
 // dependency on this module.
@@ -1837,6 +1844,7 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   // exists. This row declares the key for the known-key set; the merge
   // descends into it rather than folding the object whole.
   summary: "capped",
+  routing: "person",
   max_verification_steps: "capped",
   max_changed_lines: "capped",
   max_changed_files: "capped",
@@ -1862,6 +1870,7 @@ export interface LocalConfig {
   agents_dir?: string;
   default_base?: string;
   summary?: SummaryConfig;
+  routing?: RoutingConfig;
   // Item 7: unattended bound on the verify queue. Absent means
   // DEFAULT_MAX_VERIFICATION_STEPS. 0 is legal — every queued prior lands
   // `unconfirmed` (the pause switch, same shape as watch daily_cap).
@@ -1908,6 +1917,10 @@ export type ConfigLayer = Partial<LocalConfig>;
 // known key.
 const KNOWN_CONFIG_KEYS = new Set<string>(Object.keys(CONFIG_DIRECTION));
 
+const LOCAL_CONFIG_KEYS = new Set<string>(
+  Object.keys(CONFIG_DIRECTION).filter((key) => key !== "routing"),
+);
+
 const GLOBAL_CONFIG_KEYS = new Set<string>(
   Object.keys(CONFIG_DIRECTION).filter(
     (key) => CONFIG_DIRECTION[key as keyof LocalConfig] !== "repo",
@@ -1939,7 +1952,7 @@ const GLOBAL_CONFIG_LABEL = "~/.prhero/config.json";
 // are: they feed the validators, and validating an absent key against the
 // empty array is what keeps every error string byte-identical.
 export function parseLocalConfig(raw: string): ConfigLayer {
-  return parseConfigLayer(raw, REPO_CONFIG_LABEL, KNOWN_CONFIG_KEYS);
+  return parseConfigLayer(raw, REPO_CONFIG_LABEL, LOCAL_CONFIG_KEYS);
 }
 
 // The global layer's parser: same JSON dialect, same validators, same strict
@@ -1990,12 +2003,18 @@ function parseConfigLayer(
   const config = parsed as Record<string, unknown>;
   for (const key of Object.keys(config)) {
     if (!KNOWN_CONFIG_KEYS.has(key)) {
-      throw new CliUsageError(`${file} unknown key: ${key}`);
+      throw new CliUsageError(`${file} unknown key: ${redactDiagnostic(key)}`);
     }
     // Templated over the OFFENDING key, never a fixed example: one hardcoded
     // key name across three rejections sends two operators out of three
     // looking for the wrong line in their config.
     if (!admitted.has(key)) {
+      if (file === REPO_CONFIG_LABEL) {
+        throw new CliUsageError(
+          `${file}: ${key} is a per-person key — put it in ` +
+            "~/.prhero/config.json",
+        );
+      }
       throw new CliUsageError(
         `${file}: ${key} is a per-repo key — put it in ` +
           "<repo>/.prhero/config.json",
@@ -2033,6 +2052,7 @@ function parseConfigLayer(
     }
   }
   const summary = parseSummaryConfig(config.summary, file);
+  const routing = parseRoutingConfig(config.routing, file);
   const maxVerificationSteps = parseNonNegativeInteger(
     config.max_verification_steps,
     "max_verification_steps",
@@ -2060,6 +2080,7 @@ function parseConfigLayer(
     ...optionalString(config, "agents_dir", file),
     ...optionalString(config, "default_base", file),
     ...(summary === undefined ? {} : { summary }),
+    ...(routing === undefined ? {} : { routing }),
     ...(maxVerificationSteps === undefined
       ? {}
       : { max_verification_steps: maxVerificationSteps }),
@@ -2071,6 +2092,233 @@ function parseConfigLayer(
       : { max_changed_files: maxChangedFiles }),
     ...(scout === undefined ? {} : { scout }),
     ...(post === undefined ? {} : { post }),
+  };
+}
+
+const CREDENTIAL_KEY_NAMES = new Set([
+  "apikey",
+  "api_key",
+  "token",
+  "secret",
+  "password",
+  "bearer",
+  "auth",
+  "credential",
+  "credentials",
+]);
+
+function checkNoCredentials(
+  obj: Record<string, unknown>,
+  path: string,
+  file: string,
+): void {
+  for (const key of Object.keys(obj)) {
+    const lower = key.toLowerCase();
+    if (
+      CREDENTIAL_KEY_NAMES.has(lower) ||
+      lower.includes("secret") ||
+      lower.includes("password") ||
+      lower.includes("token") ||
+      lower.includes("apikey") ||
+      lower.includes("api_key")
+    ) {
+      throw new CliUsageError(
+        `${file} ${path}: credentials are not permitted in routing config`,
+      );
+    }
+    const val = obj[key];
+    if (typeof val === "string") {
+      const redacted = redactDiagnostic(val);
+      if (redacted !== val) {
+        throw new CliUsageError(
+          `${file} ${path}: credentials are not permitted in routing config`,
+        );
+      }
+    }
+  }
+}
+
+const KNOWN_ROUTE_MAPPING_KEYS = new Set([
+  "logical",
+  "backend",
+  "provider",
+  "gateway",
+  "modelFamily",
+  "modelSnapshot",
+  "modelVariant",
+  "disabled",
+  "allowSpend",
+]);
+
+function parseRouteMapping(
+  m: unknown,
+  path: string,
+  file: string,
+): RouteMapping {
+  if (typeof m !== "object" || m === null || Array.isArray(m)) {
+    throw new CliUsageError(`${file} ${path} must be an object`);
+  }
+  const mapping = m as Record<string, unknown>;
+  checkNoCredentials(mapping, path, file);
+
+  for (const key of Object.keys(mapping)) {
+    if (!KNOWN_ROUTE_MAPPING_KEYS.has(key)) {
+      throw new CliUsageError(
+        `${file} ${path} unknown key: ${redactDiagnostic(key)}`,
+      );
+    }
+  }
+
+  if (mapping.logical !== undefined) {
+    if (
+      typeof mapping.logical !== "string" ||
+      mapping.logical.trim().length === 0
+    ) {
+      throw new CliUsageError(
+        `${file} ${path}.logical must be a non-empty string`,
+      );
+    }
+  }
+
+  if (
+    typeof mapping.backend !== "string" ||
+    (mapping.backend !== "claude-code" && mapping.backend !== "opencode")
+  ) {
+    throw new CliUsageError(
+      `${file} ${path}.backend must be claude-code|opencode`,
+    );
+  }
+
+  if (
+    typeof mapping.provider !== "string" ||
+    mapping.provider.trim().length === 0
+  ) {
+    throw new CliUsageError(
+      `${file} ${path}.provider must be a non-empty string`,
+    );
+  }
+
+  if (mapping.gateway !== undefined) {
+    if (
+      typeof mapping.gateway !== "string" ||
+      (mapping.gateway !== "configured" &&
+        mapping.gateway !== "direct" &&
+        mapping.gateway !== "openrouter")
+    ) {
+      throw new CliUsageError(
+        `${file} ${path}.gateway must be configured|direct|openrouter`,
+      );
+    }
+  }
+
+  if (
+    mapping.modelFamily !== undefined &&
+    typeof mapping.modelFamily !== "string"
+  ) {
+    throw new CliUsageError(`${file} ${path}.modelFamily must be a string`);
+  }
+  if (
+    mapping.modelSnapshot !== undefined &&
+    typeof mapping.modelSnapshot !== "string"
+  ) {
+    throw new CliUsageError(`${file} ${path}.modelSnapshot must be a string`);
+  }
+  if (
+    mapping.modelVariant !== undefined &&
+    typeof mapping.modelVariant !== "string"
+  ) {
+    throw new CliUsageError(`${file} ${path}.modelVariant must be a string`);
+  }
+  if (mapping.disabled !== undefined && typeof mapping.disabled !== "boolean") {
+    throw new CliUsageError(`${file} ${path}.disabled must be a boolean`);
+  }
+  if (
+    mapping.allowSpend !== undefined &&
+    typeof mapping.allowSpend !== "boolean"
+  ) {
+    throw new CliUsageError(`${file} ${path}.allowSpend must be a boolean`);
+  }
+
+  return {
+    ...(mapping.logical ? { logical: mapping.logical as string } : {}),
+    backend: mapping.backend as RunnerBackend,
+    provider: mapping.provider as string,
+    ...(mapping.gateway ? { gateway: mapping.gateway as ModelGateway } : {}),
+    ...(mapping.modelFamily
+      ? { modelFamily: mapping.modelFamily as string }
+      : {}),
+    ...(mapping.modelSnapshot
+      ? { modelSnapshot: mapping.modelSnapshot as string }
+      : {}),
+    ...(mapping.modelVariant
+      ? { modelVariant: mapping.modelVariant as string }
+      : {}),
+    ...(mapping.disabled !== undefined
+      ? { disabled: mapping.disabled as boolean }
+      : {}),
+    ...(mapping.allowSpend !== undefined
+      ? { allowSpend: mapping.allowSpend as boolean }
+      : {}),
+  };
+}
+
+export function parseRoutingConfig(
+  value: unknown,
+  file: string,
+): RoutingConfig | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new CliUsageError(`${file} routing must be an object`);
+  }
+  const routing = value as Record<string, unknown>;
+  checkNoCredentials(routing, "routing", file);
+
+  for (const key of Object.keys(routing)) {
+    if (key !== "mappings" && key !== "default" && key !== "disabled") {
+      throw new CliUsageError(
+        `${file} routing unknown key: ${redactDiagnostic(key)}`,
+      );
+    }
+  }
+
+  let mappings: RouteMapping[] | Record<string, RouteMapping> | undefined;
+  if (routing.mappings !== undefined) {
+    if (Array.isArray(routing.mappings)) {
+      mappings = routing.mappings.map((m, i) =>
+        parseRouteMapping(m, `routing.mappings[${i}]`, file),
+      );
+    } else if (
+      typeof routing.mappings === "object" &&
+      routing.mappings !== null
+    ) {
+      const rec = routing.mappings as Record<string, unknown>;
+      const result: Record<string, RouteMapping> = {};
+      for (const [k, v] of Object.entries(rec)) {
+        result[k] = parseRouteMapping(v, `routing.mappings.${k}`, file);
+      }
+      mappings = result;
+    } else {
+      throw new CliUsageError(
+        `${file} routing.mappings must be an array or object`,
+      );
+    }
+  }
+
+  let def: RouteMapping | undefined;
+  if (routing.default !== undefined) {
+    def = parseRouteMapping(routing.default, "routing.default", file);
+  }
+
+  if (routing.disabled !== undefined && typeof routing.disabled !== "boolean") {
+    throw new CliUsageError(`${file} routing.disabled must be a boolean`);
+  }
+
+  return {
+    ...(mappings ? { mappings } : {}),
+    ...(def ? { default: def } : {}),
+    ...(routing.disabled !== undefined
+      ? { disabled: routing.disabled as boolean }
+      : {}),
   };
 }
 
@@ -2308,6 +2556,11 @@ export function mergeConfig(
     (layer) => layer.post,
     (a, b) => a && b,
   );
+  const routing = foldKey(
+    layers,
+    CONFIG_DIRECTION.routing,
+    (layer) => layer.routing,
+  );
 
   const summary: SummaryConfig = {
     ...(summaryEnabled.value === undefined
@@ -2331,6 +2584,7 @@ export function mergeConfig(
     ...(summaryEnabled.value === undefined && summaryModel.value === undefined
       ? {}
       : { summary }),
+    ...(routing.value === undefined ? {} : { routing: routing.value }),
     ...(maxSteps.value === undefined
       ? {}
       : { max_verification_steps: maxSteps.value }),
@@ -2350,6 +2604,7 @@ export function mergeConfig(
     parity_trigger_paths: triggers.source,
     suspicion_priors: priors.source,
     summary: { enabled: summaryEnabled.source, model: summaryModel.source },
+    routing: routing.source,
     max_verification_steps: maxSteps.source,
     max_changed_lines: maxLines.source,
     max_changed_files: maxFiles.source,

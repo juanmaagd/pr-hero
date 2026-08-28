@@ -680,6 +680,7 @@ const provenance = (
     parity_trigger_paths: "repo",
     suspicion_priors: "repo",
     summary: { enabled: "repo", model: "default" },
+    routing: "default",
     max_verification_steps: "default",
     max_changed_lines: "default",
     max_changed_files: "default",
