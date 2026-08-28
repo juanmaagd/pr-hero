@@ -4,7 +4,8 @@
 // onto the other — LLMs judge, code governs.
 
 import type { FailureClass } from "../step-runner";
-import type { TransportFailureCause } from "./contracts";
+import { classifyFailure as classifyLegacyFailure } from "../step-runner";
+import type { TransportFailureCause, TransportOutcome } from "./contracts";
 
 export type { TransportFailureCause };
 
@@ -144,4 +145,88 @@ export function causeFromLegacyFailureClass(
     case "terminal":
       return { kind: "legacy_terminal" };
   }
+}
+
+// D1-08 PR0 (D1-07 wiring): the harness's ONE place to decide "what failed
+// and why" — a pure function so the harness itself never touches the legacy
+// step-runner classifier or re-implements a transport's own witness
+// matching. Ordered per design decision D1:
+//   1. timedOut          -> watchdog_timeout (distinct from a plain network
+//                            failure — step-runner's classifyFailure collapses
+//                            both into "transient" before anything downstream
+//                            sees it, which is the pr-hero F002 defect).
+//   2. transport-native    -> the SECOND unwired mechanism this slice closes:
+//      classifyFailure()     every transport implements classifyFailure with
+//                            its own paid-for witness ordering (e.g. checking
+//                            rate-limit backpressure before a generic network
+//                            witness), and nothing in the live path called it.
+//   3. parseThrew         -> format_violation: the model's own JSON was bad,
+//                            not a provider/infra problem.
+//   4. legacy fallback    -> causeFromLegacyFailureClass(classifyFailure(...))
+//                            (D2): retains stop authority for the legacy
+//                            terminal ruling and the legacy transient/format
+//                            split for any outcome the transport's own
+//                            classifier and the parse check both miss.
+export interface ResolveFailureCauseInput {
+  readonly outcome: TransportOutcome;
+  // Not the whole `ProviderTransport` — just the one method, passed as a
+  // plain function reference (never bound or wrapped in a lambda): the D1-08
+  // spec tripwire greps harness.ts for exactly `this.transport.classifyFailure`
+  // and nothing else naming "classifyFailure".
+  readonly classifyFailure: (
+    outcome: TransportOutcome,
+  ) => TransportFailureCause | undefined;
+  readonly parseThrew: boolean;
+}
+
+export function resolveFailureCause(
+  input: ResolveFailureCauseInput,
+): CauseResolution {
+  const { outcome, classifyFailure, parseThrew } = input;
+
+  if (outcome.timedOut === true) {
+    return { kind: "cause", cause: "watchdog_timeout" };
+  }
+
+  const transportCause = classifyFailure(outcome);
+  if (transportCause !== undefined) {
+    return { kind: "cause", cause: transportCause };
+  }
+
+  if (parseThrew) {
+    return { kind: "cause", cause: "format_violation" };
+  }
+
+  return causeFromLegacyFailureClass(
+    classifyLegacyFailure({
+      stderrTail: outcome.stderrTail,
+      resultText: outcome.finalText,
+      timedOut: Boolean(outcome.timedOut),
+    }),
+    { timedOut: outcome.timedOut },
+  );
+}
+
+// Legacy attempt logs record `classification: ok|transient|terminal|format`
+// (test/step-runner.test.ts pins this literal vocabulary — it must not
+// change). The §7 cause is richer than that three-way split — e.g.
+// watchdog_timeout and network_transient both legacy-classify as
+// "transient" — so this is a lossy PROJECTION back onto the old field for
+// backward compatibility; the caller additionally logs the real
+// `CauseResolution` in a new, additive line (D1-08 design row 13).
+const TRANSIENT_FAMILY_CAUSES: ReadonlySet<FailureCause> = new Set([
+  "network_transient",
+  "protocol_truncation",
+  "rate_limit",
+  "watchdog_timeout",
+]);
+
+export function legacyClassificationFromCause(
+  resolution: CauseResolution,
+): FailureClass {
+  if (resolution.kind === "legacy_terminal") return "terminal";
+  if (resolution.cause === "format_violation") return "format";
+  return TRANSIENT_FAMILY_CAUSES.has(resolution.cause)
+    ? "transient"
+    : "terminal";
 }

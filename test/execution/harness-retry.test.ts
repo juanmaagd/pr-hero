@@ -1,0 +1,294 @@
+// PR0 (D1-08 tasks 0.1-0.5): the harness's live attempt loop must decide
+// retry disposition via decideRetryDisposition/causeFromLegacyFailureClass
+// (§7), not the legacy step-runner classifyFailure vocabulary — and it must
+// call the TRANSPORT's own classifyFailure, a second previously-unwired
+// mechanism (D1-08 design, "PR0 delta" table). These are harness-observable
+// tripwires: they fail if the wiring is ever removed again.
+
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type {
+  ProviderCapabilityReport,
+  ProviderTransport,
+  TransportFailureCause,
+  TransportOutcome,
+  TransportRequest,
+} from "../../src/execution/contracts";
+import { StepExecutionHarness } from "../../src/execution/harness";
+import type { StepSpec } from "../../src/step-runner";
+
+const USAGE = {
+  wall_ms: 1,
+  tokens_in: 1,
+  tokens_out: 0,
+  tokens_total: 1,
+  cost_usd_est: 0,
+};
+
+const CAPABILITIES: ProviderCapabilityReport = {
+  backend: "claude-code",
+  status: "ready",
+  auth: {
+    kind: "claude_subscription_oauth",
+    projectionReady: true,
+    probe: "passed",
+  },
+  isolation: {
+    syntheticHome: true,
+    workspaceReadBroker: true,
+    codegraphPolicy: true,
+  },
+  protocol: {
+    terminalProof: true,
+    boundedEvents: true,
+    usageMode: "snapshot",
+  },
+  cancellation: { deadlineMs: 7500, conformance: "passed" },
+  billing: { mode: "subscription", pricingReady: true },
+  issues: [],
+};
+
+function failOutcome(
+  overrides: Partial<TransportOutcome> = {},
+): TransportOutcome {
+  return {
+    completion: "failed",
+    protocolIntegrity: "unverified",
+    finalText: "not valid json",
+    usage: USAGE,
+    stderrTail: "",
+    ...overrides,
+  };
+}
+
+function okOutcome(): TransportOutcome {
+  return {
+    completion: "success",
+    protocolIntegrity: "verified",
+    finalText: JSON.stringify({ findings: [] }),
+    usage: USAGE,
+    stderrTail: "",
+  };
+}
+
+// A fake transport that replays a scripted sequence of outcomes, one per
+// `execute()` call (the last entry repeats if more calls arrive than
+// scripted), and records every request it received.
+function makeScriptedTransport(
+  outcomes: readonly TransportOutcome[],
+  classify: (
+    outcome: TransportOutcome,
+  ) => TransportFailureCause | undefined = () => undefined,
+): { transport: ProviderTransport; requests: TransportRequest[] } {
+  const requests: TransportRequest[] = [];
+  let calls = 0;
+  const transport: ProviderTransport = {
+    backend: "claude-code",
+    capabilities: async () => CAPABILITIES,
+    execute: async (request) => {
+      requests.push(request);
+      const outcome = outcomes[Math.min(calls, outcomes.length - 1)];
+      calls++;
+      return outcome;
+    },
+    classifyFailure: classify,
+  };
+  return { transport, requests };
+}
+
+async function makeStep(
+  dir: string,
+  overrides: Partial<StepSpec> = {},
+): Promise<StepSpec> {
+  const systemPromptPath = path.join(dir, "system.md");
+  await writeFile(systemPromptPath, "system prompt");
+  return {
+    name: "hunter-reliability",
+    systemPromptPath,
+    prompt: "Review diff",
+    tools: [],
+    mcpConfigPath: path.join(dir, "mcp.json"),
+    model: "claude-sonnet-4-5",
+    cwd: dir,
+    outPath: path.join(dir, "out.json"),
+    timeoutMs: 5_000,
+    maxAttempts: 2,
+    parse: (text) => JSON.parse(text),
+    ...overrides,
+  };
+}
+
+async function tempDir(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-harness-retry-"));
+  await mkdir(path.join(dir, "logs"), { recursive: true });
+  return dir;
+}
+
+describe("PR0 — live retry decision (§7)", () => {
+  // 0.1 RED
+  test("a transport classified rate_limit makes the harness sleep before the next attempt", async () => {
+    const dir = await tempDir();
+    const trace: string[] = [];
+    const { transport, requests } = makeScriptedTransport(
+      [failOutcome(), okOutcome()],
+      () => "rate_limit",
+    );
+    const scriptedExecute = transport.execute;
+    transport.execute = async (request, context) => {
+      trace.push(`execute:${request.attempt}`);
+      return scriptedExecute(request, context);
+    };
+    const sleepCalls: number[] = [];
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+        trace.push(`sleep:${ms}`);
+      },
+    });
+    const step = await makeStep(dir);
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("ok");
+    expect(requests.length).toBe(2);
+    // §7 line 416: a rate_limit cause backs off (capped exponential, base
+    // 1000ms) instead of retrying instantly — the legacy loop had no delay
+    // concept at all, so this is impossible to pass unwired.
+    expect(sleepCalls).toEqual([1_000]);
+    expect(trace).toEqual(["execute:1", "sleep:1000", "execute:2"]);
+  });
+
+  // 0.2 RED — delta row 2: the legacy loop's unconditional `break` after a
+  // format retry forfeits the ENTIRE remaining transient budget the moment a
+  // format-reminder retry fails to deliver, even for an unrelated transient
+  // cause. No existing test pins this: it is invisible to the current suite.
+  test("a format retry that fails to deliver does not forfeit the transient budget", async () => {
+    const dir = await tempDir();
+    // attempt 1: unrecognized failure -> format_violation -> format retry.
+    // attempt 2 (the format retry): transport says network_transient.
+    // attempt 3: succeeds. Legacy would have stopped dead after attempt 2
+    // (the unconditional `break` following a failed format retry).
+    let call = 0;
+    const { transport, requests } = makeScriptedTransport(
+      [failOutcome(), failOutcome(), okOutcome()],
+      () => {
+        call++;
+        return call === 2 ? "network_transient" : undefined;
+      },
+    );
+    const step = await makeStep(dir, { maxAttempts: 2 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const outcome = await harness.run(step);
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.attempts).toBe(3);
+    expect(requests.length).toBe(3);
+    expect(requests[1]?.userPrompt).toContain("REMINDER");
+  });
+
+  // 0.3 RED — D3: the new transient budget MUST bind to the existing
+  // per-step `maxAttempts` knob, not failure-policy's own defaults (which
+  // would silently raise worst-case spawns from 3 to 5 — a 67% cost hike).
+  test("maxTransientAttempts binds to step.maxAttempts-1, capping worst-case spawns", async () => {
+    const dir = await tempDir();
+    const alwaysTransient = Array.from({ length: 6 }, () => failOutcome());
+    const { transport, requests } = makeScriptedTransport(
+      alwaysTransient,
+      () => "network_transient",
+    );
+    const step = await makeStep(dir, { maxAttempts: 3 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("failed");
+    // 1 initial + (maxAttempts - 1) transient retries = maxAttempts, never
+    // the module default's 1 + 3 = 4.
+    expect(requests.length).toBe(3);
+    expect(result.attempts).toBe(3);
+  });
+
+  // 0.4 RED — a watchdog timeout must be attributable in the persisted
+  // attempt log distinctly from a plain network failure; the legacy loop
+  // collapsed both into the same "transient" classification with no way to
+  // tell them apart during incident triage.
+  test("watchdog_timeout is recorded distinctly from network_transient in the attempt log", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport(
+      [
+        failOutcome({ timedOut: true }),
+        failOutcome({ timedOut: false }),
+        okOutcome(),
+      ],
+      () => "network_transient",
+    );
+    const step = await makeStep(dir, { maxAttempts: 3 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+    expect(result.status).toBe("ok");
+
+    const logsDir = path.join(dir, "logs");
+    const first = await Bun.file(
+      path.join(logsDir, `${step.name}.1.log`),
+    ).text();
+    const second = await Bun.file(
+      path.join(logsDir, `${step.name}.2.log`),
+    ).text();
+
+    // Both attempts legacy-classify as "transient" (preserved vocabulary —
+    // test/step-runner.test.ts pins this literal), but the new §7 cause line
+    // tells them apart.
+    expect(first).toContain("classification: transient");
+    expect(first).toContain("cause: watchdog_timeout");
+    expect(second).toContain("classification: transient");
+    expect(second).toContain("cause: network_transient");
+  });
+});
+
+describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
+  // 0.5 RED tripwire.
+  test("harness.ts never imports the legacy classifyFailure and only references this.transport.classifyFailure", () => {
+    const src = readFileSync(
+      path.join(import.meta.dir, "../../src/execution/harness.ts"),
+      "utf8",
+    );
+
+    const stepRunnerImport = src.match(
+      /import\s*\{([^{}]*)\}\s*from\s*"\.\.\/step-runner"/,
+    );
+    expect(stepRunnerImport).not.toBeNull();
+    expect((stepRunnerImport as RegExpMatchArray)[1]).not.toMatch(
+      /\bclassifyFailure\b/,
+    );
+
+    const lines = src.split("\n");
+    const hitLines = lines.filter((line) => line.includes("classifyFailure"));
+    expect(hitLines.length).toBeGreaterThan(0);
+    for (const line of hitLines) {
+      expect(line).toContain("this.transport.classifyFailure");
+      // Never a bound method (`.bind(`) or a lambda re-implementing it
+      // (would look like `(outcome) => classifyFailure(...)` or similar).
+      expect(line).not.toMatch(/classifyFailure\s*\.bind\(/);
+      expect(line).not.toMatch(/=>\s*.*classifyFailure\(/);
+    }
+  });
+});

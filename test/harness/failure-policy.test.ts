@@ -5,9 +5,34 @@ import {
   causeFromLegacyFailureClass,
   decideRetryDisposition,
   type FailureCause,
+  legacyClassificationFromCause,
   type RetryDisposition,
+  resolveFailureCause,
 } from "../../src/execution/failure-policy";
 import type { FailureClass } from "../../src/step-runner";
+
+function outcome(
+  overrides: Partial<{
+    timedOut: boolean;
+    stderrTail: string;
+    finalText: string;
+  }> = {},
+) {
+  return {
+    completion: "failed" as const,
+    protocolIntegrity: "unverified" as const,
+    finalText: "not json",
+    usage: {
+      wall_ms: 1,
+      tokens_in: 0,
+      tokens_out: 0,
+      tokens_total: 0,
+      cost_usd_est: 0,
+    },
+    stderrTail: "",
+    ...overrides,
+  };
+}
 
 const FRESH = { transientAttemptsUsed: 0, formatRetriesUsed: 0 } as const;
 
@@ -264,6 +289,118 @@ describe("causeFromLegacyFailureClass", () => {
     const classes: FailureClass[] = ["transient", "terminal", "format"];
     for (const legacy of classes) {
       expect(causeFromLegacyFailureClass(legacy)).toBeDefined();
+    }
+  });
+});
+
+// D1-08 PR0: the harness's single cause-resolution entry point. These are
+// UNIT tests over the pure function; test/execution/harness-retry.test.ts
+// proves the same ordering is actually WIRED into the live attempt loop.
+describe("resolveFailureCause", () => {
+  test("a timed-out outcome is watchdog_timeout even when the transport classifies it as something else", () => {
+    expect(
+      resolveFailureCause({
+        outcome: outcome({ timedOut: true }),
+        classifyFailure: () => "network_transient",
+        parseThrew: true,
+      }),
+    ).toEqual({ kind: "cause", cause: "watchdog_timeout" });
+  });
+
+  test("the transport's own classification wins over a bare parse failure", () => {
+    expect(
+      resolveFailureCause({
+        outcome: outcome(),
+        classifyFailure: () => "rate_limit",
+        parseThrew: true,
+      }),
+    ).toEqual({ kind: "cause", cause: "rate_limit" });
+  });
+
+  test("an unrecognized transport outcome with a thrown parse is format_violation", () => {
+    expect(
+      resolveFailureCause({
+        outcome: outcome(),
+        classifyFailure: () => undefined,
+        parseThrew: true,
+      }),
+    ).toEqual({ kind: "cause", cause: "format_violation" });
+  });
+
+  // The fallback arm (D2): reached only when the transport recognizes
+  // nothing AND the failure was not a parse failure — the legacy witness
+  // regexes are consulted as the last resort.
+  test("falls back to the legacy classifier when neither the transport nor a parse failure explain it", () => {
+    expect(
+      resolveFailureCause({
+        outcome: outcome({ stderrTail: "read ECONNRESET" }),
+        classifyFailure: () => undefined,
+        parseThrew: false,
+      }),
+    ).toEqual({ kind: "cause", cause: "network_transient" });
+
+    expect(
+      resolveFailureCause({
+        outcome: outcome({
+          finalText: "Not logged in · Please run /login",
+        }),
+        classifyFailure: () => undefined,
+        parseThrew: false,
+      }),
+    ).toEqual({ kind: "legacy_terminal" });
+  });
+});
+
+describe("legacyClassificationFromCause", () => {
+  test("legacy_terminal projects to terminal", () => {
+    expect(legacyClassificationFromCause({ kind: "legacy_terminal" })).toBe(
+      "terminal",
+    );
+  });
+
+  test("format_violation projects to format", () => {
+    expect(
+      legacyClassificationFromCause({
+        kind: "cause",
+        cause: "format_violation",
+      }),
+    ).toBe("format");
+  });
+
+  test("every transient-family §7 cause projects to transient", () => {
+    const transientFamily: FailureCause[] = [
+      "network_transient",
+      "protocol_truncation",
+      "rate_limit",
+      "watchdog_timeout",
+    ];
+    for (const cause of transientFamily) {
+      expect(legacyClassificationFromCause({ kind: "cause", cause })).toBe(
+        "transient",
+      );
+    }
+  });
+
+  test("every other §7 cause projects to terminal", () => {
+    const terminalFamily: FailureCause[] = [
+      "auth_invalid",
+      "quota_exhausted",
+      "context_window_exceeded",
+      "output_limit_exceeded",
+      "safety_refusal",
+      "provider_configuration_invalid",
+      "runtime_unavailable",
+      "protocol_mismatch",
+      "protocol_overflow",
+      "pipeline_cancelled",
+      "user_cancelled",
+      "settlement_unconfirmed",
+      "remote_abort_unconfirmed",
+    ];
+    for (const cause of terminalFamily) {
+      expect(legacyClassificationFromCause({ kind: "cause", cause })).toBe(
+        "terminal",
+      );
     }
   });
 });
