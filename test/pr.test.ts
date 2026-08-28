@@ -20,14 +20,14 @@
 // identity marker and its claim, verbatim, never via argv".
 
 import { describe, expect, test } from "bun:test";
+import {
+  ADMISSION_CHECK_RUN_NAME,
+  type AdmissionRecord,
+  serializeAdmissionRecord,
+} from "../src/ci-admission-ledger";
 import { SKIP_SIZE_COMMENT_MARKER } from "../src/ci-gates";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
-import {
-  ADMISSION_CHECK_RUN_NAME,
-  serializeAdmissionRecord,
-  type AdmissionRecord,
-} from "../src/ci-admission-ledger";
 import {
   CommentsTruncatedError,
   fetchCommitStatuses,
