@@ -558,12 +558,65 @@ hunter, which stops making sense once hunters are user-defined.
 4. **`parity_hunter_fired`** — a run-table column and a `pipeline.json` key named after one
    hunter. Harmless now, meaningless once hunters are user-defined.
 
+## Prerequisite: shell debt sitting directly in this work's path
+
+Measured 2026-08-28, so the numbers are facts rather than impressions.
+
+**The architecture itself is sound, and the parts that matter for growth are the sound ones.**
+All twelve `*-preflight.ts` modules import no I/O whatsoever — the pure/decision split is real,
+not aspirational, so every hard decision is testable offline. Dependency direction is correct:
+`cli.ts` imports 56 modules and only 5 import it, meaning the shells depend on the core and the
+core depends on nothing. The test-to-source ratio is 1.01:1 (50,596 test lines against 49,871
+source lines). And D1-08 proved the layering empirically: five modules and ~108 tests landed
+without touching `spec.ts` or `findings.ts`.
+
+**The debt is in the shell, and it is concentrated, not diffuse.** `cli.ts` is 6,443 lines, but
+it holds 104 functions across 22 verbs — roughly five per command, which is organisation, not a
+god object. Three functions carry the problem:
+
+| Function | Approx. lines |
+|---|---|
+| `reviewPr` | **~1,188** |
+| `review` | ~495 |
+| `postInlineFindings` | ~390 |
+
+`reviewPr` alone is 2.4% of the entire source tree in one function. Nobody holds that in their
+head, and rule 1 of this project — *design before code, grounded in the real code* — is not
+satisfiable against it.
+
+**Why this belongs in this document rather than a general cleanup backlog:** `reviewPr` is
+exactly where a `--pipeline` / `--strategy` flag lands. The largest function in the project sits
+directly on this work's path, so it must be read in full before Phase 2's selector can be added.
+That makes it a prerequisite, not a tidiness preference.
+
+Scope it narrowly. This is **not** a call to refactor `cli.ts` wholesale: the layering is already
+right and rewriting what works would be the expensive mistake. Split the three functions above —
+`reviewPr` first — and leave the rest alone.
+
+One related fossil, cheap to retire while in the area: `parity_hunter_fired` is a runs-table
+column and a `pipeline.json` key named after one specific hunter. Harmless today; meaningless the
+moment hunters are user-defined.
+
 ## Sequencing
 
 **C2 comes first.** It is the real blocker: without opening the `hunter` enum, the most elegant
 YAML in the world can still only declare four specialties, and a user's `security` or `react`
 hunter fails validation. The registry (Phase 1) and the kinded list (Phase 4) are plumbing by
 comparison.
+
+Order, with the prerequisite in place:
+
+| # | Work | Why here |
+|---|---|---|
+| 0 | Split `reviewPr` (and then `review`, `postInlineFindings`) | It is where the selector lands; it must be readable before Phase 2 |
+| 1 | **C2** — open the `hunter` enum, decide `category`, make hop fields optional | Without it a user pipeline can only name four specialties |
+| 2 | Phase 1 — registry: name today's recipes | Low risk, no `execute()` change |
+| 3 | Phase 2 — selector: `--pipeline`, config, `pipeline.json` | Lands in the function step 0 made readable |
+| 4 | Phase 3 — more occupancy (`light`, `deep`, drop-refuter) | Still slots |
+| 5 | Phase 4 — kinded list + resolver, user-authored YAML | The only phase touching `execute()`'s shape |
+
+Step 0 is deliberately not a `cli.ts` refactor. Three functions, nothing else — the layering
+around them is already correct and rewriting it would cost more than it returns.
 
 Nothing here contradicts the freeze at the top of this document. It is written down so that when
 the multi-provider work finishes, this starts from a decision, not from a conversation.
