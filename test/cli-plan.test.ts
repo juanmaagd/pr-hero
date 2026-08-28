@@ -19,9 +19,14 @@ import {
   renderPlan,
   renderPrPlan,
 } from "../src/cli";
+import {
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "../src/model-routing";
 import type { CliOptions, ConfigSources } from "../src/preflight";
 import type { ParsedAgent } from "../src/prompt-set";
-import { estimateCost } from "../src/report";
+import { estimateCost, formatModelRoute } from "../src/report";
 import type { SizeGateVerdict } from "../src/size-gate";
 import type { ReviewSpec } from "../src/spec";
 
@@ -1012,5 +1017,120 @@ describe("plan card config provenance (C5 O-7)", () => {
         ),
       ),
     ).toContain("agents_dir ← env");
+  });
+});
+
+describe("plan card and details route dimensions display", () => {
+  const routingConfig: RoutingConfig = {
+    mappings: [
+      {
+        logical: "anthropic/claude-3-7-sonnet",
+        backend: "claude-code",
+        provider: "anthropic",
+        gateway: "direct",
+        modelFamily: "claude-3-7-sonnet",
+        modelSnapshot: "claude-3-7-sonnet",
+      },
+      {
+        logical: "anthropic/claude-3-5-haiku",
+        backend: "claude-code",
+        provider: "anthropic",
+        gateway: "direct",
+        modelFamily: "claude-3-5-haiku",
+        modelSnapshot: "claude-3-5-haiku",
+      },
+      {
+        logical: "anthropic/claude-3-opus",
+        backend: "claude-code",
+        provider: "anthropic",
+        gateway: "direct",
+        modelFamily: "claude-3-opus",
+        modelSnapshot: "claude-3-opus",
+      },
+      {
+        logical: "openai/o3-mini",
+        backend: "opencode",
+        provider: "openai",
+        gateway: "configured",
+        modelFamily: "o3-mini",
+        modelSnapshot: "o3-mini-2025-01-31",
+      },
+    ],
+  };
+
+  const hunter1 = resolveStepRoute({
+    stepKey: "hunter-reliability",
+    role: "hunter",
+    cliModel: "sonnet",
+    routingConfig,
+  });
+  const hunter2 = resolveStepRoute({
+    stepKey: "hunter-parity",
+    role: "hunter",
+    cliModel: "sonnet",
+    routingConfig,
+  });
+  const refuter = resolveStepRoute({
+    stepKey: "refuter",
+    role: "refuter",
+    cliModel: "openai/o3-mini",
+    routingConfig,
+  });
+  const summarizer = resolveStepRoute({
+    stepKey: "summarizer",
+    role: "summarizer",
+    cliModel: "haiku",
+    routingConfig,
+  });
+
+  const routePlan = createResolvedRoutePlan([
+    hunter1,
+    hunter2,
+    refuter,
+    summarizer,
+  ]);
+
+  test("formatModelRoute formats direct and configured routes with dimensions", () => {
+    expect(formatModelRoute(hunter1.route, "sonnet")).toBe(
+      "sonnet -> anthropic/claude-3-7-sonnet [direct, claude-code]",
+    );
+
+    expect(formatModelRoute(refuter.route, "openai/o3-mini")).toBe(
+      "openai/o3-mini -> openai/o3-mini-2025-01-31 [configured, opencode]",
+    );
+
+    expect(formatModelRoute(hunter1.route)).toBe(
+      "anthropic/claude-3-7-sonnet [direct, claude-code]",
+    );
+  });
+
+  test("planDetails renders route dimensions for each step", () => {
+    const lines = planDetails(planContext({ routePlan }), false);
+    const text = flat(lines);
+    expect(text).toContain("route hunter-reliability");
+    expect(text).toContain("anthropic/claude-3-7-sonnet [direct, claude-code]");
+    expect(text).toContain("route refuter");
+    expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
+  });
+
+  test("renderPlan displays resolved route dimensions on agent rows when routePlan is supplied", () => {
+    const lines = renderPlan(planContext({ routePlan }), false);
+    const text = flat(lines);
+    expect(text).toContain("reliability");
+    expect(text).toContain("anthropic/claude-3-7-sonnet [direct, claude-code]");
+    expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
+  });
+
+  test("prPlanDetails and renderPrPlan render route dimensions", () => {
+    const lines = prPlanDetails(prPlanContext({ routePlan }), false);
+    const text = flat(lines);
+    expect(text).toContain("route hunter-reliability");
+    expect(text).toContain("anthropic/claude-3-7-sonnet [direct, claude-code]");
+
+    const prLines = renderPrPlan(prPlanContext({ routePlan }), false);
+    const prText = flat(prLines);
+    expect(prText).toContain(
+      "anthropic/claude-3-7-sonnet [direct, claude-code]",
+    );
   });
 });

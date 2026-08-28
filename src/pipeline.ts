@@ -42,6 +42,13 @@ import {
   type RunSummary,
   type SkillOutput,
 } from "./findings";
+import {
+  agentStepKey,
+  buildResolvedRoutePlan,
+  type ResolvedModelRoute,
+  type ResolvedRoutePlan,
+  type RoutingConfig,
+} from "./model-routing";
 // Type-only, and deliberately so: the C5 provenance block is recorded
 // verbatim, never re-derived here, so the pipeline gains a shape from
 // preflight and not a runtime dependency on it (the same seam size-gate.ts
@@ -99,6 +106,11 @@ import {
   type StepSpec,
   settlementReceiptPath,
 } from "./step-runner";
+import {
+  admitRoutePlan,
+  DefaultTransportRegistry,
+  type TransportRegistry,
+} from "./transport-registry";
 import { type SessionUsage, sumUsage, zeroUsage } from "./usage";
 
 export interface PipelineInput {
@@ -193,6 +205,9 @@ export interface PipelineInput {
   // so callers that pass nothing see byte-identical step names, per_agent
   // keys, and parity semantics.
   spec?: ReviewSpec;
+  // D2 PR3: Optional pre-resolved model route plan or config
+  routePlan?: ResolvedRoutePlan;
+  routingConfig?: RoutingConfig;
   // Item 7: skip hunter (and scout) fan-out. A re-review whose restricted
   // delta is empty still classifies and verifies (C6); spawning hunters on
   // an empty patch would bill a first-review for nothing. Absent = run
@@ -220,6 +235,8 @@ export interface PipelineInput {
 
 export interface PipelineDeps {
   runner: StepRunner;
+  // D2 PR3: optional transport registry for route admission and runner dispatch
+  transportRegistry?: TransportRegistry;
   // §5.3 D1-10b: the ceiling's cancellation controller, SHARED with the runner
   // the caller built (the same controller's `signal` goes into
   // `ClaudeCodeRunnerOptions`). The pipeline needs the controller and not the
@@ -357,6 +374,9 @@ export interface PipelineResult {
   // process restart) stays visible to whatever reads this result, not just
   // to a reader of the artifact. Always an array, empty on the common case.
   unresolved: UnresolvedSpend[];
+  // D2 PR3: Route plan provenance
+  routePlan?: ResolvedRoutePlan;
+  routeFingerprint?: string;
 }
 
 // JD-derived arithmetic: v1's 45-min ceiling covered ONE session doing
@@ -659,6 +679,8 @@ interface StepMeta {
   // pipeline.json". Absent exactly when `StepResult.reservations` is: no
   // `SpendLedger` configured on the harness, or no attempt ever reserved.
   reservations?: SpendReservation[];
+  // D2 PR3: route attached at step construction
+  route?: ResolvedModelRoute;
 }
 
 // pipeline.json's `scout` key (§3.9). Written on EVERY run, including one
@@ -689,6 +711,8 @@ interface ScoutRecord {
 // Mutated as steps complete so the pipeline-ceiling path can assemble
 // whatever exists at the moment the ceiling fires.
 interface RunState {
+  // D2 PR3: Route plan provenance
+  routePlan?: ResolvedRoutePlan;
   scout?: ScoutRecord;
   // Set once, immediately after the two blocks it is drawn against are read.
   // Optional only because the pipeline ceiling can fire before `execute` got
@@ -942,6 +966,82 @@ async function execute(
   // it is settled long before a survivor exists to tier.
   state.refuterConfigured = reviewSpec.agents.some((a) => a.role === "refuter");
 
+  // Step 2.5 — D2 Model Route Plan resolution and admission
+  const effectiveRoutingConfig =
+    input.routingConfig ?? input.config?.effective?.routing;
+
+  let routePlan = input.routePlan;
+  if (!routePlan) {
+    const frontmatterByKey = new Map<string, string | undefined>();
+    for (const agent of reviewSpec.agents) {
+      try {
+        const parsed = await parseAgentFile(
+          path.join(input.agentsDir, agent.file),
+        );
+        frontmatterByKey.set(agent.key, parsed.model);
+      } catch {
+        // ignore if not readable
+      }
+    }
+    let summarizerFrontmatter: string | undefined;
+    if (input.summarizer) {
+      try {
+        const parsed = await parseAgentFile(input.summarizer.promptPath);
+        summarizerFrontmatter = parsed.model;
+      } catch {
+        // ignore if not readable
+      }
+    }
+    let scoutFrontmatter: string | undefined;
+    if (input.scout) {
+      try {
+        const parsed = await parseAgentFile(input.scout.promptPath);
+        scoutFrontmatter = parsed.model;
+      } catch {
+        // ignore if not readable
+      }
+    }
+    try {
+      routePlan = buildResolvedRoutePlan({
+        agents: reviewSpec.agents,
+        cliModel: input.model,
+        routingConfig: effectiveRoutingConfig,
+        frontmatterModel: (agentKey) => frontmatterByKey.get(agentKey),
+        ...(input.summarizer === undefined
+          ? {}
+          : {
+              summarizer: {
+                model: input.summarizer.model,
+                frontmatterModel: summarizerFrontmatter,
+              },
+            }),
+        ...(input.scout === undefined
+          ? {}
+          : {
+              scout: {
+                model: input.scout.model,
+                frontmatterModel: scoutFrontmatter,
+                defaultModel: DEFAULT_SCOUT_MODEL,
+              },
+            }),
+      });
+    } catch (error) {
+      // Spec: legacy Claude-only runs without operator routing keep today's
+      // direct model passthrough; D2 route dimensions are optional then.
+      if (effectiveRoutingConfig !== undefined) throw error;
+      routePlan = undefined;
+    }
+  }
+
+  state.routePlan = routePlan;
+
+  // Pre-confirm admit route plan
+  const transportRegistry =
+    deps.transportRegistry ?? new DefaultTransportRegistry();
+  if (routePlan !== undefined) {
+    await admitRoutePlan(routePlan, transportRegistry);
+  }
+
   // Step 3 — deterministic trigger evaluation. This decision is the driver's
   // alone; a conditional hunter never self-triggers. An unconditional hunter
   // (no trigger) always runs; a conditional one runs only when a changed path
@@ -1032,6 +1132,9 @@ async function execute(
       outPath: path.join(stepsDir, `${name}.draft.json`),
       timeoutMs: stepTimeoutMs,
       maxAttempts: DEFAULT_STEP_MAX_ATTEMPTS,
+      ...(routeForStepKey(routePlan, name) === undefined
+        ? {}
+        : { route: routeForStepKey(routePlan, name) }),
       parse: (finalText) => {
         const extracted = extractJsonObject(finalText);
         if (extracted === undefined) {
@@ -1095,6 +1198,9 @@ async function execute(
         model: summarizerMeta.model,
         cwd: input.worktree,
         outPath,
+        ...(routeForStepKey(routePlan, name) === undefined
+          ? {}
+          : { route: routeForStepKey(routePlan, name) }),
         // The summary is a cosmetic barrier ahead of dedupe/refutation. It
         // must not inherit the 30-minute hunter watchdog or its retry budget.
         timeoutMs: 5 * 60 * 1000,
@@ -1511,6 +1617,15 @@ async function runRefuter(
       ),
       timeoutMs: options.stepTimeoutMs,
       maxAttempts: DEFAULT_STEP_MAX_ATTEMPTS,
+      ...(routeForStepKey(state.routePlan, agentStepKey(options.agent)) ===
+      undefined
+        ? {}
+        : {
+            route: routeForStepKey(
+              state.routePlan,
+              agentStepKey(options.agent),
+            ),
+          }),
       parse: (finalText) => {
         const extracted = extractJsonObject(finalText);
         if (extracted === undefined) {
@@ -1925,6 +2040,9 @@ async function runScout(
       outPath,
       timeoutMs: SCOUT_TIMEOUT_MS,
       maxAttempts: 1,
+      ...(routeForStepKey(state.routePlan, name) === undefined
+        ? {}
+        : { route: routeForStepKey(state.routePlan, name) }),
       parse: (finalText) => {
         const extracted = extractJsonObject(finalText);
         if (extracted === undefined) {
@@ -2089,6 +2207,12 @@ async function finish(
     sessionFailed:
       state.hunterCount > 0 && state.hunterFailures === state.hunterCount,
     unresolved: collectUnresolvedSpend(state),
+    ...(state.routePlan === undefined
+      ? {}
+      : {
+          routePlan: state.routePlan,
+          routeFingerprint: state.routePlan.routeFingerprint,
+        }),
   };
 }
 
@@ -2142,6 +2266,14 @@ async function writePipelinePlan(
     // C5 O-6. Beside the other two provenance blocks on purpose: the question
     // "which inputs made this run what it was" has one place to look.
     ...(input.config === undefined ? {} : { config: input.config }),
+    ...(state.routePlan === undefined
+      ? {}
+      : {
+          route_plan: state.routePlan,
+          route_fingerprint: state.routePlan.routeFingerprint,
+          routePlan: state.routePlan,
+          routeFingerprint: state.routePlan.routeFingerprint,
+        }),
     generated_at: new Date().toISOString(),
     // The run's C4 boundary nonce, recorded so the artifact is auditable: a
     // reader holding `steps/*.system.md` and this file can verify which tags
@@ -2267,6 +2399,13 @@ function failedAgentEntry(): PerAgentUsage {
   };
 }
 
+function routeForStepKey(
+  routePlan: ResolvedRoutePlan | undefined,
+  stepKey: string,
+): ResolvedModelRoute | undefined {
+  return routePlan?.steps.find((step) => step.stepKey === stepKey)?.route;
+}
+
 function stepMeta(spec: StepSpec): StepMeta {
   return {
     name: spec.name,
@@ -2278,6 +2417,7 @@ function stepMeta(spec: StepSpec): StepMeta {
     // is pushed into the plan BEFORE it is spawned, and the ceiling can
     // snapshot at any instant after that. Only a settled step overwrites this.
     status: "unsettled",
+    ...(spec.route === undefined ? {} : { route: spec.route }),
   };
 }
 

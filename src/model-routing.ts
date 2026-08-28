@@ -358,3 +358,67 @@ export function createResolvedRoutePlan(
   };
   return freezeRoutePlan(plan);
 }
+
+export function agentStepKey(agent: { key: string; role: string }): string {
+  if (agent.role === "hunter") return `hunter-${agent.key}`;
+  if (agent.role === "refuter") {
+    return agent.key === "refuter" ? "refuter" : agent.key;
+  }
+  return agent.key;
+}
+
+export interface BuildRoutePlanInput {
+  readonly agents: readonly { key: string; role: string; model?: string }[];
+  readonly cliModel?: string;
+  readonly routingConfig?: RoutingConfig;
+  readonly frontmatterModel?: (agentKey: string) => string | undefined;
+  readonly summarizer?: { model?: string; frontmatterModel?: string };
+  readonly scout?: {
+    model?: string;
+    frontmatterModel?: string;
+    defaultModel?: string;
+  };
+}
+
+export function buildResolvedRoutePlan(
+  input: BuildRoutePlanInput,
+): ResolvedRoutePlan {
+  const stepRoutes: ResolvedStepRoute[] = [];
+  for (const agent of input.agents) {
+    stepRoutes.push(
+      resolveStepRoute({
+        stepKey: agentStepKey(agent),
+        role: agent.role,
+        cliModel: input.cliModel,
+        specModel: agent.model,
+        frontmatterModel: input.frontmatterModel?.(agent.key),
+        routingConfig: input.routingConfig,
+      }),
+    );
+  }
+  if (input.summarizer) {
+    stepRoutes.push(
+      resolveStepRoute({
+        stepKey: "summarizer",
+        role: "summarizer",
+        cliModel: input.cliModel,
+        specModel: input.summarizer.model,
+        frontmatterModel: input.summarizer.frontmatterModel,
+        routingConfig: input.routingConfig,
+      }),
+    );
+  }
+  if (input.scout) {
+    stepRoutes.push(
+      resolveStepRoute({
+        stepKey: "scout",
+        role: "scout",
+        cliModel: input.scout.model ?? input.cliModel,
+        frontmatterModel:
+          input.scout.frontmatterModel ?? input.scout.defaultModel,
+        routingConfig: input.routingConfig,
+      }),
+    );
+  }
+  return createResolvedRoutePlan(stepRoutes);
+}
