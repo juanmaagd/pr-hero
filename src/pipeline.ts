@@ -27,6 +27,10 @@ import {
   DEFAULT_CANCELLATION_DEADLINE_MS,
   HARNESS_GRACE_MARGIN_MS,
 } from "./execution/settlement";
+import type {
+  SpendReservation,
+  UnresolvedSpend,
+} from "./execution/spend-limiter";
 import type { NormalizedUsage } from "./execution/usage-normalized";
 import { sumNormalizedUsage } from "./execution/usage-normalized";
 import {
@@ -347,6 +351,12 @@ export interface PipelineResult {
   // hunter failure is a partial run (prose Step 4: "proceed with whatever
   // hunters did complete"), never a session failure.
   sessionFailed: boolean;
+  // D1-08 PR5b (D8): every step's `unresolved_remote` reservation, surfaced
+  // at the RETURN boundary — not only in pipeline.json — so the cross-run
+  // fencing gap (design decision D7: breaker state does not survive a
+  // process restart) stays visible to whatever reads this result, not just
+  // to a reader of the artifact. Always an array, empty on the common case.
+  unresolved: UnresolvedSpend[];
 }
 
 // JD-derived arithmetic: v1's 45-min ceiling covered ONE session doing
@@ -643,6 +653,12 @@ interface StepMeta {
   // with `per_agent`"). Absent exactly when `StepResult.usageV2` is: no
   // attempt ever spawned, or a runner that predates this field.
   usage_v2?: NormalizedUsage;
+  // D1-08 PR5b (§9.1): one entry per attempt that reached the reserve step,
+  // each carrying its own `reservationId` and TERMINAL state — spec:
+  // "every attempt MUST carry a reservationId and terminal state in
+  // pipeline.json". Absent exactly when `StepResult.reservations` is: no
+  // `SpendLedger` configured on the harness, or no attempt ever reserved.
+  reservations?: SpendReservation[];
 }
 
 // pipeline.json's `scout` key (§3.9). Written on EVERY run, including one
@@ -913,6 +929,7 @@ async function execute(
       perAgent: {},
       usage: zeroUsage(),
       sessionFailed: false,
+      unresolved: [],
     };
   }
 
@@ -2071,7 +2088,29 @@ async function finish(
     usage: state.usageTotal,
     sessionFailed:
       state.hunterCount > 0 && state.hunterFailures === state.hunterCount,
+    unresolved: collectUnresolvedSpend(state),
   };
+}
+
+// D1-08 PR5b (D8): the run-level `unresolved` collector. Reads the SAME
+// `state.steps` the artifact join site (`recordSettlement`) already wrote —
+// a second, independent scan over harness output would be a parallel
+// mechanism able to disagree with pipeline.json, exactly the trap
+// D1-10c's own comment on `recordSettlement` warns against.
+function collectUnresolvedSpend(state: RunState): UnresolvedSpend[] {
+  const unresolved: UnresolvedSpend[] = [];
+  for (const step of state.steps) {
+    for (const reservation of step.reservations ?? []) {
+      if (reservation.state !== "unresolved_remote") continue;
+      unresolved.push({
+        step: step.name,
+        bucketId: reservation.bucketId,
+        reservationId: reservation.reservationId,
+        knownUsd: reservation.knownUsd,
+      });
+    }
+  }
+  return unresolved;
 }
 
 async function writePipelinePlan(
@@ -2268,6 +2307,9 @@ function recordSettlement(
 ): void {
   if (result.usageV2 !== undefined) {
     meta.usage_v2 = result.usageV2;
+  }
+  if (result.reservations !== undefined && result.reservations.length > 0) {
+    meta.reservations = result.reservations;
   }
   meta.status = result.status;
   meta.attempts = result.attempts;

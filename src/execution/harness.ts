@@ -51,6 +51,14 @@ import {
   synthesizeInternalFailure,
   synthesizeUnconfirmed,
 } from "./settlement";
+import {
+  beginStep,
+  nextCycle,
+  type ReserveToken,
+  type SpendLedger,
+  type SpendReservation,
+  settlementFromUsage,
+} from "./spend-limiter";
 import type { NormalizedUsage } from "./usage-normalized";
 import { projectLegacyUsage, sumNormalizedUsage } from "./usage-normalized";
 
@@ -113,6 +121,19 @@ export interface StepExecutionHarnessOptions {
   // into. See DEFAULT_RATE_LIMIT_BUCKET_ID for why an explicit id is
   // optional.
   readonly rateLimitBucketId?: string;
+  // D1-08 PR5b (§9.1): the transactional spend reservation ledger. Left
+  // unconfigured, attempts reserve nothing — the ledger stays a dormant
+  // module exactly like `attemptAdmissionGate` before PR5a wired it, and
+  // every existing caller (PR5a's own tests included) keeps its ledger-free
+  // shape unmodified.
+  readonly spendLedger?: SpendLedger;
+  // What each attempt reserves BEFORE its actual cost is known. Estimating a
+  // real per-step dollar figure from prompt/model/provider pricing is a
+  // caller concern this slice does not attempt (same framing as PR5a's own
+  // `rateLimitBucketId` default: deriving the real number belongs to
+  // whoever composes the run, not to this harness). Defaults to 0 so an
+  // unconfigured caller reserves nothing rather than an invented ceiling.
+  readonly reservedUsdPerAttempt?: number;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -250,6 +271,8 @@ export class StepExecutionHarness implements StepRunner {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly attemptAdmissionGate?: AttemptAdmissionGate;
   private readonly rateLimitBucketId: string;
+  private readonly spendLedger?: SpendLedger;
+  private readonly reservedUsdPerAttempt: number;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -271,6 +294,8 @@ export class StepExecutionHarness implements StepRunner {
     this.attemptAdmissionGate = options.attemptAdmissionGate;
     this.rateLimitBucketId =
       options.rateLimitBucketId ?? DEFAULT_RATE_LIMIT_BUCKET_ID;
+    this.spendLedger = options.spendLedger;
+    this.reservedUsdPerAttempt = options.reservedUsdPerAttempt ?? 0;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -880,6 +905,16 @@ export class StepExecutionHarness implements StepRunner {
     let attempts = 0;
     let lastOutcome: TransportOutcome | undefined;
     let cancelHit = false;
+    // D1-08 PR5b (§9.1): every attempt that reached the reserve step, in
+    // order, each already finalized to a terminal reservation state by the
+    // time `runAttempt` returns. Empty when no `spendLedger` is configured.
+    const reservations: SpendReservation[] = [];
+    // Coupling 2 (spend-limiter.ts): attempt 1 always has a token —
+    // `beginStep()` — because there is no disposition yet to consult. Every
+    // later cycle's token comes from `nextCycle(disposition)`, which is
+    // `undefined` for a `terminal` disposition — structurally preventing a
+    // terminal attempt from opening a new reserve+admit cycle.
+    let reserveToken: ReserveToken = beginStep();
 
     const deadlineMs = await this.resolveCancellationDeadlineMs();
 
@@ -959,7 +994,12 @@ export class StepExecutionHarness implements StepRunner {
         kind,
         request,
         deadlineMs,
+        reserveToken,
       });
+
+      if (attemptResult.reservation !== undefined) {
+        reservations.push(attemptResult.reservation);
+      }
 
       if (attemptResult.kind === "cancelled") {
         cancelHit = true;
@@ -980,6 +1020,7 @@ export class StepExecutionHarness implements StepRunner {
           usage: projectLegacyUsage(totalUsageV2),
           usageV2: totalUsageV2,
           attempts,
+          ...(reservations.length === 0 ? {} : { reservations }),
           stderrTail: lastOutcome?.stderrTail ?? "",
           resultText: lastOutcome?.finalText.slice(-8192) ?? "",
         };
@@ -1013,6 +1054,11 @@ export class StepExecutionHarness implements StepRunner {
         if (disposition.action === "retry_after") {
           await this.sleep(disposition.delayMs);
         }
+        // Non-null: `nextCycle` only returns `undefined` for a `terminal`
+        // disposition, and this branch is reached only on `retry_now`/
+        // `retry_after`.
+        // biome-ignore lint/style/noNonNullAssertion: guaranteed by nextCycle's own contract for a non-terminal disposition
+        reserveToken = nextCycle(disposition)!;
         continue;
       }
 
@@ -1028,6 +1074,8 @@ export class StepExecutionHarness implements StepRunner {
           reason: disposition.budget,
         });
         pendingFormatPrompt = step.prompt + FORMAT_RETRY_REMINDER;
+        // biome-ignore lint/style/noNonNullAssertion: guaranteed by nextCycle's own contract for a non-terminal disposition
+        reserveToken = nextCycle(disposition)!;
         continue;
       }
 
@@ -1054,6 +1102,7 @@ export class StepExecutionHarness implements StepRunner {
             : projectLegacyUsage(totalUsageV2),
         ...(totalUsageV2 === undefined ? {} : { usageV2: totalUsageV2 }),
         attempts,
+        ...(reservations.length === 0 ? {} : { reservations }),
         stderrTail: [
           lastOutcome?.stderrTail ?? "",
           `[pr-hero] step cancelled; settled per §5.3 (${receiptPointer})`,
@@ -1073,6 +1122,7 @@ export class StepExecutionHarness implements StepRunner {
           : projectLegacyUsage(totalUsageV2),
       ...(totalUsageV2 === undefined ? {} : { usageV2: totalUsageV2 }),
       attempts,
+      ...(reservations.length === 0 ? {} : { reservations }),
       stderrTail: lastOutcome?.stderrTail ?? "",
       resultText: lastOutcome?.finalText.slice(-8192) ?? "",
     };
@@ -1090,13 +1140,18 @@ export class StepExecutionHarness implements StepRunner {
     readonly kind: "attempt" | "format-retry";
     readonly request: TransportRequest;
     readonly deadlineMs: number;
+    readonly reserveToken: ReserveToken;
   }): Promise<AttemptRunResult> {
-    const { step, attempt, kind, request, deadlineMs } = args;
+    const { step, attempt, kind, request, deadlineMs, reserveToken } = args;
 
-    // D1-08 PR5a (§9.1 step 1 / §9.2): acquire the attempt-scoped lease
-    // BEFORE execution and release it exactly once in `finally`, regardless
-    // of how the attempt ends. NO ledger call here — PR5b adds the spend
-    // reservation inside this same acquire/finally shape.
+    // D1-08 PR5b (§9.1 five-step order): acquire (1) → reserve (2) →
+    // execute (3) → settle-or-unresolved (4) → release-if-unstarted (5),
+    // all inside ONE acquire/finally-release wrapper. Lease release stays a
+    // SEPARATE `finally`, independent of the ledger transition (§9.2: an
+    // abort AFTER the provider attempt started releases the local
+    // concurrency slot but NOT the spend reservation) — this is why the
+    // ledger's own finalization lives in the `try` body below, never in the
+    // outer `finally` beside `lease?.release()`.
     const lease: AttemptLease | undefined = this.attemptAdmissionGate
       ? await this.attemptAdmissionGate.acquire({
           sessionId: request.sessionId,
@@ -1107,16 +1162,110 @@ export class StepExecutionHarness implements StepRunner {
       : undefined;
 
     try {
-      return await this.runAdmittedAttempt({
+      // Step 2: reserve spend transactionally. Left unconfigured, no
+      // `SpendLedger` call is made at all — attempts reserve nothing,
+      // exactly the ledger-free shape PR5a shipped. A refusing ledger
+      // (fenced bucket, spec: "Unresolved bucket blocks the next paid
+      // attempt") throws HERE, before the transport is ever invoked.
+      let reservation: SpendReservation | undefined;
+      if (this.spendLedger) {
+        reservation = await this.spendLedger.reserve(
+          {
+            bucketId: this.rateLimitBucketId,
+            reservedUsd: this.reservedUsdPerAttempt,
+            sessionId: request.sessionId,
+            attempt,
+          },
+          reserveToken,
+        );
+      }
+
+      // §9.2 / spec "Abort timing determines release": the ONLY point at
+      // which the provider attempt has PROVABLY never started — a
+      // cancellation that raced ahead of the reservation itself, before
+      // `runAdmittedAttempt` (and therefore the transport) is ever called.
+      // Once execution begins below, an abort must NOT release the
+      // reservation; it settles as unresolved instead (finalizeReservation).
+      if (reservation !== undefined && this.cancelSignal?.aborted) {
+        await this.spendLedger?.releaseUnstarted(
+          reservation.reservationId,
+          `${reservation.reservationId}:release-unstarted`,
+        );
+        return {
+          kind: "cancelled",
+          reservation: { ...reservation, state: "released_unstarted" },
+        };
+      }
+
+      // Step 3: mark the attempt started and execute.
+      const result = await this.runAdmittedAttempt({
         step,
         attempt,
         kind,
         request,
         deadlineMs,
       });
+
+      // Step 4: settle actual known cost exactly once (or route to
+      // markUnresolvedRemote when usage completeness never became
+      // "complete" — coupling 1, spend-limiter.ts).
+      if (reservation === undefined) return result;
+      const finalReservation = await this.finalizeReservation(
+        reservation,
+        result,
+      );
+      return { ...result, reservation: finalReservation };
     } finally {
       lease?.release();
     }
+  }
+
+  // Coupling 1 consumer: routes a finished attempt's usage through
+  // `settlementFromUsage` and applies whichever CAS transition it names.
+  // `result.kind === "cancelled"` here means the provider attempt WAS
+  // invoked (executeSession calls the transport unconditionally) but no
+  // usage ever arrived — that case can never settle as a number either, so
+  // it takes the same unresolved path with `knownUsd: undefined`.
+  private async finalizeReservation(
+    reservation: SpendReservation,
+    result: AttemptRunResult,
+  ): Promise<SpendReservation> {
+    const ledger = this.spendLedger;
+    if (ledger === undefined) return reservation;
+    const idempotencyKey = `${reservation.reservationId}:finalize`;
+    const usage =
+      result.kind === "cancelled" ? undefined : result.outcome.usage;
+    if (usage === undefined) {
+      await ledger.markUnresolvedRemote(
+        reservation.reservationId,
+        undefined,
+        idempotencyKey,
+      );
+      return {
+        ...reservation,
+        state: "unresolved_remote",
+        knownUsd: undefined,
+      };
+    }
+    const decision = settlementFromUsage(usage);
+    if (decision.kind === "settle") {
+      await ledger.settle(reservation.reservationId, decision, idempotencyKey);
+      return {
+        ...reservation,
+        state: "settled",
+        settledUsd: decision.actualUsd,
+      };
+    }
+    await ledger.markUnresolvedRemote(
+      reservation.reservationId,
+      decision.knownUsd,
+      idempotencyKey,
+    );
+    return {
+      ...reservation,
+      state: "unresolved_remote",
+      knownUsd: decision.knownUsd,
+    };
   }
 
   // The body of a single attempt, unchanged from PR0 except for the §9.2
@@ -1241,15 +1390,22 @@ type AttemptDelivery =
 
 // D1-08 PR0: `runAttempt`'s result — one attempt's outcome reduced to what
 // the retry loop needs to decide what happens next.
+// D1-08 PR5b: every variant gains an optional `reservation` — the
+// finalized `SpendReservation` for this attempt, present exactly when a
+// `SpendLedger` is configured. `runAdmittedAttempt` never sets it (it knows
+// nothing about the ledger); only `runAttempt` attaches it once the
+// reservation has reached its terminal state.
 type AttemptRunResult =
-  | { readonly kind: "cancelled" }
+  | { readonly kind: "cancelled"; readonly reservation?: SpendReservation }
   | {
       readonly kind: "delivered";
       readonly outcome: TransportOutcome;
       readonly parsed: unknown;
+      readonly reservation?: SpendReservation;
     }
   | {
       readonly kind: "failed";
       readonly outcome: TransportOutcome;
       readonly resolution: CauseResolution;
+      readonly reservation?: SpendReservation;
     };

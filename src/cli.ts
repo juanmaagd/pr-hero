@@ -1288,6 +1288,7 @@ async function review(options: CliOptions): Promise<number> {
     artifacts: [path.basename(reportPath), path.basename(findingsPath)],
     ...(links === undefined ? {} : { links }),
     sessionFailed: result.sessionFailed,
+    ...(result.unresolved.length > 0 ? { unresolved: result.unresolved } : {}),
     styles: styleEnabled(),
   })) {
     log(line);
@@ -2403,6 +2404,9 @@ async function reviewPr(
           ? {}
           : { movedHeadSha: posted.movedHeadSha }),
         sessionFailed: result.sessionFailed,
+        ...(result.unresolved.length > 0
+          ? { unresolved: result.unresolved }
+          : {}),
         styles: styleEnabled(),
       })) {
         log(line);

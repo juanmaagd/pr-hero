@@ -18,6 +18,7 @@
 // below the header exists to end that.
 
 import type { ComparisonResult } from "./compare";
+import type { UnresolvedSpend } from "./execution/spend-limiter";
 import type { Finding, FindingsDocument } from "./findings";
 import {
   blobUrl,
@@ -51,6 +52,13 @@ interface ResultWorktree {
   gitDirOwner: string;
   worktreePath: string;
 }
+
+// D1-08 PR5b (D8): the run's unresolved spend reservations, surfaced here so
+// the fencing gap (design decision D7: breaker state does not survive a
+// process restart) is visible in the terminal a human actually reads, not
+// only in pipeline.json. A plain alias over `UnresolvedSpend[]` — the
+// pipeline-level shape already carries everything this block prints.
+export type ResultUnresolved = readonly UnresolvedSpend[];
 
 // What it takes to turn a finding into something clickable. Absent when the
 // repo has no usable github remote, which is the honest degradation: the block
@@ -105,6 +113,12 @@ export interface ResultInput {
   // omission cannot hide in a second caller.
   movedHeadSha?: string;
   sessionFailed: boolean;
+  // D1-08 PR5b (D8): present and non-empty exactly when at least one spend
+  // reservation ended `unresolved_remote` this run. Its presence is what
+  // marks the header's `$X.XX` figure as a FLOOR rather than a total (the
+  // known cost is real; the unresolved bucket's true cost is not) and what
+  // earns the run a footer row naming the fenced bucket(s).
+  unresolved?: ResultUnresolved;
   styles: boolean;
   width?: number;
 }
@@ -434,7 +448,13 @@ export function renderResult(input: ResultInput): string[] {
   const left =
     `${status}${blocking} blocking · ${advisory} advisory · ` +
     `${refuted} refuted`;
-  const right = `$${input.costUsd.toFixed(2)} · ${formatElapsed(input.wallMs)}`;
+  // D8: a bucket fenced by an unresolved_remote reservation means the real
+  // cost of that bucket's attempt is UNKNOWN — printing a bare `$X.XX` there
+  // is the exact "$0 on parse failure" collapse this slice exists to kill,
+  // just relocated to the terminal's header line. `≥` marks it a floor.
+  const hasUnresolved = (input.unresolved?.length ?? 0) > 0;
+  const costLabel = `${hasUnresolved ? "≥" : ""}$${input.costUsd.toFixed(2)}`;
+  const right = `${costLabel} · ${formatElapsed(input.wallMs)}`;
   const header = headerRule(left, right, width, styles);
   // The PR's own url, directly under the rule rather than down in the artifact
   // footer, for two reasons. It is the WHERE of everything above and below it,
@@ -507,6 +527,22 @@ export function renderResult(input: ResultInput): string[] {
       footer,
     ),
   );
+  // D8: naming the fenced bucket(s) HERE, not only in pipeline.json, is the
+  // whole point of this row — see the module-level ResultUnresolved comment.
+  if (hasUnresolved) {
+    const buckets = [
+      ...new Set((input.unresolved ?? []).map((u) => u.bucketId)),
+    ];
+    lines.push(
+      ...row(
+        "unresolved",
+        `${input.unresolved?.length} spend reservation(s) unresolved in ` +
+          `bucket(s) ${buckets.join(", ")} — cost above is a floor; see ` +
+          "pipeline.json",
+        footer,
+      ),
+    );
+  }
   // The relocation headerRule reported: on a terminal too narrow for the rule
   // to carry both halves, what this run actually cost gets its own row instead
   // of disappearing with the rule's right-hand segment.
