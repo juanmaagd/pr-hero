@@ -8,6 +8,7 @@
 // a renderer that reached for `new Date()` would make that a lie).
 
 import type { Finding, FindingsDocument, Severity, Tier } from "./findings";
+import type { ResolvedModelRoute, ResolvedStepRoute } from "./model-routing";
 import { findingMarker, prCommentMarker } from "./pr-preflight";
 import {
   clusterByRootCause,
@@ -1293,4 +1294,26 @@ function duration(ms: number): string {
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+export function formatModelRoute(
+  route: ResolvedModelRoute,
+  logicalIdentity?: string,
+): string {
+  const variant = route.modelVariant ? `#${route.modelVariant}` : "";
+  const modelName = route.modelSnapshot || route.modelFamily;
+  const target = `${route.provider}/${modelName}${variant}`;
+  const gateway = route.gateway ?? "direct";
+  const dims = `[${gateway}, ${route.backend}]`;
+  if (logicalIdentity && logicalIdentity !== target) {
+    return `${logicalIdentity} -> ${target} ${dims}`;
+  }
+  return `${target} ${dims}`;
+}
+
+export function formatStepRoute(
+  step: ResolvedStepRoute,
+  rawLogical?: string,
+): string {
+  return formatModelRoute(step.route, rawLogical ?? step.logicalIdentity);
 }

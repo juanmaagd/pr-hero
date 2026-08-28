@@ -11,6 +11,7 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
+import { aliasModelFamily, aliasModelSnapshot } from "../../src/model-catalog";
 import type { StepSpec } from "../../src/step-runner";
 import { DefaultTransportRegistry } from "../../src/transport-registry";
 
@@ -100,8 +101,8 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "openrouter",
-      modelFamily: "claude-3-7-sonnet",
-      modelSnapshot: "claude-3-7-sonnet-20250219",
+      modelFamily: aliasModelFamily("sonnet"),
+      modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
       modelVariant: "thinking",
     };
 
@@ -111,7 +112,7 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
       prompt: "review diff",
       tools: [],
       mcpConfigPath: path.join(tmpDir, "mcp.json"),
-      model: "claude-3-7-sonnet",
+      model: "sonnet",
       cwd: tmpDir,
       outPath: path.join(tmpDir, "out.json"),
       timeoutMs: 10000,
@@ -127,7 +128,7 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
     expect(recordedRequests[0].route.gateway).toBe("openrouter");
     expect(recordedRequests[0].route.modelVariant).toBe("thinking");
     expect(recordedRequests[0].route.modelSnapshot).toBe(
-      "claude-3-7-sonnet-20250219",
+      `${aliasModelSnapshot("sonnet")}-20250219`,
     );
   });
 
@@ -156,7 +157,7 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
       prompt: "review diff 1",
       tools: [],
       mcpConfigPath: path.join(tmpDir, "mcp.json"),
-      model: "claude-3-7-sonnet",
+      model: "sonnet",
       cwd: tmpDir,
       outPath: path.join(tmpDir, "out-1.json"),
       timeoutMs: 10000,
@@ -165,8 +166,8 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
       route: {
         backend: "claude-code",
         provider: "anthropic",
-        modelFamily: "claude-3-7-sonnet",
-        modelSnapshot: "claude-3-7-sonnet",
+        modelFamily: aliasModelFamily("sonnet"),
+        modelSnapshot: aliasModelSnapshot("sonnet"),
       },
     };
 

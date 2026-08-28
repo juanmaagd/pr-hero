@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ResolvedModelRoute, RunnerBackend } from "./execution/contracts";
+import {
+  isModelAlias,
+  lookupAlias,
+  type ModelAlias,
+  reverseAliasForCanonical,
+} from "./model-catalog";
 import { redactDiagnostic } from "./security/redact";
 
 export type ModelGateway = "configured" | "direct" | "openrouter";
@@ -29,7 +35,7 @@ export interface ParsedLogicalIdentity {
   readonly provider: string;
   readonly model: string;
   readonly variant?: string;
-  readonly alias?: "sonnet" | "opus" | "haiku";
+  readonly alias?: ModelAlias;
 }
 
 export interface ResolvedStepRoute {
@@ -51,34 +57,15 @@ export class UnmappedRouteError extends ModelRoutingError {}
 export class AmbiguousMappingError extends ModelRoutingError {}
 export class UnauthorizedRouteError extends ModelRoutingError {}
 
-const CANONICAL_ALIASES: Record<
-  "sonnet" | "opus" | "haiku",
-  {
-    provider: string;
-    model: string;
-    canonical: string;
-    alias: "sonnet" | "opus" | "haiku";
-  }
-> = {
-  sonnet: {
-    provider: "anthropic",
-    model: "claude-3-7-sonnet",
-    canonical: "anthropic/claude-3-7-sonnet",
-    alias: "sonnet",
-  },
-  opus: {
-    provider: "anthropic",
-    model: "claude-3-opus",
-    canonical: "anthropic/claude-3-opus",
-    alias: "opus",
-  },
-  haiku: {
-    provider: "anthropic",
-    model: "claude-3-5-haiku",
-    canonical: "anthropic/claude-3-5-haiku",
-    alias: "haiku",
-  },
-};
+export type { ModelAlias } from "./model-catalog";
+export {
+  aliasCanonical,
+  aliasModelFamily,
+  aliasModelSnapshot,
+  isModelAlias,
+  lookupAlias,
+  MODEL_CATALOG,
+} from "./model-catalog";
 
 const SLASH_GRAMMAR_REGEX =
   /^([a-zA-Z0-9_-]+)\/([a-zA-Z0-9._-]+)(?:#([a-zA-Z0-9._-]+))?$/;
@@ -92,14 +79,14 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
     throw new ModelRoutingError("Model identity cannot be empty");
   }
 
-  if (trimmed === "sonnet" || trimmed === "opus" || trimmed === "haiku") {
-    const aliasInfo = CANONICAL_ALIASES[trimmed];
+  if (isModelAlias(trimmed)) {
+    const aliasInfo = lookupAlias(trimmed);
     return {
       raw: trimmed,
       canonical: aliasInfo.canonical,
       provider: aliasInfo.provider,
-      model: aliasInfo.model,
-      alias: aliasInfo.alias,
+      model: aliasInfo.modelFamily,
+      alias: trimmed,
     };
   }
 
@@ -127,9 +114,7 @@ export function resolveModelRoute(
   config?: RoutingConfig,
 ): ResolvedModelRoute {
   const parsed = parseLogicalIdentity(logicalInput);
-  const reverseAlias = (
-    Object.keys(CANONICAL_ALIASES) as Array<keyof typeof CANONICAL_ALIASES>
-  ).find((k) => CANONICAL_ALIASES[k].canonical === parsed.canonical);
+  const reverseAlias = reverseAliasForCanonical(parsed.canonical);
 
   if (config !== undefined) {
     if (config.disabled === true) {
@@ -357,4 +342,93 @@ export function createResolvedRoutePlan(
     routeFingerprint: planFingerprint,
   };
   return freezeRoutePlan(plan);
+}
+
+export function agentStepKey(agent: { key: string; role: string }): string {
+  if (agent.role === "hunter") return `hunter-${agent.key}`;
+  if (agent.role === "refuter") {
+    return agent.key === "refuter" ? "refuter" : agent.key;
+  }
+  return agent.key;
+}
+
+export interface BuildRoutePlanInput {
+  readonly agents: readonly { key: string; role: string; model?: string }[];
+  readonly cliModel?: string;
+  readonly routingConfig?: RoutingConfig;
+  readonly frontmatterModel?: (agentKey: string) => string | undefined;
+  readonly summarizer?: { model?: string; frontmatterModel?: string };
+  readonly scout?: {
+    model?: string;
+    frontmatterModel?: string;
+    defaultModel?: string;
+  };
+}
+
+export function buildResolvedRoutePlan(
+  input: BuildRoutePlanInput,
+): ResolvedRoutePlan {
+  const stepRoutes: ResolvedStepRoute[] = [];
+  for (const agent of input.agents) {
+    stepRoutes.push(
+      resolveStepRoute({
+        stepKey: agentStepKey(agent),
+        role: agent.role,
+        cliModel: input.cliModel,
+        specModel: agent.model,
+        frontmatterModel: input.frontmatterModel?.(agent.key),
+        routingConfig: input.routingConfig,
+      }),
+    );
+  }
+  if (input.summarizer) {
+    stepRoutes.push(
+      resolveStepRoute({
+        stepKey: "summarizer",
+        role: "summarizer",
+        cliModel: input.cliModel,
+        specModel: input.summarizer.model,
+        frontmatterModel: input.summarizer.frontmatterModel,
+        routingConfig: input.routingConfig,
+      }),
+    );
+  }
+  if (input.scout) {
+    stepRoutes.push(
+      resolveStepRoute({
+        stepKey: "scout",
+        role: "scout",
+        cliModel: input.scout.model ?? input.cliModel,
+        frontmatterModel:
+          input.scout.frontmatterModel ?? input.scout.defaultModel,
+        routingConfig: input.routingConfig,
+      }),
+    );
+  }
+  return createResolvedRoutePlan(stepRoutes);
+}
+
+export function spawnModelForClaudeCli(
+  route: ResolvedModelRoute,
+  executionModel: string,
+): string {
+  const gateway = route.gateway ?? "direct";
+  if (gateway !== "direct") {
+    return route.modelSnapshot;
+  }
+  if (isModelAlias(executionModel)) {
+    return executionModel;
+  }
+  try {
+    const parsed = parseLogicalIdentity(executionModel);
+    const alias = reverseAliasForCanonical(
+      `${parsed.provider}/${parsed.model}`,
+    );
+    if (alias !== undefined) {
+      return alias;
+    }
+  } catch {
+    // executionModel is not a catalog alias or slash-grammar identity.
+  }
+  return route.modelSnapshot;
 }

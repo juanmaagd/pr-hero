@@ -134,7 +134,7 @@ describe("renderStepSummary — completed review with findings", () => {
     ],
     costUsdEst: 12.9,
     wallMs: 754_000,
-    model: "claude-3-7-sonnet",
+    model: "haiku+sonnet",
     repoWebUrl: "https://github.com/juanmaagd/pr-hero",
     delta: { resolved: 1, new: 2, persist: 0, previousHeadSha: "a".repeat(40) },
   };
@@ -148,7 +148,7 @@ describe("renderStepSummary — completed review with findings", () => {
     expect(out).toContain("| Findings | 2 (1 blocking · 1 advisory) |");
     expect(out).toContain("| Estimated cost | $12.90 |");
     expect(out).toContain("| Duration | 12m34s |");
-    expect(out).toContain("| Model | claude-3-7-sonnet |");
+    expect(out).toContain("| Model | haiku+sonnet |");
   });
 
   test("groups findings by file with a Markdown link to the blob", () => {
@@ -191,7 +191,7 @@ describe("renderStepSummary — clean review (no findings)", () => {
     findings: [],
     costUsdEst: 3.68,
     wallMs: 45_000,
-    model: "claude-3-7-sonnet",
+    model: "haiku+sonnet",
   };
   const out = renderStepSummary(data);
 

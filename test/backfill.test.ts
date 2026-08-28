@@ -55,7 +55,7 @@ function sampleDoc(
     pr: 42,
     base_sha: "a".repeat(40),
     head_sha: "b".repeat(40),
-    model: "claude-3-7-sonnet",
+    model: "sonnet",
     iteration: 1,
     parity_hunter_fired: true,
     run_status: "complete",

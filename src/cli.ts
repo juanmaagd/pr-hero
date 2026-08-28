@@ -90,6 +90,11 @@ import {
 } from "./metrics";
 import { type RunRow, renderUsage } from "./metrics-preflight";
 import {
+  buildResolvedRoutePlan,
+  type ResolvedRoutePlan,
+  type RoutingConfig,
+} from "./model-routing";
+import {
   changedPathsFromDiff,
   DEFAULT_SCOUT_MODEL,
   type PerAgentUsage,
@@ -198,6 +203,7 @@ import {
   type DiffStat,
   estimateCost,
   formatElapsed,
+  formatStepRoute,
   type PrCommentDelta,
   renderPrComment,
   renderReport,
@@ -241,6 +247,7 @@ import {
   saveRunTransaction,
 } from "./store";
 import { projectCompleteRun } from "./store-preflight";
+import { admitRoutePlan, DefaultTransportRegistry } from "./transport-registry";
 import {
   renderTriageReplyBody,
   TRIAGE_MARKER_PREFIX,
@@ -357,6 +364,85 @@ export function pipelineScoutInput(
         },
       }
     : {};
+}
+
+async function buildCliRoutePlan(params: {
+  spec: ReviewSpec;
+  options: CliOptions;
+  agentFiles: Map<string, ParsedAgent>;
+  routingConfig?: RoutingConfig;
+  summary: SummarySettings;
+  summarizerEnabled?: boolean;
+  scoutEnabled?: boolean;
+}): Promise<ResolvedRoutePlan> {
+  const summarizerEnabled = params.summarizerEnabled ?? params.summary.enabled;
+  const scoutEnabled = params.scoutEnabled ?? params.options.scout;
+  let summarizerFrontmatter: string | undefined;
+  if (summarizerEnabled) {
+    try {
+      const parsed = await parseAgentFile(
+        resolveEngineAssets().summarizerPromptPath,
+      );
+      summarizerFrontmatter = parsed.model;
+    } catch {
+      // Engine-owned prompt may be unreadable in tests; route resolution still
+      // falls through CLI > spec > frontmatter precedence without it.
+    }
+  }
+  let scoutFrontmatter: string | undefined;
+  if (scoutEnabled) {
+    try {
+      const parsed = await parseAgentFile(
+        resolveEngineAssets().scoutPromptPath,
+      );
+      scoutFrontmatter = parsed.model;
+    } catch {
+      // Same contract as the summarizer branch above.
+    }
+  }
+  return buildResolvedRoutePlan({
+    agents: params.spec.agents,
+    cliModel: params.options.model,
+    routingConfig: params.routingConfig,
+    frontmatterModel: (agentKey) => params.agentFiles.get(agentKey)?.model,
+    ...(summarizerEnabled
+      ? {
+          summarizer: {
+            model: params.summary.model,
+            frontmatterModel: summarizerFrontmatter,
+          },
+        }
+      : {}),
+    ...(scoutEnabled
+      ? {
+          scout: {
+            model: params.options.scoutModel,
+            frontmatterModel: scoutFrontmatter,
+            defaultModel: DEFAULT_SCOUT_MODEL,
+          },
+        }
+      : {}),
+  });
+}
+
+// Pre-confirm route resolution: legacy runs without operator routing may omit
+// route provenance when the plan cannot be built, but admission failures must
+// always surface before confirm — never be swallowed into routePlan = undefined.
+export async function resolveRoutePlanAtConfirm(input: {
+  routingConfigured: boolean;
+  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
+  registry?: DefaultTransportRegistry;
+}): Promise<ResolvedRoutePlan | undefined> {
+  const registry = input.registry ?? new DefaultTransportRegistry();
+  let routePlan: ResolvedRoutePlan;
+  try {
+    routePlan = await input.buildRoutePlan();
+  } catch (error) {
+    if (input.routingConfigured) throw error;
+    return undefined;
+  }
+  await admitRoutePlan(routePlan, registry);
+  return routePlan;
 }
 
 // C5 O-6's half of the pipeline input. Unconditional, unlike its two
@@ -1038,6 +1124,17 @@ async function review(options: CliOptions): Promise<number> {
     summary.enabled,
     options.scout,
   );
+  const routePlan = await resolveRoutePlanAtConfirm({
+    routingConfigured: config.routing !== undefined,
+    buildRoutePlan: () =>
+      buildCliRoutePlan({
+        spec,
+        options,
+        agentFiles,
+        routingConfig: config.routing,
+        summary,
+      }),
+  });
   // Named rather than inlined into renderPlan: the same context is what the
   // confirm menu's "Show details" renders, and building it twice would risk
   // the card and the details view disagreeing about the run they describe.
@@ -1065,6 +1162,7 @@ async function review(options: CliOptions): Promise<number> {
     sizeGate,
     droppedPaths: effectiveDiff.droppedPaths,
     configProvenance: configProvenanceOf(loaded, agentsDirSource),
+    ...(routePlan === undefined ? {} : { routePlan }),
   };
   for (const line of renderPlan(planContext, styleEnabled())) log(line);
 
@@ -1184,6 +1282,7 @@ async function review(options: CliOptions): Promise<number> {
         ...pipelineSummarizerInput(summary),
         ...pipelineScoutInput(options),
         ...pipelineConfigInput(loaded),
+        ...(routePlan === undefined ? {} : { routePlan }),
         engine: await engineIdentity(),
         promptSet,
         spec,
@@ -1924,6 +2023,19 @@ async function reviewPr(
         });
       }
     }
+    const routePlan = await resolveRoutePlanAtConfirm({
+      routingConfigured: config.routing !== undefined,
+      buildRoutePlan: () =>
+        buildCliRoutePlan({
+          spec,
+          options,
+          agentFiles,
+          routingConfig: config.routing,
+          summary,
+          summarizerEnabled: summary.enabled && !skipDiscovery,
+          scoutEnabled: options.scout && !skipDiscovery,
+        }),
+    });
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
     const planContext: PrPlanContext = {
@@ -1958,6 +2070,7 @@ async function reviewPr(
               skipDiscovery,
             },
           }),
+      ...(routePlan === undefined ? {} : { routePlan }),
     };
     for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
     // What this run will actually publish. `options` is never mutated: the plan
@@ -2128,6 +2241,7 @@ async function reviewPr(
               // artifact cannot name its config inputs is the unpoolable case
               // D7 exists to prevent — whether or not hunters fanned out.
               ...pipelineConfigInput(loaded),
+              ...(routePlan === undefined ? {} : { routePlan }),
               engine: await engineIdentity(),
               promptSet,
               spec,
@@ -4827,6 +4941,8 @@ export interface PlanContext {
   // C5 O-7. Optional for the reason `resolved`/`rereview` are on the PR
   // context: a plan assembled without it renders the pre-C5 card.
   configProvenance?: ConfigProvenance;
+  // D2 PR3: Optional resolved route plan for model routing display
+  routePlan?: ResolvedRoutePlan;
   // The terminal width every row and card below is laid out against, carried
   // in exactly as ui-result.ts's ResultInput carries it. Optional so the shell
   // may leave the one sniff to the renderer's entry point; the tests ALWAYS
@@ -4885,12 +5001,29 @@ function markerRowLines(
 }
 
 function agentRow(
-  ctx: { options: CliOptions; agentFiles: Map<string, ParsedAgent> },
+  ctx: {
+    options: CliOptions;
+    agentFiles: Map<string, ParsedAgent>;
+    routePlan?: ResolvedRoutePlan;
+  },
   agent: ReviewSpec["agents"][number],
   fires: string,
 ): string {
   const parsed = ctx.agentFiles.get(agent.key);
   const model = ctx.options.model ?? agent.model ?? parsed?.model ?? "?";
+  if (ctx.routePlan) {
+    const stepRoute = ctx.routePlan.steps.find(
+      (s) =>
+        s.stepKey === agent.key ||
+        s.stepKey === `hunter-${agent.key}` ||
+        (agent.role === "refuter" &&
+          (s.role === "refuter" || s.stepKey === "refuter")),
+    );
+    if (stepRoute) {
+      const formatted = formatStepRoute(stepRoute, model);
+      return `${agent.key.padEnd(12)} ${formatted.padEnd(8)} ${fires}`;
+    }
+  }
   return `${agent.key.padEnd(12)} ${model.padEnd(8)} ${fires}`;
 }
 
@@ -5059,6 +5192,24 @@ export function planDetails(ctx: PlanContext, styles: boolean): string[] {
   );
   push("diff", ctx.diffPath);
   push("agents dir", ctx.agentsDir);
+  if (ctx.routePlan) {
+    for (const step of ctx.routePlan.steps) {
+      const rawModel =
+        step.role === "hunter"
+          ? (ctx.options.model ??
+            ctx.spec.agents.find(
+              (a) =>
+                a.key === step.stepKey || `hunter-${a.key}` === step.stepKey,
+            )?.model ??
+            ctx.agentFiles.get(step.stepKey.replace(/^hunter-/, ""))?.model)
+          : step.role === "refuter"
+            ? (ctx.options.model ??
+              ctx.spec.agents.find((a) => a.role === "refuter")?.model ??
+              ctx.agentFiles.get(step.stepKey)?.model)
+            : undefined;
+      push(`route ${step.stepKey}`, formatStepRoute(step, rawModel));
+    }
+  }
   if (ctx.configProvenance) {
     push("config", configDetail(ctx.configProvenance, ctx.options));
   }
@@ -5182,6 +5333,8 @@ export interface PrPlanContext {
   droppedPaths: string[];
   // C5 O-7, same contract as PlanContext's.
   configProvenance?: ConfigProvenance;
+  // D2 PR3: Optional resolved route plan for model routing display
+  routePlan?: ResolvedRoutePlan;
   // Set when this plan follows an interactive "Review anyway" at the
   // size-gate menu. Distinct from options.force so the decision block can
   // say "confirmed" rather than lie that --force was passed.
@@ -5318,6 +5471,24 @@ export function prPlanDetails(ctx: PrPlanContext, styles: boolean): string[] {
     `${ctx.worktreePath} — ${worktreePlanNote(ctx.worktreePath)}`,
   );
   push("agents dir", ctx.agentsDir);
+  if (ctx.routePlan) {
+    for (const step of ctx.routePlan.steps) {
+      const rawModel =
+        step.role === "hunter"
+          ? (ctx.options.model ??
+            ctx.spec.agents.find(
+              (a) =>
+                a.key === step.stepKey || `hunter-${a.key}` === step.stepKey,
+            )?.model ??
+            ctx.agentFiles.get(step.stepKey.replace(/^hunter-/, ""))?.model)
+          : step.role === "refuter"
+            ? (ctx.options.model ??
+              ctx.spec.agents.find((a) => a.role === "refuter")?.model ??
+              ctx.agentFiles.get(step.stepKey)?.model)
+            : undefined;
+      push(`route ${step.stepKey}`, formatStepRoute(step, rawModel));
+    }
+  }
   if (ctx.configProvenance) {
     // The repo path here is the OPERATOR checkout's, never the worktree's
     // (O-8) — printed so that fact is visible rather than asserted.

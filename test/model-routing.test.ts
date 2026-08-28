@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  aliasCanonical,
+  aliasModelFamily,
+  aliasModelSnapshot,
+  lookupAlias,
+} from "../src/model-catalog";
+import {
   AmbiguousMappingError,
   computeRouteFingerprint,
   createResolvedRoutePlan,
@@ -13,6 +19,7 @@ import {
   resolveLogicalModel,
   resolveModelRoute,
   resolveStepRoute,
+  spawnModelForClaudeCli,
   UnauthorizedRouteError,
   UnmappedRouteError,
 } from "../src/model-routing";
@@ -21,23 +28,23 @@ import { ReviewSpecValidationError, validateReviewSpec } from "../src/spec";
 describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
   test("parses explicit aliases: sonnet, opus, haiku", () => {
     const sonnet = parseLogicalIdentity("sonnet");
-    expect(sonnet.canonical).toBe("anthropic/claude-3-7-sonnet");
-    expect(sonnet.provider).toBe("anthropic");
-    expect(sonnet.model).toBe("claude-3-7-sonnet");
+    expect(sonnet.canonical).toBe(aliasCanonical("sonnet"));
+    expect(sonnet.provider).toBe(lookupAlias("sonnet").provider);
+    expect(sonnet.model).toBe(aliasModelFamily("sonnet"));
     expect(sonnet.alias).toBe("sonnet");
     expect(sonnet.variant).toBeUndefined();
 
     const opus = parseLogicalIdentity("opus");
-    expect(opus.canonical).toBe("anthropic/claude-3-opus");
-    expect(opus.provider).toBe("anthropic");
-    expect(opus.model).toBe("claude-3-opus");
+    expect(opus.canonical).toBe(aliasCanonical("opus"));
+    expect(opus.provider).toBe(lookupAlias("opus").provider);
+    expect(opus.model).toBe(aliasModelFamily("opus"));
     expect(opus.alias).toBe("opus");
     expect(opus.variant).toBeUndefined();
 
     const haiku = parseLogicalIdentity("haiku");
-    expect(haiku.canonical).toBe("anthropic/claude-3-5-haiku");
-    expect(haiku.provider).toBe("anthropic");
-    expect(haiku.model).toBe("claude-3-5-haiku");
+    expect(haiku.canonical).toBe(aliasCanonical("haiku"));
+    expect(haiku.provider).toBe(lookupAlias("haiku").provider);
+    expect(haiku.model).toBe(aliasModelFamily("haiku"));
     expect(haiku.alias).toBe("haiku");
     expect(haiku.variant).toBeUndefined();
   });
@@ -70,7 +77,7 @@ describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
 
   test("trims whitespace from input", () => {
     const sonnet = parseLogicalIdentity("  sonnet  ");
-    expect(sonnet.canonical).toBe("anthropic/claude-3-7-sonnet");
+    expect(sonnet.canonical).toBe(aliasCanonical("sonnet"));
 
     const slash = parseLogicalIdentity("  openai/gpt-4o#fast  ");
     expect(slash.canonical).toBe("openai/gpt-4o#fast");
@@ -227,8 +234,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-7-sonnet",
-      modelSnapshot: "claude-3-7-sonnet",
+      modelFamily: aliasModelFamily("sonnet"),
+      modelSnapshot: aliasModelSnapshot("sonnet"),
     });
 
     const opusRoute = resolveModelRoute("opus");
@@ -236,8 +243,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-opus",
-      modelSnapshot: "claude-3-opus",
+      modelFamily: aliasModelFamily("opus"),
+      modelSnapshot: aliasModelSnapshot("opus"),
     });
 
     const haikuRoute = resolveModelRoute("haiku");
@@ -245,8 +252,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-5-haiku",
-      modelSnapshot: "claude-3-5-haiku",
+      modelFamily: aliasModelFamily("haiku"),
+      modelSnapshot: aliasModelSnapshot("haiku"),
     });
   });
 
@@ -254,12 +261,12 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
     const config: RoutingConfig = {
       mappings: [
         {
-          logical: "anthropic/claude-3-7-sonnet",
+          logical: aliasCanonical("sonnet"),
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet-20250219",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
         },
         {
           logical: "openai/gpt-4o",
@@ -321,7 +328,7 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       UnmappedRouteError,
     );
     expect(() =>
-      resolveModelRoute("anthropic/claude-3-7-sonnet", { mappings: [] }),
+      resolveModelRoute(aliasCanonical("sonnet"), { mappings: [] }),
     ).toThrow(UnmappedRouteError);
   });
 
@@ -382,12 +389,12 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           disabled: true,
         },
         {
-          logical: "anthropic/claude-3-7-sonnet",
+          logical: aliasCanonical("sonnet"),
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
           allowSpend: false,
         },
       ],
@@ -431,8 +438,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: "claude-3-7-sonnet",
-          modelSnapshot: "claude-3-7-sonnet",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
           disabled: true,
         },
       },
@@ -456,7 +463,7 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           provider: "anthropic",
           disabled: true,
         },
-        "anthropic/claude-3-7-sonnet": {
+        [aliasCanonical("sonnet")]: {
           backend: "claude-code",
           provider: "anthropic",
           disabled: false,
@@ -467,9 +474,9 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
     expect(() => resolveModelRoute("sonnet", config)).toThrow(
       AmbiguousMappingError,
     );
-    expect(() =>
-      resolveModelRoute("anthropic/claude-3-7-sonnet", config),
-    ).toThrow(AmbiguousMappingError);
+    expect(() => resolveModelRoute(aliasCanonical("sonnet"), config)).toThrow(
+      AmbiguousMappingError,
+    );
   });
 
   test("disabled default route throws UnauthorizedRouteError", () => {
@@ -503,17 +510,17 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: "claude-3-7-sonnet",
-      modelSnapshot: "claude-3-7-sonnet-20250219",
+      modelFamily: aliasModelFamily("sonnet"),
+      modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
       modelVariant: "thinking",
     };
 
     const fp1 = computeRouteFingerprint(
-      "anthropic/claude-3-7-sonnet#thinking",
+      `${aliasCanonical("sonnet")}#thinking`,
       route,
     );
     const fp2 = computeRouteFingerprint(
-      "anthropic/claude-3-7-sonnet#thinking",
+      `${aliasCanonical("sonnet")}#thinking`,
       route,
     );
     expect(fp1).toBeString();
@@ -522,7 +529,7 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
 
     // Changing any target dimension changes the fingerprint
     const fpDiff = computeRouteFingerprint(
-      "anthropic/claude-3-7-sonnet#thinking",
+      `${aliasCanonical("sonnet")}#thinking`,
       {
         ...route,
         gateway: "configured",
@@ -559,13 +566,13 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
     const stepRoute: ResolvedStepRoute = {
       stepKey: "reliability",
       role: "hunter",
-      logicalIdentity: "anthropic/claude-3-7-sonnet",
+      logicalIdentity: aliasCanonical("sonnet"),
       route: {
         backend: "claude-code",
         provider: "anthropic",
         gateway: "direct",
-        modelFamily: "claude-3-7-sonnet",
-        modelSnapshot: "claude-3-7-sonnet",
+        modelFamily: aliasModelFamily("sonnet"),
+        modelSnapshot: aliasModelSnapshot("sonnet"),
       },
       routeFingerprint: "a".repeat(64),
     };
@@ -596,7 +603,7 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
 
     expect(step.stepKey).toBe("reliability");
     expect(step.role).toBe("hunter");
-    expect(step.logicalIdentity).toBe("anthropic/claude-3-7-sonnet");
+    expect(step.logicalIdentity).toBe(aliasCanonical("sonnet"));
     expect(step.route.backend).toBe("claude-code");
     expect(step.routeFingerprint).toHaveLength(64);
 
@@ -604,5 +611,52 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
     expect(Object.isFrozen(plan)).toBe(true);
     expect(plan.steps).toHaveLength(1);
     expect(plan.routeFingerprint).toBeString();
+  });
+});
+
+describe("spawnModelForClaudeCli", () => {
+  test("direct gateway passes the logical alias to Claude Code --model", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
+        },
+        "sonnet",
+      ),
+    ).toBe("sonnet");
+  });
+
+  test("configured gateway passes the operator snapshot to Claude Code --model", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "configured",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
+        },
+        "sonnet",
+      ),
+    ).toBe(`${aliasModelSnapshot("sonnet")}-20250219`);
+  });
+
+  test("direct gateway maps slash-grammar executionModel back to Claude alias", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
+        },
+        aliasCanonical("sonnet"),
+      ),
+    ).toBe("sonnet");
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
+import { aliasModelFamily, aliasModelSnapshot } from "../../src/model-catalog";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
@@ -34,6 +35,7 @@ function makeRequest(
       modelFamily: "claude",
       modelSnapshot: "claude-test-model",
     },
+    executionModel: "claude-test-model",
     systemPromptPath: "/tmp/pr-hero-test/system.md",
     systemPromptSha256: "deadbeef",
     userPrompt: "review this",
@@ -155,6 +157,41 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
 
     expect(spawnOptions?.detached).toBe(true);
     expect(signals).toHaveLength(0);
+  });
+
+  test("direct routes pass executionModel (alias) to --model, not route snapshot", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({ result: "ok" }),
+      exitCode: 0,
+    });
+    let spawnArgs: string[] | undefined;
+    const spawnFn = ((args: string[]) => {
+      spawnArgs = args;
+      return fake.proc;
+    }) as unknown as typeof Bun.spawn;
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn,
+      getPgid: (pid) => pid,
+    });
+
+    await transport.execute(
+      makeRequest({
+        executionModel: "sonnet",
+        route: {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: aliasModelFamily("sonnet"),
+          modelSnapshot: aliasModelSnapshot("sonnet"),
+        },
+      }),
+      { signal: new AbortController().signal },
+    );
+
+    const modelIndex = spawnArgs?.indexOf("--model");
+    expect(modelIndex).toBeGreaterThanOrEqual(0);
+    expect(spawnArgs?.[modelIndex! + 1]).toBe("sonnet");
   });
 
   test("abort sends SIGTERM to negative pgid first; group exiting during grace receives no SIGKILL", async () => {

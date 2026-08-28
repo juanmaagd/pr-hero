@@ -44,6 +44,10 @@ export interface TransportRequest {
   readonly sessionId: string;
   readonly attempt: number;
   readonly route: ResolvedModelRoute;
+  // The model string the provider CLI/SDK actually receives. For Claude Code
+  // direct routes this is the logical alias (sonnet|opus|haiku); configured
+  // routes use route.modelSnapshot instead.
+  readonly executionModel: string;
   readonly systemPromptPath: string;
   readonly systemPromptSha256: string;
   readonly userPrompt: string;
