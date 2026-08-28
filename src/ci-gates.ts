@@ -67,9 +67,12 @@ import {
 } from "./ci-reporter";
 import {
   type CiReviewAdmissionVerdict,
+  type CiReviewPolicyMode,
+  ciAdmissionRemainingBudget,
   ciReviewManualRequiredDetail,
   ciReviewSkipDetail,
 } from "./ci-review-admission";
+import type { DeltaRiskAssessment } from "./ci-review-risk";
 import type { SizeGateVerdict } from "./size-gate";
 
 function usd(amount: number): string {
@@ -348,6 +351,7 @@ const COVERAGE_REASON_LABEL: Record<
   "same-head": "already reviewed at this commit",
   "once-per-pr": "once_per_pr policy allows one automatic review",
   "below-threshold": "prior findings below the re-review score floor",
+  "low-risk-delta": "delta touches only low-risk paths",
 };
 
 function buildCoverageSkipComment(data: SkipCoverageSummary): string {
@@ -387,9 +391,60 @@ function buildManualRequiredComment(data: ManualRequiredSummary): string {
   return `${lines.join("\n")}\n`;
 }
 
+export interface AdmissionContext {
+  currentHead: string;
+  reviewedHead: string | null;
+  policyMode: CiReviewPolicyMode;
+  policyHash: string;
+  deltaRisk?: DeltaRiskAssessment | null;
+}
+
+function skipAdmissionSummaryFields(
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "skip" }>,
+  context?: AdmissionContext,
+): Partial<SkipCoverageSummary> {
+  if (context === undefined) return {};
+  return {
+    decision: "skip",
+    admissionReason: verdict.reason,
+    currentHead: context.currentHead,
+    reviewedHead: context.reviewedHead,
+    riskClass: context.deltaRisk?.class,
+    riskReason: context.deltaRisk?.reason,
+    remainingBudget: ciAdmissionRemainingBudget(
+      verdict.reviewCount,
+      verdict.maxAttempts,
+    ),
+    policyMode: context.policyMode,
+    policyHash: context.policyHash,
+  };
+}
+
+function manualAdmissionSummaryFields(
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>,
+  context?: AdmissionContext,
+): Partial<ManualRequiredSummary> {
+  if (context === undefined) return {};
+  return {
+    decision: "manual-required",
+    admissionReason: verdict.reason,
+    currentHead: context.currentHead,
+    reviewedHead: context.reviewedHead,
+    riskClass: context.deltaRisk?.class,
+    riskReason: context.deltaRisk?.reason,
+    remainingBudget: ciAdmissionRemainingBudget(
+      verdict.reviewCount,
+      verdict.maxAttempts,
+    ),
+    policyMode: context.policyMode,
+    policyHash: context.policyHash,
+  };
+}
+
 export function planCiReviewSkip(input: {
   prNumber: number;
   verdict: Extract<CiReviewAdmissionVerdict, { action: "skip" }>;
+  admission?: AdmissionContext;
 }): CiGateSkipPlan {
   const detail = ciReviewSkipDetail(input.verdict);
   const summary: SkipCoverageSummary = {
@@ -401,6 +456,7 @@ export function planCiReviewSkip(input: {
     minScore: input.verdict.minScore,
     reviewCount: input.verdict.reviewCount,
     maxAttempts: input.verdict.maxAttempts,
+    ...skipAdmissionSummaryFields(input.verdict, input.admission),
   };
   return {
     comment: buildCoverageSkipComment(summary),
@@ -413,6 +469,7 @@ export function planCiReviewSkip(input: {
 export function planCiReviewManualRequired(input: {
   prNumber: number;
   verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>;
+  admission?: AdmissionContext;
 }): CiGateSkipPlan {
   const detail = ciReviewManualRequiredDetail(input.verdict);
   const summary: ManualRequiredSummary = {
@@ -426,6 +483,7 @@ export function planCiReviewManualRequired(input: {
     priorScore: input.verdict.prior.score,
     reviewCount: input.verdict.reviewCount,
     maxAttempts: input.verdict.maxAttempts,
+    ...manualAdmissionSummaryFields(input.verdict, input.admission),
   };
   return {
     comment: buildManualRequiredComment(summary),

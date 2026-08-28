@@ -1861,6 +1861,7 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   ci_blocking_weight: "repo",
   ci_advisory_weight: "repo",
   ci_trusted_actors: "repo",
+  ci_admission_observe_only: "repo",
 };
 
 // The ONE nested key, so this is a second table and not a pattern. `enabled`
@@ -1898,6 +1899,9 @@ export interface LocalConfig {
   ci_blocking_weight?: number;
   ci_advisory_weight?: number;
   ci_trusted_actors?: string[];
+  // When true, admission still evaluates and logs the would-be decision but
+  // never suppresses a review (Phase 1 rollout — observe-only).
+  ci_admission_observe_only?: boolean;
 }
 
 export interface SummaryConfig {
@@ -2129,6 +2133,11 @@ function parseConfigLayer(
       `${file} ci_trusted_actors must be an array of non-empty strings`,
     );
   }
+  const ciAdmissionObserveOnly = parseOptionalBoolean(
+    config.ci_admission_observe_only,
+    "ci_admission_observe_only",
+    file,
+  );
   return {
     ...(given(config.parity_trigger_paths)
       ? { parity_trigger_paths: triggers as string[] }
@@ -2168,6 +2177,9 @@ function parseConfigLayer(
     ...(ciTrustedActors.length > 0
       ? { ci_trusted_actors: ciTrustedActors as string[] }
       : {}),
+    ...(ciAdmissionObserveOnly === undefined
+      ? {}
+      : { ci_admission_observe_only: ciAdmissionObserveOnly }),
   };
 }
 
@@ -2706,6 +2718,11 @@ export function mergeConfig(
     (layer) => layer.ci_trusted_actors,
     (a, b) => [...(a ?? []), ...(b ?? [])],
   );
+  const ciAdmissionObserveOnly = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_admission_observe_only,
+    (layer) => layer.ci_admission_observe_only,
+  );
 
   const summary: SummaryConfig = {
     ...(summaryEnabled.value === undefined
@@ -2763,6 +2780,9 @@ export function mergeConfig(
     ciTrustedActors.value.length === 0
       ? {}
       : { ci_trusted_actors: ciTrustedActors.value }),
+    ...(ciAdmissionObserveOnly.value === undefined
+      ? {}
+      : { ci_admission_observe_only: ciAdmissionObserveOnly.value }),
   };
 
   const sources: ConfigSources = {
@@ -2784,6 +2804,7 @@ export function mergeConfig(
     ci_blocking_weight: ciBlockingWeight.source,
     ci_advisory_weight: ciAdvisoryWeight.source,
     ci_trusted_actors: ciTrustedActors.source,
+    ci_admission_observe_only: ciAdmissionObserveOnly.source,
   };
 
   return { effective, sources };

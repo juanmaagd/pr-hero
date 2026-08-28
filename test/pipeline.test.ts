@@ -1926,6 +1926,7 @@ describe("assembly", () => {
         ci_blocking_weight: "default" as const,
         ci_advisory_weight: "default" as const,
         ci_trusted_actors: "repo" as const,
+        ci_admission_observe_only: "default" as const,
       },
       global_present: true,
     };

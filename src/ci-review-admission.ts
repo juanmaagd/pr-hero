@@ -9,6 +9,14 @@
 // Same-head dedup applies per head SHA; maxAttempts applies per PR.
 
 import { createHash } from "node:crypto";
+import {
+  type AdmissionRecord,
+  countTerminalAttempts,
+} from "./ci-admission-ledger";
+import {
+  type DeltaRiskAssessment,
+  deltaRiskTriggersReview,
+} from "./ci-review-risk";
 import type { Tier } from "./findings";
 import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "./pr-preflight";
 import type { LocalConfig } from "./preflight";
@@ -48,6 +56,7 @@ export interface CiReviewPolicy {
 export type CiReviewSkipReason =
   | "same-head"
   | "below-threshold"
+  | "low-risk-delta"
   | "once-per-pr";
 
 export type CiReviewManualRequiredReason =
@@ -86,6 +95,13 @@ export interface CiReviewAdmissionInput {
   // New commits since the prior summary touch a path where a prior finding
   // was posted — bypass the below-threshold skip in risk_aware mode.
   deltaTouchesPriorFindings: boolean;
+  // Current-head delta risk classification (WU-04). Absent when not computed.
+  deltaRisk?: DeltaRiskAssessment | null;
+  // Mismatched summary/state/admission heads or truncated comment fetch —
+  // run rather than trust a forged or incomplete prior score.
+  authorityFailOpen?: boolean;
+  // Explicit manual override (--force). When true, always return run.
+  forceOverride?: boolean;
 }
 
 type CiReviewAdmissionTerminalFields = {
@@ -178,6 +194,22 @@ export function resolveReviewAttemptCount(input: {
   workflowHeads: ReadonlySet<string>;
 }): number {
   return Math.max(input.stateCount, input.workflowHeads.size);
+}
+
+// Authoritative attempt count for admission: summary counter, workflow heads,
+// and durable ledger terminal rows — whichever is highest.
+export function resolveCiAdmissionAttemptCount(input: {
+  stateCount: number;
+  workflowHeads: ReadonlySet<string>;
+  ledgerRecords: readonly AdmissionRecord[];
+}): number {
+  return Math.max(
+    resolveReviewAttemptCount({
+      stateCount: input.stateCount,
+      workflowHeads: input.workflowHeads,
+    }),
+    countTerminalAttempts(input.ledgerRecords),
+  );
 }
 
 export function nextStateReviewCount(input: {
@@ -353,6 +385,62 @@ function isTrustedActor(
   return user !== undefined && trustedActors.has(user);
 }
 
+export function postedFindingFingerprint(marker: {
+  headSha: string;
+  path: string;
+  line: number;
+  c: string;
+}): string {
+  return `${marker.headSha}:${marker.path}:${marker.line}:${marker.c}`;
+}
+
+export function validateAdmissionAuthority(input: {
+  summaryHead: string | null;
+  reportMarkerHead: string | null;
+  state: ParsedStateBlock | null;
+  admission: ParsedCiAdmissionBlock | null;
+}):
+  | { ok: true; authoritativeHead: string }
+  | { ok: false; failOpen: true; reason: string } {
+  const { summaryHead, reportMarkerHead, state, admission } = input;
+  if (
+    reportMarkerHead !== null &&
+    admission !== null &&
+    reportMarkerHead !== admission.headSha
+  ) {
+    return {
+      ok: false,
+      failOpen: true,
+      reason: "report marker head does not match admission block head",
+    };
+  }
+  if (summaryHead !== null && state !== null && state.headSha !== summaryHead) {
+    return {
+      ok: false,
+      failOpen: true,
+      reason: "state block head does not match summary head",
+    };
+  }
+  if (
+    summaryHead !== null &&
+    admission !== null &&
+    admission.headSha !== summaryHead
+  ) {
+    return {
+      ok: false,
+      failOpen: true,
+      reason: "admission block head does not match summary head",
+    };
+  }
+  const authoritativeHead =
+    summaryHead ??
+    reportMarkerHead ??
+    state?.headSha ??
+    admission?.headSha ??
+    "";
+  return { ok: true, authoritativeHead };
+}
+
 export function pathsFromPostedFindingMarkers(
   comments: readonly { body: string; user?: string }[],
   summaryHead: string,
@@ -395,8 +483,9 @@ export function scanPostedFindingTiers(input: {
       untrustedMarkers++;
       continue;
     }
-    if (seenFingerprints.has(marker.c)) continue;
-    seenFingerprints.add(marker.c);
+    const fingerprint = postedFindingFingerprint(marker);
+    if (seenFingerprints.has(fingerprint)) continue;
+    seenFingerprints.add(fingerprint);
     matchedMarkers++;
     const tier = parseFindingCommentTier(comment.body);
     if (tier === null) continue;
@@ -498,6 +587,9 @@ function terminalFields(
 export function evaluateCiReviewAdmission(
   input: CiReviewAdmissionInput,
 ): CiReviewAdmissionVerdict {
+  if (input.forceOverride === true) {
+    return { action: "run" };
+  }
   if (!input.markerSeen && input.summaryHead === null) {
     return { action: "run" };
   }
@@ -534,14 +626,31 @@ export function evaluateCiReviewAdmission(
     };
   }
   const prior = priorForAdmissionInput(input);
-  if (prior.failOpen === true) {
+  if (prior.failOpen === true || input.authorityFailOpen === true) {
     return { action: "run" };
   }
   if (input.policy.mode === "every_push") {
     return { action: "run" };
   }
-  if (input.policy.mode === "risk_aware" && input.deltaTouchesPriorFindings) {
-    return { action: "run" };
+  if (input.policy.mode === "risk_aware") {
+    if (prior.score >= input.policy.rereviewMinScore) {
+      return { action: "run" };
+    }
+    if (input.deltaTouchesPriorFindings) {
+      return { action: "run" };
+    }
+    if (input.deltaRisk != null) {
+      if (deltaRiskTriggersReview(input.deltaRisk)) {
+        return { action: "run" };
+      }
+      if (input.deltaRisk.class === "low") {
+        return {
+          action: "skip",
+          reason: "low-risk-delta",
+          ...terminalFields(input, prior),
+        };
+      }
+    }
   }
   if (
     (input.policy.mode === "thresholded" ||
@@ -572,7 +681,52 @@ export function ciReviewSkipDetail(
       return `once_per_pr policy allows one automatic review (${reviewCount}/${maxAttempts} attempts used on this PR)`;
     case "below-threshold":
       return `${counts}; re-review needs score ≥ ${minScore} to justify another run`;
+    case "low-risk-delta":
+      return `${counts}; delta touches only low-risk paths (docs, tests, fixtures)`;
   }
+}
+
+export function ciAdmissionRemainingBudget(
+  reviewCount: number,
+  maxAttempts: number,
+): number {
+  return Math.max(0, maxAttempts - reviewCount);
+}
+
+export function formatCiAdmissionObserveNotice(input: {
+  verdict: Extract<
+    CiReviewAdmissionVerdict,
+    { action: "skip" | "manual-required" }
+  >;
+  currentHead: string;
+  reviewedHead: string | null;
+  policyMode: CiReviewPolicyMode;
+  policyHash: string;
+  deltaRisk?: DeltaRiskAssessment | null;
+}): string {
+  const { verdict, currentHead, reviewedHead, policyMode, policyHash } = input;
+  const would =
+    verdict.action === "skip" ? "would skip" : "would require manual override";
+  const detail =
+    verdict.action === "skip"
+      ? ciReviewSkipDetail(verdict)
+      : ciReviewManualRequiredDetail(verdict);
+  const remaining = ciAdmissionRemainingBudget(
+    verdict.reviewCount,
+    verdict.maxAttempts,
+  );
+  const risk =
+    input.deltaRisk === undefined || input.deltaRisk === null
+      ? ""
+      : ` · risk=${input.deltaRisk.class}`;
+  return (
+    `pr-hero admission (observe-only): ${would} — ${detail} ` +
+    `(current \`${currentHead.slice(0, 8)}\`, reviewed ` +
+    `${reviewedHead === null ? "none" : `\`${reviewedHead.slice(0, 8)}\``}, ` +
+    `attempts ${verdict.reviewCount}/${verdict.maxAttempts}, ` +
+    `remaining budget ${remaining}, policy ${policyMode}, ` +
+    `hash ${policyHash.slice(0, 8)}${risk})`
+  );
 }
 
 export function ciReviewManualRequiredDetail(

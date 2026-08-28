@@ -1080,6 +1080,7 @@ function messageOf(run: () => unknown): string {
 // so a future narrowing of the team file's surface has to be deliberate.
 const PRE_C5_LOCAL_KEYS = [
   "agents_dir",
+  "ci_admission_observe_only",
   "ci_advisory_weight",
   "ci_blocking_weight",
   "ci_max_attempts",
@@ -1123,6 +1124,7 @@ describe("CONFIG_DIRECTION", () => {
       ci_blocking_weight: 2,
       ci_advisory_weight: 1,
       ci_trusted_actors: ["pr-hero[bot]"],
+      ci_admission_observe_only: false,
     };
     expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(
       Object.keys(populated).sort(),
@@ -1160,6 +1162,7 @@ describe("CONFIG_DIRECTION", () => {
       ci_blocking_weight: "repo",
       ci_advisory_weight: "repo",
       ci_trusted_actors: "repo",
+      ci_admission_observe_only: "repo",
     });
     expect(SUMMARY_DIRECTION).toEqual({ enabled: "capped", model: "person" });
   });
@@ -1656,6 +1659,7 @@ describe("mergeConfig", () => {
       ci_blocking_weight: "default",
       ci_advisory_weight: "default",
       ci_trusted_actors: "default",
+      ci_admission_observe_only: "default",
     });
     // The resolvers still receive the shape they always received.
     expect(nothing.effective).toEqual(EMPTY_LOCAL_CONFIG);

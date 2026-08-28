@@ -704,6 +704,7 @@ const provenance = (
     ci_blocking_weight: "default",
     ci_advisory_weight: "default",
     ci_trusted_actors: "repo",
+    ci_admission_observe_only: "default",
     ...sources,
   },
 });

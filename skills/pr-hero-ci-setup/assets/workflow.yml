@@ -19,11 +19,13 @@ concurrency:
 # pull-requests: write lets pr-hero post inline comments and a step summary.
 # contents: read is enough for actions/checkout. issues: write lets it
 # resolve/reply on review threads (GitHub models PR conversations as issues).
+# checks: write persists the durable CI admission attempt ledger (WU-02).
 permissions:
   contents: read
   pull-requests: write
   issues: write
   statuses: write
+  checks: write
 
 jobs:
   credentials:

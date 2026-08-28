@@ -204,6 +204,10 @@ export function configRows(
       effective.ci_trusted_actors ?? [],
       sources.ci_trusted_actors,
     ),
+    ci_admission_observe_only: cell(
+      effective.ci_admission_observe_only?.toString(),
+      sources.ci_admission_observe_only,
+    ),
   };
   const summaryCells: Record<keyof SummaryConfig, ConfigCell> = {
     enabled: cell(

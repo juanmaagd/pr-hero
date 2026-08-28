@@ -24,11 +24,19 @@ import { SKIP_SIZE_COMMENT_MARKER } from "../src/ci-gates";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
 import {
+  ADMISSION_CHECK_RUN_NAME,
+  serializeAdmissionRecord,
+  type AdmissionRecord,
+} from "../src/ci-admission-ledger";
+import {
+  CommentsTruncatedError,
   fetchCommitStatuses,
   fetchPostedFindingComments,
   fetchPrComments,
   fetchPrReviewComments,
+  GRAPHQL_COMMENT_MAX_PAGES,
   ghPrHeadSha,
+  listAdmissionCheckRuns,
   parseCompareChangedFiles,
   parsePrHeroWorkflowRunHeads,
   postCommitStatus,
@@ -38,6 +46,7 @@ import {
   postPrReview,
   postReviewCommentReply,
   resolveReviewThreadForComment,
+  upsertAdmissionCheckRun,
 } from "../src/pr";
 import {
   COMMIT_STATUS_CONTEXT,
@@ -428,6 +437,7 @@ describe("fetchPrComments — REST 404 GraphQL fallback", () => {
               repository: {
                 pullRequest: {
                   comments: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
                     nodes: [
                       {
                         databaseId: 7,
@@ -475,6 +485,173 @@ describe("fetchPrComments — REST 404 GraphQL fallback", () => {
         updated_at: "2026-08-21T09:00:00Z",
       },
     ]);
+  });
+});
+
+describe("fetchPrComments — GraphQL pagination", () => {
+  test("follows issue comment pageInfo until hasNextPage is false", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["issues/42/comments"],
+        response: { stderr: "gh: Not Found (HTTP 404)", exitCode: 1 },
+      },
+      repoView,
+      {
+        match: ["graphql", "databaseId", "cursor1"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        databaseId: 8,
+                        body: "page-two",
+                        author: { login: "pr-hero" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+      {
+        match: ["graphql", "databaseId"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: {
+                    pageInfo: { hasNextPage: true, endCursor: "cursor1" },
+                    nodes: [
+                      {
+                        databaseId: 7,
+                        body: "page-one",
+                        author: { login: "pr-hero" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    const comments = await fetchPrComments(OPERATOR_ROOT, 42, { spawnFn });
+    expect(comments.map((c) => c.id)).toEqual([7, 8]);
+    expect(
+      calls.filter((c) => c.argv.join(" ").includes("databaseId")).length,
+    ).toBe(2);
+  });
+
+  test("throws CommentsTruncatedError when page limit is exceeded", async () => {
+    const pages: ScriptEntry[] = [
+      {
+        match: ["issues/42/comments"],
+        response: { stderr: "gh: Not Found (HTTP 404)", exitCode: 1 },
+      },
+      repoView,
+    ];
+    for (let i = 0; i < GRAPHQL_COMMENT_MAX_PAGES; i++) {
+      const cursor = i === 0 ? "" : `cursor${i}`;
+      pages.push({
+        match:
+          cursor.length === 0
+            ? ["graphql", "databaseId"]
+            : ["graphql", "databaseId", cursor],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: {
+                    pageInfo: {
+                      hasNextPage: true,
+                      endCursor: `cursor${i + 1}`,
+                    },
+                    nodes: [
+                      {
+                        databaseId: i + 1,
+                        body: `page-${i + 1}`,
+                        author: { login: "pr-hero" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      });
+    }
+    const { spawnFn } = makeFakeGh(pages);
+    await expect(
+      fetchPrComments(OPERATOR_ROOT, 42, { spawnFn }),
+    ).rejects.toBeInstanceOf(CommentsTruncatedError);
+  });
+});
+
+describe("fetchPrReviewComments — GraphQL page limit", () => {
+  test("throws CommentsTruncatedError when reviewThreads exceed page limit", async () => {
+    const pages: ScriptEntry[] = [
+      {
+        match: ["pulls/42/comments"],
+        response: { stderr: "gh: Not Found (HTTP 404)", exitCode: 1 },
+      },
+      repoView,
+    ];
+    for (let i = 0; i < GRAPHQL_COMMENT_MAX_PAGES; i++) {
+      const cursor = i === 0 ? "" : `cursor${i}`;
+      pages.push({
+        match:
+          cursor.length === 0
+            ? ["graphql", "reviewThreads"]
+            : ["graphql", "reviewThreads", cursor],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: {
+                      hasNextPage: true,
+                      endCursor: `cursor${i + 1}`,
+                    },
+                    nodes: [
+                      {
+                        comments: {
+                          nodes: [
+                            {
+                              fullDatabaseId: i + 1,
+                              body: `page-${i + 1}`,
+                              author: { login: "pr-hero" },
+                              path: "src/a.ts",
+                              line: i + 1,
+                              originalLine: i + 1,
+                              replyTo: null,
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      });
+    }
+    const { spawnFn } = makeFakeGh(pages);
+    await expect(
+      fetchPrReviewComments(OPERATOR_ROOT, 42, { spawnFn }),
+    ).rejects.toBeInstanceOf(CommentsTruncatedError);
   });
 });
 
@@ -1570,5 +1747,125 @@ describe("fetchCommitStatuses", () => {
       fetchCommitStatuses(OPERATOR_ROOT, "abc", { spawnFn }),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(0);
+  });
+});
+
+function admissionRecordFixture(
+  overrides: Partial<AdmissionRecord> = {},
+): AdmissionRecord {
+  return {
+    schemaVersion: 1,
+    prNumber: 42,
+    headSha: HEAD,
+    policyHash: "policyhash123456",
+    reservationId: "reservation123456",
+    attemptNumber: 1,
+    status: "reserved",
+    decisionReason: "",
+    priorScore: null,
+    blockingCount: null,
+    advisoryCount: null,
+    workflowRunId: null,
+    createdAt: "2026-08-28T12:00:00.000Z",
+    settledAt: null,
+    ...overrides,
+  };
+}
+
+describe("listAdmissionCheckRuns", () => {
+  test("parses admission records from check-run output text", async () => {
+    const record = admissionRecordFixture({
+      status: "completed",
+      decisionReason: "review complete",
+    });
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["check-runs"],
+        response: {
+          stdout: ndjson([
+            {
+              id: 99,
+              name: ADMISSION_CHECK_RUN_NAME,
+              status: "completed",
+              output: { text: serializeAdmissionRecord(record) },
+            },
+            {
+              id: 100,
+              name: "other/check",
+              status: "completed",
+              output: { text: "{}" },
+            },
+          ]),
+        },
+      },
+    ]);
+    const records = await listAdmissionCheckRuns(OPERATOR_ROOT, HEAD, {
+      spawnFn,
+    });
+    expect(records).toEqual([record]);
+    expect(calls[0]?.argv.join(" ")).toContain(`commits/${HEAD}/check-runs`);
+    expect(calls[0]?.argv).toContain("--paginate");
+  });
+
+  test("fail-open returns an empty list on gh errors", async () => {
+    const { spawnFn } = makeFakeGh([
+      {
+        match: ["check-runs"],
+        response: { stderr: "forbidden (HTTP 403)", exitCode: 1 },
+      },
+    ]);
+    await expect(
+      listAdmissionCheckRuns(OPERATOR_ROOT, HEAD, { spawnFn }),
+    ).resolves.toEqual([]);
+  });
+});
+
+describe("upsertAdmissionCheckRun", () => {
+  test("POSTs a new check run with serialized record in output.text", async () => {
+    const record = admissionRecordFixture();
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["check-runs"],
+        response: { stdout: JSON.stringify({ id: 501 }) },
+      },
+    ]);
+    const id = await upsertAdmissionCheckRun(
+      OPERATOR_ROOT,
+      { headSha: HEAD, record },
+      { spawnFn },
+    );
+    expect(id).toBe(501);
+    const argv = calls[0]?.argv ?? [];
+    expect(argv).toContain("--method");
+    expect(argv).toContain("POST");
+    expect(argv.join(" ")).toContain("repos/{owner}/{repo}/check-runs");
+    expect(argv.join(" ")).toContain(`external_id=${record.reservationId}`);
+    expect(argv.join(" ")).toContain(
+      `output[text]=${serializeAdmissionRecord(record)}`,
+    );
+    expect(argv.join(" ")).toContain(`name=${ADMISSION_CHECK_RUN_NAME}`);
+  });
+
+  test("PATCHes when checkRunId is provided", async () => {
+    const record = admissionRecordFixture({
+      status: "completed",
+      decisionReason: "review complete",
+    });
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["check-runs/77"],
+        response: { stdout: JSON.stringify({ id: 77 }) },
+      },
+    ]);
+    const id = await upsertAdmissionCheckRun(
+      OPERATOR_ROOT,
+      { headSha: HEAD, record, checkRunId: 77 },
+      { spawnFn },
+    );
+    expect(id).toBe(77);
+    const argv = calls[0]?.argv ?? [];
+    expect(argv).toContain("PATCH");
+    expect(argv.join(" ")).toContain("check-runs/77");
+    expect(argv.join(" ")).toContain("conclusion=success");
   });
 });

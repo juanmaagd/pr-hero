@@ -5,6 +5,7 @@ import {
   type CiReviewPolicy,
   canonicalAdmissionFindings,
   ciReviewPolicyHash,
+  ciReviewSkipDetail,
   DEFAULT_CI_ADVISORY_WEIGHT,
   DEFAULT_CI_BLOCKING_WEIGHT,
   DEFAULT_CI_MAX_ATTEMPTS,
@@ -16,6 +17,7 @@ import {
   parseCiAdmissionBlock,
   parseFindingCommentTier,
   pathsFromPostedFindingMarkers,
+  postedFindingFingerprint,
   priorScoreForAdmission,
   priorTierScore,
   renderCiAdmissionBlock,
@@ -24,7 +26,12 @@ import {
   resolveReviewAttemptCount,
   scanPostedFindingTiers,
   stateReviewCount,
+  validateAdmissionAuthority,
 } from "../src/ci-review-admission";
+import {
+  CI_RISK_POLICY_VERSION,
+  classifyChangedPaths,
+} from "../src/ci-review-risk";
 import type { Tier } from "../src/findings";
 import { stateFinding } from "../src/rereview-state";
 
@@ -38,10 +45,15 @@ function policy(overrides: Partial<CiReviewPolicy> = {}): CiReviewPolicy {
 }
 
 function admissionInput(
-  input: Omit<CiReviewAdmissionInput, "deltaTouchesPriorFindings"> &
-    Partial<Pick<CiReviewAdmissionInput, "deltaTouchesPriorFindings">>,
+  input: Omit<
+    CiReviewAdmissionInput,
+    "deltaTouchesPriorFindings" | "deltaRisk"
+  > &
+    Partial<
+      Pick<CiReviewAdmissionInput, "deltaTouchesPriorFindings" | "deltaRisk">
+    >,
 ): CiReviewAdmissionInput {
-  return { deltaTouchesPriorFindings: false, ...input };
+  return { deltaTouchesPriorFindings: false, deltaRisk: null, ...input };
 }
 
 function finding(tier: Tier) {
@@ -160,6 +172,56 @@ describe("scanPostedFindingTiers", () => {
               head: HEAD_B,
               tier: "blocking",
               c: "333333333333",
+            }),
+          },
+        ],
+      }),
+    ).toEqual({
+      blocking: 2,
+      advisory: 0,
+      matchedMarkers: 2,
+      parsedTiers: 2,
+    });
+  });
+
+  test("dedupes duplicate markers with the same full fingerprint", () => {
+    const body = postedFindingComment({
+      head: HEAD_A,
+      tier: "blocking",
+      c: "same-fingerprint",
+    });
+    expect(
+      scanPostedFindingTiers({
+        summaryHead: HEAD_A,
+        comments: [{ body }, { body }],
+      }),
+    ).toEqual({
+      blocking: 1,
+      advisory: 0,
+      matchedMarkers: 1,
+      parsedTiers: 1,
+    });
+  });
+
+  test("counts same claim fingerprint at different lines separately", () => {
+    expect(
+      scanPostedFindingTiers({
+        summaryHead: HEAD_A,
+        comments: [
+          {
+            body: postedFindingComment({
+              head: HEAD_A,
+              tier: "blocking",
+              c: "same-c",
+              line: 10,
+            }),
+          },
+          {
+            body: postedFindingComment({
+              head: HEAD_A,
+              tier: "blocking",
+              c: "same-c",
+              line: 20,
             }),
           },
         ],
@@ -680,6 +742,99 @@ describe("resolveReviewAttemptCount", () => {
   });
 });
 
+describe("postedFindingFingerprint", () => {
+  test("joins head, path, line, and claim fingerprint", () => {
+    expect(
+      postedFindingFingerprint({
+        headSha: HEAD_A,
+        path: "src/a.ts",
+        line: 10,
+        c: "abcd1234abcd",
+      }),
+    ).toBe(`${HEAD_A}:src/a.ts:10:abcd1234abcd`);
+  });
+});
+
+describe("validateAdmissionAuthority", () => {
+  test("accepts matching report, state, and admission heads", () => {
+    expect(
+      validateAdmissionAuthority({
+        summaryHead: HEAD_A,
+        reportMarkerHead: HEAD_A,
+        state: { headSha: HEAD_A, findings: [] },
+        admission: { headSha: HEAD_A, blocking: 0, advisory: 1, reviews: 1 },
+      }),
+    ).toEqual({ ok: true, authoritativeHead: HEAD_A });
+  });
+
+  test("fail-opens when admission head mismatches report marker", () => {
+    expect(
+      validateAdmissionAuthority({
+        summaryHead: HEAD_A,
+        reportMarkerHead: HEAD_A,
+        state: null,
+        admission: { headSha: HEAD_B, blocking: 0, advisory: 0, reviews: 1 },
+      }),
+    ).toMatchObject({
+      ok: false,
+      failOpen: true,
+      reason: "report marker head does not match admission block head",
+    });
+  });
+
+  test("fail-opens when state head mismatches summary", () => {
+    expect(
+      validateAdmissionAuthority({
+        summaryHead: HEAD_A,
+        reportMarkerHead: HEAD_A,
+        state: { headSha: HEAD_B, findings: [] },
+        admission: null,
+      }),
+    ).toMatchObject({
+      ok: false,
+      failOpen: true,
+      reason: "state block head does not match summary head",
+    });
+  });
+
+  test("fail-opens when admission head mismatches summary", () => {
+    expect(
+      validateAdmissionAuthority({
+        summaryHead: HEAD_A,
+        reportMarkerHead: HEAD_B,
+        state: null,
+        admission: { headSha: HEAD_B, blocking: 0, advisory: 0, reviews: 1 },
+      }),
+    ).toMatchObject({
+      ok: false,
+      failOpen: true,
+      reason: "admission block head does not match summary head",
+    });
+  });
+});
+
+describe("evaluateCiReviewAdmission — authorityFailOpen", () => {
+  test("runs instead of below-threshold skip when authority is untrusted", () => {
+    expect(
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: parseCiAdmissionBlock(
+            admissionBody({ blocking: 0, advisory: 1 }),
+          ),
+          postedFindings: null,
+          policy: DEFAULT_POLICY,
+          authorityFailOpen: true,
+        }),
+      ),
+    ).toEqual({ action: "run" });
+  });
+});
+
 describe("canonicalAdmissionFindings", () => {
   test("dedupes inline and outside buckets by finding id", () => {
     const findings = canonicalAdmissionFindings([
@@ -691,6 +846,17 @@ describe("canonicalAdmissionFindings", () => {
       { id: "R001", tier: "blocking" },
       { id: "R002", tier: "advisory" },
     ]);
+  });
+
+  test("dedupes outside-diff duplicates that share an id with inline findings", () => {
+    const findings = canonicalAdmissionFindings([
+      { id: "R001", tier: "blocking" },
+      { id: "R001", tier: "blocking" },
+      { id: "R003", tier: "advisory" },
+      { id: "R003", tier: "advisory" },
+    ]);
+    expect(findings).toHaveLength(2);
+    expect(priorTierScore(findings, DEFAULT_POLICY).score).toBe(3);
   });
 });
 
@@ -810,5 +976,76 @@ describe("evaluateCiReviewAdmission — delta risk bypass", () => {
       }),
     );
     expect(verdict).toEqual({ action: "run" });
+  });
+
+  test("skips docs-only delta under risk_aware with low-risk-delta", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: parseCiAdmissionBlock(
+          admissionBody({ blocking: 0, advisory: 1 }),
+        ),
+        postedFindings: null,
+        policy: policy({ mode: "risk_aware" }),
+        deltaRisk: classifyChangedPaths(["docs/guide.md", "README.md"]),
+      }),
+    );
+    expect(verdict.action).toBe("skip");
+    if (verdict.action === "skip") {
+      expect(verdict.reason).toBe("low-risk-delta");
+      expect(verdict.prior.score).toBe(1);
+      expect(ciReviewSkipDetail(verdict)).toContain("low-risk paths");
+    }
+  });
+
+  test("runs on production delta after a low-score review", () => {
+    expect(
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: parseCiAdmissionBlock(
+            admissionBody({ blocking: 0, advisory: 1 }),
+          ),
+          postedFindings: null,
+          policy: policy({ mode: "risk_aware" }),
+          deltaRisk: classifyChangedPaths(["src/pipeline.ts"]),
+        }),
+      ),
+    ).toEqual({ action: "run" });
+  });
+
+  test("runs when delta risk is unknown instead of skipping", () => {
+    expect(
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: parseCiAdmissionBlock(
+            admissionBody({ blocking: 0, advisory: 1 }),
+          ),
+          postedFindings: null,
+          policy: policy({ mode: "risk_aware" }),
+          deltaRisk: {
+            version: CI_RISK_POLICY_VERSION,
+            class: "unknown",
+            reason: "no changed paths in delta metadata",
+            changedPaths: [],
+            highRiskPaths: [],
+            lowRiskPaths: [],
+          },
+        }),
+      ),
+    ).toEqual({ action: "run" });
   });
 });
