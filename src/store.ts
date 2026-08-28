@@ -65,12 +65,12 @@ const RUN_UPSERT_SQL = `
     repo_id, run_dir, pr, checkout_path, head_sha, base_sha, diff_from_sha,
     run_status, session_failed, model, iteration, parity_hunter_fired,
     prompt_set_name, prompt_set_sha256, driver_sha, engine_name, engine_version,
-    summary_prose, summary_score, summary_score_reason, generated_at, wall_ms,
-    index_ms, index_mode, index_disk_mb, sync_ms, tokens_in, tokens_out,
-    tokens_total, cost_usd_est, blocking, advisory, root_causes_json,
-    greptile_found
+    engine_revision, findings_schema_version, summary_prose, summary_score,
+    summary_score_reason, generated_at, wall_ms, index_ms, index_mode,
+    index_disk_mb, sync_ms, tokens_in, tokens_out, tokens_total, cost_usd_est,
+    blocking, advisory, root_causes_json, greptile_found
   ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
   )
   ON CONFLICT(repo_id, run_dir) DO UPDATE SET
@@ -90,6 +90,8 @@ const RUN_UPSERT_SQL = `
     driver_sha = excluded.driver_sha,
     engine_name = excluded.engine_name,
     engine_version = excluded.engine_version,
+    engine_revision = excluded.engine_revision,
+    findings_schema_version = excluded.findings_schema_version,
     summary_prose = excluded.summary_prose,
     summary_score = excluded.summary_score,
     summary_score_reason = excluded.summary_score_reason,
@@ -128,6 +130,8 @@ function runParams(row: CanonicalRunRow): SQLQueryBindings[] {
     row.driver_sha,
     row.engine_name,
     row.engine_version,
+    row.engine_revision,
+    row.findings_schema_version,
     row.summary_prose,
     row.summary_score,
     row.summary_score_reason,
@@ -515,7 +519,7 @@ export function exportFindingsDocument(
   }
 
   const doc: FindingsDocument = {
-    schema_version: SCHEMA_VERSION,
+    schema_version: run.findings_schema_version ?? SCHEMA_VERSION,
     pr: run.pr === null ? 0 : run.pr,
     base_sha: run.base_sha,
     head_sha: run.head_sha,
@@ -531,7 +535,13 @@ export function exportFindingsDocument(
       : {}),
     ...(run.driver_sha ? { driver_sha: run.driver_sha } : {}),
     ...(run.engine_name && run.engine_version
-      ? { engine: { name: run.engine_name, version: run.engine_version } }
+      ? {
+          engine: {
+            name: run.engine_name,
+            version: run.engine_version,
+            ...(run.engine_revision ? { revision: run.engine_revision } : {}),
+          },
+        }
       : {}),
     parity_hunter_fired: Boolean(run.parity_hunter_fired),
     run_status: run.run_status,

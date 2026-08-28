@@ -4,8 +4,9 @@
 // EXACTLY the wiring the engine used to hard-code (prose Step 4), so a caller
 // that passes nothing gets byte-identical behavior.
 
-import type { Hunter } from "./findings";
 import { parseLogicalIdentity } from "./model-routing";
+
+const SAFE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 // A conditional hunter's trigger. `string[]` is a glob/contains pattern list
 // matched against the diff's changed paths with the same parityTriggered
@@ -20,6 +21,10 @@ export interface AgentSpec {
   // Stable id: becomes the per_agent telemetry key and the step-name suffix
   // ("hunter-<key>"; the single refuter step keeps the fixed name "refuter").
   key: string;
+  // Semantic specialty stamped into finding.hunter. Defaults to key when
+  // omitted — the execution identity and the specialty diverge only when D3
+  // fans multiple model legs at the same specialty.
+  specialty?: string;
   // Agent .md basename inside agentsDir, e.g. "deep-review-reliability.md".
   file: string;
   role: "hunter" | "refuter";
@@ -35,17 +40,13 @@ export interface ReviewSpec {
   agents: AgentSpec[];
 }
 
-// Findings schema v1.0.0 stamps `hunter` with the producing step's key, and
-// its Hunter enum is closed ("reliability" | "resilience" | "parity" |
-// "lifecycle") — the SCHEMA is the constraint here, not the engine. Until
-// schema v1.1 lifts the enum, hunter keys must stay inside it so tonight's
-// artifacts keep validating; the spec layer is otherwise already key-agnostic.
-const SCHEMA_HUNTER_KEYS: Hunter[] = [
-  "reliability",
-  "resilience",
-  "parity",
-  "lifecycle",
-];
+export function isSafeSlug(value: string): boolean {
+  return value.length >= 1 && value.length <= 64 && SAFE_SLUG_RE.test(value);
+}
+
+export function resolveSpecialty(agent: AgentSpec): string {
+  return agent.specialty ?? agent.key;
+}
 
 export class ReviewSpecValidationError extends Error {}
 
@@ -62,6 +63,7 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
   must(Array.isArray(spec.agents), "spec.agents must be an array");
   const agents = spec.agents as unknown[];
   const keys = new Set<string>();
+  const hunterSpecialties = new Set<string>();
   let hunterCount = 0;
   let refuterCount = 0;
   agents.forEach((entry, i) => {
@@ -74,8 +76,17 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
       typeof a.key === "string" && a.key.length > 0,
       `agents[${i}].key required`,
     );
+    must(
+      isSafeSlug(a.key as string),
+      `agents[${i}].key "${a.key}" is not a safe slug (^[a-z0-9]+(?:-[a-z0-9]+)*$, 1-64 chars)`,
+    );
     must(!keys.has(a.key as string), `agents[${i}].key duplicates "${a.key}"`);
     keys.add(a.key as string);
+    must(
+      a.specialty === undefined ||
+        (typeof a.specialty === "string" && isSafeSlug(a.specialty)),
+      `agents[${i}].specialty must be a safe slug when present`,
+    );
     must(
       typeof a.file === "string" && a.file.length > 0,
       `agents[${i}].file required`,
@@ -105,12 +116,13 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
     }
     if (a.role === "hunter") {
       hunterCount++;
+      const specialty =
+        a.specialty === undefined ? (a.key as string) : (a.specialty as string);
       must(
-        SCHEMA_HUNTER_KEYS.includes(a.key as Hunter),
-        `agents[${i}].key "${a.key}" is not a findings-schema v1.0.0 Hunter ` +
-          "enum value (reliability|resilience|parity|lifecycle); schema " +
-          "v1.1 will lift this",
+        !hunterSpecialties.has(specialty),
+        `agents[${i}] specialty "${specialty}" duplicates another hunter's effective specialty`,
       );
+      hunterSpecialties.add(specialty);
       must(
         a.trigger === undefined ||
           a.trigger === "input" ||
@@ -122,6 +134,10 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
       );
     } else {
       refuterCount++;
+      must(
+        a.specialty === undefined,
+        `agents[${i}] is a refuter and cannot carry a specialty`,
+      );
       must(
         a.trigger === undefined,
         `agents[${i}] is a refuter and cannot carry a trigger`,

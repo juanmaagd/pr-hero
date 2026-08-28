@@ -7,6 +7,7 @@ export const ENGINE_VERSION = "1.0.0";
 export * from "./dedupe";
 export * from "./drafts";
 export * from "./findings";
+export * from "./findings-conformance";
 export * from "./model-routing";
 export * from "./pipeline";
 export * from "./preflight";

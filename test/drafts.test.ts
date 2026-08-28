@@ -116,6 +116,24 @@ describe("validateHunterDraft", () => {
     );
   });
 
+  test("accepts open specialty slug hunters", () => {
+    const result = validateHunterDraft({
+      findings: [
+        draft({ hunter: "security" }),
+        draft({ hunter: "code-quality", id: "R2" }),
+      ],
+    });
+    expect(result.findings).toHaveLength(2);
+    expect(result.findings[0]?.hunter).toBe("security");
+    expect(result.findings[1]?.hunter).toBe("code-quality");
+  });
+
+  test("rejects invalid hunter slugs", () => {
+    expect(() =>
+      validateHunterDraft({ findings: [draft({ hunter: "Security" })] }),
+    ).toThrow(/hunter invalid/);
+  });
+
   test("leaves a real symbol untouched", () => {
     const result = validateHunterDraft({
       findings: [draft({ symbol: "abortUpload" })],

@@ -10,9 +10,11 @@ import {
   mergeRunEnvelope,
   type RunSummary,
   SCHEMA_VERSION,
+  SCHEMA_VERSION_V1_1,
   validateFindingsDocument,
   writeFindings,
 } from "../src/findings";
+import { FINDINGS_CONFORMANCE_CASES } from "../src/findings-conformance";
 
 function baseFinding(overrides: Partial<Finding> = {}): Finding {
   return {
@@ -60,6 +62,18 @@ function baseDocument(findings: Finding[] = [baseFinding()]): FindingsDocument {
   };
 }
 
+function baseDocumentV11(
+  findings: Finding[] = [
+    baseFinding({ hunter: "security" as Finding["hunter"] }),
+  ],
+): FindingsDocument {
+  return {
+    ...baseDocument(findings),
+    schema_version: SCHEMA_VERSION_V1_1,
+    engine: { name: "pr-hero", version: "1.0.0" },
+  };
+}
+
 const summary: RunSummary = {
   prose: "This change improves upload state handling.",
   score: 4,
@@ -74,7 +88,16 @@ describe("findings schema round-trip", () => {
 
   test("rejects the wrong schema_version", () => {
     const doc = { ...baseDocument(), schema_version: "0.9.0" };
-    expect(() => validateFindingsDocument(doc)).toThrow();
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /schema_version must be 1\.0\.0 or 1\.1\.0/,
+    );
+  });
+
+  test("rejects a near-miss schema_version", () => {
+    const doc = { ...baseDocument(), schema_version: "1.0" };
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /schema_version must be 1\.0\.0 or 1\.1\.0/,
+    );
   });
 
   test("rejects a finding missing a required field", () => {
@@ -184,6 +207,82 @@ describe("findings schema round-trip", () => {
   });
 });
 
+describe("findings schema v1.1 reader boundary", () => {
+  test("accepts an arbitrary specialty slug with required engine", () => {
+    const doc = baseDocumentV11();
+    expect(validateFindingsDocument(doc)).toEqual(doc);
+  });
+
+  test("accepts a hyphenated specialty slug", () => {
+    const doc = baseDocumentV11([
+      baseFinding({ hunter: "code-quality" as Finding["hunter"] }),
+    ]);
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+  });
+
+  test("accepts an optional engine revision", () => {
+    const doc = {
+      ...baseDocumentV11(),
+      engine: { name: "pr-hero", version: "1.0.0", revision: "abc123" },
+    };
+    expect(validateFindingsDocument(doc)).toEqual(doc);
+  });
+
+  test("rejects v1.1 without engine", () => {
+    const { engine: _engine, ...withoutEngine } = baseDocumentV11();
+    expect(() => validateFindingsDocument(withoutEngine)).toThrow(
+      /engine required/,
+    );
+  });
+
+  test("rejects an invalid specialty slug", () => {
+    const doc = baseDocumentV11([
+      baseFinding({ hunter: "Security" as Finding["hunter"] }),
+    ]);
+    expect(() => validateFindingsDocument(doc)).toThrow(/hunter invalid/);
+  });
+
+  test("rejects an untrimmed engine name", () => {
+    const doc = {
+      ...baseDocumentV11(),
+      engine: { name: " pr-hero", version: "1.0.0" },
+    };
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /engine\.name must be trimmed/,
+    );
+  });
+
+  test("rejects an engine revision with control characters", () => {
+    const doc = {
+      ...baseDocumentV11(),
+      engine: { name: "pr-hero", version: "1.0.0", revision: "bad\u0007" },
+    };
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /engine\.revision must not contain control characters/,
+    );
+  });
+
+  test("v1.0 still rejects an open specialty slug", () => {
+    const doc = baseDocument([
+      baseFinding({ hunter: "security" as Finding["hunter"] }),
+    ]);
+    expect(() => validateFindingsDocument(doc)).toThrow(/hunter invalid/);
+  });
+});
+
+describe("findings conformance cases", () => {
+  for (const conformanceCase of FINDINGS_CONFORMANCE_CASES) {
+    test(`${conformanceCase.id} → ${conformanceCase.expect}`, () => {
+      const parsed = JSON.parse(conformanceCase.raw);
+      if (conformanceCase.expect === "accept") {
+        expect(() => validateFindingsDocument(parsed)).not.toThrow();
+      } else {
+        expect(() => validateFindingsDocument(parsed)).toThrow();
+      }
+    });
+  }
+});
+
 describe("mergeRunEnvelope — sessionFailed persistence", () => {
   const envelopeArgs = {
     pr: 1546,
@@ -191,6 +290,7 @@ describe("mergeRunEnvelope — sessionFailed persistence", () => {
     head_sha: "067297acd7e7aac125a156bf597f4d05d255659e",
     model: "sonnet",
     iteration: 1,
+    engine: { name: "pr-hero", version: "1.0.0" },
     telemetry: {
       index_ms: 1000,
       index_mode: "fresh" as const,
@@ -253,6 +353,16 @@ describe("mergeRunEnvelope — sessionFailed persistence", () => {
     });
     expect(doc.summary).toEqual(summary);
     expect(doc.run_status).toBe("complete");
+  });
+
+  test("emits schema_version 1.1.0 with required engine", () => {
+    const doc = mergeRunEnvelope({
+      ...envelopeArgs,
+      skillOutput: skillOutput("complete"),
+      sessionFailed: false,
+    });
+    expect(doc.schema_version).toBe(SCHEMA_VERSION_V1_1);
+    expect(doc.engine).toEqual({ name: "pr-hero", version: "1.0.0" });
   });
 });
 

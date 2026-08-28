@@ -6,11 +6,19 @@
 // MUST accept exactly the same key set and reject the same out-of-set key.
 import { describe, expect, test } from "bun:test";
 import { type DraftFinding, validateDraftFinding } from "../src/drafts";
-import { type Finding, validateFinding } from "../src/findings";
+import {
+  type Finding,
+  SCHEMA_VERSION,
+  SCHEMA_VERSION_V1_1,
+  validateFinding,
+  validateFindingsDocument,
+} from "../src/findings";
+import { FINDINGS_CONFORMANCE_CASES } from "../src/findings-conformance";
 import { type AgentSpec, validateReviewSpec } from "../src/spec";
 
 const IN_ENUM = ["reliability", "resilience", "parity", "lifecycle"] as const;
-const OUT_OF_ENUM = "security";
+const OPEN_SLUG = "security";
+const UNSAFE_SLUG = "Security";
 
 function baseFinding(hunter: string): Finding {
   return {
@@ -71,21 +79,102 @@ describe("closed-set enum parity across validators", () => {
     });
   }
 
-  test(`validateFinding rejects out-of-enum hunter "${OUT_OF_ENUM}"`, () => {
-    expect(() => validateFinding(baseFinding(OUT_OF_ENUM), 0)).toThrow(
-      /hunter invalid/,
-    );
+  test(`validateDraftFinding accepts open slug hunter "${OPEN_SLUG}"`, () => {
+    expect(() => validateDraftFinding(baseDraft(OPEN_SLUG), 0)).not.toThrow();
   });
 
-  test(`validateDraftFinding rejects out-of-enum hunter "${OUT_OF_ENUM}"`, () => {
-    expect(() => validateDraftFinding(baseDraft(OUT_OF_ENUM), 0)).toThrow(
-      /hunter invalid/,
-    );
-  });
-
-  test(`validateReviewSpec rejects out-of-enum hunter key "${OUT_OF_ENUM}"`, () => {
+  test(`validateReviewSpec accepts open hunter key "${OPEN_SLUG}"`, () => {
     expect(() =>
-      validateReviewSpec({ agents: [agentSpec(OUT_OF_ENUM)] }),
-    ).toThrow(/Hunter enum/);
+      validateReviewSpec({ agents: [agentSpec(OPEN_SLUG)] }),
+    ).not.toThrow();
   });
+
+  test(`validateFinding rejects out-of-enum hunter "${OPEN_SLUG}"`, () => {
+    expect(() => validateFinding(baseFinding(OPEN_SLUG), 0)).toThrow(
+      /hunter invalid/,
+    );
+  });
+
+  test(`validateDraftFinding rejects unsafe hunter slug "${UNSAFE_SLUG}"`, () => {
+    expect(() => validateDraftFinding(baseDraft(UNSAFE_SLUG), 0)).toThrow(
+      /hunter invalid/,
+    );
+  });
+
+  test(`validateReviewSpec rejects unsafe hunter key "${UNSAFE_SLUG}"`, () => {
+    expect(() =>
+      validateReviewSpec({ agents: [agentSpec(UNSAFE_SLUG)] }),
+    ).toThrow(/safe slug/);
+  });
+});
+
+describe("validateFinding stays v1.0 closed-hunter for enum parity", () => {
+  test(`validateFindingsDocument v1.1 accepts "${OPEN_SLUG}" while validateFinding rejects it`, () => {
+    const doc = {
+      schema_version: SCHEMA_VERSION_V1_1,
+      pr: 1,
+      base_sha: "abc",
+      head_sha: "def",
+      model: "sonnet",
+      iteration: 1,
+      parity_hunter_fired: false,
+      run_status: "complete" as const,
+      engine: { name: "pr-hero", version: "1.0.0" },
+      telemetry: {
+        index_ms: 1,
+        index_mode: "fresh" as const,
+        index_disk_mb: 1,
+        wall_ms: 1,
+        tokens_in: 1,
+        tokens_out: 1,
+        tokens_total: 2,
+        cost_usd_est: 0.1,
+      },
+      findings: [baseFinding(OPEN_SLUG)],
+      debug: { refuted: [] },
+    };
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+    expect(() => validateFinding(baseFinding(OPEN_SLUG), 0)).toThrow(
+      /hunter invalid/,
+    );
+  });
+
+  test("validateFindingsDocument v1.0 still rejects out-of-enum hunter", () => {
+    const doc = {
+      schema_version: SCHEMA_VERSION,
+      pr: 1,
+      base_sha: "abc",
+      head_sha: "def",
+      model: "sonnet",
+      iteration: 1,
+      parity_hunter_fired: false,
+      run_status: "complete" as const,
+      telemetry: {
+        index_ms: 1,
+        index_mode: "fresh" as const,
+        index_disk_mb: 1,
+        wall_ms: 1,
+        tokens_in: 1,
+        tokens_out: 1,
+        tokens_total: 2,
+        cost_usd_est: 0.1,
+      },
+      findings: [baseFinding(OPEN_SLUG)],
+      debug: { refuted: [] },
+    };
+    expect(() => validateFindingsDocument(doc)).toThrow(/hunter invalid/);
+  });
+});
+
+describe("conformance cases match validateFindingsDocument acceptance", () => {
+  for (const conformanceCase of FINDINGS_CONFORMANCE_CASES) {
+    test(`${conformanceCase.id} semantics are identical`, () => {
+      const parsed = JSON.parse(conformanceCase.raw);
+      if (conformanceCase.expect === "accept") {
+        expect(() => validateFindingsDocument(parsed)).not.toThrow();
+      } else {
+        expect(() => validateFindingsDocument(parsed)).toThrow();
+      }
+    });
+  }
 });

@@ -842,7 +842,7 @@ describe("saveRunTransaction and round-trip fidelity", () => {
     }
   });
 
-  test("migrates a user_version=2 database to version 3 seamlessly", async () => {
+  test("migrates a user_version=2 database to version 4 seamlessly", async () => {
     const dbPath = await tmpDbPath();
     const dbV2 = new Database(dbPath, { create: true });
     dbV2.exec(`
@@ -893,7 +893,7 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       const version = (
         dbV3.query("PRAGMA user_version;").get() as { user_version: number }
       ).user_version;
-      expect(version).toBe(3);
+      expect(version).toBe(4);
 
       const tableExists = dbV3
         .query(
@@ -903,6 +903,119 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       expect(tableExists).not.toBeNull();
     } finally {
       dbV3.close();
+    }
+  });
+
+  test("migrates a user_version=3 database to version 4 with schema columns", async () => {
+    const dbPath = await tmpDbPath();
+    const dbV3 = new Database(dbPath, { create: true });
+    dbV3.exec(`
+      CREATE TABLE IF NOT EXISTS runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_id TEXT NOT NULL,
+        run_dir TEXT NOT NULL,
+        pr INTEGER NULL,
+        checkout_path TEXT NULL,
+        head_sha TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        diff_from_sha TEXT NULL,
+        run_status TEXT NOT NULL,
+        session_failed INTEGER NULL,
+        model TEXT NOT NULL,
+        iteration INTEGER NOT NULL,
+        parity_hunter_fired INTEGER NOT NULL,
+        prompt_set_name TEXT NULL,
+        prompt_set_sha256 TEXT NULL,
+        driver_sha TEXT NULL,
+        engine_name TEXT NULL,
+        engine_version TEXT NULL,
+        summary_prose TEXT NULL,
+        summary_score INTEGER NULL,
+        summary_score_reason TEXT NULL,
+        generated_at TEXT NOT NULL,
+        wall_ms INTEGER NOT NULL,
+        index_ms INTEGER NOT NULL,
+        index_mode TEXT NULL,
+        index_disk_mb REAL NULL,
+        sync_ms INTEGER NULL,
+        tokens_in INTEGER NOT NULL,
+        tokens_out INTEGER NOT NULL,
+        tokens_total INTEGER NOT NULL,
+        cost_usd_est REAL NOT NULL,
+        blocking INTEGER NOT NULL,
+        advisory INTEGER NOT NULL,
+        root_causes_json TEXT NULL,
+        greptile_found INTEGER NULL,
+        UNIQUE (repo_id, run_dir)
+      );
+      PRAGMA user_version = 3;
+    `);
+    dbV3.close();
+
+    const dbV4 = openProductStore(dbPath);
+    try {
+      const version = (
+        dbV4.query("PRAGMA user_version;").get() as { user_version: number }
+      ).user_version;
+      expect(version).toBe(4);
+
+      const columns = (
+        dbV4.query("PRAGMA table_info(runs);").all() as { name: string }[]
+      ).map((c) => c.name);
+      expect(columns).toContain("findings_schema_version");
+      expect(columns).toContain("engine_revision");
+    } finally {
+      dbV4.close();
+    }
+  });
+
+  test("v1.1 round-trip preserves schema_version and engine revision", async () => {
+    const dbPath = await tmpDbPath();
+    const db = openProductStore(dbPath);
+    try {
+      const originalDoc = sampleDoc({
+        schema_version: "1.1.0",
+        engine: { name: "pr-hero", version: "0.3.0", revision: "abc123def" },
+      });
+      const projected = projectCompleteRun({
+        doc: originalDoc,
+        repoId: REPO_ID,
+        runDir: "run-v11",
+        checkoutPath: null,
+        generatedAt: "2026-08-23T18:00:00.000Z",
+      });
+
+      const runId = saveRunTransaction(db, projected);
+      const exported = exportFindingsDocument(db, runId);
+      expect(exported).toEqual(originalDoc);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("legacy v1.0 rows backfill findings_schema_version on export", async () => {
+    const dbPath = await tmpDbPath();
+    const db = openProductStore(dbPath);
+    try {
+      const originalDoc = sampleDoc({ schema_version: "1.0.0" });
+      const projected = projectCompleteRun({
+        doc: originalDoc,
+        repoId: REPO_ID,
+        runDir: "run-v10",
+        checkoutPath: null,
+        generatedAt: "2026-08-23T18:00:00.000Z",
+      });
+
+      const runId = saveRunTransaction(db, projected);
+      db.query(
+        "UPDATE runs SET findings_schema_version = '1.0.0' WHERE id = ?",
+      ).run(runId);
+
+      const exported = exportFindingsDocument(db, runId);
+      expect(exported?.schema_version).toBe("1.0.0");
+      expect(exported).toEqual(originalDoc);
+    } finally {
+      db.close();
     }
   });
 });

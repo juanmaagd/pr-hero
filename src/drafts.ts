@@ -7,10 +7,10 @@ import type {
   CausalDisposition,
   EvidenceClass,
   Finding,
-  Hunter,
   RunSummary,
   Severity,
 } from "./findings";
+import { isSafeSlug } from "./spec";
 
 // What a hunter emits: a Finding minus the two fields the pipeline assigns
 // later (tier at Step 7, refuter_verdict at Step 6).
@@ -128,7 +128,6 @@ const CAUSAL_DISPOSITIONS: CausalDisposition[] = [
   "base-only",
   "unknown",
 ];
-const HUNTERS: Hunter[] = ["reliability", "resilience", "parity", "lifecycle"];
 const REFUTER_OUTCOMES: RefuterOutcome[] = [
   "corroborated",
   "refuted",
@@ -224,7 +223,7 @@ export function validateDraftFinding(
     `draft findings[${index}].proof_refs must be an array`,
   );
   must(
-    HUNTERS.includes(f.hunter as Hunter),
+    typeof f.hunter === "string" && isSafeSlug(f.hunter),
     `draft findings[${index}].hunter invalid`,
   );
   must(
