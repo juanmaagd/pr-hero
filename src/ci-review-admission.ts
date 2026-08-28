@@ -43,6 +43,9 @@ export interface PostedFindingAdmissionScan {
   advisory: number;
   matchedMarkers: number;
   parsedTiers: number;
+  // Markers for the prior head exist from untrusted actors only — run rather
+  // than let forged comments drive a skip.
+  failOpen?: boolean;
 }
 
 export interface CiReviewAdmissionInput {
@@ -54,6 +57,9 @@ export interface CiReviewAdmissionInput {
   admission: ParsedCiAdmissionBlock | null;
   postedFindings: PostedFindingAdmissionScan | null;
   policy: CiReviewPolicy;
+  // New commits since the prior summary touch a path where a prior finding
+  // was posted — bypass the below-threshold skip (absorbing-skip fix).
+  deltaTouchesPriorFindings: boolean;
 }
 
 export type CiReviewAdmissionVerdict =
@@ -85,6 +91,22 @@ export function resolveCiReviewPolicy(
   };
 }
 
+// GITHUB_ACTOR in Actions plus optional repo-config extras. Undefined when no
+// actor is known — callers treat that as "do not filter by author".
+export function resolveCiTrustedActors(input: {
+  githubActor?: string;
+  extra?: readonly string[];
+}): ReadonlySet<string> | undefined {
+  const actors = new Set<string>();
+  if (input.githubActor !== undefined && input.githubActor.length > 0) {
+    actors.add(input.githubActor);
+  }
+  for (const login of input.extra ?? []) {
+    if (login.length > 0) actors.add(login);
+  }
+  return actors.size > 0 ? actors : undefined;
+}
+
 export function stateReviewCount(
   state: ParsedStateBlock | null,
   markerSeen: boolean,
@@ -101,6 +123,15 @@ export function stateReviewCount(
     return admission.reviews;
   }
   return markerSeen ? 1 : 0;
+}
+
+// Workflow runs that completed (success or failure) may have consumed budget
+// without posting — take the max of the summary counter and distinct run heads.
+export function resolveReviewAttemptCount(input: {
+  stateCount: number;
+  workflowHeads: ReadonlySet<string>;
+}): number {
+  return Math.max(input.stateCount, input.workflowHeads.size);
 }
 
 export function nextStateReviewCount(input: {
@@ -165,6 +196,21 @@ export function tierCountsFromFindings(findings: readonly { tier: Tier }[]): {
     else advisory++;
   }
   return { blocking, advisory };
+}
+
+// Outside-diff findings are a subset of doc.findings; dedupe by id when a
+// caller still merges inline + outside buckets.
+export function canonicalAdmissionFindings(
+  findings: readonly { id: string; tier: Tier }[],
+): { id: string; tier: Tier }[] {
+  const seen = new Set<string>();
+  const out: { id: string; tier: Tier }[] = [];
+  for (const finding of findings) {
+    if (seen.has(finding.id)) continue;
+    seen.add(finding.id);
+    out.push(finding);
+  }
+  return out;
 }
 
 export function renderCiAdmissionBlock(
@@ -253,17 +299,58 @@ export function parseFindingCommentTier(body: string): Tier | null {
   return null;
 }
 
+function isTrustedActor(
+  user: string | undefined,
+  trustedActors: ReadonlySet<string> | undefined,
+): boolean {
+  if (trustedActors === undefined) return true;
+  return user !== undefined && trustedActors.has(user);
+}
+
+export function pathsFromPostedFindingMarkers(
+  comments: readonly { body: string; user?: string }[],
+  summaryHead: string,
+  trustedActors?: ReadonlySet<string>,
+): string[] {
+  const paths = new Set<string>();
+  for (const comment of comments) {
+    const marker = parseFindingMarker(comment.body);
+    if (marker === null || marker.headSha !== summaryHead) continue;
+    if (!isTrustedActor(comment.user, trustedActors)) continue;
+    paths.add(marker.path);
+  }
+  return [...paths];
+}
+
+export function deltaTouchesPriorFindings(
+  changedPaths: readonly string[],
+  priorPaths: readonly string[],
+): boolean {
+  if (priorPaths.length === 0) return false;
+  const changed = new Set(changedPaths);
+  return priorPaths.some((path) => changed.has(path));
+}
+
 export function scanPostedFindingTiers(input: {
   summaryHead: string;
-  comments: readonly { body: string }[];
+  comments: readonly { body: string; user?: string }[];
+  trustedActors?: ReadonlySet<string>;
 }): PostedFindingAdmissionScan | null {
   let blocking = 0;
   let advisory = 0;
   let matchedMarkers = 0;
   let parsedTiers = 0;
+  let untrustedMarkers = 0;
+  const seenFingerprints = new Set<string>();
   for (const comment of input.comments) {
     const marker = parseFindingMarker(comment.body);
     if (marker === null || marker.headSha !== input.summaryHead) continue;
+    if (!isTrustedActor(comment.user, input.trustedActors)) {
+      untrustedMarkers++;
+      continue;
+    }
+    if (seenFingerprints.has(marker.c)) continue;
+    seenFingerprints.add(marker.c);
     matchedMarkers++;
     const tier = parseFindingCommentTier(comment.body);
     if (tier === null) continue;
@@ -271,7 +358,18 @@ export function scanPostedFindingTiers(input: {
     if (tier === "blocking") blocking++;
     else advisory++;
   }
-  if (matchedMarkers === 0) return null;
+  if (matchedMarkers === 0) {
+    if (untrustedMarkers > 0) {
+      return {
+        blocking: 0,
+        advisory: 0,
+        matchedMarkers: 0,
+        parsedTiers: 0,
+        failOpen: true,
+      };
+    }
+    return null;
+  }
   return { blocking, advisory, matchedMarkers, parsedTiers };
 }
 
@@ -303,6 +401,15 @@ export function priorScoreForAdmission(input: {
     return tierScoreFromCounts(input.admission, input.policy, "admission");
   }
   if (input.postedFindings !== null) {
+    if (input.postedFindings.failOpen === true) {
+      return {
+        blocking: 0,
+        advisory: 0,
+        score: 0,
+        source: "none",
+        failOpen: true,
+      };
+    }
     if (input.postedFindings.parsedTiers > 0) {
       return tierScoreFromCounts(
         input.postedFindings,
@@ -360,6 +467,9 @@ export function evaluateCiReviewAdmission(
   }
   const prior = priorForAdmissionInput(input);
   if (prior.failOpen === true) {
+    return { action: "run" };
+  }
+  if (input.deltaTouchesPriorFindings) {
     return { action: "run" };
   }
   if (prior.score < input.policy.rereviewMinScore) {

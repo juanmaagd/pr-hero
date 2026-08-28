@@ -1923,6 +1923,7 @@ describe("assembly", () => {
         ci_rereview_min_score: "default" as const,
         ci_blocking_weight: "default" as const,
         ci_advisory_weight: "default" as const,
+        ci_trusted_actors: "repo" as const,
       },
       global_present: true,
     };

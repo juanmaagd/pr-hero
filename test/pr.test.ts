@@ -29,6 +29,8 @@ import {
   fetchPrComments,
   fetchPrReviewComments,
   ghPrHeadSha,
+  parseCompareChangedFiles,
+  parsePrHeroWorkflowRunHeads,
   postCommitStatus,
   postIssueComment,
   postIssueTriageComment,
@@ -239,6 +241,7 @@ describe("fetchPrReviewComments", () => {
               repository: {
                 pullRequest: {
                   reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
                     nodes: [
                       {
                         comments: {
@@ -291,6 +294,121 @@ describe("fetchPrReviewComments", () => {
     await expect(
       fetchPrReviewComments(OPERATOR_ROOT, 42, { spawnFn }),
     ).rejects.toThrow(/unparseable line/);
+  });
+});
+
+describe("parseCompareChangedFiles", () => {
+  test("extracts filenames from a compare API payload", () => {
+    expect(
+      parseCompareChangedFiles(
+        JSON.stringify({
+          files: [{ filename: "src/a.ts" }, { filename: "src/b.ts" }],
+        }),
+      ),
+    ).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+});
+
+describe("parsePrHeroWorkflowRunHeads", () => {
+  const HEAD = "a".repeat(40);
+  const OTHER = "b".repeat(40);
+
+  test("counts only completed success/failure runs with full SHAs", () => {
+    expect(
+      parsePrHeroWorkflowRunHeads(
+        JSON.stringify([
+          { headSha: HEAD, conclusion: "success" },
+          { headSha: OTHER, conclusion: "failure" },
+          { headSha: "c".repeat(40), conclusion: "cancelled" },
+          { headSha: "short", conclusion: "success" },
+        ]),
+      ),
+    ).toEqual(new Set([HEAD, OTHER]));
+  });
+});
+
+describe("fetchPrReviewComments — GraphQL pagination", () => {
+  test("follows reviewThreads pageInfo until hasNextPage is false", async () => {
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["pulls/42/comments"],
+        response: { stderr: "gh: Not Found (HTTP 404)", exitCode: 1 },
+      },
+      repoView,
+      {
+        match: ["graphql", "reviewThreads", "cursor1"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        comments: {
+                          nodes: [
+                            {
+                              fullDatabaseId: 2,
+                              body: "page-two",
+                              author: { login: "pr-hero" },
+                              path: "src/b.ts",
+                              line: 2,
+                              originalLine: 2,
+                              replyTo: null,
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+      {
+        match: ["graphql", "reviewThreads"],
+        response: {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: true, endCursor: "cursor1" },
+                    nodes: [
+                      {
+                        comments: {
+                          nodes: [
+                            {
+                              fullDatabaseId: 1,
+                              body: "page-one",
+                              author: { login: "pr-hero" },
+                              path: "src/a.ts",
+                              line: 1,
+                              originalLine: 1,
+                              replyTo: null,
+                            },
+                          ],
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          }),
+        },
+      },
+    ]);
+    const comments = await fetchPrReviewComments(OPERATOR_ROOT, 42, {
+      spawnFn,
+    });
+    expect(comments.map((c) => c.id)).toEqual([1, 2]);
+    expect(
+      calls.filter((c) => c.argv.join(" ").includes("reviewThreads")).length,
+    ).toBe(2);
   });
 });
 

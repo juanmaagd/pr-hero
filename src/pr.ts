@@ -28,6 +28,7 @@ import {
   type PrHeroFindingRef,
 } from "./compare";
 import { renderComparison } from "./compare-report";
+import { THREAD_PAGE_SIZE } from "./corpus-preflight";
 import type { Finding, RunStatus } from "./findings";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
@@ -928,11 +929,131 @@ const PR_ISSUE_COMMENTS_QUERY =
   "comments(first:100){nodes{databaseId body createdAt updatedAt author{login}}}}}}";
 
 const PR_REVIEW_COMMENTS_QUERY =
-  "query($repoOwner:String!,$repoName:String!,$number:Int!){" +
+  "query($repoOwner:String!,$repoName:String!,$number:Int!,$cursor:String){" +
   "repository(owner:$repoOwner,name:$repoName){pullRequest(number:$number){" +
-  "reviewThreads(first:100){nodes{comments(first:100){nodes{" +
+  `reviewThreads(first:${THREAD_PAGE_SIZE},after:$cursor){` +
+  "pageInfo{endCursor hasNextPage}" +
+  "nodes{comments(first:100){nodes{" +
   "fullDatabaseId body createdAt author{login} path line originalLine " +
   "replyTo{fullDatabaseId}}}}}}}}";
+
+// Parses `gh api repos/.../compare/{base}...{head}` — filenames only.
+export function parseCompareChangedFiles(stdout: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      `gh api compare returned invalid JSON: ${stdout.slice(0, 120)}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new CliError("gh api compare returned no object");
+  }
+  const files = (parsed as { files?: unknown }).files;
+  if (!Array.isArray(files)) {
+    throw new CliError("gh api compare returned no files list");
+  }
+  const paths: string[] = [];
+  for (const entry of files) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const filename = (entry as { filename?: unknown }).filename;
+    if (typeof filename === "string" && filename.length > 0) {
+      paths.push(filename);
+    }
+  }
+  return paths;
+}
+
+export async function ghCompareChangedFiles(
+  operatorRoot: string,
+  base: string,
+  head: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<string[]> {
+  const repo = await ghRepoOwnerName(operatorRoot, options?.spawnFn);
+  const result = await gh(
+    operatorRoot,
+    [
+      "api",
+      `repos/${repo.owner}/${repo.name}/compare/${base}...${head}`,
+      "--jq",
+      ".files[].filename",
+    ],
+    undefined,
+    options?.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(`gh api compare failed: ${result.stderr.trim()}`);
+  }
+  const paths: string[] = [];
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) paths.push(trimmed);
+  }
+  return paths;
+}
+
+const PR_HERO_WORKFLOW_FILE = "pr-hero.yml";
+const COMPLETED_WORKFLOW_CONCLUSIONS = new Set(["success", "failure"]);
+
+// Distinct head SHAs from completed pr-hero workflow runs on a branch.
+export function parsePrHeroWorkflowRunHeads(stdout: string): Set<string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new CliError(
+      `gh run list returned invalid JSON: ${stdout.slice(0, 120)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new CliError("gh run list must return a JSON array");
+  }
+  const heads = new Set<string>();
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as { headSha?: unknown; conclusion?: unknown };
+    const conclusion = record.conclusion;
+    if (
+      typeof conclusion !== "string" ||
+      !COMPLETED_WORKFLOW_CONCLUSIONS.has(conclusion)
+    ) {
+      continue;
+    }
+    const headSha = record.headSha;
+    if (typeof headSha === "string" && isFullCommitId(headSha)) {
+      heads.add(headSha);
+    }
+  }
+  return heads;
+}
+
+export async function ghPrHeroWorkflowRunHeads(
+  operatorRoot: string,
+  branch: string,
+  options?: { spawnFn?: typeof Bun.spawn },
+): Promise<Set<string>> {
+  const result = await gh(
+    operatorRoot,
+    [
+      "run",
+      "list",
+      "--workflow",
+      PR_HERO_WORKFLOW_FILE,
+      "--branch",
+      branch,
+      "--json",
+      "headSha,conclusion",
+    ],
+    undefined,
+    options?.spawnFn,
+  );
+  if (!result.ok) {
+    throw new CliError(`gh run list failed: ${result.stderr.trim()}`);
+  }
+  return parsePrHeroWorkflowRunHeads(result.stdout);
+}
 
 async function ghGraphql(
   operatorRoot: string,
@@ -1039,19 +1160,15 @@ async function fetchPrCommentsGraphql(
   return comments;
 }
 
-async function fetchPrReviewCommentsGraphql(
-  operatorRoot: string,
-  pr: number,
-  spawnFn?: typeof Bun.spawn,
-): Promise<PrReviewComment[]> {
-  const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
-  const stdout = await ghGraphql(
-    operatorRoot,
-    PR_REVIEW_COMMENTS_QUERY,
-    { repoOwner: repo.owner, repoName: repo.name, number: pr },
-    "reviewComments",
-    spawnFn,
-  );
+interface ReviewCommentsGraphqlPage {
+  nodes: unknown[];
+  hasNextPage: boolean;
+  endCursor: string | null;
+}
+
+function parseReviewCommentsGraphqlPage(
+  stdout: string,
+): ReviewCommentsGraphqlPage {
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(stdout);
@@ -1061,20 +1178,49 @@ async function fetchPrReviewCommentsGraphql(
         stdout.slice(0, 120),
     );
   }
-  const threadNodes = (
+  const connection = (
     parsed as {
       data?: {
         repository?: {
-          pullRequest?: { reviewThreads?: { nodes?: unknown } };
+          pullRequest?: { reviewThreads?: unknown };
         };
       };
     } | null
-  )?.data?.repository?.pullRequest?.reviewThreads?.nodes;
-  if (!Array.isArray(threadNodes)) {
+  )?.data?.repository?.pullRequest?.reviewThreads;
+  if (typeof connection !== "object" || connection === null) {
     throw new CliError(
       "gh api graphql (reviewComments) returned no thread list",
     );
   }
+  const record = connection as Record<string, unknown>;
+  const nodes = record.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new CliError(
+      "gh api graphql (reviewComments) returned no thread list",
+    );
+  }
+  const pageInfo = record.pageInfo;
+  if (typeof pageInfo !== "object" || pageInfo === null) {
+    throw new CliError("gh api graphql (reviewComments) returned no pageInfo");
+  }
+  const hasNextPage =
+    (pageInfo as { hasNextPage?: unknown }).hasNextPage === true;
+  const endCursorRaw = (pageInfo as { endCursor?: unknown }).endCursor;
+  const endCursor =
+    typeof endCursorRaw === "string" && endCursorRaw.length > 0
+      ? endCursorRaw
+      : null;
+  if (hasNextPage && endCursor === null) {
+    throw new CliError(
+      "gh api graphql (reviewComments) hasNextPage is true but endCursor is missing",
+    );
+  }
+  return { nodes, hasNextPage, endCursor };
+}
+
+function reviewCommentsFromThreadNodes(
+  threadNodes: unknown[],
+): PrReviewComment[] {
   const comments: PrReviewComment[] = [];
   for (const thread of threadNodes) {
     if (typeof thread !== "object" || thread === null) continue;
@@ -1118,6 +1264,40 @@ async function fetchPrReviewCommentsGraphql(
           : {}),
       });
     }
+  }
+  return comments;
+}
+
+async function fetchPrReviewCommentsGraphql(
+  operatorRoot: string,
+  pr: number,
+  spawnFn?: typeof Bun.spawn,
+): Promise<PrReviewComment[]> {
+  assertBalancedGraphql(PR_REVIEW_COMMENTS_QUERY, "reviewComments");
+  const repo = await ghRepoOwnerName(operatorRoot, spawnFn);
+  const comments: PrReviewComment[] = [];
+  let cursor: string | null = null;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const variables: Record<string, string | number> = {
+      repoOwner: repo.owner,
+      repoName: repo.name,
+      number: pr,
+    };
+    if (cursor !== null) {
+      variables.cursor = cursor;
+    }
+    const stdout = await ghGraphql(
+      operatorRoot,
+      PR_REVIEW_COMMENTS_QUERY,
+      variables,
+      "reviewComments",
+      spawnFn,
+    );
+    const page = parseReviewCommentsGraphqlPage(stdout);
+    comments.push(...reviewCommentsFromThreadNodes(page.nodes));
+    hasNextPage = page.hasNextPage;
+    cursor = page.endCursor;
   }
   return comments;
 }

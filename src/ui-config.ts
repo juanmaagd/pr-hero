@@ -192,6 +192,10 @@ export function configRows(
       effective.ci_advisory_weight?.toString(),
       sources.ci_advisory_weight,
     ),
+    ci_trusted_actors: listCell(
+      effective.ci_trusted_actors ?? [],
+      sources.ci_trusted_actors,
+    ),
   };
   const summaryCells: Record<keyof SummaryConfig, ConfigCell> = {
     enabled: cell(

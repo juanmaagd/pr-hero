@@ -1,15 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type CiReviewAdmissionInput,
+  canonicalAdmissionFindings,
   DEFAULT_CI_ADVISORY_WEIGHT,
   DEFAULT_CI_BLOCKING_WEIGHT,
   DEFAULT_CI_REREVIEW_MIN_SCORE,
+  deltaTouchesPriorFindings,
   evaluateCiReviewAdmission,
   parseCiAdmissionBlock,
   parseFindingCommentTier,
+  pathsFromPostedFindingMarkers,
   priorScoreForAdmission,
   priorTierScore,
   renderCiAdmissionBlock,
   resolveCiReviewPolicy,
+  resolveCiTrustedActors,
+  resolveReviewAttemptCount,
   scanPostedFindingTiers,
   stateReviewCount,
 } from "../src/ci-review-admission";
@@ -20,6 +26,13 @@ const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
 
 const DEFAULT_POLICY = resolveCiReviewPolicy({});
+
+function admissionInput(
+  input: Omit<CiReviewAdmissionInput, "deltaTouchesPriorFindings"> &
+    Partial<Pick<CiReviewAdmissionInput, "deltaTouchesPriorFindings">>,
+): CiReviewAdmissionInput {
+  return { deltaTouchesPriorFindings: false, ...input };
+}
 
 function finding(tier: Tier) {
   return stateFinding({
@@ -262,16 +275,18 @@ describe("priorScoreForAdmission precedence", () => {
 describe("evaluateCiReviewAdmission", () => {
   test("first review always runs", () => {
     expect(
-      evaluateCiReviewAdmission({
-        currentHead: HEAD_A,
-        summaryHead: null,
-        markerSeen: false,
-        reviewCount: 0,
-        state: null,
-        admission: null,
-        postedFindings: null,
-        policy: DEFAULT_POLICY,
-      }),
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_A,
+          summaryHead: null,
+          markerSeen: false,
+          reviewCount: 0,
+          state: null,
+          admission: null,
+          postedFindings: null,
+          policy: DEFAULT_POLICY,
+        }),
+      ),
     ).toEqual({ action: "run" });
   });
 
@@ -279,16 +294,18 @@ describe("evaluateCiReviewAdmission", () => {
     const admission = parseCiAdmissionBlock(
       admissionBody({ blocking: 2, advisory: 0 }),
     );
-    const verdict = evaluateCiReviewAdmission({
-      currentHead: HEAD_A,
-      summaryHead: HEAD_A,
-      markerSeen: true,
-      reviewCount: 1,
-      state: null,
-      admission,
-      postedFindings: null,
-      policy: DEFAULT_POLICY,
-    });
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_A,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission,
+        postedFindings: null,
+        policy: DEFAULT_POLICY,
+      }),
+    );
     expect(verdict.action).toBe("skip");
     if (verdict.action === "skip") {
       expect(verdict.reason).toBe("same-head");
@@ -299,16 +316,18 @@ describe("evaluateCiReviewAdmission", () => {
     const admission = parseCiAdmissionBlock(
       admissionBody({ blocking: 0, advisory: 2 }),
     );
-    const verdict = evaluateCiReviewAdmission({
-      currentHead: HEAD_B,
-      summaryHead: HEAD_A,
-      markerSeen: true,
-      reviewCount: 1,
-      state: null,
-      admission,
-      postedFindings: null,
-      policy: DEFAULT_POLICY,
-    });
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission,
+        postedFindings: null,
+        policy: DEFAULT_POLICY,
+      }),
+    );
     expect(verdict.action).toBe("skip");
     if (verdict.action === "skip") {
       expect(verdict.reason).toBe("below-threshold");
@@ -317,16 +336,18 @@ describe("evaluateCiReviewAdmission", () => {
   });
 
   test("severity headline alone does not inflate the score", () => {
-    const verdict = evaluateCiReviewAdmission({
-      currentHead: HEAD_B,
-      summaryHead: HEAD_A,
-      markerSeen: true,
-      reviewCount: 1,
-      state: null,
-      admission: null,
-      postedFindings: null,
-      policy: DEFAULT_POLICY,
-    });
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: null,
+        postedFindings: null,
+        policy: DEFAULT_POLICY,
+      }),
+    );
     expect(verdict.action).toBe("skip");
     if (verdict.action === "skip") {
       expect(verdict.reason).toBe("below-threshold");
@@ -368,16 +389,18 @@ describe("evaluateCiReviewAdmission", () => {
       parsedTiers: 3,
     });
     expect(
-      evaluateCiReviewAdmission({
-        currentHead: HEAD_B,
-        summaryHead: HEAD_A,
-        markerSeen: true,
-        reviewCount: 1,
-        state: null,
-        admission: null,
-        postedFindings,
-        policy: DEFAULT_POLICY,
-      }),
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: null,
+          postedFindings,
+          policy: DEFAULT_POLICY,
+        }),
+      ),
     ).toEqual({ action: "run" });
     expect(
       priorScoreForAdmission({
@@ -391,61 +414,67 @@ describe("evaluateCiReviewAdmission", () => {
 
   test("unreadable posted markers fail open", () => {
     expect(
-      evaluateCiReviewAdmission({
-        currentHead: HEAD_B,
-        summaryHead: HEAD_A,
-        markerSeen: true,
-        reviewCount: 1,
-        state: null,
-        admission: null,
-        postedFindings: {
-          blocking: 0,
-          advisory: 0,
-          matchedMarkers: 1,
-          parsedTiers: 0,
-        },
-        policy: DEFAULT_POLICY,
-      }),
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: null,
+          admission: null,
+          postedFindings: {
+            blocking: 0,
+            advisory: 0,
+            matchedMarkers: 1,
+            parsedTiers: 0,
+          },
+          policy: DEFAULT_POLICY,
+        }),
+      ),
     ).toEqual({ action: "run" });
   });
 
   test("2 advisory + 1 blocking triggers re-review", () => {
     expect(
-      evaluateCiReviewAdmission({
+      evaluateCiReviewAdmission(
+        admissionInput({
+          currentHead: HEAD_B,
+          summaryHead: HEAD_A,
+          markerSeen: true,
+          reviewCount: 1,
+          state: {
+            headSha: HEAD_A,
+            findings: [
+              finding("advisory"),
+              finding("advisory"),
+              finding("blocking"),
+            ],
+          },
+          admission: null,
+          postedFindings: null,
+          policy: DEFAULT_POLICY,
+        }),
+      ),
+    ).toEqual({ action: "run" });
+  });
+
+  test("max reviews blocks a third run", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
         currentHead: HEAD_B,
         summaryHead: HEAD_A,
         markerSeen: true,
-        reviewCount: 1,
+        reviewCount: 2,
         state: {
           headSha: HEAD_A,
-          findings: [
-            finding("advisory"),
-            finding("advisory"),
-            finding("blocking"),
-          ],
+          findings: [finding("blocking"), finding("blocking")],
+          reviews: 2,
         },
         admission: null,
         postedFindings: null,
         policy: DEFAULT_POLICY,
       }),
-    ).toEqual({ action: "run" });
-  });
-
-  test("max reviews blocks a third run", () => {
-    const verdict = evaluateCiReviewAdmission({
-      currentHead: HEAD_B,
-      summaryHead: HEAD_A,
-      markerSeen: true,
-      reviewCount: 2,
-      state: {
-        headSha: HEAD_A,
-        findings: [finding("blocking"), finding("blocking")],
-        reviews: 2,
-      },
-      admission: null,
-      postedFindings: null,
-      policy: DEFAULT_POLICY,
-    });
+    );
     expect(verdict.action).toBe("skip");
     if (verdict.action === "skip") {
       expect(verdict.reason).toBe("max-reviews");
@@ -480,5 +509,163 @@ describe("resolveCiReviewPolicy defaults", () => {
       blockingWeight: DEFAULT_CI_BLOCKING_WEIGHT,
       advisoryWeight: DEFAULT_CI_ADVISORY_WEIGHT,
     });
+  });
+});
+
+describe("resolveCiTrustedActors", () => {
+  test("includes GITHUB_ACTOR and repo-config extras", () => {
+    const actors = resolveCiTrustedActors({
+      githubActor: "pr-hero[bot]",
+      extra: ["custom-bot"],
+    });
+    expect(actors).toEqual(new Set(["pr-hero[bot]", "custom-bot"]));
+  });
+
+  test("returns undefined when no actors are configured", () => {
+    expect(resolveCiTrustedActors({})).toBeUndefined();
+  });
+});
+
+describe("resolveReviewAttemptCount", () => {
+  test("takes the max of state counter and completed workflow heads", () => {
+    expect(
+      resolveReviewAttemptCount({
+        stateCount: 1,
+        workflowHeads: new Set([HEAD_A, HEAD_B]),
+      }),
+    ).toBe(2);
+  });
+});
+
+describe("canonicalAdmissionFindings", () => {
+  test("dedupes inline and outside buckets by finding id", () => {
+    const findings = canonicalAdmissionFindings([
+      { id: "R001", tier: "blocking" },
+      { id: "R001", tier: "blocking" },
+      { id: "R002", tier: "advisory" },
+    ]);
+    expect(findings).toEqual([
+      { id: "R001", tier: "blocking" },
+      { id: "R002", tier: "advisory" },
+    ]);
+  });
+});
+
+describe("deltaTouchesPriorFindings", () => {
+  test("is true when a changed path overlaps a prior finding path", () => {
+    expect(
+      deltaTouchesPriorFindings(["src/a.ts", "src/b.ts"], ["src/b.ts"]),
+    ).toBe(true);
+  });
+
+  test("is false when no prior paths overlap", () => {
+    expect(deltaTouchesPriorFindings(["src/a.ts"], ["src/z.ts"])).toBe(false);
+  });
+});
+
+describe("pathsFromPostedFindingMarkers", () => {
+  test("ignores markers from untrusted actors", () => {
+    const trusted = new Set(["pr-hero[bot]"]);
+    expect(
+      pathsFromPostedFindingMarkers(
+        [
+          {
+            user: "evil-user",
+            body: postedFindingComment({
+              head: HEAD_A,
+              tier: "blocking",
+              path: "src/evil.ts",
+            }),
+          },
+          {
+            user: "pr-hero[bot]",
+            body: postedFindingComment({
+              head: HEAD_A,
+              tier: "blocking",
+              path: "src/real.ts",
+            }),
+          },
+        ],
+        HEAD_A,
+        trusted,
+      ),
+    ).toEqual(["src/real.ts"]);
+  });
+});
+
+describe("scanPostedFindingTiers — trusted actors", () => {
+  test("ignores untrusted markers and dedupes by fingerprint", () => {
+    const trusted = new Set(["pr-hero[bot]"]);
+    const body = postedFindingComment({
+      head: HEAD_A,
+      tier: "blocking",
+      c: "same-fingerprint",
+    });
+    expect(
+      scanPostedFindingTiers({
+        summaryHead: HEAD_A,
+        comments: [
+          { user: "pr-hero[bot]", body },
+          { user: "pr-hero[bot]", body },
+          {
+            user: "evil-user",
+            body: postedFindingComment({
+              head: HEAD_A,
+              tier: "blocking",
+              c: "forged",
+            }),
+          },
+        ],
+        trustedActors: trusted,
+      }),
+    ).toEqual({
+      blocking: 1,
+      advisory: 0,
+      matchedMarkers: 1,
+      parsedTiers: 1,
+    });
+  });
+
+  test("fail-opens when only untrusted markers exist", () => {
+    const trusted = new Set(["pr-hero[bot]"]);
+    expect(
+      scanPostedFindingTiers({
+        summaryHead: HEAD_A,
+        comments: [
+          {
+            user: "evil-user",
+            body: postedFindingComment({ head: HEAD_A, tier: "blocking" }),
+          },
+        ],
+        trustedActors: trusted,
+      }),
+    ).toEqual({
+      blocking: 0,
+      advisory: 0,
+      matchedMarkers: 0,
+      parsedTiers: 0,
+      failOpen: true,
+    });
+  });
+});
+
+describe("evaluateCiReviewAdmission — delta risk bypass", () => {
+  test("runs when new commits touch a prior finding path despite low score", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_B,
+        summaryHead: HEAD_A,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: parseCiAdmissionBlock(
+          admissionBody({ blocking: 0, advisory: 1 }),
+        ),
+        postedFindings: null,
+        policy: DEFAULT_POLICY,
+        deltaTouchesPriorFindings: true,
+      }),
+    );
+    expect(verdict).toEqual({ action: "run" });
   });
 });

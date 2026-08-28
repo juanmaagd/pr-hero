@@ -3565,6 +3565,7 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         ci_rereview_min_score: "default",
         ci_blocking_weight: "default",
         ci_advisory_weight: "default",
+        ci_trusted_actors: "default",
       });
       expect(loaded.globalPresent).toBe(false);
       expect(loaded.globalConfigPath).toBe(
@@ -3615,6 +3616,7 @@ describe("loadEffectiveConfig — O-5, no global file resolves as today", () => 
         ci_rereview_min_score: "default",
         ci_blocking_weight: "default",
         ci_advisory_weight: "default",
+        ci_trusted_actors: "default",
       });
     } finally {
       await home.cleanup();
@@ -3891,6 +3893,7 @@ describe("pipelineConfigInput — O-6", () => {
         ci_rereview_min_score: "default" as const,
         ci_blocking_weight: "default" as const,
         ci_advisory_weight: "default" as const,
+        ci_trusted_actors: "repo" as const,
       },
       repoConfigPath: "/repo/.prhero/config.json",
       globalConfigPath: "/home/.prhero/config.json",

@@ -44,11 +44,15 @@ import {
 } from "./ci-reporter";
 import {
   ciReviewSkipDetail,
+  deltaTouchesPriorFindings,
   evaluateCiReviewAdmission,
   nextStateReviewCount,
   parseCiAdmissionBlock,
+  pathsFromPostedFindingMarkers,
   renderCiAdmissionBlock,
   resolveCiReviewPolicy,
+  resolveCiTrustedActors,
+  resolveReviewAttemptCount,
   scanPostedFindingTiers,
   stateReviewCount,
   tierCountsFromFindings,
@@ -123,8 +127,10 @@ import {
   fetchPrComments,
   fetchPrRefs,
   fetchPrReviewComments,
+  ghCompareChangedFiles,
   ghCurrentBranchPr,
   ghPrHeadSha,
+  ghPrHeroWorkflowRunHeads,
   ghPrView,
   ghRepoWebUrl,
   initCodegraphIndex,
@@ -1577,23 +1583,56 @@ async function reviewPr(
     const state = summaryBody === null ? null : parseStateBlock(summaryBody);
     const parsedAdmission =
       summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
+    const trustedActors = resolveCiTrustedActors({
+      githubActor: process.env.GITHUB_ACTOR,
+      extra: config.ci_trusted_actors,
+    });
+    const allComments = [...reviewComments, ...issueComments];
     const postedFindings =
       summaryHead === null
         ? null
         : scanPostedFindingTiers({
             summaryHead,
-            comments: [...reviewComments, ...issueComments],
+            comments: allComments,
+            trustedActors,
           });
     const markerSeen = markerCommentSeen(issueComments);
+    const stateCount = stateReviewCount(state, markerSeen, parsedAdmission);
+    const headBranch = process.env.GITHUB_HEAD_REF;
+    const workflowHeads =
+      headBranch === undefined || headBranch.length === 0
+        ? new Set<string>()
+        : await ghPrHeroWorkflowRunHeads(operatorRoot, headBranch);
+    const reviewCount = resolveReviewAttemptCount({
+      stateCount,
+      workflowHeads,
+    });
+    let deltaRisk = false;
+    if (summaryHead !== null && summaryHead !== target.headSha) {
+      const priorPaths = pathsFromPostedFindingMarkers(
+        allComments,
+        summaryHead,
+        trustedActors,
+      );
+      if (priorPaths.length > 0) {
+        const changedPaths = await ghCompareChangedFiles(
+          operatorRoot,
+          summaryHead,
+          target.headSha,
+        );
+        deltaRisk = deltaTouchesPriorFindings(changedPaths, priorPaths);
+      }
+    }
     const admissionVerdict = evaluateCiReviewAdmission({
       currentHead: target.headSha,
       summaryHead,
       markerSeen,
-      reviewCount: stateReviewCount(state, markerSeen, parsedAdmission),
+      reviewCount,
       state,
       admission: parsedAdmission,
       postedFindings,
       policy: resolveCiReviewPolicy(config),
+      deltaTouchesPriorFindings: deltaRisk,
     });
     if (admissionVerdict.action === "skip") {
       const plan = planCiReviewSkip({ prNumber, verdict: admissionVerdict });
@@ -3081,7 +3120,7 @@ export async function postInlineFindings(input: {
       urls,
     );
     if (framing === undefined) {
-      const counts = tierCountsFromFindings([...doc.findings, ...outside]);
+      const counts = tierCountsFromFindings(doc.findings);
       return `${body}${renderCiAdmissionBlock(doc.head_sha, counts, postedReviewCount)}`;
     }
     return `${body}${renderStateBlock(doc.head_sha, framing.live, postedReviewCount)}`;

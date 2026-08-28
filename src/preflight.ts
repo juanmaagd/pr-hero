@@ -1854,6 +1854,7 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   ci_rereview_min_score: "repo",
   ci_blocking_weight: "repo",
   ci_advisory_weight: "repo",
+  ci_trusted_actors: "repo",
 };
 
 // The ONE nested key, so this is a second table and not a pattern. `enabled`
@@ -1888,6 +1889,7 @@ export interface LocalConfig {
   ci_rereview_min_score?: number;
   ci_blocking_weight?: number;
   ci_advisory_weight?: number;
+  ci_trusted_actors?: string[];
 }
 
 export interface SummaryConfig {
@@ -2103,6 +2105,15 @@ function parseConfigLayer(
     file,
     1,
   );
+  const ciTrustedActors = config.ci_trusted_actors ?? [];
+  if (
+    !Array.isArray(ciTrustedActors) ||
+    !ciTrustedActors.every((a) => typeof a === "string" && a.length > 0)
+  ) {
+    throw new CliUsageError(
+      `${file} ci_trusted_actors must be an array of non-empty strings`,
+    );
+  }
   return {
     ...(given(config.parity_trigger_paths)
       ? { parity_trigger_paths: triggers as string[] }
@@ -2135,6 +2146,9 @@ function parseConfigLayer(
     ...(ciAdvisoryWeight === undefined
       ? {}
       : { ci_advisory_weight: ciAdvisoryWeight }),
+    ...(ciTrustedActors.length > 0
+      ? { ci_trusted_actors: ciTrustedActors as string[] }
+      : {}),
   };
 }
 
@@ -2639,6 +2653,12 @@ export function mergeConfig(
     CONFIG_DIRECTION.ci_advisory_weight,
     (layer) => layer.ci_advisory_weight,
   );
+  const ciTrustedActors = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_trusted_actors,
+    (layer) => layer.ci_trusted_actors,
+    (a, b) => [...(a ?? []), ...(b ?? [])],
+  );
 
   const summary: SummaryConfig = {
     ...(summaryEnabled.value === undefined
@@ -2686,6 +2706,10 @@ export function mergeConfig(
     ...(ciAdvisoryWeight.value === undefined
       ? {}
       : { ci_advisory_weight: ciAdvisoryWeight.value }),
+    ...(ciTrustedActors.value === undefined ||
+    ciTrustedActors.value.length === 0
+      ? {}
+      : { ci_trusted_actors: ciTrustedActors.value }),
   };
 
   const sources: ConfigSources = {
@@ -2704,6 +2728,7 @@ export function mergeConfig(
     ci_rereview_min_score: ciRereviewMinScore.source,
     ci_blocking_weight: ciBlockingWeight.source,
     ci_advisory_weight: ciAdvisoryWeight.source,
+    ci_trusted_actors: ciTrustedActors.source,
   };
 
   return { effective, sources };

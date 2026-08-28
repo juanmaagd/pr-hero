@@ -1084,6 +1084,7 @@ const PRE_C5_LOCAL_KEYS = [
   "ci_blocking_weight",
   "ci_max_reviews",
   "ci_rereview_min_score",
+  "ci_trusted_actors",
   "default_base",
   "max_changed_files",
   "max_changed_lines",
@@ -1117,6 +1118,7 @@ describe("CONFIG_DIRECTION", () => {
       ci_rereview_min_score: 4,
       ci_blocking_weight: 2,
       ci_advisory_weight: 1,
+      ci_trusted_actors: ["pr-hero[bot]"],
     };
     expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(
       Object.keys(populated).sort(),
@@ -1151,6 +1153,7 @@ describe("CONFIG_DIRECTION", () => {
       ci_rereview_min_score: "repo",
       ci_blocking_weight: "repo",
       ci_advisory_weight: "repo",
+      ci_trusted_actors: "repo",
     });
     expect(SUMMARY_DIRECTION).toEqual({ enabled: "capped", model: "person" });
   });
@@ -1644,6 +1647,7 @@ describe("mergeConfig", () => {
       ci_rereview_min_score: "default",
       ci_blocking_weight: "default",
       ci_advisory_weight: "default",
+      ci_trusted_actors: "default",
     });
     // The resolvers still receive the shape they always received.
     expect(nothing.effective).toEqual(EMPTY_LOCAL_CONFIG);
