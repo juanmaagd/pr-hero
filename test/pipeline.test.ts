@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
+import type { NormalizedUsage } from "../src/execution/usage-normalized";
 import {
   mergeRunEnvelope,
   type RunSummary,
@@ -121,6 +122,7 @@ function ok(
   spec: StepSpec,
   output: unknown,
   usageOverrides: Partial<SessionUsage> = {},
+  usageV2?: NormalizedUsage,
 ): StepResult {
   return {
     name: spec.name,
@@ -130,6 +132,7 @@ function ok(
     attempts: 1,
     stderrTail: "",
     resultText: "",
+    ...(usageV2 !== undefined ? { usageV2 } : {}),
   };
 }
 
@@ -1229,6 +1232,114 @@ describe("engine-owned scout", () => {
     expect(plan.pr).toBe(1539);
     expect(plan.head_sha).toBe("4609456d");
     expect(Array.isArray(plan.steps)).toBe(true);
+  });
+
+  // D1-08 PR2 drift guard (design #4865 PR0 delta row / proposal deviation
+  // table): `../deep-review/runner/index.ts:334` spreads runPipeline()'s
+  // RETURNED `usage` object by name into the bench ledger — a field rename or
+  // an extra key there is a silent ledger break, not a compile error. This
+  // test pins today's 5-key legacy contract so PR2's contracts.ts/harness.ts
+  // surgery (usage -> NormalizedUsage) cannot widen or rename it, and pins
+  // that pipeline.json never grows a top-level `usage` key (the new run-level
+  // rollup is `usage_v2`, asserted separately below).
+  test("§D1-08 PR2 — runPipeline()'s returned usage keeps exactly its 5 legacy keys; pipeline.json has no top-level usage key", async () => {
+    const input = await makeInput();
+    const result = await runPipeline(input, {
+      runner: new FakeStepRunner(HUNTERS_OK),
+    });
+
+    expect(Object.keys(result.usage).sort()).toEqual(
+      [
+        "cost_usd_est",
+        "tokens_in",
+        "tokens_out",
+        "tokens_total",
+        "wall_ms",
+      ].sort(),
+    );
+    expect(typeof result.usage.wall_ms).toBe("number");
+    expect(typeof result.usage.cost_usd_est).toBe("number");
+
+    const plan = await readPlan(input.runDir);
+    expect("usage" in plan).toBe(false);
+  });
+
+  // D1-08 PR2 task 2.4 (DECIDE + RED): the run-level usage_v2 rollup lands as
+  // a top-level `usage_v2` key in pipeline.json, summed via
+  // `sumNormalizedUsage` across every step that reported normalized usage —
+  // distinct from the per-step `steps[].usage_v2` recordSettlement attaches.
+  // Written BEFORE src/pipeline.ts gains any usage_v2 wiring, so it is
+  // genuinely RED against today's plan (no usage_v2 key exists at all).
+  test("§D1-08 PR2 — pipeline.json's usage_v2 rollup sums every step's normalized usage under its own key", async () => {
+    const input = await makeInput();
+    const hunterUsageV2: NormalizedUsage = {
+      wallMs: 1_000,
+      tokens: {
+        inputUncached: 100,
+        outputVisible: 10,
+        inputKnown: 100,
+        outputKnown: 10,
+        totalKnown: 110,
+      },
+      completeness: "complete",
+      billingMode: "subscription",
+      costSource: "provider",
+      cashCostUsd: 0.01,
+    };
+    const refuterUsageV2: NormalizedUsage = {
+      wallMs: 500,
+      tokens: {
+        inputUncached: 50,
+        outputVisible: 5,
+        inputKnown: 50,
+        outputKnown: 5,
+        totalKnown: 55,
+      },
+      completeness: "complete",
+      billingMode: "subscription",
+      costSource: "provider",
+      cashCostUsd: 0.005,
+    };
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      "hunter-reliability": (spec) =>
+        ok(
+          spec,
+          {
+            findings: [
+              draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+            ],
+          },
+          {},
+          hunterUsageV2,
+        ),
+      refuter: (spec) =>
+        ok(
+          spec,
+          {
+            results: [
+              { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+            ],
+          } satisfies RefuterResult,
+          {},
+          refuterUsageV2,
+        ),
+    });
+
+    await runPipeline(input, { runner });
+
+    const plan = (await readPlan(input.runDir)) as {
+      usage_v2?: NormalizedUsage;
+    };
+    expect("usage" in plan).toBe(false);
+    expect(plan.usage_v2).toBeDefined();
+    // biome-ignore lint/style/noNonNullAssertion: asserted defined above
+    const rollup = plan.usage_v2!;
+    expect(rollup.completeness).toBe("complete");
+    expect(rollup.billingMode).toBe("subscription");
+    expect(rollup.tokens.inputUncached).toBe(150);
+    expect(rollup.tokens.outputVisible).toBe(15);
+    expect(rollup.cashCostUsd).toBeCloseTo(0.015);
   });
 
   test("the step's own parse turns the model's envelope into validated leads", async () => {

@@ -22,7 +22,7 @@ import {
   settlementReceiptPath,
 } from "../step-runner";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
-import { sumUsage, zeroUsage } from "../usage";
+import { zeroUsage } from "../usage";
 import { writeJsonAtomically } from "./atomic-write";
 import type {
   AsyncEventSink,
@@ -50,6 +50,8 @@ import {
   synthesizeInternalFailure,
   synthesizeUnconfirmed,
 } from "./settlement";
+import type { NormalizedUsage } from "./usage-normalized";
+import { projectLegacyUsage, sumNormalizedUsage } from "./usage-normalized";
 
 // §7 line 416: injected sleep for the `rate_limit` capped-exponential
 // backoff — a real timer in production, a recording stub in tests (§13 line
@@ -824,7 +826,14 @@ export class StepExecutionHarness implements StepRunner {
     // same shape), driven by the live §7 retry decision
     // (decideRetryDisposition/resolveFailureCause) instead of the legacy
     // step-runner failure classifier.
-    let totalUsage = zeroUsage();
+    // D1-08 PR2 (§8): NormalizedUsage is the single source of truth across
+    // attempts now; the legacy SessionUsage is recomputed from it via
+    // `projectLegacyUsage` at every return point below, never accumulated
+    // independently — that is what keeps the two shapes unable to drift.
+    // `undefined` until the first attempt settles: seeding it with a
+    // billingMode/costSource-less zero would force `sumNormalizedUsage` to
+    // collapse the run's real billing mode to "unknown" on the very first sum.
+    let totalUsageV2: NormalizedUsage | undefined;
     let attempts = 0;
     let lastOutcome: TransportOutcome | undefined;
     let cancelHit = false;
@@ -915,14 +924,18 @@ export class StepExecutionHarness implements StepRunner {
       }
 
       lastOutcome = attemptResult.outcome;
-      totalUsage = sumUsage(totalUsage, attemptResult.outcome.usage);
+      totalUsageV2 =
+        totalUsageV2 === undefined
+          ? attemptResult.outcome.usage
+          : sumNormalizedUsage(totalUsageV2, attemptResult.outcome.usage);
 
       if (attemptResult.kind === "delivered") {
         return {
           name: step.name,
           status: "ok",
           output: attemptResult.parsed,
-          usage: totalUsage,
+          usage: projectLegacyUsage(totalUsageV2),
+          usageV2: totalUsageV2,
           attempts,
           stderrTail: lastOutcome?.stderrTail ?? "",
           resultText: lastOutcome?.finalText.slice(-8192) ?? "",
@@ -992,7 +1005,11 @@ export class StepExecutionHarness implements StepRunner {
       return {
         name: step.name,
         status: "failed",
-        usage: totalUsage,
+        usage:
+          totalUsageV2 === undefined
+            ? zeroUsage()
+            : projectLegacyUsage(totalUsageV2),
+        ...(totalUsageV2 === undefined ? {} : { usageV2: totalUsageV2 }),
         attempts,
         stderrTail: [
           lastOutcome?.stderrTail ?? "",
@@ -1007,7 +1024,11 @@ export class StepExecutionHarness implements StepRunner {
     return {
       name: step.name,
       status: "failed",
-      usage: totalUsage,
+      usage:
+        totalUsageV2 === undefined
+          ? zeroUsage()
+          : projectLegacyUsage(totalUsageV2),
+      ...(totalUsageV2 === undefined ? {} : { usageV2: totalUsageV2 }),
       attempts,
       stderrTail: lastOutcome?.stderrTail ?? "",
       resultText: lastOutcome?.finalText.slice(-8192) ?? "",

@@ -27,6 +27,8 @@ import {
   DEFAULT_CANCELLATION_DEADLINE_MS,
   HARNESS_GRACE_MARGIN_MS,
 } from "./execution/settlement";
+import type { NormalizedUsage } from "./execution/usage-normalized";
+import { sumNormalizedUsage } from "./execution/usage-normalized";
 import {
   type DebugRefutedFinding,
   deriveTier,
@@ -635,6 +637,12 @@ interface StepMeta {
   // beats the previous answer, which was silence.
   attemptLogPath?: string;
   settlementReceiptPath?: string;
+  // D1-08 PR2 (§8): the step's normalized usage, attached by recordSettlement
+  // — the single existing usage join site (D1-10c's own comment: a second
+  // pass over `state.steps` "would be a parallel mechanism able to disagree
+  // with `per_agent`"). Absent exactly when `StepResult.usageV2` is: no
+  // attempt ever spawned, or a runner that predates this field.
+  usage_v2?: NormalizedUsage;
 }
 
 // pipeline.json's `scout` key (§3.9). Written on EVERY run, including one
@@ -725,6 +733,12 @@ interface RunState {
   summary?: RunSummary;
   perAgent: Record<string, PerAgentUsage>;
   usageTotal: SessionUsage;
+  // D1-08 PR2: the run-level rollup of every step's normalized usage, summed
+  // via `accumulateUsageV2` alongside each existing `usageTotal` accumulation
+  // site. `undefined` until the first step reports `usageV2` — seeding it
+  // with a billingMode/costSource-less zero would force `sumNormalizedUsage`
+  // to collapse the run's real billing mode to "unknown" on the first sum.
+  usageTotalV2?: NormalizedUsage;
   steps: StepMeta[];
   worsenedHits: WorseningHit[];
 }
@@ -1135,6 +1149,7 @@ async function execute(
       (result) => {
         state.perAgent.summary = perAgentEntry(result);
         state.usageTotal = sumUsage(state.usageTotal, result.usage);
+        accumulateUsageV2(state, result);
         // `recordSettlement` carries the status through from the same result,
         // so the two verdicts cannot drift the way two assignments could.
         if (summarizerMeta) {
@@ -1207,6 +1222,7 @@ async function execute(
     state.perAgent[entry.key] = perAgentEntry(result);
     recordSettlement(entry.meta, result, input.runDir);
     state.usageTotal = sumUsage(state.usageTotal, result.usage);
+    accumulateUsageV2(state, result);
     if (result.status !== "ok") {
       state.hunterFailures++;
       state.partial = true;
@@ -1545,6 +1561,7 @@ async function runRefuter(
       attempts += result.attempts;
       recordSettlement(entry.meta, result, input.runDir);
       state.usageTotal = sumUsage(state.usageTotal, result.usage);
+      accumulateUsageV2(state, result);
     } else {
       recordStepFailure(entry.meta);
     }
@@ -1710,6 +1727,7 @@ async function runVerify(
       attempts += result.attempts;
       recordSettlement(entry.meta, result, input.runDir);
       state.usageTotal = sumUsage(state.usageTotal, result.usage);
+      accumulateUsageV2(state, result);
     } else {
       recordStepFailure(entry.meta);
     }
@@ -1924,6 +1942,7 @@ async function runScout(
   // still carries the attempt count and pointers of the session that ran.
   recordSettlement(meta, result, input.runDir);
   state.usageTotal = sumUsage(state.usageTotal, result.usage);
+  accumulateUsageV2(state, result);
   if (result.status !== "ok") return abandon();
 
   const capped = capScoutLeads(result.output as ScoutLead[]);
@@ -2096,6 +2115,17 @@ async function writePipelinePlan(
     ...(input.rereview === undefined
       ? {}
       : { rereview: fillRereviewProvenance(input, state) }),
+    // D1-08 PR2 task 2.4: the run-level normalized-usage rollup, summed by
+    // `accumulateUsageV2` across every step that reported `usageV2`. Named
+    // distinctly from — and never replacing — the legacy `usage` key this
+    // artifact has never had: `runPipeline`'s RETURNED object remains the
+    // only legacy usage contract (`../deep-review/runner/index.ts` reads it
+    // there, not from this file). Omitted, not nulled, when no step ever
+    // reported normalized usage — same "absence over silence" rule `engine`/
+    // `prompt_set` already follow above.
+    ...(state.usageTotalV2 === undefined
+      ? {}
+      : { usage_v2: state.usageTotalV2 }),
     steps: state.steps,
   };
   // Atomic, never a plain write: every reader of this file parses it as JSON
@@ -2216,11 +2246,29 @@ function stepMeta(spec: StepSpec): StepMeta {
 // the usage join already reads, at the SAME join site — a second pass over the
 // steps would be a parallel mechanism able to disagree with `per_agent`, and
 // this artifact exists so those two cannot.
+// D1-08 PR2: the run-level `usage_v2` rollup's ONLY accumulator, called
+// alongside every existing `state.usageTotal = sumUsage(...)` site (mirrors
+// that legacy pattern rather than adding a second pass over `state.steps` —
+// D1-10c's own comment on why `recordSettlement` is the per-step join site
+// applies here too: a second pass "would be a parallel mechanism able to
+// disagree"). A step whose `usageV2` is absent (no attempt ever spawned)
+// contributes nothing, same as it contributes a legacy zero above.
+function accumulateUsageV2(state: RunState, result: StepResult): void {
+  if (result.usageV2 === undefined) return;
+  state.usageTotalV2 =
+    state.usageTotalV2 === undefined
+      ? result.usageV2
+      : sumNormalizedUsage(state.usageTotalV2, result.usageV2);
+}
+
 function recordSettlement(
   meta: StepMeta,
   result: StepResult,
   runDir: string,
 ): void {
+  if (result.usageV2 !== undefined) {
+    meta.usage_v2 = result.usageV2;
+  }
   meta.status = result.status;
   meta.attempts = result.attempts;
   // Cancellation before the first admitted attempt, and every preflight

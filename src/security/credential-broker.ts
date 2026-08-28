@@ -23,7 +23,16 @@ export type CredentialProjectionFile = {
   readonly sha256: string;
 };
 
-// Verbatim shape of docs/multi-runtime-model-diversity-design.md §6.1.
+// Verbatim shape of docs/multi-runtime-model-diversity-design.md §6.1, plus
+// D1-08 PR3's §9.2 addition: the scope fields `deriveBucketId`
+// (execution/bucket-id.ts) hashes into a rate-limit bucket ID. Populated
+// best-effort per credential kind — today NO broker below sets it, because
+// `claude_subscription_oauth` (the only shipped route) has no
+// account/project/rateLimitGroup to report. That is not a bug: an absent
+// `bucketScope` and an explicit `{}` are handled identically by
+// `deriveBucketId`'s "unknown" sentinel (§9.2 "Bucket Identity Coarsens
+// Unknown Scope"), so every such credential still gets one conservative,
+// coarse bucket rather than an unbounded one (design's Open Question).
 export interface CredentialProjection {
   readonly projectionId: string;
   readonly kind: CredentialKind;
@@ -32,6 +41,11 @@ export interface CredentialProjection {
   readonly syntheticTmp: string;
   readonly env: Readonly<Record<string, string>>;
   readonly files: readonly CredentialProjectionFile[];
+  readonly bucketScope?: {
+    readonly account?: string;
+    readonly project?: string;
+    readonly rateLimitGroup?: string;
+  };
   destroy(): Promise<void>;
 }
 

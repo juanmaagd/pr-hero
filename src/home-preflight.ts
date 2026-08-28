@@ -45,6 +45,11 @@ export interface PrheroLayout {
   storeSocketPath: string;
   // Upgrade check TTL cache
   upgradeCheckPath: string;
+  // D1-08 PR3 (§9.2/Q5): the persisted, non-secret HMAC key that derives
+  // rate-limit bucket IDs. Sibling of the other home files for the same
+  // reason as metricsDbPath: one place, no drift between the layout and the
+  // consumer that reads it. Rotation is delete-the-file.
+  bucketKeyPath: string;
 }
 
 export function prheroLayout(home: string): PrheroLayout {
@@ -61,6 +66,7 @@ export function prheroLayout(home: string): PrheroLayout {
     prheroDbPath: path.join(dir, "prhero.db"),
     storeSocketPath: path.join(dir, "store.sock"),
     upgradeCheckPath: path.join(dir, "upgrade-check.json"),
+    bucketKeyPath: path.join(dir, "bucket-key"),
   };
 }
 

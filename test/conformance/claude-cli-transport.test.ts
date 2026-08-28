@@ -305,6 +305,137 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
   });
 });
 
+// D1-08 PR2 (§8): TransportOutcome.usage is NormalizedUsage now. Corrupted
+// stdout must never fabricate a zero-cost leaf — the exact "$0 on parse
+// failure" collapse this slice exists to kill, just moved one layer down.
+// Cache-read and cache-write are Anthropic's own disjoint additive fields
+// (input_tokens/cache_read_input_tokens/cache_creation_input_tokens sum to
+// total input; they are not a total-minus-subset split), so the transport
+// must carry them straight into their own NormalizedTokens leaves.
+describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
+  test('corrupted stdout yields completeness "unavailable", never a zero-cost leaf', async () => {
+    const fake = makeFakeProc({
+      stdoutBody: "this is not json at all {{{",
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.usage.completeness).toBe("unavailable");
+    expect(outcome.usage.tokens).toEqual({});
+    expect(outcome.usage.cashCostUsd).toBeUndefined();
+  });
+
+  test("valid JSON with no usage block at all is also unavailable, not a fabricated zero", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({ result: "reviewed" }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.usage.completeness).toBe("unavailable");
+    expect(outcome.usage.tokens.inputUncached).toBeUndefined();
+  });
+
+  test("cache-read and cache-write land in distinct disjoint leaves, apart from uncached input", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.042,
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          cache_creation_input_tokens: 300,
+          output_tokens: 45,
+        },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.tokens.inputUncached).toBe(120);
+    expect(outcome.usage.tokens.inputCacheRead).toBe(900);
+    expect(outcome.usage.tokens.inputCacheWrite).toBe(300);
+    expect(outcome.usage.tokens.inputCacheRead).not.toBe(
+      outcome.usage.tokens.inputUncached,
+    );
+    expect(outcome.usage.tokens.outputVisible).toBe(45);
+    expect(outcome.usage.cashCostUsd).toBe(0.042);
+  });
+});
+
+// D1-08 PR3 task 3.11 (§9.2): capabilities() gains an OPTIONAL bucket-scope
+// input so a caller that HAS resolved a credential's scope (PR5a's harness
+// wiring, not yet built) can ask the transport to report the resulting
+// rateLimitBucketId on ProviderCapabilityReport. Calling with no argument —
+// every existing call site — must keep reporting rateLimitBucketId as
+// undefined, byte-identical to pre-PR3 behavior.
+describe("ClaudeCodeCliTransport.capabilities bucket identity (D1-08 PR3)", () => {
+  test("no bucket-scope argument leaves rateLimitBucketId undefined (regression pin)", async () => {
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const report = await transport.capabilities();
+    expect(report.rateLimitBucketId).toBeUndefined();
+  });
+
+  test("a supplied bucket-scope input yields the same bucketId deriveBucketId would compute", async () => {
+    const { deriveBucketId } = await import("../../src/execution/bucket-id");
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const localKey = Buffer.from("e".repeat(64), "hex");
+    const report = await transport.capabilities({
+      credentialFingerprint: "fp-claude-1",
+      bucketScope: { account: "acct-1" },
+      localKey,
+    });
+    const expected = deriveBucketId(
+      {
+        provider: "anthropic",
+        credentialFingerprint: "fp-claude-1",
+        scope: { account: "acct-1" },
+      },
+      localKey,
+    );
+    expect(report.rateLimitBucketId).toBe(expected);
+  });
+
+  test("an unknown (empty) bucket-scope still yields a deterministic bucketId, not undefined", async () => {
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const localKey = Buffer.from("f".repeat(64), "hex");
+    const report = await transport.capabilities({
+      credentialFingerprint: "fp-claude-2",
+      localKey,
+    });
+    expect(report.rateLimitBucketId).toBeDefined();
+    expect(typeof report.rateLimitBucketId).toBe("string");
+  });
+});
+
 describe("ClaudeCodeCliTransport.classifyFailure", () => {
   const transport = new ClaudeCodeCliTransport(okPromptFns);
 
@@ -314,11 +445,12 @@ describe("ClaudeCodeCliTransport.classifyFailure", () => {
       protocolIntegrity: "verified",
       finalText: where === "final" ? witness : "",
       usage: {
-        wall_ms: 1,
-        tokens_in: 1,
-        tokens_out: 0,
-        tokens_total: 1,
-        cost_usd_est: 0,
+        wallMs: 1,
+        tokens: { inputUncached: 1 },
+        completeness: "complete" as const,
+        billingMode: "subscription" as const,
+        costSource: "provider" as const,
+        cashCostUsd: 0,
       },
       stderrTail: where === "stderr" ? witness : "",
     });

@@ -1384,6 +1384,7 @@ describe("prheroHomePaths", () => {
       prheroDbPath: "/Users/x/.prhero/prhero.db",
       storeSocketPath: "/Users/x/.prhero/store.sock",
       upgradeCheckPath: "/Users/x/.prhero/upgrade-check.json",
+      bucketKeyPath: "/Users/x/.prhero/bucket-key",
       plistPath: `/Users/x/Library/LaunchAgents/${WATCH_LAUNCHD_LABEL}.plist`,
     });
   });

@@ -427,10 +427,10 @@ describe("OpenCodeSdkTransport §4.2 line 195 usage aggregation mode", () => {
     const outcome = await pending;
 
     expect(outcome.completion).toBe("success");
-    expect(outcome.usage.tokens_in).toBe(20);
-    expect(outcome.usage.tokens_out).toBe(8);
-    expect(outcome.usage.tokens_total).toBe(28);
-    expect(outcome.usage.cost_usd_est).toBeCloseTo(0.2);
+    expect(outcome.usage.tokens.inputUncached).toBe(20);
+    expect(outcome.usage.tokens.outputVisible).toBe(8);
+    expect(outcome.usage.tokens.totalKnown).toBe(28);
+    expect(outcome.usage.cashCostUsd).toBeCloseTo(0.2);
     const usageEvents = rig.sink.events.filter((e) => e.type === "usage");
     expect(usageEvents).toHaveLength(2);
   });
@@ -452,9 +452,9 @@ describe("OpenCodeSdkTransport §4.2 line 195 usage aggregation mode", () => {
     await advance(rig.clock, 8);
     const outcome = await pending;
 
-    expect(outcome.usage.tokens_in).toBe(25);
-    expect(outcome.usage.tokens_out).toBe(5);
-    expect(outcome.usage.tokens_total).toBe(30);
+    expect(outcome.usage.tokens.inputUncached).toBe(25);
+    expect(outcome.usage.tokens.outputVisible).toBe(5);
+    expect(outcome.usage.tokens.totalKnown).toBe(30);
   });
 
   test("a snapshot→delta flip after the mode was fixed makes the outcome malformed", async () => {
@@ -591,6 +591,39 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
   });
 });
 
+// D1-08 PR3 task 3.11 (§9.2): same optional bucket-scope input as the Claude
+// CLI transport — omitted by every existing call site, so behavior stays
+// byte-identical until PR5a's harness wiring supplies real credential scope.
+describe("OpenCodeSdkTransport.capabilities bucket identity (D1-08 PR3)", () => {
+  test("no bucket-scope argument leaves rateLimitBucketId undefined (regression pin)", async () => {
+    const handle = makeClient({});
+    const transport = new OpenCodeSdkTransport({ client: handle.client });
+    const report = await transport.capabilities();
+    expect(report.rateLimitBucketId).toBeUndefined();
+  });
+
+  test("a supplied bucket-scope input yields the same bucketId deriveBucketId would compute", async () => {
+    const { deriveBucketId } = await import("../../src/execution/bucket-id");
+    const handle = makeClient({});
+    const transport = new OpenCodeSdkTransport({ client: handle.client });
+    const localKey = Buffer.from("1".repeat(64), "hex");
+    const report = await transport.capabilities({
+      credentialFingerprint: "fp-opencode-1",
+      bucketScope: { project: "proj-9" },
+      localKey,
+    });
+    const expected = deriveBucketId(
+      {
+        provider: "openai",
+        credentialFingerprint: "fp-opencode-1",
+        scope: { project: "proj-9" },
+      },
+      localKey,
+    );
+    expect(report.rateLimitBucketId).toBe(expected);
+  });
+});
+
 describe("OpenCodeSdkTransport failure surface", () => {
   test("session creation failure is failed/unverified and classifies auth text", async () => {
     const handle = makeClient({
@@ -631,11 +664,11 @@ describe("OpenCodeSdkTransport failure surface", () => {
         protocolIntegrity: "unverified",
         finalText: "",
         usage: {
-          wall_ms: 0,
-          tokens_in: 0,
-          tokens_out: 0,
-          tokens_total: 0,
-          cost_usd_est: 0,
+          wallMs: 0,
+          tokens: {},
+          completeness: "unavailable",
+          billingMode: "unknown",
+          costSource: "unknown",
         },
         stderrTail: "something entirely opaque happened",
       }),
@@ -843,11 +876,12 @@ describe("OpenCodeSdkTransport classification witness (F003)", () => {
         protocolIntegrity: "verified",
         finalText: prose,
         usage: {
-          wall_ms: 1,
-          tokens_in: 1,
-          tokens_out: 0,
-          tokens_total: 1,
-          cost_usd_est: 0,
+          wallMs: 1,
+          tokens: { inputUncached: 1 },
+          completeness: "complete" as const,
+          billingMode: "subscription" as const,
+          costSource: "provider" as const,
+          cashCostUsd: 0,
         },
         stderrTail: "",
       }),
@@ -863,11 +897,12 @@ describe("OpenCodeSdkTransport classification witness (F003)", () => {
       protocolIntegrity: "verified" as const,
       finalText: "",
       usage: {
-        wall_ms: 1,
-        tokens_in: 1,
-        tokens_out: 0,
-        tokens_total: 1,
-        cost_usd_est: 0,
+        wallMs: 1,
+        tokens: { inputUncached: 1 },
+        completeness: "complete" as const,
+        billingMode: "subscription" as const,
+        costSource: "provider" as const,
+        cashCostUsd: 0,
       },
     };
     expect(
