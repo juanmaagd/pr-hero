@@ -1913,6 +1913,7 @@ describe("assembly", () => {
         parity_trigger_paths: "default" as const,
         suspicion_priors: "default" as const,
         summary: { enabled: "capped" as const, model: "default" as const },
+        routing: "default" as const,
         max_verification_steps: "capped" as const,
         max_changed_lines: "default" as const,
         max_changed_files: "default" as const,

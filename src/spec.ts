@@ -5,6 +5,7 @@
 // that passes nothing gets byte-identical behavior.
 
 import type { Hunter } from "./findings";
+import { parseLogicalIdentity } from "./model-routing";
 
 // A conditional hunter's trigger. `string[]` is a glob/contains pattern list
 // matched against the diff's changed paths with the same parityTriggered
@@ -84,10 +85,24 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
       `agents[${i}].role must be hunter|refuter`,
     );
     must(
+      a.models === undefined,
+      `agents[${i}].models is not supported in D2; fan-out is a D3 capability`,
+    );
+    must(
       a.model === undefined ||
         (typeof a.model === "string" && a.model.length > 0),
       `agents[${i}].model must be a non-empty string when present`,
     );
+    if (a.model !== undefined) {
+      try {
+        parseLogicalIdentity(a.model as string);
+      } catch (error) {
+        must(
+          false,
+          `agents[${i}].model "${a.model}" is not a valid model identity: ${(error as Error).message}`,
+        );
+      }
+    }
     if (a.role === "hunter") {
       hunterCount++;
       must(

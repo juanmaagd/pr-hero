@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { RoutingConfig } from "../src/model-routing";
 import {
   type AgentsDirConfigSeat,
   agentsDirProblems,
@@ -1097,6 +1098,7 @@ describe("CONFIG_DIRECTION", () => {
       parity_trigger_paths: ["**/Auth*"],
       suspicion_priors: [{ path: "a.ts", weight: "high", reason: "hot" }],
       summary: { enabled: false, model: "opus" },
+      routing: { mappings: [] },
       max_verification_steps: 3,
       max_changed_lines: 1500,
       max_changed_files: 150,
@@ -1126,6 +1128,7 @@ describe("CONFIG_DIRECTION", () => {
       parity_trigger_paths: "repo",
       suspicion_priors: "repo",
       summary: "capped",
+      routing: "person",
       max_verification_steps: "capped",
       max_changed_lines: "capped",
       max_changed_files: "capped",
@@ -1215,11 +1218,12 @@ describe("parseGlobalConfig", () => {
 });
 
 describe("parseLocalConfig admits the same keys it does today", () => {
-  // C5 adds NO rejection to the team file. The global file rejects the three
-  // keys no global answer could get right; this one rejects nothing new, and
-  // that asymmetry is the design, not an oversight.
   test("the admitted key set is unchanged, summary.model included", () => {
-    expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(PRE_C5_LOCAL_KEYS);
+    expect(
+      Object.keys(CONFIG_DIRECTION)
+        .filter((k) => k !== "routing")
+        .sort(),
+    ).toEqual(PRE_C5_LOCAL_KEYS);
     const full = {
       agents_dir: "/tmp/agents",
       default_base: "dev",
@@ -1235,6 +1239,127 @@ describe("parseLocalConfig admits the same keys it does today", () => {
       const one = { [key]: (full as Record<string, unknown>)[key] };
       expect(() => parseLocalConfig(JSON.stringify(one))).not.toThrow();
     }
+  });
+
+  test("rejects routing key in repo config as a per-person key", () => {
+    const raw = JSON.stringify({ routing: { mappings: [] } });
+    expect(() => parseLocalConfig(raw)).toThrow(CliUsageError);
+    expect(messageOf(() => parseLocalConfig(raw))).toBe(
+      ".prhero/config.json: routing is a per-person key — put it in ~/.prhero/config.json",
+    );
+  });
+});
+
+describe("Task 1.3: D2 Routing in preflight and credential rejection", () => {
+  test("parseGlobalConfig admits valid routing object", () => {
+    const routingConfig: RoutingConfig = {
+      mappings: [
+        {
+          logical: "anthropic/claude-3-7-sonnet",
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: "claude-3-7-sonnet",
+          modelSnapshot: "claude-3-7-sonnet",
+        },
+      ],
+      default: {
+        backend: "opencode",
+        provider: "openrouter",
+        gateway: "openrouter",
+        modelFamily: "auto",
+        modelSnapshot: "auto",
+      },
+    };
+    const parsed = parseGlobalConfig(
+      JSON.stringify({ routing: routingConfig }),
+    );
+    expect(parsed.routing).toEqual(routingConfig);
+  });
+
+  test("parseGlobalConfig rejects non-object routing", () => {
+    expect(() => parseGlobalConfig('{"routing": "invalid"}')).toThrow(
+      CliUsageError,
+    );
+    expect(messageOf(() => parseGlobalConfig('{"routing": "invalid"}'))).toBe(
+      "~/.prhero/config.json routing must be an object",
+    );
+  });
+
+  test("parseGlobalConfig rejects invalid mapping backend or gateway", () => {
+    const badBackend = JSON.stringify({
+      routing: {
+        mappings: [
+          {
+            logical: "openai/gpt-4o",
+            backend: "bad-backend",
+            provider: "openai",
+          },
+        ],
+      },
+    });
+    expect(() => parseGlobalConfig(badBackend)).toThrow(CliUsageError);
+    expect(messageOf(() => parseGlobalConfig(badBackend))).toContain(
+      "backend must be claude-code|opencode",
+    );
+
+    const badGateway = JSON.stringify({
+      routing: {
+        mappings: [
+          {
+            logical: "openai/gpt-4o",
+            backend: "opencode",
+            provider: "openai",
+            gateway: "bad-gateway",
+          },
+        ],
+      },
+    });
+    expect(() => parseGlobalConfig(badGateway)).toThrow(CliUsageError);
+    expect(messageOf(() => parseGlobalConfig(badGateway))).toContain(
+      "gateway must be configured|direct|openrouter",
+    );
+  });
+
+  test("parseGlobalConfig rejects credential keys embedded in routing config", () => {
+    const credKeys = [
+      "apiKey",
+      "api_key",
+      "token",
+      "secret",
+      "password",
+      "bearer",
+    ];
+    for (const key of credKeys) {
+      const payload = JSON.stringify({
+        routing: {
+          mappings: [
+            {
+              logical: "openai/gpt-4o",
+              backend: "opencode",
+              provider: "openai",
+              [key]: "sk-secret12345678",
+            },
+          ],
+        },
+      });
+      expect(() => parseGlobalConfig(payload)).toThrow(CliUsageError);
+      expect(messageOf(() => parseGlobalConfig(payload))).toContain(
+        "credentials are not permitted in routing config",
+      );
+    }
+  });
+
+  test("redacts secrets in error messages from preflight config parsing", () => {
+    const secret = "sk-ant-api03-abcdef123456789012345678";
+    const raw = JSON.stringify({
+      routing: {
+        unknown_key_with_secret: secret,
+      },
+    });
+    expect(() => parseGlobalConfig(raw)).toThrow(CliUsageError);
+    const msg = messageOf(() => parseGlobalConfig(raw));
+    expect(msg).not.toContain(secret);
   });
 });
 
@@ -1492,6 +1617,7 @@ describe("mergeConfig", () => {
       parity_trigger_paths: "default",
       suspicion_priors: "default",
       summary: { enabled: "default", model: "default" },
+      routing: "default",
       max_verification_steps: "default",
       max_changed_lines: "default",
       max_changed_files: "default",

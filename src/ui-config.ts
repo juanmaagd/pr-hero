@@ -108,6 +108,24 @@ function priorsCell(
   );
 }
 
+function routingCell(
+  routing: LocalConfig["routing"],
+  source: ConfigSource,
+): ConfigCell {
+  if (source === "default" || routing === undefined) {
+    return { value: UNSET, source };
+  }
+  const mappingsCount = routing.mappings
+    ? Array.isArray(routing.mappings)
+      ? routing.mappings.length
+      : Object.keys(routing.mappings).length
+    : 0;
+  return {
+    value: `${mappingsCount} mapping${mappingsCount === 1 ? "" : "s"}`,
+    source,
+  };
+}
+
 // One row per key, and the two Records below are what stops a key from
 // silently going missing: both are exhaustive over their key union, so adding
 // a member to LocalConfig or SummaryConfig fails tsc until it has a cell here.
@@ -131,6 +149,7 @@ export function configRows(
       effective.suspicion_priors,
       sources.suspicion_priors,
     ),
+    routing: routingCell(effective.routing, sources.routing),
     max_verification_steps: cell(
       effective.max_verification_steps?.toString(),
       sources.max_verification_steps,
