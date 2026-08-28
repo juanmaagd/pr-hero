@@ -31,8 +31,16 @@ import {
   type CiGateSkipPlan,
   ciExitCode,
   planCiBudgetSkip,
+  planCiReviewSkip,
   planCiSizeSkip,
 } from "./ci-gates";
+import {
+  ciReviewSkipDetail,
+  evaluateCiReviewAdmission,
+  nextStateReviewCount,
+  resolveCiReviewPolicy,
+  stateReviewCount,
+} from "./ci-review-admission";
 import {
   appendCiOutputs,
   appendStepSummary,
@@ -313,7 +321,7 @@ import { watchCommand } from "./watch";
 // declaration so the delta line's "since <sha>" clause is free (report.ts's
 // PrCommentDelta.previousHeadSha), the exact reuse watch-preflight.ts's own
 // header describes for the cross-machine guard.
-import { parseMarkerHead } from "./watch-preflight";
+import { markerCommentSeen, parseMarkerHead } from "./watch-preflight";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
@@ -1550,6 +1558,42 @@ async function reviewPr(
     }
   }
 
+  if (!options.dryRun && !options.force && isCi) {
+    const issueComments = await fetchPrComments(operatorRoot, prNumber);
+    const existingSummaryId = findMarkedCommentId(issueComments);
+    const summaryBody =
+      existingSummaryId === null
+        ? null
+        : (issueComments.find((c) => c.id === existingSummaryId)?.body ??
+          null);
+    const summaryHead =
+      summaryBody === null ? null : parseMarkerHead(summaryBody);
+    const state =
+      summaryBody === null ? null : parseStateBlock(summaryBody);
+    const markerSeen = markerCommentSeen(issueComments);
+    const admission = evaluateCiReviewAdmission({
+      currentHead: target.headSha,
+      summaryHead,
+      summaryBody,
+      markerSeen,
+      reviewCount: stateReviewCount(state, markerSeen),
+      state,
+      policy: resolveCiReviewPolicy(config),
+    });
+    if (admission.action === "skip") {
+      const plan = planCiReviewSkip({ prNumber, verdict: admission });
+      return await publishCiSkip({
+        operatorRoot,
+        prNumber,
+        post: options.post === true,
+        isCi,
+        stepSummaryFlag: options.stepSummary,
+        plan,
+        noticeMessage: `pr-hero review skipped — ${ciReviewSkipDetail(admission)}`,
+      });
+    }
+  }
+
   // 3 — the free exit, BEFORE the fetch: a PR-mode dry run creates NOTHING —
   // no fetch, no run dir, no worktree — so the cost band rides on GitHub's
   // own counters instead of a local numstat.
@@ -2702,6 +2746,7 @@ async function resolveInlinePostPlan(input: {
   // timeline; see postInlineFindings's own WHY) or leave a pre-existing one
   // alone until the closing PATCH.
   existingSummaryId: number | null;
+  summaryBody: string | null;
   // The FULL finding list the plan matched against — threaded through to
   // postPrReview's 422 recovery so it can re-match with the SAME finding
   // set the plan used, never a narrower one (CRIT-A, verify-report-pr3
@@ -2714,12 +2759,9 @@ async function resolveInlinePostPlan(input: {
     spawnFn: input.spawnFn,
   });
   const existingSummaryId = findMarkedCommentId(issueComments);
+  const summaryBody = summaryBodyForId(issueComments, existingSummaryId);
   const previousHeadSha =
-    existingSummaryId === null
-      ? undefined
-      : (parseMarkerHead(
-          issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
-        ) ?? undefined);
+    summaryBody === null ? undefined : (parseMarkerHead(summaryBody) ?? undefined);
   const posted = await fetchPostedFindingComments(
     input.operatorRoot,
     input.pr,
@@ -2750,7 +2792,22 @@ async function resolveInlinePostPlan(input: {
     posted,
     headSha: input.headSha,
   });
-  return { plan, previousHeadSha, existingSummaryId, findingRefs, posted };
+  return {
+    plan,
+    previousHeadSha,
+    existingSummaryId,
+    summaryBody,
+    findingRefs,
+    posted,
+  };
+}
+
+function summaryBodyForId(
+  comments: { id: number; body: string }[],
+  summaryId: number | null,
+): string | null {
+  if (summaryId === null) return null;
+  return comments.find((c) => c.id === summaryId)?.body ?? null;
 }
 
 // A finding's own posted comment, as a clickable link for the summary's
@@ -2905,8 +2962,12 @@ export async function postInlineFindings(input: {
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
   const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
-  const { plan, previousHeadSha, existingSummaryId, findingRefs, posted } =
+  const { plan, previousHeadSha, existingSummaryId, summaryBody, findingRefs, posted } =
     await resolveInlinePostPlan(input);
+  const postedReviewCount = nextStateReviewCount({
+    existingSummaryId,
+    state: summaryBody === null ? null : parseStateBlock(summaryBody),
+  });
 
   // Before the create-first POST and before the review submission — the last
   // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
@@ -2996,7 +3057,7 @@ export async function postInlineFindings(input: {
       urls,
     );
     if (framing === undefined) return body;
-    return `${body}${renderStateBlock(doc.head_sha, framing.live)}`;
+    return `${body}${renderStateBlock(doc.head_sha, framing.live, postedReviewCount)}`;
   };
 
   const byId = new Map(doc.findings.map((f) => [f.id, f]));

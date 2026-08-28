@@ -153,10 +153,22 @@ interface CiSkipBudgetSummary {
   budgetUsd: number;
 }
 
+interface CiSkipCoverageSummary {
+  kind: "skipped-coverage";
+  prNumber: number;
+  reason: string;
+  detail: string;
+  priorScore: number;
+  minScore: number;
+  reviewCount: number;
+  maxReviews: number;
+}
+
 export type CiSummaryData =
   | CiReviewSummary
   | CiSkipSizeSummary
-  | CiSkipBudgetSummary;
+  | CiSkipBudgetSummary
+  | CiSkipCoverageSummary;
 
 // Assistant-posture footer (spec 2.1: "Footer attributing pr-hero as an AI
 // code review assistant"), shared by all three variants — the summary must
@@ -278,6 +290,22 @@ function skipBudgetLines(data: CiSkipBudgetSummary): string[] {
   ];
 }
 
+function skipCoverageLines(data: CiSkipCoverageSummary): string[] {
+  return [
+    `### ⚠️ pr-hero Review Skipped — PR #${data.prNumber}`,
+    "",
+    "**Reason:** this push does not justify another review run.",
+    "",
+    "| Metric | Value |",
+    "| --- | --- |",
+    `| Skip reason | ${data.reason} |`,
+    `| Prior score | ${data.priorScore} (minimum ${data.minScore}) |`,
+    `| Reviews used | ${data.reviewCount}/${data.maxReviews} |`,
+    "",
+    data.detail,
+  ];
+}
+
 function reviewedLines(data: CiReviewSummary): string[] {
   const blocking = data.findings.filter((f) => f.tier === "blocking");
   const advisory = data.findings.filter((f) => f.tier === "advisory");
@@ -322,7 +350,9 @@ export function renderStepSummary(data: CiSummaryData): string {
       ? skipSizeLines(data)
       : data.kind === "skipped-budget"
         ? skipBudgetLines(data)
-        : reviewedLines(data);
+        : data.kind === "skipped-coverage"
+          ? skipCoverageLines(data)
+          : reviewedLines(data);
   const out = [...body, "---", "", FOOTER];
   return `${out.join("\n").trimEnd()}\n`;
 }

@@ -1850,6 +1850,10 @@ export const CONFIG_DIRECTION: Record<keyof LocalConfig, ConfigDirection> = {
   max_changed_files: "capped",
   scout: "capped",
   post: "capped",
+  ci_max_reviews: "repo",
+  ci_rereview_min_score: "repo",
+  ci_blocking_weight: "repo",
+  ci_advisory_weight: "repo",
 };
 
 // The ONE nested key, so this is a second table and not a pattern. `enabled`
@@ -1879,6 +1883,11 @@ export interface LocalConfig {
   max_changed_files?: number;
   scout?: boolean;
   post?: boolean;
+  // CI admission: when to spend on a synchronize push (see ci-review-admission.ts).
+  ci_max_reviews?: number;
+  ci_rereview_min_score?: number;
+  ci_blocking_weight?: number;
+  ci_advisory_weight?: number;
 }
 
 export interface SummaryConfig {
@@ -2070,6 +2079,30 @@ function parseConfigLayer(
   );
   const scout = parseOptionalBoolean(config.scout, "scout", file);
   const post = parseOptionalBoolean(config.post, "post", file);
+  const ciMaxReviews = parseCiAdmissionInteger(
+    config.ci_max_reviews,
+    "ci_max_reviews",
+    file,
+    1,
+  );
+  const ciRereviewMinScore = parseCiAdmissionInteger(
+    config.ci_rereview_min_score,
+    "ci_rereview_min_score",
+    file,
+    0,
+  );
+  const ciBlockingWeight = parseCiAdmissionInteger(
+    config.ci_blocking_weight,
+    "ci_blocking_weight",
+    file,
+    1,
+  );
+  const ciAdvisoryWeight = parseCiAdmissionInteger(
+    config.ci_advisory_weight,
+    "ci_advisory_weight",
+    file,
+    1,
+  );
   return {
     ...(given(config.parity_trigger_paths)
       ? { parity_trigger_paths: triggers as string[] }
@@ -2092,6 +2125,16 @@ function parseConfigLayer(
       : { max_changed_files: maxChangedFiles }),
     ...(scout === undefined ? {} : { scout }),
     ...(post === undefined ? {} : { post }),
+    ...(ciMaxReviews === undefined ? {} : { ci_max_reviews: ciMaxReviews }),
+    ...(ciRereviewMinScore === undefined
+      ? {}
+      : { ci_rereview_min_score: ciRereviewMinScore }),
+    ...(ciBlockingWeight === undefined
+      ? {}
+      : { ci_blocking_weight: ciBlockingWeight }),
+    ...(ciAdvisoryWeight === undefined
+      ? {}
+      : { ci_advisory_weight: ciAdvisoryWeight }),
   };
 }
 
@@ -2365,6 +2408,21 @@ function parseNonNegativeInteger(
   return value;
 }
 
+function parseCiAdmissionInteger(
+  value: unknown,
+  key: string,
+  file: string,
+  min: number,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseNonNegativeInteger(value, key, file);
+  if (parsed === undefined) return undefined;
+  if (parsed < min) {
+    throw new CliUsageError(`${file} ${key} must be an integer >= ${min}`);
+  }
+  return parsed;
+}
+
 // Widened, not weakened. Each of these reads exactly ONE property, so the
 // parameter names that property instead of demanding a whole LocalConfig —
 // which is what lets a caller hand over a raw parsed layer, before the merge
@@ -2561,6 +2619,26 @@ export function mergeConfig(
     CONFIG_DIRECTION.routing,
     (layer) => layer.routing,
   );
+  const ciMaxReviews = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_max_reviews,
+    (layer) => layer.ci_max_reviews,
+  );
+  const ciRereviewMinScore = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_rereview_min_score,
+    (layer) => layer.ci_rereview_min_score,
+  );
+  const ciBlockingWeight = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_blocking_weight,
+    (layer) => layer.ci_blocking_weight,
+  );
+  const ciAdvisoryWeight = foldKey(
+    layers,
+    CONFIG_DIRECTION.ci_advisory_weight,
+    (layer) => layer.ci_advisory_weight,
+  );
 
   const summary: SummaryConfig = {
     ...(summaryEnabled.value === undefined
@@ -2596,6 +2674,18 @@ export function mergeConfig(
       : { max_changed_files: maxFiles.value }),
     ...(scout.value === undefined ? {} : { scout: scout.value }),
     ...(post.value === undefined ? {} : { post: post.value }),
+    ...(ciMaxReviews.value === undefined
+      ? {}
+      : { ci_max_reviews: ciMaxReviews.value }),
+    ...(ciRereviewMinScore.value === undefined
+      ? {}
+      : { ci_rereview_min_score: ciRereviewMinScore.value }),
+    ...(ciBlockingWeight.value === undefined
+      ? {}
+      : { ci_blocking_weight: ciBlockingWeight.value }),
+    ...(ciAdvisoryWeight.value === undefined
+      ? {}
+      : { ci_advisory_weight: ciAdvisoryWeight.value }),
   };
 
   const sources: ConfigSources = {
@@ -2610,6 +2700,10 @@ export function mergeConfig(
     max_changed_files: maxFiles.source,
     scout: scout.source,
     post: post.source,
+    ci_max_reviews: ciMaxReviews.source,
+    ci_rereview_min_score: ciRereviewMinScore.source,
+    ci_blocking_weight: ciBlockingWeight.source,
+    ci_advisory_weight: ciAdvisoryWeight.source,
   };
 
   return { effective, sources };

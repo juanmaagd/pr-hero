@@ -1080,6 +1080,10 @@ function messageOf(run: () => unknown): string {
 // so a future narrowing of the team file's surface has to be deliberate.
 const PRE_C5_LOCAL_KEYS = [
   "agents_dir",
+  "ci_advisory_weight",
+  "ci_blocking_weight",
+  "ci_max_reviews",
+  "ci_rereview_min_score",
   "default_base",
   "max_changed_files",
   "max_changed_lines",
@@ -1109,6 +1113,10 @@ describe("CONFIG_DIRECTION", () => {
       max_changed_files: 150,
       scout: false,
       post: false,
+      ci_max_reviews: 2,
+      ci_rereview_min_score: 4,
+      ci_blocking_weight: 2,
+      ci_advisory_weight: 1,
     };
     expect(Object.keys(CONFIG_DIRECTION).sort()).toEqual(
       Object.keys(populated).sort(),
@@ -1139,6 +1147,10 @@ describe("CONFIG_DIRECTION", () => {
       max_changed_files: "capped",
       scout: "capped",
       post: "capped",
+      ci_max_reviews: "repo",
+      ci_rereview_min_score: "repo",
+      ci_blocking_weight: "repo",
+      ci_advisory_weight: "repo",
     });
     expect(SUMMARY_DIRECTION).toEqual({ enabled: "capped", model: "person" });
   });
@@ -1628,6 +1640,10 @@ describe("mergeConfig", () => {
       max_changed_files: "default",
       scout: "default",
       post: "default",
+      ci_max_reviews: "default",
+      ci_rereview_min_score: "default",
+      ci_blocking_weight: "default",
+      ci_advisory_weight: "default",
     });
     // The resolvers still receive the shape they always received.
     expect(nothing.effective).toEqual(EMPTY_LOCAL_CONFIG);

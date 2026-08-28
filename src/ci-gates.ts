@@ -65,6 +65,10 @@ import {
   type CiSummaryData,
   renderStepSummary,
 } from "./ci-reporter";
+import {
+  type CiReviewAdmissionVerdict,
+  ciReviewSkipDetail,
+} from "./ci-review-admission";
 import type { SizeGateVerdict } from "./size-gate";
 
 function usd(amount: number): string {
@@ -144,6 +148,7 @@ export interface CiGateSkip {
 // `head=` declaration to, and no fields to encode — see the module header.
 export const SKIP_SIZE_COMMENT_MARKER = "<!-- pr-hero-skip-size -->";
 export const SKIP_BUDGET_COMMENT_MARKER = "<!-- pr-hero-skip-budget -->";
+export const SKIP_COVERAGE_COMMENT_MARKER = "<!-- pr-hero-skip-coverage -->";
 
 // Same register as ci-reporter.ts's `skipSizeLines`/`skipBudgetLines` and
 // project rule 4 (assistant posture): a gate skip is a courteous notice
@@ -151,6 +156,7 @@ export const SKIP_BUDGET_COMMENT_MARKER = "<!-- pr-hero-skip-budget -->";
 // as a practical option, not a correction.
 type SkipSizeSummary = Extract<CiSummaryData, { kind: "skipped-size" }>;
 type SkipBudgetSummary = Extract<CiSummaryData, { kind: "skipped-budget" }>;
+type SkipCoverageSummary = Extract<CiSummaryData, { kind: "skipped-coverage" }>;
 
 function buildSizeSkipComment(data: SkipSizeSummary): string {
   const lines = [
@@ -285,7 +291,7 @@ export interface CiGateSkipPlan {
 // comment and summary already show (this module's own "same numbers"
 // doctrine, see the module header).
 export function ciGateSkipOutputs(
-  status: "skipped-size" | "skipped-budget",
+  status: "skipped-size" | "skipped-budget" | "skipped-coverage",
   estimatedCostUsd: number,
 ): CiOutputs {
   return {
@@ -321,6 +327,57 @@ export function planCiBudgetSkip(
     markerPrefix: SKIP_BUDGET_COMMENT_MARKER,
     summaryMarkdown: renderStepSummary(skip.summary),
     outputs: ciGateSkipOutputs("skipped-budget", input.estimatedCostUsd),
+  };
+}
+
+const COVERAGE_REASON_LABEL: Record<
+  Extract<CiReviewAdmissionVerdict, { action: "skip" }>["reason"],
+  string
+> = {
+  "same-head": "already reviewed at this commit",
+  "max-reviews": "review limit reached for this PR",
+  "below-threshold": "prior findings below the re-review score floor",
+};
+
+function buildCoverageSkipComment(data: SkipCoverageSummary): string {
+  const lines = [
+    SKIP_COVERAGE_COMMENT_MARKER,
+    "## pr-hero review skipped",
+    "",
+    "⚠️ This push did not justify another review run.",
+    "",
+    `**${data.detail}**`,
+    "",
+    `Prior score: ${data.priorScore} (re-review needs ≥ ${data.minScore}). ` +
+      `Reviews on this PR: ${data.reviewCount}/${data.maxReviews}.`,
+    "",
+    "The existing review comment still describes the last head pr-hero " +
+      "reviewed. Push a fix for the posted findings, or run " +
+      "`pr-hero review --pr <n> --post --force` locally to override.",
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+export function planCiReviewSkip(input: {
+  prNumber: number;
+  verdict: Extract<CiReviewAdmissionVerdict, { action: "skip" }>;
+}): CiGateSkipPlan {
+  const detail = ciReviewSkipDetail(input.verdict);
+  const summary: SkipCoverageSummary = {
+    kind: "skipped-coverage",
+    prNumber: input.prNumber,
+    reason: COVERAGE_REASON_LABEL[input.verdict.reason],
+    detail,
+    priorScore: input.verdict.prior.score,
+    minScore: input.verdict.minScore,
+    reviewCount: input.verdict.reviewCount,
+    maxReviews: input.verdict.maxReviews,
+  };
+  return {
+    comment: buildCoverageSkipComment(summary),
+    markerPrefix: SKIP_COVERAGE_COMMENT_MARKER,
+    summaryMarkdown: renderStepSummary(summary),
+    outputs: ciGateSkipOutputs("skipped-coverage", 0),
   };
 }
 
