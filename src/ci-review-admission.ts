@@ -121,7 +121,8 @@ export function priorTierScore(
   return {
     blocking,
     advisory,
-    score: blocking * weights.blockingWeight + advisory * weights.advisoryWeight,
+    score:
+      blocking * weights.blockingWeight + advisory * weights.advisoryWeight,
     source: "state",
   };
 }
@@ -141,9 +142,10 @@ export interface ParsedCiAdmissionBlock {
   reviews: number;
 }
 
-export function tierCountsFromFindings(
-  findings: readonly { tier: Tier }[],
-): { blocking: number; advisory: number } {
+export function tierCountsFromFindings(findings: readonly { tier: Tier }[]): {
+  blocking: number;
+  advisory: number;
+} {
   let blocking = 0;
   let advisory = 0;
   for (const finding of findings) {
@@ -169,7 +171,9 @@ export function renderCiAdmissionBlock(
   );
 }
 
-export function parseCiAdmissionBlock(body: string): ParsedCiAdmissionBlock | null {
+export function parseCiAdmissionBlock(
+  body: string,
+): ParsedCiAdmissionBlock | null {
   const start = body.indexOf(PR_CI_ADMISSION_PREFIX);
   if (start === -1) return null;
   const fromMarker = body.slice(start);
@@ -239,10 +243,7 @@ export function evaluateCiReviewAdmission(
   if (!input.markerSeen && input.summaryHead === null) {
     return { action: "run" };
   }
-  if (
-    input.summaryHead !== null &&
-    input.summaryHead === input.currentHead
-  ) {
+  if (input.summaryHead !== null && input.summaryHead === input.currentHead) {
     const prior = priorScoreForAdmission({
       state: input.state,
       admission: input.admission,
@@ -302,12 +303,8 @@ export function ciReviewSkipDetail(
     case "same-head":
       return "this commit was already reviewed";
     case "max-reviews":
-      return (
-        `review limit reached (${reviewCount}/${maxReviews} reviews on this PR)`
-      );
+      return `review limit reached (${reviewCount}/${maxReviews} reviews on this PR)`;
     case "below-threshold":
-      return (
-        `${counts}; re-review needs score ≥ ${minScore} to justify another run`
-      );
+      return `${counts}; re-review needs score ≥ ${minScore} to justify another run`;
   }
 }

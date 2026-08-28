@@ -35,6 +35,14 @@ import {
   planCiSizeSkip,
 } from "./ci-gates";
 import {
+  appendCiOutputs,
+  appendStepSummary,
+  type CiOutputs,
+  type CiSummaryData,
+  formatWorkflowCommand,
+  renderStepSummary,
+} from "./ci-reporter";
+import {
   ciReviewSkipDetail,
   evaluateCiReviewAdmission,
   nextStateReviewCount,
@@ -44,14 +52,6 @@ import {
   stateReviewCount,
   tierCountsFromFindings,
 } from "./ci-review-admission";
-import {
-  appendCiOutputs,
-  appendStepSummary,
-  type CiOutputs,
-  type CiSummaryData,
-  formatWorkflowCommand,
-  renderStepSummary,
-} from "./ci-reporter";
 import { runCiSetup } from "./ci-setup";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
@@ -1567,12 +1567,10 @@ async function reviewPr(
     const summaryBody =
       existingSummaryId === null
         ? null
-        : (issueComments.find((c) => c.id === existingSummaryId)?.body ??
-          null);
+        : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? null);
     const summaryHead =
       summaryBody === null ? null : parseMarkerHead(summaryBody);
-    const state =
-      summaryBody === null ? null : parseStateBlock(summaryBody);
+    const state = summaryBody === null ? null : parseStateBlock(summaryBody);
     const parsedAdmission =
       summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
     const markerSeen = markerCommentSeen(issueComments);
@@ -2766,7 +2764,9 @@ async function resolveInlinePostPlan(input: {
   const existingSummaryId = findMarkedCommentId(issueComments);
   const summaryBody = summaryBodyForId(issueComments, existingSummaryId);
   const previousHeadSha =
-    summaryBody === null ? undefined : (parseMarkerHead(summaryBody) ?? undefined);
+    summaryBody === null
+      ? undefined
+      : (parseMarkerHead(summaryBody) ?? undefined);
   const posted = await fetchPostedFindingComments(
     input.operatorRoot,
     input.pr,
@@ -2967,8 +2967,14 @@ export async function postInlineFindings(input: {
 }): Promise<InlinePostOutcome> {
   const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
   const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
-  const { plan, previousHeadSha, existingSummaryId, summaryBody, findingRefs, posted } =
-    await resolveInlinePostPlan(input);
+  const {
+    plan,
+    previousHeadSha,
+    existingSummaryId,
+    summaryBody,
+    findingRefs,
+    posted,
+  } = await resolveInlinePostPlan(input);
   const postedReviewCount = nextStateReviewCount({
     existingSummaryId,
     state: summaryBody === null ? null : parseStateBlock(summaryBody),

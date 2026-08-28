@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import type { Tier } from "../src/findings";
 import {
   DEFAULT_CI_ADVISORY_WEIGHT,
   DEFAULT_CI_BLOCKING_WEIGHT,
@@ -11,6 +10,7 @@ import {
   resolveCiReviewPolicy,
   stateReviewCount,
 } from "../src/ci-review-admission";
+import type { Tier } from "../src/findings";
 import { stateFinding } from "../src/rereview-state";
 
 const HEAD_A = "a".repeat(40);
@@ -42,30 +42,22 @@ function admissionBody(
 describe("priorTierScore", () => {
   test("2 advisory → score 2", () => {
     expect(
-      priorTierScore(
-        [finding("advisory"), finding("advisory")],
-        DEFAULT_POLICY,
-      ).score,
+      priorTierScore([finding("advisory"), finding("advisory")], DEFAULT_POLICY)
+        .score,
     ).toBe(2);
   });
 
   test("1 advisory + 1 blocking → score 3", () => {
     expect(
-      priorTierScore(
-        [finding("advisory"), finding("blocking")],
-        DEFAULT_POLICY,
-      ).score,
+      priorTierScore([finding("advisory"), finding("blocking")], DEFAULT_POLICY)
+        .score,
     ).toBe(3);
   });
 
   test("2 advisory + 1 blocking → score 4", () => {
     expect(
       priorTierScore(
-        [
-          finding("advisory"),
-          finding("advisory"),
-          finding("blocking"),
-        ],
+        [finding("advisory"), finding("advisory"), finding("blocking")],
         DEFAULT_POLICY,
       ).score,
     ).toBe(4);
@@ -74,7 +66,9 @@ describe("priorTierScore", () => {
 
 describe("parseCiAdmissionBlock", () => {
   test("reads tier counts from the admission marker", () => {
-    expect(parseCiAdmissionBlock(admissionBody({ blocking: 1, advisory: 2 }))).toEqual({
+    expect(
+      parseCiAdmissionBlock(admissionBody({ blocking: 1, advisory: 2 })),
+    ).toEqual({
       headSha: HEAD_A,
       blocking: 1,
       advisory: 2,
@@ -207,10 +201,7 @@ describe("evaluateCiReviewAdmission", () => {
 describe("stateReviewCount", () => {
   test("reads reviews from state when present", () => {
     expect(
-      stateReviewCount(
-        { headSha: HEAD_A, findings: [], reviews: 2 },
-        true,
-      ),
+      stateReviewCount({ headSha: HEAD_A, findings: [], reviews: 2 }, true),
     ).toBe(2);
   });
 

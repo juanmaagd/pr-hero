@@ -240,7 +240,11 @@ function asStateReviews(parsed: unknown): number | undefined | null {
   if (typeof parsed !== "object" || parsed === null) return null;
   const reviews = (parsed as { reviews?: unknown }).reviews;
   if (reviews === undefined) return undefined;
-  if (typeof reviews !== "number" || !Number.isInteger(reviews) || reviews < 1) {
+  if (
+    typeof reviews !== "number" ||
+    !Number.isInteger(reviews) ||
+    reviews < 1
+  ) {
     return null;
   }
   return reviews;
