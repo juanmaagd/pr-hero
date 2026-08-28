@@ -120,6 +120,18 @@ function routingCell(
       ? routing.mappings.length
       : Object.keys(routing.mappings).length
     : 0;
+  if (mappingsCount === 0 && routing.default) {
+    return {
+      value: "default route",
+      source,
+    };
+  }
+  if (mappingsCount > 0 && routing.default) {
+    return {
+      value: `${mappingsCount} mapping${mappingsCount === 1 ? "" : "s"} (+ default)`,
+      source,
+    };
+  }
   return {
     value: `${mappingsCount} mapping${mappingsCount === 1 ? "" : "s"}`,
     source,

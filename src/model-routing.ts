@@ -107,12 +107,16 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
   if (match) {
     const [, provider, model, variant] = match;
     const canonical = `${provider}/${model}${variant ? `#${variant}` : ""}`;
+    const reverseAlias = (
+      Object.keys(CANONICAL_ALIASES) as Array<keyof typeof CANONICAL_ALIASES>
+    ).find((k) => CANONICAL_ALIASES[k].canonical === canonical);
     return {
       raw: trimmed,
       canonical,
       provider,
       model,
       ...(variant !== undefined ? { variant } : {}),
+      ...(reverseAlias !== undefined ? { alias: reverseAlias } : {}),
     };
   }
 
@@ -180,10 +184,24 @@ export function resolveModelRoute(
         config.mappings !== null
       ) {
         const record = config.mappings as Record<string, RouteMapping>;
-        const m =
-          record[parsed.canonical] ??
-          (parsed.alias ? record[parsed.alias] : undefined) ??
-          record[parsed.raw];
+        const candidateKeys = Array.from(
+          new Set(
+            [parsed.canonical, parsed.alias, parsed.raw].filter(
+              (key): key is string => key !== undefined,
+            ),
+          ),
+        );
+        const matchedKeys = candidateKeys.filter((key) => key in record);
+
+        if (matchedKeys.length > 1) {
+          throw new AmbiguousMappingError(
+            redactDiagnostic(
+              `Ambiguous model routing: found ${matchedKeys.length} duplicate mappings for "${parsed.canonical}" in record mappings`,
+            ),
+          );
+        }
+
+        const m = matchedKeys.length > 0 ? record[matchedKeys[0]] : undefined;
 
         if (m !== undefined) {
           if (m.disabled === true || m.allowSpend === false) {

@@ -445,6 +445,30 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
     );
   });
 
+  test("record mappings with multiple matching keys (alias + canonical) throws AmbiguousMappingError", () => {
+    const config: RoutingConfig = {
+      mappings: {
+        sonnet: {
+          backend: "claude-code",
+          provider: "anthropic",
+          disabled: true,
+        },
+        "anthropic/claude-3-7-sonnet": {
+          backend: "claude-code",
+          provider: "anthropic",
+          disabled: false,
+        },
+      },
+    };
+
+    expect(() => resolveModelRoute("sonnet", config)).toThrow(
+      AmbiguousMappingError,
+    );
+    expect(() =>
+      resolveModelRoute("anthropic/claude-3-7-sonnet", config),
+    ).toThrow(AmbiguousMappingError);
+  });
+
   test("disabled default route throws UnauthorizedRouteError", () => {
     const disabledDef: RoutingConfig = {
       default: {
