@@ -89,7 +89,12 @@ function envelope(
 ): string {
   return JSON.stringify({
     result,
-    usage: { input_tokens: tokens.input, output_tokens: tokens.output },
+    usage: {
+      input_tokens: tokens.input,
+      output_tokens: tokens.output,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
     total_cost_usd: cost,
   });
 }

@@ -39,7 +39,10 @@ export function settlementFromUsage(
   if (usage.completeness !== "complete") {
     return { kind: "unresolved", knownUsd: usage.cashCostUsd };
   }
-  return { kind: "settle", actualUsd: usage.cashCostUsd ?? 0 };
+  if (usage.cashCostUsd === undefined) {
+    return { kind: "unresolved", knownUsd: undefined };
+  }
+  return { kind: "settle", actualUsd: usage.cashCostUsd };
 }
 
 // ---- Coupling 2: reserve token ----
@@ -177,13 +180,19 @@ export interface UnresolvedSpend {
   readonly knownUsd?: number;
 }
 
+type TerminalOperationKind =
+  | "settled"
+  | "released_unstarted"
+  | "unresolved_remote";
+
 interface LedgerEntry {
   reservation: SpendReservation;
   // Idempotency key of the transition that made this reservation terminal
   // — undefined while still "reserved". A repeat call carrying THIS exact
-  // key is a no-op; any other key on an already-terminal reservation is a
-  // conflict, never a silent overwrite.
+  // key AND the same operation kind is a no-op; the same key with a
+  // different operation kind is a conflict, never a silent overwrite.
   terminalIdempotencyKey?: string;
+  terminalOperationKind?: TerminalOperationKind;
 }
 
 export class InMemorySpendLedger implements SpendLedger {
@@ -218,21 +227,31 @@ export class InMemorySpendLedger implements SpendLedger {
     decision: Extract<SettlementDecision, { kind: "settle" }>,
     idempotencyKey: string,
   ): Promise<void> {
-    this.transition(reservationId, idempotencyKey, (reservation) => ({
-      ...reservation,
-      state: "settled",
-      settledUsd: decision.actualUsd,
-    }));
+    this.transition(
+      reservationId,
+      idempotencyKey,
+      "settled",
+      (reservation) => ({
+        ...reservation,
+        state: "settled",
+        settledUsd: decision.actualUsd,
+      }),
+    );
   }
 
   async releaseUnstarted(
     reservationId: string,
     idempotencyKey: string,
   ): Promise<void> {
-    this.transition(reservationId, idempotencyKey, (reservation) => ({
-      ...reservation,
-      state: "released_unstarted",
-    }));
+    this.transition(
+      reservationId,
+      idempotencyKey,
+      "released_unstarted",
+      (reservation) => ({
+        ...reservation,
+        state: "released_unstarted",
+      }),
+    );
   }
 
   async markUnresolvedRemote(
@@ -240,14 +259,21 @@ export class InMemorySpendLedger implements SpendLedger {
     knownUsd: number | undefined,
     idempotencyKey: string,
   ): Promise<void> {
-    this.transition(reservationId, idempotencyKey, (reservation) => ({
-      ...reservation,
-      state: "unresolved_remote",
-      knownUsd,
-    }));
-    const entry = this.reservations.get(reservationId);
-    if (entry !== undefined) {
-      this.fencedBuckets.add(entry.reservation.bucketId);
+    const applied = this.transition(
+      reservationId,
+      idempotencyKey,
+      "unresolved_remote",
+      (reservation) => ({
+        ...reservation,
+        state: "unresolved_remote",
+        knownUsd,
+      }),
+    );
+    if (applied) {
+      const entry = this.reservations.get(reservationId);
+      if (entry !== undefined) {
+        this.fencedBuckets.add(entry.reservation.bucketId);
+      }
     }
   }
 
@@ -268,15 +294,19 @@ export class InMemorySpendLedger implements SpendLedger {
   private transition(
     reservationId: string,
     idempotencyKey: string,
+    operationKind: TerminalOperationKind,
     apply: (reservation: SpendReservation) => SpendReservation,
-  ): void {
+  ): boolean {
     const entry = this.reservations.get(reservationId);
     if (entry === undefined) {
       throw new SpendReservationNotFoundError(reservationId);
     }
     if (entry.terminalIdempotencyKey !== undefined) {
-      if (entry.terminalIdempotencyKey === idempotencyKey) {
-        return;
+      if (
+        entry.terminalIdempotencyKey === idempotencyKey &&
+        entry.terminalOperationKind === operationKind
+      ) {
+        return false;
       }
       throw new SpendReservationConflictError(
         reservationId,
@@ -285,5 +315,7 @@ export class InMemorySpendLedger implements SpendLedger {
     }
     entry.reservation = apply(entry.reservation);
     entry.terminalIdempotencyKey = idempotencyKey;
+    entry.terminalOperationKind = operationKind;
+    return true;
   }
 }

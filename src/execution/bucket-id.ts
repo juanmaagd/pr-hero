@@ -104,7 +104,8 @@ export function loadOrCreateBucketKey(
   const readBytes = deps.readFileFn ?? ((p: string) => readFileSync(p));
   const writeBytes =
     deps.writeFileFn ??
-    ((p: string, data: Buffer) => writeFileSync(p, data, { mode: 0o600 }));
+    ((p: string, data: Buffer) =>
+      writeFileSync(p, data, { mode: 0o600, flag: "wx" }));
   const mkdir =
     deps.mkdirFn ?? ((p: string) => mkdirSync(p, { recursive: true }));
   const makeRandomBytes =
@@ -116,6 +117,20 @@ export function loadOrCreateBucketKey(
   }
   mkdir(layout.dir);
   const key = makeRandomBytes(BUCKET_KEY_BYTES);
-  writeBytes(layout.bucketKeyPath, key);
-  return key;
+  try {
+    writeBytes(layout.bucketKeyPath, key);
+    return key;
+  } catch (error) {
+    const code =
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : undefined;
+    if (code === "EEXIST") {
+      return readBytes(layout.bucketKeyPath);
+    }
+    throw error;
+  }
 }

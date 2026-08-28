@@ -13,10 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AttemptAdmissionGate } from "../../src/execution/admission";
 import { ConcurrencyAttemptAdmissionGate } from "../../src/execution/admission";
-import {
-  BucketBreakerTrippedError,
-  ConcurrencyLimiter,
-} from "../../src/execution/concurrency-limiter";
+import { ConcurrencyLimiter } from "../../src/execution/concurrency-limiter";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -252,9 +249,8 @@ describe("PR5a — AttemptAdmissionGate concurrency wiring", () => {
       spawnFn: fakeSpawn,
     });
 
-    await expect(harnessB.run(stepB)).rejects.toBeInstanceOf(
-      BucketBreakerTrippedError,
-    );
+    const resultB = await harnessB.run(stepB);
+    expect(resultB.status).toBe("failed");
     expect(transportBCalls).toBe(0);
   });
 

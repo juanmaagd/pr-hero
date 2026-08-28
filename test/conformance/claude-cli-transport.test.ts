@@ -389,6 +389,35 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
     expect(outcome.usage.tokens.outputVisible).toBe(45);
     expect(outcome.usage.cashCostUsd).toBe(0.042);
   });
+
+  test("a usage block missing any token leaf is partial, never complete with fabricated zeros", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          output_tokens: 45,
+        },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.usage.completeness).toBe("partial");
+    expect(outcome.usage.tokens.providerReportedTotal).toBe(1065);
+    expect(outcome.usage.tokens.inputUncached).toBeUndefined();
+    expect(outcome.usage.tokens.inputKnown).toBeUndefined();
+  });
 });
 
 // D1-08 PR3 task 3.11 (§9.2): capabilities() gains an OPTIONAL bucket-scope

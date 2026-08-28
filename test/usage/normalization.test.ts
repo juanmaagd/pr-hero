@@ -225,6 +225,26 @@ describe("sumNormalizedUsage — accumulation across attempts", () => {
     expect(total.completeness).toBe("partial");
   });
 
+  test("merging complete and partial usage sums totalKnown via providerReportedTotal fallback per attempt", () => {
+    const complete = normalizeInclusiveUsage({
+      wallMs: 100,
+      inputTotal: 100,
+      outputTotal: 80,
+      billingMode: "metered",
+      costSource: "provider",
+    });
+    const partial = normalizePartialUsage({
+      wallMs: 50,
+      providerReportedTotal: 500,
+      billingMode: "metered",
+      costSource: "provider",
+    });
+
+    const total = sumNormalizedUsage(complete, partial);
+    expect(total.tokens.totalKnown).toBe(680);
+    expect(projectLegacyUsage(total).tokens_total).toBe(680);
+  });
+
   test("token leaves and wall time sum across attempts", () => {
     const a = normalizeInclusiveUsage({
       wallMs: 100,

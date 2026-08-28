@@ -52,6 +52,21 @@ describe("settlementFromUsage (coupling 1 producer)", () => {
     });
   });
 
+  test("complete usage with undefined cashCostUsd resolves to unresolved, never a fabricated zero settlement", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "metered",
+      costSource: "provider",
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+
   test("partial usage always resolves to unresolved, carrying whatever cash cost is known", () => {
     const usage = normalizePartialUsage({
       wallMs: 800,
@@ -207,6 +222,26 @@ describe("CAS idempotency", () => {
 
     // The conflicting call must not have overwritten the settled amount.
     const settled = await ledger.getReservation(reservation.reservationId);
+    expect(settled?.settledUsd).toBe(1);
+  });
+
+  test("the same idempotency key with a different terminal operation is a conflict, not a silent overwrite", async () => {
+    const ledger = new InMemorySpendLedger();
+    const token = beginStep();
+    const reservation = await ledger.reserve(reserveInput(), token);
+
+    await ledger.settle(
+      reservation.reservationId,
+      { kind: "settle", actualUsd: 1 },
+      "idem-shared",
+    );
+
+    await expect(
+      ledger.releaseUnstarted(reservation.reservationId, "idem-shared"),
+    ).rejects.toBeInstanceOf(SpendReservationConflictError);
+
+    const settled = await ledger.getReservation(reservation.reservationId);
+    expect(settled?.state).toBe("settled");
     expect(settled?.settledUsd).toBe(1);
   });
 });
