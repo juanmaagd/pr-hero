@@ -10,6 +10,7 @@ import type {
   AuthEvent,
   DenialCode,
   ExecutableAllowlistEntry,
+  ResolvedModelRoute,
   StepAdmissionGate,
 } from "./execution/contracts";
 import { StepExecutionHarness } from "./execution/harness";
@@ -50,6 +51,7 @@ export interface StepSpec {
   // `<step>__<model-slug>` legs sharing a groupId.
   backend?: "claude-code" | "opencode";
   models?: string[];
+  route?: ResolvedModelRoute;
 }
 
 export interface RetryInfo {

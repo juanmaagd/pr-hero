@@ -320,6 +320,9 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
     expect(() => resolveModelRoute("openai/gpt-4o", { mappings: [] })).toThrow(
       UnmappedRouteError,
     );
+    expect(() =>
+      resolveModelRoute("anthropic/claude-3-7-sonnet", { mappings: [] }),
+    ).toThrow(UnmappedRouteError);
   });
 
   test("unmapped non-alias with default resolves to default mapping", () => {

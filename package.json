@@ -52,5 +52,8 @@
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "@opencode-ai/sdk": "^1.18.23"
   }
 }
