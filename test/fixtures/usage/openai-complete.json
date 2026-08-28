@@ -1,0 +1,40 @@
+{
+  "provider": "openai",
+  "case": "complete",
+  "description": "chat completions usage block nests cached and reasoning tokens under *_details, no cache-write concept",
+  "raw": {
+    "prompt_tokens": 1000,
+    "completion_tokens": 300,
+    "prompt_tokens_details": { "cached_tokens": 400 },
+    "completion_tokens_details": { "reasoning_tokens": 120 }
+  },
+  "input": {
+    "wallMs": 5200,
+    "inputTotal": 1000,
+    "inputCacheRead": 400,
+    "outputTotal": 300,
+    "outputReasoning": 120,
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.012,
+    "notionalCostUsd": 0.012
+  },
+  "expected": {
+    "wallMs": 5200,
+    "tokens": {
+      "inputCacheRead": 400,
+      "inputOther": 600,
+      "outputReasoning": 120,
+      "outputOther": 180,
+      "inputKnown": 1000,
+      "outputKnown": 300,
+      "totalKnown": 1300,
+      "providerReportedTotal": 1300
+    },
+    "completeness": "complete",
+    "billingMode": "metered",
+    "costSource": "provider",
+    "cashCostUsd": 0.012,
+    "notionalCostUsd": 0.012
+  }
+}

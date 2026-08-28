@@ -1,0 +1,16 @@
+{
+  "provider": "openai",
+  "case": "unknown",
+  "description": "SSE stream ended at [DONE] without the final usage chunk ever arriving",
+  "raw": "data: [DONE]\n\n",
+  "input": {
+    "wallMs": 6100
+  },
+  "expected": {
+    "wallMs": 6100,
+    "tokens": {},
+    "completeness": "unavailable",
+    "billingMode": "unknown",
+    "costSource": "unknown"
+  }
+}

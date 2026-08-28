@@ -1,0 +1,16 @@
+{
+  "provider": "anthropic",
+  "case": "unknown",
+  "description": "stdout truncated mid-stream before any usage block arrived",
+  "raw": null,
+  "input": {
+    "wallMs": 9200
+  },
+  "expected": {
+    "wallMs": 9200,
+    "tokens": {},
+    "completeness": "unavailable",
+    "billingMode": "unknown",
+    "costSource": "unknown"
+  }
+}
