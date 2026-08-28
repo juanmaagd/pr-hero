@@ -21,6 +21,7 @@ import {
   type StepSpec,
   settlementReceiptPath,
 } from "../step-runner";
+import type { TransportRegistry } from "../transport-registry";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
 import type { AttemptAdmissionGate, AttemptLease } from "./admission";
@@ -108,6 +109,7 @@ export interface StepExecutionHarnessOptions {
   readonly executableAllowlist?: readonly ExecutableAllowlistEntry[];
   readonly binaryPath?: string;
   readonly admissionGate?: StepAdmissionGate;
+  readonly registry?: TransportRegistry;
   readonly transport?: ProviderTransport;
   readonly onAuthEvent?: (event: AuthEvent) => void;
   readonly spawnFn?: typeof Bun.spawn;
@@ -285,6 +287,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly allowlist?: readonly ExecutableAllowlistEntry[];
   private readonly binaryPath?: string;
   private readonly admissionGate?: StepAdmissionGate;
+  private readonly registry?: TransportRegistry;
   private readonly transport: ProviderTransport;
   private readonly onAuthEvent?: (event: AuthEvent) => void;
   private readonly isTestFake: boolean;
@@ -310,6 +313,7 @@ export class StepExecutionHarness implements StepRunner {
     this.allowlist = options.executableAllowlist;
     this.binaryPath = options.binaryPath;
     this.admissionGate = options.admissionGate;
+    this.registry = options.registry;
     this.transport =
       options.transport ??
       new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
@@ -333,6 +337,26 @@ export class StepExecutionHarness implements StepRunner {
 
   async run(step: StepSpec): Promise<StepResult> {
     let canonicalCwd = step.cwd;
+
+    // Resolve transport for this step
+    let transport: ProviderTransport;
+    if (this.registry) {
+      const backend = step.route?.backend ?? step.backend ?? "claude-code";
+      try {
+        transport = this.registry.get(backend);
+      } catch (err) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `Transport resolution failed: ${(err as Error).message}`,
+          resultText: "",
+        };
+      }
+    } else {
+      transport = this.transport;
+    }
 
     // 1. Workspace authorization
     if (this.workspaceRoot !== undefined) {
@@ -370,7 +394,9 @@ export class StepExecutionHarness implements StepRunner {
     let verifiedBinaryPath: string;
 
     if (this.allowlist !== undefined) {
-      const candidate = this.binaryPath ?? "claude";
+      const candidate =
+        this.binaryPath ??
+        (transport.backend === "opencode" ? "opencode" : "claude");
       const execResult = await verifyExecutableAuthority({
         candidatePath: candidate,
         allowlist: this.allowlist,
@@ -397,7 +423,9 @@ export class StepExecutionHarness implements StepRunner {
     } else if (this.isTestFake) {
       // Offline unit test runner with fake spawn
       this.onAuthEvent?.({ kind: "executable", status: "approved" });
-      verifiedBinaryPath = this.binaryPath ?? "claude";
+      verifiedBinaryPath =
+        this.binaryPath ??
+        (transport.backend === "opencode" ? "opencode" : "claude");
     } else {
       // Production without configured allowlist -> fail closed
       this.onAuthEvent?.({
@@ -469,6 +497,7 @@ export class StepExecutionHarness implements StepRunner {
         verifiedBinaryPath,
         childEnv: this.buildChildEnv(projection),
         projection,
+        transport,
       });
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
@@ -565,9 +594,11 @@ export class StepExecutionHarness implements StepRunner {
 
   // §5.2: deadlines are declared transport capabilities, not request fields;
   // an unusable capability report falls back to the CLI/POSIX row default.
-  private async resolveCancellationDeadlineMs(): Promise<number> {
+  private async resolveCancellationDeadlineMs(
+    transport: ProviderTransport = this.transport,
+  ): Promise<number> {
     try {
-      const report = await this.transport.capabilities();
+      const report = await transport.capabilities();
       const declared = report.cancellation?.deadlineMs;
       if (
         typeof declared === "number" &&
@@ -585,6 +616,7 @@ export class StepExecutionHarness implements StepRunner {
   private async executeSession(args: {
     readonly step: StepSpec;
     readonly request: TransportRequest;
+    readonly transport: ProviderTransport;
     readonly deadlineMs: number;
     readonly onData: (
       outcome: TransportOutcome,
@@ -601,7 +633,7 @@ export class StepExecutionHarness implements StepRunner {
     // `local_fenced_remote_unconfirmed` without re-deriving it.
     readonly receipt: SettlementReceipt;
   }> {
-    const { step, request, deadlineMs, onData } = args;
+    const { step, request, transport, deadlineMs, onData } = args;
 
     const settlement = createSettlement(request.sessionId, request.attempt, {
       now: this.nowIso,
@@ -681,7 +713,7 @@ export class StepExecutionHarness implements StepRunner {
       },
     };
 
-    const execPromise: Promise<void> = this.transport
+    const execPromise: Promise<void> = transport
       .execute(request, { signal: controller.signal, events: sink })
       .then((resolved) => {
         if (fenceClosed || !lease.valid) {
@@ -707,7 +739,7 @@ export class StepExecutionHarness implements StepRunner {
       id: request.sessionId,
       attempt: request.attempt,
       controller,
-      transport: this.transport.backend,
+      transport: transport.backend,
       writeLease: lease,
       cancellationDeadlineMs: deadlineMs,
       settled,
@@ -852,7 +884,7 @@ export class StepExecutionHarness implements StepRunner {
         // local_fenced_remote_unconfirmed, not the generic
         // local_termination_unconfirmed. §9.2's circuit breaker (runAttempt)
         // keys off precisely this outcome to fence the bucket.
-        const isSdkBackedTransport = this.transport.backend !== "claude-code";
+        const isSdkBackedTransport = transport.backend !== "claude-code";
         // §5.3 step 6: no transport receipt facts → synthesize + quarantine.
         receipt = finalize(() =>
           synthesizeUnconfirmed(settlement, {
@@ -882,9 +914,16 @@ export class StepExecutionHarness implements StepRunner {
     readonly verifiedBinaryPath: string;
     readonly childEnv: Readonly<Record<string, string>>;
     readonly projection?: CredentialProjection;
+    readonly transport: ProviderTransport;
   }): Promise<StepResult> {
-    const { step, canonicalCwd, verifiedBinaryPath, childEnv, projection } =
-      args;
+    const {
+      step,
+      canonicalCwd,
+      verifiedBinaryPath,
+      childEnv,
+      projection,
+      transport,
+    } = args;
 
     // 3. Admission gate: called once after successful authorization
     if (this.admissionGate) {
@@ -949,7 +988,7 @@ export class StepExecutionHarness implements StepRunner {
     // terminal attempt from opening a new reserve+admit cycle.
     let reserveToken: ReserveToken = beginStep();
 
-    const deadlineMs = await this.resolveCancellationDeadlineMs();
+    const deadlineMs = await this.resolveCancellationDeadlineMs(transport);
 
     // D3: bind the new transient budget to the EXISTING per-step knob so a
     // step's worst-case spawn count stays byte-identical to the legacy loop
@@ -982,10 +1021,12 @@ export class StepExecutionHarness implements StepRunner {
       const request: TransportRequest = {
         sessionId: `${step.name}-${Date.now()}-${attempts}`,
         attempt: attempts,
-        route: {
-          backend: this.transport.backend,
-          provider: "anthropic",
-          modelFamily: "claude",
+        route: step.route ?? {
+          backend: transport.backend,
+          provider:
+            transport.backend === "claude-code" ? "anthropic" : "opencode",
+          modelFamily:
+            transport.backend === "claude-code" ? "claude" : "opencode",
           modelSnapshot: step.model,
         },
         systemPromptPath: step.systemPromptPath,
@@ -1027,6 +1068,7 @@ export class StepExecutionHarness implements StepRunner {
         kind,
         request,
         deadlineMs,
+        transport,
         reserveToken,
       });
 
@@ -1177,9 +1219,18 @@ export class StepExecutionHarness implements StepRunner {
     readonly kind: "attempt" | "format-retry";
     readonly request: TransportRequest;
     readonly deadlineMs: number;
+    readonly transport: ProviderTransport;
     readonly reserveToken: ReserveToken;
   }): Promise<AttemptRunResult> {
-    const { step, attempt, kind, request, deadlineMs, reserveToken } = args;
+    const {
+      step,
+      attempt,
+      kind,
+      request,
+      deadlineMs,
+      transport,
+      reserveToken,
+    } = args;
 
     // D1-08 PR5b (§9.1 five-step order): acquire (1) → reserve (2) →
     // execute (3) → settle-or-unresolved (4) → release-if-unstarted (5),
@@ -1245,6 +1296,7 @@ export class StepExecutionHarness implements StepRunner {
         kind,
         request,
         deadlineMs,
+        transport,
       });
 
       // Step 4: settle actual known cost exactly once (or route to
@@ -1339,12 +1391,14 @@ export class StepExecutionHarness implements StepRunner {
     readonly kind: "attempt" | "format-retry";
     readonly request: TransportRequest;
     readonly deadlineMs: number;
+    readonly transport: ProviderTransport;
   }): Promise<AttemptRunResult> {
-    const { step, attempt, kind, request, deadlineMs } = args;
+    const { step, attempt, kind, request, deadlineMs, transport } = args;
 
     const execution = await this.executeSession({
       step,
       request,
+      transport,
       deadlineMs,
       onData: async (outcome, settlement): Promise<AttemptDelivery> => {
         try {
