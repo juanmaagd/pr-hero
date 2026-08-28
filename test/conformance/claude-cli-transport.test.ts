@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
-import {
-  aliasModelFamily,
-  aliasModelSnapshot,
-} from "../../src/model-catalog";
+import { aliasModelFamily, aliasModelSnapshot } from "../../src/model-catalog";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";

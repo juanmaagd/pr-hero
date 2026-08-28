@@ -11,10 +11,7 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
-import {
-  aliasModelFamily,
-  aliasModelSnapshot,
-} from "../../src/model-catalog";
+import { aliasModelFamily, aliasModelSnapshot } from "../../src/model-catalog";
 import type { StepSpec } from "../../src/step-runner";
 import { DefaultTransportRegistry } from "../../src/transport-registry";
 

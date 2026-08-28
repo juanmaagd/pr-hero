@@ -1,9 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import {
-  aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
-} from "../src/model-catalog";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -11,6 +6,7 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../src/execution/contracts";
+import { aliasModelFamily } from "../src/model-catalog";
 import {
   createResolvedRoutePlan,
   type RoutingConfig,

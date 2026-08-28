@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { RunnerBackend } from "../src/execution/contracts";
 import { armOfRun, scoutFailed } from "../src/floor-test";
-import { aliasCanonical, aliasModelFamily, aliasModelSnapshot } from "../src/model-catalog";
+import {
+  aliasCanonical,
+  aliasModelFamily,
+  aliasModelSnapshot,
+} from "../src/model-catalog";
 import type { RoutingConfig } from "../src/model-routing";
 import { type PipelineInput, runPipeline } from "../src/pipeline";
 import { rereviewDeltaFromProvenance } from "../src/report";
