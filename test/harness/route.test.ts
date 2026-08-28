@@ -240,4 +240,41 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
     expect(result.reservations ?? []).toHaveLength(0);
     expect(result.attempts).toBe(0);
   });
+
+  test("harness without registry fails step when step.route is not claude-code", async () => {
+    const recordedRequests: TransportRequest[] = [];
+    const transport = createRecordingTransport("claude-code", recordedRequests);
+
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({})) as unknown as typeof Bun.spawn,
+    });
+
+    const opencodeSpec: StepSpec = {
+      name: "opencode-step",
+      systemPromptPath: sysPromptPath,
+      prompt: "review diff",
+      tools: [],
+      mcpConfigPath: path.join(tmpDir, "mcp.json"),
+      model: "openai/gpt-4o",
+      cwd: tmpDir,
+      outPath: path.join(tmpDir, "out.json"),
+      timeoutMs: 10000,
+      maxAttempts: 1,
+      parse: (text) => JSON.parse(text),
+      route: {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o",
+      },
+    };
+
+    const result = await harness.run(opencodeSpec);
+    expect(result.status).toBe("failed");
+    expect(result.stderrTail).toContain(
+      'No transport registry configured to handle backend "opencode"',
+    );
+    expect(recordedRequests).toHaveLength(0);
+  });
 });

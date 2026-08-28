@@ -355,6 +355,16 @@ export class StepExecutionHarness implements StepRunner {
         };
       }
     } else {
+      if (step.route && step.route.backend !== "claude-code") {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `No transport registry configured to handle backend "${step.route.backend}" for step "${step.name}"`,
+          resultText: "",
+        };
+      }
       transport = this.transport;
     }
 
@@ -1417,7 +1427,7 @@ export class StepExecutionHarness implements StepRunner {
           // legacy step-runner one.
           const resolution = resolveFailureCause({
             outcome,
-            classifyFailure: this.transport.classifyFailure,
+            classifyFailure: transport.classifyFailure,
             parseThrew: true,
           });
           const classification = legacyClassificationFromCause(resolution);

@@ -362,5 +362,55 @@ describe("Task 2.1 RED: Route Admission & Transport Registry", () => {
       expect(admission.ok).toBe(true);
       expect(admission.admittedSteps[0].route.backend).toBe("opencode");
     });
+
+    test("admitRoutePlan supports Map<RunnerBackend, ProviderCapabilityReport> as 2nd parameter", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+
+      const capReport: ProviderCapabilityReport = {
+        backend: "claude-code",
+        status: "ready",
+        auth: {
+          kind: "claude_subscription_oauth",
+          projectionReady: true,
+          probe: "passed",
+        },
+        isolation: {
+          syntheticHome: true,
+          workspaceReadBroker: true,
+          codegraphPolicy: true,
+        },
+        protocol: {
+          terminalProof: true,
+          boundedEvents: true,
+          usageMode: "snapshot",
+        },
+        cancellation: { deadlineMs: 5000, conformance: "passed" },
+        billing: { mode: "subscription", pricingReady: true },
+        issues: [],
+      };
+
+      const capabilitiesMap = new Map<RunnerBackend, ProviderCapabilityReport>([
+        ["claude-code", capReport],
+      ]);
+
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const admission = await admitRoutePlan(plan, capabilitiesMap, registry);
+      expect(admission.ok).toBe(true);
+      expect(admission.reports.get("claude-code")).toBeDefined();
+    });
+
+    test("DefaultTransportRegistry caches created transport instances across get() calls", () => {
+      const registry = new DefaultTransportRegistry();
+      const t1 = registry.get("claude-code");
+      const t2 = registry.get("claude-code");
+      expect(t1).toBe(t2);
+    });
   });
 });

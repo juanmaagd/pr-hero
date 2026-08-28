@@ -159,6 +159,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
     RunnerBackend,
     ProviderTransport | TransportFactory
   >();
+  private readonly instances = new Map<RunnerBackend, ProviderTransport>();
   private readonly defaultOptions: TransportFactoryOptions;
 
   constructor(options: CreateTransportRegistryOptions = {}) {
@@ -233,6 +234,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
     factoryOrInstance: ProviderTransport | TransportFactory,
   ): void {
     this.factories.set(backend, factoryOrInstance);
+    this.instances.delete(backend);
   }
 
   has(backend: RunnerBackend): boolean {
@@ -243,6 +245,12 @@ export class DefaultTransportRegistry implements TransportRegistry {
     backend: RunnerBackend,
     options?: TransportFactoryOptions,
   ): ProviderTransport {
+    if (!options) {
+      const cached = this.instances.get(backend);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
     const entry = this.factories.get(backend);
     if (!entry) {
       throw new RouteAdmissionError(
@@ -256,6 +264,9 @@ export class DefaultTransportRegistry implements TransportRegistry {
         throw new RouteAdmissionError(
           `Async transport factory for backend "${backend}" cannot be resolved synchronously in get()`,
         );
+      }
+      if (!options) {
+        this.instances.set(backend, instance);
       }
       return instance;
     }
@@ -356,32 +367,32 @@ export async function admitRoutePlan(
   let registry: TransportRegistry;
   let options: AdmitRoutePlanOptions;
 
-  if (
-    "get" in registryOrCapabilities &&
-    typeof (registryOrCapabilities as TransportRegistry).get === "function"
-  ) {
-    registry = registryOrCapabilities as TransportRegistry;
+  const isRegistry = (obj: unknown): obj is TransportRegistry => {
+    return (
+      typeof obj === "object" &&
+      obj !== null &&
+      !(obj instanceof Map) &&
+      !("backend" in obj) &&
+      "get" in obj &&
+      typeof (obj as TransportRegistry).get === "function"
+    );
+  };
+
+  if (isRegistry(registryOrCapabilities)) {
+    registry = registryOrCapabilities;
     options = (optionsOrRegistry as AdmitRoutePlanOptions) ?? {};
   } else {
-    // Signature: admitRoutePlan(plan, capabilities, registry, options?)
-    if (
-      optionsOrRegistry &&
-      "get" in optionsOrRegistry &&
-      typeof (optionsOrRegistry as TransportRegistry).get === "function"
-    ) {
-      registry = optionsOrRegistry as TransportRegistry;
+    // Signature: admitRoutePlan(plan, capabilities, registry?, options?)
+    if (isRegistry(optionsOrRegistry)) {
+      registry = optionsOrRegistry;
       options = {
         ...(maybeOptions ?? {}),
-        capabilities: registryOrCapabilities as
-          | ProviderCapabilityReport
-          | Map<RunnerBackend, ProviderCapabilityReport>,
+        capabilities: registryOrCapabilities,
       };
     } else {
       registry = new DefaultTransportRegistry();
       options = {
-        capabilities: registryOrCapabilities as
-          | ProviderCapabilityReport
-          | Map<RunnerBackend, ProviderCapabilityReport>,
+        capabilities: registryOrCapabilities,
         ...((optionsOrRegistry as AdmitRoutePlanOptions) ?? {}),
       };
     }

@@ -286,7 +286,7 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
     const hitLines = lines.filter((line) => line.includes("classifyFailure"));
     expect(hitLines.length).toBeGreaterThan(0);
     for (const line of hitLines) {
-      expect(line).toContain("this.transport.classifyFailure");
+      expect(line).toMatch(/(\bthis\.)?transport\.classifyFailure/);
       // Never a bound method (`.bind(`) or a lambda re-implementing it
       // (would look like `(outcome) => classifyFailure(...)` or similar).
       expect(line).not.toMatch(/classifyFailure\s*\.bind\(/);
