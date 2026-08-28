@@ -23,6 +23,7 @@ import {
 } from "../step-runner";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
+import type { AttemptAdmissionGate, AttemptLease } from "./admission";
 import { writeJsonAtomically } from "./atomic-write";
 import type {
   AsyncEventSink,
@@ -59,6 +60,15 @@ import { projectLegacyUsage, sumNormalizedUsage } from "./usage-normalized";
 const DEFAULT_SLEEP = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+// D1-08 PR5a (§9.2 Open Question): deriving a real bucket id from a
+// resolved CredentialProjection's bucketScope is a caller concern (PR3's
+// deriveBucketId is available to any caller that has one), not this
+// harness's. This sentinel is what a configured AttemptAdmissionGate has to
+// key on when no caller has derived a real one yet — every step run by one
+// harness instance still coarsens onto ONE bucket, matching the "unknown
+// scope coarsens" rule at the harness boundary too.
+const DEFAULT_RATE_LIMIT_BUCKET_ID = "default";
+
 export interface StepExecutionHarnessOptions {
   readonly workspaceRoot?: string;
   readonly executableAllowlist?: readonly ExecutableAllowlistEntry[];
@@ -91,6 +101,18 @@ export interface StepExecutionHarnessOptions {
   // D1-08 PR0 (§7 line 416): backoff delay for a `rate_limit` retry_after
   // disposition. Defaults to a real timer; tests inject a recording stub.
   readonly sleep?: (ms: number) => Promise<void>;
+  // D1-08 PR5a (§9.2): the attempt-scoped, lease-returning admission gate —
+  // admitted per ATTEMPT inside the retry loop, distinct from
+  // `admissionGate` (StepAdmissionGate, admitted once per STEP before the
+  // loop even starts and left untouched, D4). Left unconfigured, attempts
+  // are gated exactly as before this slice — the concurrency limiter stays
+  // a dormant module (D1-08 PR3's own framing) until a caller opts in. NO
+  // spend-ledger call is made here — that's PR5b.
+  readonly attemptAdmissionGate?: AttemptAdmissionGate;
+  // The rate-limit bucket every attempt this harness instance runs admits
+  // into. See DEFAULT_RATE_LIMIT_BUCKET_ID for why an explicit id is
+  // optional.
+  readonly rateLimitBucketId?: string;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -226,6 +248,8 @@ export class StepExecutionHarness implements StepRunner {
     readonly receipt: SettlementReceipt;
   }) => void;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly attemptAdmissionGate?: AttemptAdmissionGate;
+  private readonly rateLimitBucketId: string;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -244,6 +268,9 @@ export class StepExecutionHarness implements StepRunner {
     this.graceMarginMs = options.graceMarginMs ?? HARNESS_GRACE_MARGIN_MS;
     this.onSessionSettled = options.onSessionSettled;
     this.sleep = options.sleep ?? DEFAULT_SLEEP;
+    this.attemptAdmissionGate = options.attemptAdmissionGate;
+    this.rateLimitBucketId =
+      options.rateLimitBucketId ?? DEFAULT_RATE_LIMIT_BUCKET_ID;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -511,6 +538,10 @@ export class StepExecutionHarness implements StepRunner {
     readonly outcome?: TransportOutcome;
     readonly delivery?: AttemptDelivery;
     readonly cancelled: boolean;
+    // D1-08 PR5a (§9.2): every return path below builds one via `finalize`
+    // before returning — exposed so `runAttempt` can react to
+    // `local_fenced_remote_unconfirmed` without re-deriving it.
+    readonly receipt: SettlementReceipt;
   }> {
     const { step, request, deadlineMs, onData } = args;
 
@@ -654,7 +685,7 @@ export class StepExecutionHarness implements StepRunner {
           );
           await this.persistSettlement(step, session, receipt);
           this.onSessionSettled?.({ session, settlement, receipt });
-          return { session, settlement, cancelled: true };
+          return { session, settlement, cancelled: true, receipt };
         }
         settlement.acceptTerminal(
           "transport",
@@ -689,6 +720,7 @@ export class StepExecutionHarness implements StepRunner {
             settlement,
             outcome: resolved,
             cancelled: false,
+            receipt,
           };
         }
         sink.close();
@@ -713,6 +745,7 @@ export class StepExecutionHarness implements StepRunner {
           outcome: resolved,
           delivery,
           cancelled: false,
+          receipt,
         };
       }
       // §5.3 steps 2–6 in order.
@@ -754,20 +787,30 @@ export class StepExecutionHarness implements StepRunner {
         // §5.3 step 5: exactly one harness-origin non-success terminal, won
         // atomically by the compare-and-set slot.
         settlement.acceptTerminal("harness", "cancelled");
+        // D1-08 (design doc line 290): a non-CLI (SDK-backed) transport's
+        // abort() call carries no confirmed-stopped guarantee the way the
+        // CLI's process-group signalling does — that is exactly the
+        // "SDK abort without provider confirmation" case whose receipt is
+        // local_fenced_remote_unconfirmed, not the generic
+        // local_termination_unconfirmed. §9.2's circuit breaker (runAttempt)
+        // keys off precisely this outcome to fence the bucket.
+        const isSdkBackedTransport = this.transport.backend !== "claude-code";
         // §5.3 step 6: no transport receipt facts → synthesize + quarantine.
         receipt = finalize(() =>
           synthesizeUnconfirmed(settlement, {
-            processGroupAlive:
-              this.transport.backend === "claude-code"
-                ? "unknown"
-                : "not_applicable",
+            processGroupAlive: isSdkBackedTransport
+              ? "not_applicable"
+              : "unknown",
+            outcome: isSdkBackedTransport
+              ? "local_fenced_remote_unconfirmed"
+              : undefined,
           }),
         );
       }
 
       await this.persistSettlement(step, session, receipt);
       this.onSessionSettled?.({ session, settlement, receipt });
-      return { session, settlement, cancelled: true };
+      return { session, settlement, cancelled: true, receipt };
     } finally {
       if (onCancel && this.cancelSignal) {
         this.cancelSignal.removeEventListener("abort", onCancel);
@@ -1050,6 +1093,44 @@ export class StepExecutionHarness implements StepRunner {
   }): Promise<AttemptRunResult> {
     const { step, attempt, kind, request, deadlineMs } = args;
 
+    // D1-08 PR5a (§9.1 step 1 / §9.2): acquire the attempt-scoped lease
+    // BEFORE execution and release it exactly once in `finally`, regardless
+    // of how the attempt ends. NO ledger call here — PR5b adds the spend
+    // reservation inside this same acquire/finally shape.
+    const lease: AttemptLease | undefined = this.attemptAdmissionGate
+      ? await this.attemptAdmissionGate.acquire({
+          sessionId: request.sessionId,
+          attempt,
+          rateLimitBucketId: this.rateLimitBucketId,
+          signal: this.cancelSignal ?? new AbortController().signal,
+        })
+      : undefined;
+
+    try {
+      return await this.runAdmittedAttempt({
+        step,
+        attempt,
+        kind,
+        request,
+        deadlineMs,
+      });
+    } finally {
+      lease?.release();
+    }
+  }
+
+  // The body of a single attempt, unchanged from PR0 except for the §9.2
+  // breaker-trip check — split out so `runAttempt` itself stays a thin
+  // acquire/finally-release wrapper (D1-08 PR5a) around it.
+  private async runAdmittedAttempt(args: {
+    readonly step: StepSpec;
+    readonly attempt: number;
+    readonly kind: "attempt" | "format-retry";
+    readonly request: TransportRequest;
+    readonly deadlineMs: number;
+  }): Promise<AttemptRunResult> {
+    const { step, attempt, kind, request, deadlineMs } = args;
+
     const execution = await this.executeSession({
       step,
       request,
@@ -1107,6 +1188,17 @@ export class StepExecutionHarness implements StepRunner {
         }
       },
     });
+
+    // D1-08 PR5a (§9.2 "Circuit Breaker Fences An Unconfirmed-Abort
+    // Bucket"): an SDK abort the harness could not confirm remotely stopped
+    // fences this bucket for the rest of the run — the NEXT admission
+    // attempt (this step's own retry, or a different step sharing the
+    // credential) must refuse before ever reaching the transport again.
+    if (execution.receipt.outcome === "local_fenced_remote_unconfirmed") {
+      this.attemptAdmissionGate?.reportUnconfirmedRemote?.(
+        this.rateLimitBucketId,
+      );
+    }
 
     if (execution.cancelled) {
       return { kind: "cancelled" };
