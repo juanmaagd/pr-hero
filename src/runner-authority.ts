@@ -285,7 +285,8 @@ export async function resolveBindingAuthority(
     if ("error" in verified) {
       return { error: verified.error };
     }
-    const broker = claudeCredentialBroker();
+    const broker =
+      options.credentialBrokers?.["claude-code"] ?? claudeCredentialBroker();
     return {
       binding: {
         backend,

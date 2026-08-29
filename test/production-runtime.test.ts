@@ -33,6 +33,7 @@ import {
   resolveBindingAuthority,
   resolveRunnerAuthority,
 } from "../src/runner-authority";
+import type { CredentialBroker } from "../src/security/credential-broker";
 import { OpenCodeAuthBroker } from "../src/security/credential-broker";
 import { authorizeWorkspaceCwd } from "../src/security/execution-authority";
 import { buildStepArgv } from "../src/step-runner";
@@ -44,6 +45,12 @@ import {
 } from "../src/transport-registry";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
+
+const stubClaudeCredentialBroker: CredentialBroker = {
+  async project() {
+    throw new Error("stub broker: capability-gate tests never project");
+  },
+};
 
 async function writeClaudeFixture(
   dir: string,
@@ -855,6 +862,9 @@ describe("production runtime PR1", () => {
         executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
+        credentialBrokers: {
+          "claude-code": stubClaudeCredentialBroker,
+        },
         authorityDeps: {
           existsFn: (p) =>
             p === claudeFixture.canonicalPath || p.startsWith(tmpDir),
