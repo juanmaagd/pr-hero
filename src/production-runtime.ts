@@ -169,7 +169,10 @@ class DefaultActiveTransportLeaseTracker
     const gate = new Promise<void>((resolve) => {
       releaseGate = resolve;
     });
-    this.gates.set(routeKey, previous.then(() => gate));
+    this.gates.set(
+      routeKey,
+      previous.then(() => gate),
+    );
     await previous;
     try {
       return await fn();
