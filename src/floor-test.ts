@@ -147,6 +147,19 @@ export function armOfRun(plan: unknown): FloorArm | null {
   return enabled ? "scout" : "control";
 }
 
+export function diversityArmOfRun(
+  plan: unknown,
+): "diversity" | "control" | null {
+  if (typeof plan !== "object" || plan === null || Array.isArray(plan)) {
+    return null;
+  }
+  const diversity = (plan as Record<string, unknown>).multiModelDiversity;
+  if (typeof diversity !== "object" || diversity === null) return null;
+  const enabled = (diversity as Record<string, unknown>).enabled;
+  if (typeof enabled !== "boolean") return null;
+  return enabled ? "diversity" : "control";
+}
+
 // §3.6's exclusion rule, as a predicate: a scout-arm run whose scout FAILED is
 // a control-arm run wearing a scout-arm flag. Counting it would dilute the arm
 // with its own control, which is the exact way an A/B lies quietly. The harness

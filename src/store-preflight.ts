@@ -20,7 +20,36 @@ import type {
 import type { StoredComparison } from "./ledger";
 import type { PerAgentUsage } from "./pipeline";
 
-export const CURRENT_PRODUCT_SCHEMA_VERSION = 4;
+export const CURRENT_PRODUCT_SCHEMA_VERSION = 5;
+
+export const PRODUCT_V4_TO_V5_STATEMENTS: string[] = [
+  "ALTER TABLE runs ADD COLUMN diversity_plan_json TEXT NULL;",
+  `CREATE TABLE IF NOT EXISTS diversity_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL,
+    leg_id TEXT NOT NULL,
+    arm_id TEXT NOT NULL,
+    specialty TEXT NOT NULL,
+    replicate INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    cash_cost_usd REAL NULL,
+    notional_cost_usd REAL NULL
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_diversity_attempts_run_id ON diversity_attempts (run_id);`,
+  `CREATE TABLE IF NOT EXISTS diversity_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    observation_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    leg_id TEXT NOT NULL,
+    arm_id TEXT NOT NULL,
+    specialty TEXT NOT NULL,
+    observation_json TEXT NOT NULL
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_diversity_observations_run_id ON diversity_observations (run_id);`,
+];
 
 export const PRODUCT_V3_TO_V4_STATEMENTS: string[] = [
   "ALTER TABLE runs ADD COLUMN findings_schema_version TEXT NOT NULL DEFAULT '1.0.0';",
@@ -136,6 +165,7 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     advisory INTEGER NOT NULL,
     root_causes_json TEXT NULL,
     greptile_found INTEGER NULL,
+    diversity_plan_json TEXT NULL,
     UNIQUE (repo_id, run_dir)
   )`,
   `CREATE INDEX IF NOT EXISTS idx_runs_repo_id ON runs (repo_id)`,
@@ -253,6 +283,32 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_finding_triage_run_id ON finding_triage (run_id)`,
   `CREATE INDEX IF NOT EXISTS idx_finding_triage_finding_id ON finding_triage (finding_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_finding_triage_unique ON finding_triage (run_id, finding_id, ifnull(comment_id, 0))`,
+
+  `CREATE TABLE IF NOT EXISTS diversity_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    attempt_id TEXT NOT NULL,
+    leg_id TEXT NOT NULL,
+    arm_id TEXT NOT NULL,
+    specialty TEXT NOT NULL,
+    replicate INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    cash_cost_usd REAL NULL,
+    notional_cost_usd REAL NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_diversity_attempts_run_id ON diversity_attempts (run_id)`,
+  `CREATE TABLE IF NOT EXISTS diversity_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES runs (id) ON DELETE CASCADE,
+    observation_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    leg_id TEXT NOT NULL,
+    arm_id TEXT NOT NULL,
+    specialty TEXT NOT NULL,
+    observation_json TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_diversity_observations_run_id ON diversity_observations (run_id)`,
 ];
 
 export function migrationsForProductStore(
@@ -274,6 +330,7 @@ export function migrationsForProductStore(
         ...PRODUCT_V1_TO_V2_STATEMENTS,
         ...PRODUCT_V2_TO_V3_STATEMENTS,
         ...PRODUCT_V3_TO_V4_STATEMENTS,
+        ...PRODUCT_V4_TO_V5_STATEMENTS,
       ],
     };
   }
@@ -283,13 +340,23 @@ export function migrationsForProductStore(
       statements: [
         ...PRODUCT_V2_TO_V3_STATEMENTS,
         ...PRODUCT_V3_TO_V4_STATEMENTS,
+        ...PRODUCT_V4_TO_V5_STATEMENTS,
       ],
     };
   }
   if (currentVersion === 3) {
     return {
       toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
-      statements: [...PRODUCT_V3_TO_V4_STATEMENTS],
+      statements: [
+        ...PRODUCT_V3_TO_V4_STATEMENTS,
+        ...PRODUCT_V4_TO_V5_STATEMENTS,
+      ],
+    };
+  }
+  if (currentVersion === 4) {
+    return {
+      toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
+      statements: [...PRODUCT_V4_TO_V5_STATEMENTS],
     };
   }
   return {
@@ -336,6 +403,7 @@ export interface CanonicalRunRow {
   advisory: number;
   root_causes_json: string | null;
   greptile_found: 0 | 1 | null;
+  diversity_plan_json: string | null;
 }
 
 export interface CanonicalFindingRow {
@@ -441,12 +509,35 @@ export interface ProjectedFinding {
   hopTrail: HopTrail;
 }
 
+export interface DiversityAttemptRow {
+  attempt_id: string;
+  leg_id: string;
+  arm_id: string;
+  specialty: string;
+  replicate: number;
+  attempt: number;
+  status: string;
+  cash_cost_usd: number | null;
+  notional_cost_usd: number | null;
+}
+
+export interface DiversityObservationRow {
+  observation_id: string;
+  attempt_id: string;
+  leg_id: string;
+  arm_id: string;
+  specialty: string;
+  observation_json: string;
+}
+
 export interface ProjectedCompleteRun {
   run: CanonicalRunRow;
   findings: ProjectedFinding[];
   debugFindings: DebugFindingRow[];
   agents: RunAgentRow[];
   comparisonRows: ComparisonRowProjection[];
+  diversityAttempts: DiversityAttemptRow[];
+  diversityObservations: DiversityObservationRow[];
 }
 
 export function projectCompleteRun(input: {
@@ -515,6 +606,9 @@ export function projectCompleteRun(input: {
       ? input.comparison.greptile.found
         ? 1
         : 0
+      : null,
+    diversity_plan_json: input.doc.debug.diversity
+      ? JSON.stringify(input.doc.debug.diversity)
       : null,
   };
 
@@ -630,5 +724,57 @@ export function projectCompleteRun(input: {
     actor: row.actor,
   }));
 
-  return { run, findings, debugFindings, agents, comparisonRows };
+  const diversityAttempts: DiversityAttemptRow[] = [];
+  const diversityObservations: DiversityObservationRow[] = [];
+  const diversityDebug = input.doc.debug.diversity;
+  if (diversityDebug && typeof diversityDebug === "object") {
+    const attempts = (diversityDebug as Record<string, unknown>).attempts;
+    if (Array.isArray(attempts)) {
+      for (const entry of attempts) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const row = entry as Record<string, unknown>;
+        diversityAttempts.push({
+          attempt_id: String(row.attemptId ?? ""),
+          leg_id: String(row.legId ?? ""),
+          arm_id: String(row.armId ?? "diversity"),
+          specialty: String(row.specialty ?? "unknown"),
+          replicate: Number(row.replicate ?? 1),
+          attempt: Number(row.attempt ?? 1),
+          status: String(row.status ?? "completed"),
+          cash_cost_usd:
+            typeof row.cashCostUsd === "number" ? row.cashCostUsd : null,
+          notional_cost_usd:
+            typeof row.notionalCostUsd === "number"
+              ? row.notionalCostUsd
+              : null,
+        });
+      }
+    }
+    const observations = (diversityDebug as Record<string, unknown>)
+      .observations;
+    if (Array.isArray(observations)) {
+      for (const entry of observations) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const row = entry as Record<string, unknown>;
+        diversityObservations.push({
+          observation_id: String(row.observationId ?? ""),
+          attempt_id: String(row.attemptId ?? ""),
+          leg_id: String(row.legId ?? ""),
+          arm_id: String(row.armId ?? "diversity"),
+          specialty: String(row.specialty ?? "unknown"),
+          observation_json: JSON.stringify(row),
+        });
+      }
+    }
+  }
+
+  return {
+    run,
+    findings,
+    debugFindings,
+    agents,
+    comparisonRows,
+    diversityAttempts,
+    diversityObservations,
+  };
 }

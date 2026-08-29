@@ -68,10 +68,10 @@ const RUN_UPSERT_SQL = `
     engine_revision, findings_schema_version, summary_prose, summary_score,
     summary_score_reason, generated_at, wall_ms, index_ms, index_mode,
     index_disk_mb, sync_ms, tokens_in, tokens_out, tokens_total, cost_usd_est,
-    blocking, advisory, root_causes_json, greptile_found
+    blocking, advisory, root_causes_json, greptile_found, diversity_plan_json
   ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
   )
   ON CONFLICT(repo_id, run_dir) DO UPDATE SET
     repo_id = excluded.repo_id,
@@ -108,7 +108,8 @@ const RUN_UPSERT_SQL = `
     blocking = excluded.blocking,
     advisory = excluded.advisory,
     root_causes_json = excluded.root_causes_json,
-    greptile_found = excluded.greptile_found
+    greptile_found = excluded.greptile_found,
+    diversity_plan_json = excluded.diversity_plan_json
 `;
 
 function runParams(row: CanonicalRunRow): SQLQueryBindings[] {
@@ -149,6 +150,7 @@ function runParams(row: CanonicalRunRow): SQLQueryBindings[] {
     row.advisory,
     row.root_causes_json,
     row.greptile_found,
+    row.diversity_plan_json,
   ];
 }
 
@@ -169,6 +171,8 @@ export function saveRunTransaction(
     db.query("DELETE FROM debug_findings WHERE run_id = ?").run(runId);
     db.query("DELETE FROM run_agents WHERE run_id = ?").run(runId);
     db.query("DELETE FROM comparison_rows WHERE run_id = ?").run(runId);
+    db.query("DELETE FROM diversity_observations WHERE run_id = ?").run(runId);
+    db.query("DELETE FROM diversity_attempts WHERE run_id = ?").run(runId);
 
     // Insert findings + proof refs + hop trails
     const insertFinding = db.query(`
@@ -323,6 +327,49 @@ export function saveRunTransaction(
           c.verdict,
           c.reasoning,
           c.actor,
+        );
+      }
+    }
+
+    if (projected.diversityAttempts.length > 0) {
+      const insertAttempt = db.query(`
+        INSERT INTO diversity_attempts (
+          run_id, attempt_id, leg_id, arm_id, specialty, replicate, attempt,
+          status, cash_cost_usd, notional_cost_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const attempt of projected.diversityAttempts) {
+        insertAttempt.run(
+          runId,
+          attempt.attempt_id,
+          attempt.leg_id,
+          attempt.arm_id,
+          attempt.specialty,
+          attempt.replicate,
+          attempt.attempt,
+          attempt.status,
+          attempt.cash_cost_usd,
+          attempt.notional_cost_usd,
+        );
+      }
+    }
+
+    if (projected.diversityObservations.length > 0) {
+      const insertObservation = db.query(`
+        INSERT INTO diversity_observations (
+          run_id, observation_id, attempt_id, leg_id, arm_id, specialty,
+          observation_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const observation of projected.diversityObservations) {
+        insertObservation.run(
+          runId,
+          observation.observation_id,
+          observation.attempt_id,
+          observation.leg_id,
+          observation.arm_id,
+          observation.specialty,
+          observation.observation_json,
         );
       }
     }
@@ -556,6 +603,9 @@ export function exportFindingsDocument(
       ...(deduped.length > 0 ? { deduped } : {}),
       ...(run.root_causes_json
         ? { root_causes: JSON.parse(run.root_causes_json) }
+        : {}),
+      ...(run.diversity_plan_json
+        ? { diversity: JSON.parse(run.diversity_plan_json) }
         : {}),
     },
   };

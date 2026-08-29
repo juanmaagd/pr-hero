@@ -372,6 +372,74 @@ describe("saveRunTransaction and round-trip fidelity", () => {
     }
   });
 
+  test("persists diversity debug artifacts through store v5 tables", async () => {
+    const dbPath = await tmpDbPath();
+    const db = openProductStore(dbPath);
+    try {
+      const base = sampleDoc();
+      const diversityDebug = {
+        planFingerprint: "abc123",
+        attempts: [
+          {
+            attemptId: "leg-1-a1",
+            legId: "leg-1",
+            armId: "m6-diversity",
+            specialty: "reliability",
+            replicate: 1,
+            attempt: 1,
+            status: "completed",
+            cashCostUsd: 0.1,
+            notionalCostUsd: 0.05,
+          },
+        ],
+        observations: [
+          {
+            observationId: "leg-1-a1-o1",
+            attemptId: "leg-1-a1",
+            legId: "leg-1",
+            armId: "m6-diversity",
+            specialty: "reliability",
+            path: "src/app.ts",
+          },
+        ],
+      };
+      const originalDoc = sampleDoc({
+        debug: {
+          ...base.debug,
+          diversity: diversityDebug,
+        },
+      });
+      const projected = projectCompleteRun({
+        doc: originalDoc,
+        repoId: REPO_ID,
+        runDir: "2026-08-29-diversity-run",
+        checkoutPath: "/Users/juanma/Desktop/pr-hero",
+        generatedAt: "2026-08-29T10:00:00.000Z",
+      });
+
+      const runId = saveRunTransaction(db, projected);
+      const runRow = getRunById(db, runId);
+      expect(runRow?.diversity_plan_json).toBe(JSON.stringify(diversityDebug));
+
+      const attempts = db
+        .query("SELECT * FROM diversity_attempts WHERE run_id = ?")
+        .all(runId) as { attempt_id: string; specialty: string }[];
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.attempt_id).toBe("leg-1-a1");
+
+      const observations = db
+        .query("SELECT * FROM diversity_observations WHERE run_id = ?")
+        .all(runId) as { observation_id: string }[];
+      expect(observations).toHaveLength(1);
+      expect(observations[0]?.observation_id).toBe("leg-1-a1-o1");
+
+      const exportedDoc = exportFindingsDocument(db, runId);
+      expect(exportedDoc?.debug.diversity).toEqual(diversityDebug);
+    } finally {
+      db.close();
+    }
+  });
+
   test("idempotency: re-saving same run_dir updates parent and replaces children cleanly", async () => {
     const dbPath = await tmpDbPath();
     const db = openProductStore(dbPath);
@@ -842,7 +910,7 @@ describe("saveRunTransaction and round-trip fidelity", () => {
     }
   });
 
-  test("migrates a user_version=2 database to version 4 seamlessly", async () => {
+  test("migrates a user_version=2 database to current schema seamlessly", async () => {
     const dbPath = await tmpDbPath();
     const dbV2 = new Database(dbPath, { create: true });
     dbV2.exec(`
@@ -893,7 +961,7 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       const version = (
         dbV3.query("PRAGMA user_version;").get() as { user_version: number }
       ).user_version;
-      expect(version).toBe(4);
+      expect(version).toBe(CURRENT_PRODUCT_SCHEMA_VERSION);
 
       const tableExists = dbV3
         .query(
@@ -901,12 +969,19 @@ describe("saveRunTransaction and round-trip fidelity", () => {
         )
         .get();
       expect(tableExists).not.toBeNull();
+
+      const diversityTable = dbV3
+        .query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='diversity_attempts'",
+        )
+        .get();
+      expect(diversityTable).not.toBeNull();
     } finally {
       dbV3.close();
     }
   });
 
-  test("migrates a user_version=3 database to version 4 with schema columns", async () => {
+  test("migrates a user_version=3 database to current schema with v4 columns", async () => {
     const dbPath = await tmpDbPath();
     const dbV3 = new Database(dbPath, { create: true });
     dbV3.exec(`
@@ -957,13 +1032,14 @@ describe("saveRunTransaction and round-trip fidelity", () => {
       const version = (
         dbV4.query("PRAGMA user_version;").get() as { user_version: number }
       ).user_version;
-      expect(version).toBe(4);
+      expect(version).toBe(CURRENT_PRODUCT_SCHEMA_VERSION);
 
       const columns = (
         dbV4.query("PRAGMA table_info(runs);").all() as { name: string }[]
       ).map((c) => c.name);
       expect(columns).toContain("findings_schema_version");
       expect(columns).toContain("engine_revision");
+      expect(columns).toContain("diversity_plan_json");
     } finally {
       dbV4.close();
     }
