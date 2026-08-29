@@ -237,6 +237,9 @@ export interface StepExecutionHarnessOptions {
   // FIFO queue cannot hang the run forever.
   readonly attemptAdmissionTimeoutMs?: number;
   readonly credentialProjectionTimeoutMs?: number;
+  // Production leased transports: tear down the shared client/server before
+  // credential projection destroy when this step is the last active lease.
+  readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -380,6 +383,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly reservedUsdPerAttempt: number;
   private readonly attemptAdmissionTimeoutMs: number;
   private readonly credentialProjectionTimeoutMs: number;
+  private readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -412,6 +416,8 @@ export class StepExecutionHarness implements StepRunner {
     this.credentialProjectionTimeoutMs =
       options.credentialProjectionTimeoutMs ??
       DEFAULT_CREDENTIAL_PROJECTION_TIMEOUT_MS;
+    this.onBeforeCredentialProjectionDestroy =
+      options.onBeforeCredentialProjectionDestroy;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -638,6 +644,7 @@ export class StepExecutionHarness implements StepRunner {
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
       // and never a replacement for the step's own outcome.
+      await this.onBeforeCredentialProjectionDestroy?.().catch(() => {});
       this.appendDestroyFailure(
         await this.destroyProjection(projection),
         result,
@@ -647,6 +654,7 @@ export class StepExecutionHarness implements StepRunner {
       }
       return result;
     } catch (error) {
+      await this.onBeforeCredentialProjectionDestroy?.().catch(() => {});
       this.appendDestroyFailure(await this.destroyProjection(projection));
       throw error;
     }

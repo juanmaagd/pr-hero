@@ -938,8 +938,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           }),
         ]).catch(() => {});
       }
-      await this.client.close?.().catch(() => {});
     }
+  }
+
+  // Lease teardown only: execute() must not close the shared client because
+  // the cached transport instance is reused across retries and concurrent steps
+  // on the same routeFingerprint until registry.release() evicts it.
+  async dispose(): Promise<void> {
+    await this.client.close?.().catch(() => {});
   }
 
   // Marker-based mapping: the transport stamps the §4.2/§197/§290 violations

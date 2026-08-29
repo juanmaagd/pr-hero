@@ -760,7 +760,9 @@ export function mergeExactBindingCapabilityReports(
     },
     billing: {
       mode: primary.billing.mode,
-      pricingReady: primary.billing.tokenPricingAvailable,
+      pricingReady:
+        primary.billing.pricingApplicability !== "required" ||
+        primary.billing.tokenPricingAvailable,
     },
     issues,
   };

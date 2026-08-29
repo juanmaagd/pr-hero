@@ -87,28 +87,40 @@ export interface ProductionRuntime {
 
 interface ActiveTransportLeaseTracker {
   register(routeKey: string): void;
-  unregister(routeKey: string): void;
+  /** Returns true when the last active lease for this routeKey was released. */
+  unregister(routeKey: string): boolean;
+  activeCount(routeKey: string): number;
   releaseAll(registry: { release?(routeFingerprint: string): void }): void;
 }
 
 class DefaultActiveTransportLeaseTracker
   implements ActiveTransportLeaseTracker
 {
-  private readonly activeRouteKeys = new Set<string>();
+  private readonly refcounts = new Map<string, number>();
 
   register(routeKey: string): void {
-    this.activeRouteKeys.add(routeKey);
+    this.refcounts.set(routeKey, (this.refcounts.get(routeKey) ?? 0) + 1);
   }
 
-  unregister(routeKey: string): void {
-    this.activeRouteKeys.delete(routeKey);
+  unregister(routeKey: string): boolean {
+    const current = this.refcounts.get(routeKey) ?? 0;
+    if (current <= 1) {
+      this.refcounts.delete(routeKey);
+      return true;
+    }
+    this.refcounts.set(routeKey, current - 1);
+    return false;
+  }
+
+  activeCount(routeKey: string): number {
+    return this.refcounts.get(routeKey) ?? 0;
   }
 
   releaseAll(registry: { release?(routeFingerprint: string): void }): void {
-    for (const routeKey of [...this.activeRouteKeys]) {
+    for (const routeKey of [...this.refcounts.keys()]) {
       registry.release?.(routeKey);
     }
-    this.activeRouteKeys.clear();
+    this.refcounts.clear();
   }
 }
 
@@ -245,8 +257,9 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     return {
       transport,
       dispose: async () => {
-        registry.release?.(routeKey);
-        this.leaseTracker.unregister(routeKey);
+        if (this.leaseTracker.unregister(routeKey)) {
+          registry.release?.(routeKey);
+        }
       },
     };
   }
@@ -540,6 +553,7 @@ export class MultiProviderRunner implements StepRunner {
   private readonly signal?: AbortSignal;
   private readonly attemptAdmissionGate?: AttemptAdmissionGate;
   private readonly graceMarginMs?: number;
+  private readonly leaseTracker?: ActiveTransportLeaseTracker;
 
   constructor(options: {
     readonly workspaceRoot: string;
@@ -550,6 +564,7 @@ export class MultiProviderRunner implements StepRunner {
     readonly signal?: AbortSignal;
     readonly attemptAdmissionGate?: AttemptAdmissionGate;
     readonly graceMarginMs?: number;
+    readonly leaseTracker?: ActiveTransportLeaseTracker;
   }) {
     this.workspaceRoot = options.workspaceRoot;
     this.bindings = options.bindings;
@@ -559,6 +574,7 @@ export class MultiProviderRunner implements StepRunner {
     this.signal = options.signal;
     this.attemptAdmissionGate = options.attemptAdmissionGate;
     this.graceMarginMs = options.graceMarginMs;
+    this.leaseTracker = options.leaseTracker;
   }
 
   resolveBinding(step: StepSpec): RuntimeBinding | undefined {
@@ -679,6 +695,7 @@ export class MultiProviderRunner implements StepRunner {
 
     const isolation = minimalIsolationFromExecutable(binding.executable);
     const lease = await binding.acquire(isolation, this.registry);
+    const routeKey = binding.key;
     try {
       const harness = new StepExecutionHarness({
         workspaceRoot: this.workspaceRoot,
@@ -700,6 +717,17 @@ export class MultiProviderRunner implements StepRunner {
         ...(this.graceMarginMs !== undefined
           ? { graceMarginMs: this.graceMarginMs }
           : {}),
+        onBeforeCredentialProjectionDestroy: async () => {
+          if ((this.leaseTracker?.activeCount(routeKey) ?? 0) !== 1) {
+            return;
+          }
+          if (
+            "dispose" in lease.transport &&
+            typeof lease.transport.dispose === "function"
+          ) {
+            await (lease.transport as { dispose(): Promise<void> }).dispose();
+          }
+        },
       });
 
       return await harness.run({
@@ -764,6 +792,7 @@ export async function createProductionRuntime(
     signal: options.signal,
     attemptAdmissionGate: options.attemptAdmissionGate,
     graceMarginMs: options.graceMarginMs,
+    leaseTracker,
   });
 
   return {
