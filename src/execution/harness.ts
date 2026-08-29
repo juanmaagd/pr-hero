@@ -895,10 +895,14 @@ export class StepExecutionHarness implements StepRunner {
       sig.addEventListener("abort", onCancel, { once: true });
     });
 
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
     const watchdogPromise =
       harnessWatchdogMs !== undefined && harnessWatchdogMs > 0
         ? new Promise<"watchdog">((resolve) => {
-            setTimeout(() => resolve("watchdog"), harnessWatchdogMs);
+            watchdogTimer = setTimeout(
+              () => resolve("watchdog"),
+              harnessWatchdogMs,
+            );
           })
         : undefined;
 
@@ -921,14 +925,44 @@ export class StepExecutionHarness implements StepRunner {
         fenceClosed = true;
         sink.close();
         controller.abort();
-        const receipt = finalize(() =>
-          synthesizeInternalFailure(
-            settlement,
-            new Error(
-              `Step timed out after ${harnessWatchdogMs}ms (harness-owned watchdog)`,
-            ),
-          ),
-        );
+
+        const graceMs = deadlineMs + this.graceMarginMs;
+        await Promise.race([
+          execGuarded,
+          new Promise<void>((resolve) => setTimeout(resolve, graceMs)),
+        ]);
+
+        const transportTerminal = settlement.terminal;
+        let receipt: SettlementReceipt;
+        if (
+          transportTerminal !== undefined &&
+          transportTerminal.origin !== "harness"
+        ) {
+          receipt = finalize(() =>
+            settlement.receipt("failed", {
+              confirmation: transportTerminal.proof
+                ? "process_group_exited"
+                : "sdk_abort_confirmed",
+              processGroupAlive: "unknown",
+              remoteStatus: "failed",
+            }),
+          );
+        } else {
+          settlement.acceptTerminal("harness", "failed");
+          const isSdkBackedTransport = transport.backend !== "claude-code";
+          receipt = finalize(() =>
+            synthesizeUnconfirmed(settlement, {
+              processGroupAlive: isSdkBackedTransport
+                ? "not_applicable"
+                : "unknown",
+              outcome: isSdkBackedTransport
+                ? "local_fenced_remote_unconfirmed"
+                : undefined,
+              warning: `Step timed out after ${harnessWatchdogMs}ms (harness-owned watchdog)`,
+            }),
+          );
+        }
+
         await this.persistSettlement(step, session, receipt);
         this.onSessionSettled?.({ session, settlement, receipt });
         return {
@@ -1088,6 +1122,9 @@ export class StepExecutionHarness implements StepRunner {
       this.onSessionSettled?.({ session, settlement, receipt });
       return { session, settlement, cancelled: true, receipt };
     } finally {
+      if (watchdogTimer !== undefined) {
+        clearTimeout(watchdogTimer);
+      }
       if (onCancel && this.cancelSignal) {
         this.cancelSignal.removeEventListener("abort", onCancel);
       }

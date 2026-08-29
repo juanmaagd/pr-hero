@@ -903,8 +903,16 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       const captured: TransportRequest[] = [];
       const hangingTransport: ProviderTransport = {
         backend: "opencode",
-        capabilities: async () =>
-          createRecordingTransport([], "opencode").capabilities(),
+        capabilities: async () => {
+          const base = await createRecordingTransport(
+            [],
+            "opencode",
+          ).capabilities();
+          return {
+            ...base,
+            cancellation: { deadlineMs: 5, conformance: "passed" },
+          };
+        },
         execute: async (request) => {
           captured.push(request);
           await new Promise<never>(() => {});
@@ -932,6 +940,7 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       const harness = new StepExecutionHarness({
         registry,
         spawnFn: (() => ({})) as unknown as typeof Bun.spawn,
+        graceMarginMs: 0,
       });
 
       const runPromise = harness.run(
