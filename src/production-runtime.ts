@@ -24,6 +24,10 @@ import {
   resolveBindingAuthority,
   withClaudeDiscoveryAllowlist,
 } from "./runner-authority";
+import {
+  validateBindingAdmission,
+  validateRouteDrift,
+} from "./security/binding-policy";
 import { authorizeWorkspaceCwd } from "./security/execution-authority";
 import {
   ClaudeCodeRunner,
@@ -37,6 +41,7 @@ import {
   admitRoutePlan,
   createDefaultTransportRegistry,
   type D1_11ReadinessEvidence,
+  type TransportFactoryOptions,
   type TransportRegistry,
 } from "./transport-registry";
 import { zeroUsage } from "./usage";
@@ -166,12 +171,24 @@ class FrozenRuntimeBinding implements RuntimeBinding {
 
   async acquire(
     _isolation: IsolationProjection,
-    registry: { get(backend: RunnerBackend): ProviderTransport },
+    registry: {
+      get(
+        backend: RunnerBackend,
+        options?: TransportFactoryOptions,
+      ): ProviderTransport;
+      release?(routeFingerprint: string): void;
+    },
   ): Promise<TransportLease> {
-    const transport = registry.get(this.route.backend);
+    const transport = registry.get(this.route.backend, {
+      routeFingerprint: this.key,
+      route: this.route,
+    });
+    const routeKey = this.key;
     return {
       transport,
-      dispose: async () => {},
+      dispose: async () => {
+        registry.release?.(routeKey);
+      },
     };
   }
 }
@@ -362,6 +379,32 @@ export class MultiProviderRunner implements StepRunner {
         usage: zeroUsage(),
         attempts: 0,
         stderrTail: `Workspace denied: ${cwdAuth.reason}`,
+        resultText: "",
+      };
+    }
+
+    if (step.routeKey !== undefined && step.route !== undefined) {
+      const driftError = validateRouteDrift(binding.route, step.route);
+      if (driftError !== undefined) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: driftError,
+          resultText: "",
+        };
+      }
+    }
+
+    const policyError = await validateBindingAdmission(step, binding);
+    if (policyError !== undefined) {
+      return {
+        name: step.name,
+        status: "failed",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: policyError,
         resultText: "",
       };
     }

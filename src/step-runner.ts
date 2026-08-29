@@ -60,6 +60,8 @@ export interface StepSpec {
   // admitted binding. Defaults preserve Claude-only behavior.
   credentialKind?: CredentialKind;
   credentialRef?: string;
+  // Optional sha256 pin for mcp.json integrity checks at binding admission.
+  mcpConfigSha256?: string;
 }
 
 export interface RetryInfo {

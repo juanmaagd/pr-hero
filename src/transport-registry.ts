@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
+  ResolvedModelRoute,
   RunnerBackend,
 } from "./execution/contracts";
 import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
@@ -123,6 +124,8 @@ export interface TransportFactoryOptions {
   readonly env?: Record<string, string>;
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly mode?: "production" | "conformance";
+  readonly routeFingerprint?: string;
+  readonly route?: ResolvedModelRoute;
   [key: string]: unknown;
 }
 
@@ -147,6 +150,7 @@ export interface TransportRegistry {
   getAllCapabilityReports(
     options?: TransportFactoryOptions,
   ): Promise<Map<RunnerBackend, ProviderCapabilityReport>>;
+  release?(routeFingerprint: string): void;
 }
 
 export interface CreateTransportRegistryOptions
@@ -160,6 +164,8 @@ export class DefaultTransportRegistry implements TransportRegistry {
     ProviderTransport | TransportFactory
   >();
   private readonly instances = new Map<RunnerBackend, ProviderTransport>();
+  private readonly routeInstances = new Map<string, ProviderTransport>();
+  private readonly userOverriddenBackends = new Set<RunnerBackend>();
   private readonly defaultOptions: TransportFactoryOptions;
 
   constructor(options: CreateTransportRegistryOptions = {}) {
@@ -193,11 +199,17 @@ export class DefaultTransportRegistry implements TransportRegistry {
         });
       }
 
+      const route = merged.route;
       const client = createOpenCodeClient({
-        model: {
-          providerID: "openai",
-          modelID: "gpt-4o",
-        },
+        model: route
+          ? {
+              providerID: route.provider,
+              modelID: route.modelSnapshot,
+            }
+          : {
+              providerID: "openai",
+              modelID: "gpt-4o",
+            },
         loadSdk:
           merged.loadSdk ??
           (async () => {
@@ -233,8 +245,50 @@ export class DefaultTransportRegistry implements TransportRegistry {
     backend: RunnerBackend,
     factoryOrInstance: ProviderTransport | TransportFactory,
   ): void {
+    if (this.factories.has(backend)) {
+      this.userOverriddenBackends.add(backend);
+    }
     this.factories.set(backend, factoryOrInstance);
     this.instances.delete(backend);
+    for (const key of [...this.routeInstances.keys()]) {
+      if (key.startsWith(`${backend}:`)) {
+        this.routeInstances.delete(key);
+      }
+    }
+  }
+
+  private routeCacheKey(
+    backend: RunnerBackend,
+    routeFingerprint: string,
+  ): string {
+    return `${backend}:${routeFingerprint}`;
+  }
+
+  async probeOpenCodeSdk(): Promise<void> {
+    const loadSdk =
+      this.defaultOptions.loadSdk ??
+      (async () => {
+        const dynamicImport = new Function(
+          "specifier",
+          "return import(specifier)",
+        );
+        return (await dynamicImport(
+          "@opencode-ai/sdk",
+        )) as unknown as OpenCodeSdkLike;
+      });
+    await loadSdk();
+  }
+
+  needsOpenCodeSdkProbe(): boolean {
+    return !this.userOverriddenBackends.has("opencode");
+  }
+
+  release(routeFingerprint: string): void {
+    for (const key of [...this.routeInstances.keys()]) {
+      if (key.endsWith(`:${routeFingerprint}`)) {
+        this.routeInstances.delete(key);
+      }
+    }
   }
 
   has(backend: RunnerBackend): boolean {
@@ -245,7 +299,13 @@ export class DefaultTransportRegistry implements TransportRegistry {
     backend: RunnerBackend,
     options?: TransportFactoryOptions,
   ): ProviderTransport {
-    if (!options) {
+    if (options?.routeFingerprint !== undefined) {
+      const routeKey = this.routeCacheKey(backend, options.routeFingerprint);
+      const routeCached = this.routeInstances.get(routeKey);
+      if (routeCached !== undefined) {
+        return routeCached;
+      }
+    } else if (!options) {
       const cached = this.instances.get(backend);
       if (cached !== undefined) {
         return cached;
@@ -265,10 +325,19 @@ export class DefaultTransportRegistry implements TransportRegistry {
           `Async transport factory for backend "${backend}" cannot be resolved synchronously in get()`,
         );
       }
-      if (!options) {
+      if (options?.routeFingerprint !== undefined) {
+        const routeKey = this.routeCacheKey(backend, options.routeFingerprint);
+        this.routeInstances.set(routeKey, instance);
+      } else if (!options) {
         this.instances.set(backend, instance);
       }
       return instance;
+    }
+    if (options?.routeFingerprint !== undefined) {
+      const routeKey = this.routeCacheKey(backend, options.routeFingerprint);
+      this.routeInstances.set(routeKey, entry);
+    } else if (!options) {
+      this.instances.set(backend, entry);
     }
     return entry;
   }
