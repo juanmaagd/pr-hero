@@ -79,6 +79,45 @@ const DEFAULT_SLEEP = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 const DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS = 30 * 60 * 1000;
+// Credential projection must not hang the step indefinitely when a broker
+// blocks on interactive Keychain prompts or a stalled reader.
+const DEFAULT_CREDENTIAL_PROJECTION_TIMEOUT_MS = 60_000;
+
+async function projectCredentialWithBudget(
+  broker: CredentialBroker,
+  input: Parameters<CredentialBroker["project"]>[0],
+  options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
+): Promise<CredentialProjection> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("credential_projection_timed_out")),
+      options.timeoutMs,
+    );
+  });
+  const racers: Promise<CredentialProjection>[] = [
+    broker.project(input),
+    timeoutPromise,
+  ];
+  if (options.signal !== undefined) {
+    const signal = options.signal;
+    if (signal.aborted) {
+      throw new Error("credential_projection_aborted");
+    }
+    racers.push(
+      new Promise<never>((_, reject) => {
+        const onAbort = () =>
+          reject(new Error("credential_projection_aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    );
+  }
+  try {
+    return await Promise.race(racers);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function cancellableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
@@ -166,6 +205,7 @@ export interface StepExecutionHarnessOptions {
   // `signal` is wired, acquire() uses AbortSignal.timeout(ms) so a stuck
   // FIFO queue cannot hang the run forever.
   readonly attemptAdmissionTimeoutMs?: number;
+  readonly credentialProjectionTimeoutMs?: number;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -307,6 +347,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly spendLedger?: SpendLedger;
   private readonly reservedUsdPerAttempt: number;
   private readonly attemptAdmissionTimeoutMs: number;
+  private readonly credentialProjectionTimeoutMs: number;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -333,6 +374,9 @@ export class StepExecutionHarness implements StepRunner {
     this.reservedUsdPerAttempt = options.reservedUsdPerAttempt ?? 0;
     this.attemptAdmissionTimeoutMs =
       options.attemptAdmissionTimeoutMs ?? DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS;
+    this.credentialProjectionTimeoutMs =
+      options.credentialProjectionTimeoutMs ??
+      DEFAULT_CREDENTIAL_PROJECTION_TIMEOUT_MS;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -462,12 +506,19 @@ export class StepExecutionHarness implements StepRunner {
     let projectionWarning: string | undefined;
     if (this.credentialBroker) {
       try {
-        projection = await this.credentialBroker.project({
-          sessionId: step.name,
-          credentialRef: step.credentialRef ?? "claude-code-credentials",
-          kind: step.credentialKind ?? "claude_subscription_oauth",
-          verifiedBinaryPath,
-        });
+        projection = await projectCredentialWithBudget(
+          this.credentialBroker,
+          {
+            sessionId: step.name,
+            credentialRef: step.credentialRef ?? "claude-code-credentials",
+            kind: step.credentialKind ?? "claude_subscription_oauth",
+            verifiedBinaryPath,
+          },
+          {
+            timeoutMs: this.credentialProjectionTimeoutMs,
+            signal: this.cancelSignal,
+          },
+        );
       } catch (error) {
         // Class names only the failure class; broker error text is never
         // echoed because third-party brokers may embed arbitrary content.

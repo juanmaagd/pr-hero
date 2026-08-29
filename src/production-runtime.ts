@@ -1,4 +1,7 @@
+import { homedir } from "node:os";
+import { deriveBucketId, loadOrCreateBucketKey } from "./execution/bucket-id";
 import type {
+  EnvironmentPolicy,
   ExactBindingCapabilityReport,
   IsolationProjection,
   ProviderTransport,
@@ -78,10 +81,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
   readonly route: ResolvedModelRoute;
   readonly executable: VerifiedExecutable;
   readonly credential: RuntimeBindingCredential;
-  readonly environment = {
-    syntheticHome: true,
-    workspaceReadBroker: true,
-  } as const;
+  readonly environment: EnvironmentPolicy;
   readonly tools = {
     allowMapOnly: true,
     deniedTools: ["bash", "Write", "Edit", "Task"],
@@ -101,6 +101,10 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     this.route = Object.freeze({ ...options.route });
     this.executable = Object.freeze({ ...options.executable });
     this.credential = Object.freeze({ ...options.credential });
+    this.environment = Object.freeze({
+      syntheticHome: options.credential.broker !== undefined,
+      workspaceReadBroker: true,
+    });
     this.authority = options.authority;
     this.getCapabilityReport = options.getCapabilityReport;
     Object.freeze(this);
@@ -108,6 +112,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
 
   async capabilities(): Promise<ExactBindingCapabilityReport> {
     const report = await this.getCapabilityReport(this.route.backend);
+    const projectionBrokered = this.credential.broker !== undefined;
     const sdkAvailable =
       this.route.backend === "claude-code" ||
       !report.issues.some(
@@ -128,12 +133,12 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       },
       auth: {
         kind: this.credential.kind,
-        projectionReady: report.auth.projectionReady,
-        probe: report.auth.probe,
+        projectionReady: projectionBrokered,
+        probe: projectionBrokered ? report.auth.probe : "not_run",
       },
       environment: {
-        syntheticHome: report.isolation.syntheticHome,
-        enumeratedPassthrough: !report.auth.projectionReady,
+        syntheticHome: projectionBrokered,
+        enumeratedPassthrough: !projectionBrokered,
       },
       isolation: {
         workspaceReadBroker: report.isolation.workspaceReadBroker,
@@ -193,6 +198,20 @@ function uniqueRoutesByFingerprint(
   return [...seen.values()];
 }
 
+function bindingBucketId(
+  authority: ResolvedBindingAuthority,
+  route: ResolvedModelRoute,
+): string {
+  const localKey = loadOrCreateBucketKey(homedir());
+  return deriveBucketId(
+    {
+      provider: route.provider,
+      credentialFingerprint: `${authority.credentialKind}:${authority.credentialRef}`,
+    },
+    localKey,
+  );
+}
+
 async function resolveFrozenBindings(
   plan: ResolvedRoutePlan,
   options: ProductionRuntimeOptions,
@@ -229,7 +248,7 @@ async function resolveFrozenBindings(
         ...(authority.credentialBroker
           ? { broker: authority.credentialBroker }
           : {}),
-        bucketId: `${authority.bucketId}:${step.routeFingerprint.slice(0, 16)}`,
+        bucketId: bindingBucketId(authority, step.route),
       },
       getCapabilityReport: (backend) =>
         registry.getCapabilityReport(backend, {
@@ -280,7 +299,8 @@ export class MultiProviderRunner implements StepRunner {
           binding.route.provider === step.route.provider &&
           binding.route.modelFamily === step.route.modelFamily &&
           binding.route.modelSnapshot === step.route.modelSnapshot &&
-          binding.route.modelVariant === step.route.modelVariant
+          binding.route.modelVariant === step.route.modelVariant &&
+          (binding.route.gateway ?? "") === (step.route.gateway ?? "")
         ) {
           return binding;
         }

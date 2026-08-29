@@ -237,6 +237,30 @@ describe("harness with a CredentialBroker", () => {
     expect(result.stderrTail).not.toContain("operator environment");
   });
 
+  test("hanging credential projection fails before spawn within the projection budget", async () => {
+    const requests: TransportRequest[] = [];
+    const hangingBroker: CredentialBroker = {
+      project: () => new Promise(() => {}),
+    };
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        PATH: "/usr/bin:/bin",
+      },
+      credentialBroker: hangingBroker,
+      credentialProjectionTimeoutMs: 25,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(requests).toHaveLength(0);
+    expect(result.stderrTail).toContain("broker_error");
+  });
+
   test("destroy failure is appended to stderrTail instead of thrown or replacing the outcome", async () => {
     const requests: TransportRequest[] = [];
     const broker = new FakeBroker();

@@ -6,9 +6,7 @@ import type {
   ClaudeBinaryResolutionDeps,
   ExecutableAllowlistEntry,
 } from "./provider-capabilities";
-import {
-  resolveClaudeCanonicalBinary,
-} from "./provider-capabilities";
+import { resolveClaudeCanonicalBinary } from "./provider-capabilities";
 import {
   type CredentialBroker,
   KeychainCredentialBroker,

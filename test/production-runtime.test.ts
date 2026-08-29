@@ -434,6 +434,10 @@ describe("production runtime PR1", () => {
       expect(report.backend).toBe("claude-code");
       expect(report.binary.resolved).toBe(true);
       expect(report.binary.sha256).toBe(claudeFixture.sha256);
+      const brokered = binding.credential.broker !== undefined;
+      expect(report.auth.projectionReady).toBe(brokered);
+      expect(report.environment.syntheticHome).toBe(brokered);
+      expect(report.environment.enumeratedPassthrough).toBe(!brokered);
     });
 
     test("mixed Claude/OpenCode conformance admits with evidence and dispatches by routeKey", async () => {
@@ -534,6 +538,95 @@ describe("production runtime PR1", () => {
       expect(openRequests).toHaveLength(1);
       expect(openRequests[0].route.modelVariant).toBe("high");
       expect(openRequests[0].route.provider).toBe("openai");
+    });
+
+    test("resolveBinding matches gateway when routeKey is omitted", async () => {
+      const routingConfig: RoutingConfig = {
+        mappings: {
+          sonnet: {
+            backend: "claude-code",
+            provider: "anthropic",
+            gateway: "direct",
+            modelFamily: aliasModelFamily("sonnet"),
+            modelSnapshot: aliasModelSnapshot("sonnet"),
+          },
+          haiku: {
+            backend: "claude-code",
+            provider: "anthropic",
+            gateway: "configured",
+            modelFamily: aliasModelFamily("haiku"),
+            modelSnapshot: aliasModelSnapshot("haiku"),
+          },
+        },
+      };
+      const directStep = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+        routingConfig,
+      });
+      const configuredStep = resolveStepRoute({
+        stepKey: "hunter-resilience",
+        role: "hunter",
+        cliModel: "haiku",
+        routingConfig,
+      });
+      const plan = createResolvedRoutePlan([directStep, configuredStep]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        registry,
+        mode: "conformance",
+      });
+      const runner = runtime.runner as MultiProviderRunner;
+      const directBinding = runner.resolveBinding({
+        ...makeStep(tmpDir, { route: directStep.route }),
+        routeKey: undefined,
+      });
+      const configuredBinding = runner.resolveBinding({
+        ...makeStep(tmpDir, { route: configuredStep.route }),
+        routeKey: undefined,
+      });
+      expect(directBinding?.route.gateway).toBe("direct");
+      expect(configuredBinding?.route.gateway).toBe("configured");
+    });
+
+    test("bindings sharing a credential coarsen to one bucket id across models", async () => {
+      const stepA = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const stepB = resolveStepRoute({
+        stepKey: "hunter-resilience",
+        role: "hunter",
+        cliModel: "haiku",
+      });
+      const plan = createResolvedRoutePlan([stepA, stepB]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        registry,
+        mode: "conformance",
+      });
+
+      const bindingA = runtime.bindings.get(stepA.routeFingerprint);
+      const bindingB = runtime.bindings.get(stepB.routeFingerprint);
+      expect(bindingA).toBeDefined();
+      expect(bindingB).toBeDefined();
+      if (bindingA === undefined || bindingB === undefined) return;
+      expect(bindingA.credential.bucketId).toBe(bindingB.credential.bucketId);
+      expect(bindingA.credential.bucketId).not.toContain(
+        stepA.routeFingerprint.slice(0, 16),
+      );
     });
 
     test("resolveBindingAuthority rejects unsupported backends without fallback", async () => {
