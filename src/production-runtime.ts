@@ -90,6 +90,14 @@ interface ActiveTransportLeaseTracker {
   /** Returns true when the last active lease for this routeKey was released. */
   unregister(routeKey: string): boolean;
   activeCount(routeKey: string): number;
+  teardownTransportIfLast(input: {
+    routeKey: string;
+    transport: ProviderTransport;
+  }): Promise<void>;
+  endLease(input: {
+    routeKey: string;
+    registry: { release?(routeFingerprint: string): void };
+  }): Promise<void>;
   releaseAll(registry: { release?(routeFingerprint: string): void }): void;
 }
 
@@ -97,6 +105,7 @@ class DefaultActiveTransportLeaseTracker
   implements ActiveTransportLeaseTracker
 {
   private readonly refcounts = new Map<string, number>();
+  private readonly gates = new Map<string, Promise<void>>();
 
   register(routeKey: string): void {
     this.refcounts.set(routeKey, (this.refcounts.get(routeKey) ?? 0) + 1);
@@ -116,11 +125,57 @@ class DefaultActiveTransportLeaseTracker
     return this.refcounts.get(routeKey) ?? 0;
   }
 
+  async teardownTransportIfLast(input: {
+    routeKey: string;
+    transport: ProviderTransport;
+  }): Promise<void> {
+    await this.exclusive(input.routeKey, async () => {
+      if (this.activeCount(input.routeKey) !== 1) {
+        return;
+      }
+      if (
+        "dispose" in input.transport &&
+        typeof input.transport.dispose === "function"
+      ) {
+        await (input.transport as { dispose(): Promise<void> }).dispose();
+      }
+    });
+  }
+
+  async endLease(input: {
+    routeKey: string;
+    registry: { release?(routeFingerprint: string): void };
+  }): Promise<void> {
+    await this.exclusive(input.routeKey, async () => {
+      if (this.unregister(input.routeKey)) {
+        input.registry.release?.(input.routeKey);
+      }
+    });
+  }
+
   releaseAll(registry: { release?(routeFingerprint: string): void }): void {
     for (const routeKey of [...this.refcounts.keys()]) {
       registry.release?.(routeKey);
     }
     this.refcounts.clear();
+  }
+
+  private async exclusive<T>(
+    routeKey: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.gates.get(routeKey) ?? Promise.resolve();
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    this.gates.set(routeKey, previous.then(() => gate));
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      releaseGate();
+    }
   }
 }
 
@@ -257,9 +312,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     return {
       transport,
       dispose: async () => {
-        if (this.leaseTracker.unregister(routeKey)) {
-          registry.release?.(routeKey);
-        }
+        await this.leaseTracker.endLease({ routeKey, registry });
       },
     };
   }
@@ -718,15 +771,13 @@ export class MultiProviderRunner implements StepRunner {
           ? { graceMarginMs: this.graceMarginMs }
           : {}),
         onBeforeCredentialProjectionDestroy: async () => {
-          if ((this.leaseTracker?.activeCount(routeKey) ?? 0) !== 1) {
+          if (this.leaseTracker === undefined) {
             return;
           }
-          if (
-            "dispose" in lease.transport &&
-            typeof lease.transport.dispose === "function"
-          ) {
-            await (lease.transport as { dispose(): Promise<void> }).dispose();
-          }
+          await this.leaseTracker.teardownTransportIfLast({
+            routeKey,
+            transport: lease.transport,
+          });
         },
       });
 
