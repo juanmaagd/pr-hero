@@ -22,6 +22,7 @@ import {
   type ResolveRunnerAuthorityDeps,
   type RunnerAuthorityOptions,
   resolveBindingAuthority,
+  withClaudeDiscoveryAllowlist,
 } from "./runner-authority";
 import { authorizeWorkspaceCwd } from "./security/execution-authority";
 import {
@@ -446,24 +447,29 @@ export function createClaudeCompatibilityRunner(
   options: RunnerAuthorityOptions,
   deps: ResolveRunnerAuthorityDeps = {},
 ): Promise<StepRunner> {
-  return resolveBindingAuthority("claude-code", options, deps).then(
-    (result) => {
-      if (result.error !== undefined || result.binding === undefined) {
-        throw new ProductionRuntimeError(
-          result.error ?? "claude authority unavailable",
-        );
-      }
-      const binding = result.binding;
-      return new ClaudeCodeRunner({
-        workspaceRoot: binding.workspaceRoot,
-        binaryPath: binding.binaryPath,
-        executableAllowlist: binding.executableAllowlist,
-        ...(binding.credentialBroker
-          ? { credentialBroker: binding.credentialBroker }
-          : {}),
-      });
-    },
-  );
+  return withClaudeDiscoveryAllowlist(options, deps).then((resolvedOptions) => {
+    if ("error" in resolvedOptions) {
+      throw new ProductionRuntimeError(resolvedOptions.error);
+    }
+    return resolveBindingAuthority("claude-code", resolvedOptions, deps).then(
+      (result) => {
+        if (result.error !== undefined || result.binding === undefined) {
+          throw new ProductionRuntimeError(
+            result.error ?? "claude authority unavailable",
+          );
+        }
+        const binding = result.binding;
+        return new ClaudeCodeRunner({
+          workspaceRoot: binding.workspaceRoot,
+          binaryPath: binding.binaryPath,
+          executableAllowlist: binding.executableAllowlist,
+          ...(binding.credentialBroker
+            ? { credentialBroker: binding.credentialBroker }
+            : {}),
+        });
+      },
+    );
+  });
 }
 
 export type { BindingAuthorityResolution, ResolvedBindingAuthority };

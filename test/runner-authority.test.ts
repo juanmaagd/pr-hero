@@ -68,6 +68,29 @@ describe("resolveRunnerAuthority", () => {
     );
   });
 
+  test("without an explicit allowlist derives Claude discovery for CLI compatibility", async () => {
+    const bytes = new TextEncoder().encode("#!/bin/sh\necho hi\n");
+    const canonical = "/fake/bin/claude";
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const expectedSha = hasher.digest("hex");
+
+    const result = await resolveRunnerAuthority(
+      { binaryPath: canonical, workspaceRoot: "/fake/ws" },
+      {
+        existsFn: () => true,
+        realpathFn: async (p) => p,
+        readFileFn: async () => bytes,
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    if (result.runnerOptions === undefined) return;
+    expect(result.runnerOptions.executableAllowlist).toEqual([
+      { absolutePath: canonical, sha256: expectedSha },
+    ]);
+  });
+
   test("missing binary on PATH yields an error", async () => {
     const result = await resolveRunnerAuthority(
       { workspaceRoot: "/fake/ws", env: { PATH: "/empty" } },

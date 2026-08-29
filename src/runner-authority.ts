@@ -167,6 +167,31 @@ async function verifyConfiguredExecutable(
   return { allowlist: configuredAllowlist };
 }
 
+export async function withClaudeDiscoveryAllowlist(
+  options: RunnerAuthorityOptions,
+  deps: ResolveRunnerAuthorityDeps = {},
+): Promise<RunnerAuthorityOptions | { readonly error: string }> {
+  const configured = options.executableAllowlists?.["claude-code"];
+  if (configured !== undefined && configured.length > 0) {
+    return options;
+  }
+
+  const resolved = await resolveClaudeCanonicalBinary(options, deps);
+  if (resolved.error !== undefined) {
+    return { error: resolved.error };
+  }
+
+  return {
+    ...options,
+    executableAllowlists: {
+      ...options.executableAllowlists,
+      "claude-code": [
+        { absolutePath: resolved.canonicalPath, sha256: resolved.sha256 },
+      ],
+    },
+  };
+}
+
 export async function resolveBindingAuthority(
   backend: RunnerBackend,
   options: RunnerAuthorityOptions,
@@ -247,7 +272,16 @@ export async function resolveRunnerAuthority(
   options: RunnerAuthorityOptions,
   deps: ResolveRunnerAuthorityDeps = {},
 ): Promise<RunnerAuthorityResolution> {
-  const result = await resolveBindingAuthority("claude-code", options, deps);
+  const resolvedOptions = await withClaudeDiscoveryAllowlist(options, deps);
+  if ("error" in resolvedOptions) {
+    return { error: resolvedOptions.error };
+  }
+
+  const result = await resolveBindingAuthority(
+    "claude-code",
+    resolvedOptions,
+    deps,
+  );
   if (result.error !== undefined || result.binding === undefined) {
     return { error: result.error ?? "claude binding unavailable" };
   }
