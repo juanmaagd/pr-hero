@@ -65,10 +65,21 @@ export interface VerifyExecutableOptions {
   readonly snapshotDir?: string;
 }
 
+export interface VerifyExecutableAuthorityDeps {
+  readonly realpathFn?: (p: string) => Promise<string>;
+  readonly readFileFn?: (p: string) => Promise<Uint8Array>;
+  readonly statFn?: (p: string) => { mode: number };
+}
+
 export async function verifyExecutableAuthority(
   options: VerifyExecutableOptions,
+  deps: VerifyExecutableAuthorityDeps = {},
 ): Promise<ExecutableVerificationResult> {
   const { candidatePath, allowlist = [] } = options;
+  const toRealpath = deps.realpathFn ?? realpath;
+  const readBytes =
+    deps.readFileFn ?? ((p: string) => readFile(p) as Promise<Uint8Array>);
+  const statFile = deps.statFn ?? ((p: string) => statSync(p));
 
   // 1. Validate allowlist integrity: reject relative paths in allowlist entries
   for (const entry of allowlist) {
@@ -93,7 +104,7 @@ export async function verifyExecutableAuthority(
   // 3. Resolve canonical path
   let canonicalPath: string;
   try {
-    canonicalPath = await realpath(candidatePath);
+    canonicalPath = await toRealpath(candidatePath);
   } catch (error) {
     return {
       approved: false,
@@ -104,7 +115,7 @@ export async function verifyExecutableAuthority(
 
   // 4. Check executable mode bit
   try {
-    const stats = statSync(canonicalPath);
+    const stats = statFile(canonicalPath);
     const isExecutable = (stats.mode & 0o111) !== 0;
     if (!isExecutable) {
       return {
@@ -125,7 +136,7 @@ export async function verifyExecutableAuthority(
   let content: Buffer;
   let digest: string;
   try {
-    const raw = await readFile(canonicalPath);
+    const raw = await readBytes(canonicalPath);
     content = Buffer.from(raw);
     const hasher = new Bun.CryptoHasher("sha256");
     hasher.update(content);
@@ -275,6 +286,7 @@ export interface ClaudeBinaryResolutionDeps {
   readonly existsFn?: (p: string) => boolean;
   readonly realpathFn?: (p: string) => Promise<string>;
   readonly readFileFn?: (p: string) => Promise<Uint8Array>;
+  readonly statFn?: (p: string) => { mode: number };
 }
 
 export type ClaudeCanonicalBinary =

@@ -16,6 +16,7 @@ import type {
 import { StepExecutionHarness } from "./execution/harness";
 import type { SpendReservation } from "./execution/spend-limiter";
 import type { NormalizedUsage } from "./execution/usage-normalized";
+import type { CredentialKind } from "./provider-capabilities";
 import type { CredentialBroker } from "./security/credential-broker";
 import type { SessionUsage } from "./usage";
 
@@ -52,6 +53,13 @@ export interface StepSpec {
   backend?: "claude-code" | "opencode";
   models?: string[];
   route?: ResolvedModelRoute;
+  // Frozen route fingerprint from the admitted plan. Required for routed
+  // production execution via createProductionRuntime.
+  routeKey?: string;
+  // Provider credential projection stamped by MultiProviderRunner from the
+  // admitted binding. Defaults preserve Claude-only behavior.
+  credentialKind?: CredentialKind;
+  credentialRef?: string;
 }
 
 export interface RetryInfo {

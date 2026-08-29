@@ -10,11 +10,18 @@ describe("resolveRunnerAuthority", () => {
     const expectedSha = hasher.digest("hex");
 
     const result = await resolveRunnerAuthority(
-      { binaryPath: canonical, workspaceRoot: "/fake/ws" },
+      {
+        binaryPath: canonical,
+        workspaceRoot: "/fake/ws",
+        executableAllowlists: {
+          "claude-code": [{ absolutePath: canonical, sha256: expectedSha }],
+        },
+      },
       {
         existsFn: () => true,
         realpathFn: async (p) => p,
         readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o755 }),
       },
     );
 
@@ -29,15 +36,29 @@ describe("resolveRunnerAuthority", () => {
   });
 
   test("without an override, searches the injected PATH dirs in order", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const expectedSha = hasher.digest("hex");
+
     const result = await resolveRunnerAuthority(
       {
         workspaceRoot: "/fake/ws",
         env: { PATH: "/first:/second:/third" },
+        executableAllowlists: {
+          "claude-code": [
+            {
+              absolutePath: "/real/second/claude",
+              sha256: expectedSha,
+            },
+          ],
+        },
       },
       {
-        existsFn: (p) => p === "/second/claude",
+        existsFn: (p) => p === "/second/claude" || p === "/real/second/claude",
         realpathFn: async (p) => `/real${p}`,
         readFileFn: async () => new Uint8Array([1, 2, 3]),
+        statFn: () => ({ mode: 0o755 }),
       },
     );
 
@@ -47,6 +68,56 @@ describe("resolveRunnerAuthority", () => {
     expect(result.runnerOptions.executableAllowlist[0].absolutePath).toBe(
       "/real/second/claude",
     );
+  });
+
+  test("without an explicit allowlist derives Claude discovery for CLI compatibility", async () => {
+    const bytes = new TextEncoder().encode("#!/bin/sh\necho hi\n");
+    const canonical = "/fake/bin/claude";
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const expectedSha = hasher.digest("hex");
+
+    const result = await resolveRunnerAuthority(
+      { binaryPath: canonical, workspaceRoot: "/fake/ws" },
+      {
+        existsFn: () => true,
+        realpathFn: async (p) => p,
+        readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o755 }),
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    if (result.runnerOptions === undefined) return;
+    expect(result.runnerOptions.executableAllowlist).toEqual([
+      { absolutePath: canonical, sha256: expectedSha },
+    ]);
+  });
+
+  test("existsFn for PATH probing does not bypass executable permission checks", async () => {
+    const bytes = new TextEncoder().encode("#!/bin/sh\necho hi\n");
+    const canonical = "/fake/bin/claude";
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const expectedSha = hasher.digest("hex");
+
+    const result = await resolveRunnerAuthority(
+      {
+        binaryPath: canonical,
+        workspaceRoot: "/fake/ws",
+        executableAllowlists: {
+          "claude-code": [{ absolutePath: canonical, sha256: expectedSha }],
+        },
+      },
+      {
+        existsFn: () => true,
+        realpathFn: async (p) => p,
+        readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o644 }),
+      },
+    );
+
+    expect(result.error).toContain("Missing executable permissions");
   });
 
   test("missing binary on PATH yields an error", async () => {

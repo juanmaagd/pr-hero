@@ -237,6 +237,77 @@ describe("harness with a CredentialBroker", () => {
     expect(result.stderrTail).not.toContain("operator environment");
   });
 
+  test("hanging credential projection fails before spawn within the projection budget", async () => {
+    const requests: TransportRequest[] = [];
+    const hangingBroker: CredentialBroker = {
+      project: () => new Promise(() => {}),
+    };
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        PATH: "/usr/bin:/bin",
+      },
+      credentialBroker: hangingBroker,
+      credentialProjectionTimeoutMs: 25,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(requests).toHaveLength(0);
+    expect(result.stderrTail).toContain("broker_error");
+  });
+
+  test("late credential projection after timeout is destroyed instead of leaked", async () => {
+    const requests: TransportRequest[] = [];
+    let resolveLate: ((projection: CredentialProjection) => void) | undefined;
+    let destroyCalls = 0;
+    const slowBroker: CredentialBroker = {
+      project: async () =>
+        new Promise<CredentialProjection>((resolve) => {
+          resolveLate = resolve;
+        }),
+    };
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        PATH: "/usr/bin:/bin",
+      },
+      credentialBroker: slowBroker,
+      credentialProjectionTimeoutMs: 25,
+    });
+
+    const resultPromise = runStep(harness);
+    const result = await resultPromise;
+    expect(result.status).toBe("failed");
+    expect(requests).toHaveLength(0);
+
+    const home = await mkdtemp(path.join(tmpdir(), "pr-hero-late-proj-"));
+    const lateProjection: CredentialProjection = {
+      projectionId: "late-projection",
+      kind: "claude_subscription_oauth",
+      syntheticHome: home,
+      syntheticConfigHome: path.join(home, ".claude"),
+      syntheticTmp: path.join(home, "tmp"),
+      env: { HOME: home },
+      files: [],
+      destroy: async () => {
+        destroyCalls++;
+        await rm(home, { recursive: true, force: true });
+      },
+    };
+    resolveLate?.(lateProjection);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(destroyCalls).toBe(1);
+  });
+
   test("destroy failure is appended to stderrTail instead of thrown or replacing the outcome", async () => {
     const requests: TransportRequest[] = [];
     const broker = new FakeBroker();

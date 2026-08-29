@@ -6,6 +6,7 @@ import type {
   RunnerBackend,
   VerifiedExecutable,
 } from "../provider-capabilities";
+import type { CredentialBroker } from "../security/credential-broker";
 import type { WorkspaceDenialCode } from "../security/workspace-read-broker";
 import type { StepSpec } from "../step-runner";
 import type { NormalizedTokens, NormalizedUsage } from "./usage-normalized";
@@ -162,4 +163,107 @@ export interface AuthEvent {
   readonly kind: "workspace" | "executable";
   readonly status: "approved" | "denied";
   readonly reason?: string;
+}
+
+export type BillingMode = "subscription" | "metered";
+
+export interface EnvironmentPolicy {
+  readonly syntheticHome: boolean;
+  readonly workspaceReadBroker: boolean;
+}
+
+export interface ToolPolicy {
+  readonly allowMapOnly: boolean;
+  readonly deniedTools: readonly string[];
+}
+
+export interface McpPolicy {
+  readonly codegraphOnly: boolean;
+  readonly verifiedConfigRequired: boolean;
+}
+
+export interface VerifiedExecutableStatus {
+  readonly resolved: boolean;
+  readonly absolutePath?: string;
+  readonly sha256?: string;
+  readonly reason?: string;
+}
+
+export interface AuthProjectionFacts {
+  readonly kind: CredentialKind;
+  readonly projectionReady: boolean;
+  readonly probe: "passed" | "failed" | "not_run";
+}
+
+export interface EnvironmentFacts {
+  readonly syntheticHome: boolean;
+  readonly enumeratedPassthrough: boolean;
+}
+
+export interface IsolationFacts {
+  readonly workspaceReadBroker: boolean;
+  readonly codegraphPolicy: boolean;
+}
+
+export interface ToolMcpFacts {
+  readonly allowMapEnforced: boolean;
+  readonly mcpIntegrityChecked: boolean;
+}
+
+export interface ProtocolFacts {
+  readonly terminalProof: boolean;
+  readonly boundedEvents: boolean;
+  readonly usageMode: "snapshot" | "delta" | "none";
+}
+
+export interface UsageFacts {
+  readonly normalized: boolean;
+}
+
+export interface ExactBindingCapabilityReport {
+  readonly routeKey: string;
+  readonly backend: RunnerBackend;
+  readonly sdk: { readonly available: boolean; readonly version?: string };
+  readonly binary: VerifiedExecutableStatus;
+  readonly auth: AuthProjectionFacts;
+  readonly environment: EnvironmentFacts;
+  readonly isolation: IsolationFacts;
+  readonly toolsMcp: ToolMcpFacts;
+  readonly protocol: ProtocolFacts;
+  readonly usage: UsageFacts;
+  readonly billing: {
+    readonly mode: BillingMode;
+    readonly pricingApplicability: "required" | "not_applicable";
+    readonly tokenPricingAvailable: boolean;
+    readonly cashCostAccountingValid: boolean;
+  };
+}
+
+export interface RuntimeBindingCredential {
+  readonly kind: CredentialKind;
+  readonly ref: string;
+  readonly broker?: CredentialBroker;
+  readonly bucketId: string;
+}
+
+export interface RuntimeBinding {
+  readonly key: string;
+  readonly route: ResolvedModelRoute;
+  readonly executable: VerifiedExecutable;
+  readonly credential: RuntimeBindingCredential;
+  readonly environment: EnvironmentPolicy;
+  readonly tools: ToolPolicy;
+  readonly mcp: McpPolicy;
+  capabilities(): Promise<ExactBindingCapabilityReport>;
+  acquire(
+    isolation: IsolationProjection,
+    registry: {
+      get(backend: RunnerBackend): ProviderTransport;
+    },
+  ): Promise<TransportLease>;
+}
+
+export interface TransportLease {
+  readonly transport: ProviderTransport;
+  dispose(): Promise<void>;
 }
