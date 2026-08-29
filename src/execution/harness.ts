@@ -464,8 +464,8 @@ export class StepExecutionHarness implements StepRunner {
       try {
         projection = await this.credentialBroker.project({
           sessionId: step.name,
-          credentialRef: "claude-code-credentials",
-          kind: "claude_subscription_oauth",
+          credentialRef: step.credentialRef ?? "claude-code-credentials",
+          kind: step.credentialKind ?? "claude_subscription_oauth",
           verifiedBinaryPath,
         });
       } catch (error) {
