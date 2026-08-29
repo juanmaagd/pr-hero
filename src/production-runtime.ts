@@ -22,7 +22,13 @@ import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
 import { freezeRoutePlan } from "./model-routing";
 import type { ProviderCapabilityReport } from "./provider-capabilities";
 import {
+  type CapabilityGateDecision,
+  exactBindingCapabilityGate,
+  mergeExactBindingCapabilityReports,
+} from "./provider-capabilities";
+import {
   type BindingAuthorityResolution,
+  prepareProductionRunnerAuthority,
   type ResolvedBindingAuthority,
   type ResolveRunnerAuthorityDeps,
   type RunnerAuthorityOptions,
@@ -337,6 +343,174 @@ async function resolveFrozenBindings(
   return bindings;
 }
 
+export async function gateBindingsCapabilities(
+  bindings: ReadonlyMap<string, RuntimeBinding>,
+): Promise<CapabilityGateDecision> {
+  for (const binding of bindings.values()) {
+    const report = await binding.capabilities();
+    const gate = exactBindingCapabilityGate(report);
+    if (!gate.ok) {
+      return gate;
+    }
+  }
+  return { ok: true };
+}
+
+export interface ProbeBindingsReadinessResult {
+  readonly decision: CapabilityGateDecision;
+  readonly bindings: ReadonlyMap<string, RuntimeBinding>;
+  readonly registry: TransportRegistry;
+  dispose(): Promise<void>;
+}
+
+export async function probeBindingsReadiness(
+  options: ProductionRuntimeOptions,
+): Promise<ProbeBindingsReadinessResult> {
+  const workspaceAuth = authorizeWorkspaceCwd(
+    options.workspaceRoot,
+    options.workspaceRoot,
+  );
+  if (!workspaceAuth.approved) {
+    throw new ProductionRuntimeError(
+      `workspace root denied before binding probe: ${workspaceAuth.reason}`,
+    );
+  }
+
+  const plan = freezeRoutePlan(options.plan);
+  const registry =
+    options.registry ??
+    createDefaultTransportRegistry({
+      mode: options.mode,
+      evidence: options.evidence,
+      binaryPath: options.binaryPath,
+      env: options.env,
+    });
+  const leaseTracker = new DefaultActiveTransportLeaseTracker();
+  const bindings = await resolveFrozenBindings(
+    plan,
+    options,
+    registry,
+    leaseTracker,
+  );
+  const decision = await gateBindingsCapabilities(bindings);
+  return {
+    decision,
+    bindings,
+    registry,
+    dispose: async () => {
+      leaseTracker.releaseAll(registry);
+    },
+  };
+}
+
+export async function produceExecutionCapabilityReport(
+  options: ProductionRuntimeOptions,
+): Promise<ProviderCapabilityReport> {
+  const probe = await probeBindingsReadiness(options);
+  const reports = await Promise.all(
+    [...probe.bindings.values()].map((binding) => binding.capabilities()),
+  );
+  await probe.dispose();
+  return mergeExactBindingCapabilityReports(reports);
+}
+
+export function d1_11EvidenceFromExactBinding(
+  report: ExactBindingCapabilityReport,
+  sdkAvailable = report.sdk.available,
+): D1_11ReadinessEvidence {
+  return {
+    sdkAvailable,
+    credentialAuthority:
+      report.auth.projectionReady || report.auth.probe === "passed",
+    workspaceBroker: report.isolation.workspaceReadBroker,
+    pricingReady:
+      report.billing.pricingApplicability !== "required" ||
+      report.billing.tokenPricingAvailable,
+  };
+}
+
+export interface ProductionAdmissionContext {
+  readonly registry: DefaultTransportRegistry;
+  readonly authorityOptions: RunnerAuthorityOptions;
+  readonly evidence: Map<RunnerBackend, D1_11ReadinessEvidence>;
+}
+
+export async function prepareProductionAdmissionContext(input: {
+  readonly workspaceRoot: string;
+  readonly plan: ResolvedRoutePlan;
+  readonly authorityDeps?: ResolveRunnerAuthorityDeps;
+  readonly loadSdk?: () => Promise<
+    import("./transports/opencode-client").OpenCodeSdkLike
+  >;
+  readonly env?: RunnerAuthorityOptions["env"];
+}): Promise<ProductionAdmissionContext | { readonly error: string }> {
+  const authorityResult = await prepareProductionRunnerAuthority(
+    input.workspaceRoot,
+    input.plan,
+    input.authorityDeps,
+    input.env === undefined ? {} : { env: input.env },
+  );
+  if ("error" in authorityResult) {
+    return authorityResult;
+  }
+  const authorityOptions = authorityResult;
+
+  const probeRegistry = createDefaultTransportRegistry({
+    mode: "conformance",
+    binaryPath: authorityOptions.binaryPath,
+    openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
+    env: authorityOptions.env,
+    ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
+  });
+  const probe = await probeBindingsReadiness({
+    ...authorityOptions,
+    plan: input.plan,
+    workspaceRoot: input.workspaceRoot,
+    registry: probeRegistry,
+    mode: "conformance",
+    authorityDeps: input.authorityDeps,
+  });
+  if (!probe.decision.ok) {
+    await probe.dispose();
+    return {
+      error: probe.decision.reason ?? "exact-binding readiness gate failed",
+    };
+  }
+
+  const evidence = new Map<RunnerBackend, D1_11ReadinessEvidence>();
+  const needsOpenCode = [...probe.bindings.values()].some(
+    (binding) => binding.route.backend === "opencode",
+  );
+  if (needsOpenCode) {
+    if (probeRegistry instanceof DefaultTransportRegistry) {
+      try {
+        await probeRegistry.probeOpenCodeSdk();
+      } catch (error) {
+        await probe.dispose();
+        const message = error instanceof Error ? error.message : String(error);
+        return { error: `OpenCode SDK pre-confirm failed: ${message}` };
+      }
+    }
+    for (const binding of probe.bindings.values()) {
+      if (binding.route.backend !== "opencode") continue;
+      const report = await binding.capabilities();
+      evidence.set("opencode", d1_11EvidenceFromExactBinding(report, true));
+    }
+  }
+  await probe.dispose();
+
+  const registry = createDefaultTransportRegistry({
+    mode: "production",
+    evidence,
+    binaryPath: authorityOptions.binaryPath,
+    openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
+    env: authorityOptions.env,
+    ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
+  }) as DefaultTransportRegistry;
+
+  return { registry, authorityOptions, evidence };
+}
+
 function createImmutableBindingsMap(
   bindings: Map<string, RuntimeBinding>,
 ): ReadonlyMap<string, RuntimeBinding> {
@@ -488,6 +662,19 @@ export class MultiProviderRunner implements StepRunner {
           resultText: "",
         };
       }
+    }
+
+    const capabilityReport = await binding.capabilities();
+    const capabilityGate = exactBindingCapabilityGate(capabilityReport);
+    if (!capabilityGate.ok) {
+      return {
+        name: step.name,
+        status: "failed",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: `Exact-binding capability gate failed: ${capabilityGate.reason}`,
+        resultText: "",
+      };
     }
 
     const isolation = minimalIsolationFromExecutable(binding.executable);

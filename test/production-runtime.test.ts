@@ -797,5 +797,92 @@ describe("production runtime PR1", () => {
         (binding.tools.deniedTools as string[]).push("WebSearch");
       }).toThrow();
     });
+
+    test("execution re-probes exact-binding capabilities before transport acquire", async () => {
+      const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-exec-cap-"));
+      const claudeFixture = await writeClaudeFixture(tmpDir);
+      await writeFile(path.join(tmpDir, "mcp.json"), "{}");
+      await writeFile(path.join(tmpDir, "system.md"), "system");
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry({ mode: "conformance" });
+      let driftAtExecution = false;
+      const mock = createMockTransport("claude-code");
+      registry.register("claude-code", {
+        ...mock,
+        capabilities: async () => {
+          if (!driftAtExecution) {
+            return mock.capabilities();
+          }
+          return {
+            backend: "claude-code",
+            status: "blocking",
+            auth: {
+              kind: "claude_subscription_oauth",
+              projectionReady: false,
+              probe: "failed",
+            },
+            isolation: {
+              syntheticHome: true,
+              workspaceReadBroker: true,
+              codegraphPolicy: false,
+            },
+            protocol: {
+              terminalProof: true,
+              boundedEvents: false,
+              usageMode: "snapshot",
+            },
+            cancellation: { deadlineMs: 7500, conformance: "passed" },
+            billing: { mode: "subscription", pricingReady: false },
+            issues: [
+              {
+                code: "auth_failed",
+                message: "auth drifted",
+                blocking: true,
+              },
+            ],
+          };
+        },
+      });
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+        authorityDeps: {
+          existsFn: (p) =>
+            p === claudeFixture.canonicalPath || p.startsWith(tmpDir),
+          realpathFn: async (p) => p,
+        },
+      });
+      driftAtExecution = true;
+      const result = await runtime.runner.run({
+        name: "hunter-reliability",
+        systemPromptPath: path.join(tmpDir, "system.md"),
+        prompt: "go",
+        tools: ["Read"],
+        mcpConfigPath: path.join(tmpDir, "mcp.json"),
+        model: "sonnet",
+        cwd: tmpDir,
+        outPath: path.join(tmpDir, "out.json"),
+        timeoutMs: 60_000,
+        maxAttempts: 1,
+        parse: () => ({}),
+        route: step.route,
+        routeKey: step.routeFingerprint,
+      });
+      expect(result.status).toBe("failed");
+      expect(result.stderrTail).toContain(
+        "Exact-binding capability gate failed",
+      );
+      expect(result.stderrTail).toContain("auth_failed");
+      await rm(tmpDir, { recursive: true, force: true });
+    });
   });
 });

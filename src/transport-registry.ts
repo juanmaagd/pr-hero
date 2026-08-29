@@ -125,6 +125,7 @@ export interface TransportFactoryOptions {
   readonly launchServer?: () => Promise<OpenCodeServerHandle>;
   readonly readSystemPrompt?: (path: string) => Promise<string>;
   readonly binaryPath?: string;
+  readonly openCodeBinaryPath?: string;
   readonly env?: Record<string, string>;
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly mode?: "production" | "conformance";
@@ -230,7 +231,9 @@ export class DefaultTransportRegistry implements TransportRegistry {
           (async () => {
             return await launchOpenCodeServer({
               verifiedBinaryPath:
-                merged.binaryPath ?? "/usr/local/bin/opencode",
+                merged.openCodeBinaryPath ??
+                merged.binaryPath ??
+                "/usr/local/bin/opencode",
               env: merged.env ?? {},
             });
           }),

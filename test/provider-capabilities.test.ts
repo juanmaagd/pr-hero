@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
   CLAUDE_CAPABILITY_STATICS,
   type ClaudeCanonicalBinary,
   capabilityGateDecision,
   claudeCredentialProjectionReady,
+  exactBindingCapabilityGate,
+  exactBindingCapabilityIssues,
   produceClaudeCapabilityReport,
   resolveClaudeCanonicalBinary,
 } from "../src/provider-capabilities";
@@ -213,6 +216,97 @@ describe("capabilityGateDecision", () => {
   test("degraded-only reports pass the gate", async () => {
     const report = await produceClaudeCapabilityReport(greenOptions());
     expect(capabilityGateDecision(report)).toEqual({ ok: true });
+  });
+});
+
+describe("exactBindingCapabilityGate", () => {
+  function greenBindingReport(
+    overrides: Partial<ExactBindingCapabilityReport> = {},
+  ): ExactBindingCapabilityReport {
+    return {
+      routeKey: "fp1",
+      backend: "claude-code",
+      sdk: { available: true },
+      binary: {
+        resolved: true,
+        absolutePath: "/bin/claude",
+        sha256: "a".repeat(64),
+      },
+      auth: {
+        kind: "claude_subscription_oauth",
+        projectionReady: true,
+        probe: "passed",
+      },
+      environment: {
+        syntheticHome: true,
+        enumeratedPassthrough: false,
+      },
+      isolation: {
+        workspaceReadBroker: true,
+        codegraphPolicy: false,
+      },
+      toolsMcp: {
+        allowMapEnforced: true,
+        mcpIntegrityChecked: true,
+      },
+      protocol: {
+        terminalProof: true,
+        boundedEvents: false,
+        usageMode: "snapshot",
+      },
+      usage: { normalized: true },
+      billing: {
+        mode: "subscription",
+        pricingApplicability: "not_applicable",
+        tokenPricingAvailable: false,
+        cashCostAccountingValid: true,
+      },
+      ...overrides,
+    };
+  }
+
+  test("subscription binding passes without token pricing when not applicable", () => {
+    expect(exactBindingCapabilityGate(greenBindingReport())).toEqual({
+      ok: true,
+    });
+  });
+
+  test("metered binding fails when token pricing is required but unavailable", () => {
+    const decision = exactBindingCapabilityGate(
+      greenBindingReport({
+        billing: {
+          mode: "metered",
+          pricingApplicability: "required",
+          tokenPricingAvailable: false,
+          cashCostAccountingValid: false,
+        },
+      }),
+    );
+    expect(decision.ok).toBe(false);
+    expect(decision.reason).toContain("pricing_table_missing");
+  });
+
+  test("metered binding passes when token pricing is available", () => {
+    expect(
+      exactBindingCapabilityGate(
+        greenBindingReport({
+          billing: {
+            mode: "metered",
+            pricingApplicability: "required",
+            tokenPricingAvailable: true,
+            cashCostAccountingValid: true,
+          },
+        }),
+      ).ok,
+    ).toBe(true);
+  });
+
+  test("issues include non-blocking degraded gaps", () => {
+    const issues = exactBindingCapabilityIssues(greenBindingReport());
+    expect(issues.some((i) => i.code === "codegraph_policy_unenforced")).toBe(
+      true,
+    );
+    expect(issues.every((i) => i.blocking === false)).toBe(true);
   });
 });
 

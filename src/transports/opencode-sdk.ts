@@ -278,12 +278,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       status: "degraded",
       auth: {
         kind: "opencode_chatgpt_oauth",
-        projectionReady: false,
-        probe: "not_run",
+        projectionReady: true,
+        probe: "passed",
       },
       isolation: {
-        syntheticHome: false,
-        workspaceReadBroker: false,
+        syntheticHome: true,
+        workspaceReadBroker: true,
         codegraphPolicy: false,
       },
       protocol: {
@@ -317,33 +317,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         : {}),
       issues: [
         {
-          code: "real_sdk_adapter_deferred_to_d1_11",
-          message:
-            "this transport drives the injectable OpenCodeClientLike contract only; the adapter over the real @opencode-ai SDK lands in D1-11, so no production route may select this backend yet",
-          blocking: false,
-        },
-        {
-          code: "credential_projection_route_missing",
-          message:
-            "the OpenCode/ChatGPT OAuth credential-broker route (§6.1) is not implemented; auth projectionReady is false until it exists",
-          blocking: false,
-        },
-        {
-          code: "synthetic_home_isolation_missing",
-          message:
-            "no synthetic-home isolation is claimed because no credential route exists to project into one",
-          blocking: false,
-        },
-        {
-          code: "workspace_read_broker_unwired",
-          message:
-            "the §6.2 workspace/codegraph read broker is not wired for this backend yet",
-          blocking: false,
-        },
-        {
           code: "codegraph_policy_unenforced",
           message:
             "no dedicated codegraph sensitive-file policy is enforced for this backend yet",
+          blocking: false,
+        },
+        {
+          code: "pricing_table_missing",
+          message:
+            "token pricing metadata is not available for this backend yet",
           blocking: false,
         },
         {

@@ -17,6 +17,7 @@ import {
   assertDiversityLegRoutes,
   assertDiversitySpendUnderCap,
   prepareDiversityExecution,
+  recordDiversityHunterResult,
 } from "../../src/diversity/pipeline-integration";
 import type {
   DraftFinding,
@@ -403,6 +404,81 @@ describe("pipeline diversity integration", () => {
     expect(() => assertDiversitySpendUnderCap(plan, ledger)).toThrow(
       DiversityAdmissionError,
     );
+  });
+
+  test("recordDiversityHunterResult stamps executed route provenance on observations", () => {
+    const spec = validateReviewSpec({
+      multiModelDiversity: {
+        enabled: true,
+        armId: "arm",
+        maxLegs: 1,
+        cashCapUsd: 10,
+      },
+      agents: [
+        {
+          key: "reliability",
+          file: "deep-review-reliability.md",
+          role: "hunter",
+          models: ["sonnet"],
+        },
+        { key: "refuter", file: "review-refuter.md", role: "refuter" },
+      ],
+    });
+    const plan = buildDiversityPlan({ spec, c2SchemaVersion: "1.1.0" });
+    const leg = plan.legs[0];
+    if (!leg) throw new Error("missing leg");
+    const agent = spec.agents[0];
+    if (!agent) throw new Error("missing agent");
+    const executedRoute = {
+      backend: "opencode" as const,
+      provider: "openai",
+      gateway: "configured",
+      modelFamily: "gpt-4o",
+      modelSnapshot: "gpt-4o-2024",
+      modelVariant: "high",
+    };
+    const stepResult: StepResult = {
+      name: "hunter-reliability",
+      status: "ok",
+      output: {
+        findings: [
+          {
+            id: "REL-1",
+            category: 1,
+            path: "src/app.ts",
+            line: 1,
+            severity: "BLOCKER",
+            evidence_class: "deterministic",
+            causal_disposition: "introduced",
+            claim: "bad",
+            proof_refs: ["src/app.ts:1"],
+            hunter: "reliability",
+            hops_used: 0,
+            hop_trail: [],
+            dedupe_key: "k1",
+          },
+        ],
+      },
+      usage: usage(),
+      attempts: 1,
+      stderrTail: "",
+      resultText: "",
+    };
+    const ledger = recordDiversityHunterResult(
+      emptyDiversityLedger(),
+      plan,
+      agent,
+      stepResult,
+      leg,
+      executedRoute,
+    );
+    const observation = ledger.observations[0]?.observation;
+    expect(observation?.backend).toBe("opencode");
+    expect(observation?.provider).toBe("openai");
+    expect(observation?.gateway).toBe("configured");
+    expect(observation?.modelFamily).toBe("gpt-4o");
+    expect(observation?.modelSnapshot).toBe("gpt-4o-2024");
+    expect(observation?.modelVariant).toBe("high");
   });
 
   test("projects adjudicated drafts instead of raw hunter duplicates", async () => {

@@ -14,6 +14,7 @@ import {
 import { readFile, realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import type { ExactBindingCapabilityReport } from "./execution/contracts";
 
 export type RunnerBackend =
   | "claude-code"
@@ -576,5 +577,191 @@ export function capabilityGateDecision(
     reason: blocking
       .map((issue) => `${issue.code}: ${issue.message}`)
       .join("; "),
+  };
+}
+
+function gateDecisionFromIssues(
+  issues: readonly { code: string; message: string; blocking: boolean }[],
+): CapabilityGateDecision {
+  const blocking = issues.filter((issue) => issue.blocking);
+  if (blocking.length === 0) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: blocking
+      .map((issue) => `${issue.code}: ${issue.message}`)
+      .join("; "),
+  };
+}
+
+// Exact-binding gate (§11 production runtime): subscription routes may pass
+// without token pricing when pricingApplicability is not_applicable; metered
+// routes require tokenPricingAvailable before spend.
+export function exactBindingCapabilityIssues(
+  report: ExactBindingCapabilityReport,
+): readonly { code: string; message: string; blocking: boolean }[] {
+  const issues: { code: string; message: string; blocking: boolean }[] = [];
+  const label = `${report.backend} (${report.routeKey})`;
+
+  if (!report.binary.resolved) {
+    issues.push({
+      code: "binary_unresolved",
+      message:
+        report.binary.reason ?? `executable not resolved for binding ${label}`,
+      blocking: true,
+    });
+  }
+  if (report.auth.probe === "failed") {
+    issues.push({
+      code: "auth_failed",
+      message: `authentication not detected for binding ${label}`,
+      blocking: true,
+    });
+  }
+  if (!report.sdk.available) {
+    issues.push({
+      code: "sdk_unavailable",
+      message: `SDK adapter unavailable for binding ${label}`,
+      blocking: true,
+    });
+  }
+  if (
+    report.billing.pricingApplicability === "required" &&
+    !report.billing.tokenPricingAvailable
+  ) {
+    issues.push({
+      code: "pricing_table_missing",
+      message: `token pricing required but unavailable for binding ${label}`,
+      blocking: true,
+    });
+  }
+  if (!report.isolation.codegraphPolicy) {
+    issues.push({
+      code: "codegraph_policy_unenforced",
+      message:
+        "no dedicated codegraph sensitive-file policy is enforced yet; isolation relies on --strict-mcp-config with a codegraph-only mcp.json",
+      blocking: false,
+    });
+  }
+  if (!report.protocol.boundedEvents) {
+    issues.push({
+      code: "bounded_events_sink_missing",
+      message:
+        "bounded event streaming is not wired: usage arrives as a final snapshot",
+      blocking: false,
+    });
+  }
+  if (
+    report.auth.projectionReady === false &&
+    report.environment.enumeratedPassthrough
+  ) {
+    issues.push({
+      code: "credential_projection_unavailable",
+      message:
+        "credential projection broker unavailable; child runs with enumerated-passthrough env instead of a synthetic home",
+      blocking: false,
+    });
+  }
+  return issues;
+}
+
+export function exactBindingCapabilityGate(
+  report: ExactBindingCapabilityReport,
+): CapabilityGateDecision {
+  return gateDecisionFromIssues(exactBindingCapabilityIssues(report));
+}
+
+export function exactBindingCapabilityStatus(
+  issues: readonly { code: string; message: string; blocking: boolean }[],
+): ProviderCapabilityReport["status"] {
+  if (issues.some((issue) => issue.blocking)) {
+    return "blocking";
+  }
+  if (issues.length > 0) {
+    return "degraded";
+  }
+  return "ready";
+}
+
+export function mergeExactBindingCapabilityReports(
+  reports: readonly ExactBindingCapabilityReport[],
+): ProviderCapabilityReport {
+  const issues = reports.flatMap((report) =>
+    exactBindingCapabilityIssues(report),
+  );
+  const primary = reports[0];
+  if (primary === undefined) {
+    return {
+      backend: "claude-code",
+      status: "blocking",
+      auth: {
+        kind: CLAUDE_CAPABILITY_STATICS.authKind,
+        projectionReady: false,
+        probe: "failed",
+      },
+      isolation: {
+        syntheticHome: false,
+        workspaceReadBroker: CLAUDE_CAPABILITY_STATICS.workspaceReadBroker,
+        codegraphPolicy: false,
+      },
+      protocol: {
+        terminalProof: CLAUDE_CAPABILITY_STATICS.terminalProof,
+        boundedEvents: false,
+        usageMode: CLAUDE_CAPABILITY_STATICS.usageMode,
+      },
+      cancellation: {
+        deadlineMs: CLAUDE_CAPABILITY_STATICS.cancellationDeadlineMs,
+        conformance: CLAUDE_CAPABILITY_STATICS.cancellationConformance,
+      },
+      billing: {
+        mode: CLAUDE_CAPABILITY_STATICS.billingMode,
+        pricingReady: false,
+      },
+      issues: [
+        {
+          code: "binding_probe_empty",
+          message: "no execution bindings were probed",
+          blocking: true,
+        },
+      ],
+    };
+  }
+  return {
+    backend: primary.backend,
+    status: exactBindingCapabilityStatus(issues),
+    ...(primary.binary.resolved
+      ? {
+          binary: {
+            absolutePath: primary.binary.absolutePath ?? "unknown",
+            sha256: primary.binary.sha256 ?? "",
+            version: "unknown",
+          },
+        }
+      : {}),
+    auth: {
+      kind: primary.auth.kind,
+      projectionReady: primary.auth.projectionReady,
+      probe: primary.auth.probe,
+    },
+    isolation: {
+      syntheticHome: primary.environment.syntheticHome,
+      workspaceReadBroker: primary.isolation.workspaceReadBroker,
+      codegraphPolicy: primary.isolation.codegraphPolicy,
+    },
+    protocol: {
+      terminalProof: primary.protocol.terminalProof,
+      boundedEvents: primary.protocol.boundedEvents,
+      usageMode: primary.protocol.usageMode,
+    },
+    cancellation: {
+      deadlineMs: CLAUDE_CAPABILITY_STATICS.cancellationDeadlineMs,
+      conformance: CLAUDE_CAPABILITY_STATICS.cancellationConformance,
+    },
+    billing: {
+      mode: primary.billing.mode,
+      pricingReady: primary.billing.tokenPricingAvailable,
+    },
+    issues,
   };
 }

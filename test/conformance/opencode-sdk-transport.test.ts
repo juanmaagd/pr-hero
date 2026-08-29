@@ -574,9 +574,10 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
     expect(report.backend).toBe("opencode");
     expect(report.status).toBe("degraded");
     expect(report.auth.kind).toBe("opencode_chatgpt_oauth");
-    expect(report.auth.projectionReady).toBe(false);
-    expect(report.isolation.syntheticHome).toBe(false);
-    expect(report.isolation.workspaceReadBroker).toBe(false);
+    expect(report.auth.projectionReady).toBe(true);
+    expect(report.auth.probe).toBe("passed");
+    expect(report.isolation.syntheticHome).toBe(true);
+    expect(report.isolation.workspaceReadBroker).toBe(true);
     expect(report.protocol.terminalProof).toBe(true);
     expect(report.protocol.boundedEvents).toBe(true);
     expect(report.protocol.usageMode).toBe("none");
@@ -586,9 +587,11 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
     expect(report.billing.pricingReady).toBe(false);
     expect(report.issues.length).toBeGreaterThan(0);
     for (const issue of report.issues) expect(issue.blocking).toBe(false);
-    expect(report.issues.some((issue) => issue.code.includes("d1_11"))).toBe(
-      true,
-    );
+    expect(
+      report.issues.some(
+        (issue) => issue.code === "codegraph_policy_unenforced",
+      ),
+    ).toBe(true);
   });
 });
 

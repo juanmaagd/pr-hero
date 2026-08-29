@@ -9,7 +9,7 @@ import {
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
 import { initConfigTemplate } from "./preflight";
-import { claudeCredentialProjectionReady } from "./provider-capabilities";
+import { resolveBindingAuthority } from "./runner-authority";
 import {
   type CheckSystemToolsOptions,
   checkSystemTools,
@@ -272,9 +272,16 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         exists: deps.exists,
         ...deps.checkToolsOptions,
       });
-      const claudeProjectionReady = claudeCredentialProjectionReady({
-        existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
-      });
+      const workspaceRoot = deps.cwd ?? process.cwd();
+      const claudeAuthority = await resolveBindingAuthority(
+        "claude-code",
+        { workspaceRoot },
+        {
+          existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
+        },
+      );
+      const claudeProjectionReady =
+        claudeAuthority.binding?.credentialBroker !== undefined;
       return { toolStatuses, claudeProjectionReady };
     },
     async apply(state: WizardState): Promise<Partial<WizardState>> {

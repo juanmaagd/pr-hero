@@ -1078,10 +1078,25 @@ async function execute(
 
   state.routePlan = routePlan;
 
-  // Pre-confirm admit route plan
+  // Pre-confirm admit route plan — explicit caller route plans require the
+  // production runtime's shared registry; auto-built plans keep the offline
+  // default factory for harness tests.
+  const callerSuppliedRoutePlan = input.routePlan !== undefined;
   const transportRegistry =
-    deps.transportRegistry ?? new DefaultTransportRegistry();
-  if (routePlan !== undefined) {
+    deps.transportRegistry ??
+    (routePlan === undefined || !callerSuppliedRoutePlan
+      ? new DefaultTransportRegistry()
+      : undefined);
+  if (
+    routePlan !== undefined &&
+    callerSuppliedRoutePlan &&
+    transportRegistry === undefined
+  ) {
+    throw new Error(
+      "explicit route plan execution requires transportRegistry from production runtime",
+    );
+  }
+  if (routePlan !== undefined && transportRegistry !== undefined) {
     if (diversityCtx.enabled) {
       if (diversityCtx.plan) {
         assertDiversityLegRoutes(diversityCtx.plan, routePlan);
@@ -1424,6 +1439,8 @@ async function execute(
           plan,
           entry.agent,
           result,
+          undefined,
+          entry.spec.route,
         ),
       };
       state.diversity = diversityCtx;
