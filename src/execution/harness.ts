@@ -88,34 +88,57 @@ async function projectCredentialWithBudget(
   input: Parameters<CredentialBroker["project"]>[0],
   options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
 ): Promise<CredentialProjection> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error("credential_projection_timed_out")),
-      options.timeoutMs,
-    );
+  let outcome: "pending" | "budget" | undefined;
+  const guarded = broker.project(input).then(async (projection) => {
+    if (outcome === "budget") {
+      await projection.destroy().catch(() => {});
+      throw new Error("credential_projection_superseded");
+    }
+    outcome = "pending";
+    return projection;
   });
-  const racers: Promise<CredentialProjection>[] = [
-    broker.project(input),
-    timeoutPromise,
-  ];
-  if (options.signal !== undefined) {
-    const signal = options.signal;
-    if (signal.aborted) {
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const signal = options.signal;
+
+  const cleanup = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal !== undefined && onAbort !== undefined) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  };
+
+  try {
+    if (signal?.aborted) {
       throw new Error("credential_projection_aborted");
     }
-    racers.push(
-      new Promise<never>((_, reject) => {
-        const onAbort = () =>
-          reject(new Error("credential_projection_aborted"));
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("credential_projection_timed_out")),
+        options.timeoutMs,
+      );
+    });
+
+    const racers: Promise<CredentialProjection>[] = [guarded, timeoutPromise];
+
+    if (signal !== undefined) {
+      const abortPromise = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new Error("credential_projection_aborted"));
         signal.addEventListener("abort", onAbort, { once: true });
-      }),
-    );
-  }
-  try {
+      });
+      racers.push(abortPromise);
+    }
+
     return await Promise.race(racers);
+  } catch (error) {
+    if (outcome === undefined) {
+      outcome = "budget";
+    }
+    throw error;
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    cleanup();
   }
 }
 
