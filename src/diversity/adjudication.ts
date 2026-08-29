@@ -66,6 +66,55 @@ export function validateHashBinding(
   return adjudication.evidenceReportSha256 === report.sha256;
 }
 
+export function synthesizeDeterministicAdjudication(
+  group: AdjudicationGroup,
+): ClusterAdjudication | undefined {
+  if (group.ambiguous) return undefined;
+  const observations = group.clusters.flatMap(
+    (cluster) => cluster.observations,
+  );
+  if (observations.length === 0) return undefined;
+  const inspectedLocations = observations.map((observation) => ({
+    path: observation.path,
+    line: observation.line,
+    symbol: observation.symbol,
+  }));
+  const proofRefs = [
+    ...new Set(observations.flatMap((observation) => observation.proofRefs)),
+  ];
+  if (proofRefs.length === 0) return undefined;
+  const report = bindCodeEvidenceReport({
+    inspectedLocations,
+    reachableBehavior: observations.map((observation) => observation.claim),
+    proofRefs,
+    limitations: [],
+  });
+  const canonicalFindings = observations.map((observation) => ({
+    path: observation.path,
+    line: observation.line,
+    symbol: observation.symbol,
+    severity: observation.severity,
+    category: observation.category,
+    evidenceClass: "deterministic" as const,
+    causalDisposition: "introduced" as const,
+    claim: observation.claim,
+    proofRefs: [...observation.proofRefs],
+    hopsUsed: 0,
+    hopTrail: [] as HopTrail,
+  }));
+  const adjudication: ClusterAdjudication = {
+    evidenceReportSha256: report.sha256,
+    relation: "same_defect",
+    hypotheses: observations.map((observation, index) => ({
+      id: anonymousHypothesisId(index),
+      outcome: "supported" as const,
+      proofRefs: [...observation.proofRefs],
+    })),
+    canonicalFindings,
+  };
+  return adjudicateGroupConservatively(group, report, adjudication);
+}
+
 export function adjudicateGroupConservatively(
   group: AdjudicationGroup,
   report?: CodeEvidenceReport,

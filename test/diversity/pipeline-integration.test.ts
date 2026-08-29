@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DiversityCapabilityError } from "../../src/diversity/errors";
+import { prepareDiversityExecution } from "../../src/diversity/pipeline-integration";
 import type { HunterDraft } from "../../src/drafts";
 import { type PipelineInput, runPipeline } from "../../src/pipeline";
 import { validateReviewSpec } from "../../src/spec";
@@ -149,5 +151,61 @@ describe("pipeline diversity integration", () => {
     );
     expect(pipelineJson.multiModelDiversity?.enabled).toBe(true);
     expect(pipelineJson.multiModelDiversity?.legCount).toBe(2);
+  });
+
+  test("records partial failure when one diversity leg rejects before settlement", async () => {
+    const input = await makeInput();
+    let reliabilityCalls = 0;
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name.startsWith("hunter-reliability")) {
+          reliabilityCalls++;
+          if (reliabilityCalls === 1) {
+            throw new Error("spawn rejected");
+          }
+          return ok(spec, { findings: [] } satisfies HunterDraft);
+        }
+        throw new Error(`unscripted step ${spec.name}`);
+      },
+    };
+    const result = await runPipeline(input, { runner });
+    expect(result.skillOutput.run_status).toBe("partial");
+    const diversity = result.skillOutput.debug.diversity as {
+      attempts?: Array<{ status?: string }>;
+    };
+    expect(diversity?.attempts?.length).toBeGreaterThan(0);
+    const failed = diversity?.attempts?.find(
+      (attempt) => attempt.status === "failed",
+    );
+    expect(failed).toBeDefined();
+  });
+
+  test("prepareDiversityExecution blocks before spawn when capability is corrupt", () => {
+    expect(() =>
+      prepareDiversityExecution({
+        reviewSpec: validateReviewSpec({
+          multiModelDiversity: {
+            enabled: true,
+            armId: "arm",
+            maxLegs: 2,
+            cashCapUsd: 10,
+          },
+          agents: [
+            {
+              key: "reliability",
+              file: "deep-review-reliability.md",
+              role: "hunter",
+              models: ["sonnet", "opus"],
+            },
+            { key: "refuter", file: "review-refuter.md", role: "refuter" },
+          ],
+        }),
+        capabilityCheck: () => ({
+          ok: false,
+          c2SchemaVersion: "1.1.0",
+          reason: "corrupt",
+        }),
+      }),
+    ).toThrow(DiversityCapabilityError);
   });
 });

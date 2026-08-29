@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  refuseLiveRunWithoutAuthorization,
   requiresExplicitLiveAuthorization,
   scoreBenchmarkRuns,
   validateBenchmarkPlan,
@@ -49,12 +50,9 @@ if (mode === "check") {
 }
 
 if (mode === "score") {
-  const report = scoreBenchmarkRuns([]);
+  const report = scoreBenchmarkRuns([], plan);
   console.log(JSON.stringify(report, null, 2));
   process.exit(0);
 }
 
-console.error(
-  "d3: run requires separate live authorization; refusing to execute paid work",
-);
-process.exit(2);
+refuseLiveRunWithoutAuthorization();

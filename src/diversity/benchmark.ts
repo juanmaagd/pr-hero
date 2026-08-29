@@ -61,22 +61,62 @@ export function validateBenchmarkPlan(
   );
   must(plan.interleaved === true, "plan must be interleaved");
   must(
+    typeof plan.buildFingerprint === "string" &&
+      plan.buildFingerprint.length > 0,
+    "buildFingerprint required",
+  );
+  must(
+    typeof plan.promptFingerprint === "string" &&
+      plan.promptFingerprint.length > 0,
+    "promptFingerprint required",
+  );
+  must(plan.stopOnInvalidRun === true, "stopOnInvalidRun must be true");
+  must(
     typeof plan.maxCashUsd === "number" && plan.maxCashUsd > 0,
     "maxCashUsd required",
   );
   return plan as unknown as DiversityBenchmarkPlan;
 }
 
-export interface ScoredBenchmarkRun {
+export interface BenchmarkRunEvidence {
   readonly runId: string;
   readonly armId: string;
-  readonly valid: boolean;
+  readonly replicate: number;
+  readonly observedBuildFingerprint: string;
+  readonly observedPromptFingerprint: string;
+  readonly controlCompleted: boolean;
+  readonly treatmentCompleted: boolean;
+  readonly blindingIntact: boolean;
+  readonly interleavingIntact: boolean;
   readonly cashCostUsd: number;
   readonly notionalCostUsd: number;
   readonly uniqueTruePositives: number;
   readonly recall: number;
   readonly cleanPrRestraint: number;
   readonly blindSpots: number;
+  readonly capExceeded?: boolean;
+  readonly replicateOmitted?: boolean;
+}
+
+export interface ScoredBenchmarkRun extends BenchmarkRunEvidence {
+  readonly valid: boolean;
+}
+
+export function deriveRunValidity(
+  run: BenchmarkRunEvidence,
+  plan: DiversityBenchmarkPlan,
+): boolean {
+  if (run.capExceeded === true) return false;
+  if (run.replicateOmitted === true) return false;
+  if (!run.blindingIntact || !run.interleavingIntact) return false;
+  if (!run.controlCompleted || !run.treatmentCompleted) return false;
+  if (run.observedBuildFingerprint !== plan.buildFingerprint) return false;
+  if (run.observedPromptFingerprint !== plan.promptFingerprint) return false;
+  if (run.cashCostUsd > plan.maxCashUsd) return false;
+  if (run.replicate < 1 || run.replicate > plan.treatmentArm.replicates) {
+    return false;
+  }
+  return true;
 }
 
 export interface BenchmarkScoreReport {
@@ -90,10 +130,17 @@ export interface BenchmarkScoreReport {
 }
 
 export function scoreBenchmarkRuns(
-  runs: readonly ScoredBenchmarkRun[],
+  runs: readonly BenchmarkRunEvidence[],
+  plan?: DiversityBenchmarkPlan,
 ): BenchmarkScoreReport {
-  const validRuns = runs.filter((run) => run.valid);
-  const invalidRuns = runs.length - validRuns.length;
+  const scored: ScoredBenchmarkRun[] = plan
+    ? runs.map((run) => ({ ...run, valid: deriveRunValidity(run, plan) }))
+    : runs.map((run) => ({
+        ...run,
+        valid: (run as ScoredBenchmarkRun).valid ?? false,
+      }));
+  const validRuns = scored.filter((run) => run.valid);
+  const invalidRuns = scored.length - validRuns.length;
   const uniqueTp = validRuns.reduce(
     (sum, run) => sum + run.uniqueTruePositives,
     0,
@@ -139,4 +186,10 @@ export function recordPromotion(
     );
   }
   return decision;
+}
+
+export function refuseLiveRunWithoutAuthorization(): never {
+  throw new DiversityBenchmarkError(
+    "live benchmark run requires separate authorization",
+  );
 }

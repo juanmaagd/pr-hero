@@ -52,13 +52,22 @@ export function canonicalProofAnchor(
 }
 
 export function normalizedDedupeKey(observation: FindingObservation): string {
-  if (observation.dedupeKey) return observation.dedupeKey;
-  const anchors = [...observation.proofRefs].sort().join(";");
+  const anchors = [...observationAnchorKeys(observation)].sort().join(";");
   return createHash("sha256")
     .update(
-      `${observation.path}|${observation.symbol ?? ""}|${observation.category}|${anchors}`,
+      `${observation.specialty}|${observation.path}|${observation.symbol ?? ""}|${observation.category}|${anchors}`,
     )
     .digest("hex");
+}
+
+export function observationAnchorKeys(
+  observation: FindingObservation,
+): readonly string[] {
+  return observation.proofRefs.map(
+    (proofRef) =>
+      canonicalProofAnchor(observation.path, observation.symbol, proofRef)
+        .anchorHash,
+  );
 }
 
 export function compareObservations(
@@ -67,27 +76,23 @@ export function compareObservations(
   lineWindow = 100,
 ): ObservationRelation {
   if (left.specialty !== right.specialty) return "distinct";
-  const leftKey = normalizedDedupeKey(left);
-  const rightKey = normalizedDedupeKey(right);
-  if (leftKey === rightKey) return "strong_same_defect";
-
-  const sharedAnchors = left.proofRefs.filter((anchor) =>
-    right.proofRefs.includes(anchor),
+  const leftAnchors = new Set(observationAnchorKeys(left));
+  const rightAnchors = new Set(observationAnchorKeys(right));
+  const sharedAnchors = [...leftAnchors].filter((anchor) =>
+    rightAnchors.has(anchor),
   );
+  if (sharedAnchors.length > 0) {
+    return left.symbol === right.symbol ? "strong_same_defect" : "ambiguous";
+  }
+
   const sameSymbol =
     left.symbol !== undefined &&
     right.symbol !== undefined &&
     left.symbol === right.symbol;
-  if (sameSymbol && sharedAnchors.length > 0) {
-    return "strong_same_defect";
-  }
   if (sameSymbol && left.line !== undefined && right.line !== undefined) {
     if (Math.abs(left.line - right.line) <= lineWindow) {
-      return sharedAnchors.length > 0 ? "strong_same_defect" : "ambiguous";
+      return "ambiguous";
     }
-  }
-  if (sharedAnchors.length > 0) {
-    return left.symbol === right.symbol ? "strong_same_defect" : "ambiguous";
   }
   if (left.path !== right.path) return "distinct";
   return "ambiguous";

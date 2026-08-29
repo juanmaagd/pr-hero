@@ -12,12 +12,18 @@ import {
   type DedupeLoser,
   mergeAndDedupe,
 } from "./dedupe";
+import type { InternalCapabilityReport } from "./diversity/admission";
+import type { BenchmarkTarget } from "./diversity/identity";
 import {
+  assertDiversityLegRoutes,
+  assertDiversitySpendUnderCap,
   buildDiversityPipelineRecord,
   type DiversityExecutionContext,
   diversityDebugFromLedger,
   executionHuntersForTriggered,
   prepareDiversityExecution,
+  projectDiversityDrafts,
+  recordDiversityHunterFailure,
   recordDiversityHunterResult,
 } from "./diversity/pipeline-integration";
 import {
@@ -241,6 +247,11 @@ export interface PipelineInput {
     settled: PhaseBResult[];
     priors: PriorRecord[];
   };
+  // D3: frozen benchmark target and fingerprints for diversity admission.
+  diversityTarget?: BenchmarkTarget;
+  buildFingerprint?: string;
+  promptFingerprint?: string;
+  diversityCapabilityCheck?: () => InternalCapabilityReport;
 }
 
 export interface PipelineDeps {
@@ -997,6 +1008,18 @@ async function execute(
     cliModel: input.model,
     routingConfig: effectiveRoutingConfig,
     frontmatterModel: (agentKey) => frontmatterByKey.get(agentKey),
+    target: input.diversityTarget,
+    runtimeTarget: reviewSpec.multiModelDiversity?.enabled
+      ? {
+          repoId: input.diversityTarget?.repoId ?? input.worktree,
+          pr: input.pr,
+          baseSha: input.baseSha,
+          headSha: input.headSha,
+        }
+      : undefined,
+    buildFingerprint: input.buildFingerprint ?? input.promptSet?.sha256,
+    promptFingerprint: input.promptFingerprint ?? input.promptSet?.sha256,
+    capabilityCheck: input.diversityCapabilityCheck,
   });
   state.diversity = diversityCtx;
 
@@ -1060,6 +1083,9 @@ async function execute(
     deps.transportRegistry ?? new DefaultTransportRegistry();
   if (routePlan !== undefined) {
     if (diversityCtx.enabled) {
+      if (diversityCtx.plan) {
+        assertDiversityLegRoutes(diversityCtx.plan, routePlan);
+      }
       await admitDiversityRoutePlan(routePlan, transportRegistry);
     } else {
       await admitRoutePlan(routePlan, transportRegistry);
@@ -1371,6 +1397,17 @@ async function execute(
       recordStepFailure(entry.meta);
       state.hunterFailures++;
       state.partial = true;
+      if (diversityCtx.enabled && diversityCtx.plan) {
+        diversityCtx = {
+          ...diversityCtx,
+          ledger: recordDiversityHunterFailure(
+            diversityCtx.ledger,
+            diversityCtx.plan,
+            entry.agent,
+          ),
+        };
+        state.diversity = diversityCtx;
+      }
       continue;
     }
     const result = outcome.value;
@@ -1389,18 +1426,32 @@ async function execute(
         ),
       };
       state.diversity = diversityCtx;
+      assertDiversitySpendUnderCap(diversityCtx.plan!, diversityCtx.ledger);
     }
     if (result.status !== "ok") {
       state.hunterFailures++;
       state.partial = true;
       continue;
     }
-    for (const finding of (result.output as HunterDraft).findings) {
-      // The driver stamps `hunter` to the step that actually produced the
-      // draft — removes a self-report failure mode where a hunter claiming
-      // another's name corrupts attribution and dedupe diagnostics.
-      state.drafts.push({ ...finding, hunter: resolveSpecialty(entry.agent) });
+    if (!(diversityCtx.enabled && diversityCtx.plan)) {
+      for (const finding of (result.output as HunterDraft).findings) {
+        // The driver stamps `hunter` to the step that actually produced the
+        // draft — removes a self-report failure mode where a hunter claiming
+        // another's name corrupts attribution and dedupe diagnostics.
+        state.drafts.push({
+          ...finding,
+          hunter: resolveSpecialty(entry.agent),
+        });
+      }
     }
+  }
+
+  if (diversityCtx.enabled && diversityCtx.plan) {
+    const projected = projectDiversityDrafts(diversityCtx);
+    for (const draft of projected.drafts) {
+      state.drafts.push(draft);
+    }
+    if (projected.partial) state.partial = true;
   }
 
   // Step 5 — merge + dedupe + renumber (final F00N ids assigned here, before
