@@ -82,14 +82,14 @@ class FrozenRuntimeBinding implements RuntimeBinding {
   readonly executable: VerifiedExecutable;
   readonly credential: RuntimeBindingCredential;
   readonly environment: EnvironmentPolicy;
-  readonly tools = {
+  readonly tools = Object.freeze({
     allowMapOnly: true,
-    deniedTools: ["bash", "Write", "Edit", "Task"],
-  } as const;
-  readonly mcp = {
+    deniedTools: Object.freeze(["bash", "Write", "Edit", "Task"]),
+  });
+  readonly mcp = Object.freeze({
     codegraphOnly: true,
     verifiedConfigRequired: true,
-  } as const;
+  });
 
   private readonly authority: ResolvedBindingAuthority;
   private readonly getCapabilityReport: (
@@ -264,6 +264,26 @@ async function resolveFrozenBindings(
   return bindings;
 }
 
+function createImmutableBindingsMap(
+  bindings: Map<string, RuntimeBinding>,
+): ReadonlyMap<string, RuntimeBinding> {
+  const frozen = new Map(bindings);
+  return new Proxy(frozen, {
+    get(target, prop) {
+      if (prop === "set" || prop === "delete" || prop === "clear") {
+        return () => {
+          throw new ProductionRuntimeError("runtime bindings are immutable");
+        };
+      }
+      const value = Reflect.get(target, prop);
+      if (typeof value === "function") {
+        return value.bind(target);
+      }
+      return value;
+    },
+  }) as ReadonlyMap<string, RuntimeBinding>;
+}
+
 export class MultiProviderRunner implements StepRunner {
   private readonly workspaceRoot: string;
   private readonly bindings: ReadonlyMap<string, RuntimeBinding>;
@@ -305,6 +325,7 @@ export class MultiProviderRunner implements StepRunner {
           return binding;
         }
       }
+      return undefined;
     }
     if (this.defaultBindingKey !== undefined) {
       return this.bindings.get(this.defaultBindingKey);
@@ -402,22 +423,20 @@ export async function createProductionRuntime(
   const defaultClaude = [...bindings.values()].find(
     (binding) => binding.route.backend === "claude-code",
   );
+  const runnerBindings = createImmutableBindingsMap(bindings);
   const runner = new MultiProviderRunner({
     workspaceRoot: options.workspaceRoot,
-    bindings,
+    bindings: runnerBindings,
     registry,
     defaultBindingKey: defaultClaude?.key,
     spawnFn: options.spawnFn,
     signal: options.signal,
   });
 
-  const frozenBindings = new Map(bindings);
-  Object.freeze(frozenBindings);
-
   return {
     runner,
     registry,
-    bindings: frozenBindings,
+    bindings: createImmutableBindingsMap(bindings),
     admitted,
     dispose: async () => {},
   };

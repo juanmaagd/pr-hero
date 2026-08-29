@@ -10,7 +10,13 @@ describe("resolveRunnerAuthority", () => {
     const expectedSha = hasher.digest("hex");
 
     const result = await resolveRunnerAuthority(
-      { binaryPath: canonical, workspaceRoot: "/fake/ws" },
+      {
+        binaryPath: canonical,
+        workspaceRoot: "/fake/ws",
+        executableAllowlists: {
+          "claude-code": [{ absolutePath: canonical, sha256: expectedSha }],
+        },
+      },
       {
         existsFn: () => true,
         realpathFn: async (p) => p,
@@ -29,13 +35,26 @@ describe("resolveRunnerAuthority", () => {
   });
 
   test("without an override, searches the injected PATH dirs in order", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const expectedSha = hasher.digest("hex");
+
     const result = await resolveRunnerAuthority(
       {
         workspaceRoot: "/fake/ws",
         env: { PATH: "/first:/second:/third" },
+        executableAllowlists: {
+          "claude-code": [
+            {
+              absolutePath: "/real/second/claude",
+              sha256: expectedSha,
+            },
+          ],
+        },
       },
       {
-        existsFn: (p) => p === "/second/claude",
+        existsFn: (p) => p === "/second/claude" || p === "/real/second/claude",
         realpathFn: async (p) => `/real${p}`,
         readFileFn: async () => new Uint8Array([1, 2, 3]),
       },

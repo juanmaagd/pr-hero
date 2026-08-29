@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -21,6 +28,7 @@ import {
   MultiProviderRunner,
   ProductionRuntimeError,
 } from "../src/production-runtime";
+import type { ExecutableAllowlistEntry } from "../src/provider-capabilities";
 import {
   resolveBindingAuthority,
   resolveRunnerAuthority,
@@ -51,6 +59,44 @@ async function writeClaudeFixture(
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(bytes);
   return { canonicalPath, sha256: hasher.digest("hex") };
+}
+
+async function writeOpenCodeFixture(
+  dir: string,
+): Promise<{ canonicalPath: string; sha256: string }> {
+  const opencodePath = path.join(dir, "opencode");
+  const bytes = Buffer.concat([MACHO_PREFIX, Buffer.from("opencode")]);
+  await writeFile(opencodePath, bytes);
+  await chmod(opencodePath, 0o755);
+  const canonicalPath = await realpath(opencodePath);
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(bytes);
+  return { canonicalPath, sha256: hasher.digest("hex") };
+}
+
+function claudeAllowlist(fixture: {
+  canonicalPath: string;
+  sha256: string;
+}): Partial<Record<RunnerBackend, readonly ExecutableAllowlistEntry[]>> {
+  return {
+    "claude-code": [
+      { absolutePath: fixture.canonicalPath, sha256: fixture.sha256 },
+    ],
+  };
+}
+
+function mixedAllowlists(
+  claude: { canonicalPath: string; sha256: string },
+  opencode: { canonicalPath: string; sha256: string },
+): Partial<Record<RunnerBackend, readonly ExecutableAllowlistEntry[]>> {
+  return {
+    "claude-code": [
+      { absolutePath: claude.canonicalPath, sha256: claude.sha256 },
+    ],
+    opencode: [
+      { absolutePath: opencode.canonicalPath, sha256: opencode.sha256 },
+    ],
+  };
 }
 
 function createMockTransport(
@@ -190,6 +236,7 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
       });
@@ -219,6 +266,7 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
       });
@@ -307,6 +355,7 @@ describe("production runtime PR1", () => {
       const authority = await resolveRunnerAuthority({
         workspaceRoot: tmpDir,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
       });
       expect(authority.error).toBeUndefined();
       expect(authority.runnerOptions?.binaryPath).toBe(
@@ -341,6 +390,7 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
         authorityDeps: {
@@ -389,18 +439,21 @@ describe("production runtime PR1", () => {
         routingConfig,
       });
       const plan = createResolvedRoutePlan([step]);
-      const opencodePath = path.join(tmpDir, "opencode");
-      await writeFile(
-        opencodePath,
-        Buffer.concat([MACHO_PREFIX, Buffer.from("opencode")]),
-      );
-      await chmod(opencodePath, 0o755);
+      const opencodeFixture = await writeOpenCodeFixture(tmpDir);
 
       await expect(
         createProductionRuntime({
           workspaceRoot: tmpDir,
           plan,
-          openCodeBinaryPath: await realpath(opencodePath),
+          openCodeBinaryPath: opencodeFixture.canonicalPath,
+          executableAllowlists: {
+            opencode: [
+              {
+                absolutePath: opencodeFixture.canonicalPath,
+                sha256: opencodeFixture.sha256,
+              },
+            ],
+          },
           mode: "production",
         }),
       ).rejects.toThrow(OpenCodeProductionGatedError);
@@ -422,6 +475,7 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
       });
@@ -464,14 +518,7 @@ describe("production runtime PR1", () => {
         routingConfig,
       });
       const plan = createResolvedRoutePlan([claudeStep, openStep]);
-
-      const opencodePath = path.join(tmpDir, "opencode");
-      await writeFile(
-        opencodePath,
-        Buffer.concat([MACHO_PREFIX, Buffer.from("opencode")]),
-      );
-      await chmod(opencodePath, 0o755);
-      const opencodeCanonical = await realpath(opencodePath);
+      const opencodeFixture = await writeOpenCodeFixture(tmpDir);
 
       const claudeRequests: TransportRequest[] = [];
       const openRequests: TransportRequest[] = [];
@@ -496,7 +543,8 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
-        openCodeBinaryPath: opencodeCanonical,
+        openCodeBinaryPath: opencodeFixture.canonicalPath,
+        executableAllowlists: mixedAllowlists(claudeFixture, opencodeFixture),
         registry,
         mode: "conformance",
         evidence: new Map([["opencode", evidence]]),
@@ -511,7 +559,7 @@ describe("production runtime PR1", () => {
         authorityDeps: {
           existsFn: (p) =>
             p === claudeFixture.canonicalPath ||
-            p === opencodeCanonical ||
+            p === opencodeFixture.canonicalPath ||
             p.startsWith(tmpDir),
           realpathFn: async (p) => p,
         },
@@ -579,6 +627,7 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
       });
@@ -614,6 +663,7 @@ describe("production runtime PR1", () => {
         workspaceRoot: tmpDir,
         plan,
         binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
       });
@@ -640,6 +690,112 @@ describe("production runtime PR1", () => {
         },
       );
       expect(result.error).toContain("unsupported");
+    });
+
+    test("explicit mismatched OpenCode route does not fall back to Claude", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+      });
+      const runner = runtime.runner as MultiProviderRunner;
+      const unmatchedOpenCodeRoute = {
+        backend: "opencode" as const,
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o",
+      };
+
+      expect(
+        runner.resolveBinding({
+          ...makeStep(tmpDir),
+          route: unmatchedOpenCodeRoute,
+        }),
+      ).toBeUndefined();
+
+      const result = await runner.run(
+        makeStep(tmpDir, { route: unmatchedOpenCodeRoute }),
+      );
+      expect(result.status).toBe("failed");
+      expect(result.stderrTail).toContain("No admitted binding");
+    });
+
+    test("resolveBindingAuthority rejects deceptive OpenCode executables not in configured allowlist", async () => {
+      const deceptivePath = path.join(tmpDir, "README.sh");
+      await writeFile(deceptivePath, "#!/bin/sh\necho deceptive\n");
+      await chmod(deceptivePath, 0o755);
+      const canonical = await realpath(deceptivePath);
+
+      const result = await resolveBindingAuthority(
+        "opencode",
+        {
+          workspaceRoot: tmpDir,
+          openCodeBinaryPath: canonical,
+          executableAllowlists: {
+            opencode: [
+              {
+                absolutePath: "/usr/local/bin/opencode",
+                sha256:
+                  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              },
+            ],
+          },
+        },
+        {
+          existsFn: () => true,
+          realpathFn: async (p) => p,
+          readFileFn: async (p) => {
+            const text = await readFile(p);
+            return new Uint8Array(text);
+          },
+        },
+      );
+
+      expect(result.error).toBeDefined();
+      expect(result.error).toContain("not in configured allowlist");
+    });
+
+    test("exposed runtime bindings reject structural mutation", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+      });
+
+      expect(() => {
+        (runtime.bindings as Map<string, unknown>).set("evil", {});
+      }).toThrow(ProductionRuntimeError);
+
+      const binding = runtime.bindings.get(step.routeFingerprint);
+      expect(binding).toBeDefined();
+      if (binding === undefined) return;
+      expect(() => {
+        (binding.tools.deniedTools as string[]).push("WebSearch");
+      }).toThrow();
     });
   });
 });

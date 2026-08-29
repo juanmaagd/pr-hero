@@ -6,7 +6,10 @@ import type {
   ClaudeBinaryResolutionDeps,
   ExecutableAllowlistEntry,
 } from "./provider-capabilities";
-import { resolveClaudeCanonicalBinary } from "./provider-capabilities";
+import {
+  resolveClaudeCanonicalBinary,
+  verifyExecutableAuthority,
+} from "./provider-capabilities";
 import {
   type CredentialBroker,
   KeychainCredentialBroker,
@@ -19,6 +22,10 @@ export interface RunnerAuthorityOptions {
   readonly workspaceRoot: string;
   readonly env?: { PATH?: string };
   readonly credentialBrokers?: Partial<Record<RunnerBackend, CredentialBroker>>;
+  /** Independent executable authority — never derived from the candidate binary. */
+  readonly executableAllowlists?: Partial<
+    Record<RunnerBackend, readonly ExecutableAllowlistEntry[]>
+  >;
 }
 
 export interface ResolvedRunnerOptions {
@@ -117,6 +124,49 @@ function claudeCredentialBroker(): KeychainCredentialBroker | undefined {
     : undefined;
 }
 
+async function verifyConfiguredExecutable(
+  backend: RunnerBackend,
+  candidatePath: string,
+  options: RunnerAuthorityOptions,
+  deps: ResolveRunnerAuthorityDeps = {},
+): Promise<
+  | { readonly allowlist: readonly ExecutableAllowlistEntry[] }
+  | { readonly error: string }
+> {
+  const configuredAllowlist = options.executableAllowlists?.[backend];
+  if (configuredAllowlist === undefined || configuredAllowlist.length === 0) {
+    return {
+      error: `executable allowlist required for ${backend} binding authority`,
+    };
+  }
+
+  const verification = await verifyExecutableAuthority(
+    {
+      candidatePath,
+      allowlist: configuredAllowlist,
+    },
+    {
+      // Binding resolution already canonicalized the candidate path.
+      realpathFn: async (p) => p,
+      readFileFn: deps.readFileFn,
+      statFn: deps.existsFn
+        ? (p) => ({
+            mode: deps.existsFn?.(p) ? 0o755 : 0o644,
+          })
+        : undefined,
+    },
+  );
+  if (!verification.approved) {
+    return {
+      error:
+        verification.reason ??
+        `executable ${candidatePath} is not in configured allowlist for ${backend}`,
+    };
+  }
+
+  return { allowlist: configuredAllowlist };
+}
+
 export async function resolveBindingAuthority(
   backend: RunnerBackend,
   options: RunnerAuthorityOptions,
@@ -127,6 +177,15 @@ export async function resolveBindingAuthority(
     if (resolved.error !== undefined) {
       return { error: resolved.error };
     }
+    const verified = await verifyConfiguredExecutable(
+      backend,
+      resolved.canonicalPath,
+      options,
+      deps,
+    );
+    if ("error" in verified) {
+      return { error: verified.error };
+    }
     const broker = claudeCredentialBroker();
     return {
       binding: {
@@ -134,9 +193,7 @@ export async function resolveBindingAuthority(
         binaryPath: resolved.canonicalPath,
         workspaceRoot: options.workspaceRoot,
         canonicalCwd: options.workspaceRoot,
-        executableAllowlist: [
-          { absolutePath: resolved.canonicalPath, sha256: resolved.sha256 },
-        ],
+        executableAllowlist: verified.allowlist,
         credentialKind: "claude_subscription_oauth",
         credentialRef: "claude-code-credentials",
         ...(broker ? { credentialBroker: broker } : {}),
@@ -156,15 +213,22 @@ export async function resolveBindingAuthority(
     if ("error" in resolved) {
       return { error: resolved.error };
     }
+    const verified = await verifyConfiguredExecutable(
+      backend,
+      resolved.canonicalPath,
+      options,
+      deps,
+    );
+    if ("error" in verified) {
+      return { error: verified.error };
+    }
     return {
       binding: {
         backend,
         binaryPath: resolved.canonicalPath,
         workspaceRoot: options.workspaceRoot,
         canonicalCwd: options.workspaceRoot,
-        executableAllowlist: [
-          { absolutePath: resolved.canonicalPath, sha256: resolved.sha256 },
-        ],
+        executableAllowlist: verified.allowlist,
         credentialKind: "opencode_chatgpt_oauth",
         credentialRef: "opencode-auth",
         credentialBroker:
