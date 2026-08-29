@@ -465,8 +465,6 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
 
     ACTIVE_CHILD_PROCS.add(proc);
 
-    let timedOut = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     let cascadePromise: Promise<CascadeResult> | undefined;
     let provenPgid: number | undefined;
     let notifyCascadeStart: (value: "cascade") => void = () => {};
@@ -518,15 +516,8 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       const stdoutPending = new Response(proc.stdout).text();
       const stderrPending = new Response(proc.stderr).text();
 
-      if (request.timeoutMs && request.timeoutMs > 0) {
-        timer = setTimeout(() => {
-          timedOut = true;
-          console.error(
-            `Step timed out after ${request.timeoutMs}ms, escalating signal cascade`,
-          );
-          startCascade();
-        }, request.timeoutMs);
-      }
+      // Per-attempt step timeout is harness-owned (StepSpec.timeoutMs → watchdog
+      // → AbortSignal). Transports react only to the supplied signal.
 
       if (context.signal.aborted) {
         onAbort();
@@ -578,7 +569,6 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
           stderr = (await boundedText(stderrPending, this.killReapMs)) ?? "";
         }
       }
-      if (timer !== undefined) clearTimeout(timer);
 
       const wallMs = Math.round(performance.now() - start);
 
@@ -637,12 +627,10 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         finalText: fullResult,
         usage,
         stderrTail,
-        timedOut,
         ...(exitCode !== undefined ? { exitCode } : {}),
       };
     } finally {
       ACTIVE_CHILD_PROCS.delete(proc);
-      if (timer !== undefined) clearTimeout(timer);
       context.signal.removeEventListener("abort", onAbort);
     }
   }

@@ -1,4 +1,8 @@
 import { readFile } from "node:fs/promises";
+// Route-keyed transport factory/cache: one ProviderTransport instance per
+// `${backend}:${routeFingerprint}`. `release()` drops a lease; teardown order
+// inside OpenCodeSdkTransport is stream → client.close → server (harness owns
+// step timeout and calls destroy on credential projection after transport returns).
 import type {
   ProviderCapabilityReport,
   ProviderTransport,

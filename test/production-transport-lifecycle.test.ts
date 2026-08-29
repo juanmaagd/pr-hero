@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   symlink,
@@ -10,15 +12,20 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ConcurrencyAttemptAdmissionGate } from "../src/execution/admission";
+import { ConcurrencyLimiter } from "../src/execution/concurrency-limiter";
 import type {
   IsolationProjection,
   ProviderCapabilityReport,
+  ProviderTerminalProof,
   ProviderTransport,
   ResolvedModelRoute,
+  RunnerBackend,
   TransportOutcome,
   TransportRequest,
 } from "../src/execution/contracts";
 import { StepExecutionHarness } from "../src/execution/harness";
+import type { SettlementReceipt } from "../src/execution/settlement";
 import { InMemorySpendLedger } from "../src/execution/spend-limiter";
 import {
   createResolvedRoutePlan,
@@ -27,8 +34,9 @@ import {
 } from "../src/model-routing";
 import { createProductionRuntime } from "../src/production-runtime";
 import type { ExecutableAllowlistEntry } from "../src/provider-capabilities";
+import type { CredentialBroker } from "../src/security/credential-broker";
 import { OpenCodeAuthBroker } from "../src/security/credential-broker";
-import type { StepSpec } from "../src/step-runner";
+import { type StepSpec, settlementReceiptPath } from "../src/step-runner";
 import type {
   D1_11ReadinessEvidence,
   TransportFactoryOptions,
@@ -39,6 +47,7 @@ import {
 } from "../src/transport-registry";
 import type { OpenCodeSdkLike } from "../src/transports/opencode-client";
 import { createOpenCodeClient } from "../src/transports/opencode-client";
+import type { OpenCodeClientLike } from "../src/transports/opencode-sdk";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 
@@ -195,6 +204,62 @@ function openCodeRoutingConfig(): RoutingConfig {
       },
     },
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function terminalProof(eventId: string): ProviderTerminalProof {
+  return {
+    eventId,
+    providerStatus: "process_group_exited",
+    providerObservedAt: new Date().toISOString(),
+    exitCode: 0,
+  };
+}
+
+function wrapRegistryWithReleaseTracking(registry: DefaultTransportRegistry): {
+  registry: TransportRegistry;
+  releases: string[];
+} {
+  const releases: string[] = [];
+  const wrapped: TransportRegistry = {
+    register: (backend, factoryOrInstance) =>
+      registry.register(backend, factoryOrInstance),
+    has: (backend) => registry.has(backend),
+    get: (backend, options) => registry.get(backend, options),
+    getCapabilityReport: (backend, options) =>
+      registry.getCapabilityReport(backend, options),
+    getAllCapabilityReports: (options) =>
+      registry.getAllCapabilityReports(options),
+    release: (routeFingerprint) => {
+      releases.push(routeFingerprint);
+      registry.release(routeFingerprint);
+    },
+  };
+  return { registry: wrapped, releases };
+}
+
+class DestroyOrderBroker implements CredentialBroker {
+  constructor(
+    private readonly inner: CredentialBroker,
+    private readonly order: string[],
+  ) {}
+
+  async project(
+    input: Parameters<CredentialBroker["project"]>[0],
+  ): ReturnType<CredentialBroker["project"]> {
+    const projection = await this.inner.project(input);
+    const destroy = projection.destroy.bind(projection);
+    return {
+      ...projection,
+      destroy: async () => {
+        this.order.push("projection-destroy");
+        await destroy();
+      },
+    };
+  }
 }
 
 describe("Task 2.1 RED: production transport lifecycle", () => {
@@ -893,8 +958,463 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
 
       expect(result.status).toBe("failed");
       expect(captured).toHaveLength(1);
-      expect(captured[0]?.timeoutMs).toBeUndefined();
+      expect(captured[0]).not.toHaveProperty("timeoutMs");
       expect(result.stderrTail).toMatch(/timeout|timed out/i);
+    });
+  });
+
+  describe("Task 2.3 RED: unknown-outcome fencing, settlement, and ordered disposal", () => {
+    async function createClaudeProductionRuntime(
+      requests: TransportRequest[],
+      options: { signal?: AbortSignal } = {},
+    ) {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const baseRegistry = new DefaultTransportRegistry();
+      baseRegistry.register(
+        "claude-code",
+        createRecordingTransport(requests, "claude-code"),
+      );
+      const { registry, releases } =
+        wrapRegistryWithReleaseTracking(baseRegistry);
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([step]),
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: {
+          "claude-code": [
+            {
+              absolutePath: claudeFixture.canonicalPath,
+              sha256: claudeFixture.sha256,
+            },
+          ],
+        },
+        registry,
+        mode: "conformance",
+        signal: options.signal,
+      });
+      return { step, runtime, releases };
+    }
+
+    test("production runner acquires binding transport lease per step and disposes after settlement", async () => {
+      const requests: TransportRequest[] = [];
+      const { step, runtime, releases } =
+        await createClaudeProductionRuntime(requests);
+
+      const result = await runtime.runner.run(
+        makeStep(tmpDir, {
+          routeKey: step.routeFingerprint,
+          route: step.route,
+        }),
+      );
+
+      expect(result.status).toBe("ok");
+      expect(releases).toEqual([step.routeFingerprint]);
+    });
+
+    test("unconfirmed opencode abort through production runner fences the binding credential bucket", async () => {
+      const limiter = new ConcurrencyLimiter({ bucketCeiling: 5 });
+      const gate = new ConcurrencyAttemptAdmissionGate(limiter);
+
+      const controller = new AbortController();
+      let transportCalls = 0;
+      const hangingTransport: ProviderTransport = {
+        backend: "opencode",
+        capabilities: async () => {
+          const base = await createRecordingTransport(
+            [],
+            "opencode",
+          ).capabilities();
+          return {
+            ...base,
+            cancellation: { deadlineMs: 5, conformance: "passed" },
+          };
+        },
+        execute: async () => {
+          transportCalls += 1;
+          if (transportCalls === 1) {
+            await new Promise<never>(() => {});
+          }
+          return {
+            completion: "success",
+            protocolIntegrity: "verified",
+            finalText: '{"findings":[]}',
+            usage: {
+              wallMs: 1,
+              tokens: {},
+              completeness: "complete",
+              billingMode: "subscription",
+              costSource: "provider",
+              cashCostUsd: 0,
+            },
+            stderrTail: "",
+          };
+        },
+        classifyFailure: () => undefined,
+      };
+
+      const baseRegistry = new DefaultTransportRegistry();
+      baseRegistry.register("opencode", hangingTransport);
+      const sharedRuntimeOptions = {
+        workspaceRoot: tmpDir,
+        binaryPath: claudeFixture.canonicalPath,
+        openCodeBinaryPath: opencodeFixture.canonicalPath,
+        executableAllowlists: mixedAllowlists(claudeFixture, opencodeFixture),
+        mode: "conformance" as const,
+        evidence: new Map<RunnerBackend, D1_11ReadinessEvidence>([
+          ["opencode", COMPLETE_EVIDENCE],
+        ]),
+        attemptAdmissionGate: gate,
+        graceMarginMs: 5,
+        credentialBrokers: {
+          opencode: new OpenCodeAuthBroker({
+            readerFn: async () =>
+              JSON.stringify({
+                openai: { type: "oauth", access: "test", refresh: "test" },
+              }),
+          }),
+        },
+        authorityDeps: {
+          existsFn: (p: string) =>
+            p === claudeFixture.canonicalPath ||
+            p === opencodeFixture.canonicalPath ||
+            p.startsWith(tmpDir),
+          realpathFn: async (p: string) => p,
+        },
+      };
+
+      const step = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: openCodeRoutingConfig(),
+      });
+      const plan = createResolvedRoutePlan([step]);
+
+      const runtimeA = await createProductionRuntime({
+        ...sharedRuntimeOptions,
+        plan,
+        registry: baseRegistry,
+        signal: controller.signal,
+      });
+
+      const binding = runtimeA.bindings.get(step.routeFingerprint);
+      expect(binding?.credential.bucketId).toBeDefined();
+
+      const runPromise = runtimeA.runner.run(
+        makeStep(tmpDir, {
+          name: "hunter-a",
+          model: "openai/gpt-4o",
+          routeKey: step.routeFingerprint,
+          route: step.route,
+        }),
+      );
+      await sleep(10);
+      controller.abort();
+      const resultA = await runPromise;
+      expect(resultA.status).toBe("failed");
+      await sleep(50);
+
+      const runtimeB = await createProductionRuntime({
+        ...sharedRuntimeOptions,
+        plan,
+        registry: baseRegistry,
+      });
+
+      const resultB = await runtimeB.runner.run(
+        makeStep(tmpDir, {
+          name: "hunter-b",
+          model: "openai/gpt-4o",
+          routeKey: step.routeFingerprint,
+          route: step.route,
+        }),
+      );
+
+      expect(resultB.status).toBe("failed");
+      expect(transportCalls).toBe(1);
+    });
+
+    test("runtime.dispose releases all active binding transport leases", async () => {
+      const baseRegistry = new DefaultTransportRegistry();
+      baseRegistry.register(
+        "claude-code",
+        createRecordingTransport([], "claude-code"),
+      );
+      baseRegistry.register(
+        "opencode",
+        createRecordingTransport([], "opencode"),
+      );
+
+      const stepClaude = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const stepOpenCode = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: openCodeRoutingConfig(),
+      });
+      const { registry, releases } =
+        wrapRegistryWithReleaseTracking(baseRegistry);
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([stepClaude, stepOpenCode]),
+        binaryPath: claudeFixture.canonicalPath,
+        openCodeBinaryPath: opencodeFixture.canonicalPath,
+        executableAllowlists: mixedAllowlists(claudeFixture, opencodeFixture),
+        registry,
+        mode: "conformance",
+        evidence: new Map([["opencode", COMPLETE_EVIDENCE]]),
+        credentialBrokers: {
+          opencode: new OpenCodeAuthBroker({
+            readerFn: async () =>
+              JSON.stringify({
+                openai: { type: "oauth", access: "test", refresh: "test" },
+              }),
+          }),
+        },
+        authorityDeps: {
+          existsFn: (p) =>
+            p === claudeFixture.canonicalPath ||
+            p === opencodeFixture.canonicalPath ||
+            p.startsWith(tmpDir),
+          realpathFn: async (p) => p,
+        },
+      });
+
+      const claudeBinding = runtime.bindings.get(stepClaude.routeFingerprint);
+      const openCodeBinding = runtime.bindings.get(
+        stepOpenCode.routeFingerprint,
+      );
+      expect(claudeBinding).toBeDefined();
+      expect(openCodeBinding).toBeDefined();
+      if (claudeBinding === undefined || openCodeBinding === undefined) return;
+
+      await claudeBinding.acquire(ISOLATION_STUB, registry);
+      await openCodeBinding.acquire(ISOLATION_STUB, registry);
+      expect(releases).toHaveLength(0);
+
+      await runtime.dispose();
+
+      expect(releases.sort()).toEqual(
+        [stepClaude.routeFingerprint, stepOpenCode.routeFingerprint].sort(),
+      );
+    });
+
+    test("opencode step teardown disposes stream then client then server before credential projection destroy", async () => {
+      const teardownOrder: string[] = [];
+      const mockClient: OpenCodeClientLike & { close(): Promise<void> } = {
+        createSession: async () => ({ id: "sess-1" }),
+        streamEvents: () => ({
+          [Symbol.asyncIterator]() {
+            const inner = (async function* () {
+              yield {
+                kind: "terminal" as const,
+                proof: terminalProof("e1"),
+              };
+            })();
+            return {
+              next: () => inner.next(),
+              return: async () => {
+                teardownOrder.push("stream-disposed");
+                const result = await inner.return?.();
+                return result ?? { done: true as const, value: undefined };
+              },
+            };
+          },
+        }),
+        pollStatus: async () => ({ kind: "pending" }),
+        abort: async () => {},
+        close: async () => {
+          teardownOrder.push("client-close");
+          teardownOrder.push("server-close");
+        },
+      };
+
+      const broker = new DestroyOrderBroker(
+        new OpenCodeAuthBroker({
+          readerFn: async () =>
+            JSON.stringify({
+              openai: { type: "oauth", access: "test", refresh: "test" },
+            }),
+        }),
+        teardownOrder,
+      );
+
+      const registry = new DefaultTransportRegistry({
+        mode: "conformance",
+        evidence: new Map([["opencode", COMPLETE_EVIDENCE]]),
+        binaryPath: opencodeFixture.canonicalPath,
+        openCodeClient: mockClient,
+      });
+
+      const step = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: openCodeRoutingConfig(),
+      });
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([step]),
+        binaryPath: claudeFixture.canonicalPath,
+        openCodeBinaryPath: opencodeFixture.canonicalPath,
+        executableAllowlists: mixedAllowlists(claudeFixture, opencodeFixture),
+        registry,
+        mode: "conformance",
+        evidence: new Map([["opencode", COMPLETE_EVIDENCE]]),
+        credentialBrokers: { opencode: broker },
+        authorityDeps: {
+          existsFn: (p) =>
+            p === claudeFixture.canonicalPath ||
+            p === opencodeFixture.canonicalPath ||
+            p.startsWith(tmpDir),
+          realpathFn: async (p) => p,
+        },
+      });
+
+      const result = await runtime.runner.run(
+        makeStep(tmpDir, {
+          model: "openai/gpt-4o",
+          route: step.route,
+          routeKey: step.routeFingerprint,
+          parse: (text) => (text === "" ? {} : JSON.parse(text)),
+        }),
+      );
+
+      expect(result.status).toBe("ok");
+      expect(teardownOrder).toEqual([
+        "stream-disposed",
+        "client-close",
+        "server-close",
+        "projection-destroy",
+      ]);
+    });
+
+    test("transient retry through production runner persists one settlement receipt per attempt", async () => {
+      let calls = 0;
+      const scriptedTransport: ProviderTransport = {
+        backend: "claude-code",
+        capabilities: async () =>
+          createRecordingTransport([], "claude-code").capabilities(),
+        execute: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return {
+              completion: "failed",
+              protocolIntegrity: "unverified",
+              finalText: "not json",
+              usage: {
+                wallMs: 1,
+                tokens: {},
+                completeness: "complete",
+                billingMode: "subscription",
+                costSource: "provider",
+                cashCostUsd: 0,
+              },
+              stderrTail: "ECONNRESET",
+            };
+          }
+          return {
+            completion: "success",
+            protocolIntegrity: "verified",
+            finalText: '{"findings":[]}',
+            usage: {
+              wallMs: 1,
+              tokens: {},
+              completeness: "complete",
+              billingMode: "subscription",
+              costSource: "provider",
+              cashCostUsd: 0,
+            },
+            stderrTail: "",
+          };
+        },
+        classifyFailure: (outcome) =>
+          outcome.completion === "failed" ? "network_transient" : undefined,
+      };
+
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const baseRegistry = new DefaultTransportRegistry();
+      baseRegistry.register("claude-code", scriptedTransport);
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([step]),
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: {
+          "claude-code": [
+            {
+              absolutePath: claudeFixture.canonicalPath,
+              sha256: claudeFixture.sha256,
+            },
+          ],
+        },
+        registry: baseRegistry,
+        mode: "conformance",
+      });
+
+      const outPath = path.join(tmpDir, "hunter-reliability.json");
+      const result = await runtime.runner.run(
+        makeStep(tmpDir, {
+          outPath,
+          maxAttempts: 2,
+          routeKey: step.routeFingerprint,
+          route: step.route,
+        }),
+      );
+
+      expect(result.status).toBe("ok");
+      expect(calls).toBe(2);
+
+      const attempt1Path = settlementReceiptPath(
+        outPath,
+        "hunter-reliability",
+        1,
+      );
+      const attempt2Path = settlementReceiptPath(
+        outPath,
+        "hunter-reliability",
+        2,
+      );
+      expect(existsSync(attempt1Path)).toBe(true);
+      expect(existsSync(attempt2Path)).toBe(true);
+
+      const receipt1 = JSON.parse(
+        await readFile(attempt1Path, "utf8"),
+      ) as SettlementReceipt;
+      const receipt2 = JSON.parse(
+        await readFile(attempt2Path, "utf8"),
+      ) as SettlementReceipt;
+      expect(receipt1.outcome).not.toBe(receipt2.outcome);
+      expect(receipt2.outcome).toBe("completed");
+    });
+
+    test("claude step does not pass timeoutMs on TransportRequest", async () => {
+      const requests: TransportRequest[] = [];
+      const { step, runtime } = await createClaudeProductionRuntime(requests);
+
+      const result = await runtime.runner.run(
+        makeStep(tmpDir, {
+          timeoutMs: 40,
+          routeKey: step.routeFingerprint,
+          route: step.route,
+        }),
+      );
+
+      expect(result.status).toBe("ok");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).not.toHaveProperty("timeoutMs");
     });
   });
 });

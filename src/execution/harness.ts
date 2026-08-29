@@ -1,5 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+// Lifecycle ownership (§2 docs/multi-runtime-model-diversity-design.md):
+//   HARNESS — StepSpec.timeoutMs watchdog, cancellation coordinator, retry/
+//   parse, write leases + settlement receipts, event sink, spend reservations,
+//   concurrency admission, credential projection destroy AFTER transport teardown.
+//   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
+//   protocol events, return TransportOutcome, classify provider/transport causes.
+//   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
 import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
@@ -352,6 +359,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly binaryPath?: string;
   private readonly admissionGate?: StepAdmissionGate;
   private readonly registry?: TransportRegistry;
+  private readonly explicitTransport?: ProviderTransport;
   private readonly transport: ProviderTransport;
   private readonly onAuthEvent?: (event: AuthEvent) => void;
   private readonly isTestFake: boolean;
@@ -379,9 +387,12 @@ export class StepExecutionHarness implements StepRunner {
     this.binaryPath = options.binaryPath;
     this.admissionGate = options.admissionGate;
     this.registry = options.registry;
-    this.transport =
-      options.transport ??
-      new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
+    if (options.transport !== undefined) {
+      this.explicitTransport = options.transport;
+      this.transport = options.transport;
+    } else {
+      this.transport = new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
+    }
     this.onAuthEvent = options.onAuthEvent;
     this.isTestFake = Boolean(options.spawnFn);
     this.projectedEnv = projectChildEnv(options.childEnv ?? process.env);
@@ -410,7 +421,23 @@ export class StepExecutionHarness implements StepRunner {
     const effectiveBackend =
       step.route?.backend ?? step.backend ?? "claude-code";
     let transport: ProviderTransport;
-    if (this.registry) {
+    if (this.explicitTransport !== undefined) {
+      const declaredBackend = step.route?.backend ?? step.backend;
+      if (
+        declaredBackend !== undefined &&
+        this.explicitTransport.backend !== declaredBackend
+      ) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `No transport registry configured to handle backend "${declaredBackend}" for step "${step.name}"`,
+          resultText: "",
+        };
+      }
+      transport = this.explicitTransport;
+    } else if (this.registry) {
       try {
         transport = this.registry.get(effectiveBackend, {
           routeFingerprint: step.routeKey,
@@ -1195,9 +1222,6 @@ export class StepExecutionHarness implements StepRunner {
         cwd: canonicalCwd,
         tools: step.tools,
         mcpConfigPath: step.mcpConfigPath,
-        ...(transport.backend === "opencode"
-          ? {}
-          : { timeoutMs: step.timeoutMs }),
         isolation: projection
           ? {
               credentialProjectionId: projection.projectionId,
@@ -1232,8 +1256,7 @@ export class StepExecutionHarness implements StepRunner {
         deadlineMs,
         transport,
         reserveToken,
-        harnessWatchdogMs:
-          transport.backend === "opencode" ? step.timeoutMs : undefined,
+        harnessWatchdogMs: step.timeoutMs,
       });
 
       if (attemptResult.reservation !== undefined) {
@@ -1652,14 +1675,6 @@ export class StepExecutionHarness implements StepRunner {
     // above come from.
     const outcome = execution.outcome as TransportOutcome;
 
-    if (outcome.timedOut === true && harnessWatchdogMs !== undefined) {
-      return {
-        kind: "failed",
-        outcome,
-        resolution: { kind: "legacy_terminal" },
-      };
-    }
-
     if (execution.delivery?.delivered) {
       return { kind: "delivered", outcome, parsed: execution.delivery.parsed };
     }
@@ -1667,13 +1682,13 @@ export class StepExecutionHarness implements StepRunner {
     return {
       kind: "failed",
       outcome,
-      // Row 10: `?? format_violation` — the same defensive default the
-      // legacy loop applied (`?? "format"`) for the case `execution.delivery`
-      // itself is somehow absent despite not being cancelled.
-      resolution: execution.delivery?.resolution ?? {
-        kind: "cause",
-        cause: "format_violation",
-      },
+      resolution:
+        execution.delivery?.resolution ??
+        resolveFailureCause({
+          outcome,
+          classifyFailure: transport.classifyFailure,
+          parseThrew: false,
+        }),
     };
   }
 }

@@ -1,4 +1,9 @@
 import { homedir } from "node:os";
+// Production runtime composition (§2 design): frozen route-keyed bindings admit
+// once; MultiProviderRunner acquires a per-step transport lease, delegates
+// lifecycle to StepExecutionHarness, and disposes stream/client/server before
+// credential projection destroy. Registry caches transports by routeFingerprint.
+import type { AttemptAdmissionGate } from "./execution/admission";
 import { deriveBucketId, loadOrCreateBucketKey } from "./execution/bucket-id";
 import type {
   EnvironmentPolicy,
@@ -41,6 +46,7 @@ import {
   admitRoutePlan,
   createDefaultTransportRegistry,
   type D1_11ReadinessEvidence,
+  DefaultTransportRegistry,
   type TransportFactoryOptions,
   type TransportRegistry,
 } from "./transport-registry";
@@ -61,6 +67,8 @@ export interface ProductionRuntimeOptions extends RunnerAuthorityOptions {
   readonly authorityDeps?: ResolveRunnerAuthorityDeps;
   readonly spawnFn?: typeof Bun.spawn;
   readonly signal?: AbortSignal;
+  readonly attemptAdmissionGate?: AttemptAdmissionGate;
+  readonly graceMarginMs?: number;
 }
 
 export interface ProductionRuntime {
@@ -69,6 +77,33 @@ export interface ProductionRuntime {
   readonly bindings: ReadonlyMap<string, RuntimeBinding>;
   readonly admitted: AdmittedRoutePlanResult;
   dispose(): Promise<void>;
+}
+
+interface ActiveTransportLeaseTracker {
+  register(routeKey: string): void;
+  unregister(routeKey: string): void;
+  releaseAll(registry: { release?(routeFingerprint: string): void }): void;
+}
+
+class DefaultActiveTransportLeaseTracker
+  implements ActiveTransportLeaseTracker
+{
+  private readonly activeRouteKeys = new Set<string>();
+
+  register(routeKey: string): void {
+    this.activeRouteKeys.add(routeKey);
+  }
+
+  unregister(routeKey: string): void {
+    this.activeRouteKeys.delete(routeKey);
+  }
+
+  releaseAll(registry: { release?(routeFingerprint: string): void }): void {
+    for (const routeKey of [...this.activeRouteKeys]) {
+      registry.release?.(routeKey);
+    }
+    this.activeRouteKeys.clear();
+  }
 }
 
 interface FrozenRuntimeBindingOptions {
@@ -80,6 +115,20 @@ interface FrozenRuntimeBindingOptions {
   readonly getCapabilityReport: (
     backend: RunnerBackend,
   ) => Promise<ProviderCapabilityReport>;
+  readonly leaseTracker: ActiveTransportLeaseTracker;
+}
+
+function minimalIsolationFromExecutable(
+  executable: VerifiedExecutable,
+): IsolationProjection {
+  return {
+    credentialProjectionId: "production-binding",
+    env: {},
+    syntheticHome: "",
+    syntheticConfigHome: "",
+    syntheticTmp: "",
+    verifiedBinaryPath: executable.verifiedExecutionPath,
+  };
 }
 
 class FrozenRuntimeBinding implements RuntimeBinding {
@@ -101,6 +150,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
   private readonly getCapabilityReport: (
     backend: RunnerBackend,
   ) => Promise<ProviderCapabilityReport>;
+  private readonly leaseTracker: ActiveTransportLeaseTracker;
 
   constructor(options: FrozenRuntimeBindingOptions) {
     this.key = options.key;
@@ -113,6 +163,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     });
     this.authority = options.authority;
     this.getCapabilityReport = options.getCapabilityReport;
+    this.leaseTracker = options.leaseTracker;
     Object.freeze(this);
   }
 
@@ -184,10 +235,12 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       route: this.route,
     });
     const routeKey = this.key;
+    this.leaseTracker.register(routeKey);
     return {
       transport,
       dispose: async () => {
         registry.release?.(routeKey);
+        this.leaseTracker.unregister(routeKey);
       },
     };
   }
@@ -234,6 +287,7 @@ async function resolveFrozenBindings(
   plan: ResolvedRoutePlan,
   options: ProductionRuntimeOptions,
   registry: TransportRegistry,
+  leaseTracker: ActiveTransportLeaseTracker,
 ): Promise<Map<string, RuntimeBinding>> {
   const bindings = new Map<string, RuntimeBinding>();
   const deps = options.authorityDeps ?? {};
@@ -274,6 +328,7 @@ async function resolveFrozenBindings(
           evidence: options.evidence,
           binaryPath: authority.binaryPath,
         }),
+      leaseTracker,
     });
     bindings.set(step.routeFingerprint, binding);
     Object.freeze(binding);
@@ -309,6 +364,8 @@ export class MultiProviderRunner implements StepRunner {
   private readonly defaultBindingKey?: string;
   private readonly spawnFn?: typeof Bun.spawn;
   private readonly signal?: AbortSignal;
+  private readonly attemptAdmissionGate?: AttemptAdmissionGate;
+  private readonly graceMarginMs?: number;
 
   constructor(options: {
     readonly workspaceRoot: string;
@@ -317,6 +374,8 @@ export class MultiProviderRunner implements StepRunner {
     readonly defaultBindingKey?: string;
     readonly spawnFn?: typeof Bun.spawn;
     readonly signal?: AbortSignal;
+    readonly attemptAdmissionGate?: AttemptAdmissionGate;
+    readonly graceMarginMs?: number;
   }) {
     this.workspaceRoot = options.workspaceRoot;
     this.bindings = options.bindings;
@@ -324,6 +383,8 @@ export class MultiProviderRunner implements StepRunner {
     this.defaultBindingKey = options.defaultBindingKey;
     this.spawnFn = options.spawnFn;
     this.signal = options.signal;
+    this.attemptAdmissionGate = options.attemptAdmissionGate;
+    this.graceMarginMs = options.graceMarginMs;
   }
 
   resolveBinding(step: StepSpec): RuntimeBinding | undefined {
@@ -409,29 +470,62 @@ export class MultiProviderRunner implements StepRunner {
       };
     }
 
-    const harness = new StepExecutionHarness({
-      workspaceRoot: this.workspaceRoot,
-      executableAllowlist: [
-        {
-          absolutePath: binding.executable.absolutePath,
-          sha256: binding.executable.sha256,
-        },
-      ],
-      binaryPath: binding.executable.absolutePath,
-      credentialBroker: binding.credential.broker,
-      registry: this.registry,
-      spawnFn: this.spawnFn,
-      signal: this.signal,
-    });
+    if (
+      binding.route.backend === "opencode" &&
+      this.registry instanceof DefaultTransportRegistry &&
+      this.registry.needsOpenCodeSdkProbe()
+    ) {
+      try {
+        await this.registry.probeOpenCodeSdk();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `OpenCode SDK pre-confirm failed: ${message}`,
+          resultText: "",
+        };
+      }
+    }
 
-    return harness.run({
-      ...step,
-      cwd: cwdAuth.canonicalCwd,
-      route: binding.route,
-      routeKey: binding.key,
-      credentialKind: binding.credential.kind,
-      credentialRef: binding.credential.ref,
-    });
+    const isolation = minimalIsolationFromExecutable(binding.executable);
+    const lease = await binding.acquire(isolation, this.registry);
+    try {
+      const harness = new StepExecutionHarness({
+        workspaceRoot: this.workspaceRoot,
+        executableAllowlist: [
+          {
+            absolutePath: binding.executable.absolutePath,
+            sha256: binding.executable.sha256,
+          },
+        ],
+        binaryPath: binding.executable.absolutePath,
+        credentialBroker: binding.credential.broker,
+        transport: lease.transport,
+        spawnFn: this.spawnFn,
+        signal: this.signal,
+        ...(this.attemptAdmissionGate !== undefined
+          ? { attemptAdmissionGate: this.attemptAdmissionGate }
+          : {}),
+        rateLimitBucketId: binding.credential.bucketId,
+        ...(this.graceMarginMs !== undefined
+          ? { graceMarginMs: this.graceMarginMs }
+          : {}),
+      });
+
+      return await harness.run({
+        ...step,
+        cwd: cwdAuth.canonicalCwd,
+        route: binding.route,
+        routeKey: binding.key,
+        credentialKind: binding.credential.kind,
+        credentialRef: binding.credential.ref,
+      });
+    } finally {
+      await lease.dispose();
+    }
   }
 }
 
@@ -458,7 +552,13 @@ export async function createProductionRuntime(
       env: options.env,
     });
 
-  const bindings = await resolveFrozenBindings(plan, options, registry);
+  const leaseTracker = new DefaultActiveTransportLeaseTracker();
+  const bindings = await resolveFrozenBindings(
+    plan,
+    options,
+    registry,
+    leaseTracker,
+  );
   const admitted = await admitRoutePlan(plan, registry, {
     mode: options.mode,
     evidence: options.evidence,
@@ -475,6 +575,8 @@ export async function createProductionRuntime(
     defaultBindingKey: defaultClaude?.key,
     spawnFn: options.spawnFn,
     signal: options.signal,
+    attemptAdmissionGate: options.attemptAdmissionGate,
+    graceMarginMs: options.graceMarginMs,
   });
 
   return {
@@ -482,7 +584,9 @@ export async function createProductionRuntime(
     registry,
     bindings: createImmutableBindingsMap(bindings),
     admitted,
-    dispose: async () => {},
+    dispose: async () => {
+      leaseTracker.releaseAll(registry);
+    },
   };
 }
 

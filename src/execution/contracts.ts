@@ -56,7 +56,6 @@ export interface TransportRequest {
   readonly tools: readonly string[];
   readonly mcpConfigPath?: string;
   readonly isolation: IsolationProjection;
-  readonly timeoutMs?: number;
 }
 
 export interface ProviderTerminalProof {
