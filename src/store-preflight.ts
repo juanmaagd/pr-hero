@@ -11,7 +11,6 @@ import type {
   EvidenceClass,
   FindingsDocument,
   HopTrail,
-  Hunter,
   IndexMode,
   RefuterVerdict,
   RunStatus,
@@ -21,7 +20,12 @@ import type {
 import type { StoredComparison } from "./ledger";
 import type { PerAgentUsage } from "./pipeline";
 
-export const CURRENT_PRODUCT_SCHEMA_VERSION = 3;
+export const CURRENT_PRODUCT_SCHEMA_VERSION = 4;
+
+export const PRODUCT_V3_TO_V4_STATEMENTS: string[] = [
+  "ALTER TABLE runs ADD COLUMN findings_schema_version TEXT NOT NULL DEFAULT '1.0.0';",
+  "ALTER TABLE runs ADD COLUMN engine_revision TEXT NULL;",
+];
 
 export interface ProductSchemaMigration {
   toVersion: number;
@@ -113,6 +117,8 @@ export const PRODUCT_V1_STATEMENTS: string[] = [
     driver_sha TEXT NULL,
     engine_name TEXT NULL,
     engine_version TEXT NULL,
+    engine_revision TEXT NULL,
+    findings_schema_version TEXT NOT NULL DEFAULT '1.0.0',
     summary_prose TEXT NULL,
     summary_score INTEGER NULL,
     summary_score_reason TEXT NULL,
@@ -267,12 +273,28 @@ export function migrationsForProductStore(
       statements: [
         ...PRODUCT_V1_TO_V2_STATEMENTS,
         ...PRODUCT_V2_TO_V3_STATEMENTS,
+        ...PRODUCT_V3_TO_V4_STATEMENTS,
       ],
+    };
+  }
+  if (currentVersion === 2) {
+    return {
+      toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
+      statements: [
+        ...PRODUCT_V2_TO_V3_STATEMENTS,
+        ...PRODUCT_V3_TO_V4_STATEMENTS,
+      ],
+    };
+  }
+  if (currentVersion === 3) {
+    return {
+      toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
+      statements: [...PRODUCT_V3_TO_V4_STATEMENTS],
     };
   }
   return {
     toVersion: CURRENT_PRODUCT_SCHEMA_VERSION,
-    statements: [...PRODUCT_V2_TO_V3_STATEMENTS],
+    statements: [],
   };
 }
 
@@ -295,6 +317,8 @@ export interface CanonicalRunRow {
   driver_sha: string | null;
   engine_name: string | null;
   engine_version: string | null;
+  engine_revision: string | null;
+  findings_schema_version: string;
   summary_prose: string | null;
   summary_score: number | null;
   summary_score_reason: string | null;
@@ -327,7 +351,7 @@ export interface CanonicalFindingRow {
   refuter_verdict: RefuterVerdict;
   causal_disposition: CausalDisposition;
   claim: string;
-  hunter: Hunter;
+  hunter: string;
   tier: Tier;
   hops_used: number;
   dedupe_key: string;
@@ -369,7 +393,7 @@ export interface DebugFindingRow {
   causal_disposition: CausalDisposition;
   claim: string;
   proof_refs_json: string;
-  hunter: Hunter;
+  hunter: string;
   hops_used: number;
   hop_trail_json: string;
   dedupe_key: string;
@@ -464,6 +488,8 @@ export function projectCompleteRun(input: {
     driver_sha: input.doc.driver_sha ?? null,
     engine_name: input.doc.engine?.name ?? null,
     engine_version: input.doc.engine?.version ?? null,
+    engine_revision: input.doc.engine?.revision ?? null,
+    findings_schema_version: input.doc.schema_version,
     summary_prose: input.doc.summary?.prose ?? null,
     summary_score: input.doc.summary?.score ?? null,
     summary_score_reason: input.doc.summary?.score_reason ?? null,

@@ -8,6 +8,13 @@
 import type { RootCauseSummary } from "./root-cause";
 
 export const SCHEMA_VERSION = "1.0.0";
+export const SCHEMA_VERSION_V1_1 = "1.1.0";
+
+export interface EngineIdentity {
+  name: string;
+  version: string;
+  revision?: string;
+}
 
 export type EvidenceClass = "deterministic" | "inferential" | "insufficient";
 export type CausalDisposition =
@@ -59,7 +66,7 @@ export interface Finding {
   causal_disposition: CausalDisposition;
   claim: string;
   proof_refs: string[];
-  hunter: Hunter;
+  hunter: string;
   tier: Tier;
   hops_used: number;
   hop_trail: HopTrail;
@@ -132,8 +139,8 @@ export interface FindingsDocument {
   // Which engine produced this run. Absent on v1 (monolithic orchestrator)
   // documents; v2 (pr-hero) documents always carry it — without this field,
   // v1 and v2 rows in the metrics ledger are indistinguishable (same
-  // prompt_set sha on both sides of the engine swap).
-  engine?: { name: string; version: string };
+  // prompt_set sha on both sides of the engine swap). Required on v1.1.0.
+  engine?: EngineIdentity;
   parity_hunter_fired: boolean;
   run_status: RunStatus;
   // Juanma's decision (verify-report-pr3, #3305), over the verifier's cheaper
@@ -199,8 +206,66 @@ const CAUSAL_DISPOSITIONS: CausalDisposition[] = [
 ];
 const TIERS: Tier[] = ["blocking", "advisory"];
 const HUNTERS: Hunter[] = ["reliability", "resilience", "parity", "lifecycle"];
+const SPECIALTY_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SUPPORTED_SCHEMA_VERSIONS = [
+  SCHEMA_VERSION,
+  SCHEMA_VERSION_V1_1,
+] as const;
 
 export class FindingsValidationError extends Error {}
+
+function isControlFree(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 32 || code === 127) return false;
+  }
+  return true;
+}
+
+function isValidSpecialtySlug(value: string): boolean {
+  return (
+    value.length >= 1 && value.length <= 64 && SPECIALTY_SLUG_RE.test(value)
+  );
+}
+
+function validateEngineString(value: unknown, label: string): string {
+  must(typeof value === "string", `${label} required`);
+  const raw = value as string;
+  const trimmed = raw.trim();
+  must(trimmed === raw, `${label} must be trimmed`);
+  must(
+    trimmed.length >= 1 && trimmed.length <= 128,
+    `${label} must be 1-128 characters`,
+  );
+  must(isControlFree(trimmed), `${label} must not contain control characters`);
+  return trimmed;
+}
+
+function validateEngineIdentity(
+  candidate: unknown,
+  options: { required: boolean },
+): EngineIdentity | undefined {
+  if (candidate === undefined) {
+    must(!options.required, "engine required");
+    return undefined;
+  }
+  must(
+    typeof candidate === "object" && candidate !== null,
+    "engine must be an object",
+  );
+  const engine = candidate as Record<string, unknown>;
+  const name = validateEngineString(engine.name, "engine.name");
+  const version = validateEngineString(engine.version, "engine.version");
+  const revision =
+    engine.revision === undefined
+      ? undefined
+      : validateEngineString(engine.revision, "engine.revision");
+  return {
+    name,
+    version,
+    ...(revision === undefined ? {} : { revision }),
+  };
+}
 
 function must(condition: boolean, message: string): void {
   if (!condition) throw new FindingsValidationError(message);
@@ -310,16 +375,122 @@ export function validateFinding(candidate: unknown, index: number): Finding {
   return f as unknown as Finding;
 }
 
-export function validateFindingsDocument(candidate: unknown): FindingsDocument {
+function validateFindingV11(candidate: unknown, index: number): Finding {
   must(
     typeof candidate === "object" && candidate !== null,
-    "findings document must be an object",
+    `findings[${index}] must be an object`,
   );
-  const d = candidate as Record<string, unknown>;
+  const f = candidate as Record<string, unknown>;
   must(
-    d.schema_version === SCHEMA_VERSION,
-    `schema_version must be ${SCHEMA_VERSION}`,
+    typeof f.id === "string" && f.id.length > 0,
+    `findings[${index}].id required`,
   );
+  must(
+    typeof f.category === "number" && f.category >= 1 && f.category <= 14,
+    `findings[${index}].category must be 1-14`,
+  );
+  must(
+    typeof f.path === "string" && f.path.length > 0,
+    `findings[${index}].path required`,
+  );
+  must(typeof f.line === "number", `findings[${index}].line must be a number`);
+  must(
+    SEVERITIES.includes(f.severity as Severity),
+    `findings[${index}].severity invalid`,
+  );
+  must(
+    EVIDENCE_CLASSES.includes(f.evidence_class as EvidenceClass),
+    `findings[${index}].evidence_class invalid`,
+  );
+  must(
+    REFUTER_VERDICTS.includes(f.refuter_verdict as RefuterVerdict),
+    `findings[${index}].refuter_verdict invalid`,
+  );
+  must(
+    CAUSAL_DISPOSITIONS.includes(f.causal_disposition as CausalDisposition),
+    `findings[${index}].causal_disposition invalid`,
+  );
+  must(
+    typeof f.claim === "string" && f.claim.length > 0,
+    `findings[${index}].claim required`,
+  );
+  must(
+    Array.isArray(f.proof_refs),
+    `findings[${index}].proof_refs must be an array`,
+  );
+  must(
+    typeof f.hunter === "string" && isValidSpecialtySlug(f.hunter),
+    `findings[${index}].hunter invalid`,
+  );
+  must(TIERS.includes(f.tier as Tier), `findings[${index}].tier invalid`);
+  must(
+    typeof f.hops_used === "number",
+    `findings[${index}].hops_used must be a number`,
+  );
+  must(
+    Array.isArray(f.hop_trail),
+    `findings[${index}].hop_trail must be an array`,
+  );
+  must(
+    typeof f.dedupe_key === "string" && f.dedupe_key.length > 0,
+    `findings[${index}].dedupe_key required`,
+  );
+  must(
+    (f.proof_refs as unknown[]).every((ref) => typeof ref === "string"),
+    `findings[${index}].proof_refs must contain only strings`,
+  );
+  normalizeOptionalString(f, "symbol", `findings[${index}].symbol`);
+  normalizeOptionalString(
+    f,
+    "root_cause_id",
+    `findings[${index}].root_cause_id`,
+  );
+  return f as unknown as Finding;
+}
+
+function validateDocumentSummary(d: Record<string, unknown>): void {
+  if (d.summary === undefined) return;
+  must(
+    typeof d.summary === "object" && d.summary !== null,
+    "summary must be an object when present",
+  );
+  const summary = d.summary as Record<string, unknown>;
+  must(
+    typeof summary.prose === "string" && summary.prose.length > 0,
+    "summary.prose required",
+  );
+  must(
+    typeof summary.prose === "string" && summary.prose.length <= 1200,
+    "summary.prose must be at most 1200 characters",
+  );
+  must(
+    typeof summary.score === "number" &&
+      Number.isInteger(summary.score) &&
+      summary.score >= 1 &&
+      summary.score <= 5,
+    "summary.score must be an integer 1-5",
+  );
+  must(
+    typeof summary.score_reason === "string" && summary.score_reason.length > 0,
+    "summary.score_reason required",
+  );
+  must(
+    typeof summary.score_reason === "string" &&
+      summary.score_reason.length <= 400,
+    "summary.score_reason must be at most 400 characters",
+  );
+  const prose = summary.prose as string;
+  const scoreReason = summary.score_reason as string;
+  must(
+    !prose.includes("<!--") &&
+      !prose.includes("-->") &&
+      !scoreReason.includes("<!--") &&
+      !scoreReason.includes("-->"),
+    "summary strings must not contain HTML comment markers",
+  );
+}
+
+function validateDocumentEnvelope(d: Record<string, unknown>): void {
   must(typeof d.pr === "number", "pr must be a number");
   must(
     typeof d.base_sha === "string" && d.base_sha.length > 0,
@@ -339,69 +510,60 @@ export function validateFindingsDocument(candidate: unknown): FindingsDocument {
     d.run_status === "complete" || d.run_status === "partial",
     "run_status must be complete|partial",
   );
-  // Additive/optional (root_cause_id precedent): absent is valid (older
-  // artifacts), but a PRESENT value must be a boolean — same "reject only
-  // bad values of known keys, never unknown keys" allowlist discipline as
-  // every other optional field here.
   must(
     d.sessionFailed === undefined || typeof d.sessionFailed === "boolean",
     "sessionFailed must be a boolean when present",
   );
-  if (d.summary !== undefined) {
-    must(
-      typeof d.summary === "object" && d.summary !== null,
-      "summary must be an object when present",
-    );
-    const summary = d.summary as Record<string, unknown>;
-    must(
-      typeof summary.prose === "string" && summary.prose.length > 0,
-      "summary.prose required",
-    );
-    must(
-      typeof summary.prose === "string" && summary.prose.length <= 1200,
-      "summary.prose must be at most 1200 characters",
-    );
-    must(
-      typeof summary.score === "number" &&
-        Number.isInteger(summary.score) &&
-        summary.score >= 1 &&
-        summary.score <= 5,
-      "summary.score must be an integer 1-5",
-    );
-    must(
-      typeof summary.score_reason === "string" &&
-        summary.score_reason.length > 0,
-      "summary.score_reason required",
-    );
-    must(
-      typeof summary.score_reason === "string" &&
-        summary.score_reason.length <= 400,
-      "summary.score_reason must be at most 400 characters",
-    );
-    const prose = summary.prose as string;
-    const scoreReason = summary.score_reason as string;
-    must(
-      !prose.includes("<!--") &&
-        !prose.includes("-->") &&
-        !scoreReason.includes("<!--") &&
-        !scoreReason.includes("-->"),
-      "summary strings must not contain HTML comment markers",
-    );
-  }
+  validateDocumentSummary(d);
   must(
     typeof d.telemetry === "object" && d.telemetry !== null,
     "telemetry required",
   );
   must(Array.isArray(d.findings), "findings must be an array");
-  (d.findings as unknown[]).forEach((f, i) => {
-    validateFinding(f, i);
-  });
   const debug = d.debug as Record<string, unknown> | undefined;
   must(
     !!debug && Array.isArray(debug.refuted),
     "debug.refuted must be an array",
   );
+}
+
+function validateFindingsDocumentV10(
+  d: Record<string, unknown>,
+): FindingsDocument {
+  (d.findings as unknown[]).forEach((f, i) => {
+    validateFinding(f, i);
+  });
   return d as unknown as FindingsDocument;
+}
+
+function validateFindingsDocumentV11(
+  d: Record<string, unknown>,
+): FindingsDocument {
+  validateEngineIdentity(d.engine, { required: true });
+  (d.findings as unknown[]).forEach((f, i) => {
+    validateFindingV11(f, i);
+  });
+  return d as unknown as FindingsDocument;
+}
+
+export function validateFindingsDocument(candidate: unknown): FindingsDocument {
+  must(
+    typeof candidate === "object" && candidate !== null,
+    "findings document must be an object",
+  );
+  const d = candidate as Record<string, unknown>;
+  const version = d.schema_version;
+  must(
+    SUPPORTED_SCHEMA_VERSIONS.includes(
+      version as (typeof SUPPORTED_SCHEMA_VERSIONS)[number],
+    ),
+    `schema_version must be ${SCHEMA_VERSION} or ${SCHEMA_VERSION_V1_1}`,
+  );
+  validateDocumentEnvelope(d);
+  if (version === SCHEMA_VERSION) {
+    return validateFindingsDocumentV10(d);
+  }
+  return validateFindingsDocumentV11(d);
 }
 
 // Full tier-assignment rule (spec BR "Full Tier-Assignment Rule"): only
@@ -502,7 +664,7 @@ export function mergeRunEnvelope(params: {
   iteration: number;
   prompt_set?: PromptSet;
   driver_sha?: string;
-  engine?: { name: string; version: string };
+  engine: EngineIdentity;
   sessionFailed: boolean;
   telemetry: Telemetry;
 }): FindingsDocument {
@@ -511,7 +673,7 @@ export function mergeRunEnvelope(params: {
       ? "partial"
       : "complete";
   return {
-    schema_version: SCHEMA_VERSION,
+    schema_version: SCHEMA_VERSION_V1_1,
     pr: params.pr,
     base_sha: params.base_sha,
     head_sha: params.head_sha,
@@ -519,7 +681,7 @@ export function mergeRunEnvelope(params: {
     iteration: params.iteration,
     ...(params.prompt_set ? { prompt_set: params.prompt_set } : {}),
     ...(params.driver_sha ? { driver_sha: params.driver_sha } : {}),
-    ...(params.engine ? { engine: params.engine } : {}),
+    engine: params.engine,
     parity_hunter_fired: params.skillOutput.parity_hunter_fired,
     run_status,
     sessionFailed: params.sessionFailed,

@@ -95,6 +95,7 @@ import {
   type AgentSpec,
   defaultReviewSpec,
   type ReviewSpec,
+  resolveSpecialty,
   validateReviewSpec,
 } from "./spec";
 import {
@@ -1105,8 +1106,11 @@ async function execute(
   // enum (v1.0.0 constraint), so the cast below is checked, not assumed.
   // `meta` rides along so the join below can stamp attempt provenance onto the
   // SAME object already pushed into `state.steps` (D1-10c).
-  const hunterSpecs: Array<{ key: Hunter; spec: StepSpec; meta: StepMeta }> =
-    [];
+  const hunterSpecs: Array<{
+    agent: AgentSpec;
+    spec: StepSpec;
+    meta: StepMeta;
+  }> = [];
   for (const hunter of huntersAdmitted ? hunters : []) {
     const agent = await parseAgentFile(path.join(input.agentsDir, hunter.file));
     const name = `hunter-${hunter.key}`;
@@ -1148,7 +1152,7 @@ async function execute(
         if (Array.isArray(candidate.findings)) {
           for (const f of candidate.findings) {
             if (typeof f === "object" && f !== null) {
-              (f as Record<string, unknown>).hunter = hunter.key;
+              (f as Record<string, unknown>).hunter = resolveSpecialty(hunter);
             }
           }
         }
@@ -1158,7 +1162,7 @@ async function execute(
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
     const meta = stepMeta(spec);
-    hunterSpecs.push({ key: hunter.key as Hunter, spec, meta });
+    hunterSpecs.push({ agent: hunter, spec, meta });
     state.steps.push(meta);
   }
 
@@ -1225,9 +1229,9 @@ async function execute(
   state.hunterCount = hunterSpecs.length;
   emit(deps, {
     kind: "hunters-started",
-    hunters: hunterSpecs.map(({ key }) => key),
+    hunters: hunterSpecs.map(({ agent }) => agent.key),
     models: Object.fromEntries(
-      hunterSpecs.map(({ key, spec }) => [key, spec.model]),
+      hunterSpecs.map(({ agent, spec }) => [agent.key, spec.model]),
     ),
   });
   if (summarizerConstructionFailed) {
@@ -1300,7 +1304,8 @@ async function execute(
     return promise;
   };
   const settled = await Promise.allSettled([
-    ...hunterSpecs.map(({ key, spec }) => {
+    ...hunterSpecs.map(({ agent, spec }) => {
+      const key = agent.key;
       const startedAt = Date.now();
       const promise = deps.runner.run(spec);
       promise.then(
@@ -1335,14 +1340,14 @@ async function execute(
   for (const [i, entry] of hunterSpecs.entries()) {
     const outcome = settled[i];
     if (!outcome || outcome.status === "rejected") {
-      state.perAgent[entry.key] = failedAgentEntry();
+      state.perAgent[entry.agent.key] = failedAgentEntry();
       recordStepFailure(entry.meta);
       state.hunterFailures++;
       state.partial = true;
       continue;
     }
     const result = outcome.value;
-    state.perAgent[entry.key] = perAgentEntry(result);
+    state.perAgent[entry.agent.key] = perAgentEntry(result);
     recordSettlement(entry.meta, result, input.runDir);
     state.usageTotal = sumUsage(state.usageTotal, result.usage);
     accumulateUsageV2(state, result);
@@ -1355,7 +1360,7 @@ async function execute(
       // The driver stamps `hunter` to the step that actually produced the
       // draft — removes a self-report failure mode where a hunter claiming
       // another's name corrupts attribution and dedupe diagnostics.
-      state.drafts.push({ ...finding, hunter: entry.key });
+      state.drafts.push({ ...finding, hunter: resolveSpecialty(entry.agent) });
     }
   }
 

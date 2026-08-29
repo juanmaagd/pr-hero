@@ -169,6 +169,57 @@ describe("validateReviewSpec", () => {
     expect(() => validateReviewSpec(spec)).toThrow(/duplicates/);
   });
 
+  test("rejects unsafe slug keys", () => {
+    expect(() => validateReviewSpec({ agents: [hunter("Security")] })).toThrow(
+      /safe slug/,
+    );
+    expect(() =>
+      validateReviewSpec({ agents: [hunter("reliability_b")] }),
+    ).toThrow(/safe slug/);
+  });
+
+  test("accepts safe open hunter keys", () => {
+    expect(() =>
+      validateReviewSpec({ agents: [hunter("security"), REFUTER] }),
+    ).not.toThrow();
+    expect(() =>
+      validateReviewSpec({ agents: [hunter("code-quality"), REFUTER] }),
+    ).not.toThrow();
+  });
+
+  test("rejects duplicate effective specialties among hunters", () => {
+    const spec: ReviewSpec = {
+      agents: [
+        hunter("reliability"),
+        hunter("reliability-b", { specialty: "reliability" }),
+        REFUTER,
+      ],
+    };
+    expect(() => validateReviewSpec(spec)).toThrow(/specialty.*duplicates/);
+  });
+
+  test("rejects specialty on refuters", () => {
+    expect(() =>
+      validateReviewSpec({
+        agents: [
+          hunter("reliability"),
+          { ...REFUTER, specialty: "reliability" },
+        ],
+      }),
+    ).toThrow(/refuter.*specialty/);
+  });
+
+  test("rejects agents with models property", () => {
+    expect(() =>
+      validateReviewSpec({
+        agents: [
+          { ...hunter("reliability"), models: ["sonnet"] } as AgentSpec,
+          REFUTER,
+        ],
+      }),
+    ).toThrow(/models is not supported/);
+  });
+
   test("rejects two refuters", () => {
     const spec: ReviewSpec = {
       agents: [
@@ -197,14 +248,6 @@ describe("validateReviewSpec", () => {
         agents: [{ key: "reliability", file: "", role: "hunter" }],
       }),
     ).toThrow(/file required/);
-  });
-
-  test("rejects hunter keys outside the schema v1.0.0 Hunter enum", () => {
-    // The findings schema stamps `hunter` with the step key and its enum is
-    // closed — schema v1.1 lifts this, the engine itself is key-agnostic.
-    expect(() => validateReviewSpec({ agents: [hunter("security")] })).toThrow(
-      /Hunter enum/,
-    );
   });
 
   test("default spec is today's wiring exactly", () => {
@@ -412,5 +455,47 @@ describe("pipeline with a custom spec", () => {
       ReviewSpecValidationError,
     );
     expect(runner.specs.length).toBe(0);
+  });
+
+  test("stamps specialty not key when they differ", async () => {
+    const blocker: DraftFinding = {
+      id: "SEC-1",
+      category: 1,
+      path: "src/app.ts",
+      line: 10,
+      severity: "WARNING",
+      evidence_class: "inferential",
+      causal_disposition: "introduced",
+      claim: "security issue",
+      proof_refs: ["src/app.ts:10"],
+      hunter: "security",
+      hops_used: 0,
+      hop_trail: [],
+      dedupe_key: "src/app.ts:10",
+    };
+    const runner = new FakeStepRunner({
+      "hunter-security-leg": (s) => ok(s, { findings: [blocker] }),
+    });
+    const agentsDir = await makeAgentsDir();
+    await Bun.write(
+      path.join(agentsDir, "deep-review-security-leg.md"),
+      await Bun.file(path.join(agentsDir, "deep-review-reliability.md")).text(),
+    );
+    const input = await makeInput({
+      agentsDir,
+      spec: {
+        agents: [
+          hunter("security-leg", {
+            file: "deep-review-security-leg.md",
+            specialty: "security",
+          }),
+          REFUTER,
+        ],
+      },
+    });
+    const result = await runPipeline(input, { runner });
+    expect(runner.specs.map((s) => s.name)).toEqual(["hunter-security-leg"]);
+    expect(Object.keys(result.perAgent)).toEqual(["security-leg"]);
+    expect(result.skillOutput.findings[0]?.hunter).toBe("security");
   });
 });

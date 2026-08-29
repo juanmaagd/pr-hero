@@ -584,6 +584,40 @@ describe("hunter fan-out", () => {
     expect(result.skillOutput.findings[0]?.hunter).toBe("reliability");
   });
 
+  test("stamps specialty not key when they differ", async () => {
+    const agentsDir = await makeAgentsDir();
+    await Bun.write(
+      path.join(agentsDir, "deep-review-security-leg.md"),
+      await Bun.file(path.join(agentsDir, "deep-review-reliability.md")).text(),
+    );
+    const runner = new FakeStepRunner({
+      "hunter-security-leg": (spec) =>
+        ok(spec, { findings: [draft({ id: "SEC-1", hunter: "wrong" })] }),
+    });
+    const input = await makeInput({
+      agentsDir,
+      spec: {
+        agents: [
+          {
+            key: "security-leg",
+            file: "deep-review-security-leg.md",
+            role: "hunter",
+            specialty: "security",
+          },
+          {
+            key: "refuter",
+            file: "review-refuter.md",
+            role: "refuter",
+          },
+        ],
+      },
+    });
+    const result = await runPipeline(input, { runner });
+    expect(runner.specs.map((s) => s.name)).toEqual(["hunter-security-leg"]);
+    expect(Object.keys(result.perAgent)).toEqual(["security-leg"]);
+    expect(result.skillOutput.findings[0]?.hunter).toBe("security");
+  });
+
   test("parse accepts a draft whose hunter field is not even a valid enum value", async () => {
     // Regression from the first live fixture run: hunters self-reported their
     // agent name ("fixture-reliability-hunter"), which failed validation on a
@@ -1816,6 +1850,7 @@ describe("assembly", () => {
       head_sha: "4609456d",
       model: "sonnet",
       iteration: 900,
+      engine: { name: "pr-hero", version: "1.0.0" },
       sessionFailed: result.sessionFailed,
       telemetry,
     });
@@ -1849,6 +1884,7 @@ describe("assembly", () => {
       head_sha: "4609456d",
       model: "sonnet",
       iteration: 0,
+      engine: { name: "pr-hero", version: "1.0.0" },
       sessionFailed: result.sessionFailed,
       telemetry,
     };
