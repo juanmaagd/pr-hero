@@ -1,4 +1,5 @@
 import type { DraftFinding } from "../drafts";
+import type { ResolvedModelRoute } from "../execution/contracts";
 import {
   type NormalizedUsage,
   normalizeInclusiveUsage,
@@ -252,6 +253,7 @@ export function recordDiversityHunterResult(
   agent: AgentSpec,
   result: StepResult,
   leg?: DiversityLeg,
+  executedRoute?: ResolvedModelRoute,
 ): DiversityLedger {
   const resolvedLeg = leg ?? legForAgent(plan, agent);
   if (!resolvedLeg) {
@@ -290,6 +292,12 @@ export function recordDiversityHunterResult(
   }
   if (result.status !== "ok") return next;
   const terminalAttemptId = `${resolvedLeg.legId}-a${totalAttempts}`;
+  const routeProvenance: ResolvedModelRoute = executedRoute ?? {
+    backend: "claude-code",
+    provider: "anthropic",
+    modelFamily: resolvedLeg.model.split("/")[0] ?? "unknown",
+    modelSnapshot: resolvedLeg.model,
+  };
   const output = result.output as { findings?: DraftFinding[] } | undefined;
   const findings = output?.findings ?? [];
   for (const [index, finding] of findings.entries()) {
@@ -297,10 +305,16 @@ export function recordDiversityHunterResult(
       observationId: `${terminalAttemptId}-o${index + 1}`,
       specialty: resolveSpecialty(agent),
       legId: resolvedLeg.legId,
-      backend: "claude-code",
-      provider: "anthropic",
-      modelFamily: resolvedLeg.model.split("/")[0] ?? "unknown",
-      modelSnapshot: resolvedLeg.model,
+      backend: routeProvenance.backend,
+      provider: routeProvenance.provider,
+      ...(routeProvenance.gateway === undefined
+        ? {}
+        : { gateway: routeProvenance.gateway }),
+      modelFamily: routeProvenance.modelFamily,
+      modelSnapshot: routeProvenance.modelSnapshot,
+      ...(routeProvenance.modelVariant === undefined
+        ? {}
+        : { modelVariant: routeProvenance.modelVariant }),
       replicate: 1,
       attempt: totalAttempts,
       promptFingerprint: plan.promptFingerprint ?? "unknown",

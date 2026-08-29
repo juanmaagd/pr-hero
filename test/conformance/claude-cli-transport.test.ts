@@ -242,14 +242,16 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       },
     });
 
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 10);
     const startedAt = Date.now();
-    const outcome = await transport.execute(makeRequest({ timeoutMs: 10 }), {
-      signal: new AbortController().signal,
+    const outcome = await transport.execute(makeRequest(), {
+      signal: controller.signal,
     });
     const elapsed = Date.now() - startedAt;
 
-    expect(outcome.timedOut).toBe(true);
-    expect(outcome.completion).toBe("failed");
+    expect(outcome.timedOut).toBeUndefined();
+    expect(outcome.completion).toBe("cancelled");
     expect(signals.map((s) => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
     expect(signals.every((s) => s.pid === -PID)).toBe(true);
     const graceObserved = signals[1].at - signals[0].at;
@@ -274,16 +276,18 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       },
     });
 
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5);
     const startedAt = Date.now();
-    const outcome = await transport.execute(makeRequest({ timeoutMs: 5 }), {
-      signal: new AbortController().signal,
+    const outcome = await transport.execute(makeRequest(), {
+      signal: controller.signal,
     });
     const elapsed = Date.now() - startedAt;
 
     expect(elapsed).toBeLessThan(1000);
     expect(signals.map((s) => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
     expect(signals.every((s) => s.pid === -PID)).toBe(true);
-    expect(outcome.completion).toBe("failed");
+    expect(outcome.completion).toBe("cancelled");
     expect(outcome.protocolIntegrity).toBe("unverified");
     expect(outcome.stderrTail).toContain("not reaped");
     expect(outcome.terminalProof).toBeUndefined();

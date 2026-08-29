@@ -574,9 +574,10 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
     expect(report.backend).toBe("opencode");
     expect(report.status).toBe("degraded");
     expect(report.auth.kind).toBe("opencode_chatgpt_oauth");
-    expect(report.auth.projectionReady).toBe(false);
-    expect(report.isolation.syntheticHome).toBe(false);
-    expect(report.isolation.workspaceReadBroker).toBe(false);
+    expect(report.auth.projectionReady).toBe(true);
+    expect(report.auth.probe).toBe("passed");
+    expect(report.isolation.syntheticHome).toBe(true);
+    expect(report.isolation.workspaceReadBroker).toBe(true);
     expect(report.protocol.terminalProof).toBe(true);
     expect(report.protocol.boundedEvents).toBe(true);
     expect(report.protocol.usageMode).toBe("none");
@@ -586,9 +587,11 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
     expect(report.billing.pricingReady).toBe(false);
     expect(report.issues.length).toBeGreaterThan(0);
     for (const issue of report.issues) expect(issue.blocking).toBe(false);
-    expect(report.issues.some((issue) => issue.code.includes("d1_11"))).toBe(
-      true,
-    );
+    expect(
+      report.issues.some(
+        (issue) => issue.code === "codegraph_policy_unenforced",
+      ),
+    ).toBe(true);
   });
 });
 
@@ -682,55 +685,48 @@ describe("OpenCodeSdkTransport failure surface", () => {
 // the repository before any code moved; these tests pin the fixes.
 // ---------------------------------------------------------------------------
 
-describe("OpenCodeSdkTransport per-attempt deadline (F006)", () => {
-  // The sibling ClaudeCodeCliTransport self-enforces request.timeoutMs
-  // (src/transports/claude-code-cli.ts:392). The harness does NOT supply a
-  // per-attempt watchdog — its deadlineMs is the CANCELLATION budget
-  // (harness.ts:769 resolveCancellationDeadlineMs), which only starts once a
-  // cancel is requested. So a provider that streams heartbeats forever while
-  // every poll stays pending would hang the attempt, and the pipeline step
-  // awaiting it, with no internal backstop at all.
-  test("a hung provider is terminated by the request's own timeout", async () => {
+describe("OpenCodeSdkTransport per-attempt deadline ownership (F006)", () => {
+  // Per-attempt watchdog is harness-owned (StepSpec.timeoutMs → harness
+  // watchdog). TransportRequest carries no timeoutMs — see
+  // test/production-transport-lifecycle.test.ts and
+  // docs/multi-runtime-model-diversity-design.md §3.
+
+  test("a hung provider settles when the harness abort signal fires", async () => {
     const handle = makeClient({});
     const rig = makeRig({ client: handle.client });
-    const pending = rig.transport.execute(makeRequest({ timeoutMs: 1000 }), {
+    const pending = rig.transport.execute(makeRequest(), {
       signal: rig.controller.signal,
       events: rig.sink,
     });
     await flush();
+    rig.controller.abort();
     await advance(rig.clock, 8);
     const outcome = await pending;
 
-    expect(outcome.completion).toBe("failed");
-    expect(outcome.timedOut).toBe(true);
+    expect(outcome.completion).toBe("cancelled");
+    expect(outcome.timedOut).toBeUndefined();
   });
 
-  // The distinction that makes this fix worth anything: a watchdog timeout is
-  // TRANSIENT and must stay retryable. Settling through the abort path would
-  // stamp MARKER_ABORT_UNCONFIRMED into the notes, which classifyFailure maps
-  // to remote_abort_unconfirmed — a TERMINAL cause under §7. The attempt
-  // would never be retried, which is the opposite of what a timeout means.
-  test("a timeout is not laundered into an unconfirmed remote abort", async () => {
+  test("abort without provider proof is classified remote_abort_unconfirmed", async () => {
     const handle = makeClient({});
     const rig = makeRig({ client: handle.client });
-    const pending = rig.transport.execute(makeRequest({ timeoutMs: 1000 }), {
+    const pending = rig.transport.execute(makeRequest(), {
       signal: rig.controller.signal,
       events: rig.sink,
     });
     await flush();
+    rig.controller.abort();
     await advance(rig.clock, 8);
     const outcome = await pending;
 
-    expect(outcome.completion).not.toBe("cancelled");
-    expect(rig.transport.classifyFailure(outcome)).not.toBe(
+    expect(outcome.completion).toBe("cancelled");
+    expect(rig.transport.classifyFailure(outcome)).toBe(
       "remote_abort_unconfirmed",
     );
-    // Paid remote work still gets a best-effort abort — as cleanup after the
-    // settlement, never as the thing that decided it.
     expect(handle.abortCount()).toBe(1);
   });
 
-  test("no timeout is armed when the request declares none", async () => {
+  test("no transport-internal attempt deadline is armed", async () => {
     const handle = makeClient({
       stream: streamOf([{ kind: "terminal", proof: completedProof("e1") }]),
       polls: [{ kind: "terminal", proof: completedProof("e1") }],

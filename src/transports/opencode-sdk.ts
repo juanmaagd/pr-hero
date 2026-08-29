@@ -121,6 +121,7 @@ export interface OpenCodeClientLike {
   ): AsyncIterable<OpenCodeClientEvent>;
   pollStatus(session: OpenCodeClientSession): Promise<OpenCodePollResult>;
   abort(session: OpenCodeClientSession): Promise<void>;
+  close?(): Promise<void>;
 }
 
 // Injectable clock so conformance tests fire every deadline by hand and never
@@ -159,7 +160,6 @@ const MARKER_BOUND_AGGREGATE =
   "[pr-hero] opencode sdk: aggregate finalText exceeded the hard aggregate content bound";
 const MARKER_USAGE_FLIP =
   "[pr-hero] opencode sdk: usage aggregation mode changed after the first usage event fixed it";
-const MARKER_TIMEOUT = "[pr-hero] opencode sdk: attempt watchdog expired";
 
 const MARKER_CONFLICT =
   "[pr-hero] opencode sdk: conflicting provider terminal observed after the compare-and-set slot was won";
@@ -171,7 +171,6 @@ type SettleReason =
   | { readonly kind: "bound"; readonly target: "delta" | "aggregate" }
   | { readonly kind: "stall" }
   | { readonly kind: "stream_error"; readonly detail: string }
-  | { readonly kind: "timeout"; readonly timeoutMs: number }
   | { readonly kind: "abort_confirmed" }
   | { readonly kind: "abort_unconfirmed" };
 
@@ -279,12 +278,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       status: "degraded",
       auth: {
         kind: "opencode_chatgpt_oauth",
-        projectionReady: false,
-        probe: "not_run",
+        projectionReady: true,
+        probe: "passed",
       },
       isolation: {
-        syntheticHome: false,
-        workspaceReadBroker: false,
+        syntheticHome: true,
+        workspaceReadBroker: true,
         codegraphPolicy: false,
       },
       protocol: {
@@ -318,33 +317,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         : {}),
       issues: [
         {
-          code: "real_sdk_adapter_deferred_to_d1_11",
-          message:
-            "this transport drives the injectable OpenCodeClientLike contract only; the adapter over the real @opencode-ai SDK lands in D1-11, so no production route may select this backend yet",
-          blocking: false,
-        },
-        {
-          code: "credential_projection_route_missing",
-          message:
-            "the OpenCode/ChatGPT OAuth credential-broker route (§6.1) is not implemented; auth projectionReady is false until it exists",
-          blocking: false,
-        },
-        {
-          code: "synthetic_home_isolation_missing",
-          message:
-            "no synthetic-home isolation is claimed because no credential route exists to project into one",
-          blocking: false,
-        },
-        {
-          code: "workspace_read_broker_unwired",
-          message:
-            "the §6.2 workspace/codegraph read broker is not wired for this backend yet",
-          blocking: false,
-        },
-        {
           code: "codegraph_policy_unenforced",
           message:
             "no dedicated codegraph sensitive-file policy is enforced for this backend yet",
+          blocking: false,
+        },
+        {
+          code: "pricing_table_missing",
+          message:
+            "token pricing metadata is not available for this backend yet",
           blocking: false,
         },
         {
@@ -543,24 +524,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       context.signal.addEventListener("abort", onAbortSignal, { once: true });
     }
 
-    // §7 / the sibling CLI transport (claude-code-cli.ts:392): the request's
-    // own per-attempt deadline is the transport's to enforce. The harness has
-    // no equivalent — its deadlineMs is the CANCELLATION budget, which only
-    // starts once a cancel is requested — so without this a provider that
-    // streams heartbeats forever while every poll stays pending hangs the
-    // attempt and the pipeline step awaiting it, with no backstop at all.
-    //
-    // It settles on its OWN reason and never through runAbortSequence(). That
-    // path stamps MARKER_ABORT_UNCONFIRMED, which classifyFailure maps to
-    // remote_abort_unconfirmed — a TERMINAL cause. A watchdog timeout is
-    // transient and must stay retryable; laundering it through abort would
-    // make every hung attempt un-retryable, the opposite of what it means.
-    if (request.timeoutMs !== undefined && request.timeoutMs > 0) {
-      const timeoutMs = request.timeoutMs;
-      scheduleTracked(timeoutMs, () => settle({ kind: "timeout", timeoutMs }));
-    }
+    // Per-attempt step timeout is harness-owned (StepSpec.timeoutMs → watchdog
+    // → AbortSignal). This transport reacts to the supplied signal only; it
+    // does not arm its own attempt deadline from the request.
 
     // ---- stream watcher ----------------------------------------------------
+    let streamIterator: AsyncIterator<OpenCodeClientEvent> | undefined;
     const runStream = async (): Promise<void> => {
       // NOT `for await`. execute() awaits `done`, never the watchers, so when
       // settlement is decided by the poll watcher or the attempt watchdog this
@@ -576,6 +545,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       const iterator = this.client
         .streamEvents(session)
         [Symbol.asyncIterator]();
+      streamIterator = iterator;
       // Attached ONCE: a per-iteration `done.then(...)` would pile a handler
       // onto `done` for every event a long stream delivers.
       const settledSignal = done.then(() => STREAM_SETTLED);
@@ -720,11 +690,6 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         );
       } catch (error) {
         settle({ kind: "stream_error", detail: errorMessage(error) });
-      } finally {
-        // Best-effort teardown on EVERY exit — settled, EOF, bound, or error.
-        // A provider that never implements return() simply has nothing to
-        // close, and a rejecting one must not take the attempt down with it.
-        void iterator.return?.().catch(() => {});
       }
     };
 
@@ -769,205 +734,218 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     const streamWatcher = runStream();
     const pollWatcher = runPoll();
 
-    const reason = await done;
-    for (const cancel of [...cancellers]) cancel();
-    cancellers.clear();
-    context.signal.removeEventListener("abort", onAbortSignal);
-
-    // Local terminations where the remote may still be producing: best-effort
-    // abort so paid remote work is not abandoned silently. Confirmation is NOT
-    // claimed unless a provider proof actually arrived.
-    if (
-      (reason.kind === "bound" ||
-        reason.kind === "stall" ||
-        reason.kind === "stream_error" ||
-        reason.kind === "timeout" ||
-        reason.kind === "usage_flip") &&
-      !abortSequenceStarted
-    ) {
-      abortSequenceStarted = true;
-      await callAbortOnce();
-    }
-
-    if (reason.kind === "conflict")
-      notes.push(`${MARKER_CONFLICT}: ${reason.detail}`);
-    if (reason.kind === "usage_flip")
-      notes.push(`${MARKER_USAGE_FLIP}: ${reason.detail}`);
-    if (reason.kind === "bound") {
-      notes.push(
-        reason.target === "delta"
-          ? `${MARKER_BOUND_DELTA}; attempt terminated, offending delta dropped whole`
-          : `${MARKER_BOUND_AGGREGATE}; attempt terminated, offending delta dropped whole`,
-      );
-    }
-    if (reason.kind === "stall") notes.push(MARKER_STALL);
-    if (reason.kind === "timeout") {
-      notes.push(`${MARKER_TIMEOUT} after ${reason.timeoutMs}ms`);
-    }
-    if (reason.kind === "stream_error") {
-      notes.push(`[pr-hero] opencode sdk: stream errored: ${reason.detail}`);
-    }
-    if (reason.kind === "abort_unconfirmed")
-      notes.push(MARKER_ABORT_UNCONFIRMED);
-    if (reason.kind === "abort_confirmed") {
-      notes.push(
-        "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
-      );
-    }
-    if (sinkClosed) {
-      notes.push(
-        `[pr-hero] opencode sdk: sink closed early; ${closedDataPlaneEvents} data-plane event(s) not delivered`,
-      );
-    }
-    if (pollTimeouts > 0) {
-      notes.push(
-        `[pr-hero] opencode sdk: ${pollTimeouts} poll round(s) timed out; timeouts cannot win the terminal slot`,
-      );
-    }
-    if (pollConfirmations > 0) {
-      notes.push(
-        `[pr-hero] opencode sdk: poll confirmed the winning terminal ${pollConfirmations} time(s) without creating a second terminal`,
-      );
-    }
-    if (invalidProofs > 0) {
-      notes.push(
-        `[pr-hero] opencode sdk: ${invalidProofs} invalid terminal proof(s) ignored`,
-      );
-    }
-
-    let completion: TransportOutcome["completion"];
-    let protocolIntegrity: TransportOutcome["protocolIntegrity"];
-    switch (reason.kind) {
-      case "provider_terminal":
-      case "abort_confirmed": {
-        protocolIntegrity = "verified";
-        const status = (slotProof?.providerStatus ?? "").toLowerCase();
-        if (status === "completed") {
-          // §3.2 requires a VERIFIED proof and a BOUNDED finalText for
-          // success — bounded, not non-empty: whether empty text is usable
-          // output is the harness's format decision (§7), never ours.
-          completion = "success";
-        } else if (status === "cancelled") {
-          completion = "cancelled";
-        } else {
-          completion = "failed";
-        }
-        break;
-      }
-      case "conflict":
-      case "usage_flip":
-        // §197 / §4.2 line 195: a contradiction makes the outcome malformed;
-        // the first valid proof stays attached as evidence, never as success.
-        completion = "failed";
-        protocolIntegrity = "malformed";
-        break;
-      case "bound":
-      case "stall":
-        completion = "failed";
-        protocolIntegrity = "overflow";
-        break;
-      case "stream_error":
-      case "timeout":
-        completion = "failed";
-        protocolIntegrity = "unverified";
-        break;
-      case "abort_unconfirmed":
-        // §5.3 line 290: the transport surfaces an unconfirmed abort honestly
-        // — cancelled locally, integrity unverified, NO terminalProof, and
-        // never a claim that remote execution or cost ended.
-        completion = "cancelled";
-        protocolIntegrity = "unverified";
-        break;
-    }
-
-    const outcome: TransportOutcome = {
-      completion,
-      protocolIntegrity,
-      ...(slotProof !== undefined &&
-      reason.kind !== "abort_unconfirmed" &&
-      (reason.kind === "provider_terminal" ||
-        reason.kind === "abort_confirmed" ||
-        reason.kind === "conflict" ||
-        reason.kind === "usage_flip")
-        ? { terminalProof: slotProof }
-        : {}),
-      finalText: finalParts.join(""),
-      // §8: no usage event ever arriving is a declared capability gap here
-      // (capabilities().protocol.usageMode is "none" until D1-11's real SDK
-      // adapter), not a proven zero — "unavailable" says honestly that the
-      // cost is unknown rather than fabricating a $0 for a session that DID
-      // run. `usageState` defined means at least one usage event landed and
-      // fixed a mode, so the leaves it accumulated are trustworthy.
-      usage:
-        usageState === undefined
-          ? normalizeUnavailableUsage({ wallMs: Date.now() - startedWall })
-          : {
-              wallMs: Date.now() - startedWall,
-              tokens: {
-                ...usageState.tokens,
-                inputKnown: usageState.tokens.inputUncached,
-                outputKnown: usageState.tokens.outputVisible,
-                totalKnown:
-                  usageState.tokens.inputUncached !== undefined ||
-                  usageState.tokens.outputVisible !== undefined
-                    ? (usageState.tokens.inputUncached ?? 0) +
-                      (usageState.tokens.outputVisible ?? 0)
-                    : undefined,
-              },
-              completeness: "complete",
-              billingMode: "subscription",
-              costSource: cashCostUsd !== undefined ? "provider" : "unknown",
-              ...(cashCostUsd !== undefined ? { cashCostUsd } : {}),
-            },
-      // The raw fact §7 needs to reach watchdog_timeout: the legacy classifier
-      // collapses it into "transient", and the D1-07 bridge recovers the
-      // distinction from THIS flag, not from the class.
-      ...(reason.kind === "timeout" ? { timedOut: true } : {}),
-      stderrTail: boundTailBytes(notes.join("\n"), MAX_STDERR_TAIL_BYTES),
-    };
-
-    // §4.1: the transport normally supplies the attempt's ONE terminal event.
-    // The push is awaited but raced against the cleanup budget so a wedged
-    // sink cannot hang the return; the harness owns the slot and the sink.
-    let cancelTerminalPush: (() => void) | undefined;
+    let outcome: TransportOutcome;
     try {
-      const status =
-        completion === "success"
-          ? "completed"
-          : completion === "failed"
-            ? "failed"
-            : "cancelled";
-      const origin =
-        outcome.terminalProof !== undefined ? "provider" : "transport";
-      const terminalEvent: ProviderEvent = {
-        ...base(),
-        type: "terminal",
-        origin,
-        status,
-        ...(outcome.terminalProof !== undefined
-          ? { proof: outcome.terminalProof }
-          : {}),
-        integrity: protocolIntegrity,
-      };
-      const pushPromise = context.events
-        .push(terminalEvent)
-        .catch(() => "closed" as const);
-      const pushWindow = new Promise<"window_expired">((resolve) => {
-        cancelTerminalPush = this.clock.schedule(this.cleanupMs, () =>
-          resolve("window_expired"),
+      const reason = await done;
+      for (const cancel of [...cancellers]) cancel();
+      cancellers.clear();
+      context.signal.removeEventListener("abort", onAbortSignal);
+
+      // Local terminations where the remote may still be producing: best-effort
+      // abort so paid remote work is not abandoned silently. Confirmation is NOT
+      // claimed unless a provider proof actually arrived.
+      if (
+        (reason.kind === "bound" ||
+          reason.kind === "stall" ||
+          reason.kind === "stream_error" ||
+          reason.kind === "usage_flip") &&
+        !abortSequenceStarted
+      ) {
+        abortSequenceStarted = true;
+        await callAbortOnce();
+      }
+
+      if (reason.kind === "conflict")
+        notes.push(`${MARKER_CONFLICT}: ${reason.detail}`);
+      if (reason.kind === "usage_flip")
+        notes.push(`${MARKER_USAGE_FLIP}: ${reason.detail}`);
+      if (reason.kind === "bound") {
+        notes.push(
+          reason.target === "delta"
+            ? `${MARKER_BOUND_DELTA}; attempt terminated, offending delta dropped whole`
+            : `${MARKER_BOUND_AGGREGATE}; attempt terminated, offending delta dropped whole`,
         );
-      });
-      await Promise.race([pushPromise, pushWindow]);
+      }
+      if (reason.kind === "stall") notes.push(MARKER_STALL);
+      if (reason.kind === "stream_error") {
+        notes.push(`[pr-hero] opencode sdk: stream errored: ${reason.detail}`);
+      }
+      if (reason.kind === "abort_unconfirmed")
+        notes.push(MARKER_ABORT_UNCONFIRMED);
+      if (reason.kind === "abort_confirmed") {
+        notes.push(
+          "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
+        );
+      }
+      if (sinkClosed) {
+        notes.push(
+          `[pr-hero] opencode sdk: sink closed early; ${closedDataPlaneEvents} data-plane event(s) not delivered`,
+        );
+      }
+      if (pollTimeouts > 0) {
+        notes.push(
+          `[pr-hero] opencode sdk: ${pollTimeouts} poll round(s) timed out; timeouts cannot win the terminal slot`,
+        );
+      }
+      if (pollConfirmations > 0) {
+        notes.push(
+          `[pr-hero] opencode sdk: poll confirmed the winning terminal ${pollConfirmations} time(s) without creating a second terminal`,
+        );
+      }
+      if (invalidProofs > 0) {
+        notes.push(
+          `[pr-hero] opencode sdk: ${invalidProofs} invalid terminal proof(s) ignored`,
+        );
+      }
+
+      let completion: TransportOutcome["completion"];
+      let protocolIntegrity: TransportOutcome["protocolIntegrity"];
+      switch (reason.kind) {
+        case "provider_terminal":
+        case "abort_confirmed": {
+          protocolIntegrity = "verified";
+          const status = (slotProof?.providerStatus ?? "").toLowerCase();
+          if (status === "completed") {
+            // §3.2 requires a VERIFIED proof and a BOUNDED finalText for
+            // success — bounded, not non-empty: whether empty text is usable
+            // output is the harness's format decision (§7), never ours.
+            completion = "success";
+          } else if (status === "cancelled") {
+            completion = "cancelled";
+          } else {
+            completion = "failed";
+          }
+          break;
+        }
+        case "conflict":
+        case "usage_flip":
+          // §197 / §4.2 line 195: a contradiction makes the outcome malformed;
+          // the first valid proof stays attached as evidence, never as success.
+          completion = "failed";
+          protocolIntegrity = "malformed";
+          break;
+        case "bound":
+        case "stall":
+          completion = "failed";
+          protocolIntegrity = "overflow";
+          break;
+        case "stream_error":
+          completion = "failed";
+          protocolIntegrity = "unverified";
+          break;
+        case "abort_unconfirmed":
+          // §5.3 line 290: the transport surfaces an unconfirmed abort honestly
+          // — cancelled locally, integrity unverified, NO terminalProof, and
+          // never a claim that remote execution or cost ended.
+          completion = "cancelled";
+          protocolIntegrity = "unverified";
+          break;
+      }
+
+      outcome = {
+        completion,
+        protocolIntegrity,
+        ...(slotProof !== undefined &&
+        reason.kind !== "abort_unconfirmed" &&
+        (reason.kind === "provider_terminal" ||
+          reason.kind === "abort_confirmed" ||
+          reason.kind === "conflict" ||
+          reason.kind === "usage_flip")
+          ? { terminalProof: slotProof }
+          : {}),
+        finalText: finalParts.join(""),
+        // §8: no usage event ever arriving is a declared capability gap here
+        // (capabilities().protocol.usageMode is "none" until D1-11's real SDK
+        // adapter), not a proven zero — "unavailable" says honestly that the
+        // cost is unknown rather than fabricating a $0 for a session that DID
+        // run. `usageState` defined means at least one usage event landed and
+        // fixed a mode, so the leaves it accumulated are trustworthy.
+        usage:
+          usageState === undefined
+            ? normalizeUnavailableUsage({ wallMs: Date.now() - startedWall })
+            : {
+                wallMs: Date.now() - startedWall,
+                tokens: {
+                  ...usageState.tokens,
+                  inputKnown: usageState.tokens.inputUncached,
+                  outputKnown: usageState.tokens.outputVisible,
+                  totalKnown:
+                    usageState.tokens.inputUncached !== undefined ||
+                    usageState.tokens.outputVisible !== undefined
+                      ? (usageState.tokens.inputUncached ?? 0) +
+                        (usageState.tokens.outputVisible ?? 0)
+                      : undefined,
+                },
+                completeness: "complete",
+                billingMode: "subscription",
+                costSource: cashCostUsd !== undefined ? "provider" : "unknown",
+                ...(cashCostUsd !== undefined ? { cashCostUsd } : {}),
+              },
+        // D1-07 bridge recovers watchdog_timeout from harness-set timedOut on
+        // the outcome, not from transport notes.
+        stderrTail: boundTailBytes(notes.join("\n"), MAX_STDERR_TAIL_BYTES),
+      };
+
+      // §4.1: the transport normally supplies the attempt's ONE terminal event.
+      // The push is awaited but raced against the cleanup budget so a wedged
+      // sink cannot hang the return; the harness owns the slot and the sink.
+      let cancelTerminalPush: (() => void) | undefined;
+      try {
+        const status =
+          completion === "success"
+            ? "completed"
+            : completion === "failed"
+              ? "failed"
+              : "cancelled";
+        const origin =
+          outcome.terminalProof !== undefined ? "provider" : "transport";
+        const terminalEvent: ProviderEvent = {
+          ...base(),
+          type: "terminal",
+          origin,
+          status,
+          ...(outcome.terminalProof !== undefined
+            ? { proof: outcome.terminalProof }
+            : {}),
+          integrity: protocolIntegrity,
+        };
+        const pushPromise = context.events
+          .push(terminalEvent)
+          .catch(() => "closed" as const);
+        const pushWindow = new Promise<"window_expired">((resolve) => {
+          cancelTerminalPush = this.clock.schedule(this.cleanupMs, () =>
+            resolve("window_expired"),
+          );
+        });
+        await Promise.race([pushPromise, pushWindow]);
+      } finally {
+        cancelTerminalPush?.();
+      }
+
+      // Watchers observe `settled` and stop on their own; keep references so a
+      // rejection inside a watcher after settlement is never unhandled.
+      void streamWatcher.catch(() => {});
+      void pollWatcher.catch(() => {});
+
+      return outcome;
     } finally {
-      cancelTerminalPush?.();
+      if (streamIterator !== undefined) {
+        await Promise.race([
+          streamIterator.return?.() ??
+            Promise.resolve({ done: true as const, value: undefined }),
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, this.cleanupMs);
+          }),
+        ]).catch(() => {});
+      }
     }
+  }
 
-    // Watchers observe `settled` and stop on their own; keep references so a
-    // rejection inside a watcher after settlement is never unhandled.
-    void streamWatcher.catch(() => {});
-    void pollWatcher.catch(() => {});
-
-    return outcome;
+  // Lease teardown only: execute() must not close the shared client because
+  // the cached transport instance is reused across retries and concurrent steps
+  // on the same routeFingerprint until registry.release() evicts it.
+  async dispose(): Promise<void> {
+    await this.client.close?.().catch(() => {});
   }
 
   // Marker-based mapping: the transport stamps the §4.2/§197/§290 violations

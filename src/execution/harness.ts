@@ -1,5 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+// Lifecycle ownership (§2 docs/multi-runtime-model-diversity-design.md):
+//   HARNESS — StepSpec.timeoutMs watchdog, cancellation coordinator, retry/
+//   parse, write leases + settlement receipts, event sink, spend reservations,
+//   concurrency admission, credential projection destroy AFTER transport teardown.
+//   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
+//   protocol events, return TransportOutcome, classify provider/transport causes.
+//   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
 import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
@@ -22,6 +29,7 @@ import {
   settlementReceiptPath,
 } from "../step-runner";
 import type { TransportRegistry } from "../transport-registry";
+import { DefaultTransportRegistry } from "../transport-registry";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
 import type { AttemptAdmissionGate, AttemptLease } from "./admission";
@@ -229,6 +237,9 @@ export interface StepExecutionHarnessOptions {
   // FIFO queue cannot hang the run forever.
   readonly attemptAdmissionTimeoutMs?: number;
   readonly credentialProjectionTimeoutMs?: number;
+  // Production leased transports: tear down the shared client/server before
+  // credential projection destroy when this step is the last active lease.
+  readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -351,6 +362,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly binaryPath?: string;
   private readonly admissionGate?: StepAdmissionGate;
   private readonly registry?: TransportRegistry;
+  private readonly explicitTransport?: ProviderTransport;
   private readonly transport: ProviderTransport;
   private readonly onAuthEvent?: (event: AuthEvent) => void;
   private readonly isTestFake: boolean;
@@ -371,6 +383,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly reservedUsdPerAttempt: number;
   private readonly attemptAdmissionTimeoutMs: number;
   private readonly credentialProjectionTimeoutMs: number;
+  private readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
@@ -378,9 +391,12 @@ export class StepExecutionHarness implements StepRunner {
     this.binaryPath = options.binaryPath;
     this.admissionGate = options.admissionGate;
     this.registry = options.registry;
-    this.transport =
-      options.transport ??
-      new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
+    if (options.transport !== undefined) {
+      this.explicitTransport = options.transport;
+      this.transport = options.transport;
+    } else {
+      this.transport = new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
+    }
     this.onAuthEvent = options.onAuthEvent;
     this.isTestFake = Boolean(options.spawnFn);
     this.projectedEnv = projectChildEnv(options.childEnv ?? process.env);
@@ -400,6 +416,8 @@ export class StepExecutionHarness implements StepRunner {
     this.credentialProjectionTimeoutMs =
       options.credentialProjectionTimeoutMs ??
       DEFAULT_CREDENTIAL_PROJECTION_TIMEOUT_MS;
+    this.onBeforeCredentialProjectionDestroy =
+      options.onBeforeCredentialProjectionDestroy;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
@@ -409,9 +427,28 @@ export class StepExecutionHarness implements StepRunner {
     const effectiveBackend =
       step.route?.backend ?? step.backend ?? "claude-code";
     let transport: ProviderTransport;
-    if (this.registry) {
+    if (this.explicitTransport !== undefined) {
+      const declaredBackend = step.route?.backend ?? step.backend;
+      if (
+        declaredBackend !== undefined &&
+        this.explicitTransport.backend !== declaredBackend
+      ) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `No transport registry configured to handle backend "${declaredBackend}" for step "${step.name}"`,
+          resultText: "",
+        };
+      }
+      transport = this.explicitTransport;
+    } else if (this.registry) {
       try {
-        transport = this.registry.get(effectiveBackend);
+        transport = this.registry.get(effectiveBackend, {
+          routeFingerprint: step.routeKey,
+          route: step.route,
+        });
       } catch (err) {
         return {
           name: step.name,
@@ -434,6 +471,26 @@ export class StepExecutionHarness implements StepRunner {
         };
       }
       transport = this.transport;
+    }
+
+    if (
+      effectiveBackend === "opencode" &&
+      this.registry instanceof DefaultTransportRegistry &&
+      this.registry.needsOpenCodeSdkProbe()
+    ) {
+      try {
+        await this.registry.probeOpenCodeSdk();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `OpenCode SDK pre-confirm failed: ${message}`,
+          resultText: "",
+        };
+      }
     }
 
     // 1. Workspace authorization
@@ -587,6 +644,7 @@ export class StepExecutionHarness implements StepRunner {
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
       // and never a replacement for the step's own outcome.
+      await this.onBeforeCredentialProjectionDestroy?.().catch(() => {});
       this.appendDestroyFailure(
         await this.destroyProjection(projection),
         result,
@@ -596,6 +654,7 @@ export class StepExecutionHarness implements StepRunner {
       }
       return result;
     } catch (error) {
+      await this.onBeforeCredentialProjectionDestroy?.().catch(() => {});
       this.appendDestroyFailure(await this.destroyProjection(projection));
       throw error;
     }
@@ -703,6 +762,7 @@ export class StepExecutionHarness implements StepRunner {
     readonly request: TransportRequest;
     readonly transport: ProviderTransport;
     readonly deadlineMs: number;
+    readonly harnessWatchdogMs?: number;
     readonly onData: (
       outcome: TransportOutcome,
       settlement: SettlementSession,
@@ -718,7 +778,8 @@ export class StepExecutionHarness implements StepRunner {
     // `local_fenced_remote_unconfirmed` without re-deriving it.
     readonly receipt: SettlementReceipt;
   }> {
-    const { step, request, transport, deadlineMs, onData } = args;
+    const { step, request, transport, deadlineMs, harnessWatchdogMs, onData } =
+      args;
 
     const settlement = createSettlement(request.sessionId, request.attempt, {
       now: this.nowIso,
@@ -842,11 +903,93 @@ export class StepExecutionHarness implements StepRunner {
       sig.addEventListener("abort", onCancel, { once: true });
     });
 
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+    const watchdogPromise =
+      harnessWatchdogMs !== undefined && harnessWatchdogMs > 0
+        ? new Promise<"watchdog">((resolve) => {
+            watchdogTimer = setTimeout(
+              () => resolve("watchdog"),
+              harnessWatchdogMs,
+            );
+          })
+        : undefined;
+
     try {
-      const raced = await Promise.race([
+      const racers: Promise<"outcome" | "cancel" | "watchdog">[] = [
         execGuarded.then(() => "outcome" as const),
         cancelPromise,
-      ]);
+      ];
+      if (watchdogPromise !== undefined) {
+        racers.push(watchdogPromise);
+      }
+      const raced = await Promise.race(racers);
+
+      if (raced === "watchdog") {
+        settlement.markAbortRequested();
+        if (lease.valid) {
+          lease.invalidate("harness watchdog timeout");
+          settlement.markLeaseInvalidated();
+        }
+        fenceClosed = true;
+        sink.close();
+        controller.abort();
+
+        const graceMs = deadlineMs + this.graceMarginMs;
+        await Promise.race([
+          execGuarded,
+          new Promise<void>((resolve) => setTimeout(resolve, graceMs)),
+        ]);
+
+        const transportTerminal = settlement.terminal;
+        let receipt: SettlementReceipt;
+        if (
+          transportTerminal !== undefined &&
+          transportTerminal.origin !== "harness"
+        ) {
+          receipt = finalize(() =>
+            settlement.receipt("failed", {
+              confirmation: transportTerminal.proof
+                ? "process_group_exited"
+                : "sdk_abort_confirmed",
+              processGroupAlive: "unknown",
+              remoteStatus: "failed",
+            }),
+          );
+        } else {
+          settlement.acceptTerminal("harness", "failed");
+          const isSdkBackedTransport = transport.backend !== "claude-code";
+          receipt = finalize(() =>
+            synthesizeUnconfirmed(settlement, {
+              processGroupAlive: isSdkBackedTransport
+                ? "not_applicable"
+                : "unknown",
+              outcome: isSdkBackedTransport
+                ? "local_fenced_remote_unconfirmed"
+                : undefined,
+              warning: `Step timed out after ${harnessWatchdogMs}ms (harness-owned watchdog)`,
+            }),
+          );
+        }
+
+        await this.persistSettlement(step, session, receipt);
+        this.onSessionSettled?.({ session, settlement, receipt });
+        return {
+          session,
+          settlement,
+          outcome: {
+            completion: "failed",
+            protocolIntegrity: "unverified",
+            finalText: "",
+            usage: normalizeUnavailableUsage({
+              wallMs: harnessWatchdogMs ?? 0,
+            }),
+            stderrTail: `Step timed out after ${harnessWatchdogMs}ms`,
+            timedOut: true,
+          },
+          cancelled: false,
+          receipt,
+        };
+      }
 
       if (raced === "outcome") {
         const resolved = outcome;
@@ -987,6 +1130,9 @@ export class StepExecutionHarness implements StepRunner {
       this.onSessionSettled?.({ session, settlement, receipt });
       return { session, settlement, cancelled: true, receipt };
     } finally {
+      if (watchdogTimer !== undefined) {
+        clearTimeout(watchdogTimer);
+      }
       if (onCancel && this.cancelSignal) {
         this.cancelSignal.removeEventListener("abort", onCancel);
       }
@@ -1121,7 +1267,6 @@ export class StepExecutionHarness implements StepRunner {
         cwd: canonicalCwd,
         tools: step.tools,
         mcpConfigPath: step.mcpConfigPath,
-        timeoutMs: step.timeoutMs,
         isolation: projection
           ? {
               credentialProjectionId: projection.projectionId,
@@ -1156,6 +1301,7 @@ export class StepExecutionHarness implements StepRunner {
         deadlineMs,
         transport,
         reserveToken,
+        harnessWatchdogMs: step.timeoutMs,
       });
 
       if (attemptResult.reservation !== undefined) {
@@ -1307,6 +1453,7 @@ export class StepExecutionHarness implements StepRunner {
     readonly deadlineMs: number;
     readonly transport: ProviderTransport;
     readonly reserveToken: ReserveToken;
+    readonly harnessWatchdogMs?: number;
   }): Promise<AttemptRunResult> {
     const {
       step,
@@ -1316,6 +1463,7 @@ export class StepExecutionHarness implements StepRunner {
       deadlineMs,
       transport,
       reserveToken,
+      harnessWatchdogMs,
     } = args;
 
     // D1-08 PR5b (§9.1 five-step order): acquire (1) → reserve (2) →
@@ -1383,6 +1531,7 @@ export class StepExecutionHarness implements StepRunner {
         request,
         deadlineMs,
         transport,
+        harnessWatchdogMs,
       });
 
       // Step 4: settle actual known cost exactly once (or route to
@@ -1478,14 +1627,24 @@ export class StepExecutionHarness implements StepRunner {
     readonly request: TransportRequest;
     readonly deadlineMs: number;
     readonly transport: ProviderTransport;
+    readonly harnessWatchdogMs?: number;
   }): Promise<AttemptRunResult> {
-    const { step, attempt, kind, request, deadlineMs, transport } = args;
+    const {
+      step,
+      attempt,
+      kind,
+      request,
+      deadlineMs,
+      transport,
+      harnessWatchdogMs,
+    } = args;
 
     const execution = await this.executeSession({
       step,
       request,
       transport,
       deadlineMs,
+      harnessWatchdogMs,
       onData: async (outcome, settlement): Promise<AttemptDelivery> => {
         try {
           const parsed = step.parse(outcome.finalText);
@@ -1568,13 +1727,13 @@ export class StepExecutionHarness implements StepRunner {
     return {
       kind: "failed",
       outcome,
-      // Row 10: `?? format_violation` — the same defensive default the
-      // legacy loop applied (`?? "format"`) for the case `execution.delivery`
-      // itself is somehow absent despite not being cancelled.
-      resolution: execution.delivery?.resolution ?? {
-        kind: "cause",
-        cause: "format_violation",
-      },
+      resolution:
+        execution.delivery?.resolution ??
+        resolveFailureCause({
+          outcome,
+          classifyFailure: transport.classifyFailure,
+          parseThrew: false,
+        }),
     };
   }
 }

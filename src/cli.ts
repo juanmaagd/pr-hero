@@ -79,6 +79,7 @@ import { runCiSetup } from "./ci-setup";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
 import { renderDoctorReport, runDoctor } from "./doctor";
+import type { RunnerBackend } from "./execution/contracts";
 import {
   type Finding,
   type FindingsDocument,
@@ -225,6 +226,14 @@ import {
   type SummarySettings,
 } from "./preflight";
 import {
+  createProductionRuntime,
+  type ProductionAdmissionContext,
+  type ProductionRuntime,
+  prepareProductionAdmissionContext,
+  probeBindingsReadiness,
+  produceExecutionCapabilityReport,
+} from "./production-runtime";
+import {
   applyProgressEvent,
   createPanelState,
   renderPanelLines,
@@ -266,7 +275,11 @@ import {
 } from "./rereview-prepare";
 import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
-import { resolveRunnerAuthority } from "./runner-authority";
+import {
+  type RunnerAuthorityOptions,
+  type RunnerAuthorityResolution,
+  resolveRunnerAuthority,
+} from "./runner-authority";
 import {
   effectiveDiffStat,
   evaluateSizeGate,
@@ -286,7 +299,12 @@ import {
   saveRunTransaction,
 } from "./store";
 import { projectCompleteRun } from "./store-preflight";
-import { admitRoutePlan, DefaultTransportRegistry } from "./transport-registry";
+import {
+  admitRoutePlan,
+  createDefaultTransportRegistry,
+  type D1_11ReadinessEvidence,
+  type TransportRegistry,
+} from "./transport-registry";
 import {
   renderTriageReplyBody,
   TRIAGE_MARKER_PREFIX,
@@ -470,9 +488,10 @@ async function buildCliRoutePlan(params: {
 export async function resolveRoutePlanAtConfirm(input: {
   routingConfigured: boolean;
   buildRoutePlan: () => Promise<ResolvedRoutePlan>;
-  registry?: DefaultTransportRegistry;
+  registry?: TransportRegistry;
 }): Promise<ResolvedRoutePlan | undefined> {
-  const registry = input.registry ?? new DefaultTransportRegistry();
+  const registry =
+    input.registry ?? createDefaultTransportRegistry({ mode: "production" });
   let routePlan: ResolvedRoutePlan;
   try {
     routePlan = await input.buildRoutePlan();
@@ -482,6 +501,107 @@ export async function resolveRoutePlanAtConfirm(input: {
   }
   await admitRoutePlan(routePlan, registry);
   return routePlan;
+}
+
+export interface ProductionRoutePlanResult {
+  readonly routePlan: ResolvedRoutePlan;
+  readonly productionAdmission: ProductionAdmissionContext;
+}
+
+// Production admission: discover per-backend executable authority, derive
+// D1-11 evidence from exact-binding probes, and admit with one shared registry.
+export async function resolveProductionRoutePlanAtConfirm(input: {
+  routingConfigured: boolean;
+  workspaceRoot: string;
+  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
+  authorityDeps?: import("./runner-authority").ResolveRunnerAuthorityDeps;
+  loadSdk?: () => Promise<
+    import("./transports/opencode-client").OpenCodeSdkLike
+  >;
+  env?: import("./runner-authority").RunnerAuthorityOptions["env"];
+}): Promise<ProductionRoutePlanResult | undefined> {
+  let routePlan: ResolvedRoutePlan;
+  try {
+    routePlan = await input.buildRoutePlan();
+  } catch (error) {
+    if (input.routingConfigured) throw error;
+    return undefined;
+  }
+
+  const productionAdmission = await prepareProductionAdmissionContext({
+    workspaceRoot: input.workspaceRoot,
+    plan: routePlan,
+    authorityDeps: input.authorityDeps,
+    loadSdk: input.loadSdk,
+    env: input.env,
+  });
+  if ("error" in productionAdmission) {
+    throw new CliError(
+      `production admission failed: ${productionAdmission.error}`,
+    );
+  }
+  await admitRoutePlan(routePlan, productionAdmission.registry, {
+    mode: "production",
+    evidence: productionAdmission.evidence,
+  });
+  return { routePlan, productionAdmission };
+}
+
+async function enforceProviderCapabilityGate(input: {
+  routePlan: ResolvedRoutePlan | undefined;
+  workspaceRoot: string;
+  runnerAuthority?: RunnerAuthorityResolution;
+  authorityOptions?: RunnerAuthorityOptions;
+  admissionRegistry?: TransportRegistry;
+  productionEvidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
+}): Promise<void> {
+  if (input.routePlan === undefined) {
+    if (input.runnerAuthority?.error !== undefined) {
+      throw new CliError(
+        `execution authority unavailable: ${input.runnerAuthority.error}`,
+      );
+    }
+    const capabilityReport = await produceClaudeCapabilityReport({});
+    const capabilityGate = capabilityGateDecision(capabilityReport);
+    if (!capabilityGate.ok) {
+      throw new CliError(
+        `provider capability gate failed: ${capabilityGate.reason}`,
+      );
+    }
+    return;
+  }
+  const authorityOptions =
+    input.authorityOptions ??
+    (input.runnerAuthority?.error !== undefined
+      ? undefined
+      : {
+          workspaceRoot: input.workspaceRoot,
+          binaryPath: input.runnerAuthority?.runnerOptions.binaryPath,
+          executableAllowlists: {
+            "claude-code":
+              input.runnerAuthority?.runnerOptions.executableAllowlist ?? [],
+          },
+        });
+  if (authorityOptions === undefined) {
+    throw new CliError(
+      `execution authority unavailable: ${input.runnerAuthority?.error ?? "missing production authority options"}`,
+    );
+  }
+  const probe = await probeBindingsReadiness({
+    ...authorityOptions,
+    plan: input.routePlan,
+    workspaceRoot: input.workspaceRoot,
+    registry: input.admissionRegistry,
+    mode: "production",
+    evidence: input.productionEvidence,
+  });
+  if (!probe.decision.ok) {
+    await probe.dispose();
+    throw new CliError(
+      `provider capability gate failed: ${probe.decision.reason}`,
+    );
+  }
+  await probe.dispose();
 }
 
 // C5 O-6's half of the pipeline input. Unconditional, unlike its two
@@ -1163,8 +1283,9 @@ async function review(options: CliOptions): Promise<number> {
     summary.enabled,
     options.scout,
   );
-  const routePlan = await resolveRoutePlanAtConfirm({
+  const productionRoute = await resolveProductionRoutePlanAtConfirm({
     routingConfigured: config.routing !== undefined,
+    workspaceRoot: repoRoot,
     buildRoutePlan: () =>
       buildCliRoutePlan({
         spec,
@@ -1174,6 +1295,8 @@ async function review(options: CliOptions): Promise<number> {
         summary,
       }),
   });
+  const routePlan = productionRoute?.routePlan;
+  const productionAdmission = productionRoute?.productionAdmission;
   // Named rather than inlined into renderPlan: the same context is what the
   // confirm menu's "Show details" renders, and building it twice would risk
   // the card and the details view disagreeing about the run they describe.
@@ -1217,23 +1340,20 @@ async function review(options: CliOptions): Promise<number> {
     return 0;
   }
 
-  // 12.5 — the capability gate (§11/D1-09): doctor, preflight and execution
-  // consume the same ProviderCapabilityReport, and ANY blocking issue stops
-  // the route here — before the size gate's prompt and the cost band's
-  // confirm, so nothing spendable can start. Degraded items proceed because
-  // each is irrelevant to a local claude-code run: pricingReady=false (the
-  // cost band comes from the static estimate table, not a pricing table),
-  // boundedEvents=false (usage rides --output-format json snapshots),
-  // codegraphPolicy=false (isolation is enforced by --strict-mcp-config with
-  // a codegraph-only mcp.json), credential_projection_unavailable only off
-  // darwin (runner-authority then runs enumerated-passthrough env).
-  const capabilityReport = await produceClaudeCapabilityReport({});
-  const capabilityGate = capabilityGateDecision(capabilityReport);
-  if (!capabilityGate.ok) {
-    throw new CliError(
-      `provider capability gate failed: ${capabilityGate.reason}`,
-    );
-  }
+  // 12.5 — the capability gate (§11/D1-09): routed runs gate exact-binding
+  // readiness for the bindings that would execute; legacy runs keep the
+  // claude-code ProviderCapabilityReport path byte-compatible.
+  const runnerAuthority = await resolveRunnerAuthority({
+    workspaceRoot: repoRoot,
+  });
+  await enforceProviderCapabilityGate({
+    routePlan,
+    workspaceRoot: repoRoot,
+    runnerAuthority,
+    authorityOptions: productionAdmission?.authorityOptions,
+    admissionRegistry: productionAdmission?.registry,
+    productionEvidence: productionAdmission?.evidence,
+  });
 
   // 13 — the size gate, BEFORE the cost band's confirm() for the unattended
   // path. The watcher spawns with --yes, so a gate that lived only inside
@@ -1279,23 +1399,24 @@ async function review(options: CliOptions): Promise<number> {
     runDir,
     startedAt: new Date().toISOString(),
   });
-  // Resolve execution authority ONCE per run: the harness fails closed when
-  // no allowlist is configured, so a bare ClaudeCodeRunner would deny every
-  // step and burn the run at step one.
-  const runnerAuthority = await resolveRunnerAuthority({
-    workspaceRoot: repoRoot,
-  });
-  if (runnerAuthority.error !== undefined) {
-    throw new CliError(
-      `execution authority unavailable: ${runnerAuthority.error}`,
-    );
-  }
   // §5.3 D1-10b: ONE controller shared by the pipeline and the runner. The
   // pipeline aborts it when the ceiling fires; the runner's harness reads the
   // same signal and refuses to start another attempt. Two controllers would
   // leave the ceiling unable to stop the steps it is waiting on.
   const ceilingController = new AbortController();
+  let productionRuntime: ProductionRuntime | undefined;
   try {
+    if (routePlan !== undefined && productionAdmission !== undefined) {
+      productionRuntime = await createProductionRuntime({
+        ...productionAdmission.authorityOptions,
+        plan: routePlan,
+        workspaceRoot: repoRoot,
+        registry: productionAdmission.registry,
+        evidence: productionAdmission.evidence,
+        mode: "production",
+        signal: ceilingController.signal,
+      });
+    }
     result = await runPipeline(
       {
         // Local mode has no PR number. 0 is the schema-legal "not a PR" value
@@ -1327,10 +1448,16 @@ async function review(options: CliOptions): Promise<number> {
         spec,
       },
       {
-        runner: new ClaudeCodeRunner({
-          ...runnerAuthority.runnerOptions,
-          signal: ceilingController.signal,
-        }),
+        runner:
+          productionRuntime !== undefined
+            ? productionRuntime.runner
+            : new ClaudeCodeRunner({
+                ...runnerAuthority.runnerOptions,
+                signal: ceilingController.signal,
+              }),
+        ...(productionRuntime !== undefined
+          ? { transportRegistry: productionRuntime.registry }
+          : {}),
         ceilingController,
         onProgress: progress.onProgress,
       },
@@ -1340,6 +1467,9 @@ async function review(options: CliOptions): Promise<number> {
     // loop alive and hangs process exit on the error path.
     progress.stop();
     await unregisterActiveRun(process.pid);
+    if (productionRuntime !== undefined) {
+      await productionRuntime.dispose();
+    }
   }
   const wallMs = Math.round(performance.now() - started);
 
@@ -2083,21 +2213,6 @@ async function reviewPr(
       );
     }
 
-    // Capability gate (§11/D1-09), BEFORE the size-gate/skip flow and any
-    // spend: same report doctor and preflight consume; blocking issues fail
-    // loud as CliError (the top-level catch turns that into exit 1 — the
-    // correct CI outcome for "this route cannot execute"). Degraded items
-    // proceed for the same irrelevance reasons as local mode: pricingReady
-    // rides the static estimate table, usage arrives via json snapshots, and
-    // isolation is enforced by --strict-mcp-config + codegraph-only mcp.json.
-    const capabilityReport = await produceClaudeCapabilityReport({});
-    const capabilityGate = capabilityGateDecision(capabilityReport);
-    if (!capabilityGate.ok) {
-      throw new CliError(
-        `provider capability gate failed: ${capabilityGate.reason}`,
-      );
-    }
-
     // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
     // CI, a hard skip in non-interactive mode THROWS a CliError (see
     // applySizeGate below), which the top-level catch turns into exit 1 —
@@ -2291,8 +2406,9 @@ async function reviewPr(
         });
       }
     }
-    const routePlan = await resolveRoutePlanAtConfirm({
+    const productionRoute = await resolveProductionRoutePlanAtConfirm({
       routingConfigured: config.routing !== undefined,
+      workspaceRoot: worktreePath,
       buildRoutePlan: () =>
         buildCliRoutePlan({
           spec,
@@ -2303,6 +2419,19 @@ async function reviewPr(
           summarizerEnabled: summary.enabled && !skipDiscovery,
           scoutEnabled: options.scout && !skipDiscovery,
         }),
+    });
+    const routePlan = productionRoute?.routePlan;
+    const productionAdmission = productionRoute?.productionAdmission;
+    const runnerAuthority = await resolveRunnerAuthority({
+      workspaceRoot: worktreePath,
+    });
+    await enforceProviderCapabilityGate({
+      routePlan,
+      workspaceRoot: worktreePath,
+      runnerAuthority,
+      authorityOptions: productionAdmission?.authorityOptions,
+      admissionRegistry: productionAdmission?.registry,
+      productionEvidence: productionAdmission?.evidence,
     });
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
@@ -2448,11 +2577,7 @@ async function reviewPr(
             "comparable trees have taken " +
             "8–25 minutes",
         );
-        // Same once-per-run authority resolution as local mode, bound to the
-        // review root the steps actually run in: this PR's worktree.
-        const runnerAuthority = await resolveRunnerAuthority({
-          workspaceRoot: worktreePath,
-        });
+        // runnerAuthority resolved before confirm with the exact-binding gate.
         if (runnerAuthority.error !== undefined) {
           throw new CliError(
             `execution authority unavailable: ${runnerAuthority.error}`,
@@ -2462,6 +2587,7 @@ async function reviewPr(
         // exactly as in local mode — the ceiling aborts it and the harness
         // reads the same signal.
         const ceilingController = new AbortController();
+        let productionRuntime: ProductionRuntime | undefined;
         started = performance.now();
         const progress = startProgressRenderer(
           started,
@@ -2471,6 +2597,17 @@ async function reviewPr(
           summary.enabled,
         );
         try {
+          if (routePlan !== undefined && productionAdmission !== undefined) {
+            productionRuntime = await createProductionRuntime({
+              ...productionAdmission.authorityOptions,
+              plan: routePlan,
+              workspaceRoot: worktreePath,
+              registry: productionAdmission.registry,
+              evidence: productionAdmission.evidence,
+              mode: "production",
+              signal: ceilingController.signal,
+            });
+          }
           // registerActiveRun rides INSIDE this try, not before it: the
           // renderer is already ticking by now, and a throw here used to
           // leak its 250ms interval — which keeps the event loop alive and
@@ -2526,10 +2663,16 @@ async function reviewPr(
               ...(phaseB === undefined ? {} : { phaseB }),
             },
             {
-              runner: new ClaudeCodeRunner({
-                ...runnerAuthority.runnerOptions,
-                signal: ceilingController.signal,
-              }),
+              runner:
+                productionRuntime !== undefined
+                  ? productionRuntime.runner
+                  : new ClaudeCodeRunner({
+                      ...runnerAuthority.runnerOptions,
+                      signal: ceilingController.signal,
+                    }),
+              ...(productionRuntime !== undefined
+                ? { transportRegistry: productionRuntime.registry }
+                : {}),
               ceilingController,
               onProgress: progress.onProgress,
             },
@@ -2541,6 +2684,9 @@ async function reviewPr(
           // withCiWorkflowGroup's own finally, which wraps this whole block.
           progress.stop();
           await unregisterActiveRun(process.pid);
+          if (productionRuntime !== undefined) {
+            await productionRuntime.dispose();
+          }
         }
       });
       if (result === undefined) {
@@ -4927,10 +5073,55 @@ async function configCommand(options: CliOptions): Promise<number> {
 
 async function doctorCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveOptionalRepoRoot(options);
+  const workspaceRoot = repoRoot ?? process.cwd();
   const report = await runDoctor({
     repoRoot: repoRoot ?? undefined,
     cwd: repoRoot ?? undefined,
-    produceCapabilityReport: () => produceClaudeCapabilityReport({}),
+    produceCapabilityReport: async () => {
+      const authority = await resolveRunnerAuthority({ workspaceRoot });
+      if (authority.error !== undefined) {
+        return {
+          backend: "claude-code",
+          status: "blocking",
+          auth: {
+            kind: "claude_subscription_oauth",
+            projectionReady: false,
+            probe: "failed",
+          },
+          isolation: {
+            syntheticHome: false,
+            workspaceReadBroker: true,
+            codegraphPolicy: false,
+          },
+          protocol: {
+            terminalProof: true,
+            boundedEvents: false,
+            usageMode: "snapshot",
+          },
+          cancellation: { deadlineMs: 7500, conformance: "passed" },
+          billing: { mode: "subscription", pricingReady: false },
+          issues: [
+            {
+              code: "execution_authority_unavailable",
+              message: authority.error,
+              blocking: true,
+            },
+          ],
+        };
+      }
+      const plan = buildResolvedRoutePlan({
+        agents: [
+          { key: "reliability", role: "hunter", model: "sonnet" },
+          { key: "refuter", role: "refuter", model: "opus" },
+        ],
+      });
+      return produceExecutionCapabilityReport({
+        ...authority.runnerOptions,
+        plan,
+        workspaceRoot,
+        mode: "production",
+      });
+    },
   });
   const lines = renderDoctorReport(report, {
     styles: styleEnabled(process.stdout),

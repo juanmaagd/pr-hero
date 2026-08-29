@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { RunnerBackend } from "./execution/contracts";
+import type { ResolvedRoutePlan } from "./model-routing";
 import type {
   ClaudeBinaryResolutionDeps,
   ExecutableAllowlistEntry,
@@ -163,6 +164,83 @@ async function verifyConfiguredExecutable(
   return { allowlist: configuredAllowlist };
 }
 
+export async function withOpenCodeDiscoveryAllowlist(
+  options: RunnerAuthorityOptions,
+  deps: ResolveRunnerAuthorityDeps = {},
+): Promise<RunnerAuthorityOptions | { readonly error: string }> {
+  const configured = options.executableAllowlists?.opencode;
+  if (configured !== undefined && configured.length > 0) {
+    return options;
+  }
+
+  const resolved = await resolveOpenCodeCanonicalBinary(
+    {
+      binaryPath: options.openCodeBinaryPath ?? options.binaryPath,
+      env: options.env,
+    },
+    deps,
+  );
+  if ("error" in resolved) {
+    return { error: resolved.error };
+  }
+
+  return {
+    ...options,
+    openCodeBinaryPath: resolved.canonicalPath,
+    executableAllowlists: {
+      ...options.executableAllowlists,
+      opencode: [
+        { absolutePath: resolved.canonicalPath, sha256: resolved.sha256 },
+      ],
+    },
+  };
+}
+
+function planUsesBackend(
+  plan: ResolvedRoutePlan,
+  backend: RunnerBackend,
+): boolean {
+  const seen = new Set<RunnerBackend>();
+  for (const step of plan.steps) {
+    if (!seen.has(step.route.backend)) {
+      seen.add(step.route.backend);
+      if (step.route.backend === backend) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Resolves independent executable allowlists for every backend the frozen
+// plan would execute. Claude discovery stays the default; OpenCode is added
+// only when the plan names it — never as a fallback.
+export async function prepareProductionRunnerAuthority(
+  workspaceRoot: string,
+  plan: ResolvedRoutePlan,
+  deps: ResolveRunnerAuthorityDeps = {},
+  seed: Partial<RunnerAuthorityOptions> = {},
+): Promise<RunnerAuthorityOptions | { readonly error: string }> {
+  let options: RunnerAuthorityOptions = { workspaceRoot, ...seed };
+  if (planUsesBackend(plan, "claude-code")) {
+    const withClaude = await withClaudeDiscoveryAllowlist(options, deps);
+    if ("error" in withClaude) {
+      return withClaude;
+    }
+    options = withClaude;
+  }
+
+  if (!planUsesBackend(plan, "opencode")) {
+    return options;
+  }
+
+  const withOpenCode = await withOpenCodeDiscoveryAllowlist(options, deps);
+  if ("error" in withOpenCode) {
+    return withOpenCode;
+  }
+  return withOpenCode;
+}
+
 export async function withClaudeDiscoveryAllowlist(
   options: RunnerAuthorityOptions,
   deps: ResolveRunnerAuthorityDeps = {},
@@ -207,7 +285,8 @@ export async function resolveBindingAuthority(
     if ("error" in verified) {
       return { error: verified.error };
     }
-    const broker = claudeCredentialBroker();
+    const broker =
+      options.credentialBrokers?.["claude-code"] ?? claudeCredentialBroker();
     return {
       binding: {
         backend,
