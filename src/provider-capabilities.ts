@@ -286,6 +286,7 @@ export interface ClaudeBinaryResolutionDeps {
   readonly existsFn?: (p: string) => boolean;
   readonly realpathFn?: (p: string) => Promise<string>;
   readonly readFileFn?: (p: string) => Promise<Uint8Array>;
+  readonly statFn?: (p: string) => { mode: number };
 }
 
 export type ClaudeCanonicalBinary =

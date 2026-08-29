@@ -21,6 +21,7 @@ describe("resolveRunnerAuthority", () => {
         existsFn: () => true,
         realpathFn: async (p) => p,
         readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o755 }),
       },
     );
 
@@ -57,6 +58,7 @@ describe("resolveRunnerAuthority", () => {
         existsFn: (p) => p === "/second/claude" || p === "/real/second/claude",
         realpathFn: async (p) => `/real${p}`,
         readFileFn: async () => new Uint8Array([1, 2, 3]),
+        statFn: () => ({ mode: 0o755 }),
       },
     );
 
@@ -81,6 +83,7 @@ describe("resolveRunnerAuthority", () => {
         existsFn: () => true,
         realpathFn: async (p) => p,
         readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o755 }),
       },
     );
 
@@ -89,6 +92,32 @@ describe("resolveRunnerAuthority", () => {
     expect(result.runnerOptions.executableAllowlist).toEqual([
       { absolutePath: canonical, sha256: expectedSha },
     ]);
+  });
+
+  test("existsFn for PATH probing does not bypass executable permission checks", async () => {
+    const bytes = new TextEncoder().encode("#!/bin/sh\necho hi\n");
+    const canonical = "/fake/bin/claude";
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const expectedSha = hasher.digest("hex");
+
+    const result = await resolveRunnerAuthority(
+      {
+        binaryPath: canonical,
+        workspaceRoot: "/fake/ws",
+        executableAllowlists: {
+          "claude-code": [{ absolutePath: canonical, sha256: expectedSha }],
+        },
+      },
+      {
+        existsFn: () => true,
+        realpathFn: async (p) => p,
+        readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o644 }),
+      },
+    );
+
+    expect(result.error).toContain("Missing executable permissions");
   });
 
   test("missing binary on PATH yields an error", async () => {

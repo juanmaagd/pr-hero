@@ -149,11 +149,7 @@ async function verifyConfiguredExecutable(
       // Binding resolution already canonicalized the candidate path.
       realpathFn: async (p) => p,
       readFileFn: deps.readFileFn,
-      statFn: deps.existsFn
-        ? (p) => ({
-            mode: deps.existsFn?.(p) ? 0o755 : 0o644,
-          })
-        : undefined,
+      statFn: deps.statFn,
     },
   );
   if (!verification.approved) {
