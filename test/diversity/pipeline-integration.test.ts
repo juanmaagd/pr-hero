@@ -2,11 +2,34 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { DiversityCapabilityError } from "../../src/diversity/errors";
-import { prepareDiversityExecution } from "../../src/diversity/pipeline-integration";
-import type { HunterDraft } from "../../src/drafts";
+import {
+  appendAttempt,
+  type DiversityAttemptRecord,
+  emptyDiversityLedger,
+} from "../../src/diversity/accounting";
+import {
+  DiversityAdmissionError,
+  DiversityCapabilityError,
+  DiversityTargetError,
+} from "../../src/diversity/errors";
+import { buildDiversityPlan } from "../../src/diversity/identity";
+import {
+  assertDiversityLegRoutes,
+  assertDiversitySpendUnderCap,
+  prepareDiversityExecution,
+} from "../../src/diversity/pipeline-integration";
+import type {
+  DraftFinding,
+  HunterDraft,
+  RefuterResult,
+} from "../../src/drafts";
+import { normalizeInclusiveUsage } from "../../src/execution/usage-normalized";
+import {
+  createResolvedRoutePlan,
+  resolveStepRoute,
+} from "../../src/model-routing";
 import { type PipelineInput, runPipeline } from "../../src/pipeline";
-import { validateReviewSpec } from "../../src/spec";
+import { defaultReviewSpec, validateReviewSpec } from "../../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
 import type { SessionUsage } from "../../src/usage";
 
@@ -33,6 +56,45 @@ function ok(spec: StepSpec, output: unknown): StepResult {
 }
 
 const HUNTER_TOOLS = "Read, Grep, Glob, mcp__codegraph__codegraph_explore";
+
+async function makeDefaultAgentsDir(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-diversity-agents-"));
+  const hunterBody = (name: string) =>
+    [
+      "---",
+      `name: ${name}`,
+      `description: ${name} hunter`,
+      "model: sonnet",
+      `tools: ${HUNTER_TOOLS}`,
+      "---",
+      "",
+      "{{PRIORS}}",
+      "{{GOTCHAS}}",
+      "",
+    ].join("\n");
+  for (const name of [
+    "deep-review-reliability",
+    "deep-review-resilience",
+    "deep-review-parity",
+  ]) {
+    await Bun.write(path.join(dir, `${name}.md`), hunterBody(name));
+  }
+  await Bun.write(
+    path.join(dir, "review-refuter.md"),
+    [
+      "---",
+      "name: review-refuter",
+      "description: refuter",
+      "model: sonnet",
+      "tools: Read, Grep, Glob",
+      "---",
+      "",
+      "Refute.",
+      "",
+    ].join("\n"),
+  );
+  return dir;
+}
 
 async function makeAgentsDir(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-diversity-agents-"));
@@ -178,6 +240,217 @@ describe("pipeline diversity integration", () => {
       (attempt) => attempt.status === "failed",
     );
     expect(failed).toBeDefined();
+  });
+
+  test("legacy default run keeps singular hunters without diversity artifacts", async () => {
+    const runDir = await mkdtemp(path.join(tmpdir(), "pr-hero-legacy-run-"));
+    const diffPath = path.join(runDir, "diff.patch");
+    await Bun.write(diffPath, PATCH);
+    const gotchasPath = path.join(runDir, "gotchas.md");
+    await Bun.write(gotchasPath, "G-01: gotcha.");
+    const input: PipelineInput = {
+      pr: 1539,
+      baseSha: "06e857b3",
+      headSha: "4609456d",
+      worktree: "/worktrees/dr-1539",
+      diffPath,
+      gotchasPath,
+      agentsDir: await makeDefaultAgentsDir(),
+      runDir,
+      outPath: path.join(runDir, "findings.json"),
+      mcpConfigPath: "/runs/mcp.json",
+      hopBudget: 12,
+      parityTriggerPaths: [],
+      suspicionPriors: [],
+      spec: defaultReviewSpec(),
+    };
+    const specs: StepSpec[] = [];
+    const runner: StepRunner = {
+      async run(spec) {
+        specs.push(spec);
+        if (spec.name.startsWith("hunter-")) {
+          return ok(spec, { findings: [] } satisfies HunterDraft);
+        }
+        throw new Error(`unscripted step ${spec.name}`);
+      },
+    };
+    const result = await runPipeline(input, { runner });
+    const hunterSteps = specs.filter((spec) => spec.name.startsWith("hunter-"));
+    expect(hunterSteps).toHaveLength(2);
+    expect(hunterSteps.map((spec) => spec.name).sort()).toEqual([
+      "hunter-reliability",
+      "hunter-resilience",
+    ]);
+    expect(result.skillOutput.debug.diversity).toBeUndefined();
+    const pipelineJson = JSON.parse(
+      await Bun.file(path.join(runDir, "pipeline.json")).text(),
+    );
+    expect(pipelineJson.multiModelDiversity).toEqual({
+      enabled: false,
+      status: "skipped",
+    });
+  });
+
+  test("assertDiversityLegRoutes rejects route drift before hunter spawn", () => {
+    const spec = validateReviewSpec({
+      multiModelDiversity: {
+        enabled: true,
+        armId: "arm",
+        maxLegs: 2,
+        cashCapUsd: 10,
+      },
+      agents: [
+        {
+          key: "reliability",
+          file: "deep-review-reliability.md",
+          role: "hunter",
+          models: ["sonnet", "opus"],
+        },
+        { key: "refuter", file: "review-refuter.md", role: "refuter" },
+      ],
+    });
+    const plan = buildDiversityPlan({ spec, c2SchemaVersion: "1.1.0" });
+    const leg = plan.legs[0];
+    if (!leg) throw new Error("missing leg");
+    const resolved = resolveStepRoute({
+      stepKey: leg.stepKey,
+      role: "hunter",
+      specModel: leg.logicalModel,
+    });
+    const drifted = createResolvedRoutePlan([
+      { ...resolved, routeFingerprint: "drifted-fingerprint" },
+    ]);
+    expect(() => assertDiversityLegRoutes(plan, drifted)).toThrow(
+      DiversityAdmissionError,
+    );
+    expect(() => assertDiversityLegRoutes(plan, drifted)).toThrow(
+      /route drift/,
+    );
+  });
+
+  test("prepareDiversityExecution rejects frozen target drift before spawn", () => {
+    const frozen = {
+      repoId: "owner/repo",
+      pr: 1539,
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+    };
+    expect(() =>
+      prepareDiversityExecution({
+        reviewSpec: validateReviewSpec({
+          multiModelDiversity: {
+            enabled: true,
+            armId: "arm",
+            maxLegs: 2,
+            cashCapUsd: 10,
+          },
+          agents: [
+            {
+              key: "reliability",
+              file: "deep-review-reliability.md",
+              role: "hunter",
+              models: ["sonnet", "opus"],
+            },
+            { key: "refuter", file: "review-refuter.md", role: "refuter" },
+          ],
+        }),
+        target: frozen,
+        runtimeTarget: { ...frozen, headSha: "c".repeat(40) },
+      }),
+    ).toThrow(DiversityTargetError);
+  });
+
+  test("assertDiversitySpendUnderCap rejects projected spend above cash cap", () => {
+    const spec = validateReviewSpec({
+      multiModelDiversity: {
+        enabled: true,
+        armId: "arm",
+        maxLegs: 2,
+        cashCapUsd: 1,
+      },
+      agents: [
+        {
+          key: "reliability",
+          file: "deep-review-reliability.md",
+          role: "hunter",
+          models: ["sonnet"],
+        },
+        { key: "refuter", file: "review-refuter.md", role: "refuter" },
+      ],
+    });
+    const plan = buildDiversityPlan({ spec, c2SchemaVersion: "1.1.0" });
+    const leg = plan.legs[0];
+    if (!leg) throw new Error("missing leg");
+    const attempt: DiversityAttemptRecord = {
+      attemptId: `${leg.legId}-a1`,
+      legId: leg.legId,
+      armId: plan.armId,
+      specialty: "reliability",
+      replicate: 1,
+      attempt: 1,
+      status: "completed",
+      usage: normalizeInclusiveUsage({
+        wallMs: 1,
+        inputTotal: 1,
+        outputTotal: 1,
+        billingMode: "unknown",
+        costSource: "unknown",
+        cashCostUsd: 2,
+        notionalCostUsd: 2,
+      }),
+    };
+    const ledger = appendAttempt(emptyDiversityLedger(), attempt);
+    expect(() => assertDiversitySpendUnderCap(plan, ledger)).toThrow(
+      DiversityAdmissionError,
+    );
+  });
+
+  test("projects adjudicated drafts instead of raw hunter duplicates", async () => {
+    const input = await makeInput();
+    const sharedFinding: DraftFinding = {
+      id: "REL-1",
+      category: 1,
+      path: "src/app.ts",
+      line: 10,
+      symbol: "run",
+      severity: "BLOCKER",
+      evidence_class: "deterministic",
+      causal_disposition: "introduced",
+      claim: "value scaled twice along one path",
+      proof_refs: ["src/app.ts:10"],
+      hunter: "reliability",
+      hops_used: 0,
+      hop_trail: [],
+      dedupe_key: "src/app.ts:run:1",
+    };
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name.startsWith("hunter-reliability")) {
+          return ok(spec, {
+            findings: [sharedFinding],
+          } satisfies HunterDraft);
+        }
+        if (spec.name.startsWith("refuter")) {
+          const findingId = spec.name.replace(/^refuter-/, "");
+          return ok(spec, {
+            results: [
+              {
+                finding_id: findingId,
+                outcome: "corroborated",
+                proof_refs: [],
+              },
+            ],
+          } satisfies RefuterResult);
+        }
+        throw new Error(`unscripted step ${spec.name}`);
+      },
+    };
+    const result = await runPipeline(input, { runner });
+    expect(result.skillOutput.findings.length).toBeGreaterThan(0);
+    const diversity = result.skillOutput.debug.diversity as {
+      observations?: unknown[];
+    };
+    expect(diversity?.observations?.length).toBeGreaterThan(0);
   });
 
   test("prepareDiversityExecution blocks before spawn when capability is corrupt", () => {

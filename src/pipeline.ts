@@ -1416,17 +1416,18 @@ async function execute(
     state.usageTotal = sumUsage(state.usageTotal, result.usage);
     accumulateUsageV2(state, result);
     if (diversityCtx.enabled && diversityCtx.plan) {
+      const plan = diversityCtx.plan;
       diversityCtx = {
         ...diversityCtx,
         ledger: recordDiversityHunterResult(
           diversityCtx.ledger,
-          diversityCtx.plan,
+          plan,
           entry.agent,
           result,
         ),
       };
       state.diversity = diversityCtx;
-      assertDiversitySpendUnderCap(diversityCtx.plan!, diversityCtx.ledger);
+      assertDiversitySpendUnderCap(plan, diversityCtx.ledger);
     }
     if (result.status !== "ok") {
       state.hunterFailures++;

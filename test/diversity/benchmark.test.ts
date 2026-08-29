@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  DiversityBenchmarkError,
   deriveRunValidity,
   recordPromotion,
+  refuseLiveRunWithoutAuthorization,
   requiresExplicitLiveAuthorization,
   scoreBenchmarkRuns,
   validateBenchmarkPlan,
@@ -100,12 +103,58 @@ describe("diversity benchmark", () => {
     ).toBe(false);
   });
 
+  test("deriveRunValidity accepts completed dual-arm evidence", () => {
+    const plan = validateBenchmarkPlan(
+      JSON.parse(readFileSync(planPath, "utf8")),
+    );
+    expect(
+      deriveRunValidity(
+        {
+          runId: "good",
+          armId: "diversity",
+          replicate: 1,
+          observedBuildFingerprint: plan.buildFingerprint,
+          observedPromptFingerprint: plan.promptFingerprint,
+          controlCompleted: true,
+          treatmentCompleted: true,
+          blindingIntact: true,
+          interleavingIntact: true,
+          cashCostUsd: 1,
+          notionalCostUsd: 1,
+          uniqueTruePositives: 1,
+          recall: 1,
+          cleanPrRestraint: 1,
+          blindSpots: 0,
+        },
+        plan,
+      ),
+    ).toBe(true);
+  });
+
   test("requires separate live authorization and explicit promotion", () => {
     expect(requiresExplicitLiveAuthorization()).toBe(true);
+    expect(() => refuseLiveRunWithoutAuthorization()).toThrow(
+      DiversityBenchmarkError,
+    );
+    expect(() => refuseLiveRunWithoutAuthorization()).toThrow(
+      /live benchmark run requires separate authorization/,
+    );
     expect(() => recordPromotion({ approved: false, scope: "none" })).toThrow();
     expect(recordPromotion({ approved: true, scope: "reliability" })).toEqual({
       approved: true,
       scope: "reliability",
     });
+  });
+
+  test("d3 run mode refuses without live authorization", () => {
+    const script = path.join(import.meta.dir, "../../scripts/d3.ts");
+    const result = spawnSync("bun", ["run", script, "run"], {
+      cwd: path.join(import.meta.dir, "../.."),
+      encoding: "utf8",
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}${result.stdout}`).toMatch(
+      /live benchmark run requires separate authorization/,
+    );
   });
 });
