@@ -1,0 +1,24 @@
+{
+  "planId": "d3-musive-v1",
+  "target": {
+    "repoId": "musive-s3",
+    "pr": 1717,
+    "baseSha": "0000000000000000000000000000000000000001",
+    "headSha": "0000000000000000000000000000000000000002"
+  },
+  "controlArm": {
+    "armId": "control",
+    "enabled": false,
+    "replicates": 3
+  },
+  "treatmentArm": {
+    "armId": "diversity",
+    "enabled": true,
+    "replicates": 3
+  },
+  "buildFingerprint": "frozen-build",
+  "promptFingerprint": "frozen-prompts",
+  "interleaved": true,
+  "maxCashUsd": 50,
+  "stopOnInvalidRun": true
+}

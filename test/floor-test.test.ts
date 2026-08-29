@@ -482,3 +482,64 @@ describe("docs/benchmarks/m6-floor-cases.json matches §2.4septies", () => {
     }
   });
 });
+
+describe("d3 benchmark scorer hooks", () => {
+  test("offline scorer reports cash per unique TP and excludes invalid runs", async () => {
+    const { scoreBenchmarkRuns, validateBenchmarkPlan } = await import(
+      "../src/diversity/benchmark"
+    );
+    const planPath = path.join(
+      import.meta.dir,
+      "..",
+      "docs",
+      "benchmarks",
+      "d3-musive-plan.json",
+    );
+    const plan = validateBenchmarkPlan(
+      JSON.parse(await Bun.file(planPath).text()),
+    );
+    expect(plan.treatmentArm.replicates).toBeGreaterThanOrEqual(3);
+    const report = scoreBenchmarkRuns(
+      [
+        {
+          runId: "invalid",
+          armId: plan.treatmentArm.armId,
+          replicate: 1,
+          observedBuildFingerprint: "drift",
+          observedPromptFingerprint: plan.promptFingerprint,
+          controlCompleted: true,
+          treatmentCompleted: true,
+          blindingIntact: true,
+          interleavingIntact: true,
+          cashCostUsd: 9,
+          notionalCostUsd: 8,
+          uniqueTruePositives: 3,
+          recall: 1,
+          cleanPrRestraint: 0,
+          blindSpots: 0,
+        },
+        {
+          runId: "valid",
+          armId: plan.treatmentArm.armId,
+          replicate: 2,
+          observedBuildFingerprint: plan.buildFingerprint,
+          observedPromptFingerprint: plan.promptFingerprint,
+          controlCompleted: true,
+          treatmentCompleted: true,
+          blindingIntact: true,
+          interleavingIntact: true,
+          cashCostUsd: 4,
+          notionalCostUsd: 2,
+          uniqueTruePositives: 2,
+          recall: 0.5,
+          cleanPrRestraint: 1,
+          blindSpots: 1,
+        },
+      ],
+      plan,
+    );
+    expect(report.invalidRuns).toBe(1);
+    expect(report.cashCostPerUniqueTp).toBe(2);
+    expect(report.blindSpots).toBe(1);
+  });
+});

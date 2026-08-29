@@ -34,10 +34,20 @@ export interface AgentSpec {
   // Per-agent model override. Precedence for every step:
   // input.model (CLI --model) > spec.model > agent frontmatter model.
   model?: string;
+  // D3 fan-out: when multiModelDiversity.enabled, each model becomes a leg.
+  models?: readonly string[];
+}
+
+export interface MultiModelDiversityConfig {
+  readonly enabled: true;
+  readonly armId: string;
+  readonly maxLegs: number;
+  readonly cashCapUsd: number;
 }
 
 export interface ReviewSpec {
   agents: AgentSpec[];
+  multiModelDiversity?: MultiModelDiversityConfig;
 }
 
 export function isSafeSlug(value: string): boolean {
@@ -61,6 +71,35 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
   );
   const spec = candidate as Record<string, unknown>;
   must(Array.isArray(spec.agents), "spec.agents must be an array");
+  const diversityEnabled =
+    spec.multiModelDiversity !== undefined &&
+    typeof spec.multiModelDiversity === "object" &&
+    spec.multiModelDiversity !== null &&
+    (spec.multiModelDiversity as Record<string, unknown>).enabled === true;
+  if (spec.multiModelDiversity !== undefined) {
+    const diversity = spec.multiModelDiversity as Record<string, unknown>;
+    must(
+      diversity.enabled === true,
+      "multiModelDiversity.enabled must be true when present",
+    );
+    must(
+      typeof diversity.armId === "string" &&
+        isSafeSlug(diversity.armId as string),
+      "multiModelDiversity.armId must be a safe slug",
+    );
+    must(
+      typeof diversity.maxLegs === "number" &&
+        Number.isInteger(diversity.maxLegs) &&
+        (diversity.maxLegs as number) >= 1,
+      "multiModelDiversity.maxLegs must be a positive integer",
+    );
+    must(
+      typeof diversity.cashCapUsd === "number" &&
+        Number.isFinite(diversity.cashCapUsd) &&
+        (diversity.cashCapUsd as number) > 0,
+      "multiModelDiversity.cashCapUsd must be a positive number",
+    );
+  }
   const agents = spec.agents as unknown[];
   const keys = new Set<string>();
   const hunterSpecialties = new Set<string>();
@@ -96,9 +135,29 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
       `agents[${i}].role must be hunter|refuter`,
     );
     must(
-      a.models === undefined,
-      `agents[${i}].models is not supported in D2; fan-out is a D3 capability`,
+      a.models === undefined ||
+        (diversityEnabled &&
+          Array.isArray(a.models) &&
+          (a.models as unknown[]).length >= 1 &&
+          (a.models as unknown[]).every(
+            (model) => typeof model === "string" && model.length > 0,
+          )),
+      diversityEnabled
+        ? `agents[${i}].models must be a non-empty string array when multiModelDiversity is enabled`
+        : `agents[${i}].models is not supported in D2; fan-out is a D3 capability`,
     );
+    if (diversityEnabled && Array.isArray(a.models)) {
+      for (const model of a.models as string[]) {
+        try {
+          parseLogicalIdentity(model);
+        } catch (error) {
+          must(
+            false,
+            `agents[${i}].models contains invalid model identity "${model}": ${(error as Error).message}`,
+          );
+        }
+      }
+    }
     must(
       a.model === undefined ||
         (typeof a.model === "string" && a.model.length > 0),
@@ -118,11 +177,13 @@ export function validateReviewSpec(candidate: unknown): ReviewSpec {
       hunterCount++;
       const specialty =
         a.specialty === undefined ? (a.key as string) : (a.specialty as string);
-      must(
-        !hunterSpecialties.has(specialty),
-        `agents[${i}] specialty "${specialty}" duplicates another hunter's effective specialty`,
-      );
-      hunterSpecialties.add(specialty);
+      if (!diversityEnabled || a.models === undefined) {
+        must(
+          !hunterSpecialties.has(specialty),
+          `agents[${i}] specialty "${specialty}" duplicates another hunter's effective specialty`,
+        );
+        hunterSpecialties.add(specialty);
+      }
       must(
         a.trigger === undefined ||
           a.trigger === "input" ||

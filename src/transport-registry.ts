@@ -461,3 +461,21 @@ export async function admitRoutePlan(
     reports,
   };
 }
+
+export async function admitDiversityRoutePlan(
+  plan: ResolvedRoutePlan,
+  registryOrCapabilities: Parameters<typeof admitRoutePlan>[1],
+  optionsOrRegistry?: Parameters<typeof admitRoutePlan>[2],
+  maybeOptions?: Parameters<typeof admitRoutePlan>[3],
+): Promise<AdmittedRoutePlanResult> {
+  const { requireInternalFindingsCapability } = await import(
+    "./diversity/admission"
+  );
+  requireInternalFindingsCapability();
+  return admitRoutePlan(
+    plan,
+    registryOrCapabilities,
+    optionsOrRegistry,
+    maybeOptions,
+  );
+}

@@ -12,6 +12,20 @@ import {
   type DedupeLoser,
   mergeAndDedupe,
 } from "./dedupe";
+import type { InternalCapabilityReport } from "./diversity/admission";
+import type { BenchmarkTarget } from "./diversity/identity";
+import {
+  assertDiversityLegRoutes,
+  assertDiversitySpendUnderCap,
+  buildDiversityPipelineRecord,
+  type DiversityExecutionContext,
+  diversityDebugFromLedger,
+  executionHuntersForTriggered,
+  prepareDiversityExecution,
+  projectDiversityDrafts,
+  recordDiversityHunterFailure,
+  recordDiversityHunterResult,
+} from "./diversity/pipeline-integration";
 import {
   type DraftFinding,
   extractJsonObject,
@@ -108,6 +122,7 @@ import {
   settlementReceiptPath,
 } from "./step-runner";
 import {
+  admitDiversityRoutePlan,
   admitRoutePlan,
   DefaultTransportRegistry,
   type TransportRegistry,
@@ -232,6 +247,11 @@ export interface PipelineInput {
     settled: PhaseBResult[];
     priors: PriorRecord[];
   };
+  // D3: frozen benchmark target and fingerprints for diversity admission.
+  diversityTarget?: BenchmarkTarget;
+  buildFingerprint?: string;
+  promptFingerprint?: string;
+  diversityCapabilityCheck?: () => InternalCapabilityReport;
 }
 
 export interface PipelineDeps {
@@ -715,6 +735,7 @@ interface RunState {
   // D2 PR3: Route plan provenance
   routePlan?: ResolvedRoutePlan;
   scout?: ScoutRecord;
+  diversity?: DiversityExecutionContext;
   // Set once, immediately after the two blocks it is drawn against are read.
   // Optional only because the pipeline ceiling can fire before `execute` got
   // that far — a run that never selected a nonce also never composed a prompt.
@@ -967,23 +988,44 @@ async function execute(
   // it is settled long before a survivor exists to tier.
   state.refuterConfigured = reviewSpec.agents.some((a) => a.role === "refuter");
 
-  // Step 2.5 — D2 Model Route Plan resolution and admission
   const effectiveRoutingConfig =
     input.routingConfig ?? input.config?.effective?.routing;
 
+  const frontmatterByKey = new Map<string, string | undefined>();
+  for (const agent of reviewSpec.agents) {
+    try {
+      const parsed = await parseAgentFile(
+        path.join(input.agentsDir, agent.file),
+      );
+      frontmatterByKey.set(agent.key, parsed.model);
+    } catch {
+      // ignore if not readable
+    }
+  }
+
+  let diversityCtx = prepareDiversityExecution({
+    reviewSpec,
+    cliModel: input.model,
+    routingConfig: effectiveRoutingConfig,
+    frontmatterModel: (agentKey) => frontmatterByKey.get(agentKey),
+    target: input.diversityTarget,
+    runtimeTarget: reviewSpec.multiModelDiversity?.enabled
+      ? {
+          repoId: input.diversityTarget?.repoId ?? input.worktree,
+          pr: input.pr,
+          baseSha: input.baseSha,
+          headSha: input.headSha,
+        }
+      : undefined,
+    buildFingerprint: input.buildFingerprint ?? input.promptSet?.sha256,
+    promptFingerprint: input.promptFingerprint ?? input.promptSet?.sha256,
+    capabilityCheck: input.diversityCapabilityCheck,
+  });
+  state.diversity = diversityCtx;
+
+  // Step 2.5 — D2 Model Route Plan resolution and admission
   let routePlan = input.routePlan;
   if (!routePlan) {
-    const frontmatterByKey = new Map<string, string | undefined>();
-    for (const agent of reviewSpec.agents) {
-      try {
-        const parsed = await parseAgentFile(
-          path.join(input.agentsDir, agent.file),
-        );
-        frontmatterByKey.set(agent.key, parsed.model);
-      } catch {
-        // ignore if not readable
-      }
-    }
     let summarizerFrontmatter: string | undefined;
     if (input.summarizer) {
       try {
@@ -1004,7 +1046,7 @@ async function execute(
     }
     try {
       routePlan = buildResolvedRoutePlan({
-        agents: reviewSpec.agents,
+        agents: diversityCtx.routeAgents,
         cliModel: input.model,
         routingConfig: effectiveRoutingConfig,
         frontmatterModel: (agentKey) => frontmatterByKey.get(agentKey),
@@ -1040,7 +1082,14 @@ async function execute(
   const transportRegistry =
     deps.transportRegistry ?? new DefaultTransportRegistry();
   if (routePlan !== undefined) {
-    await admitRoutePlan(routePlan, transportRegistry);
+    if (diversityCtx.enabled) {
+      if (diversityCtx.plan) {
+        assertDiversityLegRoutes(diversityCtx.plan, routePlan);
+      }
+      await admitDiversityRoutePlan(routePlan, transportRegistry);
+    } else {
+      await admitRoutePlan(routePlan, transportRegistry);
+    }
   }
 
   // Step 3 — deterministic trigger evaluation. This decision is the driver's
@@ -1054,11 +1103,15 @@ async function execute(
   const skipDiscovery = input.skipDiscovery === true;
   const hunters = skipDiscovery
     ? []
-    : reviewSpec.agents.filter(
-        (a) =>
-          a.role === "hunter" &&
-          (a.trigger === undefined ||
-            parityTriggered(changedPaths, triggerPatterns(a, input))),
+    : executionHuntersForTriggered(
+        reviewSpec,
+        diversityCtx,
+        reviewSpec.agents.filter(
+          (a) =>
+            a.role === "hunter" &&
+            (a.trigger === undefined ||
+              parityTriggered(changedPaths, triggerPatterns(a, input))),
+        ),
       );
   state.parityFired = hunters.some((a) => a.trigger !== undefined);
 
@@ -1344,6 +1397,17 @@ async function execute(
       recordStepFailure(entry.meta);
       state.hunterFailures++;
       state.partial = true;
+      if (diversityCtx.enabled && diversityCtx.plan) {
+        diversityCtx = {
+          ...diversityCtx,
+          ledger: recordDiversityHunterFailure(
+            diversityCtx.ledger,
+            diversityCtx.plan,
+            entry.agent,
+          ),
+        };
+        state.diversity = diversityCtx;
+      }
       continue;
     }
     const result = outcome.value;
@@ -1351,17 +1415,44 @@ async function execute(
     recordSettlement(entry.meta, result, input.runDir);
     state.usageTotal = sumUsage(state.usageTotal, result.usage);
     accumulateUsageV2(state, result);
+    if (diversityCtx.enabled && diversityCtx.plan) {
+      const plan = diversityCtx.plan;
+      diversityCtx = {
+        ...diversityCtx,
+        ledger: recordDiversityHunterResult(
+          diversityCtx.ledger,
+          plan,
+          entry.agent,
+          result,
+        ),
+      };
+      state.diversity = diversityCtx;
+      assertDiversitySpendUnderCap(plan, diversityCtx.ledger);
+    }
     if (result.status !== "ok") {
       state.hunterFailures++;
       state.partial = true;
       continue;
     }
-    for (const finding of (result.output as HunterDraft).findings) {
-      // The driver stamps `hunter` to the step that actually produced the
-      // draft — removes a self-report failure mode where a hunter claiming
-      // another's name corrupts attribution and dedupe diagnostics.
-      state.drafts.push({ ...finding, hunter: resolveSpecialty(entry.agent) });
+    if (!(diversityCtx.enabled && diversityCtx.plan)) {
+      for (const finding of (result.output as HunterDraft).findings) {
+        // The driver stamps `hunter` to the step that actually produced the
+        // draft — removes a self-report failure mode where a hunter claiming
+        // another's name corrupts attribution and dedupe diagnostics.
+        state.drafts.push({
+          ...finding,
+          hunter: resolveSpecialty(entry.agent),
+        });
+      }
     }
+  }
+
+  if (diversityCtx.enabled && diversityCtx.plan) {
+    const projected = projectDiversityDrafts(diversityCtx);
+    for (const draft of projected.drafts) {
+      state.drafts.push(draft);
+    }
+    if (projected.partial) state.partial = true;
   }
 
   // Step 5 — merge + dedupe + renumber (final F00N ids assigned here, before
@@ -2193,12 +2284,16 @@ async function finish(
     const id = rootCauseId.get(finding.id);
     return id === undefined ? finding : { ...finding, root_cause_id: id };
   });
+  const diversityDebug = state.diversity
+    ? diversityDebugFromLedger(state.diversity)
+    : undefined;
   const skillOutput: SkillOutput = {
     findings: clustered,
     debug: {
       refuted,
       ...(deduped.length > 0 ? { deduped } : {}),
       root_causes: rootCauses,
+      ...(diversityDebug === undefined ? {} : { diversity: diversityDebug }),
     },
     parity_hunter_fired: state.parityFired,
     run_status: state.partial ? "partial" : "complete",
@@ -2288,6 +2383,14 @@ async function writePipelinePlan(
       ? {}
       : { boundary_nonce: state.boundaryNonce }),
     ...(state.scout === undefined ? {} : { scout: state.scout }),
+    ...(state.diversity === undefined
+      ? {}
+      : {
+          multiModelDiversity: buildDiversityPipelineRecord(
+            state.diversity,
+            state.partial,
+          ),
+        }),
     ...(input.rereview === undefined
       ? {}
       : { rereview: fillRereviewProvenance(input, state) }),

@@ -167,7 +167,14 @@ export interface FindingsDocument {
     // The whole derived partition, kept next to the findings it describes.
     // Also additive/optional: a run that never computed it validates the same.
     root_causes?: RootCauseSummary;
+    diversity?: DiversityDebugArtifacts;
   };
+}
+
+export interface DiversityDebugArtifacts {
+  readonly planFingerprint?: string;
+  readonly attempts?: readonly Record<string, unknown>[];
+  readonly observations?: readonly Record<string, unknown>[];
 }
 
 // Draft the engine assembles before the driver merges in the run envelope.
@@ -177,6 +184,7 @@ export interface SkillOutput {
     refuted: DebugRefutedFinding[];
     deduped?: DebugDedupedFinding[];
     root_causes?: RootCauseSummary;
+    diversity?: DiversityDebugArtifacts | Record<string, unknown>;
   };
   parity_hunter_fired: boolean;
   run_status: RunStatus;
