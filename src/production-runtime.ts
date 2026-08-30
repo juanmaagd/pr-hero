@@ -18,13 +18,16 @@ import type {
   VerifiedExecutable,
 } from "./execution/contracts";
 import { StepExecutionHarness } from "./execution/harness";
-import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
-import { freezeRoutePlan } from "./model-routing";
+import type {
+  ResolvedRoutePlan,
+  ResolvedStepRoute,
+  RoutingConfig,
+} from "./model-routing";
+import { buildResolvedRoutePlan, freezeRoutePlan } from "./model-routing";
 import type { ProviderCapabilityReport } from "./provider-capabilities";
 import {
   type CapabilityGateDecision,
   exactBindingCapabilityGate,
-  mergeExactBindingCapabilityReports,
 } from "./provider-capabilities";
 import {
   type BindingAuthorityResolution,
@@ -472,15 +475,59 @@ export async function probeBindingsReadiness(
   };
 }
 
-export async function produceExecutionCapabilityReport(
-  options: ProductionRuntimeOptions,
-): Promise<ProviderCapabilityReport> {
-  const probe = await probeBindingsReadiness(options);
-  const reports = await Promise.all(
-    [...probe.bindings.values()].map((binding) => binding.capabilities()),
+export function buildDoctorRoutePlan(
+  routingConfig?: RoutingConfig,
+): ResolvedRoutePlan {
+  return buildResolvedRoutePlan({
+    agents: [
+      { key: "reliability", role: "hunter", model: "sonnet" },
+      { key: "refuter", role: "refuter", model: "opus" },
+    ],
+    ...(routingConfig === undefined ? {} : { routingConfig }),
+  });
+}
+
+export async function collectDoctorExactBindingReports(input: {
+  readonly workspaceRoot: string;
+  readonly routingConfig?: RoutingConfig;
+  readonly authorityDeps?: ResolveRunnerAuthorityDeps;
+  readonly env?: RunnerAuthorityOptions["env"];
+  readonly loadSdk?: () => Promise<
+    import("./transports/opencode-client").OpenCodeSdkLike
+  >;
+}): Promise<readonly ExactBindingCapabilityReport[]> {
+  const plan = buildDoctorRoutePlan(input.routingConfig);
+  const authority = await prepareProductionRunnerAuthority(
+    input.workspaceRoot,
+    plan,
+    input.authorityDeps,
+    input.env === undefined ? {} : { env: input.env },
   );
-  await probe.dispose();
-  return mergeExactBindingCapabilityReports(reports);
+  if ("error" in authority) {
+    throw new Error(authority.error);
+  }
+  const probe = await probeBindingsReadiness({
+    ...authority,
+    plan,
+    workspaceRoot: input.workspaceRoot,
+    authorityDeps: input.authorityDeps,
+    ...(input.loadSdk === undefined
+      ? {}
+      : {
+          registry: createDefaultTransportRegistry({
+            mode: "conformance",
+            loadSdk: input.loadSdk,
+            env: authority.env,
+          }),
+        }),
+  });
+  try {
+    return await Promise.all(
+      [...probe.bindings.values()].map((binding) => binding.capabilities()),
+    );
+  } finally {
+    await probe.dispose();
+  }
 }
 
 export function d1_11EvidenceFromExactBinding(
