@@ -4,6 +4,7 @@ import {
   createInitialWizardState,
   isMachineOnboarded,
   renderWizardStep,
+  runWizard,
   WIZARD_STEPS,
   wizardReducer,
 } from "../src/wizard";
@@ -192,6 +193,59 @@ describe("Wizard state machine & steps", () => {
       for (const line of lines) {
         expect(line).not.toContain("\x1b");
       }
+    });
+  });
+
+  describe("dependency injection: WizardDeps.exec reaches the tool checks", () => {
+    // WizardDeps has always exposed `exec`, and a caller that injects it is
+    // entitled to assume NOTHING in the wizard shells out for real. It did not
+    // hold: the system_tools step spread only `deps.checkToolsOptions` into
+    // `checkSystemTools`, so an injected `exec` was silently dropped and the
+    // real `Bun.spawn` fallback ran `gh auth status` — a live network round
+    // trip — inside a test that had faked its I/O. That is a leak in the seam,
+    // not a slow test: it made `bun test` depend on the network and on GitHub
+    // being fast, and it is why test/repo-optional.test.ts's setup test timed
+    // out at bun's 5000ms default whenever `gh` was slow to answer.
+    test("an injected exec is used for the system-tool probes, not Bun.spawn", async () => {
+      const calls: string[][] = [];
+      await runWizard({
+        cwd: "/repo",
+        home: "/home/user",
+        exec: async (cmd) => {
+          calls.push(cmd);
+          return { exitCode: 1, stdout: "", stderr: "not a git repository" };
+        },
+        writeFile: async () => {},
+        exists: () => false,
+      });
+
+      // The tool preflight asks each installed binary for its version, and
+      // `--version` is issued by checkSystemTools alone — the wizard's own
+      // git probe is `rev-parse`. So a `--version` command arriving here is
+      // the seam being wired, not the pre-existing git call leaking through.
+      expect(calls.some((cmd) => cmd.includes("--version"))).toBe(true);
+    });
+
+    test("an injected exec keeps the wizard off the network entirely", async () => {
+      // The specific spawn that made this expensive was `gh auth status`.
+      // Nothing the wizard runs may reach a real binary when exec is injected.
+      const calls: string[][] = [];
+      await runWizard({
+        cwd: "/repo",
+        home: "/home/user",
+        exec: async (cmd) => {
+          calls.push(cmd);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+        writeFile: async () => {},
+        exists: () => false,
+      });
+
+      // Every command the wizard issued was observed here. If `gh auth status`
+      // had gone to the real Bun.spawn fallback instead, this list would not
+      // contain it — the assertion is that the probes are visible, i.e. routed
+      // through the seam rather than around it.
+      expect(calls.some((cmd) => cmd.includes("auth"))).toBe(true);
     });
   });
 });
