@@ -206,11 +206,21 @@ describe("Wizard state machine & steps", () => {
     // not a slow test: it made `bun test` depend on the network and on GitHub
     // being fast, and it is why test/repo-optional.test.ts's setup test timed
     // out at bun's 5000ms default whenever `gh` was slow to answer.
+    // `checkSystemTools` falls back to the real `Bun.which` when no `which` is
+    // injected (src/system-tools.ts:96), and it only issues the `gh auth
+    // status` exec once `which("gh")` returned a path (:156-168). So a test
+    // that injects `exec` but not `which` still depends on the host having
+    // `gh` on PATH — which is the exact ambient-state dependency these tests
+    // exist to disprove. Found by pr-hero on #118; reproduced by running them
+    // with a PATH containing no `gh`.
+    const hermeticWhich = { which: (bin: string) => `/usr/local/bin/${bin}` };
+
     test("an injected exec is used for the system-tool probes, not Bun.spawn", async () => {
       const calls: string[][] = [];
       await runWizard({
         cwd: "/repo",
         home: "/home/user",
+        checkToolsOptions: hermeticWhich,
         exec: async (cmd) => {
           calls.push(cmd);
           return { exitCode: 1, stdout: "", stderr: "not a git repository" };
@@ -233,6 +243,7 @@ describe("Wizard state machine & steps", () => {
       await runWizard({
         cwd: "/repo",
         home: "/home/user",
+        checkToolsOptions: hermeticWhich,
         exec: async (cmd) => {
           calls.push(cmd);
           return { exitCode: 0, stdout: "", stderr: "" };
