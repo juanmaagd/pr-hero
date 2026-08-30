@@ -256,8 +256,28 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       );
     const pricingApplicable =
       report.billing.mode === "metered" ? "required" : "not_applicable";
+    // The legacy report carries THREE billing modes (subscription | metered |
+    // unknown) and the exact contract carries two, so `unknown` narrows into
+    // "subscription" here. WHY that narrowing is not a lie: it is sound ONLY
+    // because `cashCostAccountingValid` below reads the ORIGINAL three-state
+    // `report.billing.mode` and independently blocks `unknown` — the design
+    // doc makes `billingMode: "unknown"` a blocking preflight result
+    // (docs/multi-runtime-model-diversity-design.md:461), and the pricing
+    // gate cannot enforce it because `unknown` is not `metered`, leaving
+    // pricingApplicability at "not_applicable". Delete or weaken the
+    // cash-cost derivation and this narrowing silently starts claiming that
+    // an unknown-billing route bills like a subscription.
     const billingMode: ExactBindingCapabilityReport["billing"]["mode"] =
       report.billing.mode === "metered" ? "metered" : "subscription";
+    // Spec (same design line): subscription OAuth may truthfully report
+    // `cashCostUsd: 0`; metered routes require provider cost or a versioned
+    // rate table; unknown is blocking.
+    const cashCostAccountingValid =
+      report.billing.mode === "subscription"
+        ? true
+        : report.billing.mode === "metered"
+          ? report.billing.pricingReady
+          : false;
     return {
       routeKey: this.key,
       backend: this.route.backend,
@@ -294,7 +314,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
         mode: billingMode,
         pricingApplicability: pricingApplicable,
         tokenPricingAvailable: report.billing.pricingReady,
-        cashCostAccountingValid: billingMode === "subscription",
+        cashCostAccountingValid,
       },
     };
   }
@@ -415,21 +435,37 @@ async function resolveFrozenBindings(
   return bindings;
 }
 
+export interface BindingsCapabilityGateResult {
+  readonly decision: CapabilityGateDecision;
+  readonly reports: readonly ExactBindingCapabilityReport[];
+}
+
+// SUGGESTION-1: `capabilities()` is deliberately NOT memoised — it re-probes
+// on every call — so the reports gathered here are the expensive artifact,
+// not a by-product to throw away. They are returned so a caller that needs
+// both the gate decision and the facts (doctor) pays ONE probe pass.
+// WHY this no longer short-circuits on the first blocking binding: doctor
+// reports on every binding regardless of the decision, so stopping early
+// would hand it a truncated view of the plan. The extra probes are bounded
+// by plan size and only occur on the already-failing path.
 export async function gateBindingsCapabilities(
   bindings: ReadonlyMap<string, RuntimeBinding>,
-): Promise<CapabilityGateDecision> {
+): Promise<BindingsCapabilityGateResult> {
+  const reports: ExactBindingCapabilityReport[] = [];
   for (const binding of bindings.values()) {
-    const report = await binding.capabilities();
-    const gate = exactBindingCapabilityGate(report);
-    if (!gate.ok) {
-      return gate;
-    }
+    reports.push(await binding.capabilities());
   }
-  return { ok: true };
+  const failed = reports
+    .map((report) => exactBindingCapabilityGate(report))
+    .find((gate) => !gate.ok);
+  return { decision: failed ?? { ok: true }, reports };
 }
 
 export interface ProbeBindingsReadinessResult {
   readonly decision: CapabilityGateDecision;
+  // The exact reports the decision was taken on, in binding order. Consumers
+  // must reuse these instead of re-calling `capabilities()`.
+  readonly reports: readonly ExactBindingCapabilityReport[];
   readonly bindings: ReadonlyMap<string, RuntimeBinding>;
   readonly registry: TransportRegistry;
   dispose(): Promise<void>;
@@ -464,9 +500,10 @@ export async function probeBindingsReadiness(
     registry,
     leaseTracker,
   );
-  const decision = await gateBindingsCapabilities(bindings);
+  const { decision, reports } = await gateBindingsCapabilities(bindings);
   return {
     decision,
+    reports,
     bindings,
     registry,
     dispose: async () => {
@@ -522,9 +559,11 @@ export async function collectDoctorExactBindingReports(input: {
         }),
   });
   try {
-    return await Promise.all(
-      [...probe.bindings.values()].map((binding) => binding.capabilities()),
-    );
+    // SUGGESTION-1: the readiness probe already called capabilities() once
+    // per binding to reach its decision. capabilities() re-probes on every
+    // call, so re-collecting here would double the probe cost for a doctor
+    // run that needs exactly the reports the gate already produced.
+    return probe.reports;
   } finally {
     await probe.dispose();
   }
