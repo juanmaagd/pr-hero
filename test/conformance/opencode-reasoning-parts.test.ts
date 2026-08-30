@@ -103,6 +103,11 @@ function partUpdated(
   };
 }
 
+const IDLE = {
+  type: "session.idle",
+  properties: { sessionID: SESSION_ID },
+} as Record<string, unknown>;
+
 function partDelta(partID: string, delta: string): Record<string, unknown> {
   return {
     type: "message.part.delta",
@@ -116,8 +121,10 @@ function partDelta(partID: string, delta: string): Record<string, unknown> {
   };
 }
 
-// The turn's terminal: the completed assistant message, which is the ONLY
-// provider-issued completion record either §197 observer can reach.
+// The turn's PROOF: the completed assistant message, which is the only
+// provider-issued completion record either §197 observer can reach. It is not
+// the turn's boundary — #127 — so every stream below ends with IDLE, the
+// event that actually says the turn is over.
 const COMPLETED = messageUpdated(ASSISTANT_MESSAGE, "assistant", {
   finish: "stop",
   time: { created: 1, completed: 1_787_811_448_694 },
@@ -142,6 +149,7 @@ function reasoningThenAnswerStream(): Array<Record<string, unknown>> {
     partDelta(ANSWER_PART, ANSWER),
     partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ANSWER),
     COMPLETED,
+    IDLE,
   ];
 }
 
@@ -154,6 +162,7 @@ function reasoningOnlyStream(): Array<Record<string, unknown>> {
     partDelta(REASONING_PART, REASONING_A),
     partDelta(REASONING_PART, REASONING_B),
     COMPLETED,
+    IDLE,
   ];
 }
 
@@ -164,6 +173,11 @@ function fakeSdk(events: Array<Record<string, unknown>>): OpenCodeSdkLike {
         create: async () => ({ data: { id: SESSION_ID } }),
         prompt: async () => ({ data: { info: {}, parts: [] } }),
         messages: async () => ({ data: [] }),
+        // #127: the poll observer's turn boundary. An empty map is a session
+        // that is not working — measured: opencode omits an idle session
+        // rather than reporting {"type":"idle"}. Here the stream settles the
+        // attempt, so this only has to be answerable.
+        status: async () => ({ data: {} }),
         abort: async () => ({ data: true }),
       },
       // The ids the real `client.tool.ids()` returns on opencode 1.18.23; a
@@ -294,8 +308,10 @@ describe("a reasoning model's thinking is not the answer", () => {
   // part must not become answer text either.
   test("the user's own part can never feed finalText", async () => {
     const events = reasoningThenAnswerStream();
+    // Before the completion AND before the boundary: the stream now ends
+    // with session.idle (#127), so length-1 would land after the turn ended.
     events.splice(
-      events.length - 1,
+      events.length - 2,
       0,
       partDelta(USER_PART, "PROMPT ECHOED BACK"),
     );
@@ -312,7 +328,7 @@ describe("a reasoning model's thinking is not the answer", () => {
   test("a delta for an unannounced part is dropped", async () => {
     const events = reasoningThenAnswerStream();
     events.splice(
-      events.length - 1,
+      events.length - 2,
       0,
       partDelta("prt_never_announced", "UNANNOUNCED"),
     );

@@ -53,10 +53,17 @@ function asNumber(value: unknown): number | undefined {
 }
 
 // §5.2/§3.2: the proof must be PROVIDER-issued. `session.idle` cannot supply
-// one — its entire payload is {sessionID} — so the proof is taken from the
-// assistant message, which carries a real completion record. Both §197
+// one — its entire payload is {sessionID} — so the proof CONTENT is taken from
+// the assistant message, which carries a real completion record. Both §197
 // observers reach it independently: the stream through `message.updated`, the
-// poll through session.get/session.messages.
+// poll through session.messages.
+//
+// A proof is not a BOUNDARY, and issue #127 is the whole cost of confusing the
+// two. This function answers "did this STEP end", never "did the turn end":
+// OpenCode creates one assistant message per agentic step, each with its own
+// `time.completed`. The turn's boundary is `session.idle` on the stream and
+// the session leaving `GET /session/status` on the poll; see mapOpenCodeEvents
+// and pollStatus below.
 export function terminalProofFromAssistant(
   info: unknown,
 ): ProviderTerminalProof | undefined {
@@ -68,8 +75,9 @@ export function terminalProofFromAssistant(
   if (typeof id !== "string" || id.length === 0) return undefined;
 
   const completed = asNumber(asRecord(message.time)?.completed);
-  // Not finished is not a terminal. An assistant message exists from the
-  // moment the turn starts; only `time.completed` says the turn ended.
+  // Not finished is not a completion record. An assistant message exists from
+  // the moment its step starts; only `time.completed` says the step ended and
+  // therefore that there is anything here to quote as proof.
   if (completed === undefined) return undefined;
 
   // providerStatus is a NORMALISED field, not a passthrough. The transport
@@ -146,7 +154,7 @@ export function retryHintFromStatus(
 // Eviction is oldest-first (a Map iterates in insertion order), which is the
 // safe direction — parts are announced and streamed in order, so the oldest
 // entry is the one no delta can still name.
-export interface OpenCodePartIndex {
+export interface OpenCodeTurnState {
   // Assistant-owned message ids. TRAP 2 lives here now: `message.part.updated`
   // fires for the USER message too, and the recorded one carried the prompt
   // text itself, so registering every text part would make a delta naming the
@@ -154,6 +162,28 @@ export interface OpenCodePartIndex {
   // written to prevent, re-entering through the door the fix had to open.
   readonly assistantMessages: Set<string>;
   readonly parts: Map<string, "answer" | "reasoning">;
+  // #127: the turn's usage, kept per MESSAGE ID rather than as one running
+  // figure. Each step message restates its OWN totals, so within a message the
+  // newest value replaces the older one — and the recorded probe
+  // (test/fixtures/opencode/probe-events.json, indices 21 and 22) emits the
+  // completed message twice, byte for byte, which a per-event sum would
+  // double-count. Across messages the values are added, because each step is a
+  // separately billed provider call.
+  readonly usage: Map<string, StepUsage>;
+  // The most recent completion record observed for this turn. This is the
+  // proof CONTENT the boundary quotes; it is never itself a boundary.
+  lastProof?: ProviderTerminalProof;
+  // One terminal per turn. `session.idle` should fire once, but a second one
+  // must not be able to manufacture a second proof — §197's slot reads a
+  // repeat as a confirmation and a DIFFERENT proof as a conflict, so the
+  // cheapest place to guarantee "once" is here, at the source.
+  boundaryReported: boolean;
+}
+
+interface StepUsage {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly costUsd?: number;
 }
 
 // Generous on purpose: a long hunter turn announces a part per tool call, per
@@ -163,8 +193,13 @@ export interface OpenCodePartIndex {
 const MAX_TRACKED_PARTS = 4096;
 const MAX_TRACKED_MESSAGES = 512;
 
-export function createPartIndex(): OpenCodePartIndex {
-  return { assistantMessages: new Set(), parts: new Map() };
+export function createTurnState(): OpenCodeTurnState {
+  return {
+    assistantMessages: new Set(),
+    parts: new Map(),
+    usage: new Map(),
+    boundaryReported: false,
+  };
 }
 
 function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
@@ -174,6 +209,30 @@ function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
     if (oldest.done === true) return;
     map.delete(oldest.value);
   }
+}
+
+// The turn's figure: every step message's LATEST snapshot, added together.
+// A field stays absent unless at least one step reported it — the mapper has
+// never invented a zero, and a fabricated 0 would be indistinguishable from a
+// real one to §8's "unavailable vs proven zero" distinction downstream.
+function turnUsage(state: OpenCodeTurnState): StepUsage {
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let costUsd: number | undefined;
+  for (const step of state.usage.values()) {
+    if (step.inputTokens !== undefined) {
+      inputTokens = (inputTokens ?? 0) + step.inputTokens;
+    }
+    if (step.outputTokens !== undefined) {
+      outputTokens = (outputTokens ?? 0) + step.outputTokens;
+    }
+    if (step.costUsd !== undefined) costUsd = (costUsd ?? 0) + step.costUsd;
+  }
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(costUsd !== undefined ? { costUsd } : {}),
+  };
 }
 
 function rememberId(set: Set<string>, id: string, cap: number): void {
@@ -199,7 +258,7 @@ function rememberId(set: Set<string>, id: string, cap: number): void {
 export function mapOpenCodeEvents(
   raw: unknown,
   sessionId: string,
-  index: OpenCodePartIndex,
+  state: OpenCodeTurnState,
 ): OpenCodeClientEvent[] {
   const type = (raw as RawEvent)?.type;
   if (typeof type !== "string") return [];
@@ -236,7 +295,7 @@ export function mapOpenCodeEvents(
       // type the provider adds next, silently, while dropping one costs at
       // worst an answer that arrives short — which fails the harness's parse
       // loudly and buys a fresh attempt on the transient budget.
-      const kind = index.parts.get(partId);
+      const kind = state.parts.get(partId);
       if (kind === "answer") return [{ kind: "delta", text: delta }];
       // Discarded HERE, at the boundary: the text does not travel, only the
       // fact that it existed. Dropping it downstream instead would spend the
@@ -258,11 +317,11 @@ export function mapOpenCodeEvents(
       // Assistant-owned parts only. The user's message has a text part too,
       // carrying the prompt itself, and it must never become a channel the
       // answer can be assembled from.
-      if (!index.assistantMessages.has(messageId)) return [];
+      if (!state.assistantMessages.has(messageId)) return [];
       if (part?.type === "text") {
-        remember(index.parts, partId, "answer", MAX_TRACKED_PARTS);
+        remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
       } else if (part?.type === "reasoning") {
-        remember(index.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+        remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
       }
       return [];
     }
@@ -282,35 +341,88 @@ export function mapOpenCodeEvents(
       // part index needs that fact even on the mid-turn restatements that
       // carry neither usage nor a proof.
       if (typeof info.id === "string" && info.id.length > 0) {
-        rememberId(index.assistantMessages, info.id, MAX_TRACKED_MESSAGES);
+        rememberId(state.assistantMessages, info.id, MAX_TRACKED_MESSAGES);
       }
       const out: OpenCodeClientEvent[] = [];
 
-      // Usage rides the assistant message and is a SNAPSHOT: the message's
-      // own running totals, restated. Emitted even mid-turn, where they are
-      // zeros — harmless under REPLACE semantics, since the completed message
-      // that follows carries the real figures.
+      // Usage rides the assistant message and is a SNAPSHOT: the MESSAGE's own
+      // running totals, restated. Emitted even mid-turn, where they are zeros
+      // — harmless, since a later restatement of the same message replaces
+      // them.
+      //
+      // #127: what is emitted is the TURN's snapshot, not the message's. One
+      // assistant message per agentic step means the attempt's REPLACE
+      // semantics would keep only the last step's counters and under-report a
+      // multi-step turn — in the direction that hides spend, which is the
+      // worst direction to be wrong in and the axis the #116 ledger is waiting
+      // on. Summing here rather than switching the attempt to `delta` mode is
+      // deliberate: the mode is fixed by the FIRST usage event and a later flip
+      // aborts the attempt, and a delta stream would have to reconstruct each
+      // message's increment from its own restatements anyway. Snapshot of a
+      // running sum keeps one mode for the whole attempt and stays correct
+      // under the duplicate completed message the probe records.
       const tokens = asRecord(info.tokens);
-      const inputTokens = asNumber(tokens?.input);
-      const outputTokens = asNumber(tokens?.output);
-      const costUsd = asNumber(info.cost);
-      if (
-        inputTokens !== undefined ||
-        outputTokens !== undefined ||
-        costUsd !== undefined
-      ) {
-        out.push({
-          kind: "usage",
-          mode: "snapshot",
-          ...(inputTokens !== undefined ? { inputTokens } : {}),
-          ...(outputTokens !== undefined ? { outputTokens } : {}),
-          ...(costUsd !== undefined ? { costUsd } : {}),
-        });
+      const messageId = typeof info.id === "string" ? info.id : undefined;
+      if (messageId !== undefined) {
+        const inputTokens = asNumber(tokens?.input);
+        const outputTokens = asNumber(tokens?.output);
+        const costUsd = asNumber(info.cost);
+        if (
+          inputTokens !== undefined ||
+          outputTokens !== undefined ||
+          costUsd !== undefined
+        ) {
+          remember(
+            state.usage,
+            messageId,
+            {
+              ...(inputTokens !== undefined ? { inputTokens } : {}),
+              ...(outputTokens !== undefined ? { outputTokens } : {}),
+              ...(costUsd !== undefined ? { costUsd } : {}),
+            },
+            MAX_TRACKED_MESSAGES,
+          );
+          out.push({ kind: "usage", mode: "snapshot", ...turnUsage(state) });
+        }
       }
 
+      // Recorded, never emitted. A completed STEP is not a completed TURN
+      // (#127); this is the content the boundary will quote when it arrives.
       const proof = terminalProofFromAssistant(info);
-      if (proof !== undefined) out.push({ kind: "terminal", proof });
+      if (proof !== undefined) state.lastProof = proof;
       return out;
+    }
+
+    // #127: THE turn boundary. `session.idle` fires exactly once for a whole
+    // agentic turn — measured on the live provider at three assistant messages
+    // to one idle — while `time.completed` fires once per STEP. Reading a step
+    // completion as the turn's terminal settled the attempt on step 1,
+    // harvested the model's plan narration as the answer and stopped a working
+    // model; that is every "hunter finished in 10-33s with one line" symptom.
+    //
+    // The §5.2/§3.2 objection to `session.idle` still stands and is respected:
+    // its whole payload is {sessionID}, so it supplies no proof and none is
+    // synthesised from it. It supplies only the BOUNDARY, and the proof quoted
+    // at that boundary is the provider's own completion record for the last
+    // step that finished. A turn that reached idle having completed nothing
+    // yields no terminal at all — the transport never issues its own proof,
+    // and the harness watchdog remains the backstop for a turn that can never
+    // produce one.
+    //
+    // Emitted from the mapper, not deferred to a quiet stream, so the terminal
+    // travels as an ordinary mapped event: streamEvents' drain-before-failure
+    // ordering is untouched and a buffered terminal still beats a failure. The
+    // recorded probe puts `session.idle` last (index 25, after both copies of
+    // the completed message at 21/22), so the last proof at the boundary is
+    // the turn's final one. If a build ever reordered them, the poll observer
+    // would quote the later message and §197 would raise a CONFLICT — loud,
+    // and exactly what that slot is for.
+    case "session.idle": {
+      if (state.boundaryReported) return [];
+      const proof = state.lastProof;
+      if (proof === undefined) return [];
+      state.boundaryReported = true;
+      return [{ kind: "terminal", proof }];
     }
 
     // A busy session is the provider saying it is still working — exactly what
@@ -321,23 +433,21 @@ export function mapOpenCodeEvents(
       return status?.type === "busy" ? [{ kind: "heartbeat" }] : [];
     }
 
-    // TRAP 3: `session.idle` is deliberately NOT mapped. Its entire payload is
-    // {sessionID} — no id, no status, no timestamp — so synthesising a proof
-    // from it would mean the transport issuing its own proof and then letting
-    // it win the §197 slot, which is precisely what that slot exists to
-    // prevent. Idle keeps a job, just not this one: it tells the caller the
-    // session stopped working, i.e. when to stop polling.
+    // TRAP 3, corrected by #127. `session.idle` used to be dropped here on the
+    // grounds that its payload ({sessionID} — no id, no status, no timestamp)
+    // cannot supply a proof. That grounds is still true and still honoured:
+    // the `session.idle` arm above synthesises nothing and quotes the
+    // provider's own completion record. What was wrong was the conclusion —
+    // dropping the event entirely left `time.completed` as the only terminal
+    // signal, and that is a STEP boundary, not a turn boundary.
+    //
+    // The predicate this file used to export for the same job (`isSessionIdle`)
+    // is gone with it: it had no caller anywhere in src, and biome does not
+    // flag an unused EXPORT, so it was dead code hiding behind a keyword. The
+    // arm above is the caller it was waiting for.
     default:
       return [];
   }
-}
-
-// The one thing `session.idle` IS good for.
-export function isSessionIdle(raw: unknown, sessionId: string): boolean {
-  return (
-    (raw as RawEvent)?.type === "session.idle" &&
-    props(raw)?.sessionID === sessionId
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +489,12 @@ export interface OpenCodeSdkClientApi {
     create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
     prompt(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
     messages(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    // `GET /session/status` — the POLL observer's turn boundary (#127), and a
+    // different endpoint from session.messages(), which is the point: §197
+    // wants two INDEPENDENT observers, not two pipes onto one fact. REQUIRED,
+    // never optional, for the same reason `tool.ids` is: an optional member
+    // lets a fake skip the surface silently, which is the shape of issue #121.
+    status(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
     abort(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
   };
   readonly event: {
@@ -538,10 +654,20 @@ interface SessionState {
   // (F002/F003 on PR #84) — in a repo that had already written the hazard
   // down, in opencode-sdk.ts, and walked into it anyway.
   readonly queue: unknown[];
-  // #124: partID → part kind, correlated from `message.part.updated`. Lives on
-  // the session because that is the scope the correlation is valid in, and
-  // because it must be released with the session rather than with the client.
-  readonly parts: OpenCodePartIndex;
+  // #124: partID → part kind, correlated from `message.part.updated`. #127
+  // added the turn's proof and usage accumulators alongside them. Lives on the
+  // session because that is the scope both are valid in, and because they must
+  // be released with the session rather than with the client.
+  readonly turn: OpenCodeTurnState;
+  // #127, and OWNED BY THE POLL OBSERVER ALONE — never written from the
+  // stream. `GET /session/status` reports a working session as busy and simply
+  // OMITS one that is not working (measured against opencode 1.18.23; see
+  // pollStatus), so absence is this observer's boundary. Absence is also
+  // exactly what a wrong directory scope looks like, and the two are
+  // indistinguishable in the response — so absence only counts once this
+  // observer has proved, through its own endpoint, that it can see this
+  // session at all.
+  observedActive: boolean;
   ended: boolean;
   wake?: () => void;
   // The handoff can end two ways. The pump ending is an EOF and says nothing
@@ -681,7 +807,8 @@ export function createOpenCodeClient(
         const state: SessionState = {
           api,
           queue: [],
-          parts: createPartIndex(),
+          turn: createTurnState(),
+          observedActive: false,
           ended: false,
         };
         states.set(sessionId, state);
@@ -820,11 +947,7 @@ export function createOpenCodeClient(
       // through the same door — so there is no handoff to race.
       for (;;) {
         while (state.queue.length > 0) {
-          yield* mapOpenCodeEvents(
-            state.queue.shift(),
-            session.id,
-            state.parts,
-          );
+          yield* mapOpenCodeEvents(state.queue.shift(), session.id, state.turn);
         }
         // Checked AFTER the drain and BEFORE `ended`: anything the provider
         // already said is delivered first — a terminal buffered before the
@@ -842,24 +965,75 @@ export function createOpenCodeClient(
       session: OpenCodeClientSession,
     ): Promise<OpenCodePollResult> {
       const state = stateFor(session);
-      const response = await state.api.session.messages({
-        path: { id: session.id },
-      });
-      // Throws on the error arm rather than reporting "pending": the caller
-      // treats a poll that throws as a FAILED OBSERVATION and counts it
-      // (opencode-sdk.ts:707), whereas a silent "pending" would let the
-      // attempt run to its stall deadline on an API error the provider
-      // already explained.
-      const messages = unwrap(response, "session.messages");
-      const list = Array.isArray(messages) ? messages : [];
-      // Last completed assistant message wins; the same helper the stream
-      // uses, on purpose. §197 wants two INDEPENDENT observers of ONE fact,
-      // not two facts that happen to resemble each other — two copies of this
-      // derivation could drift and manufacture a conflict out of nothing.
-      for (let i = list.length - 1; i >= 0; i -= 1) {
-        const info = (list[i] as { info?: unknown })?.info;
-        const proof = terminalProofFromAssistant(info);
-        if (proof !== undefined) return { kind: "terminal", proof };
+
+      // #127: the BOUNDARY first, and from a different endpoint. This observer
+      // has no event stream, so it cannot see `session.idle`; scanning
+      // session.messages() for the last completed assistant message is not a
+      // substitute, because at any poll instant "last completed" is step 1
+      // until step 2 exists. Two observers of one wrong fact are not two
+      // observers, which is precisely why the §197 cross-check could not catch
+      // the defect.
+      //
+      // Measured against opencode 1.18.23 at $0 — a local `opencode serve`
+      // plus a model-free `POST /session/{id}/shell` running `sleep 6`:
+      //
+      //   while the session is working        {"ses_…":{"type":"busy"}}
+      //   after it stops, and when freshly created   {}
+      //
+      // An idle session is simply ABSENT from the map; it is never reported as
+      // {"type":"idle"}. Requiring the explicit value — the reading the SDK's
+      // `SessionStatus` union invites — would have left this observer
+      // permanently blind and §197 down to one observer again. The explicit
+      // arm is still honoured for the build that does send it.
+      //
+      // NO `directory` query, and that is measured too: the session is created
+      // without one, so it registers under the SERVER's cwd, while prompts
+      // carry the step's cwd. `GET /session/status?directory=<step cwd>`
+      // returned {} for a session that was BUSY at that moment. Passing the
+      // step cwd here would have made every busy session look absent — which
+      // is to say, look finished — and reopened #127 through its own fix.
+      const statuses = asRecord(
+        unwrap(await state.api.session.status({}), "session.status"),
+      );
+      const statusType = asRecord(statuses?.[session.id])?.type;
+      // Both are the provider still working. `retry` especially: a session in
+      // backoff is neither done nor idle, and it will produce more steps — its
+      // `next` timestamp is what retryHintFromStatus reads for the policy.
+      if (statusType === "busy" || statusType === "retry") {
+        state.observedActive = true;
+      } else if (statusType === "idle" || statusType === undefined) {
+        // Absence is the boundary, but it is ALSO what a session this call
+        // cannot see looks like (wrong scope, unknown id, a pruned entry), and
+        // the response cannot tell the two apart. So it only counts once this
+        // observer has seen the provider name this session through this same
+        // endpoint. An explicit idle names it, so it arms and settles at once.
+        if (statusType === "idle") state.observedActive = true;
+        if (state.observedActive) {
+          const response = await state.api.session.messages({
+            path: { id: session.id },
+          });
+          // Throws on the error arm rather than reporting "pending": the
+          // caller treats a poll that throws as a FAILED OBSERVATION and
+          // counts it (opencode-sdk.ts:707), whereas a silent "pending" would
+          // let the attempt run to its stall deadline on an API error the
+          // provider already explained.
+          const messages = unwrap(response, "session.messages");
+          const list = Array.isArray(messages) ? messages : [];
+          // The turn has ended; the last completed assistant message supplies
+          // the proof CONTENT — the same helper the stream uses, on purpose.
+          // §197 wants two INDEPENDENT observers of ONE fact, not two facts
+          // that happen to resemble each other: two copies of this derivation
+          // could drift and manufacture a conflict out of nothing.
+          //
+          // No completed message means no proof, and none is invented. The
+          // attempt then falls to the harness watchdog, which is the correct
+          // place for a turn that never produced a completion record.
+          for (let i = list.length - 1; i >= 0; i -= 1) {
+            const info = (list[i] as { info?: unknown })?.info;
+            const proof = terminalProofFromAssistant(info);
+            if (proof !== undefined) return { kind: "terminal", proof };
+          }
+        }
       }
       // The SECOND observer of the failure, and the reason it exists: the
       // stream can only carry a failure while it is still being read, and the

@@ -47,7 +47,7 @@ function moduleConformance(
   return module;
 }
 
-// If this stops compiling, one of session.{create,prompt,messages,abort},
+// If this stops compiling, one of session.{create,prompt,messages,status,abort},
 // event.subscribe or tool.ids changed shape. The declared results must keep
 // BOTH arms of the SDK's `RequestResult` union: with the default
 // `ThrowOnError = false` an API error returns `{ data: undefined, error }`,
@@ -131,5 +131,26 @@ describe("the installed @opencode-ai/sdk", () => {
     });
 
     expect(typeof client.tool?.ids).toBe("function");
+  });
+
+  // Issue #127's half of the drift-kill. The poll observer's turn boundary is
+  // `GET /session/status`, and it has to be a DIFFERENT endpoint from
+  // session.messages() or §197 has two pipes onto one fact instead of two
+  // observers. Losing this method would take the boundary with it and leave
+  // the poll reading "last completed assistant message" again — which is step
+  // 1 until step 2 exists, the whole of #127.
+  test("really exposes session.status(), the poll observer's turn boundary", async () => {
+    const module = (await import("@opencode-ai/sdk")) as unknown as {
+      createOpencodeClient: (config: { baseUrl: string }) => {
+        session?: { status?: unknown; messages?: unknown };
+      };
+    };
+
+    const client = module.createOpencodeClient({
+      baseUrl: "http://127.0.0.1:1",
+    });
+
+    expect(typeof client.session?.status).toBe("function");
+    expect(client.session?.status).not.toBe(client.session?.messages);
   });
 });
