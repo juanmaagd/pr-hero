@@ -49,6 +49,18 @@ describe("5.1 / 5.2 Menu Input Loop & Keyboard Ownership", () => {
     doctorStatus: "healthy" as const,
   };
 
+  // Every test below that dispatches an action makes runMenuLoop refresh the
+  // context and status on the way back to the menu. Left uninjected, that
+  // refresh runs the real resolvers: a git subprocess plus the full doctor,
+  // whose `gh auth status` probe is a live network round trip. That is what
+  // pushed these three tests past bun's 5000ms default under load. The pinned
+  // `context`/`status` above cover only the first render, so the refresh is
+  // injected separately.
+  const noIoRefresh = {
+    resolveContext: async () => dummyContext,
+    gatherStatus: async () => dummyStatus,
+  };
+
   test("j/k and arrows move cursor with wrapping", async () => {
     const io = testIo();
     const reader = fakeReader(["j", "j", "k", "q"]);
@@ -79,6 +91,7 @@ describe("5.1 / 5.2 Menu Input Loop & Keyboard Ownership", () => {
       io,
       styles: false,
       width: 80,
+      ...noIoRefresh,
       dispatchAction: async (action) => {
         dispatched.push(action);
         return 0;
@@ -160,6 +173,7 @@ describe("5.1 / 5.2 Menu Input Loop & Keyboard Ownership", () => {
       io,
       styles: false,
       width: 80,
+      ...noIoRefresh,
       dispatchAction: async (_action) => {
         dispatched = true;
         // Reader for root menu must be closed during dispatch!
@@ -197,6 +211,7 @@ describe("5.1 / 5.2 Menu Input Loop & Keyboard Ownership", () => {
       io,
       styles: true,
       width: 80,
+      ...noIoRefresh,
       dispatchAction: async () => {
         io.write("Doctor output\n");
         return 0;
@@ -209,5 +224,54 @@ describe("5.1 / 5.2 Menu Input Loop & Keyboard Ownership", () => {
     const clearSeq = `${ESC}[2J${ESC}[H`;
     const clearMatches = raw.split(clearSeq).length - 1;
     expect(clearMatches).toBeGreaterThanOrEqual(2);
+  });
+
+  test("post-action refresh goes through the injected resolvers, never the real ones", async () => {
+    // `context`/`status` only pin the FIRST render. After an action returns,
+    // runMenuLoop refreshed by calling the real `resolveMenuContext` (a git
+    // subprocess) and `gatherMenuStatus` (which runs the full doctor — real
+    // `Bun.spawn` of git/claude/gh/codegraph, including `gh auth status`, a
+    // live network round trip). So the three tests here that dispatch an
+    // action still shelled out and hit the network despite injecting both
+    // values, and timed out at bun's 5000ms default whenever `gh` was slow.
+    // The refresh needs its own seam; pinning the initial value is not one.
+    const io = testIo();
+    let contextCalls = 0;
+    let statusCalls = 0;
+    const readers: (KeyReader & { closed: boolean })[] = [];
+    const createReader = () => {
+      const r = fakeReader(
+        readers.length === 0
+          ? ["j", "\r"]
+          : readers.length === 1
+            ? [" "]
+            : ["q"],
+      );
+      readers.push(r);
+      return r;
+    };
+
+    const exitCode = await runMenuLoop({
+      context: dummyContext,
+      status: dummyStatus,
+      createReader,
+      io,
+      styles: false,
+      width: 80,
+      resolveContext: async () => {
+        contextCalls++;
+        return dummyContext;
+      },
+      gatherStatus: async () => {
+        statusCalls++;
+        return dummyStatus;
+      },
+      dispatchAction: async () => 0,
+    });
+
+    expect(exitCode).toBe(0);
+    // The action returned and the loop came back to the menu, so it refreshed.
+    expect(contextCalls).toBeGreaterThan(0);
+    expect(statusCalls).toBeGreaterThan(0);
   });
 });

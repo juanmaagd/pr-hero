@@ -170,6 +170,15 @@ export interface MenuLoopIo {
 export interface MenuLoopOptions {
   context?: RepoContext;
   status?: MenuStatusInfo;
+  // `context`/`status` pin only the FIRST render. Every time an action
+  // returns, the loop refreshes them — and that refresh used the real
+  // `resolveMenuContext` (a git subprocess) and `gatherMenuStatus` (the full
+  // doctor: real `Bun.spawn` of git/claude/gh/codegraph, `gh auth status`
+  // among them, which is a live network round trip). A caller that injected
+  // both values still shelled out, so the refresh needs a seam of its own.
+  // Both default to the real resolvers; no production caller passes either.
+  resolveContext?: (cwd: string) => Promise<RepoContext>;
+  gatherStatus?: (home: string, cwd: string) => Promise<MenuStatusInfo>;
   createReader?: () => KeyReader;
   io?: MenuLoopIo;
   styles?: boolean;
@@ -254,8 +263,11 @@ export async function runMenuLoop(
   const styles = options.styles ?? false;
   let width = options.width ?? terminalWidth();
 
-  let context = options.context ?? (await resolveMenuContext(cwd));
-  let status = options.status ?? (await gatherMenuStatus(home, cwd));
+  const resolveContext = options.resolveContext ?? resolveMenuContext;
+  const gatherStatus = options.gatherStatus ?? gatherMenuStatus;
+
+  let context = options.context ?? (await resolveContext(cwd));
+  let status = options.status ?? (await gatherStatus(home, cwd));
   let items = getMenuOptions(context, status);
   let cursor = 0;
 
@@ -382,8 +394,8 @@ export async function runMenuLoop(
           if (repaint) io.write(`${ESC}[?25l`);
         }
         if (exit === "back") {
-          context = await resolveMenuContext(cwd);
-          status = await gatherMenuStatus(home, cwd);
+          context = await resolveContext(cwd);
+          status = await gatherStatus(home, cwd);
           items = getMenuOptions(context, status);
           cursor = Math.min(cursor, items.length - 1);
           needsClear = true;
@@ -414,8 +426,8 @@ export async function runMenuLoop(
 
       // Refresh context and status on return
       drawn = 0;
-      context = await resolveMenuContext(cwd);
-      status = await gatherMenuStatus(home, cwd);
+      context = await resolveContext(cwd);
+      status = await gatherStatus(home, cwd);
       items = getMenuOptions(context, status);
       cursor = Math.min(cursor, items.length - 1);
       needsClear = true;
