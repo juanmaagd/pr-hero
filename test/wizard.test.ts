@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
   CURRENT_ONBOARDING_VERSION,
   createInitialWizardState,
@@ -7,6 +8,44 @@ import {
   WIZARD_STEPS,
   wizardReducer,
 } from "../src/wizard";
+
+// W4 remediation (opencode-production-runtime PR3 verify #4997): the old
+// `probeExactBinding` seam returned `{ projectionReady: boolean }` — a
+// caller-supplied boolean, not the real ExactBindingCapabilityReport the
+// doctor and execution consumers derive readiness from. That let the wizard
+// step exercise a shape production code never produces. This fixture
+// matches the real report exactly (see test/doctor.test.ts's `exact()`).
+function exactBindingReport(
+  overrides: Partial<ExactBindingCapabilityReport> = {},
+): ExactBindingCapabilityReport {
+  return {
+    routeKey: "fp",
+    backend: "claude-code",
+    sdk: { available: true },
+    binary: { resolved: true, absolutePath: "/bin/claude", sha256: "aa" },
+    auth: {
+      kind: "claude_subscription_oauth",
+      projectionReady: true,
+      probe: "passed",
+    },
+    environment: { syntheticHome: true, enumeratedPassthrough: false },
+    isolation: { workspaceReadBroker: true, codegraphPolicy: false },
+    toolsMcp: { allowMapEnforced: true, mcpIntegrityChecked: true },
+    protocol: {
+      terminalProof: true,
+      boundedEvents: false,
+      usageMode: "snapshot",
+    },
+    usage: { normalized: true },
+    billing: {
+      mode: "subscription",
+      pricingApplicability: "not_applicable",
+      tokenPricingAvailable: false,
+      cashCostAccountingValid: true,
+    },
+    ...overrides,
+  };
+}
 
 describe("Wizard state machine & steps", () => {
   test("5 ordered step descriptors defined", () => {
@@ -192,6 +231,130 @@ describe("Wizard state machine & steps", () => {
       for (const line of lines) {
         expect(line).not.toContain("\x1b");
       }
+    });
+  });
+
+  describe("exact-binding initialization facts", () => {
+    const tools = {
+      cwd: "/repo",
+      home: "/home/user",
+      exists: () => true,
+      checkToolsOptions: {
+        which: (bin: string) => `/bin/${bin}`,
+        exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+      },
+    };
+
+    test("system_tools probe and render follow exact-binding projectionReady from a real ExactBindingCapabilityReport (drift, spec scenario 8)", async () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+      const unavailable = await step?.probe({
+        ...tools,
+        probeExactBinding: async () => [
+          exactBindingReport({
+            auth: {
+              kind: "claude_subscription_oauth",
+              projectionReady: false,
+              probe: "failed",
+            },
+          }),
+        ],
+      });
+      expect(unavailable?.exactBindingProjectionReady).toBe(false);
+      expect(unavailable?.exactBindingProbeError).toBeUndefined();
+      const down = step?.render(
+        { ...createInitialWizardState(), ...unavailable },
+        { styles: false, width: 80 },
+      );
+      expect(
+        down?.some((l) => l.includes("auth projection: unavailable")),
+      ).toBe(true);
+
+      // Binding drift: the same step, re-probed with fresh facts, reflects
+      // CURRENT state — it must not reuse the prior call's success flag.
+      const ready = await step?.probe({
+        ...tools,
+        probeExactBinding: async () => [exactBindingReport()],
+      });
+      expect(ready?.exactBindingProjectionReady).toBe(true);
+      const up = step?.render(
+        { ...createInitialWizardState(), ...ready },
+        { styles: false, width: 80 },
+      );
+      expect(up?.some((l) => l.includes("auth projection: ready"))).toBe(true);
+    });
+
+    test("a probe/authority failure is recorded distinctly from a genuinely unready projection", async () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+
+      // A genuine defect (broker down, transport throw, etc.) must not
+      // collapse into the SAME `false` a clean unready report also produces.
+      const errored = await step?.probe({
+        ...tools,
+        probeExactBinding: async () => {
+          throw new Error("credential broker unavailable");
+        },
+      });
+      expect(errored?.exactBindingProjectionReady).toBe(false);
+      expect(errored?.exactBindingProbeError).toContain(
+        "credential broker unavailable",
+      );
+
+      const genuinelyUnready = await step?.probe({
+        ...tools,
+        probeExactBinding: async () => [
+          exactBindingReport({
+            auth: {
+              kind: "claude_subscription_oauth",
+              projectionReady: false,
+              probe: "failed",
+            },
+          }),
+        ],
+      });
+      expect(genuinelyUnready?.exactBindingProjectionReady).toBe(false);
+      expect(genuinelyUnready?.exactBindingProbeError).toBeUndefined();
+    });
+
+    // NEW-1 (verify report #4997 rev7): the probe failure was captured in
+    // state but never rendered, so an operator saw the identical
+    // "unavailable" line whether the broker threw or the projection was
+    // cleanly unready. State-only distinctions help nobody at the terminal.
+    test("render distinguishes a probe failure from a cleanly unready projection", () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+
+      const base = {
+        ...createInitialWizardState(),
+        toolStatuses: {
+          claude: { name: "claude", installed: true, version: "1.0.0" },
+        },
+      };
+
+      const cleanlyUnready = step?.render(
+        { ...base, exactBindingProjectionReady: false },
+        { styles: false, width: 80 },
+      ) as string[];
+      expect(cleanlyUnready.join("\n")).toContain(
+        "auth projection: unavailable",
+      );
+      expect(cleanlyUnready.join("\n")).not.toContain("probe failed");
+
+      const probeFailed = step?.render(
+        {
+          ...base,
+          exactBindingProjectionReady: false,
+          exactBindingProbeError: "credential broker unavailable",
+        },
+        { styles: false, width: 80 },
+      ) as string[];
+      const rendered = probeFailed.join("\n");
+      expect(rendered).toContain("probe failed");
+      expect(rendered).toContain("credential broker unavailable");
+      // The two states must not render identically.
+      expect(rendered).not.toBe(cleanlyUnready.join("\n"));
     });
   });
 });

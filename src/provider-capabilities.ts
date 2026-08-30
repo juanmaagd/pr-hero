@@ -636,6 +636,26 @@ export function exactBindingCapabilityIssues(
       blocking: true,
     });
   }
+  // WHY: this enforces the ExactBindingCapabilityReport contract's field
+  // independence (pricingApplicability and cashCostAccountingValid are two
+  // separate facts per src/execution/contracts.ts:235-237) against ANY
+  // future producer, not only today's. The one producer that exists today
+  // (FrozenRuntimeBinding.capabilities(), src/production-runtime.ts:258-298)
+  // derives both operands from the same `mode === "metered"` ternary, so it
+  // structurally cannot emit the combination this branch guards against —
+  // that is a fact about the current producer, not a reason to remove the
+  // gate. A producer that probes cash-cost accounting independently (e.g.
+  // from broker/ledger state) would make this branch reachable.
+  if (
+    report.billing.pricingApplicability !== "required" &&
+    !report.billing.cashCostAccountingValid
+  ) {
+    issues.push({
+      code: "cash_cost_accounting_invalid",
+      message: `cash-cost accounting is not valid for binding ${label}`,
+      blocking: true,
+    });
+  }
   if (!report.isolation.codegraphPolicy) {
     issues.push({
       code: "codegraph_policy_unenforced",
@@ -682,88 +702,4 @@ export function exactBindingCapabilityStatus(
     return "degraded";
   }
   return "ready";
-}
-
-export function mergeExactBindingCapabilityReports(
-  reports: readonly ExactBindingCapabilityReport[],
-): ProviderCapabilityReport {
-  const issues = reports.flatMap((report) =>
-    exactBindingCapabilityIssues(report),
-  );
-  const primary = reports[0];
-  if (primary === undefined) {
-    return {
-      backend: "claude-code",
-      status: "blocking",
-      auth: {
-        kind: CLAUDE_CAPABILITY_STATICS.authKind,
-        projectionReady: false,
-        probe: "failed",
-      },
-      isolation: {
-        syntheticHome: false,
-        workspaceReadBroker: CLAUDE_CAPABILITY_STATICS.workspaceReadBroker,
-        codegraphPolicy: false,
-      },
-      protocol: {
-        terminalProof: CLAUDE_CAPABILITY_STATICS.terminalProof,
-        boundedEvents: false,
-        usageMode: CLAUDE_CAPABILITY_STATICS.usageMode,
-      },
-      cancellation: {
-        deadlineMs: CLAUDE_CAPABILITY_STATICS.cancellationDeadlineMs,
-        conformance: CLAUDE_CAPABILITY_STATICS.cancellationConformance,
-      },
-      billing: {
-        mode: CLAUDE_CAPABILITY_STATICS.billingMode,
-        pricingReady: false,
-      },
-      issues: [
-        {
-          code: "binding_probe_empty",
-          message: "no execution bindings were probed",
-          blocking: true,
-        },
-      ],
-    };
-  }
-  return {
-    backend: primary.backend,
-    status: exactBindingCapabilityStatus(issues),
-    ...(primary.binary.resolved
-      ? {
-          binary: {
-            absolutePath: primary.binary.absolutePath ?? "unknown",
-            sha256: primary.binary.sha256 ?? "",
-            version: "unknown",
-          },
-        }
-      : {}),
-    auth: {
-      kind: primary.auth.kind,
-      projectionReady: primary.auth.projectionReady,
-      probe: primary.auth.probe,
-    },
-    isolation: {
-      syntheticHome: primary.environment.syntheticHome,
-      workspaceReadBroker: primary.isolation.workspaceReadBroker,
-      codegraphPolicy: primary.isolation.codegraphPolicy,
-    },
-    protocol: {
-      terminalProof: primary.protocol.terminalProof,
-      boundedEvents: primary.protocol.boundedEvents,
-      usageMode: primary.protocol.usageMode,
-    },
-    cancellation: {
-      deadlineMs: CLAUDE_CAPABILITY_STATICS.cancellationDeadlineMs,
-      conformance: CLAUDE_CAPABILITY_STATICS.cancellationConformance,
-    },
-    billing: {
-      mode: primary.billing.mode,
-      pricingReady:
-        primary.billing.pricingApplicability !== "required" ||
-        primary.billing.tokenPricingAvailable,
-    },
-    issues,
-  };
 }
