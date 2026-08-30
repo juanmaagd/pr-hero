@@ -243,7 +243,10 @@ describe("OpenCodeSdkTransport §197 terminal arbitration", () => {
         { kind: "delta", text: "hi" },
         { kind: "terminal", proof: winner },
       ]),
-      polls: [{ kind: "terminal", proof: conflict }],
+      // Round 0 is taken immediately, before the first interval elapses, so
+      // the LATE conflict this test is named for is round 1. Scripting the
+      // conflict at round 0 would make it the winner and test the mirror case.
+      polls: [{ kind: "pending" }, { kind: "terminal", proof: conflict }],
     });
     const rig = makeRig({ client: handle.client });
     const pending = rig.transport.execute(makeRequest(), {
@@ -349,7 +352,10 @@ describe("OpenCodeSdkTransport §5.2 line 272 / §5.3 line 290 abort semantics",
   test("confirmed abort carries the provider proof and never claims unknown_may_continue", async () => {
     const proof = completedProof("evt-cancelled", "cancelled");
     const handle = makeClient({
-      polls: [{ kind: "terminal", proof }],
+      // Round 0 is taken immediately, before the abort is even requested; the
+      // terminal has to arrive AFTER it for this to be a confirmed abort
+      // rather than a turn that simply finished first.
+      polls: [{ kind: "pending" }, { kind: "terminal", proof }],
     });
     const rig = makeRig({ client: handle.client });
     const pending = rig.transport.execute(makeRequest(), {

@@ -170,6 +170,14 @@ export interface OpenCodeTurnState {
   // double-count. Across messages the values are added, because each step is a
   // separately billed provider call.
   readonly usage: Map<string, StepUsage>;
+  // What the bounded map above has already forgotten. The cap is a MEMORY
+  // bound and must never become an accounting one: summing only the entries
+  // still present made an evicted step's tokens vanish from every later total
+  // — and the running figure could go DOWN at the instant of eviction, which
+  // is the under-reporting direction this file calls the worst one to be wrong
+  // in. Folding the evicted value in here keeps the figure whole while the map
+  // stays bounded.
+  carriedUsage: StepUsage;
   // The most recent completion record observed for this turn. This is the
   // proof CONTENT the boundary quotes; it is never itself a boundary.
   lastProof?: ProviderTerminalProof;
@@ -198,6 +206,7 @@ export function createTurnState(): OpenCodeTurnState {
     assistantMessages: new Set(),
     parts: new Map(),
     usage: new Map(),
+    carriedUsage: {},
     boundaryReported: false,
   };
 }
@@ -211,28 +220,68 @@ function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
   }
 }
 
-// The turn's figure: every step message's LATEST snapshot, added together.
-// A field stays absent unless at least one step reported it — the mapper has
-// never invented a zero, and a fabricated 0 would be indistinguishable from a
-// real one to §8's "unavailable vs proven zero" distinction downstream.
-function turnUsage(state: OpenCodeTurnState): StepUsage {
-  let inputTokens: number | undefined;
-  let outputTokens: number | undefined;
-  let costUsd: number | undefined;
-  for (const step of state.usage.values()) {
-    if (step.inputTokens !== undefined) {
-      inputTokens = (inputTokens ?? 0) + step.inputTokens;
-    }
-    if (step.outputTokens !== undefined) {
-      outputTokens = (outputTokens ?? 0) + step.outputTokens;
-    }
-    if (step.costUsd !== undefined) costUsd = (costUsd ?? 0) + step.costUsd;
-  }
+// Field-wise addition, and every field is INDEPENDENT: a field stays absent
+// unless at least one step reported it. The mapper has never invented a zero,
+// and a fabricated 0 would be indistinguishable from a real one to §8's
+// "unavailable vs proven zero" distinction downstream.
+function addField(
+  base: number | undefined,
+  step: number | undefined,
+): number | undefined {
+  if (step === undefined) return base;
+  return (base ?? 0) + step;
+}
+
+function addUsage(base: StepUsage, step: StepUsage): StepUsage {
+  const inputTokens = addField(base.inputTokens, step.inputTokens);
+  const outputTokens = addField(base.outputTokens, step.outputTokens);
+  const costUsd = addField(base.costUsd, step.costUsd);
   return {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
   };
+}
+
+// The usage map's OWN eviction path, deliberately not the generic `remember`.
+// A generic helper shared with `state.parts` would have to grow an eviction
+// callback that exactly one of its two callers passes, and an optional hook
+// that silently changes what a caller keeps is the same hazard as an absent
+// tool key in resolveToolMap: the question gets made moot instead of answered.
+// Parts want the evicted entry GONE — an id no delta can still name — while
+// usage wants its value kept and its key forgotten. Those are different needs
+// and they get different code.
+//
+// A message evicted and then restated is counted twice, and that is the
+// accepted residual: bounded memory over an unbounded id space cannot dedupe
+// perfectly, and the leftover error is an OVER-count — spend made visible,
+// never hidden, which is the direction this transport chooses everywhere else.
+function rememberUsage(
+  state: OpenCodeTurnState,
+  messageId: string,
+  usage: StepUsage,
+): void {
+  state.usage.set(messageId, usage);
+  while (state.usage.size > MAX_TRACKED_MESSAGES) {
+    const oldest = state.usage.keys().next();
+    if (oldest.done === true) return;
+    const evicted = state.usage.get(oldest.value);
+    state.usage.delete(oldest.value);
+    // Folded BEFORE the entry is unreachable, so no path deletes a value the
+    // carried total has not already absorbed.
+    if (evicted !== undefined) {
+      state.carriedUsage = addUsage(state.carriedUsage, evicted);
+    }
+  }
+}
+
+// The turn's figure: everything the map has forgotten, plus every step
+// message's LATEST snapshot still in it. Starting from the carried total is
+// what makes the cap a memory bound rather than an accounting one.
+function turnUsage(state: OpenCodeTurnState): StepUsage {
+  let total = state.carriedUsage;
+  for (const step of state.usage.values()) total = addUsage(total, step);
+  return total;
 }
 
 function rememberId(set: Set<string>, id: string, cap: number): void {
@@ -372,16 +421,11 @@ export function mapOpenCodeEvents(
           outputTokens !== undefined ||
           costUsd !== undefined
         ) {
-          remember(
-            state.usage,
-            messageId,
-            {
-              ...(inputTokens !== undefined ? { inputTokens } : {}),
-              ...(outputTokens !== undefined ? { outputTokens } : {}),
-              ...(costUsd !== undefined ? { costUsd } : {}),
-            },
-            MAX_TRACKED_MESSAGES,
-          );
+          rememberUsage(state, messageId, {
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            ...(costUsd !== undefined ? { costUsd } : {}),
+          });
           out.push({ kind: "usage", mode: "snapshot", ...turnUsage(state) });
         }
       }

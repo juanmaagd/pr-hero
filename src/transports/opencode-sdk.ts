@@ -785,29 +785,49 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         cancelRound?.();
       }
     };
+    // Observe FIRST, delay BETWEEN rounds — never before the first one. The
+    // poll observer can only read absence as a boundary once it has seen the
+    // provider name this session through its own endpoint, and a full
+    // pollIntervalMs of blindness at the start meant a turn finishing inside
+    // that first interval was never observed working at all. Absence was then
+    // all it ever saw, absence alone proves nothing (it is also what a wrong
+    // status scope looks like), and the fallback that exists precisely for a
+    // stream EOF without `session.idle` had no path to a terminal — the
+    // attempt ran to the harness watchdog over a turn already sitting
+    // completed in session.messages().
+    //
+    // This NARROWS that window to the provider's own busy-registration
+    // latency, it does not close it: the prompt is fired-not-awaited, so a
+    // first poll can still land before the server marks the session busy. No
+    // sampling observer can do better without arming from the STREAM, and
+    // that is forbidden by design (see SessionState.observedActive) — a status
+    // scope that cannot see the session would then read step 1's completion as
+    // the turn's terminal and reopen #127, trading a loud hang for a silent
+    // truncation.
+    //
+    // The delay MOVED rather than being dropped, so every `continue` above it
+    // had to go: a `continue` that now skips the delay is a busy loop.
     const runPoll = async (): Promise<void> => {
       for (;;) {
-        if (settled) return;
-        await delay(this.pollIntervalMs);
         if (settled) return;
         const result = await pollScriptRound();
         if (settled) return;
         if (result === "round_timeout") {
           // §197: a poll timeout cannot win the slot; it is only counted.
           pollTimeouts += 1;
-          continue;
-        }
-        if (result.kind === "pending") continue;
-        if (result.kind === "failed") {
+        } else if (result.kind === "failed") {
           // §197's second observer, seeing the SAME fact the stream carries
           // when it is still alive to carry it. Settled, not counted: the
           // session cannot produce a terminal any more, so continuing to poll
           // for one would only wait out the harness watchdog.
           settle({ kind: "session_failed", detail: result.detail });
           return;
+        } else if (result.kind === "terminal") {
+          onProviderTerminalCandidate(result.proof, "poll");
+          if (settled) return;
         }
-        onProviderTerminalCandidate(result.proof, "poll");
         if (settled) return;
+        await delay(this.pollIntervalMs);
       }
     };
 
