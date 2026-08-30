@@ -432,7 +432,18 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
     }
   });
 
-  test("legacy parsers consume mixed-route artifacts without requiring new fields", () => {
+  // Forward-compatibility guard, and the ONLY instrument that can prove it.
+  // The sibling test below runs the real pipeline, which is strictly better
+  // as an end-to-end proof — but it cannot cover this, because the engine
+  // cannot yet EMIT an opencode-backed artifact (the D1-11 production gate
+  // throws first). So a hand-written literal is not a weakness here; it is
+  // the only way to assert that the legacy readers already tolerate the
+  // shape they will receive the day opencode becomes producible. Spec
+  // scenario 2 asks for exactly this ("a PR plan containing Claude and
+  // OpenCode steps ... artifacts remain readable by old consumers").
+  // Deleting this in favour of the real-artifact test silently drops
+  // backend: "opencode" from parser coverage entirely.
+  test("legacy parsers tolerate an opencode-backed route shape the engine cannot yet emit", () => {
     const head = "2222222222222222222222222222222222222222";
     const mixed = {
       pr: 42,
@@ -461,6 +472,73 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       ),
     ).toBe(1);
     expect(armOfRun(mixed)).toBe("control");
+  });
+
+  // SUGGESTION-4: this used to build its "mixed-route artifact" as a
+  // hand-written object literal, which proved only that the legacy parsers
+  // tolerate a shape a human typed. It now runs the real pipeline and reads
+  // the pipeline.json runPipeline actually wrote.
+  //
+  // The routes are two DISTINCT claude-code routes rather than
+  // claude-code + opencode, because an opencode route is not producible
+  // offline: runPipeline calls `admitRoutePlan(plan, registry)` with no
+  // options (src/pipeline.ts:1106), so mode defaults to "production" and
+  // `options.evidence` is undefined, and the D1-11 gate throws
+  // OpenCodeProductionGatedError before any artifact is written (proven by
+  // the sibling test above). The old literal was therefore asserting
+  // tolerance of a shape this engine cannot currently emit.
+  test("legacy parsers consume a real mixed-route pipeline.json without requiring new fields", async () => {
+    const env = await setupTestEnvironment();
+    try {
+      const routingConfig: RoutingConfig = {
+        mappings: [
+          {
+            logical: aliasCanonical("opus"),
+            backend: "claude-code",
+            provider: "openrouter",
+            gateway: "openrouter",
+            modelFamily: aliasModelFamily("opus"),
+            modelSnapshot: aliasModelSnapshot("opus"),
+            modelVariant: "high",
+          },
+        ],
+      };
+
+      const runner = new RecordingStepRunner();
+      await runPipeline({ ...env.input, routingConfig }, { runner });
+
+      const raw = await Bun.file(path.join(env.runDir, "pipeline.json")).text();
+      const produced = JSON.parse(raw);
+
+      // The artifact really does carry more than one distinct route.
+      const routes = produced.routePlan.steps.map(
+        (s: { route: { gateway?: string; modelVariant?: string } }) => s.route,
+      );
+      expect(routes.length).toBeGreaterThanOrEqual(2);
+      expect(
+        new Set(routes.map((r: { gateway?: string }) => r.gateway)).size,
+      ).toBeGreaterThan(1);
+      expect(
+        routes.some(
+          (r: { modelVariant?: string }) => r.modelVariant === "high",
+        ),
+      ).toBe(true);
+
+      // Legacy parsers read it without knowing any of those fields exist.
+      const head = "2222222222222222222222222222222222222222";
+      const meta = parsePipelineMeta(raw);
+      expect(meta).toEqual({ pr: 42, head_sha: head });
+      expect(
+        countAttempts(
+          [{ name: "pr-42-22222222-1", pipelineMeta: meta }],
+          42,
+          head,
+        ),
+      ).toBe(1);
+      expect(armOfRun(produced)).toBe("control");
+    } finally {
+      await env.cleanup();
+    }
   });
 
   test("OpenCode D3 debug observations record frozen route provenance", () => {
