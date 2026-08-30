@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
-  createPartIndex,
+  createTurnState,
   mapOpenCodeEvents,
   retryHintFromStatus,
   terminalProofFromAssistant,
@@ -34,7 +34,7 @@ const SESSION_ID = (
 // would drop every delta, which is exactly why the parameter is required
 // rather than optional.
 function mapAll(sessionId = SESSION_ID): OpenCodeClientEvent[] {
-  const index = createPartIndex();
+  const index = createTurnState();
   return PROBE_EVENTS.flatMap((raw) =>
     mapOpenCodeEvents(raw, sessionId, index),
   );
@@ -43,7 +43,7 @@ function mapAll(sessionId = SESSION_ID): OpenCodeClientEvent[] {
 // For the single-event assertions: an event mapped in isolation gets an index
 // that has seen nothing else.
 function mapOne(raw: unknown, sessionId = SESSION_ID): OpenCodeClientEvent[] {
-  return mapOpenCodeEvents(raw, sessionId, createPartIndex());
+  return mapOpenCodeEvents(raw, sessionId, createTurnState());
 }
 
 describe("mapOpenCodeEvent against the recorded stream", () => {
@@ -74,7 +74,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
   // door the fix had to open. Registration is gated on the part's owning
   // message having been announced as the ASSISTANT's.
   test("the recorded user part is never a channel a delta can fill", () => {
-    const index = createPartIndex();
+    const index = createTurnState();
     for (const raw of PROBE_EVENTS) mapOpenCodeEvents(raw, SESSION_ID, index);
 
     const userPart = PROBE_EVENTS.find(
@@ -113,7 +113,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
   // is oldest-first: parts are announced and streamed in order, so the oldest
   // entry is the one no delta can still name.
   test("the part index is bounded, and evicts the oldest first", () => {
-    const index = createPartIndex();
+    const index = createTurnState();
     mapOpenCodeEvents(
       {
         type: "message.updated",
@@ -153,7 +153,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
   // set is what gates part registration, so an unbounded one would grow for as
   // long as the subscription lives just as surely as the part map would.
   test("the assistant-message set is bounded too", () => {
-    const index = createPartIndex();
+    const index = createTurnState();
     for (let i = 0; i < 700; i += 1) {
       mapOpenCodeEvents(
         {
@@ -222,10 +222,12 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     expect(mapAll().some((e) => e.kind === "heartbeat")).toBe(true);
   });
 
-  test("session.idle is NOT a terminal — it carries no proof to be one", () => {
-    // Its entire payload is {sessionID}. Synthesising a proof from it would
-    // mean the transport issuing its own proof and letting it win the §197
-    // slot, which is exactly what that slot exists to prevent.
+  // #127: session.idle is the turn BOUNDARY and supplies no proof of its own.
+  // Its entire payload is {sessionID}, so synthesising one from it would mean
+  // the transport issuing its own proof and letting it win the §197 slot,
+  // which is exactly what that slot exists to prevent. Mapped in isolation —
+  // no completion record seen — it therefore yields nothing at all.
+  test("session.idle on its own carries no proof and yields nothing", () => {
     const idle = PROBE_EVENTS.find((e) => e.type === "session.idle");
     expect(Object.keys((idle as { properties: object }).properties)).toEqual([
       "sessionID",
@@ -233,35 +235,47 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     expect(mapOne(idle)).toEqual([]);
   });
 
-  test("the assistant's completed message IS the terminal", () => {
+  // #127: the completed assistant message is the PROOF, session.idle is the
+  // BOUNDARY, and the terminal is the two together. `time.completed` says a
+  // STEP ended — OpenCode writes one assistant message per agentic step — so
+  // reading it as the turn's terminal settled the attempt on step 1.
+  test("the turn's terminal quotes the last completed assistant message", () => {
     const terminals = mapAll().filter((e) => e.kind === "terminal");
-    // The recorded run restated the completed message twice. That is fine and
-    // must stay fine: §197's compare-and-set accepts an identical repeat and
-    // only conflicts on a DIFFERENT proof, so the mapping does not dedupe.
-    expect(terminals.length).toBeGreaterThanOrEqual(1);
-    for (const terminal of terminals) {
-      if (terminal.kind !== "terminal") throw new Error("unreachable");
-      expect(terminal.proof.eventId).toBe(ASSISTANT.id as string);
-      expect(terminal.proof.providerStatus).toBe("completed");
-    }
+    // ONE, from the whole replay. The recorded run restates the completed
+    // message twice (indices 21 and 22) and reaches idle once, so a mapping
+    // that emitted per completion would emit two.
+    expect(terminals.length).toBe(1);
+    const terminal = terminals[0];
+    if (terminal?.kind !== "terminal") throw new Error("unreachable");
+    expect(terminal.proof.eventId).toBe(ASSISTANT.id as string);
+    expect(terminal.proof.providerStatus).toBe("completed");
   });
 
-  // Ordering is load-bearing, not incidental: the completed assistant message
-  // carries BOTH the real usage and the terminal proof, and the transport
-  // settles on the terminal. Emitting the terminal first would drop the only
-  // accurate usage figure the attempt ever gets.
-  test("usage is emitted before the terminal it shares an event with", () => {
-    const completed = PROBE_EVENTS.filter(
-      (e) =>
-        e.type === "message.updated" &&
-        (e.properties as { info?: { time?: { completed?: number } } })?.info
-          ?.time?.completed !== undefined,
-    );
-    expect(completed.length).toBeGreaterThan(0);
-    for (const raw of completed) {
-      const mapped = mapOne(raw);
-      expect(mapped.map((e) => e.kind)).toEqual(["usage", "terminal"]);
-    }
+  // Ordering is load-bearing, not incidental: the transport SETTLES on the
+  // terminal, so a terminal that reached the slot before the turn's usage was
+  // banked would drop the only accurate figure the attempt ever gets. Since
+  // #127 the two no longer share an event at all — usage rides every step's
+  // message, the terminal rides the boundary that follows them — so the
+  // ordering holds by construction. This pins that it really does.
+  test("every usage event precedes the turn's terminal", () => {
+    const kinds = mapAll()
+      .map((e) => e.kind)
+      .filter((kind) => kind === "usage" || kind === "terminal");
+
+    expect(kinds.filter((kind) => kind === "usage").length).toBeGreaterThan(0);
+    expect(kinds.lastIndexOf("usage")).toBeLessThan(kinds.indexOf("terminal"));
+  });
+
+  // The turn's usage is the SUM of its steps', and it is summed per MESSAGE
+  // ID: the recorded run restates the same completed message twice, byte for
+  // byte, which a per-event sum would double-count into 48,024 input tokens.
+  test("a restated message does not double-count its own usage", () => {
+    const usage = mapAll().filter((e) => e.kind === "usage");
+    const last = usage[usage.length - 1];
+    if (last?.kind !== "usage") throw new Error("unreachable");
+
+    expect(last.inputTokens).toBe(24_012);
+    expect(last.outputTokens).toBe(6);
   });
 });
 

@@ -107,6 +107,12 @@ function fakeSdk(
             : { data: { info: {}, parts: [] } };
         },
         messages: async () => ({ data: [] }),
+        // #127: a refused prompt never makes the session work, so it is never
+        // listed by GET /session/status. The empty map is the honest shape,
+        // and it is also what keeps this test on the failure path: absence
+        // never having seen the session busy is not a boundary, so the poll
+        // falls through to state.failure — the fact this file is about.
+        status: async () => ({ data: {} }),
         abort: async () => {
           aborts += 1;
           return options.abortError !== undefined

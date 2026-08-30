@@ -510,6 +510,10 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
               return { data: {} };
             },
             messages: async () => ({ data: {} }),
+            // #127: the poll observer's turn boundary, GET /session/status.
+            // An empty map is a session opencode is not working on — it omits
+            // an idle session rather than reporting {"type":"idle"}.
+            status: async () => ({ data: {} }),
             abort: async () => ({ data: {} }),
           },
           event: {

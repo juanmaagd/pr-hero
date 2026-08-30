@@ -53,6 +53,7 @@ interface FakeSdk {
   emit: (event: unknown) => void;
   endStream: () => void;
   setMessages: (messages: unknown[]) => void;
+  setStatus: (status: Record<string, unknown> | undefined) => void;
 }
 
 function fakeSdk(
@@ -70,6 +71,11 @@ function fakeSdk(
   let subscribedAt = 0;
   let promptedAt = 0;
   let messages: unknown[] = [];
+  // #127: GET /session/status, the poll observer's turn boundary. Measured
+  // against opencode 1.18.23: a working session is listed {"type":"busy"} and
+  // one that is not working is simply OMITTED — an idle session is never
+  // reported as {"type":"idle"}.
+  let statuses: Record<string, unknown> = {};
   const queue: unknown[] = [];
   let notify: (() => void) | undefined;
   let ended = false;
@@ -93,6 +99,7 @@ function fakeSdk(
           return { data: {} };
         },
         messages: async () => ({ data: messages }),
+        status: async () => ({ data: statuses }),
         abort: async () => {
           aborts += 1;
           return { data: {} };
@@ -140,6 +147,9 @@ function fakeSdk(
     },
     setMessages: (m) => {
       messages = m;
+    },
+    setStatus: (status: Record<string, unknown> | undefined) => {
+      statuses = status === undefined ? {} : { [SESSION_ID]: status };
     },
   };
 }
@@ -488,11 +498,15 @@ describe("createOpenCodeClient", () => {
     expect(seen).toEqual(["early"]);
   });
 
+  // #127: a completed assistant message is a completed STEP. The terminal
+  // arrives at the turn boundary — session.idle — and quotes the last
+  // completion record seen before it.
   test("the stream stops at the terminal and yields the provider's proof", async () => {
     const fake = fakeSdk();
     const client = rig(fake);
     const session = await client.createSession(INPUT);
     fake.emit(messageEvent());
+    fake.emit({ type: "session.idle", properties: { sessionID: SESSION_ID } });
     fake.endStream();
 
     const kinds: string[] = [];
@@ -507,24 +521,37 @@ describe("createOpenCodeClient", () => {
     expect(kinds).toContain("terminal");
   });
 
-  test("poll reports pending until an assistant message completes", async () => {
+  // #127. The poll observer used to scan session.messages() for the last
+  // completed assistant message and call that the turn's terminal. At any poll
+  // instant "last completed" is step 1 until step 2 exists, so it agreed with
+  // the stream observer for a defective reason — two observers of one wrong
+  // fact are not two observers, which is why §197 could not catch this.
+  //
+  // Its boundary is now GET /session/status: a different endpoint, queried
+  // directly, and the only genuinely independent thing available to a caller
+  // with no event stream.
+  test("poll reports pending while the session is still working", async () => {
     const fake = fakeSdk();
     const client = rig(fake);
     const session = await client.createSession(INPUT);
 
+    fake.setStatus({ type: "busy" });
     fake.setMessages([{ info: { role: "user" }, parts: [] }]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
 
-    fake.setMessages([
-      { info: { role: "user" }, parts: [] },
-      { info: { ...ASSISTANT, time: { created: 1 } }, parts: [] },
-    ]);
-    expect((await client.pollStatus(session)).kind).toBe("pending");
-
+    // A completed step, mid-turn. THE defect: this used to be a terminal.
     fake.setMessages([
       { info: { role: "user" }, parts: [] },
       { info: ASSISTANT, parts: [] },
     ]);
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    // A session in backoff is neither done nor idle: more steps are coming.
+    fake.setStatus({ type: "retry", attempt: 2, message: "429", next: 1 });
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    // The work stopped, so opencode drops the session from the status map.
+    fake.setStatus(undefined);
     const done = await client.pollStatus(session);
     expect(done.kind).toBe("terminal");
     if (done.kind !== "terminal") throw new Error("unreachable");
@@ -532,6 +559,44 @@ describe("createOpenCodeClient", () => {
     // observers of one fact, not two facts that happen to look alike — so
     // both paths run through terminalProofFromAssistant.
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
+  });
+
+  // Absence is the boundary, but it is ALSO what a session this call cannot
+  // see looks like. Measured against opencode 1.18.23: a session created with
+  // no directory registers under the SERVER's cwd, and
+  // GET /session/status?directory=<step cwd> returns {} for it WHILE IT IS
+  // BUSY. An absence that has never been contradicted proves nothing, so it
+  // only counts once this observer has seen the provider name this session.
+  test("poll never reads an unseen session's absence as a finished turn", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus(undefined);
+    fake.setMessages([
+      { info: { role: "user" }, parts: [] },
+      { info: ASSISTANT, parts: [] },
+    ]);
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+  });
+
+  // The explicit arm of SessionStatus. This build omits an idle session rather
+  // than sending it, but the union declares {type:"idle"} and a build that
+  // does send it names the session — which both proves visibility and ends the
+  // turn in one observation.
+  test("an explicit idle status is a boundary on its own", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({ type: "idle" });
+    fake.setMessages([
+      { info: { role: "user" }, parts: [] },
+      { info: ASSISTANT, parts: [] },
+    ]);
+
+    expect((await client.pollStatus(session)).kind).toBe("terminal");
   });
 
   // pr-hero F002/F003 on this PR, both BLOCKER, and both right — they are the
