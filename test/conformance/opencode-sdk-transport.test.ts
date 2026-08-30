@@ -124,13 +124,17 @@ function makeClient(options: {
   polls?: Array<OpenCodePollResult>;
   hangRounds?: number[];
   createError?: Error;
+  toolMap?: Readonly<Record<string, boolean>>;
 }): ClientHandle {
   let aborts = 0;
   let round = 0;
   const client: OpenCodeClientLike = {
     createSession: async () => {
       if (options.createError) throw options.createError;
-      return { id: "oc-sess-1" };
+      return {
+        id: "oc-sess-1",
+        ...(options.toolMap !== undefined ? { toolMap: options.toolMap } : {}),
+      };
     },
     async *streamEvents() {
       if (options.stream instanceof Error) throw options.stream;
@@ -996,5 +1000,87 @@ describe("OpenCodeSdkTransport classification witness (F003)", () => {
         }),
       ).toBe("auth_invalid");
     });
+  });
+});
+
+// Issue #122. Nothing in the artifacts recorded the tool allow map that was
+// actually sent, so the only evidence the map was inert came from reading a
+// hunter narrate tool use it never performed. #116's ledger requires the
+// tools/MCP axis be provable by READING artifacts, and `allowMapEnforced:
+// true` in the capability report is a hardcoded constant, not an observation.
+describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
+  const TOOL_MAP = {
+    read: true,
+    grep: true,
+    glob: true,
+    bash: false,
+    write: false,
+    edit: false,
+  };
+
+  test("stamps the resolved map into stderrTail, once, with sorted keys", async () => {
+    const handle = makeClient({
+      toolMap: TOOL_MAP,
+      stream: streamOf([{ kind: "terminal", proof: completedProof("evt-1") }]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    const line =
+      "[pr-hero] opencode sdk: resolved tool map: " +
+      "bash=false,edit=false,glob=true,grep=true,read=true,write=false";
+    expect(outcome.stderrTail).toContain(line);
+    expect(outcome.stderrTail.split(line)).toHaveLength(2);
+  });
+
+  // The classifier's witness IS stderrTail, and its comment already worries
+  // about polluting that witness. OpenCode's ids must not read as provider
+  // diagnostics: "invalid" alone must not match `invalid api key`, and nothing
+  // in the surface may look like a rate limit or a socket error.
+  test("the map line never becomes a failure classification by itself", () => {
+    const transport = new OpenCodeSdkTransport({
+      client: makeClient({}).client,
+    });
+
+    expect(
+      transport.classifyFailure({
+        completion: "failed",
+        protocolIntegrity: "unverified",
+        finalText: "",
+        usage: {
+          wallMs: 1,
+          tokens: { inputUncached: 1 },
+          completeness: "complete",
+          billingMode: "subscription",
+          costSource: "provider",
+          cashCostUsd: 0,
+        },
+        stderrTail:
+          "[pr-hero] opencode sdk: resolved tool map: " +
+          "apply_patch=false,bash=false,edit=false,glob=true,grep=true," +
+          "invalid=false,question=false,read=true,skill=false,task=false," +
+          "todowrite=false,webfetch=false,websearch=false,write=false",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("a client that reports no map adds no line", async () => {
+    const handle = makeClient({
+      stream: streamOf([{ kind: "terminal", proof: completedProof("evt-1") }]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.stderrTail).not.toContain("resolved tool map");
   });
 });

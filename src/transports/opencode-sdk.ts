@@ -77,6 +77,12 @@ const DEFAULT_POLL_ROUND_MS = 2000;
 
 export interface OpenCodeClientSession {
   readonly id: string;
+  // The tool allow map the client actually sent, resolved against the
+  // provider's enumerated surface. Optional because `OpenCodeClientLike` is an
+  // injectable contract and a client that cannot express a tool gate has
+  // nothing to report — a client that CAN must report it, so the enforcement
+  // is provable from the attempt's artifacts instead of assumed from source.
+  readonly toolMap?: Readonly<Record<string, boolean>>;
 }
 
 export interface OpenCodeCreateSessionInput {
@@ -494,6 +500,24 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         usage: noSessionUsage(Date.now() - startedWall),
         stderrTail: `[pr-hero] opencode sdk: session creation failed: ${errorMessage(error)}`,
       };
+    }
+
+    // ONE line per attempt, on the same channel as every other
+    // `[pr-hero] opencode sdk:` diagnostic, so the tools/MCP axis is provable
+    // by reading the artifact rather than trusting `allowMapEnforced: true`.
+    // Keys are sorted so the line is byte-stable across runs.
+    //
+    // Safe as a classification witness: none of OpenCode's ids trips a pattern
+    // in classifyFailure — "invalid" alone does not match `invalid api key`,
+    // and nothing here looks like a rate limit or a socket error. Adding an id
+    // that does would silently misclassify every attempt, so check before
+    // widening this line.
+    if (session.toolMap !== undefined) {
+      const rendered = Object.keys(session.toolMap)
+        .sort()
+        .map((id) => `${id}=${session.toolMap?.[id] === true}`)
+        .join(",");
+      notes.push(`[pr-hero] opencode sdk: resolved tool map: ${rendered}`);
     }
 
     // ---- mutable attempt state --------------------------------------------

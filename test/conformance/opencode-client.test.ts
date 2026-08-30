@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import type {
+  AsyncEventSink,
+  ProviderEvent,
+  TransportRequest,
+} from "../../src/execution/contracts";
 import {
   createOpenCodeClient,
   type OpenCodeSdkLike,
 } from "../../src/transports/opencode-client";
+import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
 const ASSISTANT = JSON.parse(
@@ -13,6 +19,29 @@ const ASSISTANT = JSON.parse(
 
 const SESSION_ID = "ses_test";
 
+// The REAL tool surface, read live from `client.tool.ids()` against opencode
+// 1.18.23 while diagnosing issue #122. It is transcribed rather than derived:
+// the SDK types `tools` as an OPEN `{[key: string]: boolean}` map and
+// enumerate nothing, so this list is the only record of what the provider
+// actually offers — and of the fact that NONE of it is spelled the way the
+// engine's canonical (Claude Code namespace) tool names are.
+const OPENCODE_TOOL_IDS = [
+  "invalid",
+  "question",
+  "bash",
+  "read",
+  "glob",
+  "grep",
+  "edit",
+  "write",
+  "task",
+  "webfetch",
+  "todowrite",
+  "websearch",
+  "skill",
+  "apply_patch",
+] as const;
+
 interface FakeSdk {
   sdk: OpenCodeSdkLike;
   iterators: () => number;
@@ -20,13 +49,22 @@ interface FakeSdk {
   abortCalls: () => number;
   subscribedAt: () => number;
   promptedAt: () => number;
+  toolIdsCalls: () => Array<Record<string, unknown> | undefined>;
   emit: (event: unknown) => void;
   endStream: () => void;
   setMessages: (messages: unknown[]) => void;
 }
 
-function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
+function fakeSdk(
+  options: {
+    promptHangs?: boolean;
+    // `undefined` means "the live surface". An Error rejects the call; an
+    // array (including an empty one) resolves with exactly those ids.
+    toolIds?: readonly string[] | Error;
+  } = {},
+): FakeSdk {
   const prompts: Array<Record<string, unknown>> = [];
+  const toolIdsCalls: Array<Record<string, unknown> | undefined> = [];
   let aborts = 0;
   let order = 0;
   let subscribedAt = 0;
@@ -39,6 +77,13 @@ function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
   let iterators = 0;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
+      tool: {
+        ids: async (opts) => {
+          toolIdsCalls.push(opts as Record<string, unknown> | undefined);
+          if (options.toolIds instanceof Error) throw options.toolIds;
+          return { data: [...(options.toolIds ?? OPENCODE_TOOL_IDS)] };
+        },
+      },
       session: {
         create: async () => ({ data: { id: SESSION_ID } }),
         prompt: async (opts) => {
@@ -82,6 +127,7 @@ function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
     abortCalls: () => aborts,
     subscribedAt: () => subscribedAt,
     promptedAt: () => promptedAt,
+    toolIdsCalls: () => toolIdsCalls,
     emit: (event) => {
       queue.push(event);
       notify?.();
@@ -111,11 +157,38 @@ function rig(fake: FakeSdk) {
   });
 }
 
+// The CANONICAL tool names, verbatim from `BINDING_ALLOWED_TOOLS` and from
+// every bundled hunter prompt's `tools:` line. They are Claude Code's
+// namespace and OpenCode has never understood a single one of them; this
+// fixture used to read ["read", "grep"], a mock shaped to the same guess that
+// shipped issue #121, which is why 2818 offline tests stayed green while the
+// live map denied nothing and allowed nothing.
 const INPUT = {
   cwd: "/tmp/work",
   userPrompt: "review this",
   systemPromptPath: "/tmp/system.md",
-  tools: ["read", "grep"],
+  tools: ["Read", "Grep", "Glob", "mcp__codegraph__codegraph_explore"],
+};
+
+// What the transport must send for that input against the live surface: EVERY
+// enumerated id present, the three translatable allows true, everything else
+// explicitly false. No key is absent, so "what does OpenCode do with an absent
+// key" stops being a question this transport's safety depends on.
+const EXPECTED_TOOL_MAP = {
+  invalid: false,
+  question: false,
+  bash: false,
+  read: true,
+  glob: true,
+  grep: true,
+  edit: false,
+  write: false,
+  task: false,
+  webfetch: false,
+  todowrite: false,
+  websearch: false,
+  skill: false,
+  apply_patch: false,
 };
 
 function messageEvent(overrides: Record<string, unknown> = {}) {
@@ -169,9 +242,206 @@ describe("createOpenCodeClient", () => {
     // §6: the tool map is an ALLOWLIST expressed as explicit booleans. A tool
     // the spec did not name must be false, not merely absent — "absent" is a
     // request for the provider's default, and the default is not ours.
-    expect(body.tools).toEqual({ read: true, grep: true, bash: false });
+    expect(body.tools).toEqual(EXPECTED_TOOL_MAP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #122. The map handed to session.prompt was built by writing the
+// engine's CANONICAL tool names straight into it — Claude Code's namespace,
+// which OpenCode has never spoken. `tools` is an OPEN map, so unknown keys are
+// accepted and silently ignored: no error, no warning, nothing in the
+// response. Of the five keys sent, only "bash" landed, and only by the
+// coincidence that OpenCode happens to spell its shell tool that way.
+//
+// Two failures in one. The allowlist allowed nothing — the #116 smoke's
+// hunters ran ~10s each emitting pure narration ("Inspecting codegraph and
+// relevant consumers") about tool use they never performed. And the denylist
+// denied nothing beyond bash, leaving write/edit/apply_patch/task/webfetch/
+// websearch as ABSENT keys asking for whatever OpenCode's default is. That
+// second half is what makes the report a lie rather than a gap:
+// production-runtime.ts hardcodes `allowMapOnly: true` and reports it as
+// `allowMapEnforced` into the capability report the D1-11 admission gate
+// trusts. An isolation control that is silently a no-op while the report
+// calls it enforced is worse than an absent one (CLAUDE.md rule 4).
+// ---------------------------------------------------------------------------
+// The `tools` map as the provider received it. Reads the recorded prompt call
+// rather than any client-side state, because "what we intended to send" is the
+// claim that was already false.
+function sentTools(fake: FakeSdk): Record<string, boolean> {
+  const call = fake.promptCalls()[0];
+  if (call === undefined) throw new Error("no prompt was sent");
+  return (call.body as Record<string, unknown>).tools as Record<
+    string,
+    boolean
+  >;
+}
+
+describe("createOpenCodeClient tool-surface translation (#122)", () => {
+  test("enumerates the provider surface and denies every id it was not asked to allow", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+
+    expect(sentTools(fake)).toEqual(EXPECTED_TOOL_MAP);
+
+    // Enumeration is not optional and not cached from a hardcoded list: the
+    // surface is READ from the provider, scoped to the same directory the
+    // prompt runs in.
+    expect(fake.toolIdsCalls()).toHaveLength(1);
+    expect(fake.toolIdsCalls()[0]).toEqual({
+      query: { directory: "/tmp/work" },
+    });
   });
 
+  test("the sent map carries no key from the engine's canonical namespace", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+
+    const keys = Object.keys(sentTools(fake));
+
+    // The exact bug: these were sent verbatim and silently discarded.
+    expect(keys).not.toContain("Read");
+    expect(keys).not.toContain("Grep");
+    expect(keys).not.toContain("Glob");
+    expect(keys.filter((key) => key.startsWith("mcp__"))).toEqual([]);
+    // Nothing outside the enumerated surface reaches the provider at all.
+    expect(keys.sort()).toEqual([...OPENCODE_TOOL_IDS].sort());
+  });
+
+  test("every write-capable and escape-hatch tool is explicitly false, by name", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+
+    const tools = sentTools(fake);
+    for (const denied of [
+      "write",
+      "edit",
+      "apply_patch",
+      "task",
+      "bash",
+      "webfetch",
+      "websearch",
+    ]) {
+      expect(tools[denied]).toBe(false);
+    }
+  });
+
+  // PARITY, not construction. `mcp__codegraph__codegraph_explore` maps onto no
+  // OpenCode built-in, and that is the correct outcome: on claude-code a repo
+  // with no codegraph index runs its hunters with the other three tools and an
+  // empty mcp.json. Mirroring that means the MCP name is simply absent from a
+  // built-in map and the run proceeds. MCP expressibility on OpenCode is a
+  // separate open question (#122 q2) — opencode-sdk.ts threads an
+  // mcpConfigPath into the request that this client never applies.
+  test("an unmappable canonical name is dropped, not invented and not fatal", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    expect(session.id).toBe(SESSION_ID);
+    expect(Object.values(sentTools(fake)).filter(Boolean)).toHaveLength(3);
+  });
+
+  test("an allow the provider does not offer never appears in the map", async () => {
+    // A surface WITHOUT `grep` — a plugin build, an older opencode, a future
+    // rename. The allowlist may only ever intersect the real surface;
+    // inventing a key would be the absent-key hazard in reverse.
+    const fake = fakeSdk({ toolIds: ["read", "glob", "bash", "write"] });
+    const client = rig(fake);
+    await client.createSession(INPUT);
+
+    expect(sentTools(fake)).toEqual({
+      read: true,
+      glob: true,
+      bash: false,
+      write: false,
+    });
+  });
+
+  test("the resolved map is recorded on the session for the attempt's diagnostics", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    // #116's ledger requires the tools/MCP axis be provable by READING
+    // artifacts, not assumed from source. The session carries the map the
+    // transport actually sent so the attempt can stamp it into stderrTail.
+    expect(session.toolMap).toEqual(EXPECTED_TOOL_MAP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fail closed. A session whose tool surface cannot be established is the
+// runtime being unavailable — there is no partial map and no hardcoded
+// fallback, because either one would re-create the exact "we believe this is
+// enforced" claim the defect was made of.
+// ---------------------------------------------------------------------------
+describe("createOpenCodeClient tool-surface failure (#122)", () => {
+  test("a rejecting tool.ids aborts the session before any prompt is sent", async () => {
+    const fake = fakeSdk({ toolIds: new Error("boom") });
+    const client = rig(fake);
+
+    await expect(client.createSession(INPUT)).rejects.toThrow(/tool/i);
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  test("an empty surface is refused rather than treated as 'deny nothing'", async () => {
+    const fake = fakeSdk({ toolIds: [] });
+    const client = rig(fake);
+
+    await expect(client.createSession(INPUT)).rejects.toThrow(/tool/i);
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  test("the transport classifies an unestablishable surface as runtime_unavailable", async () => {
+    const fake = fakeSdk({ toolIds: new Error("boom") });
+    const transport = new OpenCodeSdkTransport({ client: rig(fake) });
+    const sink: AsyncEventSink = {
+      push: async (_event: ProviderEvent) => "accepted" as const,
+      close: async () => {},
+    };
+    const request: TransportRequest = {
+      sessionId: "oc-sess-122",
+      attempt: 1,
+      route: {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt",
+        modelSnapshot: "gpt-test-snapshot",
+      },
+      executionModel: "gpt-test-snapshot",
+      systemPromptPath: "/tmp/system.md",
+      systemPromptSha256: "deadbeef",
+      userPrompt: "review this",
+      cwd: "/tmp/work",
+      tools: INPUT.tools,
+      isolation: {
+        credentialProjectionId: "proj-1",
+        env: {},
+        syntheticHome: "/tmp/home",
+        syntheticConfigHome: "/tmp/config",
+        syntheticTmp: "/tmp/tmp",
+        verifiedBinaryPath: "/usr/bin/true",
+      },
+    };
+
+    const outcome = await transport.execute(request, {
+      signal: new AbortController().signal,
+      events: sink,
+    });
+
+    expect(outcome.completion).toBe("failed");
+    // Terminal, and NOT a format_violation: the model never saw the attempt,
+    // so spending the format-reminder budget on it is the issue-#121 mistake.
+    expect(transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+});
+
+describe("createOpenCodeClient", () => {
   test("buffered events survive the gap between createSession and streamEvents", async () => {
     const fake = fakeSdk();
     const client = rig(fake);

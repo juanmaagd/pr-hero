@@ -47,12 +47,12 @@ function moduleConformance(
   return module;
 }
 
-// If this stops compiling, one of session.{create,prompt,messages,abort} or
-// event.subscribe changed shape. The declared results must keep BOTH arms of
-// the SDK's `RequestResult` union: with the default `ThrowOnError = false` an
-// API error returns `{ data: undefined, error }`, and an interface that
-// declares only `{ data: T }` erases that arm and turns a handled API error
-// into a TypeError on `.data`.
+// If this stops compiling, one of session.{create,prompt,messages,abort},
+// event.subscribe or tool.ids changed shape. The declared results must keep
+// BOTH arms of the SDK's `RequestResult` union: with the default
+// `ThrowOnError = false` an API error returns `{ data: undefined, error }`,
+// and an interface that declares only `{ data: T }` erases that arm and turns
+// a handled API error into a TypeError on `.data`.
 function clientConformance(client: OpencodeClient): OpenCodeSdkClientApi {
   return client;
 }
@@ -107,5 +107,29 @@ describe("the installed @opencode-ai/sdk", () => {
     expect(typeof module.createOpencodeClient).toBe("function");
     expect(module.createClient).toBeUndefined();
     expect(() => assertOpenCodeSdk(module)).not.toThrow();
+  });
+
+  // Issue #122's half of the same drift-kill. The transport now READS the
+  // provider's tool surface instead of writing its own canonical names into an
+  // open map and hoping — so `tool.ids` is load-bearing, and it is served by
+  // `GET /experimental/tool/ids`. An experimental-prefixed endpoint is exactly
+  // the kind that gets renamed, and a rename would take the enumeration with
+  // it: no enumeration means no proven denial, while production-runtime.ts
+  // keeps reporting `allowMapEnforced: true` to the admission gate.
+  //
+  // Constructing the client is offline — the generated hey-api client dials
+  // nothing until a call is made — so the unroutable baseUrl is never reached.
+  test("really exposes tool.ids(), the enumeration the allow map is built from", async () => {
+    const module = (await import("@opencode-ai/sdk")) as unknown as {
+      createOpencodeClient: (config: { baseUrl: string }) => {
+        tool?: { ids?: unknown };
+      };
+    };
+
+    const client = module.createOpencodeClient({
+      baseUrl: "http://127.0.0.1:1",
+    });
+
+    expect(typeof client.tool?.ids).toBe("function");
   });
 });

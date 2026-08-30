@@ -495,6 +495,12 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
 
       const loadSdk = async (): Promise<OpenCodeSdkLike> => ({
         createOpencodeClient: () => ({
+          // #122: the tool surface is READ from the provider, so a fake that
+          // cannot report one cannot open a session at all. That is the point
+          // — enumerating is the only way "denied" means anything.
+          tool: {
+            ids: async () => ({ data: ["read", "grep", "glob", "bash"] }),
+          },
           session: {
             create: async () => ({ data: { id: "oc-sess-1" } }),
             prompt: async (options: {

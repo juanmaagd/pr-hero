@@ -268,6 +268,14 @@ export interface OpenCodeSdkClientApi {
   readonly event: {
     subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
   };
+  // `GET /experimental/tool/ids` — "List all tool IDs (including built-in and
+  // dynamically registered)". REQUIRED, never optional: an optional member
+  // lets a fake skip the surface silently, which is the shape of issue #121.
+  // The endpoint is experimental-prefixed, so pinning it here (and in the
+  // surface conformance test) is what keeps a rename from going unnoticed.
+  readonly tool: {
+    ids(options?: unknown): Promise<OpenCodeSdkResult<readonly string[]>>;
+  };
 }
 
 export interface OpenCodeSdkLike {
@@ -343,6 +351,65 @@ export interface CreateOpenCodeClientOptions {
 }
 
 const DEFAULT_DENY_FLOOR = ["bash"] as const;
+
+// The engine's canonical tool names are Claude Code's namespace
+// (`BINDING_ALLOWED_TOOLS`, and the `tools:` line of every bundled prompt).
+// They stay that way: the gate is backend-neutral and the prompt set is shared
+// across backends, so the translation into a provider's vocabulary belongs
+// HERE and nowhere else.
+//
+// Issue #122: this table did not exist, and the canonical names were written
+// into the prompt's `tools` map verbatim. That map is an OPEN
+// `{[key: string]: boolean}`, so OpenCode accepted "Read"/"Grep"/"Glob"/
+// "mcp__codegraph__codegraph_explore" and silently ignored all four — no
+// error, no warning, nothing in the response. The allowlist allowed nothing
+// and the denylist denied only "bash", which landed by pure naming
+// coincidence.
+//
+// `mcp__codegraph__codegraph_explore` is deliberately absent. It maps onto no
+// OpenCode built-in, and dropping it is PARITY, not a gap: on claude-code a
+// repo without a codegraph index runs its hunters with the other three tools
+// and an empty mcp.json. MCP expressibility on OpenCode is a separate open
+// question — opencode-sdk.ts threads an `mcpConfigPath` into the request that
+// this client never applies to the session.
+const CANONICAL_TO_OPENCODE_TOOL: Readonly<Record<string, string>> = {
+  Read: "read",
+  Grep: "grep",
+  Glob: "glob",
+};
+
+// ENUMERATE, never trust a default. Every id the provider reports is written
+// into the map explicitly — the allows true, everything else false — so no key
+// is ever absent. An absent key asks for the provider's default, and
+// opencode.ai/docs/tools says "By default, all tools are enabled": leaving
+// `write`, `edit`, `apply_patch` or `task` absent hands the model exactly the
+// tools §6 exists to withhold. Enumerating makes the question moot rather than
+// answering it, which is the only durable form of the fix.
+function resolveToolMap(
+  surface: readonly string[],
+  canonicalTools: readonly string[],
+  denyFloor: readonly string[],
+): Record<string, boolean> {
+  const tools: Record<string, boolean> = {};
+  for (const id of surface) tools[id] = false;
+  // Defense in depth. Ordering is unchanged from before the fix — the floor is
+  // written first and a named allow may still flip it (`denyFloor`'s contract
+  // says so) — but no canonical name in the table above maps onto a floor id,
+  // so the floor cannot be lifted by a prompt's `tools:` line.
+  for (const tool of denyFloor) tools[tool] = false;
+  for (const canonical of canonicalTools) {
+    const id = CANONICAL_TO_OPENCODE_TOOL[canonical];
+    // Two separate drops, both intentional. An unmapped canonical name (the
+    // codegraph MCP tool) has no built-in to name; an id the provider did not
+    // report is not on this build's surface. Writing either one in would be
+    // the absent-key hazard in reverse — a key we invented, meaning whatever
+    // the provider decides it means.
+    if (id === undefined) continue;
+    if (!(id in tools)) continue;
+    tools[id] = true;
+  }
+  return tools;
+}
 
 interface SessionState {
   readonly api: OpenCodeSdkClientApi;
@@ -441,6 +508,44 @@ export function createOpenCodeClient(
       let sessionId: string | undefined;
       establishing += 1;
       try {
+        // FIRST, and inside the try on purpose. The tool surface is the one
+        // thing this call must establish before anything else exists: a
+        // session whose isolation cannot be expressed is the runtime being
+        // unavailable, and failing here unwinds through the `finally` below
+        // that releases the shared server (F004's hazard, already paid for).
+        // There is deliberately NO hardcoded fallback list and no partial
+        // map — either one would rebuild the "we believe this is enforced"
+        // claim the defect was made of, while production-runtime.ts keeps
+        // reporting `allowMapEnforced: true` to the admission gate.
+        let reported: readonly string[];
+        try {
+          reported = unwrap(
+            await api.tool.ids({ query: { directory: input.cwd } }),
+            "tool.ids",
+          );
+        } catch (error) {
+          // Rethrown with context, never swallowed. The provider's own text is
+          // APPENDED rather than replaced: classifyFailure checks its
+          // auth/rate-limit/network patterns before the session-creation
+          // marker, so "fetch failed" here still keeps its transient retry
+          // instead of being flattened into a terminal ruling.
+          throw new Error(
+            "opencode could not report its tool surface, so the allow map " +
+              `cannot be enumerated: ${(error as Error).message}`,
+          );
+        }
+        const surface = (Array.isArray(reported) ? reported : []).filter(
+          (id): id is string => typeof id === "string" && id.length > 0,
+        );
+        if (surface.length === 0) {
+          throw new Error(
+            "opencode reported an empty tool surface, so the allow map cannot " +
+              "be enumerated and no tool can be proven denied; refusing to " +
+              "open a session whose isolation is unverifiable",
+          );
+        }
+        const tools = resolveToolMap(surface, input.tools, denyFloor);
+
         const created = await api.session.create({
           body: { title: "pr-hero review step" },
         });
@@ -478,10 +583,6 @@ export function createOpenCodeClient(
             state.wake = undefined;
           }
         })();
-
-        const tools: Record<string, boolean> = {};
-        for (const tool of denyFloor) tools[tool] = false;
-        for (const tool of input.tools) tools[tool] = true;
 
         // FIRED, never awaited. session.prompt blocks until the turn finishes
         // — the probe measured 4.5s — and returns the completed message. The
@@ -530,7 +631,12 @@ export function createOpenCodeClient(
           }
         })();
 
-        return { id: sessionId };
+        // The map travels with the session so the attempt can stamp what was
+        // ACTUALLY sent into its stderr notes. #116's ledger requires the
+        // tools/MCP axis be provable by reading artifacts; before this,
+        // nothing recorded the map at all and the only evidence of the defect
+        // was a hunter narrating tool use it never performed.
+        return { id: sessionId, toolMap: Object.freeze(tools) };
       } catch (error) {
         // Unwind whatever this call managed to create. Without this the
         // caller gets an exception and no id, so nothing can be released by
