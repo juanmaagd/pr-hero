@@ -85,6 +85,11 @@ export interface ProductionRuntime {
   readonly registry: TransportRegistry;
   readonly bindings: ReadonlyMap<string, RuntimeBinding>;
   readonly admitted: AdmittedRoutePlanResult;
+  // The D1-11 evidence this runtime was admitted with, echoed back verbatim.
+  // admitRoutePlan reads evidence ONLY from its own options and never from the
+  // registry, so a later admission (the pipeline's pre-confirm gate) has no way
+  // to recover it from `registry` alone — it has to be carried.
+  readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   dispose(): Promise<void>;
 }
 
@@ -543,20 +548,29 @@ export async function collectDoctorExactBindingReports(input: {
   if ("error" in authority) {
     throw new Error(authority.error);
   }
+  // WHY the conformance mode is unconditional, and why `mode` is repeated on
+  // BOTH the probe options and the registry: this diagnostic is the phase that
+  // PRODUCES D1-11 readiness evidence, so gating it on that evidence can only
+  // ever fail. It used to be split into two disagreeing branches — a
+  // conformance registry when a test injected `loadSdk`, nothing at all
+  // otherwise — and the injected branch was the only one any test exercised.
+  // The real doctor/wizard path therefore reached the OpenCode transport
+  // factory with no mode, which defaults to "production", and every OpenCode
+  // route came back blocking. Passing `mode` here too is not redundant:
+  // resolveFrozenBindings forwards `mode: options.mode` on every capability
+  // call, and an explicit `undefined` key overrides the registry's default
+  // through the factory's `{ ...defaultOptions, ...opts }` spread.
   const probe = await probeBindingsReadiness({
     ...authority,
     plan,
     workspaceRoot: input.workspaceRoot,
     authorityDeps: input.authorityDeps,
-    ...(input.loadSdk === undefined
-      ? {}
-      : {
-          registry: createDefaultTransportRegistry({
-            mode: "conformance",
-            loadSdk: input.loadSdk,
-            env: authority.env,
-          }),
-        }),
+    mode: "conformance",
+    registry: createDefaultTransportRegistry({
+      mode: "conformance",
+      env: authority.env,
+      ...(input.loadSdk === undefined ? {} : { loadSdk: input.loadSdk }),
+    }),
   });
   try {
     // SUGGESTION-1: the readiness probe already called capabilities() once
@@ -940,6 +954,7 @@ export async function createProductionRuntime(
     registry,
     bindings: createImmutableBindingsMap(bindings),
     admitted,
+    evidence: options.evidence,
     dispose: async () => {
       leaseTracker.releaseAll(registry);
     },

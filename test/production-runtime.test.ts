@@ -24,6 +24,7 @@ import {
   resolveStepRoute,
 } from "../src/model-routing";
 import {
+  collectDoctorExactBindingReports,
   createProductionRuntime,
   MultiProviderRunner,
   ProductionRuntimeError,
@@ -297,6 +298,66 @@ describe("production runtime PR1", () => {
           }),
         )?.key,
       ).toBe(step.routeFingerprint);
+    });
+
+    test("the runtime echoes the D1-11 evidence it was admitted with", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const evidence = new Map<RunnerBackend, D1_11ReadinessEvidence>([
+        [
+          "opencode",
+          {
+            sdkAvailable: true,
+            credentialAuthority: true,
+            workspaceBroker: true,
+            pricingReady: true,
+          },
+        ],
+      ]);
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+        evidence,
+      });
+
+      // The evidence has to survive the runtime boundary: admitRoutePlan reads
+      // it ONLY from its own options, so every downstream admission call site
+      // needs the runtime to hand it back out.
+      expect(runtime.evidence).toBe(evidence);
+    });
+
+    test("a runtime built without evidence exposes none", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+      });
+
+      expect(runtime.evidence).toBeUndefined();
     });
 
     test("invalid authority stops before any spawn or reservation", async () => {
@@ -644,6 +705,41 @@ describe("production runtime PR1", () => {
       } finally {
         await probe.dispose();
       }
+    });
+
+    // WHY this test exists: collectDoctorExactBindingReports carried TWO
+    // disagreeing branches and only the `loadSdk`-injected one was ever
+    // exercised by a test. The real doctor/wizard path passes no loadSdk, so
+    // it fell through to a registry with no mode at all — which the OpenCode
+    // transport factory defaults to "production" — and every OpenCode route
+    // was gated on the very D1-11 evidence this diagnostic probe exists to
+    // produce. Fully hermetic: PATH-scoped fixture binaries, and neither
+    // transport's capabilities() spawns a process or loads @opencode-ai/sdk.
+    test("collectDoctorExactBindingReports probes an OpenCode route without the production D1-11 gate when no SDK loader is injected", async () => {
+      await writeOpenCodeFixture(tmpDir);
+      const routingConfig: RoutingConfig = {
+        mappings: [
+          {
+            logical: "opus",
+            backend: "opencode",
+            provider: "openai",
+            modelFamily: "gpt-4o",
+            modelSnapshot: "gpt-4o",
+          },
+        ],
+      };
+
+      const reports = await collectDoctorExactBindingReports({
+        workspaceRoot: tmpDir,
+        routingConfig,
+        env: { PATH: tmpDir },
+      });
+
+      expect(reports.length).toBe(2);
+      expect([...reports].map((report) => report.backend).sort()).toEqual([
+        "claude-code",
+        "opencode",
+      ]);
     });
 
     test("mixed Claude/OpenCode conformance admits with evidence and dispatches by routeKey", async () => {
