@@ -234,12 +234,36 @@ export function isSessionIdle(raw: unknown, sessionId: string): boolean {
 // module-resolution stack trace.
 // ---------------------------------------------------------------------------
 
+// BOTH arms of the SDK's `RequestResult`. With its default
+// `ThrowOnError = false` every session call resolves to either
+// `{ data, error: undefined }` or `{ data: undefined, error }` — an API error
+// is a RESOLVED promise, not a rejected one. The first version of this
+// interface declared only the success arm, so a rejected model or a bad body
+// reached `.data.id` with `data` undefined and became a TypeError carrying
+// none of the provider's diagnosis (issue #121).
+//
+// Modelled as a union rather than collapsed with `throwOnError: true`
+// deliberately: the collapse is a per-call TYPE inference on the SDK's own
+// generic signatures, and it cannot travel through a narrow non-generic
+// interface like this one — the declared return type governs at every call
+// site here. The union is the shape the transport must actually survive.
+export type OpenCodeSdkResult<T> =
+  | { readonly data: T; readonly error?: undefined }
+  | { readonly data?: undefined; readonly error: unknown };
+
+// Deliberately narrow: the transport needs five methods, not the SDK's
+// twenty namespaces. test/conformance/opencode-sdk-surface.test.ts asserts at
+// COMPILE TIME that the real `OpencodeClient` is assignable to this, so the
+// narrowing can never drift back into a guess. Members are method shorthand,
+// not properties, on purpose — property-style function types are checked
+// contravariantly under `strict` and would reject the real client's generic
+// signatures for a reason that has nothing to do with conformance.
 export interface OpenCodeSdkClientApi {
   readonly session: {
-    create(options?: unknown): Promise<{ data: { id: string } }>;
-    prompt(options: unknown): Promise<{ data: unknown }>;
-    messages(options: unknown): Promise<{ data: unknown }>;
-    abort(options?: unknown): Promise<{ data: unknown }>;
+    create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
+    prompt(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    messages(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    abort(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
   };
   readonly event: {
     subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
@@ -247,7 +271,64 @@ export interface OpenCodeSdkClientApi {
 }
 
 export interface OpenCodeSdkLike {
-  createClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+  // `createOpencodeClient`, and the name is the whole of issue #121: this
+  // interface used to declare `createClient`, which the SDK has never
+  // exported. Nothing compared the two, so every live OpenCode step died on
+  // `sdk.createClient is not a function` while the offline suite stayed green
+  // — every mock was shaped to the same guess.
+  createOpencodeClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+}
+
+// The runtime half of the conformance check. `import type` is erased, so it
+// cannot guard the DYNAMIC import the transport registry performs; the loaded
+// module is therefore validated instead of asserted. This replaces two
+// `as unknown as OpenCodeSdkLike` casts — the strongest assertion TypeScript
+// has, pointed at a hand-written guess, which is precisely why the guess was
+// never caught.
+export function assertOpenCodeSdk(module: unknown): OpenCodeSdkLike {
+  const candidate = module as Partial<OpenCodeSdkLike> | null | undefined;
+  if (
+    candidate === null ||
+    candidate === undefined ||
+    typeof candidate.createOpencodeClient !== "function"
+  ) {
+    throw new Error(
+      "@opencode-ai/sdk resolved but does not export createOpencodeClient(), " +
+        "which pr-hero needs to open a session. The installed package is not " +
+        `the SDK this transport was built against (got ${describeModule(module)}).`,
+    );
+  }
+  return candidate as OpenCodeSdkLike;
+}
+
+function describeModule(module: unknown): string {
+  if (typeof module !== "object" || module === null) return typeof module;
+  const keys = Object.keys(module).sort();
+  return keys.length === 0 ? "an object with no exports" : keys.join(", ");
+}
+
+// Every `.data` read in this file goes through here. The alternative — reading
+// `.data` and trusting it — is the defect.
+function unwrap<T>(result: OpenCodeSdkResult<T>, call: string): T {
+  const data = result.data;
+  if (result.error !== undefined || data === undefined) {
+    throw new Error(
+      `opencode ${call} failed: ${describeSdkError(result.error)}`,
+    );
+  }
+  return data;
+}
+
+function describeSdkError(error: unknown): string {
+  if (error === undefined) return "the provider returned no data and no error";
+  if (typeof error === "string") return error;
+  const message = asRecord(error)?.message;
+  if (typeof message === "string" && message.length > 0) return message;
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }
 
 export interface CreateOpenCodeClientOptions {
@@ -276,6 +357,19 @@ interface SessionState {
   readonly queue: unknown[];
   ended: boolean;
   wake?: () => void;
+  // The handoff can end two ways. The pump ending is an EOF and says nothing
+  // about the turn; this says the turn never started, and carries the
+  // provider's diagnosis to the consumer instead of leaving it to infer a
+  // silence. Set only for a failure the stream itself could never report,
+  // because a refused prompt creates no message and therefore no events.
+  //
+  // Read by BOTH observers, and that is not redundancy. streamEvents can only
+  // see this while it is still being read, and the pump ends the handoff
+  // asynchronously from the prompt it knows nothing about — so when the pump
+  // wins that race the stream reader is already gone and pollStatus is the
+  // only door left. §197 asks for two independent observers of one fact; one
+  // observer plus a blind spot is not that.
+  failure?: string;
 }
 
 export function createOpenCodeClient(
@@ -342,7 +436,7 @@ export function createOpenCodeClient(
         }
       }
       const handle = server ?? (await serverPromise);
-      const api = sdk.createClient({ baseUrl: handle.url });
+      const api = sdk.createOpencodeClient({ baseUrl: handle.url });
 
       let sessionId: string | undefined;
       establishing += 1;
@@ -350,7 +444,7 @@ export function createOpenCodeClient(
         const created = await api.session.create({
           body: { title: "pr-hero review step" },
         });
-        sessionId = created.data.id;
+        sessionId = unwrap(created, "session.create").id;
 
         // Subscribed BEFORE the prompt, and the ordering is not stylistic.
         // event.subscribe() is live and unbuffered, so a subscription opened
@@ -374,7 +468,10 @@ export function createOpenCodeClient(
             }
           } catch {
             // A dead stream ends the handoff; the poll still observes the
-            // attempt.
+            // attempt — including any failure recorded after this point, which
+            // is why pollStatus reads `state.failure` too. Before it did, this
+            // line was a claim the poll could not honour: it queries
+            // session.messages(), and a turn that never started has none.
           } finally {
             state.ended = true;
             state.wake?.();
@@ -390,22 +487,48 @@ export function createOpenCodeClient(
         // — the probe measured 4.5s — and returns the completed message. The
         // ROADMAP forbids completing an attempt from one blocking HTTP call,
         // so this is the trigger and the event stream is the truth.
-        void api.session
-          .prompt({
-            path: { id: sessionId },
-            query: { directory: input.cwd },
-            body: {
-              model: { ...options.model },
-              system: systemPrompt,
-              tools,
-              parts: [{ type: "text", text: input.userPrompt }],
-            },
-          })
-          .catch(() => {
-            // Both observers see the failure; swallowing it here keeps a
-            // trigger-shaped call from becoming an unhandled rejection that
-            // outlives the attempt.
-          });
+        //
+        // Its RESULT is still observed, and the earlier `.catch()` was not
+        // enough to do that: under the SDK's default `ThrowOnError = false` an
+        // API-level refusal RESOLVES with `{ data: undefined, error }`, so the
+        // handler never ran and the refusal was dropped. The comment that
+        // stood here claimed both §197 observers would see it anyway, which is
+        // false in exactly the case that matters — a prompt the provider
+        // refused creates no message, so no event fires and the poll has
+        // nothing to find. The attempt then sat armed waiting for a terminal
+        // that a turn which never started could never produce, until the
+        // harness watchdog charged it as a timeout.
+        //
+        // A refusal answers at CALL time, not at turn end, so observing it
+        // costs the trigger shape nothing: this stays fired-not-awaited, and
+        // only the failure travels — through the same `ended`/`wake` handoff
+        // the pump uses. That handoff alone was NOT enough, though: the pump
+        // ends it on its own schedule, so when the pump wins the race the
+        // stream reader has already returned and the wake below is a no-op
+        // into a state nobody reads again. Hence the second door, pollStatus,
+        // which reads the same `state.failure`.
+        void (async () => {
+          try {
+            unwrap(
+              await api.session.prompt({
+                path: { id: sessionId },
+                query: { directory: input.cwd },
+                body: {
+                  model: { ...options.model },
+                  system: systemPrompt,
+                  tools,
+                  parts: [{ type: "text", text: input.userPrompt }],
+                },
+              }),
+              "session.prompt",
+            );
+          } catch (error) {
+            state.failure = (error as Error).message;
+            state.ended = true;
+            state.wake?.();
+            state.wake = undefined;
+          }
+        })();
 
         return { id: sessionId };
       } catch (error) {
@@ -416,7 +539,32 @@ export function createOpenCodeClient(
           states.delete(sessionId);
           // A remote session that WAS created is real work on the provider's
           // side; dropping the local map entry does not release it.
-          await api.session.abort({ path: { id: sessionId } }).catch(() => {});
+          //
+          // The result is OBSERVED, like every other call in this file: the
+          // `.catch(() => {})` that stood here could not see a refusal at all,
+          // because under `ThrowOnError = false` an API-level failure RESOLVES
+          // with `{ data: undefined, error }`. A refused abort leaves remote
+          // work running — and billing — with no trail at all.
+          //
+          // The trail is APPENDED to the error that caused the unwind, never
+          // thrown over it. This handler has no notes channel; the propagated
+          // error is the channel, since the transport stamps it into
+          // stderrTail as "session creation failed: …". And the failure that
+          // caused the unwind is the one the caller must still see — masking
+          // it with a teardown detail would trade a diagnosis for a symptom.
+          try {
+            unwrap(
+              await api.session.abort({ path: { id: sessionId } }),
+              "session.abort",
+            );
+          } catch (abortError) {
+            const detail = (abortError as Error).message;
+            if (error instanceof Error) {
+              error.message = `${error.message} (${detail})`;
+            } else {
+              throw new Error(`${String(error)} (${detail})`);
+            }
+          }
         }
         throw error;
       } finally {
@@ -443,6 +591,11 @@ export function createOpenCodeClient(
         while (state.queue.length > 0) {
           yield* mapOpenCodeEvents(state.queue.shift(), session.id);
         }
+        // Checked AFTER the drain and BEFORE `ended`: anything the provider
+        // already said is delivered first — a terminal buffered before the
+        // failure still wins its slot — and a failure is a louder end than an
+        // EOF, so it must not be swallowed by the plain return below.
+        if (state.failure !== undefined) throw new Error(state.failure);
         if (state.ended) return;
         await new Promise<void>((resolve) => {
           state.wake = resolve;
@@ -457,7 +610,13 @@ export function createOpenCodeClient(
       const response = await state.api.session.messages({
         path: { id: session.id },
       });
-      const list = Array.isArray(response.data) ? response.data : [];
+      // Throws on the error arm rather than reporting "pending": the caller
+      // treats a poll that throws as a FAILED OBSERVATION and counts it
+      // (opencode-sdk.ts:707), whereas a silent "pending" would let the
+      // attempt run to its stall deadline on an API error the provider
+      // already explained.
+      const messages = unwrap(response, "session.messages");
+      const list = Array.isArray(messages) ? messages : [];
       // Last completed assistant message wins; the same helper the stream
       // uses, on purpose. §197 wants two INDEPENDENT observers of ONE fact,
       // not two facts that happen to resemble each other — two copies of this
@@ -467,12 +626,39 @@ export function createOpenCodeClient(
         const proof = terminalProofFromAssistant(info);
         if (proof !== undefined) return { kind: "terminal", proof };
       }
+      // The SECOND observer of the failure, and the reason it exists: the
+      // stream can only carry a failure while it is still being read, and the
+      // subscription pump ends the handoff on its own schedule — completely
+      // asynchronously from the fired-not-awaited prompt. Lose that race and
+      // streamEvents has already returned at `if (state.ended) return`, so
+      // whatever the prompt's catch writes afterwards would reach nobody, and
+      // this poll would answer "pending" forever over a session that can never
+      // produce a message. §197 wants two INDEPENDENT observers of ONE fact; a
+      // failure only one of them can see is not two observers.
+      //
+      // Checked AFTER the message scan, for the same reason streamEvents
+      // checks it after draining the queue: a terminal the provider ALREADY
+      // sent still wins its slot.
+      if (state.failure !== undefined) {
+        return { kind: "failed", detail: state.failure };
+      }
       return { kind: "pending" };
     },
 
     async abort(session: OpenCodeClientSession): Promise<void> {
       const state = stateFor(session);
-      await state.api.session.abort({ path: { id: session.id } });
+      // The result is CHECKED, not discarded. Awaiting the error arm proves
+      // nothing on its own — it resolves — so a provider-side refusal used to
+      // return here as an ordinary success and the caller recorded a confirmed
+      // abort over a remote session that may still be running, and billing.
+      // Throwing is what makes it visible: the single caller
+      // (opencode-sdk.ts's callAbortOnce) catches and stamps a note into
+      // stderrTail, which keeps abort best-effort — observed, never fatal to
+      // the teardown it runs inside.
+      unwrap(
+        await state.api.session.abort({ path: { id: session.id } }),
+        "session.abort",
+      );
     },
 
     async close(): Promise<void> {

@@ -38,7 +38,7 @@ function fakeSdk(options: { promptHangs?: boolean } = {}): FakeSdk {
 
   let iterators = 0;
   const sdk: OpenCodeSdkLike = {
-    createClient: () => ({
+    createOpencodeClient: () => ({
       session: {
         create: async () => ({ data: { id: SESSION_ID } }),
         prompt: async (opts) => {
@@ -336,10 +336,10 @@ describe("createOpenCodeClient", () => {
     const fake = fakeSdk();
     let closed = 0;
     const broken: OpenCodeSdkLike = {
-      createClient: () => ({
-        ...fake.sdk.createClient({ baseUrl: "" }),
+      createOpencodeClient: () => ({
+        ...fake.sdk.createOpencodeClient({ baseUrl: "" }),
         session: {
-          ...fake.sdk.createClient({ baseUrl: "" }).session,
+          ...fake.sdk.createOpencodeClient({ baseUrl: "" }).session,
           create: async () => {
             throw new Error("remote session refused");
           },
@@ -360,6 +360,47 @@ describe("createOpenCodeClient", () => {
     });
     await expect(client.createSession(INPUT)).rejects.toThrow(/refused/);
     expect(closed).toBe(1);
+  });
+
+  // Issue #121, second half. The SDK's `RequestResult` has TWO arms under the
+  // default `ThrowOnError = false`: `{ data, error: undefined }` and
+  // `{ data: undefined, error }`. The local interface declared only the first,
+  // so an API error — a rejected model, a bad body, a 500 — reached
+  // `created.data.id` with `data` undefined and became a TypeError. A
+  // TypeError carries none of the provider's diagnosis and, being unmapped,
+  // was classified a FORMAT violation and burned a format retry.
+  test("a session.create error response fails with a diagnosable error", async () => {
+    const fake = fakeSdk();
+    const base = fake.sdk.createOpencodeClient({ baseUrl: "" });
+    const erroring: OpenCodeSdkLike = {
+      createOpencodeClient: () => ({
+        ...base,
+        session: {
+          ...base.session,
+          create: async () => ({
+            data: undefined,
+            error: { message: "model not found" },
+          }),
+        },
+      }),
+    };
+    const client = createOpenCodeClient({
+      loadSdk: async () => erroring,
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {},
+      }),
+      model: { providerID: "openai", modelID: "test-model" },
+      readSystemPrompt: async () => "SYSTEM",
+    });
+
+    // The provider's own words must survive into the message: they are the
+    // whole reason the operator can tell an infrastructure failure from a
+    // model one.
+    await expect(client.createSession(INPUT)).rejects.toThrow(
+      /session\.create.*model not found/s,
+    );
   });
 
   // pr-hero F004. A server per SESSION means every attempt leaves a spawned
@@ -402,9 +443,9 @@ describe("createOpenCodeClient", () => {
       releaseSecondCreate = r;
     });
 
-    const base = fake.sdk.createClient({ baseUrl: "" });
+    const base = fake.sdk.createOpencodeClient({ baseUrl: "" });
     const sdk: OpenCodeSdkLike = {
-      createClient: () => ({
+      createOpencodeClient: () => ({
         ...base,
         session: {
           ...base.session,
@@ -449,9 +490,9 @@ describe("createOpenCodeClient", () => {
   // local map entry does not release it.
   test("the unwind releases a remote session it already created", async () => {
     const fake = fakeSdk();
-    const base = fake.sdk.createClient({ baseUrl: "" });
+    const base = fake.sdk.createOpencodeClient({ baseUrl: "" });
     const sdk: OpenCodeSdkLike = {
-      createClient: () => ({
+      createOpencodeClient: () => ({
         ...base,
         event: {
           subscribe: async () => {

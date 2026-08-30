@@ -5,6 +5,11 @@ import type {
   ProviderTerminalProof,
   TransportRequest,
 } from "../../src/execution/contracts";
+import {
+  decideRetryDisposition,
+  legacyClassificationFromCause,
+  resolveFailureCause,
+} from "../../src/execution/failure-policy";
 import type {
   OpenCodeClientEvent,
   OpenCodeClientLike,
@@ -911,5 +916,85 @@ describe("OpenCodeSdkTransport classification witness (F003)", () => {
     expect(
       transport.classifyFailure({ ...base, stderrTail: "socket hang up" }),
     ).toBe("network_transient");
+  });
+
+  // Issue #121, part D. When `sdk.createClient is not a function` killed every
+  // live step, the outcome carried no mapped witness, so the harness fell
+  // through to the legacy classifier and called a TypeError inside our own
+  // transport a FORMAT violation — spending the format-reminder budget on an
+  // attempt the model never saw, and filing an infrastructure failure in the
+  // bucket reserved for model misbehaviour. A session that could not be
+  // created is the runtime being unavailable, which §7 makes terminal.
+  describe("a session that could not be created", () => {
+    const base = {
+      completion: "failed" as const,
+      protocolIntegrity: "unverified" as const,
+      finalText: "",
+      usage: {
+        wallMs: 1,
+        tokens: { inputUncached: 1 },
+        completeness: "complete" as const,
+        billingMode: "subscription" as const,
+        costSource: "provider" as const,
+        cashCostUsd: 0,
+      },
+    };
+
+    test("classifies as runtime_unavailable, not a format violation", () => {
+      const transport = new OpenCodeSdkTransport({
+        client: makeClient({}).client,
+      });
+      const outcome = {
+        ...base,
+        stderrTail:
+          "[pr-hero] opencode sdk: session creation failed: sdk.createClient is not a function.",
+      };
+
+      expect(transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+
+      // What the harness actually does with it: a terminal ruling, and no
+      // format retry spent.
+      const resolution = resolveFailureCause({
+        outcome,
+        classifyFailure: (o) => transport.classifyFailure(o),
+        parseThrew: true,
+      });
+      expect(resolution).toEqual({
+        kind: "cause",
+        cause: "runtime_unavailable",
+      });
+      expect(legacyClassificationFromCause(resolution)).toBe("terminal");
+      expect(
+        decideRetryDisposition("runtime_unavailable", {
+          transientAttemptsUsed: 0,
+          formatRetriesUsed: 0,
+        }),
+      ).toEqual({ action: "terminal" });
+    });
+
+    // ORDERING, not decoration. A creation failure whose text is a refused
+    // connection is a transient network failure and keeps its retry; the
+    // creation witness is the LAST resort, so it can never shadow the
+    // auth/rate-limit/network patterns above it and silently delete a retry
+    // path.
+    test("still yields to the network witness inside its own message", () => {
+      const transport = new OpenCodeSdkTransport({
+        client: makeClient({}).client,
+      });
+      expect(
+        transport.classifyFailure({
+          ...base,
+          stderrTail:
+            "[pr-hero] opencode sdk: session creation failed: fetch failed",
+        }),
+      ).toBe("network_transient");
+      expect(
+        transport.classifyFailure({
+          ...base,
+          stderrTail:
+            "[pr-hero] opencode sdk: session creation failed: 401 unauthorized",
+        }),
+      ).toBe("auth_invalid");
+    });
   });
 });

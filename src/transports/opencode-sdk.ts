@@ -107,7 +107,14 @@ export type OpenCodeClientEvent =
 
 export type OpenCodePollResult =
   | { readonly kind: "pending" }
-  | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
+  | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof }
+  // The session itself failed, so no turn will ever produce a terminal. It is
+  // NOT a terminal — the transport issues no proof of its own — and it is not
+  // a failed observation either: it is a successful observation of a fact that
+  // ends the attempt. The distinction is load-bearing. A poll that THROWS is
+  // counted (`pollTimeouts += 1; continue`) and the loop runs on forever, so
+  // reporting this by throwing would have swapped one silent hang for another.
+  | { readonly kind: "failed"; readonly detail: string };
 
 // Narrow injectable client shaped ONLY from what §197 (stream + poll
 // arbitration) and §290 (abort without provider confirmation) require. No
@@ -163,6 +170,16 @@ const MARKER_USAGE_FLIP =
 
 const MARKER_CONFLICT =
   "[pr-hero] opencode sdk: conflicting provider terminal observed after the compare-and-set slot was won";
+// Already the literal prefix of the stderrTail this transport writes when
+// createSession throws; naming it here makes it a classification witness too.
+const MARKER_SESSION_CREATE = "[pr-hero] opencode sdk: session creation failed";
+// Already the literal text the client puts on the error it hands the stream
+// when session.prompt is refused (opencode-client.ts, via unwrap); naming it
+// here makes it a classification witness too. The coupling is pinned by an
+// end-to-end test rather than by this constant —
+// test/conformance/opencode-resolved-error-arm.test.ts drives a refusal
+// through the real client and asserts what comes out here.
+const MARKER_PROMPT_REFUSED = "opencode session.prompt failed";
 
 type SettleReason =
   | { readonly kind: "provider_terminal" }
@@ -171,6 +188,7 @@ type SettleReason =
   | { readonly kind: "bound"; readonly target: "delta" | "aggregate" }
   | { readonly kind: "stall" }
   | { readonly kind: "stream_error"; readonly detail: string }
+  | { readonly kind: "session_failed"; readonly detail: string }
   | { readonly kind: "abort_confirmed" }
   | { readonly kind: "abort_unconfirmed" };
 
@@ -726,6 +744,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           continue;
         }
         if (result.kind === "pending") continue;
+        if (result.kind === "failed") {
+          // §197's second observer, seeing the SAME fact the stream carries
+          // when it is still alive to carry it. Settled, not counted: the
+          // session cannot produce a terminal any more, so continuing to poll
+          // for one would only wait out the harness watchdog.
+          settle({ kind: "session_failed", detail: result.detail });
+          return;
+        }
         onProviderTerminalCandidate(result.proof, "poll");
         if (settled) return;
       }
@@ -748,6 +774,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         (reason.kind === "bound" ||
           reason.kind === "stall" ||
           reason.kind === "stream_error" ||
+          reason.kind === "session_failed" ||
           reason.kind === "usage_flip") &&
         !abortSequenceStarted
       ) {
@@ -769,6 +796,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       if (reason.kind === "stall") notes.push(MARKER_STALL);
       if (reason.kind === "stream_error") {
         notes.push(`[pr-hero] opencode sdk: stream errored: ${reason.detail}`);
+      }
+      if (reason.kind === "session_failed") {
+        // Carries the provider's own words verbatim, which is what makes the
+        // poll path classify exactly like the stream path — classifyFailure
+        // substring-matches MARKER_PROMPT_REFUSED inside this detail rather
+        // than pattern-matching this note's own wording.
+        notes.push(
+          `[pr-hero] opencode sdk: poll observed a session failure: ${reason.detail}`,
+        );
       }
       if (reason.kind === "abort_unconfirmed")
         notes.push(MARKER_ABORT_UNCONFIRMED);
@@ -830,6 +866,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           protocolIntegrity = "overflow";
           break;
         case "stream_error":
+        case "session_failed":
+          // Unverified, never malformed: nothing contradicted anything. The
+          // provider simply never opened a turn, and the transport refuses to
+          // manufacture a proof for the one it did not run.
           completion = "failed";
           protocolIntegrity = "unverified";
           break;
@@ -997,6 +1037,29 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       )
     ) {
       return "network_transient";
+    }
+    // LAST, and the position is the point. A session that never opened — or a
+    // TURN that never started, which is the same fact one call later: the
+    // provider refused the prompt, so no message exists and the model never
+    // saw the request — is the runtime being unavailable. §7 makes that
+    // terminal, so it stops instead
+    // of spending the format-reminder budget on an attempt the model never
+    // saw. That is what went wrong in issue #121: `sdk.createClient is not a
+    // function` reached the harness with no mapped witness, fell through to
+    // the legacy classifier, and was filed as `format_violation` — a
+    // TypeError in our own transport recorded in the bucket reserved for
+    // model misbehaviour, burning a retry on the way.
+    //
+    // Checked after the auth/rate-limit/network patterns because both
+    // messages CARRY the provider's own text: "session creation failed:
+    // fetch failed" is a transient network failure that keeps its retry, and
+    // a refused prompt is if anything more likely to be a 429 or a 401. A
+    // marker check above them would silently delete those paths.
+    if (
+      witness.includes(MARKER_SESSION_CREATE) ||
+      witness.includes(MARKER_PROMPT_REFUSED)
+    ) {
+      return "runtime_unavailable";
     }
     return undefined;
   }

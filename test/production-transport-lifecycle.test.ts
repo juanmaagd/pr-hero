@@ -494,7 +494,7 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       };
 
       const loadSdk = async (): Promise<OpenCodeSdkLike> => ({
-        createClient: () => ({
+        createOpencodeClient: () => ({
           session: {
             create: async () => ({ data: { id: "oc-sess-1" } }),
             prompt: async (options: {

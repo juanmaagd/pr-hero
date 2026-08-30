@@ -16,7 +16,7 @@ import { admitRoutePlan } from "../src/transport-registry";
 
 const mockLoadSdk = async () =>
   ({
-    createClient: () => ({
+    createOpencodeClient: () => ({
       session: {},
       event: {},
     }),
