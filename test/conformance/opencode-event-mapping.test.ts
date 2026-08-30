@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  createPartIndex,
   mapOpenCodeEvents,
   retryHintFromStatus,
   terminalProofFromAssistant,
@@ -27,8 +28,22 @@ const SESSION_ID = (
   }
 ).properties.sessionID;
 
+// ONE index across the whole replay, because that is how the client uses it:
+// #124 made the mapper stateful, and the state is the partID -> part kind
+// correlation that `message.part.delta` cannot carry itself. A per-event index
+// would drop every delta, which is exactly why the parameter is required
+// rather than optional.
 function mapAll(sessionId = SESSION_ID): OpenCodeClientEvent[] {
-  return PROBE_EVENTS.flatMap((raw) => mapOpenCodeEvents(raw, sessionId));
+  const index = createPartIndex();
+  return PROBE_EVENTS.flatMap((raw) =>
+    mapOpenCodeEvents(raw, sessionId, index),
+  );
+}
+
+// For the single-event assertions: an event mapped in isolation gets an index
+// that has seen nothing else.
+function mapOne(raw: unknown, sessionId = SESSION_ID): OpenCodeClientEvent[] {
+  return mapOpenCodeEvents(raw, sessionId, createPartIndex());
 }
 
 describe("mapOpenCodeEvent against the recorded stream", () => {
@@ -49,7 +64,112 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
         ),
     );
     expect(userPartUpdate).toBeDefined();
-    expect(mapOpenCodeEvents(userPartUpdate as object, SESSION_ID)).toEqual([]);
+    expect(mapOne(userPartUpdate)).toEqual([]);
+  });
+
+  // #124's fix has to consume `message.part.updated` for the part TYPE, and
+  // that same event fires for the USER message — whose recorded part carries
+  // the prompt text itself. If the fix registered it, a delta naming that part
+  // would echo the prompt into finalText: TRAP 2 walking back in through the
+  // door the fix had to open. Registration is gated on the part's owning
+  // message having been announced as the ASSISTANT's.
+  test("the recorded user part is never a channel a delta can fill", () => {
+    const index = createPartIndex();
+    for (const raw of PROBE_EVENTS) mapOpenCodeEvents(raw, SESSION_ID, index);
+
+    const userPart = PROBE_EVENTS.find(
+      (e) =>
+        e.type === "message.part.updated" &&
+        (e.properties as { part?: { text?: string } })?.part?.text?.includes(
+          "Reply with exactly",
+        ),
+    ) as { properties: { part: { id: string; messageID: string } } };
+    expect(index.parts.has(userPart.properties.part.id)).toBe(false);
+    expect(
+      index.assistantMessages.has(userPart.properties.part.messageID),
+    ).toBe(false);
+
+    // The behaviour that property buys, stated directly.
+    expect(
+      mapOpenCodeEvents(
+        {
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESSION_ID,
+            messageID: userPart.properties.part.messageID,
+            partID: userPart.properties.part.id,
+            field: "text",
+            delta: "the prompt, echoed back",
+          },
+        },
+        SESSION_ID,
+        index,
+      ),
+    ).toEqual([]);
+  });
+
+  // The correlation index is keyed by provider-generated ids on a
+  // subscription that outlives any one turn, so it needs a ceiling. Eviction
+  // is oldest-first: parts are announced and streamed in order, so the oldest
+  // entry is the one no delta can still name.
+  test("the part index is bounded, and evicts the oldest first", () => {
+    const index = createPartIndex();
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        },
+      },
+      SESSION_ID,
+      index,
+    );
+    for (let i = 0; i < 5000; i += 1) {
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESSION_ID,
+            part: {
+              id: `prt_${i}`,
+              messageID: "msg_a",
+              type: "text",
+              text: "",
+            },
+            time: 1,
+          },
+        },
+        SESSION_ID,
+        index,
+      );
+    }
+    expect(index.parts.size).toBeLessThanOrEqual(4096);
+    expect(index.parts.has("prt_0")).toBe(false);
+    expect(index.parts.has("prt_4999")).toBe(true);
+  });
+
+  // The twin bound, and a SECOND eviction implementation — the assistant-message
+  // set is what gates part registration, so an unbounded one would grow for as
+  // long as the subscription lives just as surely as the part map would.
+  test("the assistant-message set is bounded too", () => {
+    const index = createPartIndex();
+    for (let i = 0; i < 700; i += 1) {
+      mapOpenCodeEvents(
+        {
+          type: "message.updated",
+          properties: {
+            sessionID: SESSION_ID,
+            info: { id: `msg_${i}`, role: "assistant", time: { created: 1 } },
+          },
+        },
+        SESSION_ID,
+        index,
+      );
+    }
+    expect(index.assistantMessages.size).toBeLessThanOrEqual(512);
+    expect(index.assistantMessages.has("msg_0")).toBe(false);
+    expect(index.assistantMessages.has("msg_699")).toBe(true);
   });
 
   test("events for another session are dropped, noise and all", () => {
@@ -65,7 +185,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
       "server.connected",
     ]) {
       const noise = PROBE_EVENTS.find((e) => e.type === type);
-      expect(mapOpenCodeEvents(noise as object, SESSION_ID)).toEqual([]);
+      expect(mapOne(noise)).toEqual([]);
     }
   });
 
@@ -94,7 +214,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     for (const raw of PROBE_EVENTS.filter(
       (e) => e.type === "session.updated",
     )) {
-      expect(mapOpenCodeEvents(raw, SESSION_ID)).toEqual([]);
+      expect(mapOne(raw)).toEqual([]);
     }
   });
 
@@ -110,7 +230,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     expect(Object.keys((idle as { properties: object }).properties)).toEqual([
       "sessionID",
     ]);
-    expect(mapOpenCodeEvents(idle as object, SESSION_ID)).toEqual([]);
+    expect(mapOne(idle)).toEqual([]);
   });
 
   test("the assistant's completed message IS the terminal", () => {
@@ -139,7 +259,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     );
     expect(completed.length).toBeGreaterThan(0);
     for (const raw of completed) {
-      const mapped = mapOpenCodeEvents(raw, SESSION_ID);
+      const mapped = mapOne(raw);
       expect(mapped.map((e) => e.kind)).toEqual(["usage", "terminal"]);
     }
   });

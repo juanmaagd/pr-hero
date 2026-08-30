@@ -446,10 +446,34 @@ describe("createOpenCodeClient", () => {
     const fake = fakeSdk();
     const client = rig(fake);
     const session = await client.createSession(INPUT);
+    // #124: a delta names a part, and a part is only an answer channel once
+    // `message.part.updated` has announced it under an assistant message.
+    // These two events are the stream's preamble, not its subject.
+    fake.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+      },
+    });
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_answer",
+          messageID: "msg_a",
+          type: "text",
+          text: "",
+        },
+        time: 1,
+      },
+    });
     fake.emit({
       type: "message.part.delta",
       properties: {
         sessionID: SESSION_ID,
+        partID: "prt_answer",
         field: "text",
         delta: "early",
       },
@@ -528,7 +552,36 @@ describe("createOpenCodeClient", () => {
 
     const delta = (text: string) => ({
       type: "message.part.delta",
-      properties: { sessionID: SESSION_ID, field: "text", delta: text },
+      properties: {
+        sessionID: SESSION_ID,
+        partID: "prt_answer",
+        field: "text",
+        delta: text,
+      },
+    });
+
+    // #124: a delta names a part, and a part is only an answer channel once
+    // `message.part.updated` has announced it under an assistant message.
+    // These two events are the stream's preamble, not its subject.
+    fake.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+      },
+    });
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_answer",
+          messageID: "msg_a",
+          type: "text",
+          text: "",
+        },
+        time: 1,
+      },
     });
 
     // Two before anyone calls streamEvents (the buffered window)...
