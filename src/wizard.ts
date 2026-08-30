@@ -281,6 +281,12 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         cwd: deps.cwd,
         home: deps.home,
         exists: deps.exists,
+        // WizardDeps.exec must reach the tool probes, or a caller that injected
+        // it still gets the real Bun.spawn fallback here — which runs
+        // `gh auth status`, a live network round trip, from inside a test that
+        // believed it had faked its I/O. Listed BEFORE the spread so an explicit
+        // checkToolsOptions.exec still wins; production passes neither.
+        exec: deps.exec,
         ...deps.checkToolsOptions,
       });
       const workspaceRoot = deps.cwd ?? process.cwd();

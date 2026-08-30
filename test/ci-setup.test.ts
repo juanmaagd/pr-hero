@@ -428,6 +428,24 @@ describe("checkCiConfiguration (pure diagnostic, system-tools.ts)", () => {
 });
 
 describe("doctor CI diagnostics (Pillar 3)", () => {
+  // `checkToolsOptions` was carrying only `env`, so `checkSystemTools` fell
+  // back to its real `Bun.spawn` and every one of these five tests ran
+  // `git --version`, `claude --version`, `gh --version`, `gh auth status`
+  // and `codegraph --version` for real. `gh auth status` is a live network
+  // round trip — measured at ~450ms of mostly-waiting per call — which is how
+  // five tests that assert on a pure string check became the slowest thing in
+  // the suite and timed out at bun's 5000ms default whenever `gh` was slow.
+  //
+  // The fakes are deliberately HEALTHY (every binary found, every probe exit
+  // 0). These tests assert that the CI check alone decides `severity` and, in
+  // the last one, `report.overall` — a fake-broken git would make that
+  // "blocking" for the wrong reason and the assertion would stop meaning
+  // anything. `env` stays per-test: it is the variable under study.
+  const installedTools = {
+    which: (bin: string) => `/usr/bin/${bin}`,
+    exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+  };
+
   // Both "local repo context" tests inject `env: {}` explicitly. Without it
   // `runDoctor` falls back to the real `process.env`, and the CI check is the
   // one check in the report whose severity is decided BY the environment — so
@@ -447,7 +465,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       home: "/home/user",
       exists: (p) => p === path.join("/repo", CI_WORKFLOW_RELATIVE_PATH),
       readFile: () => undefined,
-      checkToolsOptions: { env: {} },
+      checkToolsOptions: { ...installedTools, env: {} },
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
     expect(ciCheck?.severity).toBe("healthy");
@@ -460,7 +478,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       home: "/home/user",
       exists: () => false,
       readFile: () => undefined,
-      checkToolsOptions: { env: {} },
+      checkToolsOptions: { ...installedTools, env: {} },
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
     expect(ciCheck?.severity).toBe("degraded");
@@ -481,7 +499,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       home: "/home/user",
       exists: () => false,
       readFile: () => undefined,
-      checkToolsOptions: { env: { CI: "true" } },
+      checkToolsOptions: { ...installedTools, env: { CI: "true" } },
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
     expect(ciCheck?.severity).toBe("degraded");
@@ -497,6 +515,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       exists: () => false,
       readFile: () => undefined,
       checkToolsOptions: {
+        ...installedTools,
         env: {
           GITHUB_ACTIONS: "true",
           GITHUB_TOKEN: "ghs_realtoken",
@@ -515,6 +534,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
       exists: () => false,
       readFile: () => undefined,
       checkToolsOptions: {
+        ...installedTools,
         env: { GITHUB_ACTIONS: "true", GITHUB_TOKEN: "ghs_realtoken12345" },
       },
     });
