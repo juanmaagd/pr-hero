@@ -357,6 +357,12 @@ interface SessionState {
   readonly queue: unknown[];
   ended: boolean;
   wake?: () => void;
+  // The handoff can end two ways. The pump ending is an EOF and says nothing
+  // about the turn; this says the turn never started, and carries the
+  // provider's diagnosis to the consumer instead of leaving it to infer a
+  // silence. Set only for a failure the stream itself could never report,
+  // because a refused prompt creates no message and therefore no events.
+  failure?: string;
 }
 
 export function createOpenCodeClient(
@@ -471,22 +477,44 @@ export function createOpenCodeClient(
         // — the probe measured 4.5s — and returns the completed message. The
         // ROADMAP forbids completing an attempt from one blocking HTTP call,
         // so this is the trigger and the event stream is the truth.
-        void api.session
-          .prompt({
-            path: { id: sessionId },
-            query: { directory: input.cwd },
-            body: {
-              model: { ...options.model },
-              system: systemPrompt,
-              tools,
-              parts: [{ type: "text", text: input.userPrompt }],
-            },
-          })
-          .catch(() => {
-            // Both observers see the failure; swallowing it here keeps a
-            // trigger-shaped call from becoming an unhandled rejection that
-            // outlives the attempt.
-          });
+        //
+        // Its RESULT is still observed, and the earlier `.catch()` was not
+        // enough to do that: under the SDK's default `ThrowOnError = false` an
+        // API-level refusal RESOLVES with `{ data: undefined, error }`, so the
+        // handler never ran and the refusal was dropped. The comment that
+        // stood here claimed both §197 observers would see it anyway, which is
+        // false in exactly the case that matters — a prompt the provider
+        // refused creates no message, so no event fires and the poll has
+        // nothing to find. The attempt then sat armed waiting for a terminal
+        // that a turn which never started could never produce, until the
+        // harness watchdog charged it as a timeout.
+        //
+        // A refusal answers at CALL time, not at turn end, so observing it
+        // costs the trigger shape nothing: this stays fired-not-awaited, and
+        // only the failure travels — through the same `ended`/`wake` handoff
+        // the pump uses, so the consumer needs no second door.
+        void (async () => {
+          try {
+            unwrap(
+              await api.session.prompt({
+                path: { id: sessionId },
+                query: { directory: input.cwd },
+                body: {
+                  model: { ...options.model },
+                  system: systemPrompt,
+                  tools,
+                  parts: [{ type: "text", text: input.userPrompt }],
+                },
+              }),
+              "session.prompt",
+            );
+          } catch (error) {
+            state.failure = (error as Error).message;
+            state.ended = true;
+            state.wake?.();
+            state.wake = undefined;
+          }
+        })();
 
         return { id: sessionId };
       } catch (error) {
@@ -524,6 +552,11 @@ export function createOpenCodeClient(
         while (state.queue.length > 0) {
           yield* mapOpenCodeEvents(state.queue.shift(), session.id);
         }
+        // Checked AFTER the drain and BEFORE `ended`: anything the provider
+        // already said is delivered first — a terminal buffered before the
+        // failure still wins its slot — and a failure is a louder end than an
+        // EOF, so it must not be swallowed by the plain return below.
+        if (state.failure !== undefined) throw new Error(state.failure);
         if (state.ended) return;
         await new Promise<void>((resolve) => {
           state.wake = resolve;
@@ -559,7 +592,18 @@ export function createOpenCodeClient(
 
     async abort(session: OpenCodeClientSession): Promise<void> {
       const state = stateFor(session);
-      await state.api.session.abort({ path: { id: session.id } });
+      // The result is CHECKED, not discarded. Awaiting the error arm proves
+      // nothing on its own — it resolves — so a provider-side refusal used to
+      // return here as an ordinary success and the caller recorded a confirmed
+      // abort over a remote session that may still be running, and billing.
+      // Throwing is what makes it visible: the single caller
+      // (opencode-sdk.ts's callAbortOnce) catches and stamps a note into
+      // stderrTail, which keeps abort best-effort — observed, never fatal to
+      // the teardown it runs inside.
+      unwrap(
+        await state.api.session.abort({ path: { id: session.id } }),
+        "session.abort",
+      );
     },
 
     async close(): Promise<void> {
