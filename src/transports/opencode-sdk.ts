@@ -109,6 +109,15 @@ export type OpenCodeClientEvent =
       readonly message: string;
     }
   | { readonly kind: "heartbeat" }
+  // #124: a reasoning delta the mapper DISCARDED. Deliberately carries no
+  // payload — not the text, not even its length. The text is not the answer
+  // and must not spend the answer's content budget; and nothing derived from
+  // it may reach `notes`, which is classifyFailure's witness (see the note
+  // this event ends up producing for what a bare number does there). What
+  // survives the boundary is the bare fact that the model thought, which is
+  // all the transport needs to tell a turn that reasoned and never answered
+  // apart from one that produced nothing at all.
+  | { readonly kind: "reasoning" }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
@@ -186,6 +195,15 @@ const MARKER_SESSION_CREATE = "[pr-hero] opencode sdk: session creation failed";
 // test/conformance/opencode-resolved-error-arm.test.ts drives a refusal
 // through the real client and asserts what comes out here.
 const MARKER_PROMPT_REFUSED = "opencode session.prompt failed";
+// #124. Distinct from an empty answer in general: this says the turn REASONED
+// and never opened a text part, so there is no malformed output to reformat
+// and the format-reminder budget would be spent on nothing — the same argument
+// that made a turn which never started `runtime_unavailable` (#121, #123).
+// The cause it maps to differs, though, and deliberately: the runtime WAS
+// available and the model DID run, so the honest fact is that the answer
+// channel delivered no content. See classifyFailure.
+const MARKER_REASONING_ONLY =
+  "[pr-hero] opencode sdk: the turn completed with reasoning parts only and no answer text part";
 
 type SettleReason =
   | { readonly kind: "provider_terminal" }
@@ -523,6 +541,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // ---- mutable attempt state --------------------------------------------
     const finalParts: string[] = [];
     let aggregateBytes = 0;
+    // #124: the bare fact, not a volume. Nothing about reasoning is added to
+    // `aggregateBytes` either — reasoning is not the answer, so it must not
+    // consume the answer's §4.2 content budget.
+    let sawReasoning = false;
     // §4.1/§8: the first usage event fixes the attempt's aggregation mode;
     // `applyUsageUpdate` is the pure snapshot-replaces/delta-accumulates state
     // machine, shared with every other transport that folds a usage stream.
@@ -701,6 +723,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               }
               break;
             }
+            case "reasoning": {
+              // Recorded, never forwarded. There is no sink push and no bound
+              // check: nothing is being delivered and nothing is being spent —
+              // the content was dropped at the client boundary and only this
+              // one bit survives it.
+              sawReasoning = true;
+              break;
+            }
             case "heartbeat": {
               const pushed = await pushGuarded({
                 ...base(),
@@ -836,6 +866,35 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         notes.push(
           "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
         );
+      }
+      if (sawReasoning) {
+        // A FIXED string: no model prose, and no free-form numbers either.
+        //
+        // `notes` becomes stderrTail, which is classifyFailure's whole
+        // witness. Prose is the obvious hazard — reasoning is model-generated
+        // text about the very failure modes those patterns name, which is
+        // exactly why finalText is excluded from the witness and reasoning is
+        // finalText's sibling. The counts are the SUBTLE one, and they were
+        // measured, not guessed: the witness patterns include `\b429\b` and
+        // `\b(?:502|503|504)\b`, so a reasoning stream of exactly 429 bytes
+        // would have classified its own attempt `rate_limit`, and one of 503
+        // bytes `network_transient`. A byte count lands in that range often.
+        // The volume is not worth a note that can lie about why an attempt
+        // failed, and the fact that matters — reasoning and no answer — is
+        // stated below without a single digit.
+        notes.push(
+          "[pr-hero] opencode sdk: reasoning parts were received and discarded; reasoning is not the answer",
+        );
+      }
+      // Only on a turn the provider actually finished. An aborted or errored
+      // turn legitimately has no answer text, and saying otherwise would put a
+      // second, competing diagnosis on an attempt that already has one.
+      if (
+        reason.kind === "provider_terminal" &&
+        sawReasoning &&
+        finalParts.length === 0
+      ) {
+        notes.push(MARKER_REASONING_ONLY);
       }
       if (sinkClosed) {
         notes.push(
@@ -1085,6 +1144,20 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     ) {
       return "runtime_unavailable";
     }
+    // LAST, under the same ordering rule as the two markers above and for the
+    // same reason: this note sits beside the provider's own text in the same
+    // witness, so a 429 or a 401 recorded on the same attempt must still win.
+    //
+    // `protocol_truncation`, not `runtime_unavailable` and not
+    // `format_violation`. §7 freezes the cause vocabulary, so the choice is
+    // between existing members: the runtime WAS available and the model DID
+    // run, which rules out the first; nothing malformed was written, which
+    // rules out the second — a format reminder would spend that budget telling
+    // the model to reformat an answer it never produced. What actually
+    // happened is that the answer channel delivered no content, and
+    // truncation's disposition is the remedy that can work: a FRESH attempt on
+    // the transient budget, bounded at 3, never the format budget.
+    if (witness.includes(MARKER_REASONING_ONLY)) return "protocol_truncation";
     return undefined;
   }
 }

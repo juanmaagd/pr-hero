@@ -126,13 +126,80 @@ export function retryHintFromStatus(
   return delta > 0 ? delta : undefined;
 }
 
+// TRAP 4 (issue #124): `message.part.delta` carries NO part type. Its whole
+// payload is {sessionID, messageID, partID, field, delta}, so the only way to
+// know what a delta belongs to is to correlate its `partID` against the part
+// announced earlier by `message.part.updated`.
+//
+// Filtering on `field === "text"` — the FIELD NAME — is not that correlation
+// and never was: the SDK declares `ReasoningPart` with a member literally
+// called `text`, exactly as `TextPart` has, so with a reasoning model the
+// model's private thinking was concatenated into finalText as if it were the
+// answer. The #116 smoke pass 3 artifact shows it verbatim, two reasoning
+// deltas glued together with no separator where the JSON answer belonged, and
+// every hunter in that run failed format_violation over it.
+//
+// This is the state that correlation needs. It travels with the SessionState
+// so it dies with the session rather than with the process, and BOTH maps are
+// bounded: an SSE subscription is long-lived and a map keyed by a
+// provider-generated id would otherwise grow for as long as the session does.
+// Eviction is oldest-first (a Map iterates in insertion order), which is the
+// safe direction — parts are announced and streamed in order, so the oldest
+// entry is the one no delta can still name.
+export interface OpenCodePartIndex {
+  // Assistant-owned message ids. TRAP 2 lives here now: `message.part.updated`
+  // fires for the USER message too, and the recorded one carried the prompt
+  // text itself, so registering every text part would make a delta naming the
+  // user's part echo the prompt into finalText — the exact defect TRAP 2 was
+  // written to prevent, re-entering through the door the fix had to open.
+  readonly assistantMessages: Set<string>;
+  readonly parts: Map<string, "answer" | "reasoning">;
+}
+
+// Generous on purpose: a long hunter turn announces a part per tool call, per
+// step boundary and per text block, and evicting a part that is still being
+// streamed would DROP answer text. The bound exists to make growth impossible,
+// not to be reached.
+const MAX_TRACKED_PARTS = 4096;
+const MAX_TRACKED_MESSAGES = 512;
+
+export function createPartIndex(): OpenCodePartIndex {
+  return { assistantMessages: new Set(), parts: new Map() };
+}
+
+function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
+  map.set(key, value);
+  while (map.size > cap) {
+    const oldest = map.keys().next();
+    if (oldest.done === true) return;
+    map.delete(oldest.value);
+  }
+}
+
+function rememberId(set: Set<string>, id: string, cap: number): void {
+  set.add(id);
+  while (set.size > cap) {
+    const oldest = set.values().next();
+    if (oldest.done === true) return;
+    set.delete(oldest.value);
+  }
+}
+
 // Returns a LIST because one raw event can carry two facts: the assistant's
 // completed `message.updated` is both the attempt's real usage figure and its
 // terminal proof. Usage is emitted FIRST so the transport has banked it before
 // the terminal can settle the attempt out from under it.
+//
+// STATEFUL since #124, and the index is a REQUIRED parameter rather than an
+// optional one. An optional index would need a default for "no index", and
+// both available defaults are wrong: accepting every delta is the defect, and
+// dropping every delta is an empty answer. An absent argument that silently
+// changes what the mapper harvests is the same hazard as the absent tool key
+// in resolveToolMap — the question is made moot instead of answered.
 export function mapOpenCodeEvents(
   raw: unknown,
   sessionId: string,
+  index: OpenCodePartIndex,
 ): OpenCodeClientEvent[] {
   const type = (raw as RawEvent)?.type;
   if (typeof type !== "string") return [];
@@ -155,7 +222,49 @@ export function mapOpenCodeEvents(
       if (p.field !== "text") return [];
       const delta = p.delta;
       if (typeof delta !== "string" || delta.length === 0) return [];
-      return [{ kind: "delta", text: delta }];
+      const partId = p.partID;
+      if (typeof partId !== "string") return [];
+      // TRAP 4: the part's KIND decides, never the field name.
+      //
+      // An UNANNOUNCED part id is dropped, and that choice is deliberate. The
+      // recorded probe settles the ordering question it turns on: the part is
+      // announced by `message.part.updated` (type "text", text "") and only
+      // then delta'd, and its owning `message.updated` precedes that — so a
+      // delta whose part was never announced is not a race the provider is
+      // known to run. Both directions can be wrong, and they are not equally
+      // wrong: accepting an unannounced delta re-opens THIS bug for every part
+      // type the provider adds next, silently, while dropping one costs at
+      // worst an answer that arrives short — which fails the harness's parse
+      // loudly and buys a fresh attempt on the transient budget.
+      const kind = index.parts.get(partId);
+      if (kind === "answer") return [{ kind: "delta", text: delta }];
+      // Discarded HERE, at the boundary: the text does not travel, only the
+      // fact that it existed. Dropping it downstream instead would spend the
+      // answer's §4.2 content budget on text that is not the answer.
+      if (kind === "reasoning") return [{ kind: "reasoning" }];
+      return [];
+    }
+
+    // Consumed for the part's TYPE, never for its content — the TRAP 2
+    // reasoning above is unchanged and this arm still maps to nothing. What it
+    // does is register what the following deltas are allowed to become.
+    case "message.part.updated": {
+      const part = asRecord(p.part);
+      const partId = part?.id;
+      const messageId = part?.messageID;
+      if (typeof partId !== "string" || typeof messageId !== "string") {
+        return [];
+      }
+      // Assistant-owned parts only. The user's message has a text part too,
+      // carrying the prompt itself, and it must never become a channel the
+      // answer can be assembled from.
+      if (!index.assistantMessages.has(messageId)) return [];
+      if (part?.type === "text") {
+        remember(index.parts, partId, "answer", MAX_TRACKED_PARTS);
+      } else if (part?.type === "reasoning") {
+        remember(index.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+      }
+      return [];
     }
 
     // `session.updated` is deliberately NOT a usage source. Its info.tokens
@@ -168,6 +277,13 @@ export function mapOpenCodeEvents(
     case "message.updated": {
       const info = asRecord(p.info);
       if (info === undefined || info.role !== "assistant") return [];
+      // Registered before the early returns below: this event is the ONLY
+      // place the provider says which message is the assistant's, and the
+      // part index needs that fact even on the mid-turn restatements that
+      // carry neither usage nor a proof.
+      if (typeof info.id === "string" && info.id.length > 0) {
+        rememberId(index.assistantMessages, info.id, MAX_TRACKED_MESSAGES);
+      }
       const out: OpenCodeClientEvent[] = [];
 
       // Usage rides the assistant message and is a SNAPSHOT: the message's
@@ -422,6 +538,10 @@ interface SessionState {
   // (F002/F003 on PR #84) — in a repo that had already written the hazard
   // down, in opencode-sdk.ts, and walked into it anyway.
   readonly queue: unknown[];
+  // #124: partID → part kind, correlated from `message.part.updated`. Lives on
+  // the session because that is the scope the correlation is valid in, and
+  // because it must be released with the session rather than with the client.
+  readonly parts: OpenCodePartIndex;
   ended: boolean;
   wake?: () => void;
   // The handoff can end two ways. The pump ending is an EOF and says nothing
@@ -558,7 +678,12 @@ export function createOpenCodeClient(
         // into separate calls, so unless the buffering happens here that
         // window cannot be closed at all.
         const subscription = await api.event.subscribe();
-        const state: SessionState = { api, queue: [], ended: false };
+        const state: SessionState = {
+          api,
+          queue: [],
+          parts: createPartIndex(),
+          ended: false,
+        };
         states.set(sessionId, state);
 
         // The ONLY consumer of the subscription. Subscribing without pulling
@@ -695,7 +820,11 @@ export function createOpenCodeClient(
       // through the same door — so there is no handoff to race.
       for (;;) {
         while (state.queue.length > 0) {
-          yield* mapOpenCodeEvents(state.queue.shift(), session.id);
+          yield* mapOpenCodeEvents(
+            state.queue.shift(),
+            session.id,
+            state.parts,
+          );
         }
         // Checked AFTER the drain and BEFORE `ended`: anything the provider
         // already said is delivered first — a terminal buffered before the
