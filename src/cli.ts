@@ -1462,7 +1462,12 @@ async function review(options: CliOptions): Promise<number> {
                 signal: ceilingController.signal,
               }),
         ...(productionRuntime !== undefined
-          ? { transportRegistry: productionRuntime.registry }
+          ? {
+              transportRegistry: productionRuntime.registry,
+              ...(productionRuntime.evidence === undefined
+                ? {}
+                : { admissionEvidence: productionRuntime.evidence }),
+            }
           : {}),
         ceilingController,
         onProgress: progress.onProgress,
@@ -2677,7 +2682,12 @@ async function reviewPr(
                       signal: ceilingController.signal,
                     }),
               ...(productionRuntime !== undefined
-                ? { transportRegistry: productionRuntime.registry }
+                ? {
+                    transportRegistry: productionRuntime.registry,
+                    ...(productionRuntime.evidence === undefined
+                      ? {}
+                      : { admissionEvidence: productionRuntime.evidence }),
+                  }
                 : {}),
               ceilingController,
               onProgress: progress.onProgress,

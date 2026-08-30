@@ -62,6 +62,7 @@ import {
   type ResolvedModelRoute,
   type ResolvedRoutePlan,
   type RoutingConfig,
+  type RunnerBackend,
 } from "./model-routing";
 // Type-only, and deliberately so: the C5 provenance block is recorded
 // verbatim, never re-derived here, so the pipeline gains a shape from
@@ -124,6 +125,7 @@ import {
 import {
   admitDiversityRoutePlan,
   admitRoutePlan,
+  type D1_11ReadinessEvidence,
   DefaultTransportRegistry,
   type TransportRegistry,
 } from "./transport-registry";
@@ -258,6 +260,10 @@ export interface PipelineDeps {
   runner: StepRunner;
   // D2 PR3: optional transport registry for route admission and runner dispatch
   transportRegistry?: TransportRegistry;
+  // The D1-11 readiness evidence the caller already resolved, carried from
+  // `ProductionRuntime.evidence`. Optional so offline harness callers with
+  // auto-built Claude-only plans keep compiling and keep behaving identically.
+  admissionEvidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   // §5.3 D1-10b: the ceiling's cancellation controller, SHARED with the runner
   // the caller built (the same controller's `signal` goes into
   // `ClaudeCodeRunnerOptions`). The pipeline needs the controller and not the
@@ -1097,13 +1103,36 @@ async function execute(
     );
   }
   if (routePlan !== undefined && transportRegistry !== undefined) {
+    // WHY, paid for by a dead live run: `admitRoutePlan` reads the D1-11
+    // evidence ONLY from its own options object — never from the registry it
+    // is handed, however well seeded that registry is. So EVERY admission call
+    // site must thread mode + evidence explicitly or it gates against an empty
+    // map. Omitting them here is what killed a live OpenCode review in 1.1s,
+    // before a single agent spawned, with the CLI's already-resolved evidence
+    // sitting one call frame away. `mode: "production"` is what the omitted
+    // options defaulted to anyway (`options.mode ?? "production"`), so this is
+    // byte-identical for the evidence-less offline callers; and evidence-less
+    // callers stay fail-closed on purpose — an opencode route with no evidence
+    // is still rejected here.
+    const admissionOptions = {
+      mode: "production",
+      ...(deps.admissionEvidence === undefined
+        ? {}
+        : { evidence: deps.admissionEvidence }),
+    } as const;
     if (diversityCtx.enabled) {
       if (diversityCtx.plan) {
         assertDiversityLegRoutes(diversityCtx.plan, routePlan);
       }
-      await admitDiversityRoutePlan(routePlan, transportRegistry);
+      // admitDiversityRoutePlan forwards straight to admitRoutePlan, so it
+      // carries the exact same omission hazard. Both sites, one fix.
+      await admitDiversityRoutePlan(
+        routePlan,
+        transportRegistry,
+        admissionOptions,
+      );
     } else {
-      await admitRoutePlan(routePlan, transportRegistry);
+      await admitRoutePlan(routePlan, transportRegistry, admissionOptions);
     }
   }
 

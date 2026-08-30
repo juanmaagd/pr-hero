@@ -636,16 +636,21 @@ export function exactBindingCapabilityIssues(
       blocking: true,
     });
   }
-  // WHY: this enforces the ExactBindingCapabilityReport contract's field
-  // independence (pricingApplicability and cashCostAccountingValid are two
-  // separate facts per src/execution/contracts.ts:235-237) against ANY
-  // future producer, not only today's. The one producer that exists today
-  // (FrozenRuntimeBinding.capabilities(), src/production-runtime.ts:258-298)
-  // derives both operands from the same `mode === "metered"` ternary, so it
-  // structurally cannot emit the combination this branch guards against —
-  // that is a fact about the current producer, not a reason to remove the
-  // gate. A producer that probes cash-cost accounting independently (e.g.
-  // from broker/ledger state) would make this branch reachable.
+  // WHY: this is the enforcement point for the design's "billingMode:
+  // 'unknown' is a blocking preflight result"
+  // (docs/multi-runtime-model-diversity-design.md:461). The legacy
+  // ProviderCapabilityReport has three billing modes and the exact contract
+  // has two, so FrozenRuntimeBinding.capabilities() narrows `unknown` into
+  // "subscription"; that leaves pricingApplicability at "not_applicable", so
+  // the pricing_table_missing gate above structurally CANNOT catch an
+  // unknown-billing route. The producer therefore derives
+  // cashCostAccountingValid from the ORIGINAL three-state mode and reports
+  // false for `unknown`, and this branch is what turns that fact into a
+  // refusal. It is reachable through the real producer (see
+  // test/production-runtime.test.ts "an unknown legacy billing mode blocks
+  // the exact-binding gate through the real producer"), and it also holds
+  // the pricingApplicability/cashCostAccountingValid field independence
+  // (src/execution/contracts.ts:235-237) for any future producer.
   if (
     report.billing.pricingApplicability !== "required" &&
     !report.billing.cashCostAccountingValid

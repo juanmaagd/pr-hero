@@ -309,11 +309,15 @@ describe("exactBindingCapabilityGate", () => {
     expect(issues.every((i) => i.blocking === false)).toBe(true);
   });
 
-  // Contract-level, not production-path: today's only producer
-  // (FrozenRuntimeBinding.capabilities()) cannot emit this exact
-  // combination because both fields derive from the same billing mode
-  // (src/production-runtime.ts:258-298). This asserts the gate's
-  // independent-field contract for any future producer that CAN.
+  // Production-reachable since FOLLOW-UP-1: the producer
+  // (FrozenRuntimeBinding.capabilities()) derives cashCostAccountingValid
+  // from the ORIGINAL three-state legacy billing mode, so a legacy report
+  // with `mode: "unknown"` emits exactly this combination — narrowed to
+  // "subscription" with pricingApplicability "not_applicable" and
+  // cashCostAccountingValid false. The producer-path proof lives in
+  // test/production-runtime.test.ts ("an unknown legacy billing mode blocks
+  // the exact-binding gate through the real producer"); this one keeps the
+  // gate's own contract honest for any producer.
   test("subscription binding fails when cash-cost accounting is invalid", () => {
     const decision = exactBindingCapabilityGate(
       greenBindingReport({

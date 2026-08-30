@@ -24,11 +24,16 @@ import {
   resolveStepRoute,
 } from "../src/model-routing";
 import {
+  collectDoctorExactBindingReports,
   createProductionRuntime,
   MultiProviderRunner,
   ProductionRuntimeError,
+  probeBindingsReadiness,
 } from "../src/production-runtime";
-import type { ExecutableAllowlistEntry } from "../src/provider-capabilities";
+import {
+  type ExecutableAllowlistEntry,
+  exactBindingCapabilityGate,
+} from "../src/provider-capabilities";
 import {
   resolveBindingAuthority,
   resolveRunnerAuthority,
@@ -109,6 +114,7 @@ function mixedAllowlists(
 function createMockTransport(
   backend: RunnerBackend,
   requests: TransportRequest[] = [],
+  capabilityOverrides: Partial<ProviderCapabilityReport> = {},
 ): ProviderTransport {
   return {
     backend,
@@ -136,6 +142,7 @@ function createMockTransport(
       cancellation: { deadlineMs: 5000, conformance: "passed" },
       billing: { mode: "subscription", pricingReady: true },
       issues: [],
+      ...capabilityOverrides,
     }),
     execute: async (request: TransportRequest): Promise<TransportOutcome> => {
       requests.push(request);
@@ -291,6 +298,66 @@ describe("production runtime PR1", () => {
           }),
         )?.key,
       ).toBe(step.routeFingerprint);
+    });
+
+    test("the runtime echoes the D1-11 evidence it was admitted with", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const evidence = new Map<RunnerBackend, D1_11ReadinessEvidence>([
+        [
+          "opencode",
+          {
+            sdkAvailable: true,
+            credentialAuthority: true,
+            workspaceBroker: true,
+            pricingReady: true,
+          },
+        ],
+      ]);
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+        evidence,
+      });
+
+      // The evidence has to survive the runtime boundary: admitRoutePlan reads
+      // it ONLY from its own options, so every downstream admission call site
+      // needs the runtime to hand it back out.
+      expect(runtime.evidence).toBe(evidence);
+    });
+
+    test("a runtime built without evidence exposes none", async () => {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", createMockTransport("claude-code"));
+
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+      });
+
+      expect(runtime.evidence).toBeUndefined();
     });
 
     test("invalid authority stops before any spawn or reservation", async () => {
@@ -499,6 +566,180 @@ describe("production runtime PR1", () => {
       expect(report.auth.projectionReady).toBe(brokered);
       expect(report.environment.syntheticHome).toBe(brokered);
       expect(report.environment.enumeratedPassthrough).toBe(!brokered);
+    });
+
+    // FOLLOW-UP-1: the legacy ProviderCapabilityReport carries THREE billing
+    // modes (subscription | metered | unknown, provider-capabilities.ts:266)
+    // while the exact contract carries two (contracts.ts:167). The producer
+    // narrows `unknown` into `"subscription"`, so `cashCostAccountingValid`
+    // must NOT be derived from the narrowed value — the design doc is
+    // explicit that `billingMode: "unknown"` is a blocking preflight result
+    // (docs/multi-runtime-model-diversity-design.md:461), and the pricing
+    // gate cannot catch it because `unknown` is not `metered`.
+    async function bindingReportForBilling(
+      billing: ProviderCapabilityReport["billing"],
+    ) {
+      const step = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const registry = new DefaultTransportRegistry();
+      registry.register(
+        "claude-code",
+        createMockTransport("claude-code", [], { billing }),
+      );
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+      });
+      const binding = runtime.bindings.get(step.routeFingerprint);
+      if (binding === undefined) throw new Error("missing binding");
+      return await binding.capabilities();
+    }
+
+    test("an unknown legacy billing mode blocks the exact-binding gate through the real producer", async () => {
+      const report = await bindingReportForBilling({
+        mode: "unknown",
+        pricingReady: false,
+      });
+
+      // The 2-state narrowing stays: `unknown` still projects as
+      // "subscription" on the exact contract.
+      expect(report.billing.mode).toBe("subscription");
+      // ...which is exactly why the pricing gate cannot see it.
+      expect(report.billing.pricingApplicability).toBe("not_applicable");
+      // The cash-cost fact is the enforcement point, and it must say NO.
+      expect(report.billing.cashCostAccountingValid).toBe(false);
+
+      const decision = exactBindingCapabilityGate(report);
+      expect(decision.ok).toBe(false);
+      expect(decision.reason).toContain("cash_cost_accounting_invalid");
+    });
+
+    test("subscription and metered billing modes keep their spec-defined cash-cost accounting", async () => {
+      const subscription = await bindingReportForBilling({
+        mode: "subscription",
+        pricingReady: false,
+      });
+      // Spec: subscription OAuth may truthfully report cashCostUsd: 0, with
+      // no pricing table involved.
+      expect(subscription.billing.cashCostAccountingValid).toBe(true);
+      expect(exactBindingCapabilityGate(subscription).ok).toBe(true);
+
+      const meteredUnpriced = await bindingReportForBilling({
+        mode: "metered",
+        pricingReady: false,
+      });
+      // Spec: metered routes require provider cost or a versioned rate table.
+      expect(meteredUnpriced.billing.cashCostAccountingValid).toBe(false);
+      // The cash gate stays silent for metered (its guard is
+      // `pricingApplicability !== "required"`); pricing_table_missing is the
+      // blocker on this arm.
+      const meteredDecision = exactBindingCapabilityGate(meteredUnpriced);
+      expect(meteredDecision.ok).toBe(false);
+      expect(meteredDecision.reason).toContain("pricing_table_missing");
+      expect(meteredDecision.reason).not.toContain(
+        "cash_cost_accounting_invalid",
+      );
+
+      const meteredPriced = await bindingReportForBilling({
+        mode: "metered",
+        pricingReady: true,
+      });
+      expect(meteredPriced.billing.cashCostAccountingValid).toBe(true);
+      expect(exactBindingCapabilityGate(meteredPriced).ok).toBe(true);
+    });
+
+    // SUGGESTION-1: capabilities() is deliberately non-memoised (it re-probes
+    // by design, and DefaultTransportRegistry.getCapabilityReport calls
+    // transport.capabilities() on every call), so a caller that gates and
+    // then re-collects pays two full probe passes. The readiness probe must
+    // hand its reports back so doctor consumes ONE pass.
+    test("probeBindingsReadiness probes each binding once and returns the reports it gated on", async () => {
+      const hunter = resolveStepRoute({
+        stepKey: "hunter-reliability",
+        role: "hunter",
+        cliModel: "sonnet",
+      });
+      const refuter = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "opus",
+      });
+      const plan = createResolvedRoutePlan([hunter, refuter]);
+
+      let probeCount = 0;
+      const base = createMockTransport("claude-code");
+      const registry = new DefaultTransportRegistry();
+      registry.register("claude-code", {
+        ...base,
+        capabilities: async () => {
+          probeCount += 1;
+          return await base.capabilities();
+        },
+      });
+
+      const probe = await probeBindingsReadiness({
+        workspaceRoot: tmpDir,
+        plan,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlists: claudeAllowlist(claudeFixture),
+        registry,
+        mode: "conformance",
+      });
+      try {
+        expect(probe.decision.ok).toBe(true);
+        expect(probe.bindings.size).toBe(2);
+        expect(probe.reports.length).toBe(2);
+        expect([...probe.reports].map((r) => r.routeKey).sort()).toEqual(
+          [...probe.bindings.keys()].sort(),
+        );
+        // One probe per binding — no second collection pass.
+        expect(probeCount).toBe(probe.bindings.size);
+      } finally {
+        await probe.dispose();
+      }
+    });
+
+    // WHY this test exists: collectDoctorExactBindingReports carried TWO
+    // disagreeing branches and only the `loadSdk`-injected one was ever
+    // exercised by a test. The real doctor/wizard path passes no loadSdk, so
+    // it fell through to a registry with no mode at all — which the OpenCode
+    // transport factory defaults to "production" — and every OpenCode route
+    // was gated on the very D1-11 evidence this diagnostic probe exists to
+    // produce. Fully hermetic: PATH-scoped fixture binaries, and neither
+    // transport's capabilities() spawns a process or loads @opencode-ai/sdk.
+    test("collectDoctorExactBindingReports probes an OpenCode route without the production D1-11 gate when no SDK loader is injected", async () => {
+      await writeOpenCodeFixture(tmpDir);
+      const routingConfig: RoutingConfig = {
+        mappings: [
+          {
+            logical: "opus",
+            backend: "opencode",
+            provider: "openai",
+            modelFamily: "gpt-4o",
+            modelSnapshot: "gpt-4o",
+          },
+        ],
+      };
+
+      const reports = await collectDoctorExactBindingReports({
+        workspaceRoot: tmpDir,
+        routingConfig,
+        env: { PATH: tmpDir },
+      });
+
+      expect(reports.length).toBe(2);
+      expect([...reports].map((report) => report.backend).sort()).toEqual([
+        "claude-code",
+        "opencode",
+      ]);
     });
 
     test("mixed Claude/OpenCode conformance admits with evidence and dispatches by routeKey", async () => {

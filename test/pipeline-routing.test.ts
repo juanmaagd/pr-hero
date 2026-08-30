@@ -8,19 +8,30 @@ import {
   diversityDebugFromLedger,
   recordDiversityHunterResult,
 } from "../src/diversity/pipeline-integration";
-import type { RunnerBackend } from "../src/execution/contracts";
+import type {
+  ProviderCapabilityReport,
+  ProviderTransport,
+  RunnerBackend,
+  TransportOutcome,
+  TransportRequest,
+} from "../src/execution/contracts";
 import { armOfRun, scoutFailed } from "../src/floor-test";
 import {
   aliasCanonical,
   aliasModelFamily,
   aliasModelSnapshot,
 } from "../src/model-catalog";
-import type { RoutingConfig } from "../src/model-routing";
+import {
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "../src/model-routing";
 import { type PipelineInput, runPipeline } from "../src/pipeline";
 import { rereviewDeltaFromProvenance } from "../src/report";
 import { type ReviewSpec, validateReviewSpec } from "../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
 import {
+  type D1_11ReadinessEvidence,
   DefaultTransportRegistry,
   OpenCodeProductionGatedError,
   RouteAdmissionError,
@@ -118,6 +129,89 @@ class RecordingStepRunner implements StepRunner {
       output,
     };
   }
+}
+
+const READY_OPENCODE_EVIDENCE: D1_11ReadinessEvidence = {
+  sdkAvailable: true,
+  credentialAuthority: true,
+  workspaceBroker: true,
+  pricingReady: true,
+};
+
+// A registered, already-capable opencode transport. Overriding the backend
+// takes the registry's OWN D1-11 factory gate out of the picture (and with it
+// any `@opencode-ai/sdk` resolution), so these tests isolate exactly one
+// question: does runPipeline thread admission evidence into admitRoutePlan?
+function createCapableOpenCodeTransport(): ProviderTransport {
+  return {
+    backend: "opencode",
+    capabilities: async (): Promise<ProviderCapabilityReport> => ({
+      backend: "opencode",
+      status: "ready",
+      auth: {
+        kind: "opencode_chatgpt_oauth",
+        projectionReady: true,
+        probe: "passed",
+      },
+      isolation: {
+        syntheticHome: true,
+        workspaceReadBroker: true,
+        codegraphPolicy: true,
+      },
+      protocol: {
+        terminalProof: true,
+        boundedEvents: true,
+        usageMode: "snapshot",
+      },
+      cancellation: { deadlineMs: 5000, conformance: "passed" },
+      billing: { mode: "subscription", pricingReady: true },
+      issues: [],
+    }),
+    execute: async (_request: TransportRequest): Promise<TransportOutcome> => ({
+      completion: "success",
+      protocolIntegrity: "verified",
+      finalText: '{"findings":[]}',
+      usage: {
+        wallMs: 1,
+        tokens: { totalKnown: 1 },
+        completeness: "complete",
+        billingMode: "subscription",
+        costSource: "provider",
+        cashCostUsd: 0,
+      },
+      stderrTail: "",
+    }),
+    classifyFailure: () => undefined,
+  };
+}
+
+// The live-failure topology: an explicit caller-supplied plan whose steps are
+// routed at opencode, exactly as the CLI hands one to runPipeline.
+function openCodeRoutePlan() {
+  const routingConfig: RoutingConfig = {
+    mappings: {
+      "openai/gpt-4o": {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o",
+      },
+    },
+  };
+  return createResolvedRoutePlan([
+    resolveStepRoute({
+      stepKey: "hunter-reliability",
+      role: "hunter",
+      cliModel: "openai/gpt-4o",
+      routingConfig,
+    }),
+    resolveStepRoute({
+      stepKey: "refuter",
+      role: "refuter",
+      cliModel: "openai/gpt-4o",
+      routingConfig,
+    }),
+  ]);
 }
 
 async function setupTestEnvironment() {
@@ -360,6 +454,62 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
     }
   });
 
+  // The defect this covers killed a live OpenCode review in 1.1s:
+  // admitRoutePlan reads D1-11 evidence ONLY from its own options parameter,
+  // never from the registry it is handed, so runPipeline's evidence-less
+  // admission call gated an evidence-seeded production run against an empty
+  // map. The CLI already resolved the evidence; nothing carried it in.
+  test("caller-supplied opencode route plan is admitted when D1-11 evidence reaches the pipeline", async () => {
+    const env = await setupTestEnvironment();
+    try {
+      const runner = new RecordingStepRunner();
+      const registry = new DefaultTransportRegistry();
+      registry.register("opencode", createCapableOpenCodeTransport());
+
+      const result = await runPipeline(
+        { ...env.input, routePlan: openCodeRoutePlan() },
+        {
+          runner,
+          transportRegistry: registry,
+          admissionEvidence: new Map<RunnerBackend, D1_11ReadinessEvidence>([
+            ["opencode", READY_OPENCODE_EVIDENCE],
+          ]),
+        },
+      );
+
+      expect(result.sessionFailed).toBe(false);
+      const hunterStep = runner.executedSteps.find(
+        (s) => s.name === "hunter-reliability",
+      );
+      expect(hunterStep?.route?.backend).toBe("opencode");
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  // Fail-closed guard for the change above: threading evidence must not turn
+  // into "admission finds evidence somewhere". A registry that could serve the
+  // backend is NOT evidence — an admission call without evidence still gates.
+  test("opencode route stays rejected when the registry is capable but no evidence is threaded", async () => {
+    const env = await setupTestEnvironment();
+    try {
+      const runner = new RecordingStepRunner();
+      const registry = new DefaultTransportRegistry();
+      registry.register("opencode", createCapableOpenCodeTransport());
+
+      await expect(
+        runPipeline(
+          { ...env.input, routePlan: openCodeRoutePlan() },
+          { runner, transportRegistry: registry },
+        ),
+      ).rejects.toThrow(OpenCodeProductionGatedError);
+
+      expect(runner.executedSteps.length).toBe(0);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   test("schema-1.1 tolerant old readers parse pipeline.json without error", async () => {
     const env = await setupTestEnvironment();
     try {
@@ -432,7 +582,15 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
     }
   });
 
-  test("legacy parsers consume mixed-route artifacts without requiring new fields", () => {
+  // Forward-compatibility guard over a MIXED claude-code + opencode plan.
+  // The engine can now emit an opencode-backed artifact (see the
+  // evidence-threading test above), but no offline test produces a plan with
+  // both backends at once, so this literal remains the only place where the
+  // legacy readers meet that shape. Spec scenario 2 asks for exactly this
+  // ("a PR plan containing Claude and OpenCode steps ... artifacts remain
+  // readable by old consumers"). Deleting it in favour of the real-artifact
+  // test below silently drops backend: "opencode" from parser coverage.
+  test("legacy parsers tolerate a mixed claude-code + opencode route shape", () => {
     const head = "2222222222222222222222222222222222222222";
     const mixed = {
       pr: 42,
@@ -461,6 +619,72 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       ),
     ).toBe(1);
     expect(armOfRun(mixed)).toBe("control");
+  });
+
+  // SUGGESTION-4: this used to build its "mixed-route artifact" as a
+  // hand-written object literal, which proved only that the legacy parsers
+  // tolerate a shape a human typed. It now runs the real pipeline and reads
+  // the pipeline.json runPipeline actually wrote.
+  //
+  // The routes are two DISTINCT claude-code routes rather than
+  // claude-code + opencode, because this test supplies no D1-11 evidence:
+  // runPipeline threads `{ mode: "production", evidence }` into
+  // admitRoutePlan, and with no evidence the D1-11 gate throws
+  // OpenCodeProductionGatedError before any artifact is written (proven by
+  // the fail-closed test above). Producing an opencode artifact needs the
+  // evidence-threading setup, which the sibling test covers.
+  test("legacy parsers consume a real mixed-route pipeline.json without requiring new fields", async () => {
+    const env = await setupTestEnvironment();
+    try {
+      const routingConfig: RoutingConfig = {
+        mappings: [
+          {
+            logical: aliasCanonical("opus"),
+            backend: "claude-code",
+            provider: "openrouter",
+            gateway: "openrouter",
+            modelFamily: aliasModelFamily("opus"),
+            modelSnapshot: aliasModelSnapshot("opus"),
+            modelVariant: "high",
+          },
+        ],
+      };
+
+      const runner = new RecordingStepRunner();
+      await runPipeline({ ...env.input, routingConfig }, { runner });
+
+      const raw = await Bun.file(path.join(env.runDir, "pipeline.json")).text();
+      const produced = JSON.parse(raw);
+
+      // The artifact really does carry more than one distinct route.
+      const routes = produced.routePlan.steps.map(
+        (s: { route: { gateway?: string; modelVariant?: string } }) => s.route,
+      );
+      expect(routes.length).toBeGreaterThanOrEqual(2);
+      expect(
+        new Set(routes.map((r: { gateway?: string }) => r.gateway)).size,
+      ).toBeGreaterThan(1);
+      expect(
+        routes.some(
+          (r: { modelVariant?: string }) => r.modelVariant === "high",
+        ),
+      ).toBe(true);
+
+      // Legacy parsers read it without knowing any of those fields exist.
+      const head = "2222222222222222222222222222222222222222";
+      const meta = parsePipelineMeta(raw);
+      expect(meta).toEqual({ pr: 42, head_sha: head });
+      expect(
+        countAttempts(
+          [{ name: "pr-42-22222222-1", pipelineMeta: meta }],
+          42,
+          head,
+        ),
+      ).toBe(1);
+      expect(armOfRun(produced)).toBe("control");
+    } finally {
+      await env.cleanup();
+    }
   });
 
   test("OpenCode D3 debug observations record frozen route provenance", () => {
