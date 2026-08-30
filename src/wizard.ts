@@ -8,7 +8,10 @@ import {
   syncSkills,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
-import type { ExactBindingCapabilityReport } from "./execution/contracts";
+import type {
+  ExactBindingCapabilityReport,
+  RunnerBackend,
+} from "./execution/contracts";
 import { initConfigTemplate } from "./preflight";
 import { collectDoctorExactBindingReports } from "./production-runtime";
 import {
@@ -33,14 +36,26 @@ export interface WizardDryRunState {
   skippedReason?: string;
 }
 
+export interface WizardBindingAuthProjection {
+  readonly routeKey: string;
+  readonly backend: RunnerBackend;
+  readonly projectionReady: boolean;
+}
+
 export interface WizardState {
   stepIndex: number;
   selectedIndex: number;
   toolStatuses: Record<string, SystemToolStatus>;
-  exactBindingProjectionReady?: boolean;
+  // SUGGESTION-2: one entry per binding in the resolved plan. This used to be
+  // a single `.some()`-over-every-binding boolean rendered on the `claude`
+  // tool row, which reported (say) an opencode binding's ready projection as
+  // Claude's. Readiness is a per-binding fact, so it is carried per binding.
+  exactBindingAuthProjections?: readonly WizardBindingAuthProjection[];
   // Set only when the probe itself threw (broker/authority/transport
   // defect) — distinct from a clean report that says the projection is
-  // not ready. Both used to collapse into the same `false`.
+  // not ready. Both used to collapse into the same `false`. This one is
+  // plan-wide: a single throw covers the whole collection, so it belongs to
+  // no individual binding.
   exactBindingProbeError?: string;
   envDetections: AgentEnvDetection[];
   skillsSynced: boolean;
@@ -271,6 +286,29 @@ async function defaultExec(
   }
 }
 
+// The Step-1 rows are system TOOLS, not runtime bindings, and only `claude`
+// has a runner backend behind it today. A tool row may therefore speak for
+// the bindings on ITS backend and no others; every other binding gets its own
+// line (see `renderUnreportedProjections`). Add a row here only when the tool
+// really is the binary a backend executes.
+const SYSTEM_TOOL_BACKENDS: Readonly<Record<string, RunnerBackend>> = {
+  claude: "claude-code",
+};
+
+function authProjectionDetail(
+  projections: readonly WizardBindingAuthProjection[],
+  backend: RunnerBackend,
+): string {
+  const forBackend = projections.filter((p) => p.backend === backend);
+  // Having no binding on this backend is not an unready projection, so the
+  // row must stay silent rather than claim "unavailable".
+  if (forBackend.length === 0) {
+    return "";
+  }
+  const ready = forBackend.every((p) => p.projectionReady);
+  return ` (auth projection: ${ready ? "ready" : "unavailable"})`;
+}
+
 export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
   // Step 1: System tools
   {
@@ -284,10 +322,11 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         ...deps.checkToolsOptions,
       });
       const workspaceRoot = deps.cwd ?? process.cwd();
-      let exactBindingProjectionReady = false;
+      let exactBindingAuthProjections: readonly WizardBindingAuthProjection[] =
+        [];
       let exactBindingProbeError: string | undefined;
       // Both branches feed the SAME shape (ExactBindingCapabilityReport[])
-      // through the SAME readiness computation — the injected seam is no
+      // through the SAME readiness projection — the injected seam is no
       // longer a caller-decided boolean, and a real probe/authority failure
       // is captured instead of silently collapsing into "not ready".
       try {
@@ -299,17 +338,19 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
                 existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
               },
             });
-        exactBindingProjectionReady = reports.some(
-          (report) => report.auth.projectionReady,
-        );
+        exactBindingAuthProjections = reports.map((report) => ({
+          routeKey: report.routeKey,
+          backend: report.backend,
+          projectionReady: report.auth.projectionReady,
+        }));
       } catch (error) {
-        exactBindingProjectionReady = false;
+        exactBindingAuthProjections = [];
         exactBindingProbeError =
           error instanceof Error ? error.message : String(error);
       }
       return {
         toolStatuses,
-        exactBindingProjectionReady,
+        exactBindingAuthProjections,
         exactBindingProbeError,
       };
     },
@@ -328,38 +369,56 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
 
       lines.push(bold("Step 1/5: System Tools Preflight"));
       lines.push("");
+      const projections = state.exactBindingAuthProjections ?? [];
+      const reportedBackends = new Set<RunnerBackend>();
       for (const [name, st] of Object.entries(state.toolStatuses)) {
         const icon = st.installed
           ? st.authOk === false
             ? yellow("[!]")
             : green("[✓]")
           : red("[✗]");
-        // §11/D1-09: the claude line also reports auth-projection readiness
-        // from the same capability predicate execution uses.
+        // §11/D1-09: a tool row that IS a runner backend also reports the
+        // auth-projection readiness of that backend's bindings, from the same
+        // capability predicate execution uses.
+        const backend = SYSTEM_TOOL_BACKENDS[name];
         const detail =
-          name === "claude" && st.installed
-            ? ` (auth projection: ${state.exactBindingProjectionReady ? "ready" : "unavailable"})`
+          backend !== undefined && st.installed
+            ? authProjectionDetail(projections, backend)
             : "";
+        if (backend !== undefined && detail !== "") {
+          reportedBackends.add(backend);
+        }
         lines.push(
           `  ${icon} ${bold(name)}: ${st.installed ? (st.version ? `v${st.version}` : "installed") : "missing"}${detail}`,
         );
-        // A probe that THREW and a report that cleanly says "not ready" both
-        // render `unavailable` on the row above. Without this line the
-        // operator cannot tell a broken credential broker from an
-        // unconfigured one, and `exactBindingProbeError` would be state no
-        // human ever sees.
-        if (
-          name === "claude" &&
-          st.installed &&
-          state.exactBindingProbeError !== undefined
-        ) {
-          lines.push(
-            `      ${yellow("[!]")} probe failed: ${state.exactBindingProbeError}`,
-          );
-        }
         if (st.hint) {
           lines.push(`      ${st.hint}`);
         }
+      }
+      // Bindings no tool row spoke for. Folding these into the claude row is
+      // exactly the mislabeling this replaces.
+      for (const projection of projections) {
+        if (reportedBackends.has(projection.backend)) {
+          continue;
+        }
+        const icon = projection.projectionReady ? green("[✓]") : yellow("[!]");
+        lines.push(
+          `  ${icon} ${bold(projection.backend)} route ${projection.routeKey}: auth projection: ${
+            projection.projectionReady ? "ready" : "unavailable"
+          }`,
+        );
+      }
+      // A probe that THREW and a report that cleanly says "not ready" both
+      // render `unavailable` above. Without this line the operator cannot
+      // tell a broken credential broker from an unconfigured one, and
+      // `exactBindingProbeError` would be state no human ever sees. It is
+      // plan-wide, so it is attached to no binding and to no tool row — the
+      // old `name === "claude" && st.installed` gate hid it entirely
+      // whenever the claude CLI was missing.
+      if (state.exactBindingProbeError !== undefined) {
+        lines.push(
+          `  ${yellow("[!]")} exact-binding probe failed: ${state.exactBindingProbeError}`,
+        );
       }
       return lines;
     },

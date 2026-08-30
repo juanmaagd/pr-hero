@@ -261,7 +261,9 @@ describe("Wizard state machine & steps", () => {
           }),
         ],
       });
-      expect(unavailable?.exactBindingProjectionReady).toBe(false);
+      expect(unavailable?.exactBindingAuthProjections).toEqual([
+        { routeKey: "fp", backend: "claude-code", projectionReady: false },
+      ]);
       expect(unavailable?.exactBindingProbeError).toBeUndefined();
       const down = step?.render(
         { ...createInitialWizardState(), ...unavailable },
@@ -277,7 +279,9 @@ describe("Wizard state machine & steps", () => {
         ...tools,
         probeExactBinding: async () => [exactBindingReport()],
       });
-      expect(ready?.exactBindingProjectionReady).toBe(true);
+      expect(ready?.exactBindingAuthProjections).toEqual([
+        { routeKey: "fp", backend: "claude-code", projectionReady: true },
+      ]);
       const up = step?.render(
         { ...createInitialWizardState(), ...ready },
         { styles: false, width: 80 },
@@ -297,7 +301,7 @@ describe("Wizard state machine & steps", () => {
           throw new Error("credential broker unavailable");
         },
       });
-      expect(errored?.exactBindingProjectionReady).toBe(false);
+      expect(errored?.exactBindingAuthProjections).toEqual([]);
       expect(errored?.exactBindingProbeError).toContain(
         "credential broker unavailable",
       );
@@ -314,7 +318,9 @@ describe("Wizard state machine & steps", () => {
           }),
         ],
       });
-      expect(genuinelyUnready?.exactBindingProjectionReady).toBe(false);
+      expect(genuinelyUnready?.exactBindingAuthProjections).toEqual([
+        { routeKey: "fp", backend: "claude-code", projectionReady: false },
+      ]);
       expect(genuinelyUnready?.exactBindingProbeError).toBeUndefined();
     });
 
@@ -333,8 +339,16 @@ describe("Wizard state machine & steps", () => {
         },
       };
 
+      const unreadyClaudeBinding = [
+        {
+          routeKey: "fp",
+          backend: "claude-code" as const,
+          projectionReady: false,
+        },
+      ];
+
       const cleanlyUnready = step?.render(
-        { ...base, exactBindingProjectionReady: false },
+        { ...base, exactBindingAuthProjections: unreadyClaudeBinding },
         { styles: false, width: 80 },
       ) as string[];
       expect(cleanlyUnready.join("\n")).toContain(
@@ -345,7 +359,7 @@ describe("Wizard state machine & steps", () => {
       const probeFailed = step?.render(
         {
           ...base,
-          exactBindingProjectionReady: false,
+          exactBindingAuthProjections: unreadyClaudeBinding,
           exactBindingProbeError: "credential broker unavailable",
         },
         { styles: false, width: 80 },
@@ -355,6 +369,131 @@ describe("Wizard state machine & steps", () => {
       expect(rendered).toContain("credential broker unavailable");
       // The two states must not render identically.
       expect(rendered).not.toBe(cleanlyUnready.join("\n"));
+    });
+
+    // SUGGESTION-2 + NEW-1 residue: readiness was computed with `.some()`
+    // over EVERY binding but rendered only on the `claude` tool row, so an
+    // opencode binding's ready projection was reported as Claude's. The
+    // probe-failure line inherited the identical `name === "claude"` gate.
+    // A multi-binding plan is the only thing that can prove the fix.
+    test("auth projection readiness is labelled per binding, never `.some()` on the claude row", async () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+
+      const probed = await step?.probe({
+        ...tools,
+        probeExactBinding: async () => [
+          exactBindingReport({
+            routeKey: "claude-fp",
+            backend: "claude-code",
+            auth: {
+              kind: "claude_subscription_oauth",
+              projectionReady: false,
+              probe: "failed",
+            },
+          }),
+          exactBindingReport({
+            routeKey: "opencode-fp",
+            backend: "opencode",
+            auth: {
+              kind: "opencode_chatgpt_oauth",
+              projectionReady: true,
+              probe: "passed",
+            },
+          }),
+        ],
+      });
+
+      const lines = step?.render(
+        { ...createInitialWizardState(), ...probed },
+        { styles: false, width: 80 },
+      ) as string[];
+      const claudeRow = lines.find((l) => l.includes("claude:"));
+      expect(claudeRow).toBeDefined();
+      // The claude row reports the CLAUDE binding, which is unavailable.
+      expect(claudeRow).toContain("auth projection: unavailable");
+
+      // The opencode binding's ready projection is still reported — under
+      // its own backend, never folded into the claude row.
+      const openCodeLine = lines.find((l) => l.includes("opencode"));
+      expect(openCodeLine).toBeDefined();
+      expect(openCodeLine).toContain("auth projection: ready");
+
+      for (const line of lines) {
+        expect(line).not.toContain("\x1b");
+      }
+    });
+
+    // SUGGESTION-6: both tests above inject `probeExactBinding`, so the real
+    // fallback — `collectDoctorExactBindingReports` with the wizard's own
+    // `workspaceRoot` and its constructed `authorityDeps` — had no coverage
+    // at all. These two drive it for real, with NO probe seam: the error text
+    // can only come from `resolveClaudeCanonicalBinary`, which proves the
+    // injected `existsFn` reached the real authority resolver through
+    // `prepareProductionRunnerAuthority`.
+    test("without the probe seam the wizard drives the real exact-binding collector via deps.exists", async () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+
+      const probed = await step?.probe({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: () => false,
+        checkToolsOptions: {
+          which: (bin: string) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+      });
+
+      expect(probed?.exactBindingAuthProjections).toEqual([]);
+      expect(probed?.exactBindingProbeError).toBe(
+        "claude binary not found on PATH",
+      );
+    });
+
+    test("the authorityDeps fallback also honours checkToolsOptions.exists", async () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+
+      // No `deps.exists` at all — the `deps.exists ?? deps.checkToolsOptions
+      // ?.exists` fallback is the only thing that can reach the resolver.
+      const probed = await step?.probe({
+        cwd: "/repo",
+        home: "/home/user",
+        checkToolsOptions: {
+          which: (bin: string) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          exists: () => false,
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+      });
+
+      expect(probed?.exactBindingProbeError).toBe(
+        "claude binary not found on PATH",
+      );
+    });
+
+    test("a plan-wide probe failure is rendered even when the claude tool row is missing", () => {
+      const step = WIZARD_STEPS.find((s) => s.id === "system_tools");
+      expect(step).toBeDefined();
+
+      // The probe throws for the WHOLE plan, so its failure belongs to no
+      // single binding — gating it on an installed `claude` row hid it.
+      const lines = step?.render(
+        {
+          ...createInitialWizardState(),
+          toolStatuses: {
+            git: { installed: true, version: "2.0.0" },
+          } as never,
+          exactBindingProbeError: "credential broker unavailable",
+        },
+        { styles: false, width: 80 },
+      ) as string[];
+
+      const rendered = lines.join("\n");
+      expect(rendered).toContain("probe failed");
+      expect(rendered).toContain("credential broker unavailable");
     });
   });
 });
