@@ -100,6 +100,31 @@ function fakeSdk(
             : { data: true };
         },
       },
+      // The tool surface is enumerated before the prompt is fired (#122), so
+      // even a fake that is only here to refuse a prompt has to report one.
+      // The ids are the real ones `client.tool.ids()` returns on opencode
+      // 1.18.23 — a fake written in a namespace the provider does not use is
+      // how the allow-map defect stayed green over 2818 tests.
+      tool: {
+        ids: async () => ({
+          data: [
+            "invalid",
+            "question",
+            "bash",
+            "read",
+            "glob",
+            "grep",
+            "edit",
+            "write",
+            "task",
+            "webfetch",
+            "todowrite",
+            "websearch",
+            "skill",
+            "apply_patch",
+          ],
+        }),
+      },
       event: {
         subscribe: async () => ({
           stream: {
