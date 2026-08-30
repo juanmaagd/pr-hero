@@ -163,6 +163,9 @@ const MARKER_USAGE_FLIP =
 
 const MARKER_CONFLICT =
   "[pr-hero] opencode sdk: conflicting provider terminal observed after the compare-and-set slot was won";
+// Already the literal prefix of the stderrTail this transport writes when
+// createSession throws; naming it here makes it a classification witness too.
+const MARKER_SESSION_CREATE = "[pr-hero] opencode sdk: session creation failed";
 
 type SettleReason =
   | { readonly kind: "provider_terminal" }
@@ -997,6 +1000,22 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       )
     ) {
       return "network_transient";
+    }
+    // LAST, and the position is the point. A session that never opened is the
+    // runtime being unavailable — §7 makes that terminal, so it stops instead
+    // of spending the format-reminder budget on an attempt the model never
+    // saw. That is what went wrong in issue #121: `sdk.createClient is not a
+    // function` reached the harness with no mapped witness, fell through to
+    // the legacy classifier, and was filed as `format_violation` — a
+    // TypeError in our own transport recorded in the bucket reserved for
+    // model misbehaviour, burning a retry on the way.
+    //
+    // Checked after the auth/rate-limit/network patterns because the creation
+    // message CARRIES the provider's own text: "session creation failed:
+    // fetch failed" is a transient network failure that keeps its retry, and
+    // a marker check above them would silently delete that path.
+    if (witness.includes(MARKER_SESSION_CREATE)) {
+      return "runtime_unavailable";
     }
     return undefined;
   }

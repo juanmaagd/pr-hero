@@ -234,12 +234,36 @@ export function isSessionIdle(raw: unknown, sessionId: string): boolean {
 // module-resolution stack trace.
 // ---------------------------------------------------------------------------
 
+// BOTH arms of the SDK's `RequestResult`. With its default
+// `ThrowOnError = false` every session call resolves to either
+// `{ data, error: undefined }` or `{ data: undefined, error }` — an API error
+// is a RESOLVED promise, not a rejected one. The first version of this
+// interface declared only the success arm, so a rejected model or a bad body
+// reached `.data.id` with `data` undefined and became a TypeError carrying
+// none of the provider's diagnosis (issue #121).
+//
+// Modelled as a union rather than collapsed with `throwOnError: true`
+// deliberately: the collapse is a per-call TYPE inference on the SDK's own
+// generic signatures, and it cannot travel through a narrow non-generic
+// interface like this one — the declared return type governs at every call
+// site here. The union is the shape the transport must actually survive.
+export type OpenCodeSdkResult<T> =
+  | { readonly data: T; readonly error?: undefined }
+  | { readonly data?: undefined; readonly error: unknown };
+
+// Deliberately narrow: the transport needs five methods, not the SDK's
+// twenty namespaces. test/conformance/opencode-sdk-surface.test.ts asserts at
+// COMPILE TIME that the real `OpencodeClient` is assignable to this, so the
+// narrowing can never drift back into a guess. Members are method shorthand,
+// not properties, on purpose — property-style function types are checked
+// contravariantly under `strict` and would reject the real client's generic
+// signatures for a reason that has nothing to do with conformance.
 export interface OpenCodeSdkClientApi {
   readonly session: {
-    create(options?: unknown): Promise<{ data: { id: string } }>;
-    prompt(options: unknown): Promise<{ data: unknown }>;
-    messages(options: unknown): Promise<{ data: unknown }>;
-    abort(options?: unknown): Promise<{ data: unknown }>;
+    create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
+    prompt(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    messages(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    abort(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
   };
   readonly event: {
     subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
@@ -247,7 +271,64 @@ export interface OpenCodeSdkClientApi {
 }
 
 export interface OpenCodeSdkLike {
-  createClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+  // `createOpencodeClient`, and the name is the whole of issue #121: this
+  // interface used to declare `createClient`, which the SDK has never
+  // exported. Nothing compared the two, so every live OpenCode step died on
+  // `sdk.createClient is not a function` while the offline suite stayed green
+  // — every mock was shaped to the same guess.
+  createOpencodeClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+}
+
+// The runtime half of the conformance check. `import type` is erased, so it
+// cannot guard the DYNAMIC import the transport registry performs; the loaded
+// module is therefore validated instead of asserted. This replaces two
+// `as unknown as OpenCodeSdkLike` casts — the strongest assertion TypeScript
+// has, pointed at a hand-written guess, which is precisely why the guess was
+// never caught.
+export function assertOpenCodeSdk(module: unknown): OpenCodeSdkLike {
+  const candidate = module as Partial<OpenCodeSdkLike> | null | undefined;
+  if (
+    candidate === null ||
+    candidate === undefined ||
+    typeof candidate.createOpencodeClient !== "function"
+  ) {
+    throw new Error(
+      "@opencode-ai/sdk resolved but does not export createOpencodeClient(), " +
+        "which pr-hero needs to open a session. The installed package is not " +
+        `the SDK this transport was built against (got ${describeModule(module)}).`,
+    );
+  }
+  return candidate as OpenCodeSdkLike;
+}
+
+function describeModule(module: unknown): string {
+  if (typeof module !== "object" || module === null) return typeof module;
+  const keys = Object.keys(module).sort();
+  return keys.length === 0 ? "an object with no exports" : keys.join(", ");
+}
+
+// Every `.data` read in this file goes through here. The alternative — reading
+// `.data` and trusting it — is the defect.
+function unwrap<T>(result: OpenCodeSdkResult<T>, call: string): T {
+  const data = result.data;
+  if (result.error !== undefined || data === undefined) {
+    throw new Error(
+      `opencode ${call} failed: ${describeSdkError(result.error)}`,
+    );
+  }
+  return data;
+}
+
+function describeSdkError(error: unknown): string {
+  if (error === undefined) return "the provider returned no data and no error";
+  if (typeof error === "string") return error;
+  const message = asRecord(error)?.message;
+  if (typeof message === "string" && message.length > 0) return message;
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }
 
 export interface CreateOpenCodeClientOptions {
@@ -342,7 +423,7 @@ export function createOpenCodeClient(
         }
       }
       const handle = server ?? (await serverPromise);
-      const api = sdk.createClient({ baseUrl: handle.url });
+      const api = sdk.createOpencodeClient({ baseUrl: handle.url });
 
       let sessionId: string | undefined;
       establishing += 1;
@@ -350,7 +431,7 @@ export function createOpenCodeClient(
         const created = await api.session.create({
           body: { title: "pr-hero review step" },
         });
-        sessionId = created.data.id;
+        sessionId = unwrap(created, "session.create").id;
 
         // Subscribed BEFORE the prompt, and the ordering is not stylistic.
         // event.subscribe() is live and unbuffered, so a subscription opened
@@ -457,7 +538,13 @@ export function createOpenCodeClient(
       const response = await state.api.session.messages({
         path: { id: session.id },
       });
-      const list = Array.isArray(response.data) ? response.data : [];
+      // Throws on the error arm rather than reporting "pending": the caller
+      // treats a poll that throws as a FAILED OBSERVATION and counts it
+      // (opencode-sdk.ts:707), whereas a silent "pending" would let the
+      // attempt run to its stall deadline on an API error the provider
+      // already explained.
+      const messages = unwrap(response, "session.messages");
+      const list = Array.isArray(messages) ? messages : [];
       // Last completed assistant message wins; the same helper the stream
       // uses, on purpose. §197 wants two INDEPENDENT observers of ONE fact,
       // not two facts that happen to resemble each other — two copies of this

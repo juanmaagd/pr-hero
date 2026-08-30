@@ -14,6 +14,7 @@ import { capabilityGateDecision } from "./provider-capabilities";
 import { redactDiagnostic } from "./security/redact";
 import { ClaudeCodeCliTransport } from "./transports/claude-code-cli";
 import {
+  assertOpenCodeSdk,
   createOpenCodeClient,
   type OpenCodeSdkLike,
 } from "./transports/opencode-client";
@@ -25,6 +26,18 @@ import {
   launchOpenCodeServer,
   type OpenCodeServerHandle,
 } from "./transports/opencode-server";
+
+// ONE loader for both consumers (the transport factory and probeOpenCodeSdk),
+// so the probe proves exactly what the factory will get. `new Function` keeps
+// the import out of the static graph — the SDK is an OPTIONAL dependency and
+// a Claude-only install must never be asked to resolve it — but the RESULT is
+// now validated instead of `as unknown as OpenCodeSdkLike`-cast. That cast was
+// the root cause of issue #121: it silenced the only compiler check that could
+// have noticed the local interface named a factory the SDK does not export.
+async function loadOpenCodeSdk(): Promise<OpenCodeSdkLike> {
+  const dynamicImport = new Function("specifier", "return import(specifier)");
+  return assertOpenCodeSdk(await dynamicImport("@opencode-ai/sdk"));
+}
 
 export class RouteAdmissionError extends Error {}
 
@@ -215,17 +228,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
               providerID: "openai",
               modelID: "gpt-4o",
             },
-        loadSdk:
-          merged.loadSdk ??
-          (async () => {
-            const dynamicImport = new Function(
-              "specifier",
-              "return import(specifier)",
-            );
-            return (await dynamicImport(
-              "@opencode-ai/sdk",
-            )) as unknown as OpenCodeSdkLike;
-          }),
+        loadSdk: merged.loadSdk ?? loadOpenCodeSdk,
         launchServer:
           merged.launchServer ??
           (async () => {
@@ -272,17 +275,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
   }
 
   async probeOpenCodeSdk(): Promise<void> {
-    const loadSdk =
-      this.defaultOptions.loadSdk ??
-      (async () => {
-        const dynamicImport = new Function(
-          "specifier",
-          "return import(specifier)",
-        );
-        return (await dynamicImport(
-          "@opencode-ai/sdk",
-        )) as unknown as OpenCodeSdkLike;
-      });
+    const loadSdk = this.defaultOptions.loadSdk ?? loadOpenCodeSdk;
     await loadSdk();
   }
 
