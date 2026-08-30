@@ -433,6 +433,16 @@ export function diversityDebugFromLedger(
       armId: record.armId,
       specialty: record.observation.specialty,
       path: record.observation.path,
+      backend: record.observation.backend,
+      provider: record.observation.provider,
+      ...(record.observation.gateway === undefined
+        ? {}
+        : { gateway: record.observation.gateway }),
+      modelFamily: record.observation.modelFamily,
+      modelSnapshot: record.observation.modelSnapshot,
+      ...(record.observation.modelVariant === undefined
+        ? {}
+        : { modelVariant: record.observation.modelVariant }),
     })),
   };
 }

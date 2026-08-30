@@ -8,8 +8,9 @@ import {
   syncSkills,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
+import type { ExactBindingCapabilityReport } from "./execution/contracts";
 import { initConfigTemplate } from "./preflight";
-import { resolveBindingAuthority } from "./runner-authority";
+import { collectDoctorExactBindingReports } from "./production-runtime";
 import {
   type CheckSystemToolsOptions,
   checkSystemTools,
@@ -36,9 +37,11 @@ export interface WizardState {
   stepIndex: number;
   selectedIndex: number;
   toolStatuses: Record<string, SystemToolStatus>;
-  // §11/D1-09: init consumes the capability report's projection readiness —
-  // surfaced on the wizard's claude line (one existsSync probe, no spawn).
-  claudeProjectionReady?: boolean;
+  exactBindingProjectionReady?: boolean;
+  // Set only when the probe itself threw (broker/authority/transport
+  // defect) — distinct from a clean report that says the projection is
+  // not ready. Both used to collapse into the same `false`.
+  exactBindingProbeError?: string;
   envDetections: AgentEnvDetection[];
   skillsSynced: boolean;
   mcpRegistered: boolean;
@@ -65,6 +68,14 @@ export interface WizardDeps {
     options?: { cwd?: string; timeoutMs?: number },
   ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
   checkToolsOptions?: CheckSystemToolsOptions;
+  // W4 remediation (opencode-production-runtime PR3 verify #4997): this used
+  // to be `() => Promise<{ projectionReady: boolean } | undefined>` — a
+  // caller-supplied boolean that let tests bypass the real capability shape
+  // entirely. It now carries the exact ExactBindingCapabilityReport[] the
+  // doctor and execution consumers derive readiness from, so a test that
+  // injects it exercises the same field (`report.auth.projectionReady`)
+  // production code reads.
+  probeExactBinding?: () => Promise<readonly ExactBindingCapabilityReport[]>;
 }
 
 export interface WizardStepDescriptor {
@@ -279,16 +290,34 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         ...deps.checkToolsOptions,
       });
       const workspaceRoot = deps.cwd ?? process.cwd();
-      const claudeAuthority = await resolveBindingAuthority(
-        "claude-code",
-        { workspaceRoot },
-        {
-          existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
-        },
-      );
-      const claudeProjectionReady =
-        claudeAuthority.binding?.credentialBroker !== undefined;
-      return { toolStatuses, claudeProjectionReady };
+      let exactBindingProjectionReady = false;
+      let exactBindingProbeError: string | undefined;
+      // Both branches feed the SAME shape (ExactBindingCapabilityReport[])
+      // through the SAME readiness computation — the injected seam is no
+      // longer a caller-decided boolean, and a real probe/authority failure
+      // is captured instead of silently collapsing into "not ready".
+      try {
+        const reports = deps.probeExactBinding
+          ? await deps.probeExactBinding()
+          : await collectDoctorExactBindingReports({
+              workspaceRoot,
+              authorityDeps: {
+                existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
+              },
+            });
+        exactBindingProjectionReady = reports.some(
+          (report) => report.auth.projectionReady,
+        );
+      } catch (error) {
+        exactBindingProjectionReady = false;
+        exactBindingProbeError =
+          error instanceof Error ? error.message : String(error);
+      }
+      return {
+        toolStatuses,
+        exactBindingProjectionReady,
+        exactBindingProbeError,
+      };
     },
     async apply(state: WizardState): Promise<Partial<WizardState>> {
       return state;
@@ -315,11 +344,25 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         // from the same capability predicate execution uses.
         const detail =
           name === "claude" && st.installed
-            ? ` (auth projection: ${state.claudeProjectionReady ? "ready" : "unavailable"})`
+            ? ` (auth projection: ${state.exactBindingProjectionReady ? "ready" : "unavailable"})`
             : "";
         lines.push(
           `  ${icon} ${bold(name)}: ${st.installed ? (st.version ? `v${st.version}` : "installed") : "missing"}${detail}`,
         );
+        // A probe that THREW and a report that cleanly says "not ready" both
+        // render `unavailable` on the row above. Without this line the
+        // operator cannot tell a broken credential broker from an
+        // unconfigured one, and `exactBindingProbeError` would be state no
+        // human ever sees.
+        if (
+          name === "claude" &&
+          st.installed &&
+          state.exactBindingProbeError !== undefined
+        ) {
+          lines.push(
+            `      ${yellow("[!]")} probe failed: ${state.exactBindingProbeError}`,
+          );
+        }
         if (st.hint) {
           lines.push(`      ${st.hint}`);
         }

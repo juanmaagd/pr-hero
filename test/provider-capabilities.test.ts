@@ -308,6 +308,26 @@ describe("exactBindingCapabilityGate", () => {
     );
     expect(issues.every((i) => i.blocking === false)).toBe(true);
   });
+
+  // Contract-level, not production-path: today's only producer
+  // (FrozenRuntimeBinding.capabilities()) cannot emit this exact
+  // combination because both fields derive from the same billing mode
+  // (src/production-runtime.ts:258-298). This asserts the gate's
+  // independent-field contract for any future producer that CAN.
+  test("subscription binding fails when cash-cost accounting is invalid", () => {
+    const decision = exactBindingCapabilityGate(
+      greenBindingReport({
+        billing: {
+          mode: "subscription",
+          pricingApplicability: "not_applicable",
+          tokenPricingAvailable: false,
+          cashCostAccountingValid: false,
+        },
+      }),
+    );
+    expect(decision.ok).toBe(false);
+    expect(decision.reason).toContain("cash_cost_accounting_invalid");
+  });
 });
 
 describe("transport/producer parity (§11)", () => {

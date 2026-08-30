@@ -3,9 +3,13 @@ import { selfInvocation } from "../src/assets";
 import { CI_WORKFLOW_RELATIVE_PATH } from "../src/ci-setup";
 import {
   type DoctorReport,
+  PROVIDER_HINTS,
   renderDoctorReport,
   runDoctor,
 } from "../src/doctor";
+import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
+import { aliasCanonical } from "../src/model-catalog";
+import { buildDoctorRoutePlan } from "../src/production-runtime";
 
 describe("doctor tri-state evaluation", () => {
   test("healthy when all checks pass", async () => {
@@ -448,6 +452,139 @@ describe("doctor tri-state evaluation", () => {
       const providerCheck = report.checks.find((c) => c.name === "provider");
       expect(providerCheck?.severity).toBe("blocking");
       expect(providerCheck?.message).toContain("boom");
+    });
+  });
+
+  describe("exact-binding capability facts", () => {
+    const exact = (
+      overrides: Partial<ExactBindingCapabilityReport> = {},
+    ): ExactBindingCapabilityReport => ({
+      routeKey: "fp",
+      backend: "claude-code",
+      sdk: { available: true },
+      binary: { resolved: true, absolutePath: "/bin/claude", sha256: "aa" },
+      auth: {
+        kind: "claude_subscription_oauth",
+        projectionReady: true,
+        probe: "passed",
+      },
+      environment: { syntheticHome: true, enumeratedPassthrough: false },
+      isolation: { workspaceReadBroker: true, codegraphPolicy: false },
+      toolsMcp: { allowMapEnforced: true, mcpIntegrityChecked: true },
+      protocol: {
+        terminalProof: true,
+        boundedEvents: false,
+        usageMode: "snapshot",
+      },
+      usage: { normalized: true },
+      billing: {
+        mode: "subscription",
+        pricingApplicability: "not_applicable",
+        tokenPricingAvailable: false,
+        cashCostAccountingValid: true,
+      },
+      ...overrides,
+    });
+    const base = {
+      cwd: "/repo",
+      home: "/home/user",
+      exists: (p: string) => p === "/repo/.prhero/gotchas.md",
+      readFile: () => "## Gotchas\nContent",
+      checkToolsOptions: {
+        which: (bin: string) => `/bin/${bin}`,
+        exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+      },
+    };
+
+    test("subscription pricing is non-blocking; metered missing prices block", async () => {
+      const sub = await runDoctor({
+        ...base,
+        probeExactBindings: async () => [exact()],
+      });
+      expect(sub.exitCode).toBe(0);
+      expect(
+        sub.checks.some((c) => c.name === "provider:pricing_table_missing"),
+      ).toBe(false);
+      const metered = await runDoctor({
+        ...base,
+        probeExactBindings: async () => [
+          exact({
+            billing: {
+              mode: "metered",
+              pricingApplicability: "required",
+              tokenPricingAvailable: false,
+              cashCostAccountingValid: false,
+            },
+          }),
+        ],
+      });
+      expect(metered.overall).toBe("blocking");
+      expect(
+        metered.checks.find((c) => c.name === "provider:pricing_table_missing")
+          ?.severity,
+      ).toBe("blocking");
+    });
+
+    test("stale ProviderCapabilityReport cannot override exact-binding facts", async () => {
+      const report = await runDoctor({
+        ...base,
+        produceCapabilityReport: async () => ({
+          backend: "claude-code",
+          status: "ready",
+          auth: {
+            kind: "claude_subscription_oauth",
+            projectionReady: true,
+            probe: "passed",
+          },
+          isolation: {
+            syntheticHome: true,
+            workspaceReadBroker: true,
+            codegraphPolicy: true,
+          },
+          protocol: {
+            terminalProof: true,
+            boundedEvents: true,
+            usageMode: "snapshot",
+          },
+          cancellation: { deadlineMs: 7500, conformance: "passed" },
+          billing: { mode: "subscription", pricingReady: true },
+          issues: [],
+        }),
+        probeExactBindings: async () => [exact({ sdk: { available: false } })],
+      });
+      expect(report.overall).toBe("blocking");
+      expect(
+        report.checks.find((c) => c.name === "provider:sdk_unavailable")
+          ?.severity,
+      ).toBe("blocking");
+    });
+
+    test("doctor route plan constructs an OpenCode binding from routing", () => {
+      const open = buildDoctorRoutePlan({
+        mappings: {
+          [aliasCanonical("sonnet")]: {
+            backend: "opencode",
+            provider: "openai",
+            modelFamily: "gpt-4o",
+            modelSnapshot: "gpt-4o",
+            modelVariant: "high",
+          },
+        },
+      }).steps.find((step) => step.route.backend === "opencode");
+      expect(open?.route).toMatchObject({
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelVariant: "high",
+      });
+    });
+  });
+
+  describe("PROVIDER_HINTS reachability", () => {
+    test("cash_cost_accounting_invalid has no hint entry (the issue is always blocking, so pushProviderIssues never attaches its hint)", () => {
+      expect(Object.keys(PROVIDER_HINTS)).not.toContain(
+        "cash_cost_accounting_invalid",
+      );
     });
   });
 

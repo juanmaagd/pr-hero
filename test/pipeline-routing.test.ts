@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { emptyDiversityLedger } from "../src/diversity/accounting";
+import { buildDiversityPlan } from "../src/diversity/identity";
+import {
+  diversityDebugFromLedger,
+  recordDiversityHunterResult,
+} from "../src/diversity/pipeline-integration";
 import type { RunnerBackend } from "../src/execution/contracts";
 import { armOfRun, scoutFailed } from "../src/floor-test";
 import {
@@ -12,7 +18,7 @@ import {
 import type { RoutingConfig } from "../src/model-routing";
 import { type PipelineInput, runPipeline } from "../src/pipeline";
 import { rereviewDeltaFromProvenance } from "../src/report";
-import type { ReviewSpec } from "../src/spec";
+import { type ReviewSpec, validateReviewSpec } from "../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
 import {
   DefaultTransportRegistry,
@@ -424,5 +430,208 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
     } finally {
       await env.cleanup();
     }
+  });
+
+  test("legacy parsers consume mixed-route artifacts without requiring new fields", () => {
+    const head = "2222222222222222222222222222222222222222";
+    const mixed = {
+      pr: 42,
+      head_sha: head,
+      scout: { enabled: false },
+      routePlan: {
+        steps: [
+          { route: { backend: "claude-code", provider: "anthropic" } },
+          {
+            route: {
+              backend: "opencode",
+              provider: "openai",
+              modelVariant: "high",
+            },
+          },
+        ],
+      },
+    };
+    const meta = parsePipelineMeta(JSON.stringify(mixed));
+    expect(meta).toEqual({ pr: 42, head_sha: head });
+    expect(
+      countAttempts(
+        [{ name: "pr-42-22222222-1", pipelineMeta: meta }],
+        42,
+        head,
+      ),
+    ).toBe(1);
+    expect(armOfRun(mixed)).toBe("control");
+  });
+
+  test("OpenCode D3 debug observations record frozen route provenance", () => {
+    const spec = validateReviewSpec({
+      multiModelDiversity: {
+        enabled: true,
+        armId: "arm",
+        maxLegs: 3,
+        cashCapUsd: 10,
+      },
+      agents: [
+        {
+          key: "reliability",
+          file: "deep-review-reliability.md",
+          role: "hunter",
+          models: ["sonnet"],
+        },
+        { key: "refuter", file: "review-refuter.md", role: "refuter" },
+      ],
+    });
+    const plan = buildDiversityPlan({ spec, c2SchemaVersion: "1.1.0" });
+    const [leg] = plan.legs;
+    const [agent] = spec.agents;
+    if (!leg || !agent) throw new Error("missing diversity fixtures");
+    const ledger = recordDiversityHunterResult(
+      emptyDiversityLedger(),
+      plan,
+      agent,
+      {
+        name: "hunter-reliability",
+        status: "ok",
+        output: {
+          findings: [
+            {
+              id: "REL-1",
+              category: 1,
+              path: "src/app.ts",
+              line: 1,
+              severity: "BLOCKER",
+              evidence_class: "deterministic",
+              causal_disposition: "introduced",
+              claim: "bad",
+              proof_refs: ["src/app.ts:1"],
+              hunter: "reliability",
+              hops_used: 0,
+              hop_trail: [],
+              dedupe_key: "k1",
+            },
+          ],
+        },
+        usage: {
+          tokens_total: 10,
+          tokens_in: 8,
+          tokens_out: 2,
+          cost_usd_est: 0.001,
+          wall_ms: 1,
+        },
+        attempts: 1,
+        stderrTail: "",
+        resultText: "",
+      },
+      leg,
+      {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o-2024",
+        modelVariant: "high",
+      },
+    );
+    const [observation] = (diversityDebugFromLedger({
+      enabled: true,
+      plan,
+      ledger,
+      routeAgents: spec.agents,
+    })?.observations ?? []) as {
+      backend: string;
+      provider: string;
+      modelFamily: string;
+      modelSnapshot: string;
+      modelVariant?: string;
+    }[];
+    expect(observation).toMatchObject({
+      backend: "opencode",
+      provider: "openai",
+      modelFamily: "gpt-4o",
+      modelSnapshot: "gpt-4o-2024",
+      modelVariant: "high",
+    });
+  });
+
+  // SUGGESTION-3 (opencode-production-runtime PR3 verify #4997): the
+  // FindingObservation record already carries `gateway` when the frozen
+  // route names one (pipeline-integration.ts:298-312), but
+  // diversityDebugFromLedger's observation projection dropped it — the D3
+  // debug artifact could not distinguish a "configured"/"openrouter" gateway
+  // leg from a direct one.
+  test("D3 debug observations project gateway when the frozen route names one", () => {
+    const spec = validateReviewSpec({
+      multiModelDiversity: {
+        enabled: true,
+        armId: "arm",
+        maxLegs: 3,
+        cashCapUsd: 10,
+      },
+      agents: [
+        {
+          key: "reliability",
+          file: "deep-review-reliability.md",
+          role: "hunter",
+          models: ["sonnet"],
+        },
+        { key: "refuter", file: "review-refuter.md", role: "refuter" },
+      ],
+    });
+    const plan = buildDiversityPlan({ spec, c2SchemaVersion: "1.1.0" });
+    const [leg] = plan.legs;
+    const [agent] = spec.agents;
+    if (!leg || !agent) throw new Error("missing diversity fixtures");
+    const ledger = recordDiversityHunterResult(
+      emptyDiversityLedger(),
+      plan,
+      agent,
+      {
+        name: "hunter-reliability",
+        status: "ok",
+        output: {
+          findings: [
+            {
+              id: "REL-1",
+              category: 1,
+              path: "src/app.ts",
+              line: 1,
+              severity: "BLOCKER",
+              evidence_class: "deterministic",
+              causal_disposition: "introduced",
+              claim: "bad",
+              proof_refs: ["src/app.ts:1"],
+              hunter: "reliability",
+              hops_used: 0,
+              hop_trail: [],
+              dedupe_key: "k1",
+            },
+          ],
+        },
+        usage: {
+          tokens_total: 10,
+          tokens_in: 8,
+          tokens_out: 2,
+          cost_usd_est: 0.001,
+          wall_ms: 1,
+        },
+        attempts: 1,
+        stderrTail: "",
+        resultText: "",
+      },
+      leg,
+      {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o-2024",
+        gateway: "openrouter",
+      },
+    );
+    const [observation] = (diversityDebugFromLedger({
+      enabled: true,
+      plan,
+      ledger,
+      routeAgents: spec.agents,
+    })?.observations ?? []) as { gateway?: string }[];
+    expect(observation?.gateway).toBe("openrouter");
   });
 });
