@@ -81,6 +81,18 @@ function fakeSdk(
     // The subscription ends at once instead of staying open. Used where the
     // stream must not be the thing under test.
     emptyStream?: boolean;
+    // The subscription dies instead of ending cleanly. The pump swallows the
+    // error and ends the handoff exactly the same way, so this is the second
+    // half of the race: both pump exits reach `finally`.
+    streamError?: unknown;
+    // Holds the prompt's resolved error arm open. Releasing it AFTER the pump
+    // has already ended is what orders the race: the refusal lands on a
+    // handoff whose only reader has already returned.
+    promptGate?: Promise<void>;
+    // Fails the one post-create step that can still throw, which is the only
+    // way into createSession's unwind handler. The prompt is fired, never
+    // awaited, so it can never reach that catch.
+    subscribeError?: unknown;
   } = {},
 ): FakeSdk {
   let aborts = 0;
@@ -88,10 +100,12 @@ function fakeSdk(
     createOpencodeClient: () => ({
       session: {
         create: async () => ({ data: { id: SESSION_ID } }),
-        prompt: async () =>
-          options.promptError !== undefined
+        prompt: async () => {
+          if (options.promptGate !== undefined) await options.promptGate;
+          return options.promptError !== undefined
             ? { data: undefined, error: options.promptError }
-            : { data: { info: {}, parts: [] } },
+            : { data: { info: {}, parts: [] } };
+        },
         messages: async () => ({ data: [] }),
         abort: async () => {
           aborts += 1;
@@ -101,16 +115,23 @@ function fakeSdk(
         },
       },
       event: {
-        subscribe: async () => ({
-          stream: {
-            async *[Symbol.asyncIterator]() {
-              // A refused prompt produces no events at all: no message is
-              // created, so neither observer has anything to observe.
-              if (options.emptyStream === true) return;
-              await new Promise<never>(() => {});
+        subscribe: async () => {
+          if (options.subscribeError !== undefined)
+            throw options.subscribeError;
+          return {
+            stream: {
+              async *[Symbol.asyncIterator]() {
+                // A refused prompt produces no events at all: no message is
+                // created, so neither observer has anything to observe.
+                if (options.streamError !== undefined) {
+                  throw options.streamError;
+                }
+                if (options.emptyStream === true) return;
+                await new Promise<never>(() => {});
+              },
             },
-          },
-        }),
+          };
+        },
       },
     }),
   };
@@ -287,6 +308,140 @@ describe("a prompt the provider refuses", () => {
   });
 });
 
+// The race PR #123 left open. `state.failure` had exactly ONE reader —
+// streamEvents — and the subscription pump ends the handoff on its own
+// schedule, asynchronously from the fired-not-awaited prompt. When the pump
+// wins that race, streamEvents drains, finds no failure, and returns
+// permanently at `if (state.ended) return`; runStream reads that clean return
+// as an ordinary EOF and settles nothing. Whatever the prompt's catch writes
+// afterwards lands in a SessionState nobody will read again, and pollStatus —
+// which asks session.messages(), and a refused prompt creates no message —
+// answers "pending" forever. Both observers blind, and the attempt runs to the
+// harness watchdog.
+//
+// §197 wants two INDEPENDENT observers of ONE fact. A failure only one of them
+// can see is not two observers.
+describe("a refused prompt whose stream ended first", () => {
+  async function settleUnderRace(streamShape: {
+    emptyStream?: boolean;
+    streamError?: unknown;
+  }): Promise<{
+    outcome: Awaited<ReturnType<OpenCodeSdkTransport["execute"]>> | undefined;
+    fake: FakeSdk;
+  }> {
+    let release!: () => void;
+    const promptGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fake = fakeSdk({
+      ...streamShape,
+      promptGate,
+      promptError: { message: "model not found" },
+    });
+    const clock = new ManualClock();
+    const sink = new RecordingSink();
+    const transport = new OpenCodeSdkTransport({
+      client: rigClient(fake),
+      clock,
+      cleanupMs: 20,
+      pollIntervalMs: 10,
+      pollRoundMs: 20,
+    });
+
+    const pending = transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+      events: sink,
+    });
+    // The pump reaches its end — and clears the handoff — before the refusal.
+    await flush();
+    release();
+    await flush();
+    // The poll observer's ordinary cadence, fired by hand. Neither a watchdog
+    // nor the stall deadline is armed here; nothing else is pending.
+    clock.fireAll();
+
+    return { outcome: await withinWindow(pending, undefined), fake };
+  }
+
+  test("settles when the subscription EOFs before the refusal lands", async () => {
+    const { outcome, fake } = await settleUnderRace({ emptyStream: true });
+
+    if (outcome === undefined) throw new Error("the attempt never settled");
+    expect(outcome.completion).toBe("failed");
+    // A transport-side observation is never a provider terminal proof.
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.terminalProof).toBeUndefined();
+    expect(outcome.stderrTail).toContain("session.prompt failed");
+    expect(outcome.stderrTail).toContain("model not found");
+    // Same best-effort release the stream path already performs.
+    expect(fake.abortCalls()).toBeGreaterThan(0);
+  });
+
+  test("settles when the subscription dies before the refusal lands", async () => {
+    const { outcome, fake } = await settleUnderRace({
+      streamError: new Error("subscription died"),
+    });
+
+    if (outcome === undefined) throw new Error("the attempt never settled");
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.terminalProof).toBeUndefined();
+    expect(outcome.stderrTail).toContain("session.prompt failed");
+    expect(outcome.stderrTail).toContain("model not found");
+    expect(fake.abortCalls()).toBeGreaterThan(0);
+  });
+
+  test("is visible to the poll observer once the stream has gone", async () => {
+    let release!: () => void;
+    const promptGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fake = fakeSdk({
+      emptyStream: true,
+      promptGate,
+      promptError: { message: "model not found" },
+    });
+    const client = rigClient(fake);
+    const session = await client.createSession(INPUT);
+
+    // The handoff's only reader returns on the EOF the pump already delivered.
+    for await (const _event of client.streamEvents(session)) {
+      throw new Error("a refused prompt yields no events");
+    }
+    release();
+    await flush();
+
+    expect(await client.pollStatus(session)).toEqual({
+      kind: "failed",
+      detail: "opencode session.prompt failed: model not found",
+    });
+  });
+
+  // The note is substring-matched by classifyFailure, so the poll path's own
+  // wording has to keep carrying the provider's text through to the witness.
+  test("classifies as runtime_unavailable through the poll note too", () => {
+    const transport = new OpenCodeSdkTransport({
+      client: rigClient(fakeSdk()),
+    });
+    expect(
+      transport.classifyFailure({
+        completion: "failed",
+        protocolIntegrity: "unverified",
+        finalText: "",
+        usage: {
+          wallMs: 1,
+          tokens: {},
+          completeness: "unavailable",
+          billingMode: "subscription",
+          costSource: "unknown",
+        },
+        stderrTail:
+          "[pr-hero] opencode sdk: poll observed a session failure: opencode session.prompt failed: model not found",
+      }),
+    ).toBe("runtime_unavailable");
+  });
+});
+
 describe("an abort the provider refuses", () => {
   // §5.2/§290: abort is best-effort and runs while the attempt is unwinding,
   // so it must stay non-fatal. Best-effort means OBSERVED, not silent: a
@@ -327,5 +482,31 @@ describe("an abort the provider refuses", () => {
     expect(fake.abortCalls()).toBe(1);
     expect(outcome.stderrTail).toContain("abort call failed");
     expect(outcome.stderrTail).toContain("session already gone");
+  });
+
+  // The third site of the same class, left un-fixed by PR #123:
+  // createSession's unwind still discards the abort with `.catch(() => {})`,
+  // which an API-level refusal never reaches because it RESOLVES. The unwind
+  // has no notes channel — the propagated error IS the channel, because the
+  // transport stamps it into stderrTail as "session creation failed: …".
+  test("leaves a trail when it is refused during createSession's unwind", async () => {
+    const fake = fakeSdk({
+      subscribeError: new Error("event.subscribe exploded"),
+      abortError: { message: "session already gone" },
+    });
+    const client = rigClient(fake);
+
+    const failure = await client.createSession(INPUT).then(
+      () => new Error("createSession resolved instead of unwinding"),
+      (error: unknown) => error as Error,
+    );
+
+    // The failure that CAUSED the unwind still propagates; the refused abort
+    // is recorded beside it, never over it.
+    expect(failure.message).toContain("event.subscribe exploded");
+    expect(failure.message).toContain("session.abort failed");
+    expect(failure.message).toContain("session already gone");
+    // The remote session that was created is still released best-effort, once.
+    expect(fake.abortCalls()).toBe(1);
   });
 });

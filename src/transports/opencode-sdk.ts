@@ -107,7 +107,14 @@ export type OpenCodeClientEvent =
 
 export type OpenCodePollResult =
   | { readonly kind: "pending" }
-  | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
+  | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof }
+  // The session itself failed, so no turn will ever produce a terminal. It is
+  // NOT a terminal — the transport issues no proof of its own — and it is not
+  // a failed observation either: it is a successful observation of a fact that
+  // ends the attempt. The distinction is load-bearing. A poll that THROWS is
+  // counted (`pollTimeouts += 1; continue`) and the loop runs on forever, so
+  // reporting this by throwing would have swapped one silent hang for another.
+  | { readonly kind: "failed"; readonly detail: string };
 
 // Narrow injectable client shaped ONLY from what §197 (stream + poll
 // arbitration) and §290 (abort without provider confirmation) require. No
@@ -181,6 +188,7 @@ type SettleReason =
   | { readonly kind: "bound"; readonly target: "delta" | "aggregate" }
   | { readonly kind: "stall" }
   | { readonly kind: "stream_error"; readonly detail: string }
+  | { readonly kind: "session_failed"; readonly detail: string }
   | { readonly kind: "abort_confirmed" }
   | { readonly kind: "abort_unconfirmed" };
 
@@ -736,6 +744,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           continue;
         }
         if (result.kind === "pending") continue;
+        if (result.kind === "failed") {
+          // §197's second observer, seeing the SAME fact the stream carries
+          // when it is still alive to carry it. Settled, not counted: the
+          // session cannot produce a terminal any more, so continuing to poll
+          // for one would only wait out the harness watchdog.
+          settle({ kind: "session_failed", detail: result.detail });
+          return;
+        }
         onProviderTerminalCandidate(result.proof, "poll");
         if (settled) return;
       }
@@ -758,6 +774,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         (reason.kind === "bound" ||
           reason.kind === "stall" ||
           reason.kind === "stream_error" ||
+          reason.kind === "session_failed" ||
           reason.kind === "usage_flip") &&
         !abortSequenceStarted
       ) {
@@ -779,6 +796,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       if (reason.kind === "stall") notes.push(MARKER_STALL);
       if (reason.kind === "stream_error") {
         notes.push(`[pr-hero] opencode sdk: stream errored: ${reason.detail}`);
+      }
+      if (reason.kind === "session_failed") {
+        // Carries the provider's own words verbatim, which is what makes the
+        // poll path classify exactly like the stream path — classifyFailure
+        // substring-matches MARKER_PROMPT_REFUSED inside this detail rather
+        // than pattern-matching this note's own wording.
+        notes.push(
+          `[pr-hero] opencode sdk: poll observed a session failure: ${reason.detail}`,
+        );
       }
       if (reason.kind === "abort_unconfirmed")
         notes.push(MARKER_ABORT_UNCONFIRMED);
@@ -840,6 +866,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           protocolIntegrity = "overflow";
           break;
         case "stream_error":
+        case "session_failed":
+          // Unverified, never malformed: nothing contradicted anything. The
+          // provider simply never opened a turn, and the transport refuses to
+          // manufacture a proof for the one it did not run.
           completion = "failed";
           protocolIntegrity = "unverified";
           break;

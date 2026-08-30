@@ -362,6 +362,13 @@ interface SessionState {
   // provider's diagnosis to the consumer instead of leaving it to infer a
   // silence. Set only for a failure the stream itself could never report,
   // because a refused prompt creates no message and therefore no events.
+  //
+  // Read by BOTH observers, and that is not redundancy. streamEvents can only
+  // see this while it is still being read, and the pump ends the handoff
+  // asynchronously from the prompt it knows nothing about — so when the pump
+  // wins that race the stream reader is already gone and pollStatus is the
+  // only door left. §197 asks for two independent observers of one fact; one
+  // observer plus a blind spot is not that.
   failure?: string;
 }
 
@@ -461,7 +468,10 @@ export function createOpenCodeClient(
             }
           } catch {
             // A dead stream ends the handoff; the poll still observes the
-            // attempt.
+            // attempt — including any failure recorded after this point, which
+            // is why pollStatus reads `state.failure` too. Before it did, this
+            // line was a claim the poll could not honour: it queries
+            // session.messages(), and a turn that never started has none.
           } finally {
             state.ended = true;
             state.wake?.();
@@ -492,7 +502,11 @@ export function createOpenCodeClient(
         // A refusal answers at CALL time, not at turn end, so observing it
         // costs the trigger shape nothing: this stays fired-not-awaited, and
         // only the failure travels — through the same `ended`/`wake` handoff
-        // the pump uses, so the consumer needs no second door.
+        // the pump uses. That handoff alone was NOT enough, though: the pump
+        // ends it on its own schedule, so when the pump wins the race the
+        // stream reader has already returned and the wake below is a no-op
+        // into a state nobody reads again. Hence the second door, pollStatus,
+        // which reads the same `state.failure`.
         void (async () => {
           try {
             unwrap(
@@ -525,7 +539,32 @@ export function createOpenCodeClient(
           states.delete(sessionId);
           // A remote session that WAS created is real work on the provider's
           // side; dropping the local map entry does not release it.
-          await api.session.abort({ path: { id: sessionId } }).catch(() => {});
+          //
+          // The result is OBSERVED, like every other call in this file: the
+          // `.catch(() => {})` that stood here could not see a refusal at all,
+          // because under `ThrowOnError = false` an API-level failure RESOLVES
+          // with `{ data: undefined, error }`. A refused abort leaves remote
+          // work running — and billing — with no trail at all.
+          //
+          // The trail is APPENDED to the error that caused the unwind, never
+          // thrown over it. This handler has no notes channel; the propagated
+          // error is the channel, since the transport stamps it into
+          // stderrTail as "session creation failed: …". And the failure that
+          // caused the unwind is the one the caller must still see — masking
+          // it with a teardown detail would trade a diagnosis for a symptom.
+          try {
+            unwrap(
+              await api.session.abort({ path: { id: sessionId } }),
+              "session.abort",
+            );
+          } catch (abortError) {
+            const detail = (abortError as Error).message;
+            if (error instanceof Error) {
+              error.message = `${error.message} (${detail})`;
+            } else {
+              throw new Error(`${String(error)} (${detail})`);
+            }
+          }
         }
         throw error;
       } finally {
@@ -586,6 +625,22 @@ export function createOpenCodeClient(
         const info = (list[i] as { info?: unknown })?.info;
         const proof = terminalProofFromAssistant(info);
         if (proof !== undefined) return { kind: "terminal", proof };
+      }
+      // The SECOND observer of the failure, and the reason it exists: the
+      // stream can only carry a failure while it is still being read, and the
+      // subscription pump ends the handoff on its own schedule — completely
+      // asynchronously from the fired-not-awaited prompt. Lose that race and
+      // streamEvents has already returned at `if (state.ended) return`, so
+      // whatever the prompt's catch writes afterwards would reach nobody, and
+      // this poll would answer "pending" forever over a session that can never
+      // produce a message. §197 wants two INDEPENDENT observers of ONE fact; a
+      // failure only one of them can see is not two observers.
+      //
+      // Checked AFTER the message scan, for the same reason streamEvents
+      // checks it after draining the queue: a terminal the provider ALREADY
+      // sent still wins its slot.
+      if (state.failure !== undefined) {
+        return { kind: "failed", detail: state.failure };
       }
       return { kind: "pending" };
     },
