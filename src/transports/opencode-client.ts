@@ -931,11 +931,22 @@ export function createOpenCodeClient(
         // nothing else here could notice the difference, since a connected MCP
         // server contributes nothing to the tool surface enumerated below.
         //
-        // The `directory` scope mirrors what the request asked for. NOTE the
-        // #127 analogue if this ever starts failing in PR mode: session.status
-        // reported {} for a BUSY session when given a directory the server was
-        // not started in, and the only measured mcp.status readings were taken
-        // with directory == the server's own cwd.
+        // The `directory` scope mirrors what the request asked for, and the
+        // #127 analogue was checked rather than assumed. session.status
+        // reported {} for a BUSY session given a directory the server was not
+        // started in, so pollStatus below omits the parameter entirely — the
+        // obvious worry is that mcp.status scopes the same way and would then
+        // abort every PR-mode step, since the server inherits pr-hero's cwd
+        // and never the worktree.
+        //
+        // It does not. MEASURED against a real PR worktree, with the server's
+        // cwd deliberately elsewhere: `directory` set to the worktree, to the
+        // server's own cwd, to /tmp, and omitted altogether all returned the
+        // same `{"codegraph":{"status":"connected"}}`. A config-delivered MCP
+        // server belongs to the server process, not to a directory. The
+        // mismatch arm in scripts/opencode-mcp-probe.ts runs by default and
+        // re-derives this, so a provider that starts scoping it is a probe
+        // failure rather than a silent PR-mode outage.
         assertMcpConnected(
           unwrap(
             await api.mcp.status({ query: { directory: input.cwd } }),
