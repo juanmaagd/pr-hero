@@ -122,6 +122,20 @@ export interface TransportOutcome {
   // to `SessionUsage`, applied at the `runPipeline` return boundary.
   readonly usage: NormalizedUsage;
   readonly stderrTail: string;
+  // #126: the transport's OWN diagnostics — counts and tallies that describe
+  // how the transport observed the attempt, not what the provider said.
+  // `stderrTail` is the classification witness and its declared meaning is
+  // "the provider's words"; finalText is already excluded from it for exactly
+  // that reason, and our own text is the same hazard from the other
+  // direction. Measured, not guessed: a `429` poll-timeout count classified
+  // `rate_limit` and a `503` one `network_transient` on the transport's own
+  // patterns, while the legacy classifier's unanchored `502|503|529` turned
+  // `1502` into a transient too — and the prose "poll round(s) timed out"
+  // matched the legacy `timed out` pattern at EVERY count, deterministically.
+  // This channel exists so those facts stay visible in the attempt log
+  // without any classifier being able to read them. Nothing may classify off
+  // it; every witness pattern lives on `stderrTail` alone.
+  readonly diagnosticsTail?: string;
   readonly timedOut?: boolean;
   readonly exitCode?: number;
 }

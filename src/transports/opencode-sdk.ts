@@ -390,7 +390,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     request: TransportRequest,
     context: { readonly signal: AbortSignal; readonly events: AsyncEventSink },
   ): Promise<TransportOutcome> {
+    // `notes` becomes stderrTail, which is the classification WITNESS: the
+    // markers this transport stamps, plus the provider's own words verbatim.
+    // Nothing else belongs in it.
     const notes: string[] = [];
+    // #126: our own observation tallies. Same attempt log, different channel,
+    // and NO classifier reads this one — see TransportOutcome.diagnosticsTail
+    // for the measured collisions that made the separation necessary.
+    const diagnostics: string[] = [];
     const startedWall = Date.now();
     let seq = 0;
     const nextSeq = () => {
@@ -462,7 +469,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       if (settled) return;
       if (!isValidProof(proof)) {
         invalidProofs += 1;
-        notes.push(
+        diagnostics.push(
           `[pr-hero] opencode sdk: ignored invalid ${source} terminal proof (missing identity fields); it could not win the slot`,
         );
         return;
@@ -520,22 +527,27 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       };
     }
 
-    // ONE line per attempt, on the same channel as every other
-    // `[pr-hero] opencode sdk:` diagnostic, so the tools/MCP axis is provable
-    // by reading the artifact rather than trusting `allowMapEnforced: true`.
+    // ONE line per attempt (#122), so the tools/MCP axis is provable by
+    // reading the artifact rather than trusting `allowMapEnforced: true`.
     // Keys are sorted so the line is byte-stable across runs.
     //
-    // Safe as a classification witness: none of OpenCode's ids trips a pattern
-    // in classifyFailure — "invalid" alone does not match `invalid api key`,
-    // and nothing here looks like a rate limit or a socket error. Adding an id
-    // that does would silently misclassify every attempt, so check before
-    // widening this line.
+    // On the diagnostics channel, not the witness (#126). This line records
+    // what WE resolved, and it interpolates a provider-supplied id vocabulary
+    // we do not control — the two properties that make a witness lie. It used
+    // to sit in `notes` under a caveat asking every future author to check
+    // that no new id trips a classifyFailure pattern ("invalid" alone does not
+    // match `invalid api key`, nothing here looks like a rate limit or a
+    // socket error). That caveat is now unnecessary rather than merely
+    // satisfied: no classifier reads this channel, so no id CAN misclassify an
+    // attempt, and the line is free to widen.
     if (session.toolMap !== undefined) {
       const rendered = Object.keys(session.toolMap)
         .sort()
         .map((id) => `${id}=${session.toolMap?.[id] === true}`)
         .join(",");
-      notes.push(`[pr-hero] opencode sdk: resolved tool map: ${rendered}`);
+      diagnostics.push(
+        `[pr-hero] opencode sdk: resolved tool map: ${rendered}`,
+      );
     }
 
     // ---- mutable attempt state --------------------------------------------
@@ -916,23 +928,30 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       ) {
         notes.push(MARKER_REASONING_ONLY);
       }
+      // #126: the four tallies below go to `diagnostics`, never `notes`. They
+      // interpolate raw counts, and a count is a number we chose — landing it
+      // in the witness lets our own bookkeeping answer a question only the
+      // provider may answer. `429` poll timeouts filed as `rate_limit`, `503`
+      // as `network_transient`, and — the leak that needs no rare number at
+      // all — "poll round(s) timed out" carries the literal words `timed out`,
+      // which the legacy classifier reads as transient at EVERY count.
       if (sinkClosed) {
-        notes.push(
+        diagnostics.push(
           `[pr-hero] opencode sdk: sink closed early; ${closedDataPlaneEvents} data-plane event(s) not delivered`,
         );
       }
       if (pollTimeouts > 0) {
-        notes.push(
+        diagnostics.push(
           `[pr-hero] opencode sdk: ${pollTimeouts} poll round(s) timed out; timeouts cannot win the terminal slot`,
         );
       }
       if (pollConfirmations > 0) {
-        notes.push(
+        diagnostics.push(
           `[pr-hero] opencode sdk: poll confirmed the winning terminal ${pollConfirmations} time(s) without creating a second terminal`,
         );
       }
       if (invalidProofs > 0) {
-        notes.push(
+        diagnostics.push(
           `[pr-hero] opencode sdk: ${invalidProofs} invalid terminal proof(s) ignored`,
         );
       }
@@ -1027,6 +1046,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // D1-07 bridge recovers watchdog_timeout from harness-set timedOut on
         // the outcome, not from transport notes.
         stderrTail: boundTailBytes(notes.join("\n"), MAX_STDERR_TAIL_BYTES),
+        // Bounded like the witness (§4.2 line 191) because it lands on disk
+        // through the same attempt log and the same redaction.
+        diagnosticsTail: boundTailBytes(
+          diagnostics.join("\n"),
+          MAX_STDERR_TAIL_BYTES,
+        ),
       };
 
       // §4.1: the transport normally supplies the attempt's ONE terminal event.

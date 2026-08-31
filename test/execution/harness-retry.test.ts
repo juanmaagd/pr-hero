@@ -264,6 +264,47 @@ describe("PR0 — live retry decision (§7)", () => {
     expect(second).toContain("classification: transient");
     expect(second).toContain("cause: network_transient");
   });
+
+  // #126: moving the transport's own tallies off the classification witness
+  // is only half the fix — they still have to be READABLE, or the change
+  // trades a wrong retry disposition for a blind incident triage. The attempt
+  // log is where they land, redacted like everything else that hits disk.
+  test("transport diagnostics are persisted beside the witness, not inside it", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport(
+      [
+        failOutcome({
+          stderrTail: "[pr-hero] opencode sdk: stream errored: boom",
+          diagnosticsTail:
+            "[pr-hero] opencode sdk: 429 poll round(s) timed out; timeouts cannot win the terminal slot",
+        }),
+        okOutcome(),
+      ],
+      () => "network_transient",
+    );
+    const step = await makeStep(dir, { maxAttempts: 2 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    await harness.run(step);
+
+    const first = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+
+    expect(first).toContain("--- transport diagnostics ---");
+    expect(first).toContain("429 poll round(s) timed out");
+    // The witness section keeps the provider's words and nothing else.
+    const witnessSection = first.slice(
+      first.indexOf("--- stderr tail (4096) ---"),
+      first.indexOf("--- transport diagnostics ---"),
+    );
+    expect(witnessSection).toContain("stream errored: boom");
+    expect(witnessSection).not.toContain("poll round(s) timed out");
+  });
 });
 
 describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
