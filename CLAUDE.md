@@ -65,6 +65,8 @@ bun run fixture-eval --scout         # LIVE: same, with the scout stage on (~$0.
 bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
 bun run scripts/live-micro-eval.ts --scout  # LIVE: the scout's real spawn shape, tools:[] (~$0.05)
 bun run scripts/opencode-probe.ts    # LIVE: records what the OpenCode SDK really emits (~$0, needs the SDK resolvable)
+bun run scripts/opencode-mcp-probe.ts        # LIVE: 4 arms — which MCP delivery mechanisms work under --pure ($0, no inference)
+bun run scripts/opencode-mcp-toolid-probe.ts # LIVE: the literal MCP tool id, and whether the tools map gates it ($0 cash, 2 turns)
 bun run scripts/m6.ts plan   # $0: prices M6's 56 runs from gh counters + the target repo's config
 bun run scripts/m6.ts score  # $0: the floor table, re-runnable from artifacts forever
 bun run scripts/m6.ts run    # LIVE and the big one: 56 serial reviews, ~$174-374, ~4h44m
