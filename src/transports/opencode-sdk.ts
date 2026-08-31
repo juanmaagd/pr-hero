@@ -973,7 +973,18 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
         );
       }
-      if (reason.kind === "provider_terminal" && !reason.drained) {
+      // #132: gated on `completed`, and the gate is the whole rationale.
+      // Truncation-as-failure exists because SUCCESS is the one verdict that
+      // hides a short answer. A terminal whose status is `cancelled` or
+      // `failed` was never going to report success, and its answer is
+      // incomplete by definition — so the drain budget has nothing to add
+      // there, while stamping the marker would hand `protocol_truncation` a
+      // fresh transient attempt to re-run a turn the provider already ended.
+      const drainTruncated =
+        reason.kind === "provider_terminal" &&
+        !reason.drained &&
+        (slotProof?.providerStatus ?? "").toLowerCase() === "completed";
+      if (drainTruncated) {
         notes.push(MARKER_UNDELIVERED_CONTENT);
       }
       if (sawReasoning) {
@@ -1042,8 +1053,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           // proof is real and stays attached as EVIDENCE — the same rule the
           // conflict arm follows — but §4.2 line 191 forbids reporting a
           // truncated answer as anything but truncated, and success is the one
-          // verdict that would hide it.
-          if (reason.kind === "provider_terminal" && !reason.drained) {
+          // verdict that would hide it. Only the completed status can reach
+          // here; see `drainTruncated` above for why the others must not.
+          if (drainTruncated) {
             completion = "failed";
             protocolIntegrity = "truncated";
             break;

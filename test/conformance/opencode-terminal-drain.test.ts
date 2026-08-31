@@ -315,6 +315,42 @@ describe("#132 a poll-won terminal waits for the stream to go quiet", () => {
     expect(rig.transport.classifyFailure(outcome)).toBe("protocol_truncation");
   });
 
+  test("a cancelled provider terminal keeps its verdict when the budget runs out", async () => {
+    const stream = gatedStream();
+    const rig = makeRig(
+      makeClient({
+        stream: stream.iterable,
+        polls: [
+          {
+            kind: "terminal",
+            proof: completedProof("evt-cancel", "cancelled"),
+          },
+        ],
+      }),
+      { maxDrainCycles: 1 },
+    );
+    await flush();
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      stream.emit({ kind: "delta", text: "chunk " });
+      await flush();
+      rig.clock.fireAll();
+      await flush();
+    }
+    const outcome = await rig.pending;
+
+    // Truncation-as-failure exists because SUCCESS is the one verdict that
+    // hides a short answer. A cancelled turn was never going to report success
+    // and its answer is incomplete by definition, so the drain budget has
+    // nothing to add — and flipping it to `failed` would hand
+    // `protocol_truncation` a fresh transient attempt to re-run a turn
+    // somebody cancelled provider-side.
+    expect(outcome.completion).toBe("cancelled");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.stderrTail).not.toContain("still delivering");
+    expect(rig.transport.classifyFailure(outcome)).toBeUndefined();
+  });
+
   test("the window keeps its §197 purpose while it is re-armed", async () => {
     const stream = gatedStream();
     const rig = makeRig(
