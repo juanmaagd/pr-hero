@@ -231,7 +231,9 @@ describe("OpenCodeSdkTransport §197 terminal arbitration", () => {
     if (terminal.type !== "terminal") throw new Error("unreachable");
     expect(terminal.origin).toBe("provider");
     expect(terminal.integrity).toBe("verified");
-    expect(outcome.stderrTail).toContain("confirmed the winning terminal");
+    // #126: the confirmation TALLY is ours, so it rides diagnosticsTail; the
+    // absence of a conflict marker is a witness fact and stays here.
+    expect(outcome.diagnosticsTail).toContain("confirmed the winning terminal");
     expect(outcome.stderrTail).not.toContain("conflicting");
   });
 
@@ -317,7 +319,12 @@ describe("OpenCodeSdkTransport §197 terminal arbitration", () => {
 
     expect(outcome.completion).toBe("success");
     expect(outcome.terminalProof?.eventId).toBe("evt-after-timeout");
-    expect(outcome.stderrTail).toContain("poll round(s) timed out");
+    // #126: the tally lives on the diagnostics channel, never on the
+    // classification witness — its own prose ("timed out") and its count both
+    // match classifier patterns. Pinned in full by
+    // test/conformance/opencode-diagnostic-witness.test.ts.
+    expect(outcome.diagnosticsTail).toContain("poll round(s) timed out");
+    expect(outcome.stderrTail).not.toContain("poll round(s) timed out");
   });
 
   test("an invalid terminal proof cannot win the slot; a valid one can", async () => {
@@ -344,7 +351,10 @@ describe("OpenCodeSdkTransport §197 terminal arbitration", () => {
 
     expect(outcome.completion).toBe("success");
     expect(outcome.terminalProof?.eventId).toBe("evt-valid");
-    expect(outcome.stderrTail).toContain("invalid terminal proof");
+    // #126: both the per-occurrence note and the tally are our own words
+    // about our own observation, so they ride diagnosticsTail.
+    expect(outcome.diagnosticsTail).toContain("invalid terminal proof");
+    expect(outcome.stderrTail).not.toContain("invalid terminal proof");
   });
 });
 
@@ -1024,7 +1034,7 @@ describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
     edit: false,
   };
 
-  test("stamps the resolved map into stderrTail, once, with sorted keys", async () => {
+  test("stamps the resolved map into diagnosticsTail, once, with sorted keys", async () => {
     const handle = makeClient({
       toolMap: TOOL_MAP,
       stream: streamOf([{ kind: "terminal", proof: completedProof("evt-1") }]),
@@ -1040,14 +1050,19 @@ describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
     const line =
       "[pr-hero] opencode sdk: resolved tool map: " +
       "bash=false,edit=false,glob=true,grep=true,read=true,write=false";
-    expect(outcome.stderrTail).toContain(line);
-    expect(outcome.stderrTail.split(line)).toHaveLength(2);
+    // #126: the line moved off the classification witness. It says what WE
+    // resolved, in a provider-supplied id vocabulary we do not control.
+    expect(outcome.diagnosticsTail).toContain(line);
+    expect((outcome.diagnosticsTail ?? "").split(line)).toHaveLength(2);
+    expect(outcome.stderrTail).not.toContain("resolved tool map");
   });
 
-  // The classifier's witness IS stderrTail, and its comment already worries
-  // about polluting that witness. OpenCode's ids must not read as provider
-  // diagnostics: "invalid" alone must not match `invalid api key`, and nothing
-  // in the surface may look like a rate limit or a socket error.
+  // #122 asked whether OpenCode's ids could read as provider diagnostics —
+  // "invalid" against `invalid api key`, an id that looks like a rate limit or
+  // a socket error. #126 answers it structurally instead of by vocabulary
+  // audit: the line rides diagnosticsTail, which classifyFailure never reads,
+  // so no id can classify an attempt no matter how the surface grows. The
+  // hostile map below would have matched on the old channel.
   test("the map line never becomes a failure classification by itself", () => {
     const transport = new OpenCodeSdkTransport({
       client: makeClient({}).client,
@@ -1066,11 +1081,13 @@ describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
           costSource: "provider",
           cashCostUsd: 0,
         },
-        stderrTail:
+        stderrTail: "",
+        diagnosticsTail:
           "[pr-hero] opencode sdk: resolved tool map: " +
           "apply_patch=false,bash=false,edit=false,glob=true,grep=true," +
           "invalid=false,question=false,read=true,skill=false,task=false," +
-          "todowrite=false,webfetch=false,websearch=false,write=false",
+          "todowrite=false,webfetch=false,websearch=false,write=false," +
+          "unauthorized=false,rate_limit_429=false,econnreset=false",
       }),
     ).toBeUndefined();
   });
@@ -1087,6 +1104,7 @@ describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
     await advance(rig.clock, 6);
     const outcome = await pending;
 
+    expect(outcome.diagnosticsTail).not.toContain("resolved tool map");
     expect(outcome.stderrTail).not.toContain("resolved tool map");
   });
 });

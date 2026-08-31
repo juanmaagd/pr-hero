@@ -349,6 +349,12 @@ async function writeAttemptLog(
       "--- stderr tail (4096) ---",
       // §6.3: redaction before persistence — nothing unredacted hits disk.
       redactDiagnostic(outcome.stderrTail),
+      // #126: the transport's own tallies, on their own line-item section so
+      // triage still reads them while no classifier can. The section is always
+      // written, empty included, so the log format stays fixed rather than
+      // varying with what a given attempt happened to observe.
+      "--- transport diagnostics ---",
+      redactDiagnostic(outcome.diagnosticsTail ?? ""),
       "--- result tail (8192) ---",
       redactDiagnostic(outcome.finalText.slice(-8192)),
       "",
