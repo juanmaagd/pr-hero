@@ -36,9 +36,22 @@ import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 // the worst of them: "poll round(s) timed out" contains "timed out", so it is
 // deterministic at every count rather than a rare numeric collision.
 //
-// The rule these tests pin is therefore class-level, not instance-level: the
-// transport's OWN diagnostics never reach the witness at all. They travel on
-// `diagnosticsTail`, which no classifier reads.
+// The rule these tests pin is class-level, not instance-level, and the line it
+// draws is NOT "ours vs the provider's":
+//
+//   STAYS in stderrTail — the deliberate classification markers
+//   (MARKER_STALL, MARKER_REASONING_ONLY, the abort notes, the reasoning
+//   note). They are our words too, and classifyFailure substring-matches them
+//   ON PURPOSE; moving them off the witness would silently delete the
+//   transport's whole marker-based mapping. Provider-verbatim text
+//   (session_failed detail, stream errors) stays for the same reason.
+//
+//   MOVES to diagnosticsTail — free-form observation records: counts,
+//   tallies, and any interpolated text that is neither a declared marker nor
+//   the provider's own words.
+//
+// The hazard is text nobody meant as a classification signal being read as
+// one. A marker is meant as one.
 
 class ManualClock implements OpenCodeTransportClock {
   private pending: Array<{ fn: () => void }> = [];
