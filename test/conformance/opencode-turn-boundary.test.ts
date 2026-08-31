@@ -243,6 +243,10 @@ function fakeSdk(): FakeSdk {
 
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
+      // #141: `GET /mcp`, the readback the client performs before prompting.
+      // These rigs declare no registry, so the verified answer is "nothing
+      // connected" — which is a declaration too, not an absence of one.
+      mcp: { status: async () => ({ data: {} }) },
       tool: { ids: async () => ({ data: [...TOOL_IDS] }) },
       session: {
         create: async () => ({ data: { id: SESSION_ID } }),

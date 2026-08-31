@@ -167,6 +167,63 @@ describe("launchOpenCodeServer", () => {
     await server.close();
   });
 
+  // #141 §D: MCP arrives in the child's ENVIRONMENT at spawn, so the servers
+  // are connected from the server's first byte. Nothing is added to a running
+  // server after the fact, which is what leaves no window between "server up"
+  // and "MCP connected" — the #128 race class.
+  test("carries the MCP registry in OPENCODE_CONFIG_CONTENT at spawn", async () => {
+    const fake = fakeServer();
+    const projected = { HOME: "/tmp/projection" };
+    const mcp = {
+      codegraph: {
+        type: "local" as const,
+        command: ["/opt/homebrew/bin/codegraph", "serve", "--mcp", "-p", "/w"],
+        enabled: true as const,
+      },
+    };
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: projected,
+      mcp,
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+
+    const env = fake.env();
+    expect(env?.OPENCODE_CONFIG_CONTENT).toBe(JSON.stringify({ mcp }));
+    // The projection is still passed through in full; the config is the ONE
+    // documented addition, never a merge of process.env.
+    expect(env?.HOME).toBe("/tmp/projection");
+    expect(Object.keys(env ?? {}).sort()).toEqual([
+      "HOME",
+      "OPENCODE_CONFIG_CONTENT",
+    ]);
+    fake.finish(0);
+    await server.close();
+  });
+
+  // Parity with claude-code on a repo with no codegraph index: pr-hero writes
+  // {"mcpServers":{}} and the hunters run on read/grep/glob. An empty `mcp`
+  // object delivered as config would be a claim about the child's tool
+  // channels that pr-hero is not making.
+  test("delivers no config at all when there is no MCP to deliver", async () => {
+    const fake = fakeServer();
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: { HOME: "/tmp/projection" },
+      mcp: {},
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+    expect(fake.env()).toEqual({ HOME: "/tmp/projection" });
+    fake.finish(0);
+    await server.close();
+  });
+
   test("refuses a binary path that was never resolved to an absolute one", async () => {
     const fake = fakeServer();
     await expect(
