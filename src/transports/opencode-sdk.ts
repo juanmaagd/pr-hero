@@ -75,6 +75,15 @@ const SDK_DEADLINE_MARGIN_MS = 500;
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_POLL_ROUND_MS = 2000;
 
+// #132: how many consecutive post-win windows may be extended by a stream that
+// keeps delivering. Each cycle is one `cleanupMs`, so this bounds the hold at
+// maxDrainCycles x cleanupMs of SUSTAINED delivery — a whole answer draining in
+// microseconds costs one cycle and never approaches the budget. It exists so a
+// provider that will not stop cannot hold the attempt open until the step
+// watchdog fires: exhausting it is an explicit `truncated` outcome, which is a
+// louder and more actionable end than a watchdog timeout over a won terminal.
+const DEFAULT_MAX_DRAIN_CYCLES = 4;
+
 export interface OpenCodeClientSession {
   readonly id: string;
   // The tool allow map the client actually sent, resolved against the
@@ -168,6 +177,7 @@ export interface OpenCodeSdkTransportOptions {
   readonly maxFinalTextBytes?: number;
   readonly pollIntervalMs?: number;
   readonly pollRoundMs?: number;
+  readonly maxDrainCycles?: number;
   readonly clock?: OpenCodeTransportClock;
   readonly nowIso?: () => string;
 }
@@ -195,6 +205,17 @@ const MARKER_SESSION_CREATE = "[pr-hero] opencode sdk: session creation failed";
 // test/conformance/opencode-resolved-error-arm.test.ts drives a refusal
 // through the real client and asserts what comes out here.
 const MARKER_PROMPT_REFUSED = "opencode session.prompt failed";
+// #132, and #124's sibling in CAUSE rather than in fact: that one says the
+// turn reasoned and never opened a text part, this one says it opened one and
+// was cut off mid-delivery. Both map to `protocol_truncation` because a FRESH
+// attempt is the only remedy that can work on either.
+//
+// Deliberately digit-free and worded clear of every classifier pattern: it
+// shares the witness with the provider's own text, so a marker that reads like
+// a rate limit or a socket error would decide the cause instead of reporting
+// the fact (#126).
+const MARKER_UNDELIVERED_CONTENT =
+  "[pr-hero] opencode sdk: the drain budget expired while the stream was still delivering; the answer is incomplete";
 // #124. Distinct from an empty answer in general: this says the turn REASONED
 // and never opened a text part, so there is no malformed output to reformat
 // and the format-reminder budget would be spent on nothing — the same argument
@@ -206,7 +227,11 @@ const MARKER_REASONING_ONLY =
   "[pr-hero] opencode sdk: the turn completed with reasoning parts only and no answer text part";
 
 type SettleReason =
-  | { readonly kind: "provider_terminal" }
+  // #132: `drained` records whether the stream had gone QUIET when the
+  // post-win window closed. False means the drain budget ran out with content
+  // still arriving — a provider terminal over an unfinished delivery, which is
+  // the one shape of this reason that must never report success.
+  | { readonly kind: "provider_terminal"; readonly drained: boolean }
   | { readonly kind: "conflict"; readonly detail: string }
   | { readonly kind: "usage_flip"; readonly detail: string }
   | { readonly kind: "bound"; readonly target: "delta" | "aggregate" }
@@ -293,6 +318,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   private readonly maxFinalTextBytes: number;
   private readonly pollIntervalMs: number;
   private readonly pollRoundMs: number;
+  private readonly maxDrainCycles: number;
   private readonly clock: OpenCodeTransportClock;
   private readonly nowIso: () => string;
 
@@ -305,6 +331,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     this.maxFinalTextBytes = options.maxFinalTextBytes ?? MAX_FINAL_TEXT_BYTES;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.pollRoundMs = options.pollRoundMs ?? DEFAULT_POLL_ROUND_MS;
+    this.maxDrainCycles = options.maxDrainCycles ?? DEFAULT_MAX_DRAIN_CYCLES;
     this.clock = options.clock ?? systemClock;
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
   }
@@ -458,6 +485,32 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       }
     };
 
+    // ---- #132 post-win drain window ---------------------------------------
+    // `deltaSinceArm` is the whole delivery signal: set when a delta is picked
+    // up by the stream watcher and cleared every time the window re-arms, so a
+    // window that closes with it false saw a stream that said nothing for a
+    // full cleanup budget. In real time that is decisive — the client hands
+    // events over through an in-process queue, so a buffered delta reaches the
+    // watcher within a microtask, never a timer.
+    let deltaSinceArm = false;
+    let drainCyclesLeft = 0;
+    const armDrainWindow = (): void => {
+      deltaSinceArm = false;
+      scheduleTracked(this.cleanupMs, () => {
+        if (settled) return;
+        if (!deltaSinceArm) {
+          settle({ kind: "provider_terminal", drained: true });
+          return;
+        }
+        if (drainCyclesLeft <= 0) {
+          settle({ kind: "provider_terminal", drained: false });
+          return;
+        }
+        drainCyclesLeft -= 1;
+        armDrainWindow();
+      });
+    };
+
     // ---- §197 terminal compare-and-set slot -------------------------------
     let slotProof: ProviderTerminalProof | undefined;
     let pollConfirmations = 0;
@@ -483,12 +536,27 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           settle({ kind: "abort_confirmed" });
           return;
         }
-        // Post-win observation window: a later conflicting terminal must be
-        // able to flip the outcome malformed (§197), so hold settlement open
-        // for one cleanup-budget window before recording the win.
-        scheduleTracked(this.cleanupMs, () =>
-          settle({ kind: "provider_terminal" }),
-        );
+        // Post-win window, with TWO purposes now.
+        //
+        // §197's, which came first: a later conflicting terminal must be able
+        // to flip the outcome malformed, so settlement is held open for one
+        // cleanup budget before the win is recorded.
+        //
+        // #132's: the other observer may still be delivering this turn's
+        // answer. The poll reaches the boundary from `/session/status` while
+        // the stream is mid-delivery, and a window that simply expired
+        // reported success over a truncated finalText — silently, since the
+        // proof is valid and the completion is real. So the window now asks
+        // whether the stream went quiet, and re-arms while it has not.
+        //
+        // This does NOT couple the observers. What §197 keeps independent is
+        // the EVIDENCE — `observedActive` is owned by the poll and is never
+        // armed from the stream (opencode-client.ts), because two observers of
+        // one derived fact are not two observers. "Have you finished
+        // delivering?" is a question about DELIVERY, and the answer changes no
+        // observer's verdict about when the turn ended.
+        drainCyclesLeft = this.maxDrainCycles;
+        armDrainWindow();
         return;
       }
       if (sameTerminal(slotProof, proof)) {
@@ -634,6 +702,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           if (settled) return;
           switch (event.kind) {
             case "delta": {
+              // #132: set BEFORE the push, not after it. The window must count
+              // a delta the watcher is still handing to the sink, or a slow
+              // consumer turns the one delta in flight into the one delta
+              // lost — the same gap that let `finalParts.push` below run after
+              // settlement had already frozen the answer.
+              deltaSinceArm = true;
               const bytes = utf8Bytes(event.text);
               if (bytes > this.maxDeltaBytes) {
                 // §4.2 line 191: the offending delta is dropped WHOLE — it is
@@ -899,6 +973,20 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
         );
       }
+      // #132: gated on `completed`, and the gate is the whole rationale.
+      // Truncation-as-failure exists because SUCCESS is the one verdict that
+      // hides a short answer. A terminal whose status is `cancelled` or
+      // `failed` was never going to report success, and its answer is
+      // incomplete by definition — so the drain budget has nothing to add
+      // there, while stamping the marker would hand `protocol_truncation` a
+      // fresh transient attempt to re-run a turn the provider already ended.
+      const drainTruncated =
+        reason.kind === "provider_terminal" &&
+        !reason.drained &&
+        (slotProof?.providerStatus ?? "").toLowerCase() === "completed";
+      if (drainTruncated) {
+        notes.push(MARKER_UNDELIVERED_CONTENT);
+      }
       if (sawReasoning) {
         // A FIXED string: no model prose, and no free-form numbers either.
         //
@@ -961,6 +1049,17 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       switch (reason.kind) {
         case "provider_terminal":
         case "abort_confirmed": {
+          // #132: a won terminal over a delivery that never finished. The
+          // proof is real and stays attached as EVIDENCE — the same rule the
+          // conflict arm follows — but §4.2 line 191 forbids reporting a
+          // truncated answer as anything but truncated, and success is the one
+          // verdict that would hide it. Only the completed status can reach
+          // here; see `drainTruncated` above for why the others must not.
+          if (drainTruncated) {
+            completion = "failed";
+            protocolIntegrity = "truncated";
+            break;
+          }
           protocolIntegrity = "verified";
           const status = (slotProof?.providerStatus ?? "").toLowerCase();
           if (status === "completed") {
@@ -1202,6 +1301,16 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // happened is that the answer channel delivered no content, and
     // truncation's disposition is the remedy that can work: a FRESH attempt on
     // the transient budget, bounded at 3, never the format budget.
+    // #132, and LAST for the same reason as the markers above: this note sits
+    // beside the provider's own text in one witness, so a 429 or a 401
+    // recorded on the same attempt must still win. `protocol_truncation` is
+    // the literal fact — the answer channel was cut short — and its
+    // disposition is the remedy that can work: a FRESH attempt on the
+    // transient budget, never the format budget, which would spend a reminder
+    // telling the model to reformat text it did finish writing.
+    if (witness.includes(MARKER_UNDELIVERED_CONTENT)) {
+      return "protocol_truncation";
+    }
     if (witness.includes(MARKER_REASONING_ONLY)) return "protocol_truncation";
     return undefined;
   }
