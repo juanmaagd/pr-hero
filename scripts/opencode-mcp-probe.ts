@@ -161,15 +161,23 @@ async function syntheticHome(): Promise<{
   const home = await mkdtemp(path.join(os.tmpdir(), "prhero-mcp-probe-"));
   await mkdir(path.join(home, ".config"), { recursive: true });
   await mkdir(path.join(home, ".local", "share"), { recursive: true });
+  await mkdir(path.join(home, "tmp"), { recursive: true });
   return {
     home,
     env: {
       HOME: home,
+      // Pinned because the cited projection pins it. The launcher passes its
+      // env through with no merge from process.env, so a key omitted here is
+      // a key the child simply does not have — and a probe whose child differs
+      // from the production condition in an undocumented way is measuring
+      // something other than what it claims to.
+      TMPDIR: path.join(home, "tmp"),
       XDG_CONFIG_HOME: path.join(home, ".config"),
       XDG_DATA_HOME: path.join(home, ".local", "share"),
-      // PATH is carried so a failure here is about MCP rather than about
-      // process spawning. Production projects no PATH, which is exactly why
-      // every command array above uses an absolute binary.
+      // The ONE deliberate deviation from that projection, called out rather
+      // than left to be discovered: PATH is carried so a failure here is
+      // about MCP rather than about process spawning. Production projects
+      // none, which is exactly why every command array above is absolute.
       PATH: process.env.PATH ?? "",
     },
   };

@@ -29,6 +29,11 @@ function flag(name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
+// How long the event reader is given to notice the turn is over. Generous —
+// it only runs after `session.prompt` has already resolved, so it is draining
+// what is left, not waiting for work.
+const READER_DRAIN_MS = 2_000;
+
 const [providerID = "openai", modelID = "gpt-5.6-luna"] = (
   flag("model") ?? "openai/gpt-5.6-luna"
 ).split("/");
@@ -111,7 +116,14 @@ async function turn(
     },
   });
   stop = true;
-  await reader;
+  // The flag alone cannot end the reader. `if (stop) return` sits inside the
+  // loop body, so it is only ever re-evaluated when the stream delivers
+  // ANOTHER event — and `session.prompt` has already blocked until the turn
+  // completed, so the stream may have nothing left to deliver. An unbounded
+  // `await` on an idle SSE stream hangs the probe with no diagnostic at all.
+  // scripts/opencode-probe.ts bounds its reader for this reason; this one did
+  // not, and completed on luck rather than design.
+  await Promise.race([reader, Bun.sleep(READER_DRAIN_MS)]);
 
   const parts = (response.data as { parts?: unknown[] })?.parts ?? [];
   collectToolNames(parts, seen);
