@@ -593,11 +593,17 @@ describe("production runtime PR1", () => {
     async function bindingReportForBilling(
       billing: ProviderCapabilityReport["billing"],
       now?: () => Date,
+      routingConfig?: RoutingConfig,
     ) {
+      // No routingConfig resolves through the alias fallback in
+      // model-routing.ts, which pins provider "anthropic" -- the catalogue's
+      // own provider. That is what keeps every arm below meaning what it meant
+      // before the provider gate existed.
       const step = resolveStepRoute({
         stepKey: "hunter-reliability",
         role: "hunter",
         cliModel: "sonnet",
+        ...(routingConfig === undefined ? {} : { routingConfig }),
       });
       const plan = createResolvedRoutePlan([step]);
       const registry = new DefaultTransportRegistry();
@@ -727,6 +733,36 @@ describe("production runtime PR1", () => {
 
         expect(report.billing.tokenPricingAvailable).toBe(true);
         expect(exactBindingCapabilityGate(report).ok).toBe(true);
+      });
+
+      test("a foreign provider on a catalogued model is refused, not billed at Anthropic's rates", async () => {
+        // The finding: pr-hero reviewing PR #162 on the OpenCode route,
+        // refuter verdict `corroborated`. `parseRouteMapping`
+        // (preflight.ts) validates `provider` as any non-empty string and
+        // never cross-checks it against `modelSnapshot`, so this mapping is
+        // admissible -- and the predicate, seeing only the model id, priced
+        // it from the Anthropic-only catalogue. Same fresh table, same
+        // catalogued model as the arm above; only the provider differs.
+        const routingConfig: RoutingConfig = {
+          default: {
+            backend: "claude-code",
+            provider: "openai",
+            modelFamily: "claude-sonnet-5",
+            modelSnapshot: "claude-sonnet-5",
+          },
+        };
+        const report = await bindingReportForBilling(
+          { mode: "metered", pricingReady: false },
+          FRESH_CATALOG,
+          routingConfig,
+        );
+
+        expect(report.billing.pricingApplicability).toBe("required");
+        expect(report.billing.tokenPricingAvailable).toBe(false);
+        expect(report.billing.cashCostAccountingValid).toBe(false);
+        const decision = exactBindingCapabilityGate(report);
+        expect(decision.ok).toBe(false);
+        expect(decision.reason).toContain("pricing_table_missing");
       });
     });
 

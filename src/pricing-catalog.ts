@@ -141,6 +141,13 @@ const FETCHED_AT_MS = Date.parse(PRICING_CATALOG.fetched_at);
 // Exact model id, or a logical alias. Alias knowledge is NOT duplicated here:
 // model-catalog.ts owns the alias -> snapshot mapping and is the only place
 // that may answer it, so an alias repointed there repoints its price too.
+//
+// Takes NO provider on purpose. This is the raw catalogue lookup and the
+// catalogue is Anthropic's by construction, so a provider argument here would
+// be a check every caller has to remember to pass -- which is how the gate
+// went missing in the first place. The provider axis is answered ONCE, in
+// tokenPricingAvailableFor, which the doctrine below already names as the one
+// predicate a `pricingReady` site may call. Do not "fix" this by widening it.
 export function lookupModelPricing(modelId: string): ModelPricing | undefined {
   const resolved = isModelAlias(modelId)
     ? aliasModelSnapshot(modelId)
@@ -167,11 +174,45 @@ export function isPricingCatalogFresh(now: Date): boolean {
   return pricingCatalogAge(now) < PRICING_MAX_AGE_DAYS;
 }
 
-// The one predicate a `pricingReady` site should call. Membership alone is not
-// enough — see PRICING_MAX_AGE_DAYS: a known model at an expired price is the
-// confident-wrong case the metered gate exists to prevent.
-export function tokenPricingAvailableFor(modelId: string, now: Date): boolean {
+// Hand-written config, so "Anthropic" is a capital letter and not another
+// company. Trim and case are the ONLY normalisation: no aliasing `claude` to
+// `anthropic`, no prefix matching. Every such rule is a way for a provider
+// this catalogue does not cover to be mistaken for one it does, which is the
+// failure the gate below exists to stop.
+function providerMatchesCatalog(provider: string): boolean {
   return (
-    lookupModelPricing(modelId) !== undefined && isPricingCatalogFresh(now)
+    provider.trim().toLowerCase() ===
+    PRICING_CATALOG.provider.trim().toLowerCase()
+  );
+}
+
+// The one predicate a `pricingReady` site should call. THREE facts have to
+// agree, and each one alone is a way to report a confident wrong price:
+//
+// 1. Provider. The catalogue has ALWAYS declared whose prices these are --
+//    config/models/anthropic-pricing.json carries `"provider": "anthropic"`
+//    and normalizePricingCatalog above parses it into PricingCatalog.provider
+//    -- and this predicate ignored it, answering from the model id alone. The
+//    collision is REACHABLE, not theoretical: parseRouteMapping
+//    (preflight.ts) validates `provider` as any non-empty string and never
+//    cross-checks it against `modelSnapshot`, so a route of
+//    `{ provider: "openai", modelSnapshot: "claude-sonnet-5" }` was admitted
+//    as priced and would have billed another provider at Anthropic's rates.
+// 2. Membership -- see lookupModelPricing's Object.hasOwn guard.
+// 3. Freshness -- see PRICING_MAX_AGE_DAYS: a known model at an expired price
+//    is the same confident-wrong case arriving through the calendar.
+//
+// The provider gate is the same shape as the prototype bug one function up,
+// through a door the design did not consider, and was found the same way:
+// pr-hero reviewing this very module's own PR, refuter verdict `corroborated`.
+export function tokenPricingAvailableFor(
+  provider: string,
+  modelId: string,
+  now: Date,
+): boolean {
+  return (
+    providerMatchesCatalog(provider) &&
+    lookupModelPricing(modelId) !== undefined &&
+    isPricingCatalogFresh(now)
   );
 }
