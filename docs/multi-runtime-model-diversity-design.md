@@ -341,6 +341,7 @@ The credential broker copies only the minimum credential record into an ephemera
 |---|---|---|
 | Claude Code local subscription | Claude Code OAuth store or OS keychain | Only the selected subscription OAuth record required by the verified CLI, never the full real `HOME` or config tree |
 | OpenCode using ChatGPT Plus | OpenCode/ChatGPT OAuth store | Only the selected OAuth record in ephemeral XDG config; no unrelated OpenCode providers, history, plugins, or settings |
+| OpenCode local metered provider | `auth.json[<provider>]`, `type: "api"` | Only that provider's record; no unrelated OpenCode providers |
 | CI metered provider | Explicit CI secret | The exact provider token as one allowlisted env value or 0600 file; no inherited CI environment |
 
 Sources must be approved roots or OS keychain entries. Files and every parent are `lstat`-checked, must not be symlinks, and must satisfy ownership/mode policy. Ephemeral directories are 0700; credential files are 0600. Credential values, source paths, and projection contents never enter logs, events, prompts, callbacks, or artifacts. `destroy()` runs after settlement; failure is a blocking security warning.

@@ -237,6 +237,40 @@ describe("harness with a CredentialBroker", () => {
     expect(result.stderrTail).not.toContain("operator environment");
   });
 
+  // #133: `missing_provider_record` is the metered kind's own failure class,
+  // and it must NOT join the one-class degradation above. The degrade exists
+  // because Claude's subscription store MOVED, which is an environment fact;
+  // an absent provider API token is not, and running the step anyway would
+  // hand an adversarial-diff agent the operator's ambient provider keys on a
+  // route that bills real cash.
+  test("a missing provider record fails closed instead of degrading", async () => {
+    let admitted = false;
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker(
+      new CredentialProjectionError("missing_provider_record"),
+    );
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: { HOME: "/Users/juanma-real-home" },
+      admissionGate: {
+        admit: () => {
+          admitted = true;
+        },
+      },
+      credentialBroker: broker,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(admitted).toBe(false);
+    expect(requests.length).toBe(0);
+    expect(result.stderrTail).toContain("missing_provider_record");
+    expect(result.stderrTail).not.toContain("operator environment");
+  });
+
   test("hanging credential projection fails before spawn within the projection budget", async () => {
     const requests: TransportRequest[] = [];
     const hangingBroker: CredentialBroker = {
