@@ -10,6 +10,10 @@ import {
   createOpenCodeClient,
   type OpenCodeSdkLike,
 } from "../../src/transports/opencode-client";
+import {
+  assertMcpConnected,
+  translateMcpConfig,
+} from "../../src/transports/opencode-mcp";
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
@@ -54,6 +58,8 @@ interface FakeSdk {
   endStream: () => void;
   setMessages: (messages: unknown[]) => void;
   setStatus: (status: Record<string, unknown> | undefined) => void;
+  setMcpStatus: (status: Record<string, unknown>) => void;
+  mcpStatusCalls: () => Array<Record<string, unknown> | undefined>;
 }
 
 function fakeSdk(
@@ -76,6 +82,11 @@ function fakeSdk(
   // one that is not working is simply OMITTED — an idle session is never
   // reported as {"type":"idle"}.
   let statuses: Record<string, unknown> = {};
+  // #141: `GET /mcp`, the readback §E compares against what pr-hero declared.
+  // Measured shape (scripts/opencode-mcp-probe.ts): {"<name>":{"status":"connected"}},
+  // and {} when nothing is connected.
+  let mcpStatus: Record<string, unknown> = {};
+  const mcpStatusCalls: Array<Record<string, unknown> | undefined> = [];
   const queue: unknown[] = [];
   let notify: (() => void) | undefined;
   let ended = false;
@@ -83,6 +94,12 @@ function fakeSdk(
   let iterators = 0;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
+      mcp: {
+        status: async (opts) => {
+          mcpStatusCalls.push(opts as Record<string, unknown> | undefined);
+          return { data: mcpStatus };
+        },
+      },
       tool: {
         ids: async (opts) => {
           toolIdsCalls.push(opts as Record<string, unknown> | undefined);
@@ -151,10 +168,34 @@ function fakeSdk(
     setStatus: (status: Record<string, unknown> | undefined) => {
       statuses = status === undefined ? {} : { [SESSION_ID]: status };
     },
+    setMcpStatus: (status: Record<string, unknown>) => {
+      mcpStatus = status;
+    },
+    mcpStatusCalls: () => mcpStatusCalls,
   };
 }
 
-function rig(fake: FakeSdk) {
+const CODEGRAPH_BIN = "/opt/homebrew/bin/codegraph";
+
+// Byte-for-byte what src/cli.ts writes (CODEGRAPH_ONLY_MCP_CONFIG), so the
+// fixture cannot drift from the file the translation actually receives.
+const CLAUDE_MCP_JSON = JSON.stringify({
+  mcpServers: {
+    codegraph: {
+      type: "stdio",
+      command: "codegraph",
+      args: ["serve", "--mcp"],
+    },
+  },
+});
+
+// What a repo with no `.codegraph` index gets (src/cli.ts:1263-1272).
+const EMPTY_MCP_JSON = JSON.stringify({ mcpServers: {} });
+
+function rig(
+  fake: FakeSdk,
+  overrides: Partial<Parameters<typeof createOpenCodeClient>[0]> = {},
+) {
   return createOpenCodeClient({
     loadSdk: async () => fake.sdk,
     launchServer: async () => ({
@@ -164,6 +205,9 @@ function rig(fake: FakeSdk) {
     }),
     model: { providerID: "openai", modelID: "test-model" },
     readSystemPrompt: async () => "SYSTEM",
+    readMcpConfig: async () => EMPTY_MCP_JSON,
+    codegraphBinaryPath: CODEGRAPH_BIN,
+    ...overrides,
   });
 }
 
@@ -184,6 +228,13 @@ const INPUT = {
 // enumerated id present, the three translatable allows true, everything else
 // explicitly false. No key is absent, so "what does OpenCode do with an absent
 // key" stops being a question this transport's safety depends on.
+//
+// #141: `codegraph_codegraph_explore` is here too, and it is FALSE because
+// this input declares no mcp registry. It is written rather than omitted for
+// exactly the reason every other id is — an absent key asks for the provider's
+// default — and it is never reported by `tool.ids()` even when its server IS
+// connected (measured, #141 fact 3), so it has to be written from pr-hero's
+// own knowledge or it can never be written at all.
 const EXPECTED_TOOL_MAP = {
   invalid: false,
   question: false,
@@ -199,6 +250,7 @@ const EXPECTED_TOOL_MAP = {
   websearch: false,
   skill: false,
   apply_patch: false,
+  codegraph_codegraph_explore: false,
 };
 
 function messageEvent(overrides: Record<string, unknown> = {}) {
@@ -316,8 +368,14 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
     expect(keys).not.toContain("Grep");
     expect(keys).not.toContain("Glob");
     expect(keys.filter((key) => key.startsWith("mcp__"))).toEqual([]);
-    // Nothing outside the enumerated surface reaches the provider at all.
-    expect(keys.sort()).toEqual([...OPENCODE_TOOL_IDS].sort());
+    // The enumerated surface, plus the MCP ids pr-hero knows about and the
+    // provider does not report (#141 fact 3) — measured on both endpoints,
+    // before and after connect. Written explicitly rather than omitted for the
+    // same reason as every enumerated id: an absent key asks for the
+    // provider's default. Nothing else reaches the provider at all.
+    expect(keys.sort()).toEqual(
+      [...OPENCODE_TOOL_IDS, "codegraph_codegraph_explore"].sort(),
+    );
   });
 
   test("every write-capable and escape-hatch tool is explicitly false, by name", async () => {
@@ -368,6 +426,8 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
       glob: true,
       bash: false,
       write: false,
+      // Off-surface by nature, still written: see EXPECTED_TOOL_MAP.
+      codegraph_codegraph_explore: false,
     });
   });
 
@@ -931,5 +991,391 @@ describe("createOpenCodeClient", () => {
     await expect(client.createSession(INPUT)).rejects.toThrow(
       /@opencode-ai\/sdk/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #141: the Claude-shaped mcp.json translated into OpenCode's `Config.mcp`.
+//
+// TRANSLATED, never duplicated. `src/security/binding-policy.ts` already
+// validates that exact file — no symlink, `mcpServers` empty or exactly
+// ["codegraph"], optional sha256 pin — so a second OpenCode-shaped config
+// would be a registry the integrity gate never sees. The two shapes are not
+// compatible: Claude writes `mcpServers` / "stdio" / command-string + args
+// array, OpenCode reads `mcp` / "local" / one command ARRAY
+// (McpLocalConfig, types.gen.d.ts:946-969).
+// ---------------------------------------------------------------------------
+describe("translateMcpConfig (#141)", () => {
+  test("emits OpenCode's McpLocalConfig for the codegraph server, byte-exact", () => {
+    expect(
+      translateMcpConfig({
+        json: CLAUDE_MCP_JSON,
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+        codegraphBinaryPath: CODEGRAPH_BIN,
+      }),
+    ).toEqual({
+      codegraph: {
+        type: "local",
+        command: [CODEGRAPH_BIN, "serve", "--mcp", "-p", "/tmp/work"],
+        enabled: true,
+      },
+    });
+  });
+
+  // `-p <cwd>` is REQUIRED, not decorative. The OpenCode server process
+  // inherits pr-hero's process cwd, NOT the review target: in PR mode the
+  // target is a worktree, so a codegraph that resolved its project from cwd
+  // would index the operator's checkout and answer every hunter about the
+  // wrong tree — silently, since it would answer.
+  test("scopes the server to the step's cwd, not the launcher's", () => {
+    const config = translateMcpConfig({
+      json: CLAUDE_MCP_JSON,
+      configPath: "/run/mcp.json",
+      cwd: "/tmp/worktrees/pr-141",
+      codegraphBinaryPath: CODEGRAPH_BIN,
+    });
+    expect(config.codegraph?.command).toEqual([
+      CODEGRAPH_BIN,
+      "serve",
+      "--mcp",
+      "-p",
+      "/tmp/worktrees/pr-141",
+    ]);
+  });
+
+  // Parity with claude-code on a repo with no index (src/cli.ts:1263-1272):
+  // an empty registry means no MCP at all, and the hunters run on
+  // read/grep/glob. #116's pass-3 ledger recorded that as CORRECT.
+  test("an empty registry translates to no servers at all", () => {
+    expect(
+      translateMcpConfig({
+        json: EMPTY_MCP_JSON,
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+        codegraphBinaryPath: CODEGRAPH_BIN,
+      }),
+    ).toEqual({});
+  });
+
+  // FAIL LOUD, never degrade. The production env projection is exactly
+  // {HOME, TMPDIR, XDG_DATA_HOME, XDG_CONFIG_HOME} (credential-broker.ts:
+  // 449-457) — there is no PATH — so the bare "codegraph" the Claude-side
+  // file carries cannot resolve in the child. Degrading to it would produce a
+  // server that never connects, and E's readback would then abort the attempt
+  // with a diagnosis pointing at the wrong thing.
+  test("refuses to emit a command it cannot resolve to an absolute binary", () => {
+    expect(() =>
+      translateMcpConfig({
+        json: CLAUDE_MCP_JSON,
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+      }),
+    ).toThrow(/codegraph/i);
+  });
+
+  test("refuses a relative binary override for the same reason", () => {
+    expect(() =>
+      translateMcpConfig({
+        json: CLAUDE_MCP_JSON,
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+        codegraphBinaryPath: "bin/codegraph",
+      }),
+    ).toThrow(/absolute/i);
+  });
+
+  // This translation knows how to build exactly one command. A server it does
+  // not recognise must not be silently dropped — a dropped server is a tool
+  // the prompt was promised and the model never gets, which is the absent-key
+  // hazard resolveToolMap exists to kill.
+  test("refuses a server it cannot express", () => {
+    expect(() =>
+      translateMcpConfig({
+        json: JSON.stringify({
+          mcpServers: { github: { type: "stdio", command: "gh-mcp" } },
+        }),
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+        codegraphBinaryPath: CODEGRAPH_BIN,
+      }),
+    ).toThrow(/github/);
+  });
+
+  // A remote transport has no command to translate at all.
+  test("refuses a non-stdio server", () => {
+    expect(() =>
+      translateMcpConfig({
+        json: JSON.stringify({
+          mcpServers: {
+            codegraph: { type: "sse", url: "http://127.0.0.1:9/sse" },
+          },
+        }),
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+        codegraphBinaryPath: CODEGRAPH_BIN,
+      }),
+    ).toThrow(/stdio/);
+  });
+
+  test("refuses a file that is not JSON, naming the path", () => {
+    expect(() =>
+      translateMcpConfig({
+        json: "{",
+        configPath: "/run/mcp.json",
+        cwd: "/tmp/work",
+        codegraphBinaryPath: CODEGRAPH_BIN,
+      }),
+    ).toThrow(/\/run\/mcp\.json/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #141 §E: the readback. This is the OpenCode analogue of claude-code's
+// `--strict-mcp-config`, and it is strictly stronger because it is VERIFIED
+// rather than declared.
+// ---------------------------------------------------------------------------
+describe("assertMcpConnected (#141)", () => {
+  test("accepts exactly the declared set, connected", () => {
+    expect(() =>
+      assertMcpConnected({ codegraph: { status: "connected" } }, ["codegraph"]),
+    ).not.toThrow();
+  });
+
+  test("accepts an empty status for an empty declaration", () => {
+    expect(() => assertMcpConnected({}, [])).not.toThrow();
+  });
+
+  // Measured (#141 fact 7): `--pure` suppresses neither config-delivered nor
+  // config-FILE MCP servers, so a server launched with the operator's real
+  // HOME loads ~/.config/opencode/opencode.jsonc and connects whatever the
+  // operator configured. Production is shielded only INCIDENTALLY, by the
+  // synthetic XDG_CONFIG_HOME. An extra server is an undeclared tool channel
+  // in a process holding a projected credential.
+  test("refuses a server pr-hero did not declare", () => {
+    expect(() =>
+      assertMcpConnected(
+        {
+          codegraph: { status: "connected" },
+          "operator-thing": { status: "connected" },
+        },
+        ["codegraph"],
+      ),
+    ).toThrow(/operator-thing/);
+  });
+
+  test("refuses a declared server that is missing", () => {
+    expect(() => assertMcpConnected({}, ["codegraph"])).toThrow(/codegraph/);
+  });
+
+  test("refuses a declared server that is not connected", () => {
+    expect(() =>
+      assertMcpConnected({ codegraph: { status: "failed" } }, ["codegraph"]),
+    ).toThrow(/failed/);
+  });
+
+  // An unreadable response proves nothing, and "nothing extra is connected"
+  // is exactly the claim that cannot be made from it.
+  test("refuses a response it cannot read", () => {
+    expect(() => assertMcpConnected("connected", [])).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #141: MCP applied, end to end through the client.
+//
+// The defect this closes: `mcpConfigPath` was threaded from the harness, into
+// the transport request, into createSession — and then applied to nothing. The
+// OpenCode route's hunters ran without codegraph on every repo, indexed or
+// not, and no artifact said so.
+// ---------------------------------------------------------------------------
+const MCP_INPUT = { ...INPUT, mcpConfigPath: "/run/mcp.json" };
+
+function launchRecorder() {
+  const launches: Array<unknown> = [];
+  return {
+    launches: () => launches,
+    launchServer: async (mcp?: unknown) => {
+      launches.push(mcp);
+      return { url: "http://127.0.0.1:1", pid: 1, close: async () => {} };
+    },
+  };
+}
+
+describe("createOpenCodeClient MCP delivery (#141)", () => {
+  test("hands the translated registry to the server launch, not to a running server", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ codegraph: { status: "connected" } });
+    const launcher = launchRecorder();
+    const client = rig(fake, {
+      launchServer: launcher.launchServer,
+      readMcpConfig: async () => CLAUDE_MCP_JSON,
+    });
+
+    await client.createSession(MCP_INPUT);
+
+    // Config present from the server's first byte is the point: it leaves no
+    // window between "server up" and "MCP connected" (the #128 race class).
+    expect(launcher.launches()).toEqual([
+      {
+        codegraph: {
+          type: "local",
+          command: [CODEGRAPH_BIN, "serve", "--mcp", "-p", "/tmp/work"],
+          enabled: true,
+        },
+      },
+    ]);
+  });
+
+  test("reads the registry the binding policy already gates, by its own path", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ codegraph: { status: "connected" } });
+    const read: string[] = [];
+    const client = rig(fake, {
+      readMcpConfig: async (p: string) => {
+        read.push(p);
+        return CLAUDE_MCP_JSON;
+      },
+    });
+
+    await client.createSession(MCP_INPUT);
+
+    // One source of truth. A second, OpenCode-shaped config would be a
+    // registry `binding-policy.ts` never validates.
+    expect(read).toEqual(["/run/mcp.json"]);
+  });
+
+  test("allows the codegraph MCP tool once its server is delivered", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ codegraph: { status: "connected" } });
+    const client = rig(fake, { readMcpConfig: async () => CLAUDE_MCP_JSON });
+
+    const session = await client.createSession(MCP_INPUT);
+
+    expect(session.toolMap).toEqual({
+      ...EXPECTED_TOOL_MAP,
+      codegraph_codegraph_explore: true,
+    });
+  });
+
+  // Parity, and #116's pass-3 ledger recorded it as CORRECT: a repo with no
+  // index yields {"mcpServers":{}}, no MCP is delivered, and the hunters run
+  // on read/grep/glob. The empty case must not fail the readback.
+  test("a repo with no codegraph index delivers nothing and still runs", async () => {
+    const fake = fakeSdk();
+    const launcher = launchRecorder();
+    const client = rig(fake, {
+      launchServer: launcher.launchServer,
+      readMcpConfig: async () => EMPTY_MCP_JSON,
+    });
+
+    const session = await client.createSession(MCP_INPUT);
+
+    expect(launcher.launches()).toEqual([{}]);
+    expect(session.toolMap?.codegraph_codegraph_explore).toBe(false);
+    expect(fake.promptCalls()).toHaveLength(1);
+  });
+
+  // FAIL LOUD, never degrade. The opencode child is spawned with no PATH, so
+  // the bare "codegraph" the Claude-side file carries cannot start.
+  test("an unresolvable codegraph binary aborts before any prompt is sent", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake, {
+      readMcpConfig: async () => CLAUDE_MCP_JSON,
+      codegraphBinaryPath: undefined,
+    });
+
+    await expect(client.createSession(MCP_INPUT)).rejects.toThrow(/codegraph/i);
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  test("a declared registry with no reader configured aborts rather than skipping MCP", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake, { readMcpConfig: undefined });
+
+    await expect(client.createSession(MCP_INPUT)).rejects.toThrow(/mcp/i);
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  // ONE server hosts every session of a client, and its MCP config is fixed at
+  // spawn. A second session with a different cwd would silently ride the first
+  // one's `-p`, which is the wrong-tree failure the `-p` exists to prevent.
+  test("refuses a second session whose registry differs from the launched one", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ codegraph: { status: "connected" } });
+    const client = rig(fake, { readMcpConfig: async () => CLAUDE_MCP_JSON });
+
+    await client.createSession(MCP_INPUT);
+    await expect(
+      client.createSession({ ...MCP_INPUT, cwd: "/tmp/other-worktree" }),
+    ).rejects.toThrow(/server/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #141 §E: the readback, at the client. claude-code declares its isolation
+// with `--strict-mcp-config`; this route VERIFIES it, which is strictly
+// stronger. Every mismatch aborts the attempt before the model is prompted.
+// ---------------------------------------------------------------------------
+describe("createOpenCodeClient MCP readback (#141)", () => {
+  test("verifies the connected set before the model is prompted", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ codegraph: { status: "connected" } });
+    const client = rig(fake, { readMcpConfig: async () => CLAUDE_MCP_JSON });
+
+    await client.createSession(MCP_INPUT);
+
+    expect(fake.mcpStatusCalls()).toEqual([
+      { query: { directory: "/tmp/work" } },
+    ]);
+  });
+
+  // Measured (#141 fact 7): `--pure` suppresses neither config-delivered nor
+  // config-FILE MCP servers, so a server that ever saw the operator's real
+  // HOME connects whatever ~/.config/opencode/opencode.jsonc names.
+  test("an undeclared server aborts before any prompt is sent", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({
+      codegraph: { status: "connected" },
+      "operator-thing": { status: "connected" },
+    });
+    const client = rig(fake, { readMcpConfig: async () => CLAUDE_MCP_JSON });
+
+    await expect(client.createSession(MCP_INPUT)).rejects.toThrow(
+      /operator-thing/,
+    );
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  test("a declared server that never connected aborts before any prompt", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({});
+    const client = rig(fake, { readMcpConfig: async () => CLAUDE_MCP_JSON });
+
+    await expect(client.createSession(MCP_INPUT)).rejects.toThrow(/codegraph/);
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  test("a declared server in any non-connected state aborts before any prompt", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ codegraph: { status: "failed" } });
+    const client = rig(fake, { readMcpConfig: async () => CLAUDE_MCP_JSON });
+
+    await expect(client.createSession(MCP_INPUT)).rejects.toThrow(/failed/);
+    expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  // The empty declaration is a declaration: "no MCP", verified. A server
+  // leaking in from anywhere is the same threat whether or not pr-hero asked
+  // for one of its own.
+  test("an undeclared server aborts even when pr-hero delivered nothing", async () => {
+    const fake = fakeSdk();
+    fake.setMcpStatus({ "operator-thing": { status: "connected" } });
+    const client = rig(fake, { readMcpConfig: async () => EMPTY_MCP_JSON });
+
+    await expect(client.createSession(MCP_INPUT)).rejects.toThrow(
+      /operator-thing/,
+    );
+    expect(fake.promptCalls()).toHaveLength(0);
   });
 });

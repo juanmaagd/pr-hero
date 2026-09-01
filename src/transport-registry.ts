@@ -18,6 +18,7 @@ import {
   createOpenCodeClient,
   type OpenCodeSdkLike,
 } from "./transports/opencode-client";
+import type { OpenCodeMcpConfig } from "./transports/opencode-mcp";
 import {
   type OpenCodeClientLike,
   OpenCodeSdkTransport,
@@ -135,10 +136,19 @@ export interface TransportFactoryOptions {
   readonly spawnFn?: typeof Bun.spawn;
   readonly openCodeClient?: OpenCodeClientLike;
   readonly loadSdk?: () => Promise<OpenCodeSdkLike>;
-  readonly launchServer?: () => Promise<OpenCodeServerHandle>;
+  readonly launchServer?: (
+    mcp?: OpenCodeMcpConfig,
+  ) => Promise<OpenCodeServerHandle>;
   readonly readSystemPrompt?: (path: string) => Promise<string>;
+  readonly readMcpConfig?: (path: string) => Promise<string>;
   readonly binaryPath?: string;
   readonly openCodeBinaryPath?: string;
+  // #141: absolute, and resolved HERE rather than inside the client. The
+  // client is the wrong place for a PATH lookup — the same rule
+  // opencode-server.ts states for the opencode binary itself — and the
+  // launcher-side default below keeps the operator's override on the same
+  // option path as every other binary this registry hands out.
+  readonly codegraphBinaryPath?: string;
   readonly env?: Record<string, string>;
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly mode?: "production" | "conformance";
@@ -218,6 +228,11 @@ export class DefaultTransportRegistry implements TransportRegistry {
       }
 
       const route = merged.route;
+      // Resolved ONCE per client, before the options object is built: the
+      // lookup hits the filesystem, and a spread that called it twice would
+      // pay for it twice for one value.
+      const codegraphBinaryPath =
+        merged.codegraphBinaryPath ?? Bun.which("codegraph") ?? undefined;
       const client = createOpenCodeClient({
         model: route
           ? {
@@ -231,13 +246,18 @@ export class DefaultTransportRegistry implements TransportRegistry {
         loadSdk: merged.loadSdk ?? loadOpenCodeSdk,
         launchServer:
           merged.launchServer ??
-          (async () => {
+          (async (mcp?: OpenCodeMcpConfig) => {
             return await launchOpenCodeServer({
               verifiedBinaryPath:
                 merged.openCodeBinaryPath ??
                 merged.binaryPath ??
                 "/usr/local/bin/opencode",
               env: merged.env ?? {},
+              // #141: the run's registry rides the SPAWN. OpenCode reads
+              // `OPENCODE_CONFIG_CONTENT` at startup, so a server already
+              // running cannot be given one without opening a window between
+              // "server up" and "MCP connected".
+              ...(mcp === undefined ? {} : { mcp }),
             });
           }),
         readSystemPrompt:
@@ -245,6 +265,20 @@ export class DefaultTransportRegistry implements TransportRegistry {
           (async (filePath: string) => {
             return await readFile(filePath, "utf8");
           }),
+        // #141: the SAME mcp.json `binding-policy.ts` already validates —
+        // not a second, OpenCode-shaped registry the integrity gate would
+        // never see. The path arrives on the request; this only reads it.
+        readMcpConfig:
+          merged.readMcpConfig ??
+          (async (filePath: string) => {
+            return await readFile(filePath, "utf8");
+          }),
+        // An unresolved binary is carried through as "unresolved" rather than
+        // refused here: the translation is the only place that knows whether a
+        // codegraph binary was needed at all. A repo with no index needs none,
+        // and refusing to build a client for it would break the parity case
+        // #116's ledger recorded as correct.
+        ...(codegraphBinaryPath === undefined ? {} : { codegraphBinaryPath }),
       });
 
       return new OpenCodeSdkTransport({ client });

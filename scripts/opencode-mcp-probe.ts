@@ -339,6 +339,71 @@ const results: ArmResult[] = [];
   );
 }
 
+// Arm E — the directory-scope question, and the reason it is an ARM rather
+// than a comment. `assertMcpConnected` reads the connected set back with
+// `query.directory` set to the review target, while the server inherits
+// pr-hero's own cwd and never the worktree — so in PR mode those two paths
+// always differ. #127 is the precedent that makes this worth measuring:
+// session.status returned {} for a BUSY session given a directory the server
+// was not started in, which is why pollStatus omits the parameter. If
+// mcp.status scoped the same way, the readback would abort every PR-mode step.
+//
+// A comment asserting it does not would be exactly the kind of claim this
+// repo has already paid for four times. This runs by default so a provider
+// that starts scoping it fails the probe instead of the reviews.
+{
+  const { home, env } = await syntheticHome();
+  const arm: ArmResult = {
+    arm: "E/directory-scope",
+    note: "mcp.status read from directories the server was not started in",
+    envKeys: [],
+    calls: [],
+  };
+  console.error(`\n=== ${arm.arm}: ${arm.note}`);
+  const server = await launchOpenCodeServer({
+    verifiedBinaryPath: opencodeBin,
+    env: {
+      ...env,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        mcp: { [PROBE_SERVER]: codegraphMcpConfig },
+      }),
+    },
+  });
+  console.error(`  server ${server.url} (pid ${server.pid})`);
+  console.error(`  server process cwd: ${process.cwd()}`);
+  try {
+    const client = createOpencodeClient({ baseUrl: server.url });
+    // Three GENUINELY distinct directories plus the omitted case. `repoDir`
+    // defaults to the process cwd, so listing it alongside `process.cwd()`
+    // would have compared a value against itself and called the agreement
+    // evidence — the shape of a test that cannot fail.
+    for (const dir of [repoDir, home, "/tmp", undefined]) {
+      arm.calls.push(
+        await record(`mcp.status directory=${dir ?? "(omitted)"}`, () =>
+          mcpOf(client).status(dir ? { query: { directory: dir } } : {}),
+        ),
+      );
+    }
+  } finally {
+    await server.close();
+  }
+  const connected = arm.calls.map((c) =>
+    JSON.stringify((c.value as { data?: unknown })?.data ?? c.error),
+  );
+  const agree = new Set(connected).size === 1;
+  console.error(`  all readings agree: ${agree}`);
+  for (const [i, c] of arm.calls.entries()) {
+    console.error(`    ${c.label} => ${connected[i]}`);
+  }
+  if (!agree) {
+    console.error(
+      "  ⚠️  mcp.status IS directory-scoped on this build — the readback in " +
+        "opencode-client.ts will abort PR-mode steps. See #141.",
+    );
+  }
+  results.push(arm);
+}
+
 const outPath = path.join(outDir, "mcp-probe.json");
 await Bun.write(
   outPath,
@@ -352,7 +417,14 @@ await Bun.write(
 console.error("\n=== Summary");
 for (const arm of results) {
   console.error(`${arm.arm}`);
-  console.error(`  tool.ids at launch:  ${(arm.toolIds ?? []).length}`);
+  // `n/a` rather than 0: the directory-scope arm takes no tool readings at
+  // all, and a zero would read as "the surface was empty" — a measurement it
+  // never made.
+  if (arm.toolIds === undefined) {
+    console.error("  tool readings:       n/a (directory-scope arm)");
+    continue;
+  }
+  console.error(`  tool.ids at launch:  ${arm.toolIds.length}`);
   console.error(
     `  NEW after delivery:  ${JSON.stringify(arm.newToolIds ?? [])}`,
   );

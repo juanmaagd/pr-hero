@@ -16,6 +16,7 @@
 // the server actually prints.
 
 import type { SpawnedProcess } from "../step-runner";
+import { mcpConfigIsEmpty, type OpenCodeMcpConfig } from "./opencode-mcp";
 
 // The line the server prints on startup, verified live against
 // opencode 1.18.23: "opencode server listening on http://127.0.0.1:<port>".
@@ -56,8 +57,19 @@ export interface LaunchOpenCodeServerOptions {
   // exactly the PATH lookup §13 forbids.
   readonly verifiedBinaryPath: string;
   // The COMPLETE environment for the child. Passed through untouched — this
-  // module never merges process.env into it, which is the whole point.
+  // module never merges process.env into it, which is the whole point. The ONE
+  // documented addition is `mcp` below, and it is a value pr-hero computed
+  // rather than one inherited from anywhere.
   readonly env: Readonly<Record<string, string>>;
+  // #141: the run's MCP registry, translated from the Claude-shaped mcp.json
+  // the binding policy already gates. Delivered as `OPENCODE_CONFIG_CONTENT`
+  // at SPAWN, so the servers are connected from the server's first byte —
+  // there is then no window between "server up" and "MCP connected" for a
+  // prompt to fall into (the #128 race class). An empty registry delivers no
+  // config at all: parity with claude-code on a repo with no codegraph index,
+  // where the hunters run on read/grep/glob and pr-hero makes no claim about
+  // the child's tool channels.
+  readonly mcp?: OpenCodeMcpConfig;
   readonly spawnFn?: typeof Bun.spawn;
   // Injectable for offline tests; production signals the child by pid. Same
   // shape as ClaudeCodeCliTransport's, so the two shutdown paths read alike.
@@ -100,6 +112,7 @@ export async function launchOpenCodeServer(
     termGraceMs = DEFAULT_TERM_GRACE_MS,
     killReapMs = DEFAULT_KILL_REAP_MS,
     hostname = "127.0.0.1",
+    mcp,
   } = options;
 
   if (!verifiedBinaryPath.startsWith("/")) {
@@ -108,9 +121,20 @@ export async function launchOpenCodeServer(
     );
   }
 
+  // The projection, plus the run's own MCP registry when there is one. The
+  // config is READ from `OPENCODE_CONFIG_CONTENT` at startup, which is the
+  // mechanism the SDK's own helper uses (dist/server.js:15) and the one
+  // measured to work under `--pure` (#141 fact 1). Written here rather than by
+  // the caller so the "exactly the projected environment" rule keeps a single
+  // enforcement point.
+  const childEnv: Record<string, string> =
+    mcp === undefined || mcpConfigIsEmpty(mcp)
+      ? { ...env }
+      : { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp }) };
+
   const proc = spawnFn(openCodeServerArgv(verifiedBinaryPath, hostname), {
     // EXACTLY the projected environment. Never `...process.env`.
-    env: env as Record<string, string>,
+    env: childEnv,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",

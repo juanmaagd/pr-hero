@@ -53,6 +53,11 @@ function moduleConformance(
 // `ThrowOnError = false` an API error returns `{ data: undefined, error }`,
 // and an interface that declares only `{ data: T }` erases that arm and turns
 // a handled API error into a TypeError on `.data`.
+// #141 added `mcp.status` to the same interface: MCP is delivered as config at
+// server spawn and then VERIFIED against this endpoint before the model is
+// prompted. Losing it would take the verification with it, and nothing else
+// could notice — a connected MCP server contributes nothing to `tool.ids` or
+// `tool.list` (measured), so the allow-map enumeration is blind to it.
 function clientConformance(client: OpencodeClient): OpenCodeSdkClientApi {
   return client;
 }
@@ -131,6 +136,26 @@ describe("the installed @opencode-ai/sdk", () => {
     });
 
     expect(typeof client.tool?.ids).toBe("function");
+  });
+
+  // #141's half of the drift-kill. `GET /mcp` is the ONLY surface on which a
+  // connected MCP server is visible: it contributes nothing to `tool.ids` or
+  // `tool.list`, measured on both endpoints and both providers, before and
+  // after connect. So this endpoint is not a convenience — it is the entire
+  // evidence base for "exactly the servers pr-hero declared are connected",
+  // which is this route's replacement for claude-code's `--strict-mcp-config`.
+  test("really exposes mcp.status(), the readback the isolation claim rests on", async () => {
+    const module = (await import("@opencode-ai/sdk")) as unknown as {
+      createOpencodeClient: (config: { baseUrl: string }) => {
+        mcp?: { status?: unknown };
+      };
+    };
+
+    const client = module.createOpencodeClient({
+      baseUrl: "http://127.0.0.1:1",
+    });
+
+    expect(typeof client.mcp?.status).toBe("function");
   });
 
   // Issue #127's half of the drift-kill. The poll observer's turn boundary is

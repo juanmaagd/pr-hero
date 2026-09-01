@@ -15,6 +15,13 @@
 // (§13).
 
 import type { ProviderTerminalProof } from "../execution/contracts";
+import {
+  ALL_MCP_TOOL_IDS,
+  assertMcpConnected,
+  mcpToolIdsFor,
+  type OpenCodeMcpConfig,
+  translateMcpConfig,
+} from "./opencode-mcp";
 import type {
   OpenCodeClientEvent,
   OpenCodeClientLike,
@@ -552,6 +559,15 @@ export interface OpenCodeSdkClientApi {
   readonly tool: {
     ids(options?: unknown): Promise<OpenCodeSdkResult<readonly string[]>>;
   };
+  // `GET /mcp` — the §E readback's endpoint, and the only place a connected
+  // MCP server is visible at all: it contributes nothing to `tool.ids` or
+  // `tool.list` (measured, #141 fact 3). REQUIRED, never optional, for the
+  // same reason as the two above — an optional member lets a fake skip the
+  // surface silently, which is the shape of issue #121, and a skipped readback
+  // is an unverified tool channel rather than a missing convenience.
+  readonly mcp: {
+    status(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
+  };
 }
 
 export interface OpenCodeSdkLike {
@@ -617,9 +633,25 @@ function describeSdkError(error: unknown): string {
 
 export interface CreateOpenCodeClientOptions {
   readonly loadSdk: () => Promise<OpenCodeSdkLike>;
-  readonly launchServer: () => Promise<OpenCodeServerHandle>;
+  // #141: the run's MCP registry travels INTO the launch. OpenCode reads it
+  // from the environment at startup, so a server already running cannot be
+  // given one without leaving a window between "server up" and "MCP
+  // connected" for a prompt to fall into (the #128 race class).
+  readonly launchServer: (
+    mcp?: OpenCodeMcpConfig,
+  ) => Promise<OpenCodeServerHandle>;
   readonly model: { readonly providerID: string; readonly modelID: string };
   readonly readSystemPrompt: (promptPath: string) => Promise<string>;
+  // #141: reads the Claude-shaped mcp.json named by the request. Optional only
+  // because a request may carry no registry at all; a request that DOES carry
+  // one and finds no reader here aborts rather than running without MCP, which
+  // is the silent degradation this issue is about.
+  readonly readMcpConfig?: (configPath: string) => Promise<string>;
+  // Absolute, resolved by the caller (transport-registry.ts). The client never
+  // looks a binary up: resolution is a PATH question, and this module has no
+  // business answering one — the same rule opencode-server.ts states for the
+  // opencode binary itself.
+  readonly codegraphBinaryPath?: string;
   // §6 deny floor: tools that stay false unless the spec names them. Absent is
   // NOT the same as false — an absent key asks for the provider's default, and
   // the provider's default is not ours to inherit.
@@ -642,17 +674,29 @@ const DEFAULT_DENY_FLOOR = ["bash"] as const;
 // and the denylist denied only "bash", which landed by pure naming
 // coincidence.
 //
-// `mcp__codegraph__codegraph_explore` is deliberately absent. It maps onto no
-// OpenCode built-in, and dropping it is PARITY, not a gap: on claude-code a
-// repo without a codegraph index runs its hunters with the other three tools
-// and an empty mcp.json. MCP expressibility on OpenCode is a separate open
-// question — opencode-sdk.ts threads an `mcpConfigPath` into the request that
-// this client never applies to the session.
+// #141: `mcp__codegraph__codegraph_explore` used to be absent from this table,
+// on the grounds that it mapped onto no OpenCode built-in and that dropping it
+// was parity with a codegraph-less repo. That was true of the TABLE and false
+// of the ROUTE: `mcpConfigPath` was threaded all the way into createSession
+// and then applied to nothing, so every OpenCode hunter ran without codegraph
+// even on an indexed repo — a silent capability gap between the two backends,
+// invisible in any artifact because the map recorded only ids the provider
+// reported.
+//
+// The id is OpenCode's `<server>_<tool>` normalisation of the codegraph
+// server's single tool, and it is MEASURED rather than derived (#141 fact 4):
+// with this key written false the model answered REFUSED and no tool call
+// appeared in the stream. Parity for the codegraph-less case is unchanged and
+// now explicit — an empty registry leaves the key written FALSE rather than
+// absent.
 const CANONICAL_TO_OPENCODE_TOOL: Readonly<Record<string, string>> = {
   Read: "read",
   Grep: "grep",
   Glob: "glob",
+  mcp__codegraph__codegraph_explore: "codegraph_codegraph_explore",
 };
+
+const MCP_TOOL_ID_SET: ReadonlySet<string> = new Set(ALL_MCP_TOOL_IDS);
 
 // ENUMERATE, never trust a default. Every id the provider reports is written
 // into the map explicitly — the allows true, everything else false — so no key
@@ -665,9 +709,20 @@ function resolveToolMap(
   surface: readonly string[],
   canonicalTools: readonly string[],
   denyFloor: readonly string[],
+  // #141: the MCP tool ids this session's registry actually delivers. Empty
+  // when no registry was delivered — which is the common case and the parity
+  // case, not an error.
+  deliveredMcpToolIds: ReadonlySet<string>,
 ): Record<string, boolean> {
   const tools: Record<string, boolean> = {};
   for (const id of surface) tools[id] = false;
+  // #141: MCP ids are legitimately ABSENT from the reported surface. Measured
+  // on both endpoints, both providers, before and after connect: a connected
+  // MCP server contributes nothing to `tool.ids()` or `tool.list()`, and the
+  // SDK docstring promising "including built-in and dynamically registered" is
+  // simply wrong about MCP. So they are seeded from pr-hero's own table — the
+  // enumeration rule is unchanged, only its source differs for these ids.
+  for (const id of ALL_MCP_TOOL_IDS) tools[id] = false;
   // Defense in depth. Ordering is unchanged from before the fix — the floor is
   // written first and a named allow may still flip it (`denyFloor`'s contract
   // says so) — but no canonical name in the table above maps onto a floor id,
@@ -681,6 +736,15 @@ function resolveToolMap(
     // the absent-key hazard in reverse — a key we invented, meaning whatever
     // the provider decides it means.
     if (id === undefined) continue;
+    // An MCP id can only be allowed by a registry that actually delivered it.
+    // The `id in tools` guard below cannot make this call — the id is seeded
+    // above, so it is always present — and it must not be allowed to: writing
+    // true for a server that was never launched would grant the model a tool
+    // that does not exist and hide the gap #141 exists to close.
+    if (MCP_TOOL_ID_SET.has(id)) {
+      if (deliveredMcpToolIds.has(id)) tools[id] = true;
+      continue;
+    }
     if (!(id in tools)) continue;
     tools[id] = true;
   }
@@ -729,6 +793,37 @@ interface SessionState {
   failure?: string;
 }
 
+// #141. Returns an EMPTY registry for a request that names none, which is the
+// parity case rather than an error: a repo with no `.codegraph` index gets
+// {"mcpServers":{}} from the driver (src/cli.ts:1263-1272) and its hunters run
+// on read/grep/glob, exactly as they do on claude-code.
+async function resolveMcpConfig(
+  options: CreateOpenCodeClientOptions,
+  input: OpenCodeCreateSessionInput,
+): Promise<OpenCodeMcpConfig> {
+  const configPath = input.mcpConfigPath;
+  if (configPath === undefined) return {};
+  const read = options.readMcpConfig;
+  // Aborts rather than proceeding without MCP. Silently skipping is the whole
+  // of #141: the path was threaded through three layers and applied to
+  // nothing, so an indexed repo's hunters ran blind and no artifact said so.
+  if (read === undefined) {
+    throw new Error(
+      `the request names an mcp registry (${configPath}) but this opencode ` +
+        "client has no reader for it, so MCP cannot be delivered; refusing to " +
+        "run a step without the tools it was configured with",
+    );
+  }
+  return translateMcpConfig({
+    json: await read(configPath),
+    configPath,
+    cwd: input.cwd,
+    ...(options.codegraphBinaryPath === undefined
+      ? {}
+      : { codegraphBinaryPath: options.codegraphBinaryPath }),
+  });
+}
+
 export function createOpenCodeClient(
   options: CreateOpenCodeClientOptions,
 ): OpenCodeClientLike & { close(): Promise<void> } {
@@ -741,6 +836,14 @@ export function createOpenCodeClient(
   // the session API is for.
   let serverPromise: Promise<OpenCodeServerHandle> | undefined;
   let server: OpenCodeServerHandle | undefined;
+  // #141: the registry the shared server was actually launched with, as its
+  // own JSON. The readback (§E) compares NAMES, and names are not the whole
+  // config: two sessions on different trees would agree on "codegraph" while
+  // disagreeing on the `-p <cwd>` baked into the command at spawn — which is
+  // precisely the wrong-tree failure `-p` exists to prevent, and it would be
+  // invisible to every other check here. Production does not hit this today
+  // (one cwd per pipeline); the guard is for the day that changes.
+  let launchedMcp: string | undefined;
   // Calls that have committed to the shared server but have not registered a
   // session yet. `states` alone cannot answer "is anyone using this?": its
   // entry appears only after session.create AND event.subscribe both
@@ -782,15 +885,33 @@ export function createOpenCodeClient(
         input.systemPromptPath,
       );
 
+      // #141: read and translated BEFORE anything is spawned, for the same
+      // F005 reason as the system prompt — a registry that cannot be honoured
+      // must cost nothing to unwind — and because §D needs the config in hand
+      // at launch, not after it.
+      const mcpConfig = await resolveMcpConfig(options, input);
+      const mcpFingerprint = JSON.stringify(mcpConfig);
+
       if (serverPromise === undefined) {
-        serverPromise = options.launchServer();
+        serverPromise = options.launchServer(mcpConfig);
+        // Recorded synchronously, before the first await: a sibling call that
+        // arrives mid-launch must compare against this launch, not against
+        // whatever it would have asked for.
+        launchedMcp = mcpFingerprint;
         try {
           server = await serverPromise;
         } catch (error) {
           // A failed launch must not poison the client forever.
           serverPromise = undefined;
+          launchedMcp = undefined;
           throw error;
         }
+      } else if (launchedMcp !== mcpFingerprint) {
+        throw new Error(
+          "the opencode server for this client was launched with a different " +
+            "MCP registry; its servers are fixed at spawn, so this session " +
+            "would silently ride the first one's project scope",
+        );
       }
       const handle = server ?? (await serverPromise);
       const api = sdk.createOpencodeClient({ baseUrl: handle.url });
@@ -798,8 +919,44 @@ export function createOpenCodeClient(
       let sessionId: string | undefined;
       establishing += 1;
       try {
-        // FIRST, and inside the try on purpose. The tool surface is the one
-        // thing this call must establish before anything else exists: a
+        // §E, and FIRST: the OpenCode analogue of claude-code's
+        // `--strict-mcp-config`, except claude-code DECLARES its isolation
+        // with a flag and this reads the connected set back from the provider.
+        // Verified beats declared, and the concrete threat is measured (#141
+        // fact 7): `--pure` suppresses neither config-delivered nor
+        // config-FILE MCP servers, so a server that ever saw the operator's
+        // real HOME connects whatever ~/.config/opencode/opencode.jsonc names.
+        // Production is shielded only INCIDENTALLY, by the synthetic
+        // XDG_CONFIG_HOME the credential projection happens to set — and
+        // nothing else here could notice the difference, since a connected MCP
+        // server contributes nothing to the tool surface enumerated below.
+        //
+        // The `directory` scope mirrors what the request asked for, and the
+        // #127 analogue was checked rather than assumed. session.status
+        // reported {} for a BUSY session given a directory the server was not
+        // started in, so pollStatus below omits the parameter entirely — the
+        // obvious worry is that mcp.status scopes the same way and would then
+        // abort every PR-mode step, since the server inherits pr-hero's cwd
+        // and never the worktree.
+        //
+        // It does not. MEASURED against a real PR worktree, with the server's
+        // cwd deliberately elsewhere: `directory` set to the worktree, to the
+        // server's own cwd, to /tmp, and omitted altogether all returned the
+        // same `{"codegraph":{"status":"connected"}}`. A config-delivered MCP
+        // server belongs to the server process, not to a directory. The
+        // mismatch arm in scripts/opencode-mcp-probe.ts runs by default and
+        // re-derives this, so a provider that starts scoping it is a probe
+        // failure rather than a silent PR-mode outage.
+        assertMcpConnected(
+          unwrap(
+            await api.mcp.status({ query: { directory: input.cwd } }),
+            "mcp.status",
+          ),
+          Object.keys(mcpConfig),
+        );
+
+        // The tool surface comes next, and inside the try on purpose. It is
+        // the one thing this call must establish before anything else exists: a
         // session whose isolation cannot be expressed is the runtime being
         // unavailable, and failing here unwinds through the `finally` below
         // that releases the shared server (F004's hazard, already paid for).
@@ -834,7 +991,12 @@ export function createOpenCodeClient(
               "open a session whose isolation is unverifiable",
           );
         }
-        const tools = resolveToolMap(surface, input.tools, denyFloor);
+        const tools = resolveToolMap(
+          surface,
+          input.tools,
+          denyFloor,
+          mcpToolIdsFor(mcpConfig),
+        );
 
         const created = await api.session.create({
           body: { title: "pr-hero review step" },
@@ -979,6 +1141,11 @@ export function createOpenCodeClient(
           const dying = server;
           serverPromise = undefined;
           server = undefined;
+          // Cleared WITH the server it describes. The fingerprint is only
+          // meaningful while a launched server exists; keeping the two in step
+          // is what makes "compare against the launch" a local invariant
+          // rather than an ordering the next reader has to reconstruct.
+          launchedMcp = undefined;
           if (dying !== undefined) await dying.close().catch(() => {});
         }
       }
@@ -1119,6 +1286,7 @@ export function createOpenCodeClient(
       const handle = server;
       server = undefined;
       serverPromise = undefined;
+      launchedMcp = undefined;
       if (handle !== undefined) await handle.close();
     },
   };

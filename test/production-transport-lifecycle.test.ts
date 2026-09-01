@@ -15,6 +15,7 @@ import path from "node:path";
 import { ConcurrencyAttemptAdmissionGate } from "../src/execution/admission";
 import { ConcurrencyLimiter } from "../src/execution/concurrency-limiter";
 import type {
+  AsyncEventSink,
   IsolationProjection,
   ProviderCapabilityReport,
   ProviderTerminalProof,
@@ -501,6 +502,10 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
           tool: {
             ids: async () => ({ data: ["read", "grep", "glob", "bash"] }),
           },
+          // #141: the readback the client performs before prompting. This
+          // request declares no mcp registry, so the verified answer is
+          // "nothing connected".
+          mcp: { status: async () => ({ data: {} }) },
           session: {
             create: async () => ({ data: { id: "oc-sess-1" } }),
             prompt: async (options: {
@@ -548,6 +553,145 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
         {
           providerID: route.provider,
           modelID: route.modelSnapshot,
+        },
+      ]);
+    });
+  });
+
+  // #141: the registry is where the client learns which codegraph binary
+  // exists and where the launch closure learns there is a registry to carry.
+  // The threaded-and-never-applied path this issue closes ran through exactly
+  // this factory, so the wiring gets its own test rather than being trusted to
+  // the type checker.
+  describe("built-in opencode factory MCP wiring (#141)", () => {
+    test("carries the run's registry into the launch, resolved to the configured binary", async () => {
+      const launches: unknown[] = [];
+      const mcpJson = path.join(tmpDir, "mcp.json");
+      await Bun.write(
+        mcpJson,
+        JSON.stringify({
+          mcpServers: {
+            codegraph: {
+              type: "stdio",
+              command: "codegraph",
+              args: ["serve", "--mcp"],
+            },
+          },
+        }),
+      );
+
+      const loadSdk = async (): Promise<OpenCodeSdkLike> => ({
+        createOpencodeClient: () => ({
+          tool: { ids: async () => ({ data: ["read"] }) },
+          mcp: {
+            status: async () => ({
+              data: { codegraph: { status: "connected" } },
+            }),
+          },
+          session: {
+            create: async () => ({ data: { id: "oc-sess-141" } }),
+            prompt: async () => ({ data: {} }),
+            messages: async () => ({ data: {} }),
+            status: async () => ({ data: {} }),
+            abort: async () => ({ data: {} }),
+          },
+          event: {
+            subscribe: async () => ({
+              // Just enough of a real turn to settle: an assistant message
+              // with a completion record, one text part, and the `session.idle`
+              // boundary (#127).
+              stream: (async function* () {
+                const sessionID = "oc-sess-141";
+                yield {
+                  type: "message.updated",
+                  properties: {
+                    sessionID,
+                    info: {
+                      role: "assistant",
+                      id: "msg_1",
+                      time: { completed: 1_700_000_000_000 },
+                      finish: "stop",
+                    },
+                  },
+                };
+                yield {
+                  type: "message.part.updated",
+                  properties: {
+                    sessionID,
+                    part: { id: "prt_1", messageID: "msg_1", type: "text" },
+                  },
+                };
+                yield {
+                  type: "message.part.delta",
+                  properties: {
+                    sessionID,
+                    partID: "prt_1",
+                    field: "text",
+                    delta: "{}",
+                  },
+                };
+                yield { type: "session.idle", properties: { sessionID } };
+              })(),
+            }),
+          },
+        }),
+      });
+
+      const registry = new DefaultTransportRegistry({
+        mode: "conformance",
+        loadSdk,
+        codegraphBinaryPath: "/opt/homebrew/bin/codegraph",
+        launchServer: async (mcp?: unknown) => {
+          launches.push(mcp);
+          return {
+            url: "http://127.0.0.1:4096",
+            pid: 4242,
+            close: async () => {},
+          };
+        },
+      });
+      const transport = registry.get("opencode");
+      const sink: AsyncEventSink = {
+        push: async () => "accepted" as const,
+        close: async () => {},
+      };
+      const controller = new AbortController();
+
+      await transport.execute(
+        {
+          sessionId: "oc-141",
+          attempt: 1,
+          route: {
+            backend: "opencode",
+            provider: "anthropic",
+            modelFamily: "claude",
+            modelSnapshot: "claude-test",
+          },
+          executionModel: "claude-test",
+          systemPromptPath: path.join(tmpDir, "system.md"),
+          systemPromptSha256: "deadbeef",
+          userPrompt: "review",
+          cwd: tmpDir,
+          tools: ["Read", "mcp__codegraph__codegraph_explore"],
+          mcpConfigPath: mcpJson,
+          isolation: ISOLATION_STUB,
+        },
+        { signal: controller.signal, events: sink },
+      );
+
+      expect(launches).toEqual([
+        {
+          codegraph: {
+            type: "local",
+            command: [
+              "/opt/homebrew/bin/codegraph",
+              "serve",
+              "--mcp",
+              "-p",
+              tmpDir,
+            ],
+            enabled: true,
+          },
         },
       ]);
     });
