@@ -170,7 +170,9 @@ describe("pricing catalog", () => {
     });
 
     test("an alias is available exactly as long as its snapshot is", () => {
-      expect(tokenPricingAvailableFor("sonnet", daysAfterFetch(0))).toBe(true);
+      expect(
+        tokenPricingAvailableFor("anthropic", "sonnet", daysAfterFetch(0)),
+      ).toBe(true);
     });
   });
 
@@ -178,7 +180,9 @@ describe("pricing catalog", () => {
     test("an unlisted model id has no price and is never available", () => {
       expect(lookupModelPricing("gpt-4o")).toBeUndefined();
       expect(lookupModelPricing("claude-opus-4-1")).toBeUndefined();
-      expect(tokenPricingAvailableFor("gpt-4o", daysAfterFetch(0))).toBe(false);
+      expect(
+        tokenPricingAvailableFor("anthropic", "gpt-4o", daysAfterFetch(0)),
+      ).toBe(false);
     });
 
     test("an Object.prototype member is not a model", () => {
@@ -199,7 +203,11 @@ describe("pricing catalog", () => {
         "isPrototypeOf",
       ]) {
         expect(lookupModelPricing(member)).toBeUndefined();
-        expect(tokenPricingAvailableFor(member, daysAfterFetch(0))).toBe(false);
+        // The catalogue's own provider, so the provider gate is not what is
+        // answering here -- the model axis has to refuse on its own.
+        expect(
+          tokenPricingAvailableFor("anthropic", member, daysAfterFetch(0)),
+        ).toBe(false);
       }
     });
   });
@@ -222,11 +230,101 @@ describe("pricing catalog", () => {
       // because the metered gate would bill a confident wrong number instead
       // of refusing. Staleness must beat catalogue membership.
       expect(lookupModelPricing("claude-opus-5")).toBeDefined();
+      // Anthropic on both arms, so staleness -- not the provider gate -- is
+      // the only thing that can flip the answer between them.
       expect(
-        tokenPricingAvailableFor("claude-opus-5", daysAfterFetch(89)),
+        tokenPricingAvailableFor(
+          "anthropic",
+          "claude-opus-5",
+          daysAfterFetch(89),
+        ),
       ).toBe(true);
       expect(
-        tokenPricingAvailableFor("claude-opus-5", daysAfterFetch(90)),
+        tokenPricingAvailableFor(
+          "anthropic",
+          "claude-opus-5",
+          daysAfterFetch(90),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe("provider gate", () => {
+    test("a foreign provider is never priced from this catalogue", () => {
+      // The reported finding: pr-hero reviewing PR #162 on the OpenCode route,
+      // refuter verdict `corroborated`. `parseRouteMapping` (preflight.ts)
+      // validates `provider` as any non-empty string and never cross-checks it
+      // against `modelSnapshot`, so `{ provider: "openai", modelSnapshot:
+      // "claude-sonnet-5" }` is an admissible route mapping. The predicate saw
+      // only the model id, found it in the Anthropic-only catalogue, and
+      // reported a metered route as PRICED -- billing another provider at
+      // Anthropic's rates. A confident wrong price instead of an honest absent
+      // one, which is the exact failure this module exists to prevent.
+      expect(
+        tokenPricingAvailableFor(
+          "openai",
+          "claude-sonnet-5",
+          daysAfterFetch(0),
+        ),
+      ).toBe(false);
+      // Not a quirk of one id: every catalogued model is off-limits to it.
+      for (const [modelId] of EXPECTED) {
+        expect(
+          tokenPricingAvailableFor("openai", modelId, daysAfterFetch(0)),
+        ).toBe(false);
+      }
+    });
+
+    test("the catalogue's own provider still prices its own models", () => {
+      // The behaviour the gate must not cost us: same model, same fresh table,
+      // the provider the catalogue declares.
+      expect(
+        tokenPricingAvailableFor(
+          "anthropic",
+          "claude-sonnet-5",
+          daysAfterFetch(0),
+        ),
+      ).toBe(true);
+    });
+
+    test("case and surrounding whitespace are not a different provider", () => {
+      // config/models/*.json and the routing config are both hand-written.
+      // "Anthropic" is a capital letter, not another company.
+      for (const provider of [
+        "Anthropic",
+        " anthropic ",
+        "ANTHROPIC",
+        "\tAnthropic\n",
+      ]) {
+        expect(
+          tokenPricingAvailableFor(
+            provider,
+            "claude-sonnet-5",
+            daysAfterFetch(0),
+          ),
+        ).toBe(true);
+      }
+    });
+
+    test("a third provider is refused like any other non-match", () => {
+      // Deliberately NOT an exhaustive provider list: the gate is an equality
+      // against the catalogue's declared provider, so anything that is not it
+      // is refused without this module having to know what it is.
+      for (const provider of ["zai", "openrouter", "bedrock", ""]) {
+        expect(
+          tokenPricingAvailableFor(
+            provider,
+            "claude-opus-5",
+            daysAfterFetch(0),
+          ),
+        ).toBe(false);
+      }
+    });
+
+    test("a foreign provider stays refused on a stale table too", () => {
+      // Both axes refuse independently; neither is load-bearing for the other.
+      expect(
+        tokenPricingAvailableFor("openai", "claude-opus-5", daysAfterFetch(90)),
       ).toBe(false);
     });
   });

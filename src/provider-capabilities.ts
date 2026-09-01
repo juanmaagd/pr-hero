@@ -555,7 +555,8 @@ export async function produceClaudeCapabilityReport(
       // #137 left hardcoded ON PURPOSE: no model id is in scope here.
       // ProduceClaudeCapabilityReportOptions carries binary/env/auth probes
       // only, because this is a BACKEND-wide report produced before any route
-      // is resolved. `tokenPricingAvailableFor` needs a model to answer, so
+      // is resolved. `tokenPricingAvailableFor` needs a provider AND a model
+      // to answer, and neither is in scope until a route resolves, so
       // `false` stays the honest default rather than a price for a model
       // nobody has named yet.
       pricingReady: false,

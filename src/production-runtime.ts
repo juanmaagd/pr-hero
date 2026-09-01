@@ -289,8 +289,11 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     const billingMode: ExactBindingCapabilityReport["billing"]["mode"] =
       report.billing.mode === "metered" ? "metered" : "subscription";
     // #137. THE place the bundled catalogue is consulted, and the only one:
-    // this is the sole site where a model id (`this.route.modelSnapshot`) and
-    // a billing decision are both in scope. The four `pricingReady: false`
+    // this is the sole site where a provider (`this.route.provider`), a model
+    // id (`this.route.modelSnapshot`) and a billing decision are all in
+    // scope. The provider is not decoration -- the catalogue is Anthropic's
+    // and says so, and a route may name any provider beside any model
+    // snapshot. The four `pricingReady: false`
     // sites upstream are backend-wide reports produced before any route
     // resolves, so they stay the honest default and say so in their own
     // comments.
@@ -311,7 +314,11 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // defeats it by making the unknown look known.
     const tokenPricingAvailable =
       report.billing.pricingReady ||
-      tokenPricingAvailableFor(this.route.modelSnapshot, this.now());
+      tokenPricingAvailableFor(
+        this.route.provider,
+        this.route.modelSnapshot,
+        this.now(),
+      );
     // Spec (same design line): subscription OAuth may truthfully report
     // `cashCostUsd: 0`; metered routes require provider cost or a versioned
     // rate table; unknown is blocking. The catalogue IS "a versioned rate
