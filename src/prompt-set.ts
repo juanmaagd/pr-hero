@@ -18,10 +18,6 @@ export const AGENT_NAMES = [
   "review-refuter",
 ] as const;
 
-export function agentFilesIn(agentsDir: string): string[] {
-  return AGENT_NAMES.map((name) => `${agentsDir}/${name}.md`);
-}
-
 export interface ParsedAgent {
   name: string;
   description: string;
