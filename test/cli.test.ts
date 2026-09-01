@@ -30,6 +30,8 @@ import {
   createRunDir,
   deriveEngineIdentity,
   engineIdentity,
+  heldCommitStatusLock,
+  holdCommitStatusLock,
   type InlinePostOutcome,
   ingestReviewMetrics,
   loadEffectiveConfig,
@@ -43,18 +45,26 @@ import {
   postInlineFindings,
   postInlineIfEligible,
   postingExitCode,
+  releaseCommitStatusLock,
   reportFatalCiError,
   runDoctorCommand,
   runPostCommand,
   runTriageCommand,
   runTriageReplyCommand,
+  settleHeldCommitStatusOnSignal,
 } from "../src/cli";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import type { StoredComparison } from "../src/ledger";
-import { ADMISSION_CHECK_RUN_NAME, listAdmissionCheckRuns } from "../src/pr";
 import {
+  ADMISSION_CHECK_RUN_NAME,
+  listAdmissionCheckRuns,
+  type postCommitStatus,
+} from "../src/pr";
+import {
+  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+  type CommitStatusRequest,
   claimFingerprint,
   findingMarker,
   PR_FINDING_MARKER_PREFIX,
@@ -4353,5 +4363,121 @@ describe("CI admission reviewCount — ledger check runs feed admission", () => 
       deltaRisk: null,
     });
     expect(exhausted.action).toBe("manual-required");
+  });
+});
+
+describe("the in-flight commit-status lock this process holds", () => {
+  const lock = {
+    operatorRoot: "/repo",
+    sha: "c".repeat(40),
+    targetUrl: "https://github.com/org/repo/pull/162",
+  };
+
+  afterEach(() => {
+    releaseCommitStatusLock();
+  });
+
+  test("nothing is held before a pending is published", () => {
+    expect(heldCommitStatusLock()).toBeNull();
+  });
+
+  test("holding records exactly what settling needs", () => {
+    holdCommitStatusLock(lock);
+    expect(heldCommitStatusLock()).toEqual(lock);
+  });
+
+  test("releasing clears it, so the normal settle cannot leave it set", () => {
+    holdCommitStatusLock(lock);
+    releaseCommitStatusLock();
+    expect(heldCommitStatusLock()).toBeNull();
+  });
+
+  test("releasing twice is a no-op", () => {
+    holdCommitStatusLock(lock);
+    releaseCommitStatusLock();
+    releaseCommitStatusLock();
+    expect(heldCommitStatusLock()).toBeNull();
+  });
+});
+
+describe("settleHeldCommitStatusOnSignal", () => {
+  const lock = {
+    operatorRoot: "/repo",
+    sha: "d".repeat(40),
+    targetUrl: "https://github.com/org/repo/pull/162",
+  };
+
+  afterEach(() => {
+    releaseCommitStatusLock();
+  });
+
+  function recordingPoster(): {
+    post: typeof postCommitStatus;
+    calls: {
+      operatorRoot: string;
+      sha: string;
+      request: CommitStatusRequest;
+      options: unknown;
+    }[];
+  } {
+    const calls: {
+      operatorRoot: string;
+      sha: string;
+      request: CommitStatusRequest;
+      options: unknown;
+    }[] = [];
+    const post = (async (
+      operatorRoot: string,
+      sha: string,
+      request: CommitStatusRequest,
+      _spawnFn?: unknown,
+      options?: unknown,
+    ) => {
+      calls.push({ operatorRoot, sha, request, options });
+    }) as unknown as typeof postCommitStatus;
+    return { post, calls };
+  }
+
+  test("holding nothing posts nothing", async () => {
+    const { post, calls } = recordingPoster();
+    await settleHeldCommitStatusOnSignal(post);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("settles the held sha with one bounded attempt", async () => {
+    holdCommitStatusLock(lock);
+    const { post, calls } = recordingPoster();
+    await settleHeldCommitStatusOnSignal(post);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.operatorRoot).toBe(lock.operatorRoot);
+    expect(calls[0]?.sha).toBe(lock.sha);
+    expect(calls[0]?.request.state).toBe("error");
+    expect(calls[0]?.request.description).toBe("review did not finish");
+    expect(calls[0]?.options).toEqual({
+      attempts: 1,
+      timeoutMs: CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+    });
+  });
+
+  test("take-and-clear: a second signal posts nothing", async () => {
+    // Actions cancels with SIGINT and follows with SIGTERM before the grace
+    // period ends. Both handlers can be in flight at once, and the lock must
+    // be claimed before the await, not after it.
+    holdCommitStatusLock(lock);
+    const { post, calls } = recordingPoster();
+    await Promise.all([
+      settleHeldCommitStatusOnSignal(post),
+      settleHeldCommitStatusOnSignal(post),
+    ]);
+    expect(calls).toHaveLength(1);
+    expect(heldCommitStatusLock()).toBeNull();
+  });
+
+  test("a failing settle never escapes the handler", async () => {
+    holdCommitStatusLock(lock);
+    const post = (async () => {
+      throw new Error("missing permission (HTTP 403)");
+    }) as unknown as typeof postCommitStatus;
+    await expect(settleHeldCommitStatusOnSignal(post)).resolves.toBeUndefined();
   });
 });

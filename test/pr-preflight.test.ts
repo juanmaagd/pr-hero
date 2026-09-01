@@ -19,7 +19,9 @@ import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
 import type { GreptileFinding } from "../src/greptile";
 import {
   buildComparisonJson,
+  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
   COMMIT_STATUS_CONTEXT,
+  COMMIT_STATUS_TIMEOUT_MS,
   commitStatusCompletion,
   commitStatusRequest,
   decideWorktree,
@@ -35,6 +37,7 @@ import {
   prRunDirCandidate,
   resolveCurrentPrNumber,
   resolvePrTarget,
+  settleRequestForCancellation,
   worktreeDirty,
 } from "../src/pr-preflight";
 import { CliError, CliUsageError, parseArgs } from "../src/preflight";
@@ -1119,6 +1122,57 @@ describe("commitStatusRequest", () => {
     expect(request.state).toBe("error");
     expect(request.description).toBe("review did not finish");
     expect(request.state).not.toBe("failure");
+  });
+});
+
+describe("settleRequestForCancellation", () => {
+  const lock = {
+    operatorRoot: "/repo",
+    sha: "a".repeat(40),
+    targetUrl: "https://github.com/org/repo/pull/162",
+  };
+
+  test("holding no lock settles nothing", () => {
+    expect(settleRequestForCancellation(null)).toBeNull();
+  });
+
+  test("settles the exact sha the lock was taken on, as error", () => {
+    // The sha is load-bearing: PR #162's cancelled run posted its pending on
+    // 1b57c92 and the settle has to land on THAT head, not on whatever the
+    // operator checkout points at by the time the signal arrives.
+    expect(settleRequestForCancellation(lock)).toEqual({
+      operatorRoot: "/repo",
+      sha: lock.sha,
+      request: {
+        state: "error",
+        context: COMMIT_STATUS_CONTEXT,
+        // "review did not finish" is honest for a cancelled run, so the
+        // cancellation path needs no description of its own.
+        description: "review did not finish",
+        targetUrl: lock.targetUrl,
+      },
+    });
+  });
+
+  test("a lock with no target url settles without one", () => {
+    const request = settleRequestForCancellation({
+      ...lock,
+      targetUrl: undefined,
+    })?.request;
+    expect(request?.state).toBe("error");
+    expect(request?.targetUrl).toBeUndefined();
+  });
+});
+
+describe("CANCELLATION_COMMIT_STATUS_TIMEOUT_MS", () => {
+  test("is short enough to beat the runner's SIGKILL grace period", () => {
+    // A settle that outlives SIGKILL is no settle at all: the normal 15s
+    // bound (times two attempts) is longer than the grace window a cancelled
+    // Actions job gets.
+    expect(CANCELLATION_COMMIT_STATUS_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
+    expect(CANCELLATION_COMMIT_STATUS_TIMEOUT_MS).toBeLessThan(
+      COMMIT_STATUS_TIMEOUT_MS,
+    );
   });
 });
 

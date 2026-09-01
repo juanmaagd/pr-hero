@@ -171,10 +171,12 @@ import {
   writeComparison,
 } from "./pr";
 import {
+  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
   claimFingerprint,
   commitStatusCompletion,
   commitStatusRequest,
   findMarkedCommentId,
+  type HeldCommitStatusLock,
   isInFlightCommitStatus,
   type PrTarget,
   parseFindingMarker,
@@ -182,6 +184,7 @@ import {
   prRunDirCandidate,
   resolveCurrentPrNumber,
   resolvePrTarget,
+  settleRequestForCancellation,
 } from "./pr-preflight";
 import {
   AGENT_FILE_PATTERNS,
@@ -1606,6 +1609,69 @@ async function review(options: CliOptions): Promise<number> {
 //     under ~/.prhero/repos/<id>/worktrees/pr-<n>. The pipeline's cwd, the
 //     tree the codegraph checks run against, and a root the run dir must
 //     stay outside of.
+
+// WHY this module-level state exists (paid for on PR #162, 2026-09-01): a run
+// cancelled by the workflow's `cancel-in-progress` concurrency group posted its
+// pending on the head it was legitimately reviewing and then never settled it,
+// because the SIGTERM/SIGINT handlers end in `process.exit()` — which skips
+// reviewPr's `finally`. The next run read that pending back through
+// isInFlightCommitStatus, saw a lock younger than the 90-minute TTL, and
+// skipped: PR #162 went unreviewed while the `review` job still reported
+// success.
+//
+// The lock cannot tell "another process is working" from "a dead process left
+// this behind" — it is a cross-machine TOCTOU guard, not a liveness probe. So
+// the fix is on the holder's side: the process that took the lock releases it
+// on the way out. This closes the CANCELLATION case, which is by far the most
+// common one, because `cancel-in-progress: true` on a head-ref concurrency
+// group fires on EVERY push, not only a force-push. A runner that dies with no
+// signal at all (hard kill, OOM, a dropped machine) still reaches nothing here
+// and remains covered only by the TTL.
+//
+// Module state, and the same precedent as `unregisterActiveRun(process.pid)`:
+// a signal handler installed in runCli cannot see reviewPr's scope, so what it
+// needs has to be parked where both can reach it.
+let heldLock: HeldCommitStatusLock | null = null;
+
+export function holdCommitStatusLock(lock: HeldCommitStatusLock): void {
+  heldLock = lock;
+}
+
+export function releaseCommitStatusLock(): void {
+  heldLock = null;
+}
+
+export function heldCommitStatusLock(): HeldCommitStatusLock | null {
+  return heldLock;
+}
+
+// Settles the pending this process is holding, then exits — the caller is a
+// signal handler and MUST still reach its `process.exit(code)`.
+//
+// Take-and-clear BEFORE the await, not after: Actions cancels with SIGINT and
+// follows with SIGTERM before the grace period ends, so both handlers can be
+// in flight at once and a peek-then-post would settle twice. `post` is a seam
+// only so the take-and-clear and the bound below are testable offline.
+//
+// Every error is swallowed on purpose. Failing to settle leaves us exactly
+// where PR #162 left us — never worse — and a throw here would cost the exit
+// code the handler owes the runner.
+export async function settleHeldCommitStatusOnSignal(
+  post: typeof postCommitStatus = postCommitStatus,
+): Promise<void> {
+  const settle = settleRequestForCancellation(heldLock);
+  releaseCommitStatusLock();
+  if (settle === null) return;
+  try {
+    await post(settle.operatorRoot, settle.sha, settle.request, undefined, {
+      attempts: 1,
+      timeoutMs: CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+    });
+  } catch {
+    // Ignore
+  }
+}
+
 async function tryPublishCommitStatus(
   operatorRoot: string,
   sha: string,
@@ -2540,6 +2606,16 @@ async function reviewPr(
         targetUrl: statusTargetUrl,
       }),
     );
+    // From here the lock is HELD, and the only two ways out both clear it:
+    // the finally below on the normal path, and the signal handlers in runCli
+    // on the cancelled one. Held even if the publish above failed — a settle
+    // for a status that was never posted is a harmless no-op write, whereas
+    // skipping the hold on a publish that actually landed is the #162 bug.
+    holdCommitStatusLock({
+      operatorRoot,
+      sha: headSha,
+      targetUrl: statusTargetUrl,
+    });
 
     let result: PipelineResult | undefined;
     let posted: InlinePostOutcome | null = null;
@@ -3065,8 +3141,15 @@ async function reviewPr(
           targetUrl: statusTargetUrl,
         }),
       );
-      // Best-effort: SIGTERM/SIGINT handlers cannot reach this state, but any
-      // throw or early return that skipped explicit settlement still lands here.
+      // Settled, so nothing is held: the signal handlers must never post a
+      // second, contradicting status over the one just written. Released
+      // immediately after the settle so no path through this finally — throw,
+      // early return, or normal exit — can leave the lock standing.
+      releaseCommitStatusLock();
+      // Best-effort: the SIGTERM/SIGINT handlers settle the COMMIT STATUS
+      // (holdCommitStatusLock above) but still cannot reach the ledger, which
+      // has no equivalent hand-off. Any throw or early return that skipped
+      // explicit settlement does land here.
       if (
         ciAdmissionLedger !== null &&
         (ciAdmissionLedger.record.status === "reserved" ||
@@ -7324,6 +7407,10 @@ export async function runCli(
     } catch {
       // Ignore
     }
+    // After killing the children (stop spending first), before exiting: the
+    // in-flight lock this process took is released by its holder, or the next
+    // run skips the head for the rest of the 90-minute TTL (#146).
+    await settleHeldCommitStatusOnSignal();
     process.exit(143);
   });
   process.on("SIGINT", async () => {
@@ -7334,6 +7421,7 @@ export async function runCli(
     } catch {
       // Ignore
     }
+    await settleHeldCommitStatusOnSignal();
     process.exit(130);
   });
   process.on("exit", () => {

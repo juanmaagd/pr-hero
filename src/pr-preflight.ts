@@ -608,6 +608,12 @@ export const IN_FLIGHT_TTL_MS = 90 * 60 * 1000;
 // API must not pin watch.lock or delay a pipeline that already confirmed.
 export const COMMIT_STATUS_TIMEOUT_MS = 15_000;
 
+// The cancellation settle runs inside a signal handler, and the runner
+// SIGKILLs shortly after the signal. Two attempts at COMMIT_STATUS_TIMEOUT_MS
+// outlive that grace window, and a settle that outlives SIGKILL is no settle
+// at all — so the cancellation path trades the retry for landing in time.
+export const CANCELLATION_COMMIT_STATUS_TIMEOUT_MS = 5_000;
+
 // GitHub's commit-status description is a short field (historically 140).
 export const COMMIT_STATUS_DESCRIPTION_MAX = 140;
 
@@ -653,6 +659,39 @@ export function commitStatusRequest(input: {
     context: COMMIT_STATUS_CONTEXT,
     description: clipStatusDescription(description),
     targetUrl: input.targetUrl,
+  };
+}
+
+// What settling an abandoned run needs, and nothing else. The process that
+// posted the pending is the only one that knows all three, and by the time a
+// signal arrives reviewPr's scope is unreachable — so this is what the
+// module-level lock in cli.ts carries across that gap.
+export interface HeldCommitStatusLock {
+  operatorRoot: string;
+  sha: string;
+  targetUrl: string | undefined;
+}
+
+// The pure half of the cancellation settle: lock in, the exact three
+// arguments postCommitStatus takes out. `phase: "error"` is reused verbatim
+// — its description, "review did not finish", is already the honest sentence
+// for a cancelled run, so no new vocabulary enters the status contract.
+//
+// The SHA is the load-bearing field. It is the head the pending was posted
+// on, captured at publish time; resolving the head again inside a signal
+// handler could name a different commit and leave the real lock standing.
+export function settleRequestForCancellation(
+  lock: HeldCommitStatusLock | null,
+): { operatorRoot: string; sha: string; request: CommitStatusRequest } | null {
+  if (lock === null) return null;
+  return {
+    operatorRoot: lock.operatorRoot,
+    sha: lock.sha,
+    request: commitStatusRequest({
+      phase: "error",
+      posted: false,
+      targetUrl: lock.targetUrl,
+    }),
   };
 }
 

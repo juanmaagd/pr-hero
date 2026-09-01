@@ -49,7 +49,9 @@ import {
   upsertAdmissionCheckRun,
 } from "../src/pr";
 import {
+  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
   COMMIT_STATUS_CONTEXT,
+  COMMIT_STATUS_TIMEOUT_MS,
   commitStatusRequest,
   findingMarker,
   PR_COMMENT_MARKER_PREFIX,
@@ -1653,6 +1655,72 @@ describe("postCommitStatus", () => {
       ),
     ).rejects.toThrow(/full 40-char id/);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("postCommitStatus bounds", () => {
+  // makeFakeGh records argv/cwd/stdin only, and the bound under test travels
+  // as Bun.spawn's `timeout` option — so this fake watches that option.
+  function makeTimeoutRecordingGh(exitCode: number): {
+    spawnFn: typeof Bun.spawn;
+    timeouts: (number | undefined)[];
+  } {
+    const timeouts: (number | undefined)[] = [];
+    const encoder = new TextEncoder();
+    const spawnFn = ((_argv: string[], opts?: { timeout?: number }) => {
+      timeouts.push(opts?.timeout);
+      const stream = () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(""));
+            controller.close();
+          },
+        });
+      return {
+        stdout: stream(),
+        stderr: stream(),
+        exited: Promise.resolve(exitCode),
+        kill() {},
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { spawnFn, timeouts };
+  }
+
+  const request = commitStatusRequest({
+    phase: "error",
+    posted: false,
+    targetUrl: undefined,
+  });
+
+  test("the default settle keeps two attempts at the 15s bound", async () => {
+    const { spawnFn, timeouts } = makeTimeoutRecordingGh(1);
+    await expect(
+      postCommitStatus(OPERATOR_ROOT, HEAD, request, spawnFn),
+    ).rejects.toThrow(/commit status error/);
+    expect(timeouts).toEqual([
+      COMMIT_STATUS_TIMEOUT_MS,
+      COMMIT_STATUS_TIMEOUT_MS,
+    ]);
+  });
+
+  test("the cancellation settle is one attempt at the short bound", async () => {
+    const { spawnFn, timeouts } = makeTimeoutRecordingGh(1);
+    await expect(
+      postCommitStatus(OPERATOR_ROOT, HEAD, request, spawnFn, {
+        attempts: 1,
+        timeoutMs: CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+      }),
+    ).rejects.toThrow(/commit status error/);
+    expect(timeouts).toEqual([CANCELLATION_COMMIT_STATUS_TIMEOUT_MS]);
+  });
+
+  test("a successful cancellation settle still spends only one call", async () => {
+    const { spawnFn, timeouts } = makeTimeoutRecordingGh(0);
+    await postCommitStatus(OPERATOR_ROOT, HEAD, request, spawnFn, {
+      attempts: 1,
+      timeoutMs: CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+    });
+    expect(timeouts).toHaveLength(1);
   });
 });
 
