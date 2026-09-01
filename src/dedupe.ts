@@ -31,6 +31,85 @@ const SEVERITY_RANK: Record<Severity, number> = {
 // over-merge that dumps an in-diff finding into the summary is not.
 export const DEDUPE_SYMBOL_LINE_WINDOW = 100;
 
+// Tokens that carry no defect identity. A closed list on purpose: the
+// threshold below is only meaningful under the exact tokenizer and stopword
+// list that produced it, so this list is part of the calibration and a test
+// re-derives the corpus scores through it.
+const CLAIM_STOPWORDS = new Set(
+  (
+    "a an the is are was were be been being and or but if then so that this " +
+    "these those it its of to in on for with as at by from into no not " +
+    "never every any all when after before once each other same which whose " +
+    "there here"
+  ).split(" "),
+);
+
+// Claim overlap that licenses a discard. JUDGEMENT, but measured: over the 20
+// within-arm draft pairs in test/fixtures/dedupe-142-drafts.json (issue #153's
+// corpus, ground truth known), same-defect pairs score 0.286-0.667 and
+// different-defect pairs score 0.143-0.310. 0.35 sits above EVERY
+// different-defect pair, so the direction of error is under-merge: a duplicate
+// comment is visible, a destroyed BLOCKER is not.
+//
+// State the weakness plainly. The margin is thin (0.310 vs 0.35) and the
+// calibration is one 29-line fixture. Musive PR 1727's must-merge pair
+// (935/978) survives only as line numbers in the comment above — its claim
+// text was never recorded — so this design CANNOT guarantee that pair still
+// merges, and duplicates that used to collapse may now post twice. The
+// severe-loser trace in report.ts's "Not reported" section is what keeps the
+// residual risk visible instead of silent.
+export const DEDUPE_CLAIM_OVERLAP_THRESHOLD = 0.35;
+
+// Below this many distinct tokens a claim is refused as a fold candidate: a
+// short claim scores high overlap against anything that happens to contain its
+// few tokens, so the coefficient stops discriminating. The observed minimum on
+// the real corpus is 14 distinct tokens, so this guard never fires on the
+// calibration set — it is a guard against a degenerate case that set does not
+// contain.
+export const DEDUPE_CLAIM_MIN_TOKENS = 8;
+
+function claimTokens(claim: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const raw of claim.toLowerCase().split(/[^a-z0-9_]+/)) {
+    // Length 1 drops the array/index noise ("a", "i", "x") that survives the
+    // stopword list without naming anything.
+    if (raw.length <= 1) continue;
+    if (CLAIM_STOPWORDS.has(raw)) continue;
+    tokens.add(raw);
+  }
+  return tokens;
+}
+
+// OVERLAP COEFFICIENT, |A n B| / min(|A|,|B|) — deliberately not Jaccard.
+// Jaccard does not separate on this corpus: same-defect pairs score
+// 0.143-0.417 and different-defect pairs 0.049-0.156, ranges that CROSS, so no
+// Jaccard threshold exists that folds duplicates without also folding distinct
+// defects. Overlap normalises by the shorter claim, which is what makes a
+// terse hunter's paraphrase of a verbose hunter's claim score as the same
+// defect.
+//
+// Returns 0 when either claim is under DEDUPE_CLAIM_MIN_TOKENS: refusing to
+// score is refusing permission to discard.
+export function claimSimilarity(a: string, b: string): number {
+  const left = claimTokens(a);
+  const right = claimTokens(b);
+  const smaller = Math.min(left.size, right.size);
+  if (smaller < DEDUPE_CLAIM_MIN_TOKENS) return 0;
+  let shared = 0;
+  for (const token of left) {
+    if (right.has(token)) shared++;
+  }
+  return shared / smaller;
+}
+
+// The permission to DISCARD a claim. Grouping (exact key, path proximity)
+// stays a wide recall net; this is the narrow gate in front of the delete.
+function mayFold(loser: DraftFinding, winner: DraftFinding): boolean {
+  return (
+    claimSimilarity(loser.claim, winner.claim) >= DEDUPE_CLAIM_OVERLAP_THRESHOLD
+  );
+}
+
 // Richest claim: higher severity first, then more proof_refs; a full tie
 // keeps the earlier finding (first appearance), which keeps the pass stable.
 function pickRichest(group: DraftFinding[]): DraftFinding {
@@ -98,6 +177,48 @@ function clusterByProximity(
   return clusters;
 }
 
+// One round of folding: the richest remaining member leads, and every other
+// remaining member folds into it ONLY IF the claim gate says so. Members that
+// do not fold stay for the next round and get their own survivor. Repeat until
+// the group is empty.
+//
+// Similarity is measured ONLY against the round's winner, never member to
+// member. Text similarity is not transitive: a "bridge" claim that reads like
+// both of two dissimilar claims would let them chain into one component and
+// discard a real defect — the same failure mode the proximity net already has,
+// re-introduced through prose. Measuring against the leader means every
+// discard was licensed pairwise against the claim that actually survives.
+//
+// Returned in first-appearance order of each winner within `group`, so the
+// callers' "survivor surfaces where its cluster first appeared" ordering holds
+// whether a group yields one winner or five.
+function foldGroup(
+  group: DraftFinding[],
+): Array<{ winner: DraftFinding; folded: DraftFinding[] }> {
+  const rounds: Array<{ winner: DraftFinding; folded: DraftFinding[] }> = [];
+  let remaining = group;
+  while (remaining.length > 0) {
+    const winner = pickRichest(remaining);
+    const folded: DraftFinding[] = [];
+    const carried: DraftFinding[] = [];
+    for (const member of remaining) {
+      if (member === winner) continue;
+      if (mayFold(member, winner)) folded.push(member);
+      else carried.push(member);
+    }
+    rounds.push({ winner, folded });
+    remaining = carried;
+  }
+  const orderOf = new Map<DraftFinding, number>();
+  group.forEach((member, i) => {
+    if (!orderOf.has(member)) orderOf.set(member, i);
+  });
+  return rounds.sort(
+    (a, b) =>
+      (orderOf.get(a.winner) as number) - (orderOf.get(b.winner) as number),
+  );
+}
+
 export function mergeAndDedupe(drafts: DraftFinding[]): {
   survivors: DedupedSurvivor[];
   deduped: DedupeLoser[];
@@ -108,6 +229,17 @@ export function mergeAndDedupe(drafts: DraftFinding[]): {
 
   // Pass 1 — exact dedupe_key groups. Map preserves insertion order, so
   // winners come out in first-appearance order of their groups.
+  //
+  // An exact key match is NOT proof of the same defect, and #153 paid for
+  // that: in the opencode arm `src/authz.ts:authorize:6` was the key of both
+  // the stale-cache draft (L16) and the fail-open draft (L26) — one key, two
+  // planted BLOCKERs — and take-all destroyed one of them before pass 2 ever
+  // ran. The key is built from `symbol`, which is free text a model writes,
+  // so it is a recall net like any other. A member that does not fold emits
+  // as its own survivor and flows into pass 2.
+  //
+  // Pass 1 deliberately does NOT fold proof_refs (it never has); leaving that
+  // alone keeps this change about the discard decision only.
   const byKey = new Map<string, DraftFinding[]>();
   for (const draft of drafts) {
     const group = byKey.get(draft.dedupe_key);
@@ -116,45 +248,57 @@ export function mergeAndDedupe(drafts: DraftFinding[]): {
   }
   const pass1: DraftFinding[] = [];
   for (const group of byKey.values()) {
-    const winner = pickRichest(group);
-    pass1.push(winner);
-    for (const draft of group) {
-      if (draft !== winner) winnerOf.set(draft, winner);
+    for (const { winner, folded } of foldGroup(group)) {
+      pass1.push(winner);
+      for (const loser of folded) winnerOf.set(loser, winner);
     }
   }
 
-  // Pass 2 — cross-category collapse on path:symbol, ONLY when both findings
-  // carry a non-empty symbol. The schema has `symbol?:` — collapsing
-  // symbol-less findings would key on path alone and over-merge distinct
-  // defects file-wide (a JD finding), so they never participate here.
+  // Pass 2 — cross-category collapse on PATH, with `symbol` dropped as an
+  // identity axis entirely (#153). It was free text a model writes, and it
+  // failed both ways on the same 29-line file: three hunters spelled one
+  // defect `authorize`, `authorize / roleCache` and `roleCache` and got three
+  // findings, while two hunters agreeing on `authorize` had their independent
+  // BLOCKERs merged into a claim about a different defect.
   //
-  // Same-symbol is a recall net for "same defect, different hunter
-  // category", not "everything in this function is one bug". Musive PR 1727
-  // collapsed a tap-to-audio finding at playAudio:544 into a timer-leak
-  // finding at :935 because both carried symbol `playAudio`; pickRichest
-  // kept line 544 (off-diff) and the in-diff leak posted only as Evidence
-  // inside the summary. Within a path:symbol group, collapse only the
-  // connected component whose lines fall inside DEDUPE_SYMBOL_LINE_WINDOW.
-  const bySymbol = new Map<string, DraftFinding[]>();
+  // Symbol-less findings now participate too. The old exclusion was written
+  // because path-alone keying would over-merge distinct defects file-wide —
+  // true, and the warning still names a real risk, but it assumed
+  // DISCARD-ON-COLLISION. Grouping no longer discards anything: the claim gate
+  // does, and a conservative gate does not discard non-duplicates.
+  //
+  // Grouping stays a recall net for "same defect, different hunter category",
+  // not "everything in this file is one bug". Musive PR 1727 collapsed a
+  // tap-to-audio finding at playAudio:544 into a timer-leak finding at :935
+  // because both carried symbol `playAudio`; pickRichest kept line 544
+  // (off-diff) and the in-diff leak posted only as Evidence inside the
+  // summary. Proximity still forms the candidate cluster — only the connected
+  // component whose lines fall inside DEDUPE_SYMBOL_LINE_WINDOW — and greedy
+  // leader-based folding then decides, inside that cluster, what may be
+  // discarded.
+  const byPath = new Map<string, DraftFinding[]>();
   for (const draft of pass1) {
-    if (!draft.symbol) continue;
-    const key = `${draft.path}:${draft.symbol}`;
-    const group = bySymbol.get(key);
+    const group = byPath.get(draft.path);
     if (group) group.push(draft);
-    else bySymbol.set(key, [draft]);
+    else byPath.set(draft.path, [draft]);
   }
-  const clusterOf = new Map<DraftFinding, DraftFinding[]>();
+  // A winner's FOLDED members, not its whole proximity cluster: the cluster is
+  // the candidate net, and folding refs from a candidate that was never
+  // discarded would attach one defect's evidence to another's finding.
+  const foldedInto = new Map<DraftFinding, DraftFinding[]>();
   const clusterWinnerOf = new Map<DraftFinding, DraftFinding>();
-  for (const group of bySymbol.values()) {
+  for (const group of byPath.values()) {
     for (const cluster of clusterByProximity(
       group,
       DEDUPE_SYMBOL_LINE_WINDOW,
     )) {
-      const winner = pickRichest(cluster);
-      clusterOf.set(winner, cluster);
-      for (const draft of cluster) {
-        clusterWinnerOf.set(draft, winner);
-        if (draft !== winner) winnerOf.set(draft, winner);
+      for (const { winner, folded } of foldGroup(cluster)) {
+        foldedInto.set(winner, folded);
+        clusterWinnerOf.set(winner, winner);
+        for (const loser of folded) {
+          clusterWinnerOf.set(loser, winner);
+          winnerOf.set(loser, winner);
+        }
       }
     }
   }
@@ -171,23 +315,17 @@ export function mergeAndDedupe(drafts: DraftFinding[]): {
   // original winner, so renumbering has to key on that original.
   const originalOf = new Map<DraftFinding, DraftFinding>();
   for (const draft of pass1) {
-    if (!draft.symbol) {
-      survivorsRaw.push(draft);
-      originalOf.set(draft, draft);
-      continue;
-    }
     const winner = clusterWinnerOf.get(draft) as DraftFinding;
     if (emittedWinners.has(winner)) continue;
     emittedWinners.add(winner);
-    const cluster = clusterOf.get(winner) as DraftFinding[];
-    if (cluster.length === 1) {
+    const losers = foldedInto.get(winner) as DraftFinding[];
+    if (losers.length === 0) {
       survivorsRaw.push(winner);
       originalOf.set(winner, winner);
       continue;
     }
     const foldedRefs = [...winner.proof_refs];
-    for (const member of cluster) {
-      if (member === winner) continue;
+    for (const member of losers) {
       for (const ref of member.proof_refs) {
         if (!foldedRefs.includes(ref)) foldedRefs.push(ref);
       }
