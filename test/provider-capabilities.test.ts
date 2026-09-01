@@ -374,4 +374,64 @@ describe("transport/producer parity (§11)", () => {
       expect(issue.blocking).toBe(false);
     }
   });
+
+  // The parity assertion above is FIXTURE-DEPENDENT, not structural, and that
+  // is a landmine rather than an oversight: greenOptions() authenticates with
+  // CLAUDE_CODE_OAUTH_TOKEN and no API key, so a producer that DERIVED its
+  // billing mode would still answer "subscription" there and leave the whole
+  // suite green while contradicting the static transport in every API-key
+  // environment. Nothing else in this file asserts the constant's value at
+  // all. These two tests close that hole.
+  test("billingMode is a deliberate static, and stays one until pricing exists", async () => {
+    // Pinning the value, not endorsing it. CLAUDE_CAPABILITY_STATICS declares
+    // "fields every claude-code route claims independent of host environment",
+    // and for billing that claim is knowingly false: an ANTHROPIC_API_KEY user
+    // is billed per token and is reported as a subscription anyway.
+    //
+    // It is left false ON PURPOSE, because deriving it today fails CLOSED in
+    // the worst direction. Verified in the code, not assumed:
+    //
+    //   billing.mode "metered"
+    //     -> pricingApplicability "required"        production-runtime.ts:263
+    //     -> tokenPricingAvailable = pricingReady   production-runtime.ts:322
+    //     -> pricingReady is hardcoded false in every transport
+    //        (provider-capabilities.ts:555, claude-code-cli.ts:323,
+    //         opencode-sdk.ts:373, transport-registry.ts:421)
+    //     -> pricing_table_missing, blocking: true  provider-capabilities.ts:629-637
+    //
+    // A metered claude-code route would be refused ADMISSION outright, so an
+    // API-key user would go from "review skipped at the budget ceiling" to
+    // "review never runs". config/models/anthropic.json is a model-alias
+    // catalogue with no prices in it, so pricingReady cannot become true by
+    // reading what already ships.
+    //
+    // If this test just went red: you are on the right track and the
+    // prerequisite is issue #137 (a real per-provider pricing catalogue), not
+    // this constant. Land pricing first, then derive, then delete this test.
+    // Issue #156's CI budget ceiling deliberately does NOT read this field --
+    // see deriveCiBillingMode in src/ci-gates.ts, which answers the narrower
+    // "should CI impose a spend ceiling?" and reaches nothing but the ceiling.
+    expect(CLAUDE_CAPABILITY_STATICS.billingMode).toBe("subscription");
+
+    const withApiKey = await produceClaudeCapabilityReport({
+      ...greenOptions(),
+      env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-test" },
+    });
+    expect(withApiKey.billing.mode).toBe("subscription");
+    expect(withApiKey.billing.pricingReady).toBe(false);
+  });
+
+  test("the transport contradicts the producer in no environment", async () => {
+    // The structural half of the parity claim: same assertion, run under an
+    // API-key environment the green fixture never exercises. A derived
+    // producer breaks HERE, which is the point -- the contradiction becomes a
+    // red test instead of a production admission refusal.
+    const transport = new ClaudeCodeCliTransport();
+    const fromTransport = await transport.capabilities();
+    const fromProducer = await produceClaudeCapabilityReport({
+      ...greenOptions(),
+      env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-test" },
+    });
+    expect(fromTransport.billing.mode).toBe(fromProducer.billing.mode);
+  });
 });
