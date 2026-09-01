@@ -140,11 +140,7 @@
       "symbol": "authorize",
       "severity": "BLOCKER",
       "dedupe_key": "src/authz.ts:authorize:3",
-      "proof_refs": [
-        "src/authz.ts:3",
-        "src/authz.ts:26",
-        "src/authz.ts:11"
-      ],
+      "proof_refs": ["src/authz.ts:3", "src/authz.ts:26", "src/authz.ts:11"],
       "claim": "When directory lookup fails, an empty principal.roles array passes the length guard and authorizes every required role, despite the principal containing no roles."
     },
     {
@@ -158,11 +154,7 @@
       "symbol": "authorize",
       "severity": "BLOCKER",
       "dedupe_key": "src/authz.ts:authorize:6",
-      "proof_refs": [
-        "src/authz.ts:8",
-        "src/authz.ts:16",
-        "src/authz.ts:21"
-      ],
+      "proof_refs": ["src/authz.ts:8", "src/authz.ts:16", "src/authz.ts:21"],
       "claim": "Authorization results are cached indefinitely by principal ID, so a role revocation or change continues granting the old role on subsequent requests."
     },
     {
@@ -176,10 +168,7 @@
       "symbol": "authorize",
       "severity": "BLOCKER",
       "dedupe_key": "src/authz.ts:authorize:6",
-      "proof_refs": [
-        "src/authz.ts:26",
-        "src/authz.ts:27"
-      ],
+      "proof_refs": ["src/authz.ts:26", "src/authz.ts:27"],
       "claim": "When the directory lookup fails, a principal with no local roles is authorized for every required role, making the sole admin authorization gate fail open during dependency outages."
     }
   ]

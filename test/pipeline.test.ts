@@ -157,7 +157,14 @@ function draft(overrides: Partial<DraftFinding> = {}): DraftFinding {
     severity: "WARNING",
     evidence_class: "deterministic",
     causal_disposition: "introduced",
-    claim: "value scaled twice along one path",
+    // Realistic hunter prose, not a six-word label: since #153 a claim under
+    // DEDUPE_CLAIM_MIN_TOKENS can never license a discard, so a label-length
+    // claim would make every dedupe assertion below assert the guard rather
+    // than the merge.
+    claim:
+      "the width value is scaled by the device pixel ratio twice along the " +
+      "cached branch, so the rendered element ends up at double its intended " +
+      "size on retina displays",
     proof_refs: ["src/app.ts:10"],
     hunter: "reliability",
     hops_used: 0,
@@ -1464,6 +1471,22 @@ describe("dedupe integration", () => {
 // ---------------------------------------------------------------------------
 
 describe("refuter", () => {
+  // These stand for DIFFERENT defects that all reach the refuter, so they get
+  // different prose. They used to share one claim and were kept apart only by
+  // `symbol`; since #153 dropped symbol as an identity axis, three same-path
+  // drafts repeating one claim are — correctly — one finding.
+  const BLOCKER_CLAIMS: Record<number, string> = {
+    10:
+      "the abort handler clears the upload record but leaves the progress " +
+      "row mounted, so a cancelled transfer keeps reporting itself as active",
+    20:
+      "the websocket reconnect path never re-subscribes to the presence " +
+      "channel, so a member roster goes silently stale after any network blip",
+    30:
+      "the exporter emits a duration field in seconds where the manifest " +
+      "schema declares milliseconds, breaking every downstream consumer of " +
+      "that document",
+  };
   const inferentialBlocker = (id: string, line: number) =>
     draft({
       id,
@@ -1471,6 +1494,7 @@ describe("refuter", () => {
       symbol: `sym${line}`,
       severity: "BLOCKER",
       evidence_class: "inferential",
+      claim: BLOCKER_CLAIMS[line] ?? `unmapped defect at line ${line}`,
       dedupe_key: `src/app.ts:sym${line}:1`,
     });
 
@@ -1746,16 +1770,38 @@ describe("refuter", () => {
 
 describe("root-cause clustering", () => {
   test("a fan-out shares one root_cause_id and leaves findings untouched", async () => {
-    // Three call sites of ONE systemic defect: distinct dedupe keys (so
-    // nothing collapses in Step 5) all citing the same producer location
-    // first, with different prose after the location token. Plus an unrelated
-    // fourth finding to prove the partition is not "everything is one".
+    // Three call sites of ONE systemic defect: distinct dedupe keys AND
+    // distinct per-site claims (so nothing collapses in Step 5) all citing
+    // the same producer location first, with different prose after the
+    // location token. Plus an unrelated fourth finding to prove the partition
+    // is not "everything is one".
+    //
+    // The claims have to differ since #153: a fan-out is one root cause seen
+    // at several sites, and each site's claim describes ITS site. Three
+    // same-path drafts repeating one claim word for word are one finding, and
+    // Step 5 now says so — distinct symbols no longer keep them apart.
     const producer = "src/duration.ts:19-20";
+    const SITE_CLAIMS: Record<string, string> = {
+      playHead:
+        "the play head renders raw seconds straight into the transport " +
+        "label, so a track reports its position a thousand times too small",
+      seekBar:
+        "the seek bar maps a drag offset onto milliseconds without dividing, " +
+        "leaving the scrub handle pinned near zero for any real duration",
+      exporter:
+        "the exporter writes whatever unit it received into the manifest " +
+        "duration field, so downstream consumers read a broken contract",
+      unrelated:
+        "the retry loop reuses one idempotency token across attempts, so a " +
+        "duplicated server-side charge is created whenever the first attempt " +
+        "actually succeeded",
+    };
     const site = (id: string, symbol: string, prose: string) =>
       draft({
         id,
         symbol,
         path: "src/app.ts",
+        claim: SITE_CLAIMS[symbol] as string,
         dedupe_key: `src/app.ts:${symbol}:1`,
         proof_refs: [`${producer} (${prose})`, `src/app.ts:1 (${symbol})`],
       });
@@ -1769,6 +1815,7 @@ describe("root-cause clustering", () => {
             draft({
               id: "REL-4",
               symbol: "unrelated",
+              claim: SITE_CLAIMS.unrelated as string,
               dedupe_key: "src/app.ts:unrelated:1",
               proof_refs: ["src/other.ts:7 (independent defect)"],
             }),
