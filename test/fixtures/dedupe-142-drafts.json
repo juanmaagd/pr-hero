@@ -1,0 +1,186 @@
+{
+  "source": "github.com/juanmaagd/pr-hero issue #142, the two control-arm runs whose retraction filed #153",
+  "target": "disposable repo, src/authz.ts, 29 lines, two planted BLOCKER defects inside authorize()",
+  "defects": {
+    "fail-open": "src/authz.ts:26 - the catch fallback grants every required role to a principal with no roles",
+    "stale-cache": "src/authz.ts:8/16 - roleCache is never invalidated, so a revoked admin keeps passing"
+  },
+  "note": "Verbatim hunter drafts. `defect` is the ground-truth partition: line 26 is the fail-open, every other line is the cache. These are the ONLY real claim texts this project has for calibrating a claim-similarity gate - PR 1727's pairs survive as line numbers in a code comment, without their text.",
+  "drafts": [
+    {
+      "arm": "claude-code",
+      "route": "sonnet [claude-code]",
+      "hunter": "lifecycle",
+      "defect": "stale-cache",
+      "category": 1,
+      "path": "src/authz.ts",
+      "line": 16,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:1",
+      "proof_refs": [
+        "src/authz.ts:8 module-level `const roleCache = new Map(...)` — no TTL/expiry/version field in the value type",
+        "src/authz.ts:21 `roleCache.set(principal.id, roles)` is the sole arm site, reached only inside the try block on a successful lookup",
+        "src/authz.ts:16-17 `if (cached) return cached.includes(required);` is the sole disarm-adjacent site and contains no freshness check; no delete/clear/expiry call exists anywhere in src/authz.ts, and repo-wide search for `roleCache` returns no other references, confirming no invalidation path exists on this surface"
+      ],
+      "claim": "roleCache (authz.ts:8) is armed by the first successful lookup (authz.ts:21) and keyed only by principal.id with no TTL, version, or invalidation field; the cache-hit short-circuit at authz.ts:16-17 returns the cached roles unconditionally on every subsequent authorize() call for that same principal.id, so a role revoked (or granted) in the directory after the first lookup is never observed again — nothing in this file or the rest of the repository (grepped, zero other references to roleCache) ever deletes, expires, or refreshes an entry, so a de-provisioned admin keeps passing the only gate in front of the admin routes until the process restarts."
+    },
+    {
+      "arm": "claude-code",
+      "route": "sonnet [claude-code]",
+      "hunter": "reliability",
+      "defect": "fail-open",
+      "category": 3,
+      "path": "src/authz.ts",
+      "line": 26,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:3",
+      "proof_refs": [
+        "src/authz.ts:22 - success path: return roles.includes(required) — false for an empty array",
+        "src/authz.ts:26 - catch fallback: return principal.roles.includes(required) || principal.roles.length === 0 — always true when principal.roles is empty, ignoring `required` entirely"
+      ],
+      "claim": "On the success path an empty roles array correctly denies access (roles.includes(required) is false), but the new catch-block fallback treats principal.roles.length === 0 as an automatic grant, so any principal with no listed roles is authorized for any `required` role (including admin) whenever the directory lookup throws."
+    },
+    {
+      "arm": "claude-code",
+      "route": "sonnet [claude-code]",
+      "hunter": "reliability",
+      "defect": "stale-cache",
+      "category": 10,
+      "path": "src/authz.ts",
+      "line": 16,
+      "symbol": "authorize / roleCache",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:10",
+      "proof_refs": [
+        "src/authz.ts:21 - roleCache.set(principal.id, roles) persists the lookup result with no expiry metadata",
+        "src/authz.ts:16-17 - roleCache.get(principal.id) is returned and trusted on every future call with no re-check against the directory"
+      ],
+      "claim": "roleCache stores each principal's roles on first successful lookup with no TTL, version, or invalidation path, so every subsequent call trusts that snapshot forever even after the underlying directory (the source of truth this same code calls out to) revokes or changes the principal's roles."
+    },
+    {
+      "arm": "claude-code",
+      "route": "sonnet [claude-code]",
+      "hunter": "resilience",
+      "defect": "fail-open",
+      "category": 6,
+      "path": "src/authz.ts",
+      "line": 26,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:6",
+      "proof_refs": [
+        "src/authz.ts:26 return principal.roles.includes(required) || principal.roles.length === 0;",
+        "gotchas: authorize() is the only gate in front of the admin routes; nothing downstream re-checks the caller's role"
+      ],
+      "claim": "On a directory/lookup failure, the catch-block fallback `return principal.roles.includes(required) || principal.roles.length === 0` grants access whenever principal.roles is empty, regardless of what `required` is. Any principal with no roles attached (the normal shape for a not-yet-provisioned or role-less user) is auto-authorized for every required role — including admin — the moment the role directory has a blip. Combined with the stated gotcha that authorize() is the sole, final gate with no downstream re-check, a transient directory failure turns into a full authorization bypass for any caller whose principal object carries an empty roles array, rather than the intended narrow allowance for previously-known admins."
+    },
+    {
+      "arm": "claude-code",
+      "route": "sonnet [claude-code]",
+      "hunter": "resilience",
+      "defect": "stale-cache",
+      "category": 6,
+      "path": "src/authz.ts",
+      "line": 8,
+      "symbol": "roleCache",
+      "severity": "CRITICAL",
+      "dedupe_key": "src/authz.ts:roleCache:6",
+      "proof_refs": [
+        "src/authz.ts:8 const roleCache = new Map<string, readonly string[]>();",
+        "src/authz.ts:16-17 const cached = roleCache.get(principal.id); if (cached) return cached.includes(required);",
+        "src/authz.ts:21 roleCache.set(principal.id, roles); (no corresponding delete/expiry anywhere in file)",
+        "gotchas: authorize() is the only gate in front of the admin routes; nothing downstream re-checks the caller's role"
+      ],
+      "claim": "roleCache is a module-level Map with no TTL, expiry, or invalidation path — once a principal's roles are fetched once, `if (cached) return cached.includes(required)` short-circuits the real lookup for the remaining lifetime of the process. If a user's roles change after the first successful lookup (e.g. an admin role is revoked), authorize() keeps returning the stale, now-incorrect answer indefinitely; there is no code path anywhere in this file that ever calls roleCache.delete/clear or attaches an expiration. Given the gotcha that authorize() is the only gate and nothing downstream re-checks the role, a revoked admin who was cached before revocation retains admin access to the admin routes until the process restarts."
+    },
+    {
+      "arm": "opencode",
+      "route": "openai/gpt-5.6-luna [opencode]",
+      "hunter": "lifecycle",
+      "defect": "stale-cache",
+      "category": 1,
+      "path": "src/authz.ts",
+      "line": 15,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:1",
+      "proof_refs": [
+        "src/authz.ts:20 roleCache.set(principal.id, roles)",
+        "src/authz.ts:15 cached lookup keyed only by principal.id with no invalidation or refresh trigger"
+      ],
+      "claim": "The module-level role cache can continue authorizing a principal with roles that have been revoked because repeated authorization for the same principal.id never re-reads the directory."
+    },
+    {
+      "arm": "opencode",
+      "route": "openai/gpt-5.6-luna [opencode]",
+      "hunter": "lifecycle",
+      "defect": "fail-open",
+      "category": 3,
+      "path": "src/authz.ts",
+      "line": 26,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:3",
+      "proof_refs": [
+        "src/authz.ts:21-26 lookup rejection catch branch",
+        "src/authz.ts:26 principal.roles.length === 0 grants the required role"
+      ],
+      "claim": "When the directory lookup fails, the catch branch authorizes every required role for a principal whose roles array is empty, turning an authorization outage into a fail-open access path."
+    },
+    {
+      "arm": "opencode",
+      "route": "openai/gpt-5.6-luna [opencode]",
+      "hunter": "reliability",
+      "defect": "fail-open",
+      "category": 3,
+      "path": "src/authz.ts",
+      "line": 26,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:3",
+      "proof_refs": [
+        "src/authz.ts:3",
+        "src/authz.ts:26",
+        "src/authz.ts:11"
+      ],
+      "claim": "When directory lookup fails, an empty principal.roles array passes the length guard and authorizes every required role, despite the principal containing no roles."
+    },
+    {
+      "arm": "opencode",
+      "route": "openai/gpt-5.6-luna [opencode]",
+      "hunter": "resilience",
+      "defect": "stale-cache",
+      "category": 6,
+      "path": "src/authz.ts",
+      "line": 16,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:6",
+      "proof_refs": [
+        "src/authz.ts:8",
+        "src/authz.ts:16",
+        "src/authz.ts:21"
+      ],
+      "claim": "Authorization results are cached indefinitely by principal ID, so a role revocation or change continues granting the old role on subsequent requests."
+    },
+    {
+      "arm": "opencode",
+      "route": "openai/gpt-5.6-luna [opencode]",
+      "hunter": "resilience",
+      "defect": "fail-open",
+      "category": 6,
+      "path": "src/authz.ts",
+      "line": 26,
+      "symbol": "authorize",
+      "severity": "BLOCKER",
+      "dedupe_key": "src/authz.ts:authorize:6",
+      "proof_refs": [
+        "src/authz.ts:26",
+        "src/authz.ts:27"
+      ],
+      "claim": "When the directory lookup fails, a principal with no local roles is authorized for every required role, making the sole admin authorization gate fail open during dependency outages."
+    }
+  ]
+}
