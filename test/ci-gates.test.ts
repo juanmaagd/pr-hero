@@ -11,12 +11,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   type BudgetGateVerdict,
+  budgetDisabledWarningMessage,
+  budgetUnlimitedNoticeMessage,
+  CI_DEFAULT_METERED_BUDGET_USD,
   type CiBudgetGateSkipInput,
   type CiGateSkip,
   type CiSizeGateSkipInput,
   ciBudgetGateSkip,
   ciSizeGateSkip,
+  deriveCiBillingMode,
   evaluateBudgetGate,
+  resolveCiBudgetCeiling,
 } from "../src/ci-gates";
 import { renderStepSummary } from "../src/ci-reporter";
 import type { SizeGateVerdict } from "../src/size-gate";
@@ -324,5 +329,167 @@ describe("ciBudgetGateSkip", () => {
     const rendered = renderStepSummary(skip.summary);
     expect(rendered).toContain("PR #56");
     expect(rendered).toContain("$12.50 (budget $10.00)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deriveCiBillingMode — issue #156. The CI budget gate compared a
+// token-derived estimate against a real-dollar ceiling on a route where the
+// real dollar figure is $0.00, so it refused work for an imaginary overrun.
+// This is the pure half of the fix: which route is actually metered.
+// ---------------------------------------------------------------------------
+
+describe("deriveCiBillingMode", () => {
+  test("a non-empty ANTHROPIC_API_KEY is metered", () => {
+    expect(deriveCiBillingMode({ ANTHROPIC_API_KEY: "sk-test" })).toBe(
+      "metered",
+    );
+  });
+
+  // action.yml:111 binds `ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}`
+  // UNCONDITIONALLY, and GitHub renders an unset input as the empty string —
+  // so every subscription-route CI run carries `ANTHROPIC_API_KEY=""` in the
+  // child env. Trimming is what keeps that from reading as an invoice.
+  test("an empty ANTHROPIC_API_KEY is subscription — action.yml always binds the variable", () => {
+    expect(deriveCiBillingMode({ ANTHROPIC_API_KEY: "" })).toBe("subscription");
+  });
+
+  test("a whitespace-only ANTHROPIC_API_KEY is subscription", () => {
+    expect(deriveCiBillingMode({ ANTHROPIC_API_KEY: "   " })).toBe(
+      "subscription",
+    );
+  });
+
+  test("an OAuth token alone is subscription", () => {
+    expect(
+      deriveCiBillingMode({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" }),
+    ).toBe("subscription");
+  });
+
+  // The conservative direction, asserted explicitly so nobody "fixes" it into
+  // a precedence claim. This repo does NOT know which credential the Claude
+  // CLI bills when both are present: action.yml:111-112 binds both,
+  // test/harness/env-projection.test.ts:48-56 asserts both survive the
+  // projection with no precedence, and defaultClaudeAuthProbe
+  // (src/provider-capabilities.ts:402-405) ORs them into one boolean. This
+  // rule does not need that answer — a wrong "unlimited" produces a real
+  // invoice, a wrong ceiling produces a skipped review the operator clears
+  // with one line of YAML.
+  test("BOTH credentials set is metered — we cannot rule out that the key bills", () => {
+    expect(
+      deriveCiBillingMode({
+        ANTHROPIC_API_KEY: "sk-test",
+        CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test",
+      }),
+    ).toBe("metered");
+  });
+
+  test("an empty env is subscription", () => {
+    expect(deriveCiBillingMode({})).toBe("subscription");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCiBudgetCeiling — total over four cases, and `source` is what the
+// shell branches on so the two non-operator outcomes stay distinguishable.
+// ---------------------------------------------------------------------------
+
+describe("resolveCiBudgetCeiling", () => {
+  test("an operator value wins on a metered route", () => {
+    expect(
+      resolveCiBudgetCeiling({ configured: 5, billingMode: "metered" }),
+    ).toEqual({ budgetUsd: 5, source: "operator" });
+  });
+
+  // How an operator imposes a ceiling on a subscription route: `budget-usd: 5`
+  // is honoured verbatim, exactly as it is on a metered one.
+  test("an operator value wins on a subscription route too", () => {
+    expect(
+      resolveCiBudgetCeiling({ configured: 5, billingMode: "subscription" }),
+    ).toEqual({ budgetUsd: 5, source: "operator" });
+  });
+
+  test("unset on a metered route falls back to the default ceiling", () => {
+    expect(
+      resolveCiBudgetCeiling({ configured: undefined, billingMode: "metered" }),
+    ).toEqual({
+      budgetUsd: CI_DEFAULT_METERED_BUDGET_USD,
+      source: "default-metered",
+    });
+  });
+
+  test("unset on a subscription route has no ceiling at all", () => {
+    expect(
+      resolveCiBudgetCeiling({
+        configured: undefined,
+        billingMode: "subscription",
+      }),
+    ).toEqual({ budgetUsd: undefined, source: "unlimited-subscription" });
+  });
+
+  // 0 and negatives are how an operator DISABLES the ceiling on a metered
+  // route (evaluateBudgetGate's `<= 0` convention). Swallowing them into the
+  // default-metered branch would silently reimpose the $10 they just removed.
+  test("an explicit 0 takes the operator branch, never the metered default", () => {
+    expect(
+      resolveCiBudgetCeiling({ configured: 0, billingMode: "metered" }),
+    ).toEqual({ budgetUsd: 0, source: "operator" });
+  });
+
+  test("an explicit negative takes the operator branch too", () => {
+    expect(
+      resolveCiBudgetCeiling({ configured: -1, billingMode: "metered" }),
+    ).toEqual({ budgetUsd: -1, source: "operator" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// budgetUnlimitedNoticeMessage — ci-gates.ts:107-115's "a disable is only
+// safe when it is loud" applied to the new no-ceiling branch, which produces
+// no ceiling and would otherwise be silent.
+// ---------------------------------------------------------------------------
+
+describe("budgetUnlimitedNoticeMessage", () => {
+  test("only the unlimited-subscription branch speaks", () => {
+    expect(
+      budgetUnlimitedNoticeMessage({ budgetUsd: 5, source: "operator" }),
+    ).toBeNull();
+    expect(
+      budgetUnlimitedNoticeMessage({
+        budgetUsd: CI_DEFAULT_METERED_BUDGET_USD,
+        source: "default-metered",
+      }),
+    ).toBeNull();
+    expect(
+      budgetUnlimitedNoticeMessage({
+        budgetUsd: undefined,
+        source: "unlimited-subscription",
+      }),
+    ).not.toBeNull();
+  });
+
+  test("states the reason, the surviving size gate, and how to impose a ceiling", () => {
+    const message = budgetUnlimitedNoticeMessage({
+      budgetUsd: undefined,
+      source: "unlimited-subscription",
+    });
+    expect(message).not.toBeNull();
+    if (message === null) throw new Error("unreachable");
+    expect(message.toLowerCase()).toContain("subscription");
+    expect(message.toLowerCase()).toContain("size gate");
+    expect(message).toContain("budget-usd");
+  });
+
+  // Two different facts: "you disabled the ceiling you configured" and "no
+  // ceiling was resolved because the route draws on a subscription". Merging
+  // them would tell an operator who configured nothing that they disabled
+  // something.
+  test("is distinct from budgetDisabledWarningMessage", () => {
+    const notice = budgetUnlimitedNoticeMessage({
+      budgetUsd: undefined,
+      source: "unlimited-subscription",
+    });
+    expect(notice).not.toBe(budgetDisabledWarningMessage(0));
+    expect(notice?.toLowerCase()).not.toContain("disabled");
   });
 });
