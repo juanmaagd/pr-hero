@@ -15,12 +15,19 @@ describe("proofRefPathClaim", () => {
     expect(proofRefPathClaim("src/a.ts:12 (the guard)")).toEqual(["src/a.ts"]);
   });
 
-  test("a bare filename counts as a claim through its line number", () => {
-    // No slash and no dot, so only the `:12` makes this a citation rather
-    // than a word — without that trigger it would be an easy way to smuggle
-    // an unresolvable ref past the rule.
-    expect(proofRefPathClaim("Makefile:12")).toEqual(["Makefile"]);
+  test("ABSTAINS on a bareword, line number or not (pr-hero #165 F002)", () => {
+    // A `:<digits>` suffix used to make a bareword checkable, which bought
+    // `Makefile:12` and cost `line:42`, `confidence:80` and `hunk:3` — all
+    // plausible beside a real citation, each enough to reject a whole draft.
+    // The two shapes are SYNTACTICALLY INDISTINGUISHABLE, so the rule cannot
+    // accuse either without accusing both, and abstains on both instead.
+    expect(proofRefPathClaim("Makefile:12")).toBeUndefined();
+    expect(proofRefPathClaim("line:42")).toBeUndefined();
+    expect(proofRefPathClaim("confidence:80")).toBeUndefined();
+    expect(proofRefPathClaim("hunk:3")).toBeUndefined();
+    // An extension or a separator still makes it checkable.
     expect(proofRefPathClaim("package.json:15-20")).toEqual(["package.json"]);
+    expect(proofRefPathClaim("src/a.ts:12")).toEqual(["src/a.ts"]);
   });
 
   test("offers BOTH spellings of a git-prefixed ref, never just the stripped one", () => {
@@ -104,6 +111,43 @@ describe("pathsNamedInDiff", () => {
 
   test("is empty for an empty patch", () => {
     expect(pathsNamedInDiff("").size).toBe(0);
+  });
+
+  test("names a DELETED BINARY, which has no ---/+++ pair (pr-hero #165 F001)", () => {
+    // Verified against real `git diff` output: a binary file gets a
+    // `diff --git` header and `Binary files a/x and /dev/null differ`, and
+    // no side markers at all. Missing it meant a deleted asset was absent
+    // from the allowlist AND gone from disk, so citing it read as fabrication.
+    const patch = [
+      "diff --git a/logo.png b/logo.png",
+      "deleted file mode 100644",
+      "index 228b506..0000000",
+      "Binary files a/logo.png and /dev/null differ",
+      "",
+    ].join("\n");
+    expect([...pathsNamedInDiff(patch)]).toEqual(["logo.png"]);
+  });
+
+  test("names a path git had to QUOTE for its spaces", () => {
+    // Neither `--- a/` nor ` b/` matches `--- "a/we ird.ts"`, so every such
+    // file was missing from an allowlist — the direction that costs findings.
+    const patch = [
+      'diff --git "a/we ird.ts" "b/we ird.ts"',
+      '--- "a/we ird.ts"',
+      "+++ /dev/null",
+      "",
+    ].join("\n");
+    expect([...pathsNamedInDiff(patch)]).toEqual(["we ird.ts"]);
+  });
+
+  test("never names /dev/null through the header either", () => {
+    const patch = [
+      "diff --git a/gone.ts b/gone.ts",
+      "--- a/gone.ts",
+      "+++ /dev/null",
+      "",
+    ].join("\n");
+    expect(pathsNamedInDiff(patch).has("/dev/null")).toBe(false);
   });
 });
 

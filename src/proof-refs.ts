@@ -34,10 +34,6 @@
 
 const ESCAPING_SEGMENT = "..";
 
-// A `:<digits>` line suffix — the `path:line` form the prompts mandate. It is
-// what makes `Makefile:12` a path claim despite having neither slash nor dot.
-const LINE_SUFFIX = /:\d/;
-
 // The path spellings a ref could mean, or `undefined` when the ref asserts no
 // checkable repo path at all. `undefined` is the ABSTENTION, and it is load
 // bearing: it is what separates "the tree says this is false" from "there is
@@ -65,13 +61,21 @@ export function proofRefPathClaim(ref: string): string[] | undefined {
   if (normalized.startsWith("/") || normalized.startsWith("~"))
     return undefined;
   if (normalized.split("/").includes(ESCAPING_SEGMENT)) return undefined;
-  // What makes this a PATH claim rather than prose: a directory separator, a
-  // file extension, or an explicit line number. `gotcha` and `diff-hunk#1`
-  // have none of the three and are left alone.
-  const looksLikePath =
-    normalized.includes("/") ||
-    normalized.includes(".") ||
-    LINE_SUFFIX.test(trimmed.slice(colon === -1 ? trimmed.length : colon));
+  // What makes this a PATH claim rather than prose: a directory separator or
+  // a file extension. `gotcha` and `diff-hunk#1` have neither and are left
+  // alone.
+  //
+  // A `:<digits>` suffix is deliberately NOT a third trigger, though the
+  // `path:line` form the prompts mandate has one. It was, and it made
+  // `Makefile:12` checkable at the cost of also claiming `line:42`,
+  // `confidence:80` and `hunk:3` — plausible things for a model to write
+  // beside a real citation, each one enough to reject the whole draft. The two
+  // shapes are SYNTACTICALLY INDISTINGUISHABLE, so no sharper regex separates
+  // them; for a bareword, "the tree does not have it" is ambiguous between
+  // "invented file" and "not a file at all", and a rule that cannot tell those
+  // apart has no business accusing either. Abstaining loses the ability to
+  // catch a fabricated `Makefile:12`, which is the cheaper half of the trade.
+  const looksLikePath = normalized.includes("/") || normalized.includes(".");
   if (!looksLikePath) return undefined;
   const candidates = [normalized];
   // `a/` and `b/` are git diff notation a model copies out of the patch — and
@@ -97,19 +101,72 @@ export function proofRefPathClaim(ref: string): string[] | undefined {
 export function pathsNamedInDiff(patch: string): Set<string> {
   const named = new Set<string>();
   for (const line of patch.split("\n")) {
+    // The `diff --git` header is the ONLY line every file gets. A binary file
+    // has no `---`/`+++` pair at all — git writes
+    // `Binary files a/logo.png and /dev/null differ` instead — so without this
+    // a deleted binary is absent from the set AND gone from disk, and citing
+    // it is called fabrication. Verified against real `git diff` output, not
+    // assumed.
+    if (line.startsWith(DIFF_HEADER)) {
+      addHeaderPaths(line.slice(DIFF_HEADER.length), named);
+      continue;
+    }
     let candidate: string | undefined;
-    if (line.startsWith("+++ b/")) candidate = line.slice("+++ b/".length);
-    else if (line.startsWith("--- a/")) candidate = line.slice("--- a/".length);
-    else if (line.startsWith("rename to "))
-      candidate = line.slice("rename to ".length);
-    else if (line.startsWith("rename from "))
-      candidate = line.slice("rename from ".length);
+    // The quote is optional because git wraps any path containing a space:
+    // `--- "a/we ird.ts"`. Matching only the bare spelling left every such
+    // file out of an ALLOWLIST, which is the direction that costs findings.
+    for (const [prefix, strip] of SIDE_PREFIXES) {
+      if (!line.startsWith(prefix)) continue;
+      candidate = unwrapPath(line.slice(prefix.length), strip);
+      break;
+    }
     if (candidate === undefined) continue;
-    const trimmed = candidate.trim();
-    if (trimmed.length === 0 || trimmed === "/dev/null") continue;
-    named.add(trimmed);
+    if (candidate.length === 0 || candidate === "/dev/null") continue;
+    named.add(candidate);
   }
   return named;
+}
+
+const DIFF_HEADER = "diff --git ";
+
+// Prefix → whether an `a/`/`b/` side marker follows it. `rename to`/`from`
+// carry the bare path; the `---`/`+++` pair carries the side marker, either
+// spelling of it.
+const SIDE_PREFIXES: ReadonlyArray<readonly [string, boolean]> = [
+  ["+++ ", true],
+  ["--- ", true],
+  ["rename to ", false],
+  ["rename from ", false],
+];
+
+function unwrapPath(raw: string, stripSideMarker: boolean): string {
+  const trimmed = raw.trim().replace(/^"/, "").replace(/"$/, "");
+  return stripSideMarker ? trimmed.replace(/^[ab]\//, "") : trimmed;
+}
+
+// `a/<old> b/<new>`, unpicked leniently ON PURPOSE. A path containing " b/"
+// makes the split ambiguous and git quotes any path with spaces, so rather
+// than parse git's quoting rules this adds EVERY plausible split: `named` is
+// an ALLOWLIST, so an extra entry can only make the rule abstain more, while a
+// missing one is what produces a false accusation. The asymmetry is the whole
+// design — over-inclusion costs a citation nobody checks, under-inclusion
+// costs a correct finding and its whole draft.
+function addHeaderPaths(rest: string, named: Set<string>): void {
+  // Both spellings of the right-hand side marker: ` b/` bare, ` "b/` quoted.
+  for (const marker of [' "b/', " b/"]) {
+    for (
+      let i = rest.indexOf(marker);
+      i !== -1;
+      i = rest.indexOf(marker, i + 1)
+    ) {
+      for (const half of [rest.slice(0, i), rest.slice(i + 1)]) {
+        const unwrapped = unwrapPath(half, true);
+        if (unwrapped.length > 0 && unwrapped !== "/dev/null") {
+          named.add(unwrapped);
+        }
+      }
+    }
+  }
 }
 
 // The refs that assert a repo path the tree does not have, returned as the
