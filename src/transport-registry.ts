@@ -11,6 +11,10 @@ import type {
 } from "./execution/contracts";
 import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
 import { capabilityGateDecision } from "./provider-capabilities";
+import {
+  type CredentialBroker,
+  OpenCodeAuthBroker,
+} from "./security/credential-broker";
 import { redactDiagnostic } from "./security/redact";
 import { ClaudeCodeCliTransport } from "./transports/claude-code-cli";
 import {
@@ -24,7 +28,7 @@ import {
   OpenCodeSdkTransport,
 } from "./transports/opencode-sdk";
 import {
-  launchOpenCodeServer,
+  launchProjectedOpenCodeServer,
   type OpenCodeServerHandle,
 } from "./transports/opencode-server";
 
@@ -150,6 +154,9 @@ export interface TransportFactoryOptions {
   // option path as every other binary this registry hands out.
   readonly codegraphBinaryPath?: string;
   readonly env?: Record<string, string>;
+  // #149: the credential broker the authority resolved for the opencode
+  // backend. The server runs under its projection for the servers whole life.
+  readonly credentialBroker?: CredentialBroker;
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly mode?: "production" | "conformance";
   readonly routeFingerprint?: string;
@@ -195,6 +202,14 @@ export class DefaultTransportRegistry implements TransportRegistry {
   private readonly routeInstances = new Map<string, ProviderTransport>();
   private readonly userOverriddenBackends = new Set<RunnerBackend>();
   private readonly defaultOptions: TransportFactoryOptions;
+
+  // #149: read-only, and it exists for exactly one reason — the invariant that
+  // the server launcher and the binding authority share ONE broker instance
+  // was unobservable from outside, which is how the forwarding that claimed to
+  // guarantee it shipped dead. Identity here is the assertion.
+  get openCodeCredentialBroker(): CredentialBroker | undefined {
+    return this.defaultOptions.credentialBroker;
+  }
 
   constructor(options: CreateTransportRegistryOptions = {}) {
     this.defaultOptions = options;
@@ -244,22 +259,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
               modelID: "gpt-4o",
             },
         loadSdk: merged.loadSdk ?? loadOpenCodeSdk,
-        launchServer:
-          merged.launchServer ??
-          (async (mcp?: OpenCodeMcpConfig) => {
-            return await launchOpenCodeServer({
-              verifiedBinaryPath:
-                merged.openCodeBinaryPath ??
-                merged.binaryPath ??
-                "/usr/local/bin/opencode",
-              env: merged.env ?? {},
-              // #141: the run's registry rides the SPAWN. OpenCode reads
-              // `OPENCODE_CONFIG_CONTENT` at startup, so a server already
-              // running cannot be given one without opening a window between
-              // "server up" and "MCP connected".
-              ...(mcp === undefined ? {} : { mcp }),
-            });
-          }),
+        launchServer: merged.launchServer ?? openCodeLaunchServerFor(merged),
         readSystemPrompt:
           merged.readSystemPrompt ??
           (async (filePath: string) => {
@@ -581,4 +581,51 @@ export async function admitDiversityRoutePlan(
     optionsOrRegistry,
     maybeOptions,
   );
+}
+
+// #149: the launcher the registry hands out when the caller injects none.
+// Named and exported because it is the ONLY place production chooses the
+// opencode server environment, and every existing test injects `launchServer`
+// instead — so an inline closure here was, by construction, untested.
+export function defaultOpenCodeLaunchServer(options: {
+  readonly verifiedBinaryPath: string;
+  readonly broker: CredentialBroker;
+  readonly baseEnv?: Readonly<Record<string, string | undefined>>;
+  readonly spawnFn?: typeof Bun.spawn;
+  readonly killFn?: (pid: number, signal?: string | number) => unknown;
+}): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
+  return async (mcp?: OpenCodeMcpConfig) => {
+    return await launchProjectedOpenCodeServer({
+      ...options,
+      // #141: the run’s registry rides the SPAWN. OpenCode reads
+      // `OPENCODE_CONFIG_CONTENT` at startup, so a server already running
+      // cannot be given one without opening a window between "server up" and
+      // "MCP connected".
+      ...(mcp === undefined ? {} : { mcp }),
+    });
+  };
+}
+
+// #149: how the registry turns its options into a launcher. Split out from the
+// factory so the WIRING is reachable from a test — the factory itself only
+// hands `launchServer` to the client, and every existing test injects one,
+// which is how the previous inline closure went untested for its whole life.
+export function openCodeLaunchServerFor(
+  merged: TransportFactoryOptions,
+): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
+  return defaultOpenCodeLaunchServer({
+    verifiedBinaryPath:
+      merged.openCodeBinaryPath ??
+      merged.binaryPath ??
+      "/usr/local/bin/opencode",
+    // The same broker the credential authority resolved for this backend.
+    // Defaulting a second instance here would be a second source of truth
+    // beside runner-authority.ts, and a caller injecting a fake at the
+    // authority would silently get a real one at the server.
+    broker: merged.credentialBroker ?? new OpenCodeAuthBroker(),
+    // pr-hero own environment, filtered to operational keys only. The
+    // projection owns HOME/TMPDIR/XDG_* and overrides whatever survives;
+    // see composeOpenCodeServerEnv.
+    baseEnv: merged.env ?? process.env,
+  });
 }

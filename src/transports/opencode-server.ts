@@ -15,6 +15,7 @@
 // collide on. This module asks for an ephemeral port and reads back the URL
 // the server actually prints.
 
+import type { CredentialBroker } from "../security/credential-broker";
 import type { SpawnedProcess } from "../step-runner";
 import { mcpConfigIsEmpty, type OpenCodeMcpConfig } from "./opencode-mcp";
 
@@ -261,4 +262,100 @@ export async function launchOpenCodeServer(
   });
 
   return { url, pid: proc.pid, close };
+}
+
+// #149: the environment the server may inherit from pr-hero's own process.
+//
+// This list is deliberately NOT the harness's ENV_PASSTHROUGH, and the
+// difference is the whole point. That list serves a claude-code child and
+// carries ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN.
+// opencode reads ambient provider keys as credential SOURCES — measured live
+// on 1.18.23: launching with an otherwise-projected env plus a fake
+// ANTHROPIC_API_KEY connected the `anthropic` provider, and plus a fake
+// OPENAI_API_KEY connected `openai`. Composing the server's env from the
+// harness's list would therefore reintroduce, through the fix, the very leak
+// #149 is about.
+//
+// So: operational keys only. Nothing here can name a credential or a home.
+const SERVER_ENV_PASSTHROUGH: readonly string[] = [
+  // Not optional: the projection carries no PATH, and the measured-clean
+  // configuration included it. `{HOME}` alone was never measured.
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+];
+
+export function composeOpenCodeServerEnv(
+  base: Readonly<Record<string, string | undefined>>,
+  projectionEnv: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const composed: Record<string, string> = {};
+  for (const key of SERVER_ENV_PASSTHROUGH) {
+    const value = base[key];
+    if (value !== undefined) composed[key] = value;
+  }
+  // Last, and unconditionally: HOME/TMPDIR/XDG_* are the projection's to own.
+  // An inherited value surviving here is the defect, not a fallback.
+  return { ...composed, ...projectionEnv };
+}
+
+export interface LaunchProjectedOpenCodeServerOptions
+  extends Omit<LaunchOpenCodeServerOptions, "env"> {
+  // The credential authority's broker for this backend. Defaulting one here
+  // would be a second source of truth beside runner-authority.ts, so the
+  // caller supplies the same instance the binding was resolved with.
+  readonly broker: CredentialBroker;
+  // pr-hero's own environment, filtered through SERVER_ENV_PASSTHROUGH.
+  readonly baseEnv?: Readonly<Record<string, string | undefined>>;
+}
+
+// The server's env is its ENTIRE environment, and the server outlives every
+// individual step, so the projection it runs under must outlive them too:
+// one projection per SERVER, destroyed by the handle's close(). Handing the
+// shared server a per-step projection would leave its HOME pointing at a
+// directory deleted when that step settled, while siblings still used it.
+export async function launchProjectedOpenCodeServer(
+  options: LaunchProjectedOpenCodeServerOptions,
+): Promise<OpenCodeServerHandle> {
+  const { broker, baseEnv = {}, ...launchOptions } = options;
+
+  const projection = await broker.project({
+    // Three of these four are voided by the OpenCode broker; `kind` is the one
+    // it reads, and it is the kind runner-authority.ts binds for this backend.
+    sessionId: "opencode-server",
+    credentialRef: "opencode-auth",
+    kind: "opencode_chatgpt_oauth",
+    verifiedBinaryPath: launchOptions.verifiedBinaryPath,
+  });
+
+  let handle: OpenCodeServerHandle;
+  try {
+    handle = await launchOpenCodeServer({
+      ...launchOptions,
+      env: composeOpenCodeServerEnv(baseEnv, projection.env),
+    });
+  } catch (error) {
+    // The client resets its launch promise on failure and will project again,
+    // so a projection abandoned here is a credential left on disk per retry.
+    await projection.destroy();
+    throw error;
+  }
+
+  return {
+    url: handle.url,
+    pid: handle.pid,
+    close: async () => {
+      try {
+        await handle.close();
+      } finally {
+        await projection.destroy();
+      }
+    },
+  };
 }
