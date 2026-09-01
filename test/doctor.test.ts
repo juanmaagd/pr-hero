@@ -13,6 +13,7 @@ import {
 } from "../src/doctor";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import { aliasCanonical } from "../src/model-catalog";
+import { PRICING_CATALOG, PRICING_MAX_AGE_DAYS } from "../src/pricing-catalog";
 import { buildDoctorRoutePlan } from "../src/production-runtime";
 
 // These fixtures fake the MACHINE's filesystem. The engine's own bundle is not
@@ -32,6 +33,12 @@ describe("doctor tri-state evaluation", () => {
     const report = await runDoctor({
       cwd: "/repo",
       home: "/home/user",
+      // Pinned to the day the bundled pricing table was fetched. Without this
+      // the assertion below ("every check is healthy") reads the wall clock
+      // through the pricing-catalogue check and turns red on the calendar
+      // date the table crosses PRICING_MAX_AGE_DAYS — a failure with no
+      // commit behind it. What this test is about is unchanged.
+      now: () => new Date(PRICING_CATALOG.fetched_at),
       exists: (p) => {
         if (p === "/repo/.prhero/gotchas.md") return true;
         if (p === "/repo/.codegraph") return true;
@@ -700,6 +707,67 @@ describe("doctor tri-state evaluation", () => {
       const check = report.checks.find((c) => c.name === "agents_dir");
       expect(check?.severity).toBe("blocking");
       expect(check?.message).toContain("review-refuter.md");
+    });
+  });
+
+  describe("pricing catalog freshness", () => {
+    // Same machine fixture the all-healthy case above uses, minus the parts no
+    // pricing assertion depends on: this check reads only the bundled
+    // catalogue and the injected clock, never the filesystem.
+    const pricingOptions = {
+      cwd: "/repo",
+      home: "/home/user",
+      exists: (p: string) => p === "/repo/.prhero/gotchas.md",
+      readFile: (p: string) =>
+        p === "/repo/.prhero/gotchas.md"
+          ? "## Gotchas\nContent"
+          : bundledPromptBody(p),
+      checkToolsOptions: {
+        which: (bin: string) => `/bin/${bin}`,
+        exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+      },
+    };
+
+    const atAge = (days: number): Date =>
+      new Date(Date.parse(PRICING_CATALOG.fetched_at) + days * 86_400_000);
+
+    test("a fresh catalogue is healthy and names its age and source", async () => {
+      const report = await runDoctor({
+        ...pricingOptions,
+        now: () => atAge(PRICING_MAX_AGE_DAYS - 1),
+      });
+
+      const check = report.checks.find((c) => c.name === "pricing-catalog");
+      expect(check?.severity).toBe("healthy");
+      expect(check?.message).toContain(String(PRICING_MAX_AGE_DAYS - 1));
+      expect(check?.message).toContain(PRICING_CATALOG.source_url);
+      expect(check?.message).toContain(PRICING_CATALOG.fetched_at);
+    });
+
+    test("a catalogue at the age limit is degraded with a re-fetch hint", async () => {
+      const report = await runDoctor({
+        ...pricingOptions,
+        now: () => atAge(PRICING_MAX_AGE_DAYS),
+      });
+
+      const check = report.checks.find((c) => c.name === "pricing-catalog");
+      expect(check?.severity).toBe("degraded");
+      expect(check?.message).toContain(String(PRICING_MAX_AGE_DAYS));
+      expect(check?.hint).toBeDefined();
+      expect(check?.hint).toContain(PRICING_CATALOG.source_url);
+    });
+
+    test("staleness never blocks: a subscription user is the common case and is unaffected", async () => {
+      const report = await runDoctor({
+        ...pricingOptions,
+        now: () => atAge(PRICING_MAX_AGE_DAYS * 10),
+      });
+
+      const check = report.checks.find((c) => c.name === "pricing-catalog");
+      expect(check?.severity).toBe("degraded");
+      expect(report.overall).not.toBe("blocking");
+      expect(report.exitCode).toBe(0);
     });
   });
 

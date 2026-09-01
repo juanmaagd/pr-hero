@@ -505,7 +505,7 @@ export async function produceClaudeCapabilityReport(
   issues.push({
     code: "pricing_table_missing",
     message:
-      "no per-model pricing table is bundled, so cash-cost estimates cannot be derived from usage snapshots",
+      "a versioned Anthropic pricing table is bundled, but this report is backend-wide and produced before any route resolves, so it has no model to price; per-route pricing is decided at the runtime binding",
     blocking: false,
   });
 
@@ -552,6 +552,12 @@ export async function produceClaudeCapabilityReport(
     },
     billing: {
       mode: CLAUDE_CAPABILITY_STATICS.billingMode,
+      // #137 left hardcoded ON PURPOSE: no model id is in scope here.
+      // ProduceClaudeCapabilityReportOptions carries binary/env/auth probes
+      // only, because this is a BACKEND-wide report produced before any route
+      // is resolved. `tokenPricingAvailableFor` needs a model to answer, so
+      // `false` stays the honest default rather than a price for a model
+      // nobody has named yet.
       pricingReady: false,
     },
     issues,

@@ -370,6 +370,13 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // D1-08 PR3 does not touch pricing readiness (see the identical note
         // on ClaudeCodeCliTransport.capabilities) — the real pricing table
         // is D1-11's job, unrelated to bucketScope.
+        //
+        // #137 shipped an Anthropic table and still leaves this `false`: no
+        // model id is in scope here. The registry factory reads
+        // `options.route` to pick the CLIENT's model and hands this transport
+        // only `{ client }`, so the route is not retained to price. It would
+        // not help if it were — this backend's default route is
+        // `openai/gpt-4o`, which an Anthropic catalogue does not cover.
         pricingReady: false,
       },
       ...(input !== undefined
@@ -394,7 +401,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         {
           code: "pricing_table_missing",
           message:
-            "token pricing metadata is not available for this backend yet",
+            "this backend reports no per-request token cost, and the bundled pricing table covers Anthropic models only — this backend's default route is openai/gpt-4o",
           blocking: false,
         },
         {
@@ -406,7 +413,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         {
           code: "pricing_table_missing",
           message:
-            "no per-model pricing table is bundled, so notional cost cannot be derived; subscription cash cost stays 0",
+            "the bundled pricing table is Anthropic-only, so notional cost cannot be derived for this backend's models; subscription cash cost stays 0",
           blocking: false,
         },
       ],

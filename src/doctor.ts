@@ -18,6 +18,12 @@ import {
   resolveAgentsDirSetting,
 } from "./preflight";
 import {
+  isPricingCatalogFresh,
+  PRICING_CATALOG,
+  PRICING_MAX_AGE_DAYS,
+  pricingCatalogAge,
+} from "./pricing-catalog";
+import {
   exactBindingCapabilityIssues,
   type ProviderCapabilityReport,
 } from "./provider-capabilities";
@@ -49,6 +55,11 @@ export interface RunDoctorOptions {
   checkToolsOptions?: CheckSystemToolsOptions;
   exists?: (p: string) => boolean;
   readFile?: (p: string) => string | undefined;
+  // Injected so the pricing-catalogue check is not a dated time bomb in the
+  // suite: it goes degraded once the bundled table passes
+  // PRICING_MAX_AGE_DAYS, which would flip any wall-clock test asserting an
+  // all-healthy report red on a calendar date nobody edited.
+  now?: () => Date;
   // Exact-binding facts from the binding that would execute the route.
   // When present, these win over produceCapabilityReport (stale caller
   // readiness booleans must not determine doctor verdict).
@@ -83,7 +94,7 @@ export const PROVIDER_HINTS: Record<string, string> = {
   bounded_events_sink_missing:
     "Usage arrives as a final snapshot until the bounded event sink is wired (D1-08 residual).",
   pricing_table_missing:
-    "Cash-cost estimates need a bundled per-model pricing table; notional estimates remain available.",
+    "A versioned pricing table ships with the engine and its age is reported by the pricing-catalog check; this site simply has no model in scope to price. Notional estimates remain available.",
 };
 
 function pushProviderIssues(
@@ -130,6 +141,8 @@ export async function runDoctor(
         return undefined;
       }
     });
+
+  const now = options.now ?? (() => new Date());
 
   const repoDir = options.repoRoot ?? options.cwd;
 
@@ -230,6 +243,29 @@ export async function runDoctor(
       name: "codegraph",
       severity: "healthy",
       message: `CodeGraph is installed (${tools.codegraph.version ?? "unknown"}) and repository is indexed`,
+    });
+  }
+
+  // Bundled pricing catalogue (#137). Reported, never enforced here: doctor's
+  // blocking tier is for things that stop a review, and a stale price table
+  // stops nothing for a subscription user — the common case, whose routes bill
+  // a truthful $0 and never consult this file. Degraded is the whole point:
+  // the metered gate silently returns to refusing, and this line is what makes
+  // that refusal traceable to an expired table instead of looking like a bug.
+  const catalogAge = pricingCatalogAge(now());
+  const catalogProvenance = `fetched ${PRICING_CATALOG.fetched_at} from ${PRICING_CATALOG.source_url}`;
+  if (isPricingCatalogFresh(now())) {
+    checks.push({
+      name: "pricing-catalog",
+      severity: "healthy",
+      message: `Model pricing catalogue is ${catalogAge} day(s) old (${catalogProvenance})`,
+    });
+  } else {
+    checks.push({
+      name: "pricing-catalog",
+      severity: "degraded",
+      message: `Model pricing catalogue is ${catalogAge} day(s) old, past the ${PRICING_MAX_AGE_DAYS}-day limit (${catalogProvenance})`,
+      hint: `Re-fetch ${PRICING_CATALOG.source_url} into config/models/anthropic-pricing.json and update fetched_at; until then metered routes stay refused rather than billed at a stale rate.`,
     });
   }
 

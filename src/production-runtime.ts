@@ -24,6 +24,7 @@ import type {
   RoutingConfig,
 } from "./model-routing";
 import { buildResolvedRoutePlan, freezeRoutePlan } from "./model-routing";
+import { tokenPricingAvailableFor } from "./pricing-catalog";
 import type { ProviderCapabilityReport } from "./provider-capabilities";
 import {
   type CapabilityGateDecision,
@@ -79,6 +80,12 @@ export interface ProductionRuntimeOptions extends RunnerAuthorityOptions {
   readonly signal?: AbortSignal;
   readonly attemptAdmissionGate?: AttemptAdmissionGate;
   readonly graceMarginMs?: number;
+  // #137: the clock the bundled pricing catalogue's freshness is judged
+  // against, forwarded to every binding. A seam and not `new Date()` inline
+  // for the same reason doctor.ts has one: a test proving a fresh table
+  // prices a route would otherwise turn red on the calendar day the shipped
+  // table crosses PRICING_MAX_AGE_DAYS, with no commit behind it.
+  readonly now?: () => Date;
 }
 
 export interface ProductionRuntime {
@@ -201,6 +208,7 @@ interface FrozenRuntimeBindingOptions {
     backend: RunnerBackend,
   ) => Promise<ProviderCapabilityReport>;
   readonly leaseTracker: ActiveTransportLeaseTracker;
+  readonly now?: () => Date;
 }
 
 function minimalIsolationFromExecutable(
@@ -236,6 +244,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     backend: RunnerBackend,
   ) => Promise<ProviderCapabilityReport>;
   private readonly leaseTracker: ActiveTransportLeaseTracker;
+  private readonly now: () => Date;
 
   constructor(options: FrozenRuntimeBindingOptions) {
     this.key = options.key;
@@ -249,6 +258,10 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     this.authority = options.authority;
     this.getCapabilityReport = options.getCapabilityReport;
     this.leaseTracker = options.leaseTracker;
+    // Resolved into a field BEFORE Object.freeze(this), like every other
+    // injected dependency here — the instance is frozen, so a clock added
+    // after this line could never be assigned.
+    this.now = options.now ?? (() => new Date());
     Object.freeze(this);
   }
 
@@ -275,14 +288,43 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // an unknown-billing route bills like a subscription.
     const billingMode: ExactBindingCapabilityReport["billing"]["mode"] =
       report.billing.mode === "metered" ? "metered" : "subscription";
+    // #137. THE place the bundled catalogue is consulted, and the only one:
+    // this is the sole site where a model id (`this.route.modelSnapshot`) and
+    // a billing decision are both in scope. The four `pricingReady: false`
+    // sites upstream are backend-wide reports produced before any route
+    // resolves, so they stay the honest default and say so in their own
+    // comments.
+    //
+    // Two INDEPENDENT sources for one fact, either sufficient: a transport
+    // that reports its own cost keeps working when the table expires, and a
+    // provider that reports nothing is still priceable from the table.
+    //
+    // Observably a NO-OP today, and deliberately so: no route reports
+    // `billingMode: "metered"` yet (the claude-code static is "subscription"
+    // and so is opencode's), so `pricingApplicability` is never "required"
+    // and nothing gates on this value. It goes live the moment #161 derives
+    // a real metered mode — at which point a metered route with a catalogued
+    // model and a CURRENT table is admissible, and one with an expired table
+    // is refused rather than billed at a guessed price. That refusal is
+    // #137's entire point: an old price is worse than no price, because the
+    // gate exists to refuse billing an unknown amount and a stale quote
+    // defeats it by making the unknown look known.
+    const tokenPricingAvailable =
+      report.billing.pricingReady ||
+      tokenPricingAvailableFor(this.route.modelSnapshot, this.now());
     // Spec (same design line): subscription OAuth may truthfully report
     // `cashCostUsd: 0`; metered routes require provider cost or a versioned
-    // rate table; unknown is blocking.
+    // rate table; unknown is blocking. The catalogue IS "a versioned rate
+    // table", so this reads the SAME combined fact as tokenPricingAvailable
+    // above — deriving it from the raw transport flag instead would ship a
+    // metered report claiming priced-but-not-accountable, which is
+    // self-contradictory and would strand the route in a gate that no longer
+    // has a reason to refuse it.
     const cashCostAccountingValid =
       report.billing.mode === "subscription"
         ? true
         : report.billing.mode === "metered"
-          ? report.billing.pricingReady
+          ? tokenPricingAvailable
           : false;
     return {
       routeKey: this.key,
@@ -319,7 +361,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       billing: {
         mode: billingMode,
         pricingApplicability: pricingApplicable,
-        tokenPricingAvailable: report.billing.pricingReady,
+        tokenPricingAvailable,
         cashCostAccountingValid,
       },
     };
@@ -418,6 +460,7 @@ async function resolveFrozenBindings(
       route: step.route,
       authority,
       executable,
+      ...(options.now === undefined ? {} : { now: options.now }),
       credential: {
         kind: authority.credentialKind,
         ref: authority.credentialRef,

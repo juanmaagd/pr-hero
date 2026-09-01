@@ -23,6 +23,7 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "../src/model-routing";
+import { PRICING_CATALOG, PRICING_MAX_AGE_DAYS } from "../src/pricing-catalog";
 import {
   collectDoctorExactBindingReports,
   createProductionRuntime,
@@ -576,8 +577,22 @@ describe("production runtime PR1", () => {
     // explicit that `billingMode: "unknown"` is a blocking preflight result
     // (docs/multi-runtime-model-diversity-design.md:461), and the pricing
     // gate cannot catch it because `unknown` is not `metered`.
+    // #137 clock seam. Built from Date.parse of the catalogue's own stamp so
+    // every arm below is timezone-stable and, more importantly, dateless: an
+    // arm that read the wall clock would flip on the calendar day the bundled
+    // table crosses PRICING_MAX_AGE_DAYS, with no commit behind it.
+    const catalogAgeClock = (days: number): (() => Date) => {
+      const at = new Date(
+        Date.parse(PRICING_CATALOG.fetched_at) + days * 86_400_000,
+      );
+      return () => at;
+    };
+    const FRESH_CATALOG = catalogAgeClock(0);
+    const STALE_CATALOG = catalogAgeClock(PRICING_MAX_AGE_DAYS);
+
     async function bindingReportForBilling(
       billing: ProviderCapabilityReport["billing"],
+      now?: () => Date,
     ) {
       const step = resolveStepRoute({
         stepKey: "hunter-reliability",
@@ -597,6 +612,7 @@ describe("production runtime PR1", () => {
         executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
+        ...(now === undefined ? {} : { now }),
       });
       const binding = runtime.bindings.get(step.routeFingerprint);
       if (binding === undefined) throw new Error("missing binding");
@@ -632,10 +648,19 @@ describe("production runtime PR1", () => {
       expect(subscription.billing.cashCostAccountingValid).toBe(true);
       expect(exactBindingCapabilityGate(subscription).ok).toBe(true);
 
-      const meteredUnpriced = await bindingReportForBilling({
-        mode: "metered",
-        pricingReady: false,
-      });
+      // #137: STALE_CATALOG is what keeps this arm meaning what it has always
+      // meant. The route's model (claude-sonnet-5) is now IN the bundled
+      // catalogue, so a fresh table would price this metered route on the
+      // catalogue alone and the arm would stop being the unpriced case it
+      // exists to prove. Expiring the table is how "no pricing is available"
+      // is still expressible — the assertions below are unchanged.
+      const meteredUnpriced = await bindingReportForBilling(
+        {
+          mode: "metered",
+          pricingReady: false,
+        },
+        STALE_CATALOG,
+      );
       // Spec: metered routes require provider cost or a versioned rate table.
       expect(meteredUnpriced.billing.cashCostAccountingValid).toBe(false);
       // The cash gate stays silent for metered (its guard is
@@ -654,6 +679,55 @@ describe("production runtime PR1", () => {
       });
       expect(meteredPriced.billing.cashCostAccountingValid).toBe(true);
       expect(exactBindingCapabilityGate(meteredPriced).ok).toBe(true);
+    });
+
+    // #137. The binding is the ONLY place a model id and a billing decision
+    // are both in scope, so it is the only place the bundled catalogue can be
+    // consulted. These arms are the proof that consulting it does what the
+    // issue asked: price what is known and current, refuse everything else.
+    describe("bundled pricing catalogue as a second pricing source", () => {
+      test("a catalogued model on a fresh table prices a metered route the transport could not price", async () => {
+        // The route resolves to claude-sonnet-5, which the catalogue covers.
+        const report = await bindingReportForBilling(
+          { mode: "metered", pricingReady: false },
+          FRESH_CATALOG,
+        );
+
+        expect(report.billing.pricingApplicability).toBe("required");
+        expect(report.billing.tokenPricingAvailable).toBe(true);
+        // Coherence: the design line this file already quotes says metered
+        // needs "provider cost or a versioned rate table". A bundled,
+        // date-stamped table IS the second half of that sentence, so the
+        // cash-cost fact must move with the pricing fact — a report claiming
+        // priced-but-not-accountable would be self-contradictory.
+        expect(report.billing.cashCostAccountingValid).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
+      });
+
+      test("an expired table refuses the same route rather than billing a guessed price", async () => {
+        const report = await bindingReportForBilling(
+          { mode: "metered", pricingReady: false },
+          STALE_CATALOG,
+        );
+
+        expect(report.billing.tokenPricingAvailable).toBe(false);
+        const decision = exactBindingCapabilityGate(report);
+        expect(decision.ok).toBe(false);
+        expect(decision.reason).toContain("pricing_table_missing");
+      });
+
+      test("the transport's own pricingReady still suffices when the table is expired", async () => {
+        // Two INDEPENDENT sources for one fact; either alone is enough. A
+        // provider that reports its own cost must not be held hostage by the
+        // freshness of a table it never needed.
+        const report = await bindingReportForBilling(
+          { mode: "metered", pricingReady: true },
+          STALE_CATALOG,
+        );
+
+        expect(report.billing.tokenPricingAvailable).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
+      });
     });
 
     // SUGGESTION-1: capabilities() is deliberately non-memoised (it re-probes
