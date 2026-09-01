@@ -3662,3 +3662,164 @@ describe("agentFiles: a prompt set with no directory behind it", () => {
     await expect(runPipeline(input, { runner })).rejects.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #152 — proof_refs resolvability, wired at every parse site
+//
+// The rule itself is proven in test/proof-refs.test.ts and test/drafts.test.ts.
+// What these assert is the WIRING: that all three legs actually receive a
+// resolver built from the reviewed target, because a validator nobody calls
+// with one is exactly the state #152 describes. The reviewed target here is
+// the patch (`src/app.ts`) — makeInput's worktree is a fixture path with
+// nothing on disk, which is also why an invented path resolves to nothing.
+// ---------------------------------------------------------------------------
+
+describe("#152 proof_refs resolvability wiring", () => {
+  test("the hunter parse rejects an invented citation and keeps an honest one", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) => {
+        expect(() =>
+          spec.parse(
+            JSON.stringify({
+              findings: [draft({ proof_refs: ["package.json:15-20"] })],
+            }),
+          ),
+        ).toThrow(/package\.json:15-20/);
+        return ok(spec, spec.parse(JSON.stringify({ findings: [draft()] })));
+      },
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    // Only holds if the fake ran to completion, i.e. the throw above was the
+    // rejection and not an unexpected failure of the honest parse.
+    expect(result.skillOutput.findings.length).toBe(1);
+  });
+
+  test("the refuter parse rejects a verdict whose whole record is invented", async () => {
+    // #152 verbatim: `{"outcome":"inconclusive","proof_refs":
+    // ["src/index.ts:7-20","package.json:15-20"]}` against a tree holding
+    // neither file, with read/grep/glob all available.
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, { findings: [draft({ severity: "CRITICAL" })] }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) => {
+        expect(() =>
+          spec.parse(
+            JSON.stringify({
+              results: [
+                {
+                  finding_id: "F001",
+                  outcome: "inconclusive",
+                  proof_refs: ["src/index.ts:7-20", "package.json:15-20"],
+                },
+              ],
+            }),
+          ),
+        ).toThrow(/src\/index\.ts:7-20/);
+        return ok(spec, {
+          results: [
+            {
+              finding_id: "F001",
+              outcome: "corroborated",
+              proof_refs: ["src/app.ts:10"],
+            },
+          ],
+        });
+      },
+    });
+    const result = await runPipeline(await makeInput(), { runner });
+    expect(result.skillOutput.findings[0]?.refuter_verdict).toBe(
+      "corroborated",
+    );
+  });
+
+  test("the verify leg is wired to the same rule", async () => {
+    const runner = new FakeStepRunner({
+      verifier: (spec) => {
+        expect(() =>
+          spec.parse(
+            JSON.stringify({
+              results: [
+                {
+                  finding_id: "V001",
+                  outcome: "refuted",
+                  proof_refs: ["src/ghost.ts:1"],
+                },
+              ],
+            }),
+          ),
+        ).toThrow(/src\/ghost\.ts:1/);
+        return ok(spec, {
+          results: [
+            {
+              finding_id: "V001",
+              outcome: "refuted",
+              proof_refs: ["src/app.ts:10"],
+            },
+          ],
+        });
+      },
+    });
+    const input = await makeInput({
+      skipDiscovery: true,
+      verifyQueue: [
+        {
+          priorId: "R001",
+          sev: "CRITICAL",
+          trigger: "touched",
+          claim: "a live defect",
+          locs: ["src/app.ts:10"],
+          authorReply: "",
+          commentBody: "",
+          triageTag: "",
+          deltaHunks: "",
+        },
+      ],
+      rereview: {
+        case: "C",
+        last_reviewed_head: "a".repeat(40),
+        last_head_source: "summary_marker",
+        discovery_range: `${"a".repeat(40)}..${"c".repeat(40)}`,
+        discovery_restricted: true,
+        discovery_skipped_empty_delta: true,
+        prior_findings: 1,
+        settled_deterministically: 0,
+        verified: 0,
+        verification_capped: 0,
+        verification_triggers: {
+          applied: 0,
+          touched: 0,
+          overlap: 0,
+          verify_all: 0,
+        },
+        live: [],
+      },
+      phaseB: {
+        settled: [
+          {
+            id: "R001",
+            status: "queued",
+            locs: ["src/app.ts:10"],
+            renamed: false,
+            trigger: "touched",
+          },
+        ],
+        priors: [
+          {
+            id: "R001",
+            sev: "CRITICAL",
+            tier: "blocking",
+            channel: "inline",
+            locs: ["src/app.ts:10"],
+            claim: "a live defect",
+            triage: null,
+            newThreadReply: false,
+          },
+        ],
+      },
+    });
+    const result = await runPipeline(input, { runner });
+    expect(result.perAgent.verifier?.status).toBe("ok");
+  });
+});

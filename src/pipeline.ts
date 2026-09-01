@@ -4,6 +4,7 @@
 // assembly) deterministic and testable here, and spends model tokens only on
 // the hunts and the refutation themselves.
 
+import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { blockForgesNonce, selectBoundaryNonce, wrapBlock } from "./boundary";
@@ -77,6 +78,7 @@ import {
   renderPriorsBlock,
   type SuspicionPrior,
 } from "./prompt-set";
+import { pathsNamedInDiff } from "./proof-refs";
 import {
   applyWorsening,
   type GateStatus,
@@ -442,6 +444,34 @@ export function changedPathsFromDiff(patch: string): string[] {
   return paths;
 }
 
+// #152's impure half: "does the reviewed tree contain this repo-relative
+// path". The pure rules live in proof-refs.ts; only this closure touches disk.
+//
+// The reviewed target is the worktree AND the patch, in that order of intent:
+// a file the PR deletes is gone from the checkout yet fully readable in the
+// diff, so a hunter can cite it honestly and must not be accused of inventing
+// it. Memoized because the same handful of paths recur across every finding of
+// every step, and each miss would otherwise re-stat.
+//
+// Every path reaching `existsSync` has already been rejected by
+// `proofRefCandidates` if it is absolute or escapes via `..` — that guard is
+// what keeps this join inside the tree it was built for.
+export function makeProofRefResolver(
+  worktree: string,
+  patch: string,
+): (candidate: string) => boolean {
+  const named = pathsNamedInDiff(patch);
+  const memo = new Map<string, boolean>();
+  return (candidate) => {
+    const cached = memo.get(candidate);
+    if (cached !== undefined) return cached;
+    const resolved =
+      named.has(candidate) || existsSync(path.join(worktree, candidate));
+    memo.set(candidate, resolved);
+    return resolved;
+  };
+}
+
 // CONTAINS-COMPATIBLE glob matching (JD finding): the prose rules say "path
 // contains AbortFileMultipartUpload" but the config encodes that rule as the
 // glob `**/AbortFileMultipartUpload*`, where `*` does not cross `/` — so the
@@ -768,6 +798,12 @@ interface ScoutRecord {
 interface RunState {
   // D2 PR3: Route plan provenance
   routePlan?: ResolvedRoutePlan;
+  // #152: built once, the moment the patch is read, and consulted by every
+  // parse site. Read off `state` AT CALL TIME rather than captured when a
+  // spec is built — the refuter and verify legs construct their specs long
+  // after the hunters', and a captured undefined would silently disable the
+  // check on exactly the leg that motivated the issue.
+  resolveProofRef?: (candidate: string) => boolean;
   scout?: ScoutRecord;
   diversity?: DiversityExecutionContext;
   // Set once, immediately after the two blocks it is drawn against are read.
@@ -1171,6 +1207,7 @@ async function execute(
   // when ANY conditional hunter actually ran — with the default spec that is
   // exactly the old "parity hunter fired" semantics.
   const patch = await Bun.file(input.diffPath).text();
+  state.resolveProofRef = makeProofRefResolver(input.worktree, patch);
   const changedPaths = changedPathsFromDiff(patch);
   const skipDiscovery = input.skipDiscovery === true;
   const hunters = skipDiscovery
@@ -1281,7 +1318,11 @@ async function execute(
             }
           }
         }
-        return validateHunterDraft(extracted);
+        return validateHunterDraft(extracted, {
+          ...(state.resolveProofRef === undefined
+            ? {}
+            : { resolveProofRef: state.resolveProofRef }),
+        });
       },
       // Observational tap only; emit() swallows a throwing listener.
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
@@ -1801,7 +1842,11 @@ async function runRefuter(
         if (extracted === undefined) {
           throw new Error("refuter final message has no JSON object");
         }
-        return validateRefuterResult(extracted, [survivor.id]);
+        return validateRefuterResult(extracted, [survivor.id], {
+          ...(state.resolveProofRef === undefined
+            ? {}
+            : { resolveProofRef: state.resolveProofRef }),
+        });
       },
       // Same observational tap as the hunter steps: a refuter step retries
       // through the same loop, and the non-TTY log is where that shows.
@@ -1979,7 +2024,11 @@ async function runVerify(
         if (extracted === undefined) {
           throw new Error("verifier final message has no JSON object");
         }
-        return validateRefuterResult(extracted, [subject.vId]);
+        return validateRefuterResult(extracted, [subject.vId], {
+          ...(state.resolveProofRef === undefined
+            ? {}
+            : { resolveProofRef: state.resolveProofRef }),
+        });
       },
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
