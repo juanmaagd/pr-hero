@@ -9,24 +9,42 @@
 // one. Evidence that cannot be resolved is not weaker evidence; it is NO
 // evidence wearing the shape of some.
 //
+// THE RULE, and the reason it is narrower than "every ref must resolve":
+//
+//   Only accuse what can be checked. A ref is judged ONLY when it asserts a
+//   repo path; anything else is unverifiable, and unverifiable is not the same
+//   as false.
+//
+// That distinction was bought with a failed fixture eval, not reasoned into
+// existence. On the first live run under the strict rule a hunter found the
+// planted defect perfectly, cited four real `path:line` refs — and added a
+// fifth quoting the gotcha it had been handed:
+//
+//   "gotcha: Volume values are 0-1 gain fractions everywhere in this codebase"
+//
+// The strict rule called that fabrication, rejected the draft, burned the
+// retry and lost BOTH hunters: a correct finding destroyed over a citation
+// style the prompts never forbade. Prose, gotcha quotes and hunk labels are
+// now out of scope; `src/index.ts:7-20` — #152's own case — still is not.
+//
 // This module is the pure half on purpose: it never touches the filesystem.
 // The reviewed tree arrives as an injected predicate, which keeps drafts.ts
 // pure, keeps the offline suite offline, and makes every rule below testable
 // without a repo.
 
-// The shape the prompts mandate — `path:line`, stated in
-// `prompts/default/review-refuter.md` and in every hunter's output contract.
-// Everything here parses AROUND that contract rather than enforcing its
-// spelling: the question is only ever "which path does this ref name".
-
 const ESCAPING_SEGMENT = "..";
 
-// The path spellings a ref could legitimately mean, in the order to try them.
-// Empty means the ref names nothing that could live inside the reviewed tree,
-// which is itself an unresolved verdict — never a reason to skip the ref.
-export function proofRefCandidates(ref: string): string[] {
+// A `:<digits>` line suffix — the `path:line` form the prompts mandate. It is
+// what makes `Makefile:12` a path claim despite having neither slash nor dot.
+const LINE_SUFFIX = /:\d/;
+
+// The path spellings a ref could mean, or `undefined` when the ref asserts no
+// checkable repo path at all. `undefined` is the ABSTENTION, and it is load
+// bearing: it is what separates "the tree says this is false" from "there is
+// nothing here to check", and only the former may fail a step.
+export function proofRefPathClaim(ref: string): string[] | undefined {
   const trimmed = ref.trim();
-  if (trimmed.length === 0) return [];
+  if (trimmed.length === 0) return undefined;
   // Everything before the FIRST colon. `src/a.ts:12-20` and
   // `src/a.ts:12 (the guard)` both reduce to the same path, and a line range
   // is deliberately not checked here — path existence is the cheap,
@@ -34,13 +52,27 @@ export function proofRefCandidates(ref: string): string[] {
   const colon = trimmed.indexOf(":");
   const raw = (colon === -1 ? trimmed : trimmed.slice(0, colon)).trim();
   const normalized = raw.replace(/^\.\//, "");
-  if (normalized.length === 0) return [];
-  // Absolute, home-relative and escaping refs cannot be answered by "does the
-  // reviewed tree contain this", so they resolve to nothing rather than being
-  // probed outside the worktree — the resolver must never be handed a path
-  // that leaves the tree it was built for.
-  if (normalized.startsWith("/") || normalized.startsWith("~")) return [];
-  if (normalized.split("/").includes(ESCAPING_SEGMENT)) return [];
+  if (normalized.length === 0) return undefined;
+  // Whitespace inside the path part means the ref is a sentence, not a
+  // citation — "the guard in src/player.ts is missing" names a file without
+  // claiming to BE one, and a reviewer accusing it of fabrication is wrong.
+  if (/\s/.test(normalized)) return undefined;
+  // Absolute, home-relative and escaping refs are abstentions rather than
+  // failures: "does the reviewed tree contain this" has no answer for a path
+  // outside it, and the resolver must never be handed one. An absolute path
+  // to a file that really does exist is a spelling problem, not a lie, and
+  // burning a whole draft over spelling is what the fixture eval punished.
+  if (normalized.startsWith("/") || normalized.startsWith("~"))
+    return undefined;
+  if (normalized.split("/").includes(ESCAPING_SEGMENT)) return undefined;
+  // What makes this a PATH claim rather than prose: a directory separator, a
+  // file extension, or an explicit line number. `gotcha` and `diff-hunk#1`
+  // have none of the three and are left alone.
+  const looksLikePath =
+    normalized.includes("/") ||
+    normalized.includes(".") ||
+    LINE_SUFFIX.test(trimmed.slice(colon === -1 ? trimmed.length : colon));
+  if (!looksLikePath) return undefined;
   const candidates = [normalized];
   // `a/` and `b/` are git diff notation a model copies out of the patch — and
   // `a/` is also a perfectly legal directory name. Offering BOTH spellings
@@ -80,19 +112,19 @@ export function pathsNamedInDiff(patch: string): Set<string> {
   return named;
 }
 
-// The refs whose evidence cannot be found, returned as the model's ORIGINAL
-// text — a reader has to see which citation was the invented one, and the
-// parsed path is not what the model wrote.
+// The refs that assert a repo path the tree does not have, returned as the
+// model's ORIGINAL text — a reader has to see which citation was the invented
+// one, and the parsed path is not what the model wrote. A ref that asserts no
+// path is absent from this list: it was never judged.
 export function unresolvedProofRefs(
   refs: readonly string[],
   resolves: (path: string) => boolean,
 ): string[] {
   const unresolved: string[] = [];
   for (const ref of refs) {
-    const candidates = proofRefCandidates(ref);
-    if (candidates.length === 0 || !candidates.some((c) => resolves(c))) {
-      unresolved.push(ref);
-    }
+    const claim = proofRefPathClaim(ref);
+    if (claim === undefined) continue;
+    if (!claim.some((candidate) => resolves(candidate))) unresolved.push(ref);
   }
   return unresolved;
 }

@@ -1,18 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import {
   pathsNamedInDiff,
-  proofRefCandidates,
+  proofRefPathClaim,
   unresolvedProofRefs,
 } from "../src/proof-refs";
 
-describe("proofRefCandidates", () => {
+describe("proofRefPathClaim", () => {
   test("reads the path off every shape the prompts mandate", () => {
-    expect(proofRefCandidates("src/a.ts")).toEqual(["src/a.ts"]);
-    expect(proofRefCandidates("src/a.ts:12")).toEqual(["src/a.ts"]);
-    expect(proofRefCandidates("src/a.ts:12-20")).toEqual(["src/a.ts"]);
-    expect(proofRefCandidates("  src/a.ts:12  ")).toEqual(["src/a.ts"]);
-    expect(proofRefCandidates("./src/a.ts:12")).toEqual(["src/a.ts"]);
-    expect(proofRefCandidates("src/a.ts:12 (the guard)")).toEqual(["src/a.ts"]);
+    expect(proofRefPathClaim("src/a.ts")).toEqual(["src/a.ts"]);
+    expect(proofRefPathClaim("src/a.ts:12")).toEqual(["src/a.ts"]);
+    expect(proofRefPathClaim("src/a.ts:12-20")).toEqual(["src/a.ts"]);
+    expect(proofRefPathClaim("  src/a.ts:12  ")).toEqual(["src/a.ts"]);
+    expect(proofRefPathClaim("./src/a.ts:12")).toEqual(["src/a.ts"]);
+    expect(proofRefPathClaim("src/a.ts:12 (the guard)")).toEqual(["src/a.ts"]);
+  });
+
+  test("a bare filename counts as a claim through its line number", () => {
+    // No slash and no dot, so only the `:12` makes this a citation rather
+    // than a word — without that trigger it would be an easy way to smuggle
+    // an unresolvable ref past the rule.
+    expect(proofRefPathClaim("Makefile:12")).toEqual(["Makefile"]);
+    expect(proofRefPathClaim("package.json:15-20")).toEqual(["package.json"]);
   });
 
   test("offers BOTH spellings of a git-prefixed ref, never just the stripped one", () => {
@@ -20,33 +28,42 @@ describe("proofRefCandidates", () => {
     // but `a/` is also a legal directory name. Returning both spellings means
     // the resolver decides from the tree instead of this parser guessing, so
     // a repo with a real top-level `a/` cannot be rejected for spelling.
-    expect(proofRefCandidates("b/src/a.ts:9")).toEqual([
+    expect(proofRefPathClaim("b/src/a.ts:9")).toEqual([
       "b/src/a.ts",
       "src/a.ts",
     ]);
-    expect(proofRefCandidates("a/src/a.ts")).toEqual([
-      "a/src/a.ts",
-      "src/a.ts",
-    ]);
+    expect(proofRefPathClaim("a/src/a.ts")).toEqual(["a/src/a.ts", "src/a.ts"]);
   });
 
-  test("offers nothing for a ref that names no path inside the tree", () => {
-    expect(proofRefCandidates("")).toEqual([]);
-    expect(proofRefCandidates("   ")).toEqual([]);
-    expect(proofRefCandidates(":12")).toEqual([]);
-    // Absolute and escaping refs are unresolvable BY DEFINITION here: the
-    // question this module answers is "does the reviewed tree contain this",
-    // and neither spelling is a path inside it.
-    expect(proofRefCandidates("/etc/passwd")).toEqual([]);
-    expect(proofRefCandidates("~/secrets.txt")).toEqual([]);
-    expect(proofRefCandidates("../outside.ts:3")).toEqual([]);
-    expect(proofRefCandidates("src/../../outside.ts")).toEqual([]);
+  test("ABSTAINS on a ref that asserts no repo path", () => {
+    // The distinction the failed fixture eval paid for: unverifiable is not
+    // false. Everything here is left unjudged rather than called fabrication.
+    expect(proofRefPathClaim("")).toBeUndefined();
+    expect(proofRefPathClaim("   ")).toBeUndefined();
+    expect(proofRefPathClaim(":12")).toBeUndefined();
+    // A quoted gotcha — the exact ref that destroyed a correct finding and
+    // both hunters on the first live run under the strict rule.
+    expect(
+      proofRefPathClaim(
+        "gotcha: Volume values are 0-1 gain fractions everywhere in this codebase",
+      ),
+    ).toBeUndefined();
+    // Prose that NAMES a file without claiming to be a citation of one.
+    expect(
+      proofRefPathClaim("the guard in src/player.ts is missing"),
+    ).toBeUndefined();
+    // A hunk label, not a path.
+    expect(proofRefPathClaim("diff-hunk#1")).toBeUndefined();
   });
 
-  test("treats prose as a path candidate, leaving the verdict to the tree", () => {
-    // Not this module's call: prose that happens to name a real file must
-    // still resolve, and prose that names nothing fails at the resolver.
-    expect(proofRefCandidates("diff-hunk#1")).toEqual(["diff-hunk#1"]);
+  test("ABSTAINS on paths outside the tree instead of accusing them", () => {
+    // "Does the reviewed tree contain this" has no answer for a path outside
+    // it, and the resolver must never be handed one. An absolute path to a
+    // file that really exists is a spelling problem, not a lie.
+    expect(proofRefPathClaim("/etc/passwd")).toBeUndefined();
+    expect(proofRefPathClaim("~/secrets.txt")).toBeUndefined();
+    expect(proofRefPathClaim("../outside.ts:3")).toBeUndefined();
+    expect(proofRefPathClaim("src/../../outside.ts")).toBeUndefined();
   });
 });
 
@@ -120,9 +137,30 @@ describe("unresolvedProofRefs", () => {
     ).toEqual(["src/index.ts:7-20", "package.json:15-20"]);
   });
 
-  test("an unusable ref is unresolved, never silently skipped", () => {
+  test("REGRESSION — a real finding cited alongside a gotcha survives", () => {
+    // The live draft the strict rule destroyed, verbatim in shape: four sound
+    // citations plus one quoted gotcha. Rejecting this cost a correct BLOCKER
+    // and both hunters of that run.
     expect(
-      unresolvedProofRefs(["", "/etc/passwd", "../x.ts"], resolves),
-    ).toEqual(["", "/etc/passwd", "../x.ts"]);
+      unresolvedProofRefs(
+        [
+          "src/a.ts:6",
+          "src/a.ts:8",
+          "src/b.ts:10",
+          "src/b.ts:4",
+          "gotcha: Volume values are 0-1 gain fractions everywhere in this codebase",
+        ],
+        resolves,
+      ),
+    ).toEqual([]);
+  });
+
+  test("a ref that asserts nothing is never judged, in either direction", () => {
+    expect(
+      unresolvedProofRefs(
+        ["", "/etc/passwd", "../x.ts", "diff-hunk#1"],
+        resolves,
+      ),
+    ).toEqual([]);
   });
 });
