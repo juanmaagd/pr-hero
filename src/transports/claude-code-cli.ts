@@ -320,6 +320,13 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         // bucket ID says WHICH rate-limit pool a credential shares, not
         // whether its cost can be priced. Still `false`, tracked by the
         // pre-existing "pricing_table_missing" issue below.
+        //
+        // #137 shipped that table and still leaves this `false`: no model id
+        // is in scope here. capabilities() takes only a credential
+        // fingerprint and bucket scope, it is called before any specific
+        // request (see the BUCKET_IDENTITY_PROVIDER note above), and the
+        // registry's claude-code factory forwards only `spawnFn` — the
+        // transport never receives `options.route`. Honest default.
         pricingReady: false,
       },
       ...(input !== undefined
@@ -350,7 +357,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         {
           code: "pricing_table_missing",
           message:
-            "no per-model pricing table is bundled, so cash-cost estimates cannot be derived from usage snapshots",
+            "a versioned Anthropic pricing table is bundled, but capabilities() carries no route, so this transport cannot name the model to price; the runtime binding prices per route",
           blocking: false,
         },
       ],
