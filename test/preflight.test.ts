@@ -468,7 +468,7 @@ describe("resolveAgentsDirSetting", () => {
         env: "/from/env",
         cwd: "/work",
       }),
-    ).toEqual({ dir: "/work/agents", source: "flag" });
+    ).toEqual({ dir: "/work/agents", source: "flag", kind: "dir" });
   });
 
   // THE point of the key: the config names a prompt set in a sibling repo, so
@@ -490,6 +490,7 @@ describe("resolveAgentsDirSetting", () => {
     ).toEqual({
       dir: "/Users/x/Desktop/deep-review/agents/clean",
       source: "repo",
+      kind: "dir",
     });
   });
 
@@ -502,7 +503,11 @@ describe("resolveAgentsDirSetting", () => {
         config: seat("./prompts", "/Users/x/.prhero", "global"),
         cwd: "/work",
       }),
-    ).toEqual({ dir: "/Users/x/.prhero/prompts", source: "global" });
+    ).toEqual({
+      dir: "/Users/x/.prhero/prompts",
+      source: "global",
+      kind: "dir",
+    });
   });
 
   test("an absolute config path is taken as is", () => {
@@ -516,7 +521,7 @@ describe("resolveAgentsDirSetting", () => {
 
   test("the env var is the fallback before the bundled default", () => {
     expect(resolveAgentsDirSetting({ env: "/from/env", cwd: "/work" })).toEqual(
-      { dir: "/from/env", source: "env" },
+      { dir: "/from/env", source: "env", kind: "dir" },
     );
     expect(resolveAgentsDirSetting({ cwd: "/work" }).source).toBe("default");
   });
@@ -550,6 +555,7 @@ describe("agentsDirSeat", () => {
     expect(resolveAgentsDirSetting({ config: seat, cwd: "/work" })).toEqual({
       dir: "/Users/x/.prhero/prompts",
       source: "global",
+      kind: "dir",
     });
   });
 

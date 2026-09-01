@@ -5,7 +5,7 @@
 // tested is a preflight that gets tested once, live, at $10 a go.
 
 import path from "node:path";
-import { resolveEngineAssets } from "./assets";
+import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type { SuspicionPrior } from "./prompt-set";
 // size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
@@ -1458,9 +1458,56 @@ export function resolveBaseRef(input: {
 // every hunter's model.
 export type AgentsDirSource = "flag" | "repo" | "global" | "env" | "default";
 
+// What `dir` MEANS depends on `kind`, and the two cases are not
+// interchangeable. A Bun-compiled binary embeds every prompt at a hashed,
+// FLATTENED path (`/$bunfs/root/review-refuter-qkhw7k00.md`), and its
+// containing "directory" is not one: `existsSync("/$bunfs/root")` is false and
+// `Bun.Glob().scan({cwd})` on it THROWS ENOENT rather than yielding nothing.
+// Only `Bun.file(<embedded path>)` reads. So in compiled mode there is no
+// directory to join a basename onto — there is a MAP, and `dir` degrades to a
+// display label for the plan card and the config row.
 export interface AgentsDirResolution {
+  // A real directory when `kind === "dir"`; a DISPLAY LABEL when `"bundled"`.
+  // Never `/$bunfs/root`: that string is actionable to nobody and would name a
+  // path that exists on no machine in every artifact it reached.
   dir: string;
   source: AgentsDirSource;
+  kind: "dir" | "bundled";
+  // Logical filename -> readable path. Present iff `kind === "bundled"`.
+  files?: Record<string, string>;
+}
+
+// The label the shipped binary shows wherever a prompt-set path would go.
+// A constant rather than a literal per site because `pr-hero init` already
+// prints this exact wording for the same concept, and two copies drift the
+// first time one of them is edited.
+export const BUNDLED_AGENTS_DIR_LABEL = "bundled default (from engine)";
+
+// THE read site for every agent file, and the reason it exists is that
+// `path.join(agentsDir, agent.file)` is unfixable under compiled mode: the
+// embedded name is hashed, so the logical basename joined onto anything names
+// a file that does not exist. Callers ask this instead and never see the
+// difference.
+export function agentFilePath(
+  resolution: Pick<AgentsDirResolution, "kind" | "dir" | "files">,
+  file: string,
+): string {
+  if (resolution.kind === "bundled") {
+    const embedded = resolution.files?.[file];
+    if (embedded === undefined) {
+      // A spec that names a prompt the build never embedded is a BUILD defect,
+      // and it has to say so. Falling back to a join would hand the reader
+      // "/$bunfs/root/<file>" — a path that reads plausibly, exists nowhere,
+      // and sends them hunting a filesystem bug instead of a manifest gap.
+      throw new Error(
+        `the bundled prompt set has no "${file}" — the review spec references ` +
+          "a prompt this build did not embed (asset-manifest.ts and the spec " +
+          "have drifted)",
+      );
+    }
+    return embedded;
+  }
+  return path.join(resolution.dir, file);
 }
 
 // The config seat as ONE object rather than three loose optionals. A value,
@@ -1497,23 +1544,54 @@ export function resolveAgentsDirSetting(input: {
   config?: AgentsDirConfigSeat | undefined;
   env?: string | undefined;
   cwd: string;
+  // The runtime's packaged assets, injected. NOT a convenience: the real
+  // `detectAssetMode()` reads `import.meta.dir`, which under `bun test` always
+  // reports "dev", so the compiled branch below is unreachable from a test
+  // without this seam — which is exactly how a shipped binary that could not
+  // load a single prompt kept an entire offline suite green. Resolved lazily
+  // inside the default branch so an explicit flag, config or env never pays
+  // for asset detection.
+  assets?: EngineAssets | undefined;
 }): AgentsDirResolution {
   if (input.flag) {
-    return { dir: path.resolve(input.cwd, input.flag), source: "flag" };
+    return {
+      dir: path.resolve(input.cwd, input.flag),
+      source: "flag",
+      kind: "dir",
+    };
   }
   if (input.config) {
     return {
       dir: path.resolve(input.config.dir, input.config.value),
       source: input.config.layer,
+      kind: "dir",
     };
   }
   if (input.env) {
-    return { dir: path.resolve(input.cwd, input.env), source: "env" };
+    return {
+      dir: path.resolve(input.cwd, input.env),
+      source: "env",
+      kind: "dir",
+    };
   }
-  const assets = resolveEngineAssets();
+  const assets = input.assets ?? resolveEngineAssets();
+  // The compiled binary's default set is a MAP, never a directory: its
+  // `defaultAgentsDir` is `path.dirname(<embedded path>)`, i.e. "/$bunfs/root",
+  // which no `existsSync` accepts and no `Bun.Glob` can scan. Handing that
+  // string on as a directory is the whole defect — every consumer downstream
+  // would join a logical basename onto it and read a file that is not there.
+  if (assets.mode === "compiled") {
+    return {
+      dir: BUNDLED_AGENTS_DIR_LABEL,
+      source: "default",
+      kind: "bundled",
+      files: assets.bundledAgentFiles,
+    };
+  }
   return {
     dir: assets.defaultAgentsDir,
     source: "default",
+    kind: "dir",
   };
 }
 
