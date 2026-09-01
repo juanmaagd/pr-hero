@@ -35,12 +35,15 @@ import {
 import {
   type AdmissionContext,
   budgetDisabledWarningMessage,
+  budgetUnlimitedNoticeMessage,
   type CiGateSkipPlan,
   ciExitCode,
+  deriveCiBillingMode,
   planCiBudgetSkip,
   planCiReviewManualRequired,
   planCiReviewSkip,
   planCiSizeSkip,
+  resolveCiBudgetCeiling,
 } from "./ci-gates";
 import {
   appendCiOutputs,
@@ -1665,15 +1668,34 @@ async function reviewPr(
     CI: process.env.CI,
   });
   options = { ...options, scout, post, yes: options.yes || isCi };
+  // Issue #156: resolve the ceiling ONCE, here, and use this same value at
+  // the budget gate far below. Resolving twice invites the announcement and
+  // the gate drifting apart. Deliberately NOT folded back into
+  // `options.budgetUsd` — the metered default is a CI-gate policy, and
+  // leaking a 10 that the operator never typed into every other read of
+  // `options.budgetUsd` would make it look configured.
+  const ciBudgetCeiling = resolveCiBudgetCeiling({
+    configured: options.budgetUsd,
+    billingMode: deriveCiBillingMode(process.env),
+  });
   // Spec 3.1: a silent disable is indistinguishable from a passing gate, so
   // an EXPLICIT `--budget-usd <= 0` warns even though it never skips a run.
   // Emitted here (once, as soon as isCi/budgetUsd are both known) rather
   // than beside the budget-gate check below, which only runs at all when
-  // there IS an estimate to compare against.
+  // there IS an estimate to compare against. The subscription notice rides
+  // the same reasoning and the same placement, one register quieter: a
+  // resolved no-ceiling is not an operator mistake, but it is still a gate
+  // that did not run, and this repo does not ship those silently.
   if (isCi) {
-    const disabledWarning = budgetDisabledWarningMessage(options.budgetUsd);
+    const disabledWarning = budgetDisabledWarningMessage(
+      ciBudgetCeiling.budgetUsd,
+    );
     if (disabledWarning !== null) {
       log(formatWorkflowCommand("warning", disabledWarning));
+    }
+    const unlimitedNotice = budgetUnlimitedNoticeMessage(ciBudgetCeiling);
+    if (unlimitedNotice !== null) {
+      log(formatWorkflowCommand("notice", unlimitedNotice));
     }
   }
   // The WHOLE resolution, not just its dir: under the compiled binary the
@@ -2413,11 +2435,18 @@ async function reviewPr(
     // (the watcher's attempt counter) does not apply to an ephemeral CI
     // runner, and restructuring the cost estimate earlier is out of Phase
     // 3's scope.
-    if (isCi && options.budgetUsd !== undefined) {
+    // `ciBudgetCeiling.budgetUsd`, not `options.budgetUsd`: since issue #156
+    // an unset `--budget-usd` is a POLICY, not an absent number. It resolves
+    // to no ceiling on a subscription route (where `estimate.high` is a token
+    // figure and the cash cost is $0.00, so gating on it refused work over an
+    // overrun that cannot happen) and to the default ceiling on a metered one.
+    // `undefined` here still means the gate does not run — the announcement
+    // for that already fired at the resolution site above.
+    if (isCi && ciBudgetCeiling.budgetUsd !== undefined) {
       const budgetPlan = planCiBudgetSkip({
         isCi,
         estimatedCostUsd: estimate.high,
-        budgetUsd: options.budgetUsd,
+        budgetUsd: ciBudgetCeiling.budgetUsd,
         prNumber,
       });
       if (budgetPlan !== null) {

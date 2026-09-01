@@ -35,9 +35,9 @@ inputs:
     required: false
     default: '50'
   budget-usd:
-    description: 'Spend gate: skip the review when its estimated cost exceeds this USD ceiling. A value <= 0 disables the ceiling (still gated by the size limits above).'
+    description: 'Spend gate: skip the review when its estimated cost exceeds this USD ceiling. Leave unset to resolve the ceiling from the route billing mode - no ceiling on a Claude subscription (a run draws on quota, not a per-token invoice), a default ceiling on a metered ANTHROPIC_API_KEY route. An explicit value is honoured on any route; a value <= 0 disables the ceiling (still gated by the size limits above).'
     required: false
-    default: '10.00'
+    default: ''
   post:
     description: 'Publish findings as inline PR comments and a review'
     required: false
