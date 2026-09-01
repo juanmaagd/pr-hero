@@ -10,30 +10,34 @@ jobs:
     name: Build binaries
     strategy:
       matrix:
-        # `native` says whether the runner can EXECUTE what it just built, which
-        # is what decides if the smoke below can run. Only darwin-x64 cannot: it
-        # is cross-compiled on an arm64 macOS runner, and relying on Rosetta
-        # being present would make the gate flaky rather than honest. It ships
-        # covered by the three targets that do run, since the defect class this
-        # guards — asset resolution inside the virtual filesystem — is
-        # architecture-independent.
+        # EVERY runner here must be able to EXECUTE what it builds, because the
+        # smoke below runs the artifact before it is uploaded. That is why
+        # darwin-x64 builds on macos-15-intel rather than on the arm64
+        # macos-latest: cross-compiling it there would leave one of four
+        # published binaries never once executed — the exact gap this workflow
+        # exists to close — and leaning on Rosetta instead would make the gate
+        # flaky rather than honest.
+        #
+        # macos-15-intel is a standard GitHub-hosted label (its predecessor
+        # macos-13 was retired in December 2025), and standard runners are free
+        # and unlimited on public repositories.
+        #
+        # Keep this invariant when adding a target: pick a runner of the target's
+        # own architecture. test/packaging.test.ts parses this matrix and fails
+        # if any target is uploaded without being smoked.
         include:
           - os: macos-latest
             target: darwin-arm64
             bun_target: bun-darwin-arm64
-            native: true
-          - os: macos-latest
+          - os: macos-15-intel
             target: darwin-x64
             bun_target: bun-darwin-x64
-            native: false
           - os: ubuntu-latest
             target: linux-x64
             bun_target: bun-linux-x64
-            native: true
           - os: ubuntu-24.04-arm
             target: linux-arm64
             bun_target: bun-linux-arm64
-            native: true
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -64,7 +68,6 @@ jobs:
       # bundled assets must never reach a release page. That is exactly what
       # v1.0.0 did, and this job was green when it happened.
       - name: Compiled-binary smoke
-        if: matrix.native
         run: bun run scripts/compiled-smoke.ts ./pr-hero-${{ matrix.target }}
 
       - name: Upload binary artifact

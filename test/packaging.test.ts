@@ -184,6 +184,67 @@ describe("Packaging & distribution configuration", () => {
     expect(smokeAt).toBeLessThan(uploadAt);
   });
 
+  // The above checks that the smoke step EXISTS and comes first. It cannot see
+  // whether the step runs for every matrix leg — and the first version of this
+  // workflow shipped exactly that hole: darwin-x64 was gated behind
+  // `if: matrix.native` while `Upload binary artifact` had no condition at all,
+  // so one of four published binaries would still have reached users having
+  // never been executed once. A guard with a documented exemption is a guard
+  // that erodes: nothing failed, warned, or even grepped if a future target
+  // took the same exit "just for convenience".
+  //
+  // So this parses the workflow instead of reading it. The invariant is
+  // structural: every leg that uploads must also smoke.
+  test("every release target that is uploaded is also smoked", () => {
+    const release = Bun.YAML.parse(
+      readFileSync(path.join(rootDir, ".github", "workflows", "release.yml"), {
+        encoding: "utf-8",
+      }),
+    ) as {
+      jobs: Record<
+        string,
+        {
+          strategy?: { matrix?: { include?: Record<string, string>[] } };
+          steps: Record<string, unknown>[];
+        }
+      >;
+    };
+
+    const job = release.jobs["build-binaries"];
+    expect(job).toBeDefined();
+    const legs = job?.strategy?.matrix?.include ?? [];
+    expect(legs.length).toBeGreaterThan(0);
+
+    const step = (needle: string) =>
+      job?.steps.find((s) => String(s.name ?? "").includes(needle));
+    const smoke = step("Compiled-binary smoke");
+    const upload = step("Upload binary artifact");
+    expect(smoke).toBeDefined();
+    expect(upload).toBeDefined();
+
+    // Neither may carry a condition. An unconditional upload paired with a
+    // conditional smoke is precisely the shape that lets an unexecuted binary
+    // ship, and the asymmetry is invisible in a plain-text scan.
+    expect(smoke?.if).toBeUndefined();
+    expect(upload?.if).toBeUndefined();
+
+    // Every leg must name a runner of its own architecture, or the smoke on
+    // that leg cannot execute what it just built. Checked by shape rather than
+    // by an allowlist of labels so a runner-image migration does not need a
+    // test edit — only a cross-architecture pairing does.
+    for (const leg of legs) {
+      const wantsArm = leg.target?.endsWith("-arm64");
+      const runnerIsArm = /-arm\b|macos-latest|macos-1[4-9]$|macos-2\d$/.test(
+        leg.os ?? "",
+      );
+      expect({
+        target: leg.target,
+        os: leg.os,
+        ok: wantsArm === runnerIsArm,
+      }).toEqual({ target: leg.target, os: leg.os, ok: true });
+    }
+  });
+
   test("the compiled smoke exists and asserts on the virtual-filesystem root", () => {
     const smokePath = path.join(rootDir, "scripts", "compiled-smoke.ts");
     expect(existsSync(smokePath)).toBe(true);
