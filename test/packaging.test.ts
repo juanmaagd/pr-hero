@@ -145,6 +145,212 @@ describe("Packaging & distribution configuration", () => {
     expect(commands).not.toContain("bunx biome");
   });
 
+  // The scar: every gate above this one runs from SOURCE, where
+  // `import.meta.dir` names a real directory and the engine reports asset mode
+  // "dev". The published artifact is a Bun-compiled binary whose assets live at
+  // hashed paths inside a virtual filesystem, and no amount of `bun test` can
+  // reach that runtime. v1.0.0 shipped a binary whose `review` command failed
+  // for 100% of users — past 2466 green tests, a green lint, and a `doctor`
+  // that reported the prompt set healthy. release.yml built that binary and
+  // uploaded it without ever executing it once.
+  //
+  // These assertions exist so a future edit cannot quietly drop the one step
+  // that runs the thing users actually download.
+  test("both workflows run the compiled binary before trusting it", () => {
+    const ci = readFileSync(
+      path.join(rootDir, ".github", "workflows", "ci.yml"),
+      "utf-8",
+    );
+    expect(ci).toContain("bun run scripts/compiled-smoke.ts");
+
+    const release = readFileSync(
+      path.join(rootDir, ".github", "workflows", "release.yml"),
+      "utf-8",
+    );
+    // Passing the built path is the whole point: a smoke that compiled its own
+    // binary would prove nothing about the artifact being uploaded. Matched as
+    // a regex rather than a literal because the workflow's `${{ ... }}` reads
+    // to a linter as a template placeholder in the wrong kind of quotes.
+    expect(release).toMatch(
+      /bun run scripts\/compiled-smoke\.ts \.\/pr-hero-\$\{\{ matrix\.target \}\}/,
+    );
+
+    // Ordering is load-bearing, not cosmetic. A binary that cannot resolve its
+    // own bundled assets must fail the job BEFORE it reaches a release page.
+    const smokeAt = release.indexOf("scripts/compiled-smoke.ts");
+    const uploadAt = release.indexOf("Upload binary artifact");
+    expect(smokeAt).toBeGreaterThan(-1);
+    expect(uploadAt).toBeGreaterThan(-1);
+    expect(smokeAt).toBeLessThan(uploadAt);
+  });
+
+  // The above checks that the smoke step EXISTS and comes first. It cannot see
+  // whether the step runs for every matrix leg — and the first version of this
+  // workflow shipped exactly that hole: darwin-x64 was gated behind
+  // `if: matrix.native` while `Upload binary artifact` had no condition at all,
+  // so one of four published binaries would still have reached users having
+  // never been executed once. A guard with a documented exemption is a guard
+  // that erodes: nothing failed, warned, or even grepped if a future target
+  // took the same exit "just for convenience".
+  //
+  // So this parses the workflow instead of reading it. The invariant is
+  // structural: every leg that uploads must also smoke.
+  test("every release target that is uploaded is also smoked", () => {
+    const release = Bun.YAML.parse(
+      readFileSync(path.join(rootDir, ".github", "workflows", "release.yml"), {
+        encoding: "utf-8",
+      }),
+    ) as {
+      jobs: Record<
+        string,
+        {
+          strategy?: { matrix?: { include?: Record<string, string>[] } };
+          steps: Record<string, unknown>[];
+        }
+      >;
+    };
+
+    const job = release.jobs["build-binaries"];
+    expect(job).toBeDefined();
+    const legs = job?.strategy?.matrix?.include ?? [];
+    expect(legs.length).toBeGreaterThan(0);
+
+    const step = (needle: string) =>
+      job?.steps.find((s) => String(s.name ?? "").includes(needle));
+    const smoke = step("Compiled-binary smoke");
+    const upload = step("Upload binary artifact");
+    expect(smoke).toBeDefined();
+    expect(upload).toBeDefined();
+
+    // Neither may carry a condition. An unconditional upload paired with a
+    // conditional smoke is precisely the shape that lets an unexecuted binary
+    // ship, and the asymmetry is invisible in a plain-text scan.
+    expect(smoke?.if).toBeUndefined();
+    expect(upload?.if).toBeUndefined();
+
+    // Every leg must name a runner of its own architecture, or the smoke on
+    // that leg cannot execute what it just built. Checked by shape rather than
+    // by an allowlist of labels so a runner-image migration does not need a
+    // test edit — only a cross-architecture pairing does.
+    for (const leg of legs) {
+      const wantsArm = leg.target?.endsWith("-arm64");
+      const runnerIsArm = /-arm\b|macos-latest|macos-1[4-9]$|macos-2\d$/.test(
+        leg.os ?? "",
+      );
+      expect({
+        target: leg.target,
+        os: leg.os,
+        ok: wantsArm === runnerIsArm,
+      }).toEqual({ target: leg.target, os: leg.os, ok: true });
+    }
+  });
+
+  // The other half of "nothing ships". The smoke stops a BROKEN binary from
+  // being published; this stops a WORKING one from being cancelled. Without an
+  // explicit `fail-fast: false`, one leg failing to acquire its runner — a
+  // retired label, a rename, a capacity blip — cancels the other three
+  // in-flight legs, and a release that was fine on three architectures
+  // produces nothing at all.
+  test("one bad release leg cannot cancel the others", () => {
+    const release = Bun.YAML.parse(
+      readFileSync(path.join(rootDir, ".github", "workflows", "release.yml"), {
+        encoding: "utf-8",
+      }),
+    ) as {
+      jobs: Record<string, { strategy?: Record<string, unknown> }>;
+    };
+    expect(release.jobs["build-binaries"]?.strategy?.["fail-fast"]).toBe(false);
+  });
+
+  // Drift guard. The runbook described the release matrix as `macos-13` long
+  // after that image was retired, and nothing noticed — the finding that
+  // exposed it cited the stale line as evidence that a runner label had no
+  // corroboration anywhere else in the repo. A document that describes CI is
+  // only useful while it is true.
+  test("the release runbook names the runners the workflow actually uses", () => {
+    const release = Bun.YAML.parse(
+      readFileSync(path.join(rootDir, ".github", "workflows", "release.yml"), {
+        encoding: "utf-8",
+      }),
+    ) as {
+      jobs: Record<
+        string,
+        { strategy?: { matrix?: { include?: Record<string, string>[] } } }
+      >;
+    };
+    const runbook = readFileSync(
+      path.join(rootDir, "docs", "release-runbook.md"),
+      "utf-8",
+    );
+    const legs =
+      release.jobs["build-binaries"]?.strategy?.matrix?.include ?? [];
+    expect(legs.length).toBeGreaterThan(0);
+    for (const leg of legs) {
+      expect({
+        os: leg.os,
+        documented: runbook.includes(leg.os ?? ""),
+      }).toEqual({ os: leg.os, documented: true });
+    }
+  });
+
+  test("the compiled smoke exists and asserts on the virtual-filesystem root", () => {
+    const smokePath = path.join(rootDir, "scripts", "compiled-smoke.ts");
+    expect(existsSync(smokePath)).toBe(true);
+    const smoke = readFileSync(smokePath, "utf-8");
+    // `/$bunfs` is the marker for the entire defect class. A smoke that stopped
+    // checking for it would still pass while a leaked virtual path reached the
+    // terminal again.
+    expect(smoke).toContain("/$bunfs");
+    expect(smoke).toContain("--dry-run");
+  });
+
+  // PREVENTION, where the smoke above is only detection. Every defect in #154
+  // was the same line of code written in four places: a filesystem path derived
+  // from the module's own location. That is correct in dev and npm and
+  // meaningless in a compiled binary, where it resolves to /$bunfs/root — a
+  // virtual root that `existsSync` denies, `Bun.Glob` throws on, and no
+  // subprocess can read.
+  //
+  // src/assets.ts already declares itself "Authority for packaged-asset
+  // resolution and self-invocation. Single authority across dev, npm, and
+  // compiled runtimes." Until this test, that was a comment enforcing nothing,
+  // and four other files quietly did the same work incorrectly. This makes the
+  // header true.
+  //
+  // Scoped to the path-deriving members only. `import.meta.main` is the entry
+  // guard and is perfectly safe compiled — banning it would be cargo cult.
+  test("only src/assets.ts derives filesystem paths from import.meta", () => {
+    const offenders: Record<string, number> = {};
+    for (const rel of [
+      ...new Bun.Glob("src/**/*.ts").scanSync(rootDir),
+    ].sort()) {
+      // Comments are stripped for the same reason the `bunx biome` scar above
+      // strips them: this file's WHY comments SHOULD name the antipattern to
+      // explain the rule, and a raw substring scan would make documenting the
+      // hazard indistinguishable from committing it.
+      const code = readFileSync(path.join(rootDir, rel), "utf-8")
+        .split("\n")
+        .filter((line) => {
+          const t = line.trimStart();
+          return (
+            !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")
+          );
+        })
+        .join("\n");
+      const hits = code.match(/import\.meta\.(dir|url|path)\b/g);
+      if (hits) offenders[rel.replaceAll("\\", "/")] = hits.length;
+    }
+
+    // src/cli.ts keeps exactly ONE, and the count is pinned so a second cannot
+    // arrive unnoticed: `engineIdentity`'s `git rev-parse` for the engine's own
+    // revision, which sits AFTER an early return for compiled mode and is
+    // therefore unreachable in the runtime where it would be wrong.
+    expect(offenders).toEqual({
+      "src/assets.ts": expect.any(Number),
+      "src/cli.ts": 1,
+    });
+  });
+
   describe("action.yml — the official Composite Action (Pillar 3 task 5.1)", () => {
     const actionPath = path.join(rootDir, "action.yml");
 

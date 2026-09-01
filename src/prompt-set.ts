@@ -18,10 +18,6 @@ export const AGENT_NAMES = [
   "review-refuter",
 ] as const;
 
-export function agentFilesIn(agentsDir: string): string[] {
-  return AGENT_NAMES.map((name) => `${agentsDir}/${name}.md`);
-}
-
 export interface ParsedAgent {
   name: string;
   description: string;
@@ -136,12 +132,22 @@ export interface PromptSetIdentity {
 // `name` is the agents DIRECTORY basename, which is what the lab's `arm-a` /
 // `baseline` set names have always meant — two runs can share a fingerprint
 // and differ in nothing else, so the name is a label and the sha is the fact.
+//
+// `name` overrides that derivation, and the compiled binary is why: its
+// bundled set has no directory at all (the prompts are embedded at hashed,
+// flattened paths, and `agentsDir` is a display label there). It must still
+// report "default" — byte-identical to what dev and npm derive from
+// `prompts/default` — or one prompt set would name itself three ways and every
+// cross-run comparison of `prompt_set` would split into three rows. Passed
+// explicitly rather than string-munged out of the label, because a label is
+// prose and prose gets edited.
 export async function promptSetIdentity(
   agentsDir: string,
   files: string[],
+  name?: string,
 ): Promise<PromptSetIdentity> {
   return {
-    name: agentsDir.replace(/\/+$/, "").split("/").pop() ?? agentsDir,
+    name: name ?? agentsDir.replace(/\/+$/, "").split("/").pop() ?? agentsDir,
     sha256: await promptSetFingerprint(files),
   };
 }

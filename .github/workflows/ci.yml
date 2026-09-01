@@ -61,3 +61,14 @@ jobs:
       # linter, because it is trusted. test/packaging.test.ts pins this line.
       - name: Lint
         run: ./node_modules/.bin/biome check src test
+
+      # Everything above runs from SOURCE, where `import.meta.dir` names a real
+      # directory and the engine always reports asset mode "dev". The published
+      # artifact is a Bun-compiled binary whose assets live at hashed paths in a
+      # virtual filesystem, and no test above can reach that runtime. v1.0.0
+      # shipped a binary whose `review` failed for every user past a fully green
+      # version of this job. This step builds the artifact and runs it.
+      # Free: `--dry-run` returns before the capability gate, so no `claude`, no
+      # credentials and no network are involved, and nothing is spawned.
+      - name: Compiled-binary smoke
+        run: bun run scripts/compiled-smoke.ts

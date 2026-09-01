@@ -47,6 +47,7 @@ import {
 // preflight and not a runtime dependency on it (the same seam size-gate.ts
 // already uses for NumstatFile).
 import type { ConfigSources, LocalConfig } from "./preflight";
+import { agentFilePath } from "./preflight";
 import {
   parseAgentFile,
   parseAgentSource,
@@ -115,6 +116,18 @@ export interface PipelineInput {
   excludedPaths?: string[];
   gotchasPath: string;
   agentsDir: string;
+  // Logical agent filename -> readable path, present only when the prompt set
+  // is the compiled binary's BUNDLED one, where every prompt is embedded at a
+  // hashed, flattened path and `agentsDir` is a display label rather than a
+  // directory. OPTIONAL so every caller that really does have a directory
+  // stays unchanged.
+  //
+  // It ARRIVES as input and is never fetched here by calling
+  // resolveEngineAssets(): that call reads `import.meta.dir`, which under
+  // `bun test` always reports "dev", so resolving it internally would leave
+  // the compiled path exactly as untestable as it was when it shipped unable
+  // to load a single prompt.
+  agentFiles?: Record<string, string>;
   runDir: string;
   // Where the CALLER will write the final findings document after merging the
   // run envelope — the pipeline itself never writes it (it returns the
@@ -576,6 +589,21 @@ function refuterPrompt(batchJson: string, nonce: string): string {
   ].join("\n");
 }
 
+// Where an agent's prompt actually lives, for the three stages that read one.
+// A bare `path.join(input.agentsDir, file)` is correct for a directory and
+// impossible for the compiled binary's bundled set, whose prompts are embedded
+// at hashed, flattened paths — so the presence of `agentFiles` IS the
+// discriminator, and it is read here once instead of at each of the three call
+// sites.
+function agentPromptPath(input: PipelineInput, file: string): string {
+  return agentFilePath(
+    input.agentFiles
+      ? { kind: "bundled", dir: input.agentsDir, files: input.agentFiles }
+      : { kind: "dir", dir: input.agentsDir },
+    file,
+  );
+}
+
 // A conditional hunter's trigger, resolved against the ReviewSpec: the
 // "input" sentinel reads PipelineInput.parityTriggerPaths (the trigger PATHS
 // stay lab config; the spec only wires "this hunter is conditional").
@@ -1008,7 +1036,7 @@ async function execute(
   const hunterSpecs: Array<{ key: Hunter; spec: StepSpec; meta: StepMeta }> =
     [];
   for (const hunter of huntersAdmitted ? hunters : []) {
-    const agent = await parseAgentFile(path.join(input.agentsDir, hunter.file));
+    const agent = await parseAgentFile(agentPromptPath(input, hunter.file));
     const name = `hunter-${hunter.key}`;
     const systemPromptPath = path.join(stepsDir, `${name}.system.md`);
     // The rendered body is written run-dir-side as an audit artifact: the
@@ -1447,7 +1475,7 @@ async function runRefuter(
     `${batchJson}\n`,
   );
   const agent = await parseAgentFile(
-    path.join(input.agentsDir, options.agent.file),
+    agentPromptPath(input, options.agent.file),
   );
   // One shared body, written once: every step is the same agent asked about a
   // different finding.
@@ -1654,7 +1682,7 @@ async function runVerify(
     )}\n`,
   );
   const agent = await parseAgentFile(
-    path.join(input.agentsDir, options.agent.file),
+    agentPromptPath(input, options.agent.file),
   );
   const systemPromptPath = path.join(options.stepsDir, "verifier.system.md");
   await writeSystemPrompt(systemPromptPath, agent.body);

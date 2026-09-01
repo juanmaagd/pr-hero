@@ -187,8 +187,10 @@ describe("gc launchd paths", () => {
 
 describe("renderGcPlist", () => {
   const input = {
-    runtimePath: "/Users/x/.bun/bin/bun",
-    entryPath: "/Users/x/Desktop/pr-hero/src/cli.ts",
+    invocation: {
+      command: "/Users/x/.bun/bin/bun",
+      args: ["/Users/x/Desktop/pr-hero/src/cli.ts"],
+    },
     intervalSeconds: 21600,
     logPath: "/Users/x/.prhero/gc-launchd.log",
     pathEnv: "/opt/homebrew/bin:/usr/bin:/bin",
@@ -215,6 +217,25 @@ describe("renderGcPlist", () => {
       pathEnv: "/a&b:/c<d>:/usr/bin",
     });
     expect(plist).toContain("<string>/a&amp;b:/c&lt;d&gt;:/usr/bin</string>");
+  });
+
+  // A compiled binary contributes NO entry path — it IS the entry. The old
+  // fixed runtime+entry pair had no way to say that, so `gc install` rendered
+  // `<binary> /$bunfs/root/cli.ts gc`, which launchd ran every interval
+  // forever and the CLI rejected every time as an unknown command.
+  test("a compiled invocation puts the subcommand straight after the binary", () => {
+    const plist = renderGcPlist({
+      ...input,
+      invocation: { command: "/usr/local/bin/pr-hero", args: [] },
+    });
+    expect(plist).toContain(
+      "  <array>\n" +
+        "    <string>/usr/local/bin/pr-hero</string>\n" +
+        "    <string>gc</string>\n" +
+        "  </array>",
+    );
+    expect(plist).not.toContain("cli.ts");
+    expect(plist).not.toContain("$bunfs");
   });
 });
 
