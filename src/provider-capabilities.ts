@@ -651,13 +651,21 @@ export function exactBindingCapabilityIssues(
   // "subscription"; that leaves pricingApplicability at "not_applicable", so
   // the pricing_table_missing gate above structurally CANNOT catch an
   // unknown-billing route. The producer therefore derives
-  // cashCostAccountingValid from the ORIGINAL three-state mode and reports
-  // false for `unknown`, and this branch is what turns that fact into a
-  // refusal. It is reachable through the real producer (see
-  // test/production-runtime.test.ts "an unknown legacy billing mode blocks
-  // the exact-binding gate through the real producer"), and it also holds
-  // the pricingApplicability/cashCostAccountingValid field independence
-  // (src/execution/contracts.ts:235-237) for any future producer.
+  // cashCostAccountingValid from the THREE-STATE effective mode (#133's
+  // `effectiveBillingMode`, which is the transport's own mode for every kind
+  // except `provider_api_token`) and reports false for `unknown`, and this
+  // branch is what turns that fact into a refusal. It is reachable through
+  // the real producer (see test/production-runtime.test.ts "an unknown legacy
+  // billing mode blocks the exact-binding gate through the real producer"),
+  // and it also holds the pricingApplicability/cashCostAccountingValid field
+  // independence (src/execution/contracts.ts:235-237) for any future
+  // producer.
+  //
+  // #133 does not weaken this: the effective mode only ever replaces
+  // `unknown` with `metered`, and a metered route without pricing is caught
+  // by pricing_table_missing above instead. Nothing reaches "subscription"
+  // that did not already, so `unknown` still ends in a blocking refusal on
+  // one branch or the other.
   if (
     report.billing.pricingApplicability !== "required" &&
     !report.billing.cashCostAccountingValid

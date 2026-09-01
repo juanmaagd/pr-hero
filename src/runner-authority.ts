@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { RunnerBackend } from "./execution/contracts";
+import type { CredentialKind, RunnerBackend } from "./execution/contracts";
 import type { ResolvedRoutePlan } from "./model-routing";
 import type {
   ClaudeBinaryResolutionDeps,
@@ -14,6 +14,8 @@ import {
 import {
   type CredentialBroker,
   KeychainCredentialBroker,
+  OPENCODE_OAUTH_PROVIDER,
+  OpenCodeApiTokenBroker,
   OpenCodeAuthBroker,
 } from "./security/credential-broker";
 
@@ -52,9 +54,11 @@ export interface ResolvedBindingAuthority {
   readonly workspaceRoot: string;
   readonly canonicalCwd: string;
   readonly executableAllowlist: readonly ExecutableAllowlistEntry[];
-  readonly credentialKind:
-    | "claude_subscription_oauth"
-    | "opencode_chatgpt_oauth";
+  // #133: the full CredentialKind. This field used to re-declare a NARROWER
+  // union of its own, which was the single compile-time reason a metered
+  // provider route could not be bound — everything downstream (the harness,
+  // the projection, the capability report) already spoke the full type.
+  readonly credentialKind: CredentialKind;
   readonly credentialRef: string;
   readonly credentialBroker?: CredentialBroker;
   readonly bucketId: string;
@@ -266,8 +270,65 @@ export async function withClaudeDiscoveryAllowlist(
   };
 }
 
+// #133. WHICH credential a route runs on, decided from the backend AND the
+// provider. Backend alone is not enough: OpenCode serves exactly one provider
+// from a subscription (OPENCODE_OAUTH_PROVIDER) and everything else from a
+// metered API token, and those are different credentials with different
+// billing, different projection payloads and different rate-limit buckets.
+//
+// This is deliberately PROVIDER-KEYED and deliberately does NOT read the
+// credential store. The bounded, known limit that buys: an `openai` entry
+// holding an API key rather than an OAuth record still resolves to
+// `opencode_chatgpt_oauth` here, and is then refused by the OAuth broker's
+// existing `type !== "oauth"` lock (credential-broker.ts). That is a loud
+// failure with a one-line fix, not a silent metered run. Reading the store
+// here to disambiguate would put a credential read inside a pure routing
+// decision, and would make the answer depend on machine state the frozen
+// plan cannot record.
+//
+// WHY the default is `provider_api_token` rather than the subscription kind:
+// metered is the FAIL-CLOSED direction. A metered route with no pricing is
+// refused at the exact-binding gate (`pricing_table_missing`, blocking), so
+// the cost of guessing metered is a refusal. A route wrongly marked
+// subscription EXECUTES and reports `cashCostUsd: 0` over real spend — the
+// cost of guessing subscription is an unmetered bill nobody sees.
+export function credentialKindForRoute(
+  backend: RunnerBackend,
+  provider: string,
+): CredentialKind {
+  if (backend === "claude-code") {
+    return "claude_subscription_oauth";
+  }
+  if (backend === "opencode") {
+    return provider === OPENCODE_OAUTH_PROVIDER
+      ? "opencode_chatgpt_oauth"
+      : "provider_api_token";
+  }
+  // Exhaustive on purpose: a backend with no credential authority must not
+  // fall into the metered default by accident. It has no binding at all —
+  // resolveBindingAuthority refuses it a few lines below — and inventing a
+  // kind for it here would make that refusal look like a pricing problem.
+  throw new Error(`No credential authority is bound for backend "${backend}"`);
+}
+
+// The DEFAULT broker for an opencode route, derived from the same provider
+// that decided the kind. Exported because production-runtime.ts resolves the
+// plan's one shared broker (#149 keeps it a single instance) and must reach
+// the same answer: two copies of this pairing would be two chances to hand a
+// route a broker that refuses its kind — a failure that surfaces only at
+// projection time, inside a live run.
+export function openCodeCredentialBroker(provider: string): CredentialBroker {
+  return credentialKindForRoute("opencode", provider) === "provider_api_token"
+    ? new OpenCodeApiTokenBroker(provider)
+    : new OpenCodeAuthBroker();
+}
+
 export async function resolveBindingAuthority(
   backend: RunnerBackend,
+  // Required, not optional: an optional provider would default silently at
+  // every call site, and a silent default here picks the BILLING MODE. tsc
+  // finding all five call sites is the point — `bun test` would not.
+  provider: string,
   options: RunnerAuthorityOptions,
   deps: ResolveRunnerAuthorityDeps = {},
 ): Promise<BindingAuthorityResolution> {
@@ -294,7 +355,7 @@ export async function resolveBindingAuthority(
         workspaceRoot: options.workspaceRoot,
         canonicalCwd: options.workspaceRoot,
         executableAllowlist: verified.allowlist,
-        credentialKind: "claude_subscription_oauth",
+        credentialKind: credentialKindForRoute(backend, provider),
         credentialRef: "claude-code-credentials",
         ...(broker ? { credentialBroker: broker } : {}),
         bucketId: "claude-code",
@@ -322,6 +383,7 @@ export async function resolveBindingAuthority(
     if ("error" in verified) {
       return { error: verified.error };
     }
+    const credentialKind = credentialKindForRoute(backend, provider);
     return {
       binding: {
         backend,
@@ -329,10 +391,17 @@ export async function resolveBindingAuthority(
         workspaceRoot: options.workspaceRoot,
         canonicalCwd: options.workspaceRoot,
         executableAllowlist: verified.allowlist,
-        credentialKind: "opencode_chatgpt_oauth",
-        credentialRef: "opencode-auth",
+        credentialKind,
+        // #133: per-PROVIDER, because two providers on this one backend are
+        // two different credentials. `credentialRef` is half of
+        // `credentialFingerprint` (production-runtime.ts), which is what
+        // separates rate-limit buckets — a shared ref would pool an OAuth
+        // subscription's quota and a metered token's quota into one bucket
+        // and make both wrong.
+        credentialRef: `opencode-auth:${provider}`,
         credentialBroker:
-          options.credentialBrokers?.opencode ?? new OpenCodeAuthBroker(),
+          options.credentialBrokers?.opencode ??
+          openCodeCredentialBroker(provider),
         bucketId: "opencode",
       },
     };
@@ -354,6 +423,9 @@ export async function resolveRunnerAuthority(
 
   const result = await resolveBindingAuthority(
     "claude-code",
+    // The CLI-compatibility path is Claude-only by construction, and
+    // credentialKindForRoute ignores the provider for that backend.
+    "anthropic",
     resolvedOptions,
     deps,
   );

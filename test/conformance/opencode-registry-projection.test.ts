@@ -80,6 +80,7 @@ describe("the registry's default opencode launcher (#149)", () => {
     const launch = defaultOpenCodeLaunchServer({
       verifiedBinaryPath: "/opt/homebrew/bin/opencode",
       broker: broker.broker,
+      credentialKind: "opencode_chatgpt_oauth",
       baseEnv: {
         PATH: "/usr/bin",
         HOME: "/Users/operator",
@@ -103,6 +104,7 @@ describe("the registry's default opencode launcher (#149)", () => {
     const launch = defaultOpenCodeLaunchServer({
       verifiedBinaryPath: "/opt/homebrew/bin/opencode",
       broker: broker.broker,
+      credentialKind: "opencode_chatgpt_oauth",
       baseEnv: { PATH: "/usr/bin" },
       spawnFn: spawn.spawnFn,
       killFn: () => {},
