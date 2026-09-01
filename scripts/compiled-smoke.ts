@@ -20,7 +20,7 @@
 // costs a compile and about a second.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -97,6 +97,18 @@ function makeFixtureRepo(): string {
   // commit signing must be off: a smoke that prompts for a passphrase hangs CI.
   git("config", "commit.gpgsign", "false");
 
+  // A real repository has been through `pr-hero init`, and the engine refuses
+  // to review without a non-empty gotchas file on purpose: an empty one makes
+  // the whole review a zero-cost no-op that LOOKS like a clean result. Writing
+  // one here reproduces an initialised repo rather than weakening the smoke —
+  // without it the run dies on that guard and never reaches the prompt-set
+  // resolution this exists to exercise.
+  mkdirSync(path.join(dir, ".prhero"), { recursive: true });
+  writeFileSync(
+    path.join(dir, ".prhero", "gotchas.md"),
+    "# Repo gotchas\n\n- smoke: this fixture exists only to boot the engine.\n",
+  );
+
   writeFileSync(path.join(dir, "seed.ts"), "export const seed = 1;\n");
   git("add", "-A");
   git("commit", "--quiet", "-m", "seed");
@@ -126,10 +138,25 @@ async function main(): Promise<number> {
   );
 
   const repo = makeFixtureRepo();
+  // --out, not a fabricated `origin`. pr-hero keys the global home by origin
+  // URL, so a fixture with an invented remote would litter ~/.prhero/repos on
+  // every run, on CI and on a developer's machine alike. --out keeps the whole
+  // smoke inside temp directories it also removes. It must live OUTSIDE the
+  // reviewed repo, hence a sibling rather than a subdirectory.
+  const outDir = mkdtempSync(path.join(os.tmpdir(), "prhero-smoke-out-"));
   let passed = true;
 
   const review = run(
-    [binary, "review", "--base", "HEAD~1", "--dry-run", "--yes"],
+    [
+      binary,
+      "review",
+      "--base",
+      "HEAD~1",
+      "--dry-run",
+      "--yes",
+      "--out",
+      outDir,
+    ],
     repo,
   );
   passed =
@@ -165,6 +192,7 @@ async function main(): Promise<number> {
     ) && passed;
 
   rmSync(repo, { recursive: true, force: true });
+  rmSync(outDir, { recursive: true, force: true });
   if (provided === undefined) {
     rmSync(path.dirname(binary), { recursive: true, force: true });
   }
