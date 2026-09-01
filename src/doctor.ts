@@ -6,7 +6,16 @@ import {
   inspectMcpRegistration,
   inspectSkillsSync,
 } from "./agent-env";
-import { resolveEngineAssets, selfInvocation } from "./assets";
+import {
+  type EngineAssets,
+  resolveEngineAssets,
+  selfInvocation,
+} from "./assets";
+import {
+  agentFilePath,
+  localReviewSpec,
+  resolveAgentsDirSetting,
+} from "./preflight";
 import type { ProviderCapabilityReport } from "./provider-capabilities";
 import {
   type CheckSystemToolsOptions,
@@ -36,6 +45,12 @@ export interface RunDoctorOptions {
   checkToolsOptions?: CheckSystemToolsOptions;
   exists?: (p: string) => boolean;
   readFile?: (p: string) => string | undefined;
+  // The engine's own packaged assets. Injectable for the same reason
+  // preflight.ts's resolveAgentsDirSetting takes them: the real
+  // detectAssetMode() reads import.meta.dir, which under `bun test` always
+  // answers "dev", so the COMPILED bundle — the one that shipped broken — is
+  // unreachable from an offline test without this seam.
+  assets?: EngineAssets;
   // §11/D1-09: doctor consumes the SAME ProviderCapabilityReport execution
   // gates on. Injectable so offline tests stay deterministic; the CLI's
   // doctor command passes the real producer. Opt-in rather than default-on
@@ -92,6 +107,11 @@ export async function runDoctor(
   const repoDir = options.repoRoot ?? options.cwd;
 
   const checks: DoctorCheckItem[] = [];
+
+  // ONE resolution, shared by the bundled-prompt check below and the skills
+  // sync check further down: two calls would let an injected bundle disagree
+  // with the real one inside a single report.
+  const assets = options.assets ?? resolveEngineAssets();
 
   // 1. System tools
   const tools = await checkSystemTools({
@@ -241,11 +261,64 @@ export async function runDoctor(
       });
     }
   } else {
-    checks.push({
-      name: "agents_dir",
-      severity: "healthy",
-      message: "Using bundled prompt set (default)",
+    // This branch used to push "Using bundled prompt set (default)" and
+    // healthy, unconditionally, having verified nothing at all — which is how
+    // `doctor` printed a green agents_dir on the machine where the next
+    // `review` died with `agents dir does not exist: /$bunfs/root`. A doctor
+    // that reports health it never checked is worse than no doctor, because it
+    // is the thing an operator trusts before spending money.
+    //
+    // Resolved through preflight's resolveAgentsDirSetting/agentFilePath, the
+    // same pair the review itself reads prompts with: a second way to answer
+    // "where is the bundled set" is a second way to be wrong, and only one of
+    // the two would be the one the review uses.
+    const bundled = resolveAgentsDirSetting({
+      cwd: repoDir ?? process.cwd(),
+      assets,
     });
+    // READ, rather than exists() followed by a read. Reading is the operation
+    // the review actually performs, so it is the one whose failure matters; an
+    // existence probe in front of it only adds a second verdict on the same
+    // file. An empty body counts as unreadable: a zero-byte prompt gives a
+    // hunter an empty system prompt, which spends money and finds nothing.
+    const unreadable: string[] = [];
+    const bundledSpec = localReviewSpec();
+    for (const agent of bundledSpec.agents) {
+      try {
+        const body = readFile(agentFilePath(bundled, agent.file));
+        if (body === undefined || body.trim().length === 0) {
+          unreadable.push(agent.file);
+        }
+      } catch {
+        // agentFilePath throws when the spec names a prompt this build never
+        // embedded — manifest/spec drift, and the report has to survive it as
+        // a finding rather than take the whole doctor down with it.
+        unreadable.push(agent.file);
+      }
+    }
+
+    if (unreadable.length > 0) {
+      checks.push({
+        name: "agents_dir",
+        severity: "blocking",
+        // LOGICAL filenames only. The embedded path is
+        // "/$bunfs/root/<name>-<hash>.md", which exists on no machine and
+        // sends the reader hunting a filesystem bug instead of a build one.
+        message: `Bundled prompt set is incomplete: cannot read ${unreadable.join(", ")}`,
+        hint:
+          "This build cannot review anything. Reinstall the engine with " +
+          "'pr-hero upgrade', or set \"agents_dir\" in .prhero/config.json to " +
+          "a checked-out prompt set.",
+      });
+    } else {
+      checks.push({
+        name: "agents_dir",
+        severity: "healthy",
+        message:
+          `Using bundled prompt set (default): ${bundled.dir} — ` +
+          `${bundledSpec.agents.length} prompts read`,
+      });
+    }
   }
 
   // 3. Gotchas check (only when repo root is supplied or discovered)
@@ -296,7 +369,6 @@ export async function runDoctor(
     which: options.checkToolsOptions?.which,
   });
 
-  const assets = resolveEngineAssets();
   const self = selfInvocation();
   const mcpReg = {
     command: self.command,
