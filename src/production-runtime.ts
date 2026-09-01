@@ -491,14 +491,7 @@ export async function probeBindingsReadiness(
   }
 
   const plan = freezeRoutePlan(options.plan);
-  const registry =
-    options.registry ??
-    createDefaultTransportRegistry({
-      mode: options.mode,
-      evidence: options.evidence,
-      binaryPath: options.binaryPath,
-      env: options.env,
-    });
+  const registry = options.registry ?? productionFallbackRegistry(options);
   const leaseTracker = new DefaultActiveTransportLeaseTracker();
   const bindings = await resolveFrozenBindings(
     plan,
@@ -931,14 +924,7 @@ export async function createProductionRuntime(
   }
 
   const plan = freezeRoutePlan(options.plan);
-  const registry =
-    options.registry ??
-    createDefaultTransportRegistry({
-      mode: options.mode,
-      evidence: options.evidence,
-      binaryPath: options.binaryPath,
-      env: options.env,
-    });
+  const registry = options.registry ?? productionFallbackRegistry(options);
 
   const leaseTracker = new DefaultActiveTransportLeaseTracker();
   const bindings = await resolveFrozenBindings(
@@ -1010,3 +996,30 @@ export function createClaudeCompatibilityRunner(
 }
 
 export type { BindingAuthorityResolution, ResolvedBindingAuthority };
+
+// #149, second round: the registry a caller gets when it supplies none. Shared
+// by both fallbacks because they had drifted into the same defect twice — the
+// caller supplied `credentialBrokers` and the registry dropped it, so the
+// binding authority got the caller broker (runner-authority.ts:335) and the
+// server that actually runs the inference got a fresh real one. Found by
+// pr-hero own review of the first fix, which patched only the third site.
+export function productionFallbackRegistry(options: {
+  readonly mode?: "production" | "conformance";
+  readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
+  readonly binaryPath?: string;
+  readonly env?: Record<string, string>;
+  readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
+}): TransportRegistry {
+  return createDefaultTransportRegistry({
+    mode: options.mode,
+    evidence: options.evidence,
+    binaryPath: options.binaryPath,
+    env: options.env,
+    // Forwarded only when the caller actually supplied one. Substituting a
+    // fresh broker here would erase the difference between "no preference"
+    // and "use THIS one", which is the whole defect.
+    ...(options.credentialBrokers?.opencode === undefined
+      ? {}
+      : { credentialBroker: options.credentialBrokers.opencode }),
+  });
+}

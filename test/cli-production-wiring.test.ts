@@ -11,6 +11,7 @@ import {
 import {
   d1_11EvidenceFromExactBinding,
   prepareProductionAdmissionContext,
+  productionFallbackRegistry,
 } from "../src/production-runtime";
 import {
   admitRoutePlan,
@@ -209,6 +210,33 @@ describe("CLI production wiring (verify C1/C3)", () => {
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  // #149, second round: prepareProductionAdmissionContext was fixed while the
+  // two `options.registry ?? createDefaultTransportRegistry(...)` fallbacks
+  // kept dropping `credentialBrokers` — so a caller that supplies a broker but
+  // no registry still got the fake at the binding authority and a real one at
+  // the server. Found by pr-hero own review of the first fix.
+  test("the fallback registry carries the caller opencode broker", () => {
+    const injected = {
+      project: async () => {
+        throw new Error("not called in this test");
+      },
+    };
+    const registry = productionFallbackRegistry({
+      mode: "production",
+      credentialBrokers: { opencode: injected },
+    }) as DefaultTransportRegistry;
+    expect(registry.openCodeCredentialBroker).toBe(injected);
+  });
+
+  test("the fallback registry supplies no broker when the caller did not", () => {
+    const registry = productionFallbackRegistry({
+      mode: "production",
+    }) as DefaultTransportRegistry;
+    // Absent, not a stand-in: the registry own default is then the single
+    // source, and inventing one here would hide a caller that meant to inject.
+    expect(registry.openCodeCredentialBroker).toBeUndefined();
   });
 
   test("resolveProductionRoutePlanAtConfirm wires mixed Claude/OpenCode production admission", async () => {
