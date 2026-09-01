@@ -195,6 +195,53 @@ describe("Packaging & distribution configuration", () => {
     expect(smoke).toContain("--dry-run");
   });
 
+  // PREVENTION, where the smoke above is only detection. Every defect in #154
+  // was the same line of code written in four places: a filesystem path derived
+  // from the module's own location. That is correct in dev and npm and
+  // meaningless in a compiled binary, where it resolves to /$bunfs/root — a
+  // virtual root that `existsSync` denies, `Bun.Glob` throws on, and no
+  // subprocess can read.
+  //
+  // src/assets.ts already declares itself "Authority for packaged-asset
+  // resolution and self-invocation. Single authority across dev, npm, and
+  // compiled runtimes." Until this test, that was a comment enforcing nothing,
+  // and four other files quietly did the same work incorrectly. This makes the
+  // header true.
+  //
+  // Scoped to the path-deriving members only. `import.meta.main` is the entry
+  // guard and is perfectly safe compiled — banning it would be cargo cult.
+  test("only src/assets.ts derives filesystem paths from import.meta", () => {
+    const offenders: Record<string, number> = {};
+    for (const rel of [
+      ...new Bun.Glob("src/**/*.ts").scanSync(rootDir),
+    ].sort()) {
+      // Comments are stripped for the same reason the `bunx biome` scar above
+      // strips them: this file's WHY comments SHOULD name the antipattern to
+      // explain the rule, and a raw substring scan would make documenting the
+      // hazard indistinguishable from committing it.
+      const code = readFileSync(path.join(rootDir, rel), "utf-8")
+        .split("\n")
+        .filter((line) => {
+          const t = line.trimStart();
+          return (
+            !t.startsWith("//") && !t.startsWith("*") && !t.startsWith("/*")
+          );
+        })
+        .join("\n");
+      const hits = code.match(/import\.meta\.(dir|url|path)\b/g);
+      if (hits) offenders[rel.replaceAll("\\", "/")] = hits.length;
+    }
+
+    // src/cli.ts keeps exactly ONE, and the count is pinned so a second cannot
+    // arrive unnoticed: `engineIdentity`'s `git rev-parse` for the engine's own
+    // revision, which sits AFTER an early return for compiled mode and is
+    // therefore unreachable in the runtime where it would be wrong.
+    expect(offenders).toEqual({
+      "src/assets.ts": expect.any(Number),
+      "src/cli.ts": 1,
+    });
+  });
+
   describe("action.yml — the official Composite Action (Pillar 3 task 5.1)", () => {
     const actionPath = path.join(rootDir, "action.yml");
 
