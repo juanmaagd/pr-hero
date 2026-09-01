@@ -145,6 +145,56 @@ describe("Packaging & distribution configuration", () => {
     expect(commands).not.toContain("bunx biome");
   });
 
+  // The scar: every gate above this one runs from SOURCE, where
+  // `import.meta.dir` names a real directory and the engine reports asset mode
+  // "dev". The published artifact is a Bun-compiled binary whose assets live at
+  // hashed paths inside a virtual filesystem, and no amount of `bun test` can
+  // reach that runtime. v1.0.0 shipped a binary whose `review` command failed
+  // for 100% of users — past 2466 green tests, a green lint, and a `doctor`
+  // that reported the prompt set healthy. release.yml built that binary and
+  // uploaded it without ever executing it once.
+  //
+  // These assertions exist so a future edit cannot quietly drop the one step
+  // that runs the thing users actually download.
+  test("both workflows run the compiled binary before trusting it", () => {
+    const ci = readFileSync(
+      path.join(rootDir, ".github", "workflows", "ci.yml"),
+      "utf-8",
+    );
+    expect(ci).toContain("bun run scripts/compiled-smoke.ts");
+
+    const release = readFileSync(
+      path.join(rootDir, ".github", "workflows", "release.yml"),
+      "utf-8",
+    );
+    // Passing the built path is the whole point: a smoke that compiled its own
+    // binary would prove nothing about the artifact being uploaded. Matched as
+    // a regex rather than a literal because the workflow's `${{ ... }}` reads
+    // to a linter as a template placeholder in the wrong kind of quotes.
+    expect(release).toMatch(
+      /bun run scripts\/compiled-smoke\.ts \.\/pr-hero-\$\{\{ matrix\.target \}\}/,
+    );
+
+    // Ordering is load-bearing, not cosmetic. A binary that cannot resolve its
+    // own bundled assets must fail the job BEFORE it reaches a release page.
+    const smokeAt = release.indexOf("scripts/compiled-smoke.ts");
+    const uploadAt = release.indexOf("Upload binary artifact");
+    expect(smokeAt).toBeGreaterThan(-1);
+    expect(uploadAt).toBeGreaterThan(-1);
+    expect(smokeAt).toBeLessThan(uploadAt);
+  });
+
+  test("the compiled smoke exists and asserts on the virtual-filesystem root", () => {
+    const smokePath = path.join(rootDir, "scripts", "compiled-smoke.ts");
+    expect(existsSync(smokePath)).toBe(true);
+    const smoke = readFileSync(smokePath, "utf-8");
+    // `/$bunfs` is the marker for the entire defect class. A smoke that stopped
+    // checking for it would still pass while a leaked virtual path reached the
+    // terminal again.
+    expect(smoke).toContain("/$bunfs");
+    expect(smoke).toContain("--dry-run");
+  });
+
   describe("action.yml — the official Composite Action (Pillar 3 task 5.1)", () => {
     const actionPath = path.join(rootDir, "action.yml");
 

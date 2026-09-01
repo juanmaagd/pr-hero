@@ -10,19 +10,30 @@ jobs:
     name: Build binaries
     strategy:
       matrix:
+        # `native` says whether the runner can EXECUTE what it just built, which
+        # is what decides if the smoke below can run. Only darwin-x64 cannot: it
+        # is cross-compiled on an arm64 macOS runner, and relying on Rosetta
+        # being present would make the gate flaky rather than honest. It ships
+        # covered by the three targets that do run, since the defect class this
+        # guards — asset resolution inside the virtual filesystem — is
+        # architecture-independent.
         include:
           - os: macos-latest
             target: darwin-arm64
             bun_target: bun-darwin-arm64
+            native: true
           - os: macos-latest
             target: darwin-x64
             bun_target: bun-darwin-x64
+            native: false
           - os: ubuntu-latest
             target: linux-x64
             bun_target: bun-linux-x64
+            native: true
           - os: ubuntu-24.04-arm
             target: linux-arm64
             bun_target: bun-linux-arm64
+            native: true
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -46,6 +57,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           bun build --compile --target=${{ matrix.bun_target }} --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define __PRHERO_VERSION__="\"${VERSION}\"" src/cli.ts --outfile pr-hero-${{ matrix.target }}
+
+      # Runs THE ARTIFACT ABOUT TO BE UPLOADED, not a rebuild of it: a smoke
+      # that compiles its own binary would prove nothing about this one. Placed
+      # before the upload on purpose — a binary that cannot resolve its own
+      # bundled assets must never reach a release page. That is exactly what
+      # v1.0.0 did, and this job was green when it happened.
+      - name: Compiled-binary smoke
+        if: matrix.native
+        run: bun run scripts/compiled-smoke.ts ./pr-hero-${{ matrix.target }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
