@@ -418,6 +418,11 @@ export class DefaultTransportRegistry implements TransportRegistry {
             },
             billing: {
               mode: "subscription",
+              // #137 leaves this hardcoded: no model id is in scope. This is
+              // the synthetic report for a backend whose transport could not
+              // be CONSTRUCTED (OpenCodeProductionGatedError), so there is no
+              // route, no client and no model behind it — and the report is
+              // already blocking on `d1_11_production_gated`.
               pricingReady: false,
             },
             issues: [
