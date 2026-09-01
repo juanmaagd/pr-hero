@@ -1291,8 +1291,10 @@ describe("parseLockPid", () => {
 
 describe("renderWatchPlist", () => {
   const input = {
-    runtimePath: "/Users/x/.bun/bin/bun",
-    entryPath: "/Users/x/Desktop/pr-hero/src/cli.ts",
+    invocation: {
+      command: "/Users/x/.bun/bin/bun",
+      args: ["/Users/x/Desktop/pr-hero/src/cli.ts"],
+    },
     intervalSeconds: 900,
     logPath: "/Users/x/.prhero/launchd.log",
     pathEnv: "/opt/homebrew/bin:/usr/bin:/bin",
@@ -1332,6 +1334,27 @@ describe("renderWatchPlist", () => {
       pathEnv: "/a&b:/c<d>:/usr/bin",
     });
     expect(plist).toContain("<string>/a&amp;b:/c&lt;d&gt;:/usr/bin</string>");
+  });
+
+  // A compiled binary contributes NO entry path — it IS the entry. The old
+  // fixed runtime+entry pair could not say that, so `watch install` rendered
+  // `<binary> /$bunfs/root/cli.ts watch --once`; launchd ran it every
+  // interval and the CLI rejected the path as an unknown command every time,
+  // into a log nobody reads, while install reported success.
+  test("a compiled invocation puts the subcommand straight after the binary", () => {
+    const plist = renderWatchPlist({
+      ...input,
+      invocation: { command: "/usr/local/bin/pr-hero", args: [] },
+    });
+    expect(plist).toContain(
+      "  <array>\n" +
+        "    <string>/usr/local/bin/pr-hero</string>\n" +
+        "    <string>watch</string>\n" +
+        "    <string>--once</string>\n" +
+        "  </array>",
+    );
+    expect(plist).not.toContain("cli.ts");
+    expect(plist).not.toContain("$bunfs");
   });
 });
 
@@ -1722,8 +1745,7 @@ describe("removeWatchRepo", () => {
 describe("watch status pure pieces", () => {
   test("parsePlistInterval round-trips renderWatchPlist", () => {
     const plist = renderWatchPlist({
-      runtimePath: "/b/bun",
-      entryPath: "/x/cli.ts",
+      invocation: { command: "/b/bun", args: ["/x/cli.ts"] },
       intervalSeconds: 900,
       logPath: "/x/l.log",
       pathEnv: "/usr/bin",

@@ -9,6 +9,7 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
+import type { SelfInvocation } from "./assets";
 import { type PrheroLayout, prheroLayout } from "./home-preflight";
 import { PR_COMMENT_MARKER_PREFIX } from "./pr-preflight";
 import { CliUsageError, isFullCommitId, type NumstatFile } from "./preflight";
@@ -1055,13 +1056,20 @@ export function parseLockPid(raw: string): number | null {
 export const WATCH_LAUNCHD_LABEL = "io.prhero.watch";
 
 export interface WatchPlistInput {
-  // ABSOLUTE runtime + entry (the running bun binary and src/cli.ts), never
-  // a bare `pr-hero`: launchd starts agents with a bare-bones PATH
-  // (/usr/bin:/bin) that has never heard of bun, and a PATH lookup that
-  // works in every terminal is exactly the kind of thing that only fails
-  // under launchd at 3am.
-  runtimePath: string;
-  entryPath: string;
+  // The engine's OWN invocation (assets.ts's selfInvocation()), never a fixed
+  // runtime + entry-script pair and never a bare `pr-hero`. Two traps, one
+  // field:
+  //
+  // launchd starts agents with a bare-bones PATH (/usr/bin:/bin) that has
+  // never heard of bun, so a name that resolves in every terminal resolves in
+  // nothing launchd starts — selfInvocation answers absolute on both halves.
+  //
+  // And a compiled binary IS the entry: it contributes no script path at all.
+  // The pair could not say that, so it rendered `<binary> /$bunfs/root/cli.ts
+  // watch --once`, whose second argument exists on no machine. launchd ran it
+  // every interval, the CLI rejected the path as an unknown command every
+  // time, into a log nobody reads — and `watch install` reported success.
+  invocation: SelfInvocation;
   intervalSeconds: number;
   // launchd's stdout/stderr for the tick process — the SEPARATE launchd.log,
   // so the spawned review's progress noise can never land in watch.log and
@@ -1074,6 +1082,7 @@ export interface WatchPlistInput {
 }
 
 export function renderWatchPlist(input: WatchPlistInput): string {
+  const programArguments = [input.invocation.command, ...input.invocation.args];
   const lines = [
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`,
@@ -1083,10 +1092,9 @@ export function renderWatchPlist(input: WatchPlistInput): string {
     `  <string>${WATCH_LAUNCHD_LABEL}</string>`,
     `  <key>ProgramArguments</key>`,
     `  <array>`,
-    `    <string>${xmlEscape(input.runtimePath)}</string>`,
-    `    <string>${xmlEscape(input.entryPath)}</string>`,
-    `    <string>watch</string>`,
-    `    <string>--once</string>`,
+    ...[...programArguments, "watch", "--once"].map(
+      (arg) => `    <string>${xmlEscape(arg)}</string>`,
+    ),
     `  </array>`,
     `  <key>StartInterval</key>`,
     `  <integer>${input.intervalSeconds}</integer>`,

@@ -7,6 +7,7 @@
 // Skip an in-flight tree (a live pid on the sibling lock). Never rm -rf.
 
 import path from "node:path";
+import type { SelfInvocation } from "./assets";
 import { GC_TTL_HOURS, prheroLayout } from "./home-preflight";
 
 export type PrLifecycle = "open" | "merged" | "closed" | "unknown";
@@ -120,14 +121,25 @@ export function gcLaunchdLogPath(home: string): string {
 }
 
 export interface GcPlistInput {
-  runtimePath: string;
-  entryPath: string;
+  // The engine's OWN invocation (assets.ts's selfInvocation()), not a fixed
+  // runtime + entry-script pair. A compiled binary IS the entry and
+  // contributes no script path at all, which the pair had no way to say: it
+  // rendered `<binary> /$bunfs/root/cli.ts gc`, a path that exists on no
+  // machine, and launchd re-ran that unknown-command failure every interval
+  // forever while `gc install` reported success.
+  //
+  // Absolute by construction (selfInvocation resolves both halves), which is
+  // what launchd needs: it starts agents with a bare-bones PATH
+  // (/usr/bin:/bin) that has never heard of bun or pr-hero, so a bare name
+  // that resolves in every terminal resolves in nothing launchd starts.
+  invocation: SelfInvocation;
   intervalSeconds: number;
   logPath: string;
   pathEnv: string;
 }
 
 export function renderGcPlist(input: GcPlistInput): string {
+  const programArguments = [input.invocation.command, ...input.invocation.args];
   const lines = [
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`,
@@ -137,9 +149,9 @@ export function renderGcPlist(input: GcPlistInput): string {
     `  <string>${GC_LAUNCHD_LABEL}</string>`,
     `  <key>ProgramArguments</key>`,
     `  <array>`,
-    `    <string>${xmlEscape(input.runtimePath)}</string>`,
-    `    <string>${xmlEscape(input.entryPath)}</string>`,
-    `    <string>gc</string>`,
+    ...[...programArguments, "gc"].map(
+      (arg) => `    <string>${xmlEscape(arg)}</string>`,
+    ),
     `  </array>`,
     `  <key>StartInterval</key>`,
     `  <integer>${input.intervalSeconds}</integer>`,

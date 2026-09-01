@@ -10,19 +10,55 @@ defects — stuck loading latches, missing cleanups, re-entrancy, stalls — and
 style or convention. It is an **assistant, not a merge gate**: every report closes with that
 disclaimer, and nothing in this tool blocks a merge.
 
+## Requirements
+
+pr-hero does not call any model API of its own. It **spawns the Claude Code CLI as a subprocess** and
+inherits that CLI's authentication. `claude` is the engine; everything else here is plumbing.
+
+| Dependency | Needed for | Without it |
+| --- | --- | --- |
+| **Claude Code CLI**, installed *and authenticated* | everything | nothing runs — it is the engine |
+| **git** | everything | nothing runs |
+| **Bun ≥ 1.3** on `PATH` | install options B and C only | option A carries its own runtime |
+| **GitHub CLI (`gh`)**, authenticated | `review --pr`, `--post`, `watch`, `reverts`, `corpus` | local review still works in full |
+| **codegraph** | optional code intelligence | hunters navigate with git and grep, with less structural context |
+
+Run `pr-hero doctor` first: it checks every one of these and prints what is missing. The one thing it
+cannot check is Bun — on an npm or source install the launcher itself is a Bun script, so a missing
+Bun fails *before* any pr-hero code runs, with `env: bun: No such file or directory`. Install Bun
+(`brew install oven-sh/bun/bun`, or `curl -fsSL https://bun.sh/install | bash`) or use option A,
+whose binary needs no Bun on your machine.
+
+### What a review bills against
+
+pr-hero inherits whatever authentication your `claude` CLI already uses:
+
+- **Signed in with a Claude subscription** → runs consume your **subscription quota**. No per-token
+  invoice arrives.
+- **`ANTHROPIC_API_KEY` exported in the environment** → `claude` picks it up and the same runs are
+  **billed as API usage**.
+
+The dollar figures pr-hero prints — the cost band before a run, `pr-hero usage` after one — are
+always a **token-derived estimate**, because that is the only unit comparable across both models. On
+a subscription, read them as "how much of my window will this consume", not as a bill. If you keep an
+`ANTHROPIC_API_KEY` in a project `.env`, be deliberate about sourcing it into the shell you launch
+pr-hero from: that single step is what moves a run from quota to invoice.
+
 ## Installation
 
 ```bash
-# Option A: Standalone binary (macOS / Linux, zero external runtime dependency)
+# Option A: Standalone binary (macOS / Linux, bundles its own Bun — still needs claude and git)
 curl -fsSL https://raw.githubusercontent.com/juanmaagd/pr-hero/main/install.sh | bash
 
-# Option B: Global npm install (requires Bun >= 1.3 on PATH)
+# Option B: Global npm install (requires Bun >= 1.3 already on PATH)
 npm install -g pr-hero
 
 # Option C: From source / development
 git clone https://github.com/juanmaagd/pr-hero.git && cd pr-hero
 bun install && bun link
 ```
+
+See [Requirements](#requirements) above — `claude` and `git` are needed by every option.
 
 ## Quick start
 

@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { resolveEngineAssets } from "../src/assets";
 import {
   type AdmissionRecord,
   serializeAdmissionRecord,
@@ -28,6 +29,7 @@ import {
   computeDroppedFindingIds,
   createRunDir,
   deriveEngineIdentity,
+  engineIdentity,
   type InlinePostOutcome,
   ingestReviewMetrics,
   loadEffectiveConfig,
@@ -3337,6 +3339,34 @@ describe("deriveEngineIdentity", () => {
       name: "pr-hero",
       version: "0.0.0",
     });
+  });
+});
+
+// The compiled binary's half of C4 O-0. `detectAssetMode()` reads
+// `import.meta.dir`, which under `bun test` always reports "dev", so the
+// compiled branch is unreachable without injecting the assets — which is
+// exactly how a binary that died with `ENOENT: /$bunfs/package.json` on
+// every `upgrade` walked past the whole suite.
+describe("engineIdentity", () => {
+  const assets = resolveEngineAssets();
+
+  test("compiled mode takes the baked version and names no revision", async () => {
+    // The revision assertion is the one that proves the spawn was SKIPPED
+    // rather than merely tolerated: this checkout is a git repository, so a
+    // compiled branch that still shelled out would come back with a real sha.
+    expect(
+      await engineIdentity({
+        ...assets,
+        mode: "compiled",
+        version: "9.9.9-baked",
+      }),
+    ).toEqual({ name: "pr-hero", version: "9.9.9-baked" });
+  });
+
+  test("the version is the assets' version, never a second package.json read", async () => {
+    const identity = await engineIdentity({ ...assets, version: "1.2.3-seam" });
+    expect(identity.name).toBe("pr-hero");
+    expect(identity.version).toBe("1.2.3-seam");
   });
 });
 

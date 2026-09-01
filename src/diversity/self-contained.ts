@@ -31,8 +31,17 @@ function collectTsFiles(root: string): string[] {
   return files;
 }
 
+// A lint over the diversity SOURCE TREE, not a runtime capability: it reads
+// src/diversity/**/*.ts off disk and rejects sibling-lab imports. That has
+// meaning only against a real checkout, so the root is a REQUIRED argument
+// and the only caller (test/diversity/self-contained.test.ts) supplies it.
+// It used to default to `path.join(import.meta.dir)`, which is /$bunfs/root
+// in a compiled binary — a virtual path readdirSync cannot walk. That is the
+// exact defect class test/packaging.test.ts pins, and the pin caught this on
+// arrival; see test/architecture/import-boundaries.test.ts for the same
+// source-tree lint deriving its root from the TEST's location instead.
 export function assertDiversityGraphSelfContained(
-  diversityRoot = path.join(import.meta.dir),
+  diversityRoot: string,
 ): SelfContainedReport {
   const violations: string[] = [];
   for (const file of collectTsFiles(diversityRoot)) {
