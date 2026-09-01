@@ -6,6 +6,11 @@ import path from "node:path";
 import type { EngineAssets } from "../src/assets";
 import { resolveEngineAssets } from "../src/assets";
 import {
+  loadEffectiveConfig,
+  preflightAgentsDir,
+  resolveAgentsDir,
+} from "../src/cli";
+import {
   type AgentsDirConfigSeat,
   agentFilePath,
   agentsDirProblems,
@@ -322,5 +327,55 @@ describe("the bundled set satisfies the spec without touching a filesystem", () 
     );
 
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+describe("the cli shell over a bundled resolution", () => {
+  // The exact regression users hit: `resolveAgentsDir` gated every resolution
+  // behind existsSync, and existsSync("/$bunfs/root") is FALSE, so the shipped
+  // binary died with "agents dir does not exist" before a single step ran.
+  test("resolveAgentsDir does not existsSync-gate a bundled default", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pr-hero-cfg-"));
+    const loaded = await loadEffectiveConfig({ root, home: root });
+    const previous = process.env.PRHERO_AGENTS_DIR;
+    delete process.env.PRHERO_AGENTS_DIR;
+    try {
+      const resolution = resolveAgentsDir({}, loaded, compiledAssets());
+      expect(resolution.kind).toBe("bundled");
+      expect(resolution.dir).toBe(BUNDLED_AGENTS_DIR_LABEL);
+    } finally {
+      if (previous !== undefined) process.env.PRHERO_AGENTS_DIR = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Bun.Glob().scan() on the embedded root THROWS ENOENT rather than yielding
+  // nothing, so a bundled set must never reach the glob at all.
+  test("preflightAgentsDir accepts a bundled set without globbing", async () => {
+    const resolution = resolveAgentsDirSetting({
+      cwd: "/repo",
+      assets: compiledAssets(),
+    });
+
+    await preflightAgentsDir(
+      resolution,
+      localReviewSpec().agents.map((a) => a.file),
+    );
+  });
+
+  test("preflightAgentsDir still reports a bundled set that misses a spec file", async () => {
+    const resolution = resolveAgentsDirSetting({
+      cwd: "/repo",
+      assets: compiledAssets({
+        "review-refuter.md": `${EMBEDDED_ROOT}/review-refuter-qkhw7k00.md`,
+      }),
+    });
+
+    await expect(
+      preflightAgentsDir(
+        resolution,
+        localReviewSpec().agents.map((a) => a.file),
+      ),
+    ).rejects.toThrow(/deep-review-reliability\.md/);
   });
 });

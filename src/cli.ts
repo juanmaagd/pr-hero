@@ -25,7 +25,7 @@ import {
   registerActiveRun,
   unregisterActiveRun,
 } from "./activity";
-import { resolveEngineAssets } from "./assets";
+import { type EngineAssets, resolveEngineAssets } from "./assets";
 import {
   budgetDisabledWarningMessage,
   type CiGateSkipPlan,
@@ -136,12 +136,14 @@ import {
   AGENT_FILE_PATTERNS,
   type AgentsDirResolution,
   type AgentsDirSource,
+  agentFilePath,
   agentsDirProblems,
   agentsDirSeat,
   allExcludedMessage,
   assertBasenameOnly,
   assertOutsideRepo,
   type BaseRefResolution,
+  BUNDLED_AGENTS_DIR_LABEL,
   CliError,
   type CliOptions,
   CliUsageError,
@@ -892,16 +894,16 @@ async function review(options: CliOptions): Promise<number> {
   }
 
   // 5 + 6 — the prompt set and the wiring that consumes it.
-  const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
-    options,
-    loaded,
-  );
+  // The WHOLE resolution, not just its dir: under the compiled binary the
+  // prompt set is a map of embedded paths and `dir` is only a display label.
+  const agents = resolveAgentsDir(options, loaded);
+  const { dir: agentsDir, source: agentsDirSource } = agents;
   const spec = validateReviewSpec(localReviewSpec());
   spec.agents.forEach((agent, i) => {
     assertBasenameOnly(agent.file, i);
   });
   await preflightAgentsDir(
-    agentsDir,
+    agents,
     spec.agents.map((a) => a.file),
   );
   const agentFiles = new Map<string, ParsedAgent>();
@@ -910,7 +912,7 @@ async function review(options: CliOptions): Promise<number> {
     // frontmatter block must fail here, not three spawned steps later.
     agentFiles.set(
       agent.key,
-      await parseAgentFile(path.join(agentsDir, agent.file)),
+      await parseAgentFile(agentFilePath(agents, agent.file)),
     );
   }
 
@@ -922,7 +924,16 @@ async function review(options: CliOptions): Promise<number> {
   // findings.ts has declared and never populated.
   const promptSet = await promptSetIdentity(
     agentsDir,
-    spec.agents.map((a) => path.join(agentsDir, a.file)),
+    // spec DECLARATION order, and it must stay that: promptSetFingerprint
+    // hashes the concatenated texts in the order it is handed, and
+    // `prompt_set.sha256` is compared across runs by an external consumer.
+    // Reading the list off the bundled map's keys instead would move every
+    // fingerprint ever recorded, silently — the digest still looks valid.
+    spec.agents.map((a) => agentFilePath(agents, a.file)),
+    // A bundled set has no directory basename to be named after. "default" is
+    // what dev and npm derive from prompts/default, so the same prompt set
+    // names itself identically in all three runtimes.
+    agents.kind === "bundled" ? "default" : undefined,
   );
 
   // 7 — gotchas. Checked HERE rather than left to the pipeline's fail-loud
@@ -1174,6 +1185,7 @@ async function review(options: CliOptions): Promise<number> {
         excludedPaths: effectiveDiff.droppedPaths,
         gotchasPath,
         agentsDir,
+        ...(agents.files ? { agentFiles: agents.files } : {}),
         runDir,
         outPath: path.join(runDir, "findings.json"),
         mcpConfigPath,
@@ -1385,23 +1397,23 @@ async function reviewPr(
       log(formatWorkflowCommand("warning", disabledWarning));
     }
   }
-  const { dir: agentsDir, source: agentsDirSource } = resolveAgentsDir(
-    options,
-    loaded,
-  );
+  // The WHOLE resolution, not just its dir: under the compiled binary the
+  // prompt set is a map of embedded paths and `dir` is only a display label.
+  const agents = resolveAgentsDir(options, loaded);
+  const { dir: agentsDir, source: agentsDirSource } = agents;
   const spec = validateReviewSpec(localReviewSpec());
   spec.agents.forEach((agent, i) => {
     assertBasenameOnly(agent.file, i);
   });
   await preflightAgentsDir(
-    agentsDir,
+    agents,
     spec.agents.map((a) => a.file),
   );
   const agentFiles = new Map<string, ParsedAgent>();
   for (const agent of spec.agents) {
     agentFiles.set(
       agent.key,
-      await parseAgentFile(path.join(agentsDir, agent.file)),
+      await parseAgentFile(agentFilePath(agents, agent.file)),
     );
   }
 
@@ -1413,7 +1425,16 @@ async function reviewPr(
   // findings.ts has declared and never populated.
   const promptSet = await promptSetIdentity(
     agentsDir,
-    spec.agents.map((a) => path.join(agentsDir, a.file)),
+    // spec DECLARATION order, and it must stay that: promptSetFingerprint
+    // hashes the concatenated texts in the order it is handed, and
+    // `prompt_set.sha256` is compared across runs by an external consumer.
+    // Reading the list off the bundled map's keys instead would move every
+    // fingerprint ever recorded, silently — the digest still looks valid.
+    spec.agents.map((a) => agentFilePath(agents, a.file)),
+    // A bundled set has no directory basename to be named after. "default" is
+    // what dev and npm derive from prompts/default, so the same prompt set
+    // names itself identically in all three runtimes.
+    agents.kind === "bundled" ? "default" : undefined,
   );
   const gotchasPath = options.gotchas
     ? path.resolve(options.gotchas)
@@ -2114,6 +2135,7 @@ async function reviewPr(
               excludedPaths: effectiveDiff.droppedPaths,
               gotchasPath,
               agentsDir,
+              ...(agents.files ? { agentFiles: agents.files } : {}),
               runDir,
               outPath: path.join(runDir, "findings.json"),
               mcpConfigPath,
@@ -4102,9 +4124,15 @@ async function resolveDiffFrom(
 // The impure half of the agents-dir chain: the seat's `configDir` is the
 // dirname of the file the WINNING layer lives in (agentsDirSeat, JD-14), and
 // only the existence check below touches the disk.
-function resolveAgentsDir(
-  options: CliOptions,
+export function resolveAgentsDir(
+  // Narrowed to what it actually reads: `--agents` is the only flag in play,
+  // and a wider type would let a caller believe this consults others.
+  options: Pick<CliOptions, "agents">,
   loaded: EffectiveConfig,
+  // Injected only by tests, which cannot otherwise reach the compiled branch:
+  // detectAssetMode() reads `import.meta.dir` and always reports "dev" under
+  // `bun test`.
+  assets?: EngineAssets,
 ): AgentsDirResolution {
   const seat = agentsDirSeat({
     config: loaded.effective,
@@ -4117,8 +4145,15 @@ function resolveAgentsDir(
     ...(seat === undefined ? {} : { config: seat }),
     env: process.env.PRHERO_AGENTS_DIR,
     cwd: process.cwd(),
+    ...(assets === undefined ? {} : { assets }),
   });
-  if (!existsSync(resolution.dir)) {
+  // Only a DIRECTORY can be checked for existence, and this gate running
+  // unconditionally is the whole shipped defect: the compiled binary's bundled
+  // set has no directory, `existsSync` on the embedded root is false, and every
+  // run of the released binary died here with "agents dir does not exist"
+  // before a single step spawned. A bundled set's conformance is checked by
+  // preflightAgentsDir over the manifest's keys instead.
+  if (resolution.kind === "dir" && !existsSync(resolution.dir)) {
     throw new CliError(`agents dir does not exist: ${resolution.dir}`);
   }
   return resolution;
@@ -4199,7 +4234,7 @@ async function init(options: CliOptions): Promise<number> {
     omitted.agentsDir
       ? globalLayer?.agents_dir
         ? `  agents_dir    ${globalLayer.agents_dir} (from ${globalConfigPath})`
-        : "  agents_dir    bundled default (from engine)"
+        : `  agents_dir    ${BUNDLED_AGENTS_DIR_LABEL}`
       : `  agents_dir    ${agentsSeed?.dir} (from ${agentsSeed?.source})`,
   );
   log(`  default_base  ${baseSeed.ref} (from ${baseSeed.source})`);
@@ -4525,20 +4560,31 @@ export async function mcpCommand(options: CliOptions): Promise<number> {
   return 0;
 }
 
-async function preflightAgentsDir(
-  agentsDir: string,
+export async function preflightAgentsDir(
+  agents: Pick<AgentsDirResolution, "kind" | "dir" | "files">,
   specFiles: string[],
 ): Promise<void> {
   const present = new Set<string>();
-  for (const pattern of AGENT_FILE_PATTERNS) {
-    for await (const entry of new Bun.Glob(pattern).scan({ cwd: agentsDir })) {
-      present.add(entry);
+  if (agents.kind === "bundled") {
+    // The manifest's keys ARE the present set, and there is nothing to scan:
+    // Bun.Glob().scan() over the embedded root THROWS ENOENT rather than
+    // yielding nothing, so a bundled set reaching the glob below is not a
+    // degraded check but a crash. Key ORDER is irrelevant here — unlike the
+    // fingerprint, agentsDirProblems compares sets bidirectionally.
+    for (const file of Object.keys(agents.files ?? {})) present.add(file);
+  } else {
+    for (const pattern of AGENT_FILE_PATTERNS) {
+      for await (const entry of new Bun.Glob(pattern).scan({
+        cwd: agents.dir,
+      })) {
+        present.add(entry);
+      }
     }
   }
   const problems = agentsDirProblems(specFiles, [...present]);
   if (problems.length > 0) {
     throw new CliError(
-      `prompt set ${agentsDir} does not match the review spec:\n` +
+      `prompt set ${agents.dir} does not match the review spec:\n` +
         problems.map((p) => `  - ${p}`).join("\n"),
     );
   }
