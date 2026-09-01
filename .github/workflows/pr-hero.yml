@@ -132,7 +132,6 @@ jobs:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           max-changed-lines: 1500
-          budget-usd: 15.00
 
       # Without this step the triage half of the review loop has no input.
       # `pr-hero triage reply --pr <n> --from <run-dir> --finding F00N` is the
