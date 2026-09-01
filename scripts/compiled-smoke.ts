@@ -15,12 +15,20 @@
 // directory), reads those prompts, fingerprints them, and prints a plan — with
 // no `/$bunfs` path escaping into user-facing output.
 //
-// Deliberately free: `--dry-run` returns before the capability gate, so this
-// needs no `claude`, no authentication and no network, and spawns nothing. It
-// costs a compile and about a second.
+// Deliberately free: `--dry-run` spawns no step, so this needs no
+// authentication, no network and no money. It costs a compile and about a
+// second. It does need a binary NAMED `claude` on PATH, because route
+// admission discovers one before the dry run returns — a stub is created below
+// and never executed.
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -186,7 +194,29 @@ async function main(): Promise<number> {
   // what it found — is not a smoke. --out is kept as well, so the run dir lands
   // beside the rest of the temp state rather than inside the fake home.
   const home = mkdtempSync(path.join(os.tmpdir(), "prhero-smoke-home-"));
-  const env = { ...process.env, HOME: home };
+
+  // A stub `claude` at the FRONT of PATH. Route admission discovers the binary
+  // by name and hashes its bytes for run identity — it does not validate that
+  // hash against anything — so a stub satisfies it, and `--dry-run` returns
+  // before any step is spawned, so the stub is never executed.
+  //
+  // Why this is not cheating: what this file exists to prove is that the
+  // COMPILED binary can resolve its own embedded assets. Provider admission is
+  // a different gate with its own tests, and on a CI runner there is no
+  // `claude` to find — so without the stub the run dies before it ever reaches
+  // the prompt set, and the smoke reports a missing dependency instead of the
+  // thing it was built to catch. Prepended rather than appended so the result
+  // is the same on a developer's machine, where a real `claude` is on PATH.
+  const stubDir = mkdtempSync(path.join(os.tmpdir(), "prhero-smoke-bin-stub-"));
+  const stub = path.join(stubDir, "claude");
+  writeFileSync(stub, "#!/bin/sh\nexit 0\n");
+  chmodSync(stub, 0o755);
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${stubDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  };
   let passed = true;
 
   const review = run(
@@ -248,6 +278,7 @@ async function main(): Promise<number> {
   rmSync(repo, { recursive: true, force: true });
   rmSync(outDir, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
+  rmSync(stubDir, { recursive: true, force: true });
   if (provided === undefined) {
     rmSync(path.dirname(binary), { recursive: true, force: true });
   }
