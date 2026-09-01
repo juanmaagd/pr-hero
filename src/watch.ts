@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { selfInvocation } from "./assets";
 import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
 import { parseComparisonJson } from "./ledger";
@@ -119,15 +120,6 @@ async function run(
     proc.exited,
   ]);
   return { ok: exitCode === 0, stdout, stderr };
-}
-
-// The entry pr-hero itself is running from, resolved to ABSOLUTE paths for
-// re-spawning: under launchd there is no user PATH, so a bare `pr-hero`
-// (or a bare `bun`) resolves in every terminal and in nothing launchd
-// starts. process.execPath is the running bun binary; cli.ts sits next to
-// this file by construction (both live in src/).
-function cliEntryPath(): string {
-  return path.join(import.meta.dir, "cli.ts");
 }
 
 export async function watchCommand(options: CliOptions): Promise<number> {
@@ -542,10 +534,17 @@ async function runTick(
     ),
   );
 
+  // The engine re-invoking ITSELF, through the one resolver that knows how:
+  // under launchd there is no user PATH, so a bare `pr-hero` (or a bare
+  // `bun`) resolves in every terminal and in nothing launchd starts — and a
+  // hand-built `[execPath, <dir>/cli.ts]` pair names a script the compiled
+  // binary does not carry, which is the tick spawning a review that could
+  // never start.
+  const self = selfInvocation();
   const proc = Bun.spawn(
     [
-      process.execPath,
-      cliEntryPath(),
+      self.command,
+      ...self.args,
       "review",
       "--pr",
       String(launch.pr),
@@ -743,8 +742,7 @@ async function watchInstall(intervalMin: number): Promise<number> {
   await mkdir(paths.dir, { recursive: true });
   await mkdir(path.dirname(paths.plistPath), { recursive: true });
   const plist = renderWatchPlist({
-    runtimePath: process.execPath,
-    entryPath: cliEntryPath(),
+    invocation: selfInvocation(),
     intervalSeconds: intervalMin * 60,
     logPath: paths.launchdLogPath,
     pathEnv: process.env.PATH ?? "",

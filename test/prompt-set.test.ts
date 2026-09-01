@@ -97,6 +97,25 @@ describe("promptSetIdentity", () => {
     );
   });
 
+  // The compiled binary has no prompt-set directory to take a name from — its
+  // prompts are embedded at hashed, flattened paths. It must still report
+  // "default", byte-identical to what dev and npm derive from prompts/default,
+  // or the same prompt set would name itself differently in three runtimes and
+  // every cross-run comparison of `prompt_set` would split into three rows.
+  test("an explicit name overrides the directory basename", async () => {
+    const dir = await setDir({ "a.md": "alpha" }, "bunfs-root-");
+    const identity = await promptSetIdentity(
+      "bundled default (from engine)",
+      [path.join(dir, "a.md")],
+      "default",
+    );
+
+    expect(identity.name).toBe("default");
+    expect(identity.sha256).toBe(
+      await promptSetFingerprint([path.join(dir, "a.md")]),
+    );
+  });
+
   test("a trailing slash does not become the name", async () => {
     // `agents/baseline/` and `agents/baseline` are the same set, and a ledger
     // that split them into two rows would be counting one arm twice.

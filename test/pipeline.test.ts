@@ -3579,3 +3579,86 @@ describe("D1-10c attempt provenance", () => {
     expect(step?.settlementReceiptPath).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bundled prompt sets: the pipeline reads a MAP, never a directory.
+//
+// Under the Bun-compiled binary every prompt lives at a hashed, flattened
+// path, so `path.join(input.agentsDir, agent.file)` names a file that does not
+// exist. `agentFiles` carries the logical-name -> readable-path map instead.
+// It ARRIVES as input on purpose: fetching it inside the pipeline by calling
+// resolveEngineAssets() would leave the compiled path exactly as untestable as
+// it was when it shipped broken.
+// ---------------------------------------------------------------------------
+
+describe("agentFiles: a prompt set with no directory behind it", () => {
+  // Every basename is deliberately mismatched with its logical name, so a
+  // single surviving `path.join(agentsDir, file)` cannot accidentally work.
+  async function makeEmbeddedAgents(): Promise<{
+    agentsDir: string;
+    agentFiles: Record<string, string>;
+  }> {
+    const real = await makeAgentsDir();
+    const embedded = await mkdtemp(path.join(tmpdir(), "pr-hero-embedded-"));
+    const agentFiles: Record<string, string> = {};
+    for (const logical of [
+      "deep-review-reliability.md",
+      "deep-review-resilience.md",
+      "deep-review-parity.md",
+      "review-refuter.md",
+    ]) {
+      const hashed = path.join(
+        embedded,
+        `${path.basename(logical, ".md")}-qkhw7k00.md`,
+      );
+      await Bun.write(hashed, await Bun.file(path.join(real, logical)).text());
+      agentFiles[logical] = hashed;
+    }
+    return {
+      // Not a directory that exists — the display label the compiled binary
+      // shows. If anything still joins onto it, the step dies immediately.
+      agentsDir: "bundled default (from engine)",
+      agentFiles,
+    };
+  }
+
+  test("hunters and the refuter both load their prompt from the map", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) =>
+        ok(spec, {
+          findings: [
+            draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+          ],
+        }),
+      "hunter-resilience": (spec) => ok(spec, emptyDraft()),
+      refuter: (spec) =>
+        ok(spec, {
+          results: [
+            { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+          ],
+        } satisfies RefuterResult),
+    });
+    const input = await makeInput(await makeEmbeddedAgents());
+
+    const result = await runPipeline(input, { runner });
+
+    expect(result.skillOutput.run_status).toBe("complete");
+    // Both prompt-reading stages ran: a body that never parsed would have
+    // thrown at composition, long before either produced a verdict.
+    expect(runner.specs.map((s) => s.name)).toContain("hunter-reliability");
+    expect(runner.specs.map((s) => s.name)).toContain("refuter-F001");
+    expect(result.skillOutput.findings[0]?.refuter_verdict).toBe(
+      "corroborated",
+    );
+  });
+
+  test("without the map the same run cannot find a single prompt", async () => {
+    // The control, and the shipped binary's behaviour: identical input minus
+    // `agentFiles`. It is why the map is a fix and not an optimisation.
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const { agentsDir } = await makeEmbeddedAgents();
+    const input = await makeInput({ agentsDir });
+
+    await expect(runPipeline(input, { runner })).rejects.toThrow();
+  });
+});

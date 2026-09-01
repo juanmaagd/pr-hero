@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { selfInvocation } from "../src/assets";
+import {
+  type EngineAssets,
+  resolveEngineAssets,
+  selfInvocation,
+} from "../src/assets";
 import { CI_WORKFLOW_RELATIVE_PATH } from "../src/ci-setup";
 import {
   type DoctorReport,
@@ -10,6 +14,17 @@ import {
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import { aliasCanonical } from "../src/model-catalog";
 import { buildDoctorRoutePlan } from "../src/production-runtime";
+
+// These fixtures fake the MACHINE's filesystem. The engine's own bundle is not
+// on it — in a compiled binary the prompts live inside the executable — so a
+// fixture saying "this machine has nothing" must not also be read as "the
+// shipped prompt set is broken". Every fixture that is not specifically
+// probing the bundle answers for it through this.
+const BUNDLED_PROMPT_PATHS = new Set(
+  Object.values(resolveEngineAssets().bundledAgentFiles),
+);
+const bundledPromptBody = (p: string): string | undefined =>
+  BUNDLED_PROMPT_PATHS.has(p) ? "# bundled prompt\n" : undefined;
 
 describe("doctor tri-state evaluation", () => {
   test("healthy when all checks pass", async () => {
@@ -55,7 +70,7 @@ describe("doctor tri-state evaluation", () => {
           // If reading either the upstream asset or the synced copy, return the same content
           return "same mock content";
         }
-        return undefined;
+        return bundledPromptBody(p);
       },
       checkToolsOptions: {
         which: (bin) =>
@@ -278,7 +293,7 @@ describe("doctor tri-state evaluation", () => {
         },
         readFile: (p) => {
           if (p === "/repo/.prhero/gotchas.md") return "## Gotchas\nContent";
-          return undefined;
+          return bundledPromptBody(p);
         },
         checkToolsOptions: {
           which: (bin) => (bin === "claude" ? "/bin/claude" : `/bin/${bin}`),
@@ -308,7 +323,7 @@ describe("doctor tri-state evaluation", () => {
         },
         readFile: (p) => {
           if (p === "/repo/.prhero/gotchas.md") return "## Gotchas\nContent";
-          return undefined;
+          return bundledPromptBody(p);
         },
         checkToolsOptions: {
           which: (bin) => (bin === "claude" ? "/bin/claude" : `/bin/${bin}`),
@@ -331,7 +346,9 @@ describe("doctor tri-state evaluation", () => {
         home: "/home/user",
         exists: (p) => p === "/repo/.prhero/gotchas.md",
         readFile: (p) =>
-          p === "/repo/.prhero/gotchas.md" ? "## Gotchas\nContent" : undefined,
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
         checkToolsOptions: {
           which: (bin) => `/bin/${bin}`,
           exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
@@ -381,7 +398,9 @@ describe("doctor tri-state evaluation", () => {
         home: "/home/user",
         exists: (p) => p === "/repo/.prhero/gotchas.md",
         readFile: (p) =>
-          p === "/repo/.prhero/gotchas.md" ? "## Gotchas\nContent" : undefined,
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
         checkToolsOptions: {
           which: (bin) => `/bin/${bin}`,
           exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
@@ -437,7 +456,9 @@ describe("doctor tri-state evaluation", () => {
         home: "/home/user",
         exists: (p) => p === "/repo/.prhero/gotchas.md",
         readFile: (p) =>
-          p === "/repo/.prhero/gotchas.md" ? "## Gotchas\nContent" : undefined,
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
         checkToolsOptions: {
           which: (bin) => `/bin/${bin}`,
           exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
@@ -577,6 +598,108 @@ describe("doctor tri-state evaluation", () => {
         modelFamily: "gpt-4o",
         modelVariant: "high",
       });
+    });
+  });
+
+  // The check that was pure assertion until this suite existed: doctor
+  // reported "Using bundled prompt set (default)" unconditionally, having
+  // verified nothing, on the very machine whose next `review` died with
+  // `agents dir does not exist: /$bunfs/root`. A green doctor beside a broken
+  // review is worse than no doctor, because it is the thing people trust.
+  describe("bundled prompt set", () => {
+    // A COMPILED bundle, which is the mode that broke: the paths are the
+    // manifest's embedded ones, so nothing here touches a real filesystem.
+    const embedded: Record<string, string> = {
+      "deep-review-reliability.md": "/embedded/reliability-aaaa.md",
+      "deep-review-resilience.md": "/embedded/resilience-bbbb.md",
+      "deep-review-lifecycle.md": "/embedded/lifecycle-cccc.md",
+      "deep-review-parity.md": "/embedded/parity-dddd.md",
+      "review-refuter.md": "/embedded/refuter-eeee.md",
+    };
+    const compiledAssets = (files: Record<string, string>): EngineAssets => ({
+      ...resolveEngineAssets(),
+      mode: "compiled",
+      bundledAgentFiles: files,
+    });
+
+    const baseOptions = {
+      cwd: "/repo",
+      home: "/home/user",
+      exists: (p: string) =>
+        p === "/repo/.prhero/gotchas.md" ||
+        p === "/home/user/.prhero/setup.json",
+      checkToolsOptions: {
+        which: (bin: string) => `/bin/${bin}`,
+        exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+      },
+    };
+
+    test("every prompt the review spec names is readable -> healthy", async () => {
+      const report = await runDoctor({
+        ...baseOptions,
+        assets: compiledAssets(embedded),
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : "# a prompt body\n",
+      });
+
+      const check = report.checks.find((c) => c.name === "agents_dir");
+      expect(check?.severity).toBe("healthy");
+      expect(check?.message).toContain("5");
+    });
+
+    test("a prompt that cannot be read is blocking, named by its logical file", async () => {
+      const report = await runDoctor({
+        ...baseOptions,
+        assets: compiledAssets(embedded),
+        readFile: (p) => {
+          if (p === "/repo/.prhero/gotchas.md") return "## Gotchas\nContent";
+          if (p === "/embedded/refuter-eeee.md") return undefined;
+          return "# a prompt body\n";
+        },
+      });
+
+      const check = report.checks.find((c) => c.name === "agents_dir");
+      expect(check?.severity).toBe("blocking");
+      expect(check?.message).toContain("review-refuter.md");
+      // The logical name, never the embedded path: "/$bunfs/root/<hash>.md" is
+      // actionable to nobody and names a file that exists on no machine.
+      expect(check?.message).not.toContain("/embedded/");
+      expect(check?.hint).toBeDefined();
+    });
+
+    test("an empty prompt is as broken as a missing one", async () => {
+      const report = await runDoctor({
+        ...baseOptions,
+        assets: compiledAssets(embedded),
+        readFile: (p) => {
+          if (p === "/repo/.prhero/gotchas.md") return "## Gotchas\nContent";
+          if (p === "/embedded/parity-dddd.md") return "   \n";
+          return "# a prompt body\n";
+        },
+      });
+
+      const check = report.checks.find((c) => c.name === "agents_dir");
+      expect(check?.severity).toBe("blocking");
+      expect(check?.message).toContain("deep-review-parity.md");
+    });
+
+    test("a manifest the build never embedded is blocking, not a crash", async () => {
+      const { "review-refuter.md": _dropped, ...incomplete } = embedded;
+      const report = await runDoctor({
+        ...baseOptions,
+        assets: compiledAssets(incomplete),
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : "# a prompt body\n",
+      });
+
+      const check = report.checks.find((c) => c.name === "agents_dir");
+      expect(check?.severity).toBe("blocking");
+      expect(check?.message).toContain("review-refuter.md");
     });
   });
 

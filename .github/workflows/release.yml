@@ -9,12 +9,42 @@ jobs:
   build-binaries:
     name: Build binaries
     strategy:
+      # What this buys, precisely: when one leg fails, the others still finish
+      # and upload. It does NOT keep the release publishing — `publish-release`
+      # below has a bare `needs: build-binaries`, so a failed leg makes that job
+      # skip and nothing is published either way.
+      #
+      # That skip is deliberate and should stay. A release missing one
+      # platform's binary is worse than no release: install.sh resolves a
+      # per-platform download URL, so a partial publish turns into a 404 for
+      # whoever is on the missing architecture, while a failed release simply
+      # leaves the previous version installable.
+      #
+      # The value is diagnostic and it is real: a broken run reports every
+      # failing leg instead of only the first, and the three good artifacts are
+      # built and attached, so the re-run after a fix has somewhere to start.
+      fail-fast: false
       matrix:
+        # EVERY runner here must be able to EXECUTE what it builds, because the
+        # smoke below runs the artifact before it is uploaded. That is why
+        # darwin-x64 builds on macos-15-intel rather than on the arm64
+        # macos-latest: cross-compiling it there would leave one of four
+        # published binaries never once executed — the exact gap this workflow
+        # exists to close — and leaning on Rosetta instead would make the gate
+        # flaky rather than honest.
+        #
+        # macos-15-intel is a standard GitHub-hosted label (its predecessor
+        # macos-13 was retired in December 2025), and standard runners are free
+        # and unlimited on public repositories.
+        #
+        # Keep this invariant when adding a target: pick a runner of the target's
+        # own architecture. test/packaging.test.ts parses this matrix and fails
+        # if any target is uploaded without being smoked.
         include:
           - os: macos-latest
             target: darwin-arm64
             bun_target: bun-darwin-arm64
-          - os: macos-latest
+          - os: macos-15-intel
             target: darwin-x64
             bun_target: bun-darwin-x64
           - os: ubuntu-latest
@@ -46,6 +76,14 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           bun build --compile --target=${{ matrix.bun_target }} --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define __PRHERO_VERSION__="\"${VERSION}\"" src/cli.ts --outfile pr-hero-${{ matrix.target }}
+
+      # Runs THE ARTIFACT ABOUT TO BE UPLOADED, not a rebuild of it: a smoke
+      # that compiles its own binary would prove nothing about this one. Placed
+      # before the upload on purpose — a binary that cannot resolve its own
+      # bundled assets must never reach a release page. That is exactly what
+      # v1.0.0 did, and this job was green when it happened.
+      - name: Compiled-binary smoke
+        run: bun run scripts/compiled-smoke.ts ./pr-hero-${{ matrix.target }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
