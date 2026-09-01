@@ -163,7 +163,7 @@ flowchart TD
 ### Pipeline Workflow Stages
 
 1. **`build-binaries`**:
-   - Executes across a matrix of 4 runner environments (`macos-latest`, `macos-15-intel`, `ubuntu-latest`, `ubuntu-24.04-arm`), each on its target's own architecture so the smoke below can execute what it built. `fail-fast: false`, so one unavailable runner cannot cancel the other three legs and take the whole release down with it.
+   - Executes across a matrix of 4 runner environments (`macos-latest`, `macos-15-intel`, `ubuntu-latest`, `ubuntu-24.04-arm`), each on its target's own architecture so the smoke below can execute what it built. `fail-fast: false`, so a failing leg does not cancel the other three — they finish and upload, and the run reports every failure rather than only the first. This does **not** keep the release publishing: `publish-release` has a bare `needs: build-binaries`, so any failed leg skips it. That is deliberate — a release missing one platform binary would give `install.sh` a 404 on that architecture, while a failed release leaves the previous version installable.
    - Runs full test suite and typechecks on each OS.
    - Compiles standalone executables using `bun build --compile --minify` with embedded version definitions.
    - **Runs the compiled binary** (`scripts/compiled-smoke.ts`) before uploading it. v1.0.0 shipped a binary whose `review` failed for every user because this step did not exist.

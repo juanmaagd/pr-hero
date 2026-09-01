@@ -9,13 +9,20 @@ jobs:
   build-binaries:
     name: Build binaries
     strategy:
-      # Each target publishes independently. Without this, GitHub's default
-      # cancels every other in-flight leg the moment one fails — so a single
-      # runner label that is retired, renamed, or briefly unavailable takes
-      # down the whole release and NOTHING ships, which is a worse outcome than
-      # the one binary that leg was responsible for. The smoke below is what
-      # stops a broken artifact from shipping; this is what stops a working one
-      # from being cancelled by an unrelated failure.
+      # What this buys, precisely: when one leg fails, the others still finish
+      # and upload. It does NOT keep the release publishing — `publish-release`
+      # below has a bare `needs: build-binaries`, so a failed leg makes that job
+      # skip and nothing is published either way.
+      #
+      # That skip is deliberate and should stay. A release missing one
+      # platform's binary is worse than no release: install.sh resolves a
+      # per-platform download URL, so a partial publish turns into a 404 for
+      # whoever is on the missing architecture, while a failed release simply
+      # leaves the previous version installable.
+      #
+      # The value is diagnostic and it is real: a broken run reports every
+      # failing leg instead of only the first, and the three good artifacts are
+      # built and attached, so the re-run after a fix has somewhere to start.
       fail-fast: false
       matrix:
         # EVERY runner here must be able to EXECUTE what it builds, because the
