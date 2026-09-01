@@ -12,7 +12,10 @@ import {
   d1_11EvidenceFromExactBinding,
   prepareProductionAdmissionContext,
 } from "../src/production-runtime";
-import { admitRoutePlan } from "../src/transport-registry";
+import {
+  admitRoutePlan,
+  type DefaultTransportRegistry,
+} from "../src/transport-registry";
 
 const mockLoadSdk = async () =>
   ({
@@ -96,6 +99,113 @@ describe("CLI production wiring (verify C1/C3)", () => {
           evidence: admission.evidence,
         }),
       ).resolves.toMatchObject({ ok: true });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // #149 follow-up: the fix forwards `credentialBrokers.opencode` into the
+  // transport registry so the server launcher and the binding authority share
+  // ONE broker. That forwarding was dead on the production path — the input
+  // type carried no `credentialBrokers`, so the value was always undefined
+  // and each side independently constructed its own OpenCodeAuthBroker.
+  test("the opencode credential broker is resolved once and shared", async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-broker-"));
+    try {
+      const claude = await writeExecutable(
+        tmpDir,
+        "claude",
+        "#!/bin/sh\necho ok\n",
+      );
+      const opencode = await writeExecutable(tmpDir, "opencode", "opencode");
+      const step = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: {
+          mappings: {
+            "openai/gpt-4o": {
+              backend: "opencode",
+              provider: "openai",
+              modelFamily: "gpt-4o",
+              modelSnapshot: "gpt-4o",
+            },
+          },
+        },
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const injected = {
+        project: async () => {
+          throw new Error("not called in this test");
+        },
+      };
+      const admission = await prepareProductionAdmissionContext({
+        workspaceRoot: tmpDir,
+        plan,
+        env: { PATH: tmpDir },
+        loadSdk: mockLoadSdk,
+        authorityDeps: fixtureDeps(tmpDir, claude, opencode),
+        credentialBrokers: { opencode: injected },
+      });
+      if ("error" in admission) {
+        throw new Error(admission.error);
+      }
+      // Identity, not shape: a second OpenCodeAuthBroker would satisfy a
+      // shape assertion while being exactly the divergence under test.
+      expect(admission.authorityOptions.credentialBrokers?.opencode).toBe(
+        injected,
+      );
+      // The registry that launches the server holds the SAME object, not a
+      // second one built from the same config.
+      expect(
+        (admission.registry as DefaultTransportRegistry)
+          .openCodeCredentialBroker,
+      ).toBe(injected);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("an uninjected opencode broker is still resolved once, not per consumer", async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-broker2-"));
+    try {
+      const claude = await writeExecutable(
+        tmpDir,
+        "claude",
+        "#!/bin/sh\necho ok\n",
+      );
+      const opencode = await writeExecutable(tmpDir, "opencode", "opencode");
+      const step = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: {
+          mappings: {
+            "openai/gpt-4o": {
+              backend: "opencode",
+              provider: "openai",
+              modelFamily: "gpt-4o",
+              modelSnapshot: "gpt-4o",
+            },
+          },
+        },
+      });
+      const plan = createResolvedRoutePlan([step]);
+      const admission = await prepareProductionAdmissionContext({
+        workspaceRoot: tmpDir,
+        plan,
+        env: { PATH: tmpDir },
+        loadSdk: mockLoadSdk,
+        authorityDeps: fixtureDeps(tmpDir, claude, opencode),
+      });
+      if ("error" in admission) {
+        throw new Error(admission.error);
+      }
+      // Defined even with nothing injected: the ONE instance both the binding
+      // authority and the transport registry are handed.
+      expect(
+        admission.authorityOptions.credentialBrokers?.opencode,
+      ).toBeDefined();
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }

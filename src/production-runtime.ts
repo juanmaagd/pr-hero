@@ -42,6 +42,7 @@ import {
   validateBindingAdmission,
   validateRouteDrift,
 } from "./security/binding-policy";
+import { OpenCodeAuthBroker } from "./security/credential-broker";
 import { authorizeWorkspaceCwd } from "./security/execution-authority";
 import {
   ClaudeCodeRunner,
@@ -612,12 +613,26 @@ export async function prepareProductionAdmissionContext(input: {
     import("./transports/opencode-client").OpenCodeSdkLike
   >;
   readonly env?: RunnerAuthorityOptions["env"];
+  readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
 }): Promise<ProductionAdmissionContext | { readonly error: string }> {
+  // #149: resolve the opencode broker ONCE, here, and seed it into the
+  // authority so runner-authority.ts binding resolution and the transport
+  // registry that launches the server are handed the SAME object. Each side
+  // defaulting its own `new OpenCodeAuthBroker()` is the "two brokers,
+  // diverging in silence" case: a caller injecting a fake would get the fake
+  // at the binding and a real broker at the server.
+  const credentialBrokers = {
+    ...input.credentialBrokers,
+    opencode: input.credentialBrokers?.opencode ?? new OpenCodeAuthBroker(),
+  };
   const authorityResult = await prepareProductionRunnerAuthority(
     input.workspaceRoot,
     input.plan,
     input.authorityDeps,
-    input.env === undefined ? {} : { env: input.env },
+    {
+      ...(input.env === undefined ? {} : { env: input.env }),
+      credentialBrokers,
+    },
   );
   if ("error" in authorityResult) {
     return authorityResult;
@@ -629,13 +644,8 @@ export async function prepareProductionAdmissionContext(input: {
     binaryPath: authorityOptions.binaryPath,
     openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
     env: authorityOptions.env,
-    // #149: the SAME broker instance the binding authority resolved. Without
-    // this, a caller injecting a fake through `credentialBrokers.opencode`
-    // gets the fake at the authority and a real OpenCodeAuthBroker at the
-    // server — two brokers, diverging in silence.
-    ...(authorityOptions.credentialBrokers?.opencode === undefined
-      ? {}
-      : { credentialBroker: authorityOptions.credentialBrokers.opencode }),
+    // #149: the SAME instance seeded into the binding authority above.
+    credentialBroker: credentialBrokers.opencode,
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   });
   const probe = await probeBindingsReadiness({
@@ -681,13 +691,8 @@ export async function prepareProductionAdmissionContext(input: {
     binaryPath: authorityOptions.binaryPath,
     openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
     env: authorityOptions.env,
-    // #149: the SAME broker instance the binding authority resolved. Without
-    // this, a caller injecting a fake through `credentialBrokers.opencode`
-    // gets the fake at the authority and a real OpenCodeAuthBroker at the
-    // server — two brokers, diverging in silence.
-    ...(authorityOptions.credentialBrokers?.opencode === undefined
-      ? {}
-      : { credentialBroker: authorityOptions.credentialBrokers.opencode }),
+    // #149: the SAME instance seeded into the binding authority above.
+    credentialBroker: credentialBrokers.opencode,
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   }) as DefaultTransportRegistry;
 

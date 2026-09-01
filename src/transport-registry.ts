@@ -203,6 +203,14 @@ export class DefaultTransportRegistry implements TransportRegistry {
   private readonly userOverriddenBackends = new Set<RunnerBackend>();
   private readonly defaultOptions: TransportFactoryOptions;
 
+  // #149: read-only, and it exists for exactly one reason — the invariant that
+  // the server launcher and the binding authority share ONE broker instance
+  // was unobservable from outside, which is how the forwarding that claimed to
+  // guarantee it shipped dead. Identity here is the assertion.
+  get openCodeCredentialBroker(): CredentialBroker | undefined {
+    return this.defaultOptions.credentialBroker;
+  }
+
   constructor(options: CreateTransportRegistryOptions = {}) {
     this.defaultOptions = options;
 
