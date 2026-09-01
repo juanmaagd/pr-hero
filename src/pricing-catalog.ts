@@ -145,6 +145,16 @@ export function lookupModelPricing(modelId: string): ModelPricing | undefined {
   const resolved = isModelAlias(modelId)
     ? aliasModelSnapshot(modelId)
     : modelId;
+  // Object.hasOwn, not a bare index. `models` is a plain object, so indexing
+  // it with an arbitrary model id reaches Object.prototype: `lookupModelPricing
+  // ("constructor")` returned the Object constructor, and every prototype
+  // member made tokenPricingAvailableFor answer TRUE for a model that does not
+  // exist. That is the precise failure this module was built to prevent -- a
+  // confident wrong price instead of an honest absent one -- arriving through
+  // the language rather than through a stale table.
+  //
+  // Found by pr-hero reviewing this module's own PR (#162).
+  if (!Object.hasOwn(PRICING_CATALOG.models, resolved)) return undefined;
   return PRICING_CATALOG.models[resolved];
 }
 

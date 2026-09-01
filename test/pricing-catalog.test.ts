@@ -180,6 +180,28 @@ describe("pricing catalog", () => {
       expect(lookupModelPricing("claude-opus-4-1")).toBeUndefined();
       expect(tokenPricingAvailableFor("gpt-4o", daysAfterFetch(0))).toBe(false);
     });
+
+    test("an Object.prototype member is not a model", () => {
+      // `models` is a plain object, so a bare index reached the prototype
+      // chain: lookupModelPricing("constructor") returned the Object
+      // constructor, and tokenPricingAvailableFor answered TRUE for every one
+      // of these -- a confident price for a model that does not exist, which
+      // is the exact failure this module exists to prevent, arriving through
+      // the language instead of through a stale table.
+      //
+      // Found by pr-hero reviewing this module's own PR (#162).
+      for (const member of [
+        "constructor",
+        "toString",
+        "hasOwnProperty",
+        "valueOf",
+        "__proto__",
+        "isPrototypeOf",
+      ]) {
+        expect(lookupModelPricing(member)).toBeUndefined();
+        expect(tokenPricingAvailableFor(member, daysAfterFetch(0))).toBe(false);
+      }
+    });
   });
 
   describe("freshness", () => {
