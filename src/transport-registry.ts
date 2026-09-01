@@ -251,24 +251,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
               modelID: "gpt-4o",
             },
         loadSdk: merged.loadSdk ?? loadOpenCodeSdk,
-        launchServer:
-          merged.launchServer ??
-          defaultOpenCodeLaunchServer({
-            verifiedBinaryPath:
-              merged.openCodeBinaryPath ??
-              merged.binaryPath ??
-              "/usr/local/bin/opencode",
-            // #149: the same broker the credential authority resolved for this
-            // backend. Defaulting a second instance here would be a second
-            // source of truth beside runner-authority.ts, and a test that
-            // injected a fake at the authority would silently get a real one
-            // at the server.
-            broker: merged.credentialBroker ?? new OpenCodeAuthBroker(),
-            // pr-hero own environment, filtered to operational keys only. The
-            // projection owns HOME/TMPDIR/XDG_* and overrides whatever
-            // survives; see composeOpenCodeServerEnv.
-            baseEnv: merged.env ?? process.env,
-          }),
+        launchServer: merged.launchServer ?? openCodeLaunchServerFor(merged),
         readSystemPrompt:
           merged.readSystemPrompt ??
           (async (filePath: string) => {
@@ -613,4 +596,28 @@ export function defaultOpenCodeLaunchServer(options: {
       ...(mcp === undefined ? {} : { mcp }),
     });
   };
+}
+
+// #149: how the registry turns its options into a launcher. Split out from the
+// factory so the WIRING is reachable from a test — the factory itself only
+// hands `launchServer` to the client, and every existing test injects one,
+// which is how the previous inline closure went untested for its whole life.
+export function openCodeLaunchServerFor(
+  merged: TransportFactoryOptions,
+): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
+  return defaultOpenCodeLaunchServer({
+    verifiedBinaryPath:
+      merged.openCodeBinaryPath ??
+      merged.binaryPath ??
+      "/usr/local/bin/opencode",
+    // The same broker the credential authority resolved for this backend.
+    // Defaulting a second instance here would be a second source of truth
+    // beside runner-authority.ts, and a caller injecting a fake at the
+    // authority would silently get a real one at the server.
+    broker: merged.credentialBroker ?? new OpenCodeAuthBroker(),
+    // pr-hero own environment, filtered to operational keys only. The
+    // projection owns HOME/TMPDIR/XDG_* and overrides whatever survives;
+    // see composeOpenCodeServerEnv.
+    baseEnv: merged.env ?? process.env,
+  });
 }

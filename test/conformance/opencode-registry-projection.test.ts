@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { CredentialBroker } from "../../src/security/credential-broker";
-import { defaultOpenCodeLaunchServer } from "../../src/transport-registry";
+import {
+  defaultOpenCodeLaunchServer,
+  openCodeLaunchServerFor,
+} from "../../src/transport-registry";
 
 // #149: the registry built the default launcher with `env: merged.env ?? {}`,
 // and nothing on the review path supplied `env`. A server handed `{}` resolves
@@ -119,5 +122,55 @@ describe("the registry's default opencode launcher (#149)", () => {
     const delivered = spawn.env()?.OPENCODE_CONFIG_CONTENT;
     expect(delivered).toBeDefined();
     expect(JSON.parse(delivered as string).mcp.codegraph.enabled).toBe(true);
+  });
+});
+
+// The factory only hands `launchServer` to the client, and every other test
+// injects one — so these assertions guard the WIRING itself: that the
+// registry's options reach the projected launcher at all. Mutating
+// `merged.credentialBroker ?? …` to always-real leaves the suite green
+// without them.
+describe("openCodeLaunchServerFor wiring (#149)", () => {
+  test("it consults the broker the caller injected, not a fresh real one", async () => {
+    let asked = 0;
+    const sentinel = new Error("injected broker reached");
+    const launch = openCodeLaunchServerFor({
+      openCodeBinaryPath: "/opt/homebrew/bin/opencode",
+      credentialBroker: {
+        project: async () => {
+          asked += 1;
+          throw sentinel;
+        },
+      },
+    });
+
+    await expect(launch()).rejects.toThrow("injected broker reached");
+    expect(asked).toBe(1);
+  });
+
+  test("a launch that fails after projecting destroys the projection", async () => {
+    let destroyed = 0;
+    const launch = openCodeLaunchServerFor({
+      // Not absolute: the launcher refuses it AFTER the projection exists,
+      // which is the window a credential would leak through on every retry.
+      openCodeBinaryPath: "opencode",
+      credentialBroker: {
+        project: async () => ({
+          projectionId: "cred-fake",
+          kind: "opencode_chatgpt_oauth" as const,
+          syntheticHome: "/tmp/proj-home",
+          syntheticConfigHome: "/tmp/proj-home/.config",
+          syntheticTmp: "/tmp/proj-home/tmp",
+          env: { HOME: "/tmp/proj-home" },
+          files: [],
+          destroy: async () => {
+            destroyed += 1;
+          },
+        }),
+      },
+    });
+
+    await expect(launch()).rejects.toThrow("absolute, verified path");
+    expect(destroyed).toBe(1);
   });
 });
