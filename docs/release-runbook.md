@@ -163,9 +163,10 @@ flowchart TD
 ### Pipeline Workflow Stages
 
 1. **`build-binaries`**:
-   - Executes across a matrix of 4 runner environments (`macos-latest`, `macos-13`, `ubuntu-latest`, `ubuntu-24.04-arm`).
+   - Executes across a matrix of 4 runner environments (`macos-latest`, `macos-15-intel`, `ubuntu-latest`, `ubuntu-24.04-arm`), each on its target's own architecture so the smoke below can execute what it built. `fail-fast: false`, so one unavailable runner cannot cancel the other three legs and take the whole release down with it.
    - Runs full test suite and typechecks on each OS.
    - Compiles standalone executables using `bun build --compile --minify` with embedded version definitions.
+   - **Runs the compiled binary** (`scripts/compiled-smoke.ts`) before uploading it. v1.0.0 shipped a binary whose `review` failed for every user because this step did not exist.
    - Uploads binary artifacts (`pr-hero-darwin-arm64`, `pr-hero-darwin-x64`, `pr-hero-linux-x64`, `pr-hero-linux-arm64`).
 2. **`publish-release`**:
    - Gathers all compiled binaries and computes cryptographic `SHA256SUMS`.

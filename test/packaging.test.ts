@@ -245,6 +245,54 @@ describe("Packaging & distribution configuration", () => {
     }
   });
 
+  // The other half of "nothing ships". The smoke stops a BROKEN binary from
+  // being published; this stops a WORKING one from being cancelled. Without an
+  // explicit `fail-fast: false`, one leg failing to acquire its runner — a
+  // retired label, a rename, a capacity blip — cancels the other three
+  // in-flight legs, and a release that was fine on three architectures
+  // produces nothing at all.
+  test("one bad release leg cannot cancel the others", () => {
+    const release = Bun.YAML.parse(
+      readFileSync(path.join(rootDir, ".github", "workflows", "release.yml"), {
+        encoding: "utf-8",
+      }),
+    ) as {
+      jobs: Record<string, { strategy?: Record<string, unknown> }>;
+    };
+    expect(release.jobs["build-binaries"]?.strategy?.["fail-fast"]).toBe(false);
+  });
+
+  // Drift guard. The runbook described the release matrix as `macos-13` long
+  // after that image was retired, and nothing noticed — the finding that
+  // exposed it cited the stale line as evidence that a runner label had no
+  // corroboration anywhere else in the repo. A document that describes CI is
+  // only useful while it is true.
+  test("the release runbook names the runners the workflow actually uses", () => {
+    const release = Bun.YAML.parse(
+      readFileSync(path.join(rootDir, ".github", "workflows", "release.yml"), {
+        encoding: "utf-8",
+      }),
+    ) as {
+      jobs: Record<
+        string,
+        { strategy?: { matrix?: { include?: Record<string, string>[] } } }
+      >;
+    };
+    const runbook = readFileSync(
+      path.join(rootDir, "docs", "release-runbook.md"),
+      "utf-8",
+    );
+    const legs =
+      release.jobs["build-binaries"]?.strategy?.matrix?.include ?? [];
+    expect(legs.length).toBeGreaterThan(0);
+    for (const leg of legs) {
+      expect({
+        os: leg.os,
+        documented: runbook.includes(leg.os ?? ""),
+      }).toEqual({ os: leg.os, documented: true });
+    }
+  });
+
   test("the compiled smoke exists and asserts on the virtual-filesystem root", () => {
     const smokePath = path.join(rootDir, "scripts", "compiled-smoke.ts");
     expect(existsSync(smokePath)).toBe(true);

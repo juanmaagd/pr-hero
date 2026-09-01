@@ -9,6 +9,14 @@ jobs:
   build-binaries:
     name: Build binaries
     strategy:
+      # Each target publishes independently. Without this, GitHub's default
+      # cancels every other in-flight leg the moment one fails — so a single
+      # runner label that is retired, renamed, or briefly unavailable takes
+      # down the whole release and NOTHING ships, which is a worse outcome than
+      # the one binary that leg was responsible for. The smoke below is what
+      # stops a broken artifact from shipping; this is what stops a working one
+      # from being cancelled by an unrelated failure.
+      fail-fast: false
       matrix:
         # EVERY runner here must be able to EXECUTE what it builds, because the
         # smoke below runs the artifact before it is uploaded. That is why
