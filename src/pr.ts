@@ -335,6 +335,10 @@ export async function postCommitStatus(
   sha: string,
   status: CommitStatusRequest,
   spawnFn?: typeof Bun.spawn,
+  // Only the cancellation settle narrows these. It runs inside a signal
+  // handler racing the runner's SIGKILL, where the retry below costs more
+  // time than it buys. Every other caller keeps the two-attempt default.
+  options?: { attempts?: number; timeoutMs?: number },
 ): Promise<void> {
   if (!isFullCommitId(sha)) {
     throw new CliError(
@@ -358,15 +362,11 @@ export async function postCommitStatus(
   }
   // Two attempts: a single blip on the completing POST is exactly how a
   // yellow pending gets stuck on a finished review.
+  const attempts = options?.attempts ?? 2;
+  const timeoutMs = options?.timeoutMs ?? COMMIT_STATUS_TIMEOUT_MS;
   let lastStderr = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await gh(
-      operatorRoot,
-      args,
-      undefined,
-      spawnFn,
-      COMMIT_STATUS_TIMEOUT_MS,
-    );
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const result = await gh(operatorRoot, args, undefined, spawnFn, timeoutMs);
     if (result.ok) return;
     lastStderr = result.stderr.trim();
   }
