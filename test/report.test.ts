@@ -243,6 +243,93 @@ describe("renderReport", () => {
     );
   });
 
+  // #153: a severe claim discarded as a duplicate left NO trace here — only a
+  // count — and that is why an authorization-bypass BLOCKER merged into a
+  // claim about a different defect stayed invisible for as long as it did.
+  // debug.deduped[] recorded it the whole time; nothing surfaced it.
+  test("severe dedupe losers are named, not just counted", () => {
+    const { tier: _tier, ...severe } = finding({
+      id: "R7",
+      path: "src/authz.ts",
+      line: 26,
+      severity: "BLOCKER",
+      claim: "the catch fallback grants every required role to a principal",
+    });
+    const { tier: _advisoryTier, ...advisory } = finding({
+      id: "R8",
+      path: "src/authz.ts",
+      line: 8,
+      severity: "SUGGESTION",
+      claim: "the cache map could carry a TTL",
+    });
+    const markdown = renderReport(
+      doc({
+        debug: {
+          refuted: [],
+          deduped: [
+            { ...severe, merged_into: "F001" },
+            { ...advisory, merged_into: "F002" },
+          ],
+          root_causes: clusterByRootCause([]),
+        },
+      }),
+      META,
+    );
+    expect(markdown).toContain("0 refuted, 2 merged as duplicates.");
+    expect(markdown).toContain(
+      "- `src/authz.ts:26` — the catch fallback grants every required role " +
+        "to a principal — merged into F001",
+    );
+    // Advisory severity stays counted only: the trace exists to make a lost
+    // BLOCKER visible, not to reprint every merge.
+    expect(markdown).not.toContain("the cache map could carry a TTL");
+  });
+
+  test("a CRITICAL dedupe loser is named too, and the list is spaced off the count", () => {
+    const { tier: _tier, ...critical } = finding({
+      id: "R7",
+      path: "src/authz.ts",
+      line: 16,
+      severity: "CRITICAL",
+      claim: "roleCache is never invalidated",
+    });
+    const markdown = renderReport(
+      doc({
+        debug: {
+          refuted: [],
+          deduped: [{ ...critical, merged_into: "F001" }],
+          root_causes: clusterByRootCause([]),
+        },
+      }),
+      META,
+    );
+    expect(markdown).toContain(
+      "0 refuted, 1 merged as duplicates.\n\n" +
+        "- `src/authz.ts:16` — roleCache is never invalidated — " +
+        "merged into F001",
+    );
+  });
+
+  test("advisory-only dedupe losers keep the section to a bare count", () => {
+    const { tier: _tier, ...advisory } = finding({
+      id: "R8",
+      severity: "WARNING",
+      claim: "a warning that merged away",
+    });
+    const markdown = renderReport(
+      doc({
+        debug: {
+          refuted: [],
+          deduped: [{ ...advisory, merged_into: "F001" }],
+          root_causes: clusterByRootCause([]),
+        },
+      }),
+      META,
+    );
+    expect(markdown).toContain("0 refuted, 1 merged as duplicates.");
+    expect(markdown).not.toContain("a warning that merged away");
+  });
+
   test("a document with no per_agent telemetry still renders the run line", () => {
     const markdown = renderReport(
       doc({ telemetry: { ...TELEMETRY, per_agent: undefined } }),

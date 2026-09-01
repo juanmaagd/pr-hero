@@ -1218,19 +1218,42 @@ function renderSingleton(finding: Finding): string[] {
 // reading this file.
 function notReported(doc: FindingsDocument): string[] {
   const refuted = doc.debug.refuted;
-  const dedupedCount = doc.debug.deduped?.length ?? 0;
+  const deduped = doc.debug.deduped ?? [];
   const out = ["## Not reported", ""];
-  if (refuted.length === 0 && dedupedCount === 0) {
+  if (refuted.length === 0 && deduped.length === 0) {
     out.push("Nothing was refuted, and nothing was merged as a duplicate.");
     return out;
   }
-  out.push(`${refuted.length} refuted, ${dedupedCount} merged as duplicates.`);
+  out.push(
+    `${refuted.length} refuted, ${deduped.length} merged as duplicates.`,
+  );
   if (refuted.length > 0) out.push("");
   for (const finding of refuted) {
     out.push(
       `- ${finding.id} ${code(`${finding.path}:${finding.line}`)} — ` +
         `${oneLine(finding.claim)} — ${finding.refuter_verdict}`,
     );
+  }
+  // A severe claim discarded as a duplicate used to leave nothing here but a
+  // number, and issue #153 is what that cost: an authorization-bypass BLOCKER
+  // was merged into a claim about a DIFFERENT defect and vanished from the
+  // report, while debug.deduped[] had recorded it the whole time. A count is
+  // not a trace. Advisory losers stay counted only — this exists to make a
+  // lost BLOCKER visible, not to reprint every merge.
+  //
+  // No id: a loser keeps its hunter-assigned draft id, which names nothing a
+  // reader can look up, so the location is the anchor.
+  const severe = deduped.filter(
+    (loser) => loser.severity === "BLOCKER" || loser.severity === "CRITICAL",
+  );
+  if (severe.length > 0) {
+    out.push("");
+    for (const loser of severe) {
+      out.push(
+        `- ${code(`${loser.path}:${loser.line}`)} — ` +
+          `${oneLine(loser.claim)} — merged into ${loser.merged_into}`,
+      );
+    }
   }
   return out;
 }
