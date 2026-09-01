@@ -208,12 +208,16 @@ describe("generateCiWorkflowTemplate (pure)", () => {
   // A scaffolded repo must inherit action.yml's spend ceiling, never one this
   // repo chose for itself. `budget-usd` is a real money cap on someone else's
   // account; raising it from a template they did not read is not ours to do.
-  // This repo overrides it only because it reviews itself and its own PRs
-  // outgrew the default — see OWN_CI_WORKFLOW_OPTIONS.
-  test("the scaffolded template never sets budget-usd for a consumer", () => {
+  //
+  // Since issue #156 NO side sets it, this repo included: action.yml's
+  // `budget-usd` default is empty and the CLI resolves the ceiling from the
+  // route's billing mode, so writing `budget-usd: 15.00` here would IMPOSE a
+  // ceiling on a subscription route that would otherwise carry none — the
+  // opposite of what the override was for.
+  test("neither the scaffolded template nor this repo's own sets budget-usd", () => {
     expect(generateCiWorkflowTemplate()).not.toContain("budget-usd:");
-    expect(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS)).toContain(
-      "budget-usd: 15.00",
+    expect(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS)).not.toContain(
+      "budget-usd:",
     );
   });
 

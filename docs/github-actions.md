@@ -158,10 +158,21 @@ nothing:
 | Gate | Input | Default | Disable |
 |---|---|---|---|
 | Size | `max-changed-lines` / `max-changed-files` | `1000` / `50` | `0` |
-| Budget | `budget-usd` | `10.00` | any value `<= 0` |
+| Budget | `budget-usd` | route-derived (see below) | any value `<= 0` |
 
 Both gates exit 0 and leave a courteous PR comment plus step-summary note when they trip — they are cost
 gates, not quality gates, and never fail the job.
+
+**Leaving `budget-usd` unset resolves the ceiling from how the run is billed.** A Claude
+subscription route (`CLAUDE_CODE_OAUTH_TOKEN`) draws on quota rather than a per-token invoice, so its
+real cash cost is `$0.00` and there is no dollar figure to gate on — no ceiling is applied, and the run
+emits a `::notice::` saying so. A metered route (`ANTHROPIC_API_KEY`) gets a `10.00` default, because
+that is the case where a runaway PR really does produce an invoice. Setting `budget-usd` explicitly is
+honoured verbatim on either route.
+
+If **both** credentials are set, the ceiling is applied: this project does not record which one the
+Claude CLI actually bills, and a wrongly-removed ceiling costs money while a wrongly-applied one costs
+one skipped review you can clear with `budget-usd: 0`.
 
 **A `budget-usd` of `0` or below does not mean "spend nothing" — it disables the ceiling.** This
 matches the sibling size-gate knobs' documented convention (`<= 0` disables the limit). Reading it the

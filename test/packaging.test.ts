@@ -513,8 +513,8 @@ describe("Packaging & distribution configuration", () => {
   // The byte-equality drift tests above already fail if these lines change, but
   // they fail by showing a diff — they never say WHICH side is supposed to
   // carry an override. These two state the rule directly: a scaffolded repo
-  // inherits action.yml's defaults and is never handed spend or size ceilings
-  // it did not choose, while this repo overrides both because it reviews
+  // inherits action.yml's defaults and is never handed ceilings it did not
+  // choose, while this repo raises only the size gate because it reviews
   // itself. A future edit that "helpfully" pushes an override into the
   // scaffolded template breaks this, not just a byte comparison.
   test("the scaffolded template sets neither spend nor size ceilings", () => {
@@ -523,9 +523,15 @@ describe("Packaging & distribution configuration", () => {
     expect(scaffolded).not.toContain("max-changed-lines:");
   });
 
-  test("this repo's own workflow overrides both ceilings", () => {
+  // Spend is deliberately NOT on this list since issue #156. action.yml's
+  // `budget-usd` default is now empty and the CLI resolves the ceiling from
+  // the route's billing mode, so an explicit `budget-usd: 15.00` here would
+  // impose a ceiling the policy would not otherwise apply — on a subscription
+  // route that ceiling gates a token-derived estimate against $0.00 of real
+  // spend, and a skipped review reads exactly like a clean one.
+  test("this repo's own workflow overrides only the size ceiling", () => {
     const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
-    expect(own).toContain("budget-usd: 15.00");
+    expect(own).not.toContain("budget-usd:");
     // 1500, not action.yml's 1000: D1-10c was skipped at 1023 changed lines,
     // and a skipped review reads exactly like a clean one on the checks page.
     expect(own).toContain("max-changed-lines: 1500");

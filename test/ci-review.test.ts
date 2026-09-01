@@ -12,11 +12,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   budgetDisabledWarningMessage,
+  budgetUnlimitedNoticeMessage,
+  CI_DEFAULT_METERED_BUDGET_USD,
   type CiGateSkipPlan,
   ciExitCode,
   ciGateSkipOutputs,
+  deriveCiBillingMode,
   planCiBudgetSkip,
   planCiSizeSkip,
+  resolveCiBudgetCeiling,
   SKIP_BUDGET_COMMENT_MARKER,
   SKIP_SIZE_COMMENT_MARKER,
 } from "../src/ci-gates";
@@ -411,6 +415,112 @@ describe("planCiBudgetSkip", () => {
     // header doctrine) — estimatedCostUsd here is estimate.high, per
     // report.ts's own documented under-estimate bias (see report.ts ~97-98).
     expect(plan.outputs.cost_usd_est).toBe(12.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The CI budget gate's route-aware resolution (issue #156). The gate compared
+// `estimate.high` — a token-derived figure — against a real-dollar ceiling.
+// On a subscription route the real cash cost is $0.00, so a $10 default
+// refused work for an overrun that could not happen, and a skipped review is
+// indistinguishable from a clean one on the checks page (ci-setup.ts:50-63).
+//
+// These compose the same three pure functions cli.ts's gate composes, in the
+// same order, so a wiring change that drops one has to break a test here.
+// ---------------------------------------------------------------------------
+
+function budgetGateFor(input: {
+  env: Record<string, string | undefined>;
+  configured: number | undefined;
+  estimatedCostUsd: number;
+}): CiGateSkipPlan | null {
+  const ceiling = resolveCiBudgetCeiling({
+    configured: input.configured,
+    billingMode: deriveCiBillingMode(input.env),
+  });
+  if (ceiling.budgetUsd === undefined) return null;
+  return planCiBudgetSkip({
+    isCi: true,
+    estimatedCostUsd: input.estimatedCostUsd,
+    budgetUsd: ceiling.budgetUsd,
+    prNumber: 156,
+  });
+}
+
+describe("CI budget gate resolution by billing mode", () => {
+  test("subscription route, no configured budget: no gate runs at any estimate", () => {
+    expect(
+      budgetGateFor({
+        env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
+        configured: undefined,
+        estimatedCostUsd: 999,
+      }),
+    ).toBeNull();
+  });
+
+  test("subscription route with no ceiling announces itself — a silent no-gate is the failure this repo has already paid for", () => {
+    const ceiling = resolveCiBudgetCeiling({
+      configured: undefined,
+      billingMode: deriveCiBillingMode({
+        CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test",
+      }),
+    });
+    expect(budgetUnlimitedNoticeMessage(ceiling)).not.toBeNull();
+    // and the <= 0 warning stays silent: nothing was disabled here.
+    expect(budgetDisabledWarningMessage(ceiling.budgetUsd)).toBeNull();
+  });
+
+  test("metered route, no configured budget: the default ceiling applies", () => {
+    const plan = budgetGateFor({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      configured: undefined,
+      estimatedCostUsd: CI_DEFAULT_METERED_BUDGET_USD + 2.5,
+    });
+    expect(plan).not.toBeNull();
+    if (plan === null) throw new Error("unreachable");
+    expect(plan.outputs.status).toBe("skipped-budget");
+    expect(plan.comment).toContain(
+      `$${CI_DEFAULT_METERED_BUDGET_USD.toFixed(2)}`,
+    );
+  });
+
+  test("metered route, no configured budget, estimate under the default: no skip", () => {
+    expect(
+      budgetGateFor({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        configured: undefined,
+        estimatedCostUsd: CI_DEFAULT_METERED_BUDGET_USD - 1,
+      }),
+    ).toBeNull();
+  });
+
+  test("an explicit ceiling wins on a subscription route", () => {
+    const plan = budgetGateFor({
+      env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
+      configured: 5,
+      estimatedCostUsd: 6,
+    });
+    expect(plan).not.toBeNull();
+    if (plan === null) throw new Error("unreachable");
+    expect(plan.comment).toContain("$5.00");
+  });
+
+  test("an explicit ceiling wins on a metered route, including an explicit disable", () => {
+    expect(
+      budgetGateFor({
+        env: { ANTHROPIC_API_KEY: "sk-test" },
+        configured: 0,
+        estimatedCostUsd: 999,
+      }),
+    ).toBeNull();
+    const plan = budgetGateFor({
+      env: { ANTHROPIC_API_KEY: "sk-test" },
+      configured: 20,
+      estimatedCostUsd: 25,
+    });
+    expect(plan).not.toBeNull();
+    if (plan === null) throw new Error("unreachable");
+    expect(plan.comment).toContain("$20.00");
   });
 });
 

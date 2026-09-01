@@ -276,6 +276,124 @@ export function budgetDisabledWarningMessage(
 }
 
 // ---------------------------------------------------------------------------
+// Route-aware ceiling resolution (issue #156). The budget gate compares
+// `estimate.high` — a TOKEN-derived figure — against a real-dollar ceiling.
+// On a Claude subscription route the real cash cost of a run is $0.00, so the
+// shipped $10 default refused to do work over an overrun that cannot happen,
+// and a skipped review is indistinguishable from a clean one to anyone
+// reading the checks (this module's own doctrine, ~110-115; ci-setup.ts:50-63).
+// So: no ceiling by default on a subscription route, the default ceiling on a
+// metered one, and an explicit operator value honoured verbatim on either.
+// ---------------------------------------------------------------------------
+
+export type CiBillingMode = "subscription" | "metered";
+
+// A non-empty ANTHROPIC_API_KEY means metered. Everything else, including an
+// OAuth token, means subscription.
+//
+// This repo does NOT settle which credential actually bills when BOTH
+// CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are present, and it is worth
+// being explicit that the gap is real rather than papering over it:
+// action.yml:111-112 binds both into the child env unconditionally,
+// test/harness/env-projection.test.ts:48-56 deliberately asserts both survive
+// the projection with no precedence between them, and `defaultClaudeAuthProbe`
+// (provider-capabilities.ts:402-405) ORs them into a single boolean. Whichever
+// one the Claude CLI itself prefers wins, and that fact is recorded nowhere in
+// this codebase.
+//
+// This rule does not need that answer, because the two errors are not
+// symmetric. Guess "unlimited" wrongly and a real invoice arrives that nobody
+// authorized. Guess "ceiling" wrongly and one review is skipped, which the
+// operator clears with a single line of YAML (`budget-usd: 0`). So the mere
+// PRESENCE of a key keeps the ceiling: we cannot rule out that it bills.
+// README.md:38-45 already states the user-facing half of the same rule —
+// sourcing ANTHROPIC_API_KEY into the shell "is what moves a run from quota to
+// invoice".
+//
+// Trimming is load-bearing, not defensive: action.yml:111 binds the input
+// UNCONDITIONALLY and GitHub renders an unset input as the empty string, so
+// every subscription-route CI run carries `ANTHROPIC_API_KEY=""`. Without the
+// trim, no route would ever resolve as a subscription in Actions.
+//
+// This is deliberately NOT `provider-capabilities.ts`'s
+// `CLAUDE_CAPABILITY_STATICS.billingMode` (:354-362), and the two must not be
+// "unified" later. That constant is static `"subscription"` and making it
+// derived is an ADMISSION hazard, verified before this was written: metered →
+// `pricingApplicability: "required"` (production-runtime.ts:263) →
+// `tokenPricingAvailable = report.billing.pricingReady`
+// (production-runtime.ts:322), and `pricingReady` is hardcoded false in every
+// transport (provider-capabilities.ts:555, claude-code-cli.ts:323,
+// opencode-sdk.ts:373, transport-registry.ts:421) → `pricing_table_missing`
+// with `blocking: true` (provider-capabilities.ts:629-637). A metered
+// claude-code route would be refused admission outright, which is strictly
+// worse than the skipped review this function exists to prevent. This one
+// answers a narrower question — "should CI impose a spend ceiling?" — and
+// reaches nothing but the ceiling.
+export function deriveCiBillingMode(
+  env: Record<string, string | undefined>,
+): CiBillingMode {
+  return env.ANTHROPIC_API_KEY?.trim() ? "metered" : "subscription";
+}
+
+export const CI_DEFAULT_METERED_BUDGET_USD = 10;
+
+export interface CiBudgetCeiling {
+  // `undefined` means NO ceiling — the gate does not run at all. Distinct from
+  // a `0` ceiling, which reaches `evaluateBudgetGate` and is allowed there by
+  // the `<= 0` convention; the two arrive by different routes and the shell
+  // announces them with different messages.
+  budgetUsd: number | undefined;
+  source: "operator" | "default-metered" | "unlimited-subscription";
+}
+
+// Total over the four cases. `source` exists so the caller can tell the two
+// no-ceiling outcomes apart without re-deriving why.
+//
+// An explicitly configured value is honoured verbatim on ANY route — that is
+// how an operator imposes a ceiling on a subscription (`budget-usd: 5`) or
+// removes one on a metered route (`budget-usd: 0`, which still reaches
+// `budgetDisabledWarningMessage`). The `configured !== undefined` test is what
+// keeps 0 and negatives on the operator branch: falling back to a truthiness
+// check would swallow the explicit disable and silently reimpose the $10 the
+// operator just removed.
+export function resolveCiBudgetCeiling(input: {
+  configured: number | undefined;
+  billingMode: CiBillingMode;
+}): CiBudgetCeiling {
+  if (input.configured !== undefined) {
+    return { budgetUsd: input.configured, source: "operator" };
+  }
+  if (input.billingMode === "metered") {
+    return {
+      budgetUsd: CI_DEFAULT_METERED_BUDGET_USD,
+      source: "default-metered",
+    };
+  }
+  return { budgetUsd: undefined, source: "unlimited-subscription" };
+}
+
+// The loudness half. `unlimited-subscription` produces no ceiling and would
+// otherwise be silent, which is the exact shape this module already refuses
+// for the `<= 0` case: a disable is only safe when it is loud.
+//
+// Kept SEPARATE from `budgetDisabledWarningMessage`, and separate in register
+// too — a NOTE, not a warning. The operator chose nothing wrong here; they
+// configured nothing and the policy resolved. Merging the two would tell
+// someone who never set `budget-usd` that they disabled something.
+export function budgetUnlimitedNoticeMessage(
+  ceiling: CiBudgetCeiling,
+): string | null {
+  if (ceiling.source !== "unlimited-subscription") return null;
+  return (
+    "no budget-usd ceiling was applied: this route authenticates against a " +
+    "Claude subscription, where a run draws on quota rather than a " +
+    "per-token invoice, so the estimated cost is not a dollar figure to " +
+    "gate on. The size gate still applies independently. Set `budget-usd: " +
+    "<n>` to impose a ceiling anyway."
+  );
+}
+
+// ---------------------------------------------------------------------------
 // CI skip plan — the ONE call reviewPr's shell makes per gate. Composes
 // ciSizeGateSkip/ciBudgetGateSkip's {comment, summary} with renderStepSummary
 // (ci-reporter.ts) and the $GITHUB_OUTPUT contract into everything the shell

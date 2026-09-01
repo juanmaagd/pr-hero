@@ -38,14 +38,22 @@ export const CI_WORKFLOW_RELATIVE_PATH = path.join(
 export interface CiWorkflowTemplateOptions {
   actionRef?: string;
   // Repo-local override for the action's own `budget-usd` default. Omitted
-  // means "say nothing and inherit action.yml's default", which is what every
+  // means "say nothing and inherit the action's default", which is what every
   // scaffolded repo gets: raising a stranger's spend ceiling from a template
-  // they did not choose is not ours to do. THIS repo overrides it because it
-  // reviews itself, and a self-review's diff grows every time a finding is
-  // answered — the budget reads the whole diff against main, not the delta
-  // since the last review, so an iterating PR walks toward the ceiling exactly
-  // when the check matters most. That is a real design wart, recorded here
-  // rather than hidden behind a number.
+  // they did not choose is not ours to do.
+  //
+  // Since issue #156 that inherited default is a POLICY, not a number:
+  // action.yml's `budget-usd` default is empty, and the CLI resolves the
+  // ceiling from the route's billing mode (ci-gates.ts's
+  // `resolveCiBudgetCeiling`) — no ceiling on a Claude subscription, a default
+  // ceiling on a metered ANTHROPIC_API_KEY route. Inheriting is therefore
+  // strictly better than it was: a scaffolded repo now gets a ceiling exactly
+  // when a ceiling means something.
+  //
+  // NOTHING sets this today, this repo included — see OWN_CI_WORKFLOW_OPTIONS
+  // for why the one override that existed went away. The knob stays because a
+  // repo that genuinely wants a fixed ceiling on a subscription route needs a
+  // way to say so, and that is the only thing an explicit value now means.
   budgetUsd?: string;
   // Repo-local override for the action's own `max-changed-lines` default, and
   // omitted for the same reason as `budgetUsd`: a scaffolded repo inherits
@@ -54,12 +62,17 @@ export interface CiWorkflowTemplateOptions {
   // twenty-three lines over, and a skipped review is indistinguishable from a
   // clean one to anyone reading the checks.
   //
-  // Raising it costs little and risks little HERE, and both halves of that
-  // matter: the real spend ceiling is `budget-usd`, which still refuses the
-  // work outright, so this gate only governs predictability. It is a COST
-  // gate, never a quality one — the size<->quality question is unmeasured in
-  // this project (`scripts/scope-probe.ts`), so this number is not a claim
-  // that pr-hero reviews a 1500-line diff as well as a 300-line one.
+  // Raising it costs little and risks little HERE. It is a COST gate, never a
+  // quality one — the size<->quality question is unmeasured in this project
+  // (`scripts/scope-probe.ts`), so this number is not a claim that pr-hero
+  // reviews a 1500-line diff as well as a 300-line one.
+  //
+  // Since issue #156 it is also the ONLY gate bounding a self-review's scope
+  // here, which is what the number has to be read against: this comment used
+  // to lean on `budget-usd` as "the real spend ceiling, which still refuses
+  // the work outright". On this repo's subscription route it never was — it
+  // gated `estimate.high`, a token-derived figure, against $0.00 of real
+  // cash.
   maxChangedLines?: string;
 }
 
@@ -70,9 +83,18 @@ export const DEFAULT_CI_ACTION_REF = "juanmaagd/pr-hero@v1";
 // tests and every regeneration read the same object, so a change here cannot
 // leave the committed workflow and the tests disagreeing about what "ours"
 // means. Nothing a scaffolded repo receives passes through here.
+//
+// `budgetUsd` is deliberately absent (issue #156). It used to be "15.00", set
+// because a self-review's diff grows against the base every time a finding is
+// answered, so an iterating PR walked toward the ceiling exactly when the
+// check mattered most. The route's billing mode now solves that: this repo
+// reviews itself on a Claude subscription, where `resolveCiBudgetCeiling`
+// applies no ceiling at all. Restoring the line would not restore a safety
+// net — it would IMPOSE a ceiling the policy would otherwise not apply, on an
+// `estimate.high` that is not this route's cash cost. `maxChangedLines` stays:
+// that gate is real on any route.
 export const OWN_CI_WORKFLOW_OPTIONS: CiWorkflowTemplateOptions = {
   actionRef: "./",
-  budgetUsd: "15.00",
   maxChangedLines: "1500",
 };
 
