@@ -629,6 +629,13 @@ export async function prepareProductionAdmissionContext(input: {
     binaryPath: authorityOptions.binaryPath,
     openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
     env: authorityOptions.env,
+    // #149: the SAME broker instance the binding authority resolved. Without
+    // this, a caller injecting a fake through `credentialBrokers.opencode`
+    // gets the fake at the authority and a real OpenCodeAuthBroker at the
+    // server — two brokers, diverging in silence.
+    ...(authorityOptions.credentialBrokers?.opencode === undefined
+      ? {}
+      : { credentialBroker: authorityOptions.credentialBrokers.opencode }),
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   });
   const probe = await probeBindingsReadiness({
@@ -674,6 +681,13 @@ export async function prepareProductionAdmissionContext(input: {
     binaryPath: authorityOptions.binaryPath,
     openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
     env: authorityOptions.env,
+    // #149: the SAME broker instance the binding authority resolved. Without
+    // this, a caller injecting a fake through `credentialBrokers.opencode`
+    // gets the fake at the authority and a real OpenCodeAuthBroker at the
+    // server — two brokers, diverging in silence.
+    ...(authorityOptions.credentialBrokers?.opencode === undefined
+      ? {}
+      : { credentialBroker: authorityOptions.credentialBrokers.opencode }),
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   }) as DefaultTransportRegistry;
 

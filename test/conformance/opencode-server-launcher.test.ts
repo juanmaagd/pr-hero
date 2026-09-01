@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { launchOpenCodeServer } from "../../src/transports/opencode-server";
+import type { CredentialBroker } from "../../src/security/credential-broker";
+import {
+  composeOpenCodeServerEnv,
+  launchOpenCodeServer,
+  launchProjectedOpenCodeServer,
+} from "../../src/transports/opencode-server";
 
 const BIN = "/opt/homebrew/bin/opencode";
 const PID = 515151;
@@ -342,5 +347,222 @@ describe("launchOpenCodeServer", () => {
     const before = fake.signals().length;
     await server.close();
     expect(fake.signals().length).toBe(before);
+  });
+});
+
+// #149: the server launched with `env: {}` resolved the OPERATOR's real home
+// for both config (their MCP servers) and data (their auth.json), so every
+// OpenCode inference authenticated against their credential store while the
+// per-attempt projection was built, never read, and destroyed. These tests
+// pin the fix: the server runs under a projection whose lifetime is the
+// server's, composed from an allowlist that is deliberately NOT the harness's.
+describe("projected server launch (#149)", () => {
+  interface FakeProjection {
+    broker: CredentialBroker;
+    destroys: () => number;
+    projects: () => number;
+  }
+
+  const PROJECTION_ENV = {
+    HOME: "/tmp/proj-home",
+    TMPDIR: "/tmp/proj-home/tmp",
+    XDG_DATA_HOME: "/tmp/proj-home/.local/share",
+    XDG_CONFIG_HOME: "/tmp/proj-home/.config",
+  } as const;
+
+  function fakeBroker(
+    options: { failWith?: Error; onDestroy?: () => void } = {},
+  ): FakeProjection {
+    let destroys = 0;
+    let projects = 0;
+    const broker: CredentialBroker = {
+      project: async () => {
+        projects += 1;
+        if (options.failWith !== undefined) throw options.failWith;
+        return {
+          projectionId: "cred-fake",
+          kind: "opencode_chatgpt_oauth",
+          syntheticHome: PROJECTION_ENV.HOME,
+          syntheticConfigHome: PROJECTION_ENV.XDG_CONFIG_HOME,
+          syntheticTmp: PROJECTION_ENV.TMPDIR,
+          env: { ...PROJECTION_ENV },
+          files: [],
+          destroy: async () => {
+            destroys += 1;
+            options.onDestroy?.();
+          },
+        };
+      },
+    };
+    return { broker, destroys: () => destroys, projects: () => projects };
+  }
+
+  test("the spawn env is the server allowlist plus the projection, exactly", async () => {
+    const fake = fakeServer();
+    const proj = fakeBroker();
+    const pending = launchProjectedOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      broker: proj.broker,
+      baseEnv: {
+        PATH: "/usr/bin",
+        LANG: "en_US.UTF-8",
+        // Measured live on opencode 1.18.23: an ambient provider key
+        // CONNECTS that provider. Both of these are in the harness's
+        // ENV_PASSTHROUGH, which is why the server cannot reuse that list —
+        // composing from it would reintroduce this exact leak through the fix.
+        ANTHROPIC_API_KEY: "sk-ant-must-not-reach-the-server",
+        CLAUDE_CODE_OAUTH_TOKEN: "must-not-reach-the-server",
+        // The operator's real identity: pinned over by the projection.
+        HOME: "/Users/operator",
+        TMPDIR: "/var/folders/operator",
+        // Not on any allowlist.
+        EDITOR: "vim",
+      },
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    await pending;
+
+    expect(fake.env()).toEqual({
+      PATH: "/usr/bin",
+      LANG: "en_US.UTF-8",
+      ...PROJECTION_ENV,
+    });
+  });
+
+  test("the projection wins over an allowlisted key of the same name", () => {
+    // No overlap exists today (the allowlist is operational, the projection is
+    // identity), so the launch tests above cannot exercise this. It is a
+    // forward guard, and an untested one would be decoration: a broker that
+    // later pinned PATH must not be silently overridden by pr-hero own.
+    expect(
+      composeOpenCodeServerEnv(
+        { PATH: "/inherited/bin", LANG: "en_US.UTF-8" },
+        { HOME: "/tmp/proj", PATH: "/projected/bin" },
+      ),
+    ).toEqual({
+      PATH: "/projected/bin",
+      LANG: "en_US.UTF-8",
+      HOME: "/tmp/proj",
+    });
+  });
+
+  test("close() destroys the projection", async () => {
+    const fake = fakeServer();
+    const proj = fakeBroker();
+    const pending = launchProjectedOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      broker: proj.broker,
+      baseEnv: { PATH: "/usr/bin" },
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+      termGraceMs: 5,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+
+    const closing = server.close();
+    fake.finish(0);
+    await closing;
+
+    expect(proj.destroys()).toBe(1);
+  });
+
+  test("the projection outlives the process it authenticates", async () => {
+    const fake = fakeServer();
+    const order: string[] = [];
+    const proj = fakeBroker({ onDestroy: () => order.push("destroy") });
+    const pending = launchProjectedOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      broker: proj.broker,
+      baseEnv: { PATH: "/usr/bin" },
+      spawnFn: fake.spawnFn,
+      killFn: (_pid, signal) => {
+        order.push(String(signal));
+      },
+      termGraceMs: 5,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+
+    const closing = server.close();
+    fake.finish(0);
+    await closing;
+
+    // Destroying the auth store while the server still holds it would pull
+    // the credential out from under a live process. The shutdown cascade runs
+    // first; the projection goes last.
+    expect(order).toEqual(["SIGTERM", "destroy"]);
+  });
+
+  test("a failed launch destroys the projection instead of leaking it", async () => {
+    const proj = fakeBroker();
+    await expect(
+      launchProjectedOpenCodeServer({
+        verifiedBinaryPath: BIN,
+        broker: proj.broker,
+        baseEnv: { PATH: "/usr/bin" },
+        spawnFn: (() => {
+          throw new Error("spawn refused");
+        }) as unknown as typeof Bun.spawn,
+      }),
+    ).rejects.toThrow("spawn refused");
+
+    expect(proj.projects()).toBe(1);
+    expect(proj.destroys()).toBe(1);
+  });
+
+  test("a projection failure fails the launch closed, with no spawn", async () => {
+    const fake = fakeServer();
+    const proj = fakeBroker({ failWith: new Error("no oauth record") });
+    await expect(
+      launchProjectedOpenCodeServer({
+        verifiedBinaryPath: BIN,
+        broker: proj.broker,
+        baseEnv: { PATH: "/usr/bin" },
+        spawnFn: fake.spawnFn,
+      }),
+    ).rejects.toThrow("no oauth record");
+
+    // Degrading to the operator's environment here is precisely the bug.
+    expect(fake.argv()).toEqual([]);
+  });
+
+  test("the projection is asked for the opencode credential the authority binds", async () => {
+    const fake = fakeServer();
+    let seen: { kind: string; verifiedBinaryPath: string } | undefined;
+    const broker: CredentialBroker = {
+      project: async (input) => {
+        seen = {
+          kind: input.kind,
+          verifiedBinaryPath: input.verifiedBinaryPath,
+        };
+        return {
+          projectionId: "cred-fake",
+          kind: input.kind,
+          syntheticHome: PROJECTION_ENV.HOME,
+          syntheticConfigHome: PROJECTION_ENV.XDG_CONFIG_HOME,
+          syntheticTmp: PROJECTION_ENV.TMPDIR,
+          env: { ...PROJECTION_ENV },
+          files: [],
+          destroy: async () => {},
+        };
+      },
+    };
+    const pending = launchProjectedOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      broker,
+      baseEnv: { PATH: "/usr/bin" },
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    await pending;
+
+    expect(seen).toEqual({
+      kind: "opencode_chatgpt_oauth",
+      verifiedBinaryPath: BIN,
+    });
   });
 });
