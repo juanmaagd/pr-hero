@@ -13,6 +13,7 @@ import {
 } from "../src/findings";
 import {
   changedPathsFromDiff,
+  makeProofRefResolver,
   PIPELINE_SCHEMA_VERSION,
   type PipelineInput,
   type PipelineProgressEvent,
@@ -3821,5 +3822,56 @@ describe("#152 proof_refs resolvability wiring", () => {
     });
     const result = await runPipeline(input, { runner });
     expect(result.perAgent.verifier?.status).toBe("ok");
+  });
+});
+
+describe("#152 makeProofRefResolver", () => {
+  test("resolves a file that exists in the worktree but is NOT in the diff", async () => {
+    // The DOMINANT production shape, and the one every other test in this file
+    // misses: makeInput's worktree is a fixture path with nothing on disk, so
+    // until this test the `existsSync` half of the resolver had never once
+    // returned true. A hunter that hops three files out cites an unchanged
+    // file — no diff entry can vouch for it, and rejecting it would be the
+    // catastrophic-retry failure inverted.
+    const worktree = await mkdtemp(path.join(tmpdir(), "pr-hero-tree-"));
+    await mkdir(path.join(worktree, "src", "deep"), { recursive: true });
+    await Bun.write(
+      path.join(worktree, "src", "deep", "helper.ts"),
+      "export {};\n",
+    );
+    const resolve = makeProofRefResolver(worktree, "");
+    expect(resolve("src/deep/helper.ts")).toBe(true);
+    expect(resolve("src/deep/ghost.ts")).toBe(false);
+    expect(resolve("package.json")).toBe(false);
+    await rm(worktree, { recursive: true, force: true });
+  });
+
+  test("resolves a deleted file from the patch after it is gone from disk", async () => {
+    const worktree = await mkdtemp(path.join(tmpdir(), "pr-hero-tree-"));
+    const patch = [
+      "diff --git a/src/gone.ts b/src/gone.ts",
+      "deleted file mode 100644",
+      "--- a/src/gone.ts",
+      "+++ /dev/null",
+      "",
+    ].join("\n");
+    const resolve = makeProofRefResolver(worktree, patch);
+    expect(resolve("src/gone.ts")).toBe(true);
+    expect(resolve("/dev/null")).toBe(false);
+    await rm(worktree, { recursive: true, force: true });
+  });
+
+  test("answers a repeated path identically once memoized", async () => {
+    // The memo is the only thing between this resolver and one stat per ref
+    // per finding per step; a cache that answered differently on the second
+    // call would make a step's verdict depend on citation order.
+    const worktree = await mkdtemp(path.join(tmpdir(), "pr-hero-tree-"));
+    await Bun.write(path.join(worktree, "real.ts"), "export {};\n");
+    const resolve = makeProofRefResolver(worktree, "");
+    expect(resolve("real.ts")).toBe(true);
+    expect(resolve("real.ts")).toBe(true);
+    expect(resolve("ghost.ts")).toBe(false);
+    expect(resolve("ghost.ts")).toBe(false);
+    await rm(worktree, { recursive: true, force: true });
   });
 });
