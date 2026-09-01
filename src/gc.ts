@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { selfInvocation } from "./assets";
 import {
   decideGc,
   GC_LAUNCHD_LABEL,
@@ -274,10 +275,6 @@ async function run(
   return { ok: exitCode === 0, stdout, stderr };
 }
 
-function cliEntryPath(): string {
-  return path.join(import.meta.dir, "cli.ts");
-}
-
 async function gcInstall(intervalMin: number): Promise<number> {
   if (process.platform !== "darwin") {
     throw new CliError(
@@ -291,8 +288,10 @@ async function gcInstall(intervalMin: number): Promise<number> {
   await mkdir(prheroLayout(home).dir, { recursive: true });
   await mkdir(path.dirname(plistPath), { recursive: true });
   const plist = renderGcPlist({
-    runtimePath: process.execPath,
-    entryPath: cliEntryPath(),
+    // selfInvocation(), not a hand-built runtime + src/cli.ts pair: the pair
+    // is only correct for a source checkout, and the compiled binary it was
+    // wrong for is the one users install.
+    invocation: selfInvocation(),
     intervalSeconds: intervalMin * 60,
     logPath,
     pathEnv: process.env.PATH ?? "",
