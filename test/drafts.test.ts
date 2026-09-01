@@ -251,3 +251,89 @@ describe("validateRefuterResult", () => {
     expect(() => validateRefuterResult(candidate, ["F001"])).toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #152: proof_refs resolvability. The resolver is OPTIONAL, and its absence
+// must leave every pre-existing caller (the lab, the probes, the offline
+// suite) behaving exactly as before — the check is opt-in wiring, not a new
+// unconditional rule the shared schema quietly grew.
+// ---------------------------------------------------------------------------
+describe("proof_refs resolvability", () => {
+  const tree = new Set(["src/upload.ts", "src/authz.ts"]);
+  const resolveProofRef = (p: string): boolean => tree.has(p);
+
+  test("without a resolver, an unresolvable ref still validates", () => {
+    const candidate = {
+      findings: [draft({ proof_refs: ["src/nowhere.ts:7-20"] })],
+    };
+    expect(validateHunterDraft(candidate)).toEqual(candidate);
+    const verdicts = {
+      results: [
+        {
+          finding_id: "F001",
+          outcome: "corroborated" as const,
+          proof_refs: ["src/nowhere.ts:7-20"],
+        },
+      ],
+    };
+    expect(validateRefuterResult(verdicts, ["F001"])).toEqual(verdicts);
+  });
+
+  test("with a resolver, a resolvable draft ref passes", () => {
+    const candidate = {
+      findings: [draft({ proof_refs: ["src/upload.ts:42", "b/src/authz.ts"] })],
+    };
+    expect(validateHunterDraft(candidate, { resolveProofRef })).toEqual(
+      candidate,
+    );
+  });
+
+  test("with a resolver, an empty evidence list still passes", () => {
+    // Emptiness is a separate question with its own answer elsewhere; this
+    // rule is only about refs that name something unfindable.
+    const candidate = { findings: [draft({ proof_refs: [] })] };
+    expect(validateHunterDraft(candidate, { resolveProofRef })).toEqual(
+      candidate,
+    );
+  });
+
+  test("rejects a hunter draft citing a path the tree does not have", () => {
+    const candidate = {
+      findings: [
+        draft({ proof_refs: ["src/upload.ts:42", "package.json:15-20"] }),
+      ],
+    };
+    expect(() => validateHunterDraft(candidate, { resolveProofRef })).toThrow(
+      /package\.json:15-20/,
+    );
+  });
+
+  test("rejects a refuter verdict citing a path the tree does not have", () => {
+    // The observed #152 failure, verbatim: a verdict whose whole evidentiary
+    // record was invented, on a repo that contained neither file.
+    const candidate = {
+      results: [
+        {
+          finding_id: "F001",
+          outcome: "inconclusive" as const,
+          proof_refs: ["src/index.ts:7-20", "package.json:15-20"],
+        },
+      ],
+    };
+    expect(() =>
+      validateRefuterResult(candidate, ["F001"], { resolveProofRef }),
+    ).toThrow(/src\/index\.ts:7-20/);
+  });
+
+  test("names the offending finding, not just the ref", () => {
+    const candidate = {
+      findings: [
+        draft({ id: "R1", proof_refs: ["src/upload.ts:42"] }),
+        draft({ id: "R2", proof_refs: ["src/ghost.ts:1"] }),
+      ],
+    };
+    expect(() => validateHunterDraft(candidate, { resolveProofRef })).toThrow(
+      /findings\[1\]/,
+    );
+  });
+});

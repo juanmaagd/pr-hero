@@ -10,6 +10,7 @@ import type {
   RunSummary,
   Severity,
 } from "./findings";
+import { unresolvedProofRefs } from "./proof-refs";
 import { isSafeSlug } from "./spec";
 
 // What a hunter emits: a Finding minus the two fields the pipeline assigns
@@ -38,7 +39,33 @@ export interface RefuterResult {
   }>;
 }
 
+// #152: the reviewed tree arrives as a predicate, never as a filesystem
+// call from here — this module stays pure and the offline suite stays offline.
+export interface DraftValidationOptions {
+  // Answers "does the reviewed tree contain this repo-relative path". ABSENT
+  // means the resolvability rule does not run at all, which is what keeps the
+  // lab, the probes and every offline caller behaving exactly as before.
+  resolveProofRef?: (path: string) => boolean;
+}
+
 export class DraftValidationError extends Error {}
+
+// A citation nobody can resolve is not weaker evidence, it is NO evidence
+// wearing the shape of some (#152) — so it fails the step the same way a
+// duplicate verdict or a malformed draft does, and takes the existing retry.
+function mustResolveProofRefs(
+  refs: readonly string[],
+  options: DraftValidationOptions | undefined,
+  label: string,
+): void {
+  const resolve = options?.resolveProofRef;
+  if (resolve === undefined) return;
+  const unresolved = unresolvedProofRefs(refs, resolve);
+  must(
+    unresolved.length === 0,
+    `${label} cite paths absent from the reviewed tree: ${unresolved.join(", ")}`,
+  );
+}
 
 function must(condition: boolean, message: string): void {
   if (!condition) throw new DraftValidationError(message);
@@ -180,6 +207,7 @@ export function validateSummary(candidate: unknown): RunSummary {
 export function validateDraftFinding(
   candidate: unknown,
   index: number,
+  options?: DraftValidationOptions,
 ): DraftFinding {
   must(
     typeof candidate === "object" && candidate !== null,
@@ -246,6 +274,11 @@ export function validateDraftFinding(
     (f.proof_refs as unknown[]).every((ref) => typeof ref === "string"),
     `draft findings[${index}].proof_refs must contain only strings`,
   );
+  mustResolveProofRefs(
+    f.proof_refs as string[],
+    options,
+    `draft findings[${index}].proof_refs`,
+  );
   // The only two optional keys on a DraftFinding. `root_cause_id` is normally
   // engine-assigned (pipeline.ts), which does not stop a hunter emitting it.
   normalizeOptionalString(f, "symbol", `draft findings[${index}].symbol`);
@@ -257,7 +290,10 @@ export function validateDraftFinding(
   return f as unknown as DraftFinding;
 }
 
-export function validateHunterDraft(candidate: unknown): HunterDraft {
+export function validateHunterDraft(
+  candidate: unknown,
+  options?: DraftValidationOptions,
+): HunterDraft {
   must(
     typeof candidate === "object" && candidate !== null,
     "hunter draft must be an object",
@@ -265,7 +301,7 @@ export function validateHunterDraft(candidate: unknown): HunterDraft {
   const d = candidate as Record<string, unknown>;
   must(Array.isArray(d.findings), "hunter draft .findings must be an array");
   (d.findings as unknown[]).forEach((f, i) => {
-    validateDraftFinding(f, i);
+    validateDraftFinding(f, i, options);
   });
   return d as unknown as HunterDraft;
 }
@@ -277,6 +313,7 @@ export function validateHunterDraft(candidate: unknown): HunterDraft {
 export function validateRefuterResult(
   candidate: unknown,
   submittedIds: string[],
+  options?: DraftValidationOptions,
 ): RefuterResult {
   must(
     typeof candidate === "object" && candidate !== null,
@@ -309,6 +346,11 @@ export function validateRefuterResult(
     must(
       (r.proof_refs as unknown[]).every((ref) => typeof ref === "string"),
       `refuter results[${i}].proof_refs must contain only strings`,
+    );
+    mustResolveProofRefs(
+      r.proof_refs as string[],
+      options,
+      `refuter results[${i}].proof_refs`,
     );
     const id = r.finding_id as string;
     must(!seen.has(id), `refuter results duplicate verdict for ${id}`);
