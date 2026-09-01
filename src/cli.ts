@@ -2395,28 +2395,6 @@ async function reviewPr(
       );
     }
 
-    // Cross-machine TOCTOU: the watcher already skipped fresh pendings at
-    // gather, but a CLI and a watcher can still overlap between that fetch
-    // and this process posting its own pending. --yes (the watcher child)
-    // aborts before createPrRunDir so it consumes no poison-PR attempt.
-    // Interactive continues: a stuck pending must not trap the operator
-    // behind the 90-minute TTL.
-    if (
-      isInFlightCommitStatus(
-        await fetchCommitStatuses(operatorRoot, headSha),
-        Date.now(),
-      )
-    ) {
-      if (options.yes) {
-        log("skip: a pr-hero review is already in-flight on this head");
-        return 0;
-      }
-      log(
-        "warning: a pr-hero review is already in-flight on this head; " +
-          "continuing",
-      );
-    }
-
     // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
     const runDir = await createPrRunDir(
       options,
