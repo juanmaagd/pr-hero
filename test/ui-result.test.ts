@@ -483,6 +483,78 @@ describe("renderResult footer", () => {
     expect(joined(renderResult(input()))).toContain("$3.50–$5.25");
   });
 
+  // #173 (§8: "Artifacts and reports show cash and notional totals
+  // separately. Budget enforcement uses cash only; research comparisons may
+  // use notional only when clearly labelled.").
+  //
+  // The header's figure is CASH, and on a subscription route cash is $0.00 —
+  // truthfully, but uselessly on its own. Without this row a subscription run
+  // would print `$0.00` and the list-basis figure the operator has been
+  // reading for months would simply vanish from the terminal. The row is what
+  // makes the change a relocation rather than a loss, and its wording is what
+  // keeps the two numbers from being read as one.
+  describe("cash and notional are shown apart (#173)", () => {
+    test("a notional total is its own labelled row, never folded into the header figure", () => {
+      const text = joined(
+        renderResult(input({ costUsd: 0, notionalUsd: 0.0455 })),
+      );
+      expect(text).toContain("notional");
+      expect(text).toContain("$0.05");
+      // Labelled as not-cash, per §8's "only when clearly labelled".
+      expect(text).toContain("list price");
+      expect(text).toContain("not charged");
+      // The header keeps reporting cash, and cash alone.
+      const rule = stripAnsi(
+        renderResult(input({ costUsd: 0, notionalUsd: 0.0455 }))[1] ?? "",
+      );
+      expect(rule).toContain("$0.00");
+      expect(rule).not.toContain("$0.05");
+    });
+
+    // The legacy path — a runner reporting no normalized usage at all — must
+    // stay byte-identical, which an always-present row with a `$0.00` default
+    // would break while still passing the assertion above.
+    test("no notional figure means no row at all, not a zero one", () => {
+      const text = joined(renderResult(input()));
+      expect(text).not.toContain("notional");
+      expect(renderResult(input({ notionalUsd: undefined }))).toEqual(
+        renderResult(input()),
+      );
+    });
+
+    test("a metered run with real cash and no notional keeps a single figure", () => {
+      const text = joined(renderResult(input({ costUsd: 4.09 })));
+      expect(text).toContain("$4.09");
+      expect(text).not.toContain("notional");
+    });
+
+    // The row's value is the longest in the footer, so it is the one that
+    // would overrun a narrow terminal if it ever bypassed `row()`'s wrapping.
+    //
+    // Asserted over the lines this row ADDS, not over the whole render: the
+    // block already emits lines longer than the width for reasons that predate
+    // it and are not wrapping failures — an unbreakable run-dir path, and
+    // finding prose. Asserting every line would have been a false premise that
+    // fails against correct code.
+    test("the row wraps to the value column instead of overrunning a narrow terminal", () => {
+      const width = 20; // clamped to MIN_WIDTH (40) by the renderer
+      const without = renderResult(input({ costUsd: 0, width }));
+      const added = renderResult(
+        input({ costUsd: 0, notionalUsd: 0.0455, width }),
+      ).filter((line, i) => line !== without[i]);
+      expect(added.length).toBeGreaterThan(1); // it really did wrap
+      for (const line of added) expect(line.length).toBeLessThanOrEqual(40);
+    });
+
+    test("the row emits no escape sequences with styles off", () => {
+      for (const line of renderResult(
+        input({ costUsd: 0, notionalUsd: 0.0455, styles: false }),
+      )) {
+        expect(line).not.toContain(ESC);
+      }
+    });
+  });
+
   test("no `posted:` line — step 14 already printed one during the run", () => {
     const text = joined(
       renderResult(input({ artifacts: ["report.md", "post.json"] })),

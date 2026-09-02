@@ -213,6 +213,28 @@ describe("renderReport", () => {
     expect(markdown).toContain("3 files, +120 −45 · run complete · $12.90");
   });
 
+  // #173 (§8: "Artifacts and reports show cash and notional totals
+  // separately"). report.md is the artifact half of that sentence; the
+  // terminal's own row is asserted in test/ui-result.test.ts.
+  describe("cash and notional in the run line", () => {
+    test("a notional figure is appended as its own labelled segment", () => {
+      const markdown = renderReport(doc(), {
+        ...META,
+        costUsd: 0,
+        notionalUsd: 0.0455,
+      });
+      expect(markdown).toContain("run complete · $0.00");
+      expect(markdown).toContain("$0.05 at list price, not charged");
+    });
+
+    test("no notional figure leaves the run line byte-identical", () => {
+      expect(renderReport(doc(), { ...META, notionalUsd: undefined })).toBe(
+        renderReport(doc(), META),
+      );
+      expect(renderReport(doc(), META)).not.toContain("list price");
+    });
+  });
+
   test("advisory-only documents leave blocking empty", () => {
     const findings = [
       finding({ id: "F001", severity: "WARNING", tier: "advisory" }),

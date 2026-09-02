@@ -1384,6 +1384,87 @@ describe("engine-owned scout", () => {
     expect(rollup.cashCostUsd).toBeCloseTo(0.015);
   });
 
+  // #173: the same rollup, on the RETURNED result rather than only in
+  // pipeline.json. The terminal and report.md need the notional total to show
+  // it beside cash (§8), and taking it off the artifact-bound object is what
+  // keeps the two surfaces unable to disagree — a second accumulation for the
+  // display path is exactly the "parallel mechanism able to disagree" the
+  // per-step join site's own comment refuses.
+  test("#173 — the returned result carries the same normalized rollup, so cash and notional can be shown apart", async () => {
+    const input = await makeInput();
+    const subscriptionUsage = (
+      cash: number,
+      notional: number,
+    ): NormalizedUsage => ({
+      wallMs: 1_000,
+      tokens: {
+        inputUncached: 100,
+        outputVisible: 10,
+        inputKnown: 100,
+        outputKnown: 10,
+        totalKnown: 110,
+      },
+      completeness: "complete",
+      billingMode: "subscription",
+      costSource: "subscription",
+      cashCostUsd: cash,
+      notionalCostUsd: notional,
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      "hunter-reliability": (spec) =>
+        ok(
+          spec,
+          {
+            findings: [
+              draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+            ],
+          },
+          {},
+          subscriptionUsage(0, 0.03),
+        ),
+      refuter: (spec) =>
+        ok(
+          spec,
+          {
+            results: [
+              { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+            ],
+          } satisfies RefuterResult,
+          {},
+          subscriptionUsage(0, 0.015),
+        ),
+    });
+
+    const result = await runPipeline(input, { runner });
+
+    // Cash stays 0 across both steps; notional accumulates. Deliberately NOT
+    // asserted against `result.usage.cost_usd_est` here: FakeStepRunner
+    // hand-builds its legacy usage from a fixed per-step constant rather than
+    // projecting it from `usageV2`, so that assertion would test the fixture
+    // and not the code. The real legacy↔cash coupling is proven against the
+    // live harness in test/step-runner.test.ts.
+    expect(result.usageV2?.cashCostUsd).toBe(0);
+    expect(result.usageV2?.notionalCostUsd).toBeCloseTo(0.045);
+    // Same object the artifact publishes — not a second tally.
+    const plan = (await readPlan(input.runDir)) as {
+      usage_v2?: NormalizedUsage;
+    };
+    expect(result.usageV2).toEqual(plan.usage_v2 as NormalizedUsage);
+  });
+
+  // A runner that reports no normalized usage at all leaves the field absent
+  // rather than zero — the display surfaces key on `undefined` to omit their
+  // notional row entirely, so a fabricated zero here would print a list-price
+  // claim for a run that never produced one.
+  test("#173 — a runner reporting no normalized usage leaves the rollup absent, never zeroed", async () => {
+    const input = await makeInput();
+    const result = await runPipeline(input, {
+      runner: new FakeStepRunner(HUNTERS_OK),
+    });
+    expect(result.usageV2).toBeUndefined();
+  });
+
   test("the step's own parse turns the model's envelope into validated leads", async () => {
     // The FakeStepRunner hands back a pre-parsed output, so without this the
     // wiring between `{"leads":[...]}` and ScoutLead[] would be untested — and

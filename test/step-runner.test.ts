@@ -232,7 +232,14 @@ describe("ClaudeCodeRunner success path", () => {
     expect(stepResult.usage.tokens_in).toBe(300);
     expect(stepResult.usage.tokens_out).toBe(40);
     expect(stepResult.usage.tokens_total).toBe(340);
-    expect(stepResult.usage.cost_usd_est).toBe(0.05);
+    // #173: `cost_usd_est` is projected from `cashCostUsd`, and a claude-code
+    // route is a subscription — nothing is charged, so the legacy figure is a
+    // truthful 0. The CLI's list-basis number is not lost, it moved to
+    // `notionalCostUsd`, and asserting BOTH here is what makes this a
+    // relocation rather than a deletion.
+    expect(stepResult.usage.cost_usd_est).toBe(0);
+    expect(stepResult.usageV2?.cashCostUsd).toBe(0);
+    expect(stepResult.usageV2?.notionalCostUsd).toBe(0.05);
   });
 });
 
@@ -263,10 +270,16 @@ describe("ClaudeCodeRunner transient retry", () => {
     expect(stepResult.status).toBe("ok");
     expect(stepResult.attempts).toBe(2);
     expect(calls.length).toBe(2);
-    // Usage summed across BOTH attempts — the failed one still cost money.
+    // Usage summed across BOTH attempts — the failed one still consumed quota.
     expect(stepResult.usage.tokens_in).toBe(150);
     expect(stepResult.usage.tokens_out).toBe(25);
-    expect(stepResult.usage.cost_usd_est).toBeCloseTo(0.03);
+    // #173: the cash figure is 0 on a subscription and stays 0 however many
+    // attempts run, while the notional figure ACCUMULATES across them
+    // (0.01 + 0.02). That is `sumNormalizedUsage`'s "cash and notional
+    // accumulate independently" rule reaching production for the first time.
+    expect(stepResult.usage.cost_usd_est).toBe(0);
+    expect(stepResult.usageV2?.cashCostUsd).toBe(0);
+    expect(stepResult.usageV2?.notionalCostUsd).toBeCloseTo(0.03);
     expect(await Bun.file(spec.outPath).json()).toEqual(GOOD_DRAFT);
   });
 

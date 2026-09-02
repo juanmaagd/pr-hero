@@ -150,7 +150,15 @@ export interface ReportMeta {
   // Paths the exclusion filter dropped from the reviewed diff, if any. Stated
   // in the report because it is a mutation of the input, not a detail.
   excludedPaths?: string[];
+  // CASH, and only cash — §8's "Budget enforcement uses cash only". A Claude
+  // subscription route reports a truthful $0.00 here.
   costUsd: number;
+  // #173 (§8: "Artifacts and reports show cash and notional totals
+  // separately"). The list-basis figure the run was NOT charged. Absent means
+  // no segment at all, never a `$0.00` one — a runner that reported no
+  // normalized usage has no list figure, and printing one it never produced
+  // is the fabrication the usage slice exists to prevent.
+  notionalUsd?: number;
   wallMs: number;
 }
 
@@ -1079,9 +1087,17 @@ export function blobUrl(
 
 function runLines(doc: FindingsDocument, meta: ReportMeta): string[] {
   const { files, insertions, deletions } = meta.diffStat;
+  // #173: cash first and unqualified, notional after it and never without its
+  // basis spelled out — §8 allows notional in a report "only when clearly
+  // labelled", and two bare dollar figures side by side is precisely the
+  // mixing it forbids.
+  const notional =
+    meta.notionalUsd === undefined
+      ? ""
+      : ` (${usd(meta.notionalUsd)} at list price, not charged)`;
   const lines = [
     `${files} file${files === 1 ? "" : "s"}, +${insertions} −${deletions}` +
-      ` · run ${doc.run_status} · ${usd(meta.costUsd)} · ${duration(meta.wallMs)}`,
+      ` · run ${doc.run_status} · ${usd(meta.costUsd)}${notional} · ${duration(meta.wallMs)}`,
   ];
   const excluded = meta.excludedPaths ?? [];
   if (excluded.length > 0) {

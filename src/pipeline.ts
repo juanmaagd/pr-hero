@@ -406,6 +406,20 @@ export interface PipelineResult {
   // reliability | resilience | parity | refuter.
   perAgent: Record<string, PerAgentUsage>;
   usage: SessionUsage;
+  // #173: the run-level normalized rollup, the SAME object `pipeline.json`
+  // publishes as its `usage_v2` key — handed to the caller so the terminal and
+  // report.md can show cash and notional apart (§8: "Artifacts and reports
+  // show cash and notional totals separately"). The legacy `usage` above
+  // projects `cashCostUsd` only, and on a Claude subscription route that is a
+  // truthful $0.00 with the list-basis figure living here instead.
+  //
+  // Taken off `state.usageTotalV2` rather than re-accumulated for the display
+  // path: a second tally is the "parallel mechanism able to disagree with
+  // per_agent" the per-step usage join site already refuses. Absent — never
+  // zeroed — when no step reported normalized usage, because the display
+  // surfaces key on `undefined` to omit their notional row, and a fabricated
+  // zero would print a list-price claim for a run that produced none.
+  usageV2?: NormalizedUsage;
   // True only when ALL hunter steps failed — nothing was hunted. A single
   // hunter failure is a partial run (prose Step 4: "proceed with whatever
   // hunters did complete"), never a session failure.
@@ -2427,6 +2441,9 @@ async function finish(
     skillOutput,
     perAgent: state.perAgent,
     usage: state.usageTotal,
+    ...(state.usageTotalV2 === undefined
+      ? {}
+      : { usageV2: state.usageTotalV2 }),
     sessionFailed:
       state.hunterCount > 0 && state.hunterFailures === state.hunterCount,
     unresolved: collectUnresolvedSpend(state),

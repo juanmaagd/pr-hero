@@ -67,13 +67,22 @@ function hashPromptFile(promptPath: string): string {
 // `normalizeUnavailableUsage`: "unavailable" means an attempt ran and its
 // cost is unknown, which would misfile a $0 refusal as an unresolved spend
 // once PR5's spend ledger reads completeness.
+//
+// #173, 2026-09-02: `costSource` was `"provider"` here, which was never true
+// — no provider was contacted. It has to match the parse arms below for a
+// second, mechanical reason: an unclassified failure legacy-classifies as
+// "format" (step-runner.ts `classifyFailure`), which has a retry, so a denied
+// attempt 1 can be summed with a spawned attempt 2 — and `sumNormalizedUsage`
+// collapses `costSource` to "unknown" whenever two attempts disagree. Leaving
+// this one behind would have erased the run's cost basis on exactly the retry
+// path this transport already supports.
 function noSpawnUsage(wallMs: number): NormalizedUsage {
   return {
     wallMs,
     tokens: {},
     completeness: "complete",
     billingMode: "subscription",
-    costSource: "provider",
+    costSource: "subscription",
     cashCostUsd: 0,
   };
 }
@@ -94,8 +103,18 @@ interface RawClaudeCliResult {
   // are deliberately NOT read here. Cost already has ONE parse site
   // (`normalizeClaudeCliUsage`, from `total_cost_usd`) and one filing
   // decision; a second reader of a second cost field is exactly how two
-  // numbers for one attempt start disagreeing. `costBasis: "list"` on a
-  // subscription run is a real problem and it is #173's, not this slice's.
+  // numbers for one attempt start disagreeing.
+  //
+  // #173 closed the `costBasis: "list"` problem this comment used to defer,
+  // and closed it WITHOUT reading the field. `costBasis` is in the response,
+  // but the FILING decision follows the credential's billing mode rather than
+  // the response's label: `normalizeClaudeCliUsage` files `total_cost_usd` as
+  // notional on the strength of the route being a subscription, which is true
+  // whatever any per-model entry says. Parsing `costBasis` per model would add
+  // the second cost reader this paragraph exists to refuse. What is still unread and still
+  // wanted is the per-model SPLIT (#173 records it): one `--model sonnet`
+  // invocation ran two models, so a single route-level cost is an incomplete
+  // provenance claim in the same way a single `modelSnapshot` is.
   readonly modelUsage?: Readonly<
     Record<string, { readonly canonicalModel?: unknown } | null | undefined>
   >;
@@ -149,6 +168,29 @@ function observedModelsFromCliResult(
   return observed.length === 0 ? undefined : observed;
 }
 
+// #173 (§8, docs/multi-runtime-model-diversity-design.md:462): "Subscription
+// OAuth may truthfully report `cashCostUsd: 0`; optional catalog cost is
+// `notionalCostUsd` and never mixed with cash." This is the one site that
+// applies that rule for this transport, and it is applied STATICALLY rather
+// than branched on `billingMode`, because this transport's route can only be a
+// subscription: `credentialKindForRoute` (runner-authority.ts) returns
+// `claude_subscription_oauth` for the claude-code backend unconditionally, so
+// a metered branch here would be unreachable code with no way to test it
+// honestly. When #161 makes a metered claude-code route real, THIS is the site
+// that has to grow the branch — and `billingMode` above it is the field that
+// decides which way it goes.
+//
+// The figure itself is list-basis, verified live 2026-09-02 rather than
+// inferred: the CLI's `modelUsage` block labels each model's `costUSD` with
+// `"costBasis": "list"`, and `total_cost_usd` is their sum. On a subscription
+// nothing is charged, so filing it as cash recorded spend that never happened.
+//
+// Note the two fields answer to different things. `notionalCostUsd` follows
+// the provider: absent when the CLI reported no total, because inventing 0
+// there would claim the attempt consumed nothing. `cashCostUsd` follows the
+// CREDENTIAL: it is 0 because the subscription charges nothing, whatever the
+// CLI said, so it is unconditional.
+//
 // §8: `--output-format json`'s usage block is already disjoint-additive —
 // input_tokens (uncached), cache_read_input_tokens, and
 // cache_creation_input_tokens sum to total input (verified against the real
@@ -188,8 +230,9 @@ function normalizeClaudeCliUsage(
       wallMs,
       providerReportedTotal,
       billingMode: "subscription",
-      costSource: "provider",
-      cashCostUsd: parsed.total_cost_usd,
+      costSource: "subscription",
+      cashCostUsd: 0,
+      notionalCostUsd: parsed.total_cost_usd,
     });
   }
   const inputUncached = leafValues[0] as number;
@@ -211,11 +254,12 @@ function normalizeClaudeCliUsage(
     },
     completeness: "complete",
     billingMode: "subscription",
-    costSource: "provider",
-    // `?? undefined` keeps a genuinely absent `total_cost_usd` from becoming
-    // a fabricated $0 — `projectLegacyUsage` already falls back to 0 for the
+    costSource: "subscription",
+    cashCostUsd: 0,
+    // A genuinely absent `total_cost_usd` stays absent rather than becoming a
+    // fabricated $0 — `projectLegacyUsage` already falls back to 0 for the
     // legacy `cost_usd_est` reader, so nothing downstream loses precision.
-    cashCostUsd: parsed.total_cost_usd,
+    notionalCostUsd: parsed.total_cost_usd,
   };
 }
 

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
+import { settlementFromUsage } from "../../src/execution/spend-limiter";
+import { outputTokensKnown } from "../../src/execution/usage-normalized";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
@@ -559,7 +561,10 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
       outcome.usage.tokens.inputUncached,
     );
     expect(outcome.usage.tokens.outputVisible).toBe(45);
-    expect(outcome.usage.cashCostUsd).toBe(0.042);
+    // #173: `total_cost_usd` is LIST basis, so it is notional, never cash.
+    // The cost half of this record is owned by the #173 describe below.
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.042);
   });
 
   test("a usage block missing any token leaf is partial, never complete with fabricated zeros", async () => {
@@ -589,6 +594,179 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
     expect(outcome.usage.tokens.providerReportedTotal).toBe(1065);
     expect(outcome.usage.tokens.inputUncached).toBeUndefined();
     expect(outcome.usage.tokens.inputKnown).toBeUndefined();
+  });
+});
+
+// #173, 2026-09-02. The CLI's `total_cost_usd` is the sum of its per-model
+// `costUSD` values, and the live probe on 2026-09-02 showed every one of them
+// carries `"costBasis": "list"` — what the tokens WOULD have cost through the
+// API. This transport's route is a Claude subscription by construction
+// (`credentialKindForRoute` returns `claude_subscription_oauth` for the
+// claude-code backend unconditionally), so nothing is charged and the design's
+// §8 rule applies: "Subscription OAuth may truthfully report `cashCostUsd: 0`;
+// optional catalog cost is `notionalCostUsd` and never mixed with cash."
+//
+// Both halves are asserted on every arm, because either one alone passes
+// against a broken implementation: cash-only would pass a transport that
+// dropped the figure entirely, and notional-only would pass one that filed it
+// in BOTH fields.
+describe("ClaudeCodeCliTransport cash vs notional cost (#173)", () => {
+  async function runWith(stdoutBody: string) {
+    const fake = makeFakeProc({ stdoutBody, exitCode: 0 });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+    return transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+  }
+
+  test("a complete attempt files the list figure as notional and reports zero cash", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  test("a partial attempt files the list figure as notional and reports zero cash", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("partial");
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  // Absence over fabrication, on the notional side only: a CLI that reported
+  // no `total_cost_usd` gives us no list figure to record, and inventing 0 for
+  // it would claim the run consumed nothing. Cash is a different fact — it is
+  // 0 because the subscription charges nothing, whatever the CLI said.
+  test("an absent total_cost_usd leaves notional undefined while cash stays a truthful zero", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          cache_creation_input_tokens: 300,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // A pre-spawn denial contacted no provider, so `costSource: "provider"` was
+  // never true there. It has to agree with the parse arms for a second reason:
+  // an unclassified failure legacy-classifies as "format", which HAS a retry,
+  // so a denied attempt 1 can be summed with a spawned attempt 2 — and
+  // `sumNormalizedUsage` collapses costSource to "unknown" when the two
+  // attempts disagree.
+  test("a pre-spawn denial reports the same subscription cost basis as a spawned attempt", async () => {
+    const fake = makeFakeProc({ stdoutBody: "", exitCode: 0 });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      promptLstatFn: () => ({ mode: 0o100600, isSymbolicLink: true }),
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.stderrTail).toContain("prompt integrity denied");
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // The ripple this change could have caused, proven against the transport's
+  // OWN output rather than a hand-built record. #172 added a metered-zero rule
+  // to `settlementFromUsage`: a metered attempt reporting $0 having produced
+  // output tokens is unresolved, not settled. Every claude-code attempt now
+  // reports exactly $0 cash WITH output tokens, so if that rule keyed on the
+  // number instead of the billing mode, every subscription review would fence
+  // its own bucket and refuse the next step. It keys on the mode.
+  //
+  // `test/harness/spend-limiter.test.ts` already asserts the pure rule on a
+  // hand-built subscription record; this arm proves the WIRING — that what the
+  // transport actually emits lands on the settling side of it.
+  test("a subscription attempt reporting zero cash still settles, and does not trip the metered-zero rule", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outputTokensKnown(outcome.usage.tokens)).toBeGreaterThan(0);
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0,
+    });
+  });
+
+  // The negative that makes the assertion above discriminate: the same $0 with
+  // the same output tokens under a METERED mode is unresolved. Without this,
+  // a rule that simply settled every zero would pass the arm above.
+  test("the same zero under a metered billing mode is unresolved, not settled", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(
+      settlementFromUsage({ ...outcome.usage, billingMode: "metered" }),
+    ).toEqual({ kind: "unresolved", knownUsd: undefined });
   });
 });
 
