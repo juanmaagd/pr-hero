@@ -11,7 +11,6 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
-import { aliasModelFamily, aliasModelSnapshot } from "../../src/model-catalog";
 import type { StepSpec } from "../../src/step-runner";
 import { DefaultTransportRegistry } from "../../src/transport-registry";
 
@@ -101,8 +100,8 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "openrouter",
-      modelFamily: aliasModelFamily("sonnet"),
-      modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
+      modelFamily: "sonnet",
+      modelSnapshot: "claude-sonnet-5-20250219",
       modelVariant: "thinking",
     };
 
@@ -128,7 +127,7 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
     expect(recordedRequests[0].route.gateway).toBe("openrouter");
     expect(recordedRequests[0].route.modelVariant).toBe("thinking");
     expect(recordedRequests[0].route.modelSnapshot).toBe(
-      `${aliasModelSnapshot("sonnet")}-20250219`,
+      "claude-sonnet-5-20250219",
     );
   });
 
@@ -166,8 +165,8 @@ describe("Task 2.1 RED: Harness Route Integration", () => {
       route: {
         backend: "claude-code",
         provider: "anthropic",
-        modelFamily: aliasModelFamily("sonnet"),
-        modelSnapshot: aliasModelSnapshot("sonnet"),
+        modelFamily: "sonnet",
+        modelSnapshot: "sonnet",
       },
     };
 

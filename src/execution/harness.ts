@@ -355,6 +355,20 @@ async function writeAttemptLog(
       // varying with what a given attempt happened to observe.
       "--- transport diagnostics ---",
       redactDiagnostic(outcome.diagnosticsTail ?? ""),
+      // #175 half 2: the models the PROVIDER says it ran, which is the only
+      // trustworthy answer to "what did this attempt actually use" — the
+      // route's own `modelSnapshot` records what we ASKED for. Always
+      // written, empty included, for the same reason as the section above:
+      // a log format that varies with what an attempt happened to observe is
+      // one a reader cannot tell apart from a log that lost a section.
+      "--- observed models ---",
+      ...(outcome.observedModels ?? []).map((observed) =>
+        redactDiagnostic(
+          observed.canonicalModel === undefined
+            ? observed.model
+            : `${observed.model} (canonical: ${observed.canonicalModel})`,
+        ),
+      ),
       "--- result tail (8192) ---",
       redactDiagnostic(outcome.finalText.slice(-8192)),
       "",

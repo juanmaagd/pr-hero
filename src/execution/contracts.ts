@@ -107,6 +107,31 @@ export interface AsyncEventSink {
   close(): void;
 }
 
+// #175 half 2, 2026-09-02. WHICH model(s) the provider actually ran, as the
+// provider reported them — not as we asked for them.
+//
+// WHY this exists at all: the engine used to assert a model version up front,
+// from a hardcoded alias -> snapshot mapping that nothing verified (see the
+// #175 note atop model-catalog.ts). The Claude CLI has been reporting the
+// truth in its `modelUsage` block the whole time and we discarded it.
+//
+// WHY it is a LIST and not "the model that ran": verified live 2026-09-02, a
+// single `--model sonnet` invocation reported TWO models — the requested
+// sonnet snapshot AND `claude-haiku-4-5-20251001`, which the CLI uses for its
+// own internal work. Collapsing that to a scalar would be a new false
+// provenance claim replacing the one #175 removed. Nothing may assume the
+// requested model appears here, or that exactly one entry does.
+//
+// `model` is the exact snapshot the provider keyed the entry on;
+// `canonicalModel` is the family it reported for that snapshot, absent when
+// the provider did not say. Neither is derived, defaulted, or cross-checked
+// against the route — a mismatch between what we asked for and what ran is a
+// FACT to record, and reconciling it here would erase it.
+export interface ObservedModel {
+  readonly model: string;
+  readonly canonicalModel?: string;
+}
+
 export interface TransportOutcome {
   readonly completion: "success" | "failed" | "cancelled";
   readonly protocolIntegrity:
@@ -136,6 +161,22 @@ export interface TransportOutcome {
   // without any classifier being able to read them. Nothing may classify off
   // it; every witness pattern lives on `stderrTail` alone.
   readonly diagnosticsTail?: string;
+  // #175 half 2: the models the provider says it ran. `undefined` — never
+  // `[]` — when the provider reported nothing, because an empty list is the
+  // claim "we looked and nothing ran" and absence is the honest shape for
+  // "we were told nothing" (the same rule `normalizeUnavailableUsage` follows
+  // for tokens one field up).
+  //
+  // WHERE THIS STOPS, stated here so the next reader does not assume more
+  // wiring than exists: the ONLY consumer is the per-attempt log written by
+  // `writeAttemptLog` (harness.ts). It is deliberately NOT folded into
+  // `NormalizedUsage` — that is §8's numeric contract, summed field-by-field
+  // by `sumNormalizedUsage` into a run-level rollup, and a list of names
+  // needs union-with-dedup semantics that would have to be designed rather
+  // than assumed. It therefore does not reach `StepResult`, `per_agent`,
+  // `pipeline.json`, or the terminal report. Wiring it to provenance is a
+  // separate slice; parsing it and making it readable is this one.
+  readonly observedModels?: readonly ObservedModel[];
   readonly timedOut?: boolean;
   readonly exitCode?: number;
 }

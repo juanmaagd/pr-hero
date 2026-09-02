@@ -1,6 +1,5 @@
 import anthropicPricing from "../config/models/anthropic-pricing.json";
 import zaiPricing from "../config/models/zai-pricing.json";
-import { isModelAlias, lookupAlias } from "./model-catalog";
 
 // #137. How long a fetched price table is allowed to speak for its provider.
 //
@@ -243,10 +242,28 @@ export function pricingCatalogFor(
   return PRICING_CATALOGS_INTERNAL[key];
 }
 
-// Exact model id, or a logical alias, within ONE catalogue. Alias knowledge is
-// NOT duplicated here: model-catalog.ts owns the alias -> snapshot mapping and
-// is the only place that may answer it, so an alias repointed there repoints
-// its price too.
+// Exact model id, within ONE catalogue, matched VERBATIM.
+//
+// #175, 2026-09-02: this used to resolve a logical alias through
+// model-catalog.ts first, and the comment here said an alias repointed there
+// repointed its price too. Both are gone, because the mapping they described
+// is gone: an alias no longer names a version. `sonnet` is a word the
+// PROVIDER resolves at spawn time, and this table is keyed on versions, so
+// there is nothing left to resolve it to. A bare alias therefore has no price
+// — the honest answer, and the same one this module gives every model it
+// cannot price with confidence.
+//
+// WHY the cross-provider alias guard went with it, rather than being kept for
+// safety: that guard existed because this function RESOLVED an Anthropic
+// alias and could therefore ask z.ai's table for `claude-sonnet-5`. With no
+// resolution the hazard is gone by construction. Re-adding an alias-shaped
+// early return (`if (isModelAlias(modelId)) return undefined`) would look
+// equivalent and is not — it would refuse a price for a model a FOREIGN
+// provider published under a name pr-hero happens to use as an Anthropic
+// alias, which is our convention overriding their catalogue. Provider model
+// names are the provider's business; the arm
+// "a foreign catalogue's own model named like an alias is priced" in
+// test/pricing-catalog.test.ts is what keeps that from creeping back.
 //
 // Takes a CATALOGUE, not a provider, and that is the same doctrine this
 // function has always carried rather than a widening of it. This is the raw
@@ -260,20 +277,6 @@ export function lookupModelPricing(
   catalog: PricingCatalog,
   modelId: string,
 ): ModelPricing | undefined {
-  let resolved = modelId;
-  if (isModelAlias(modelId)) {
-    const alias = lookupAlias(modelId);
-    // An alias belongs to a PROVIDER. `sonnet|opus|haiku` are Anthropic's, and
-    // resolving one inside a foreign catalogue would ask z.ai's table for
-    // `claude-sonnet-5` — today that answers undefined by luck, because no
-    // z.ai model happens to be named like an Anthropic snapshot. Luck is not
-    // a gate: refuse structurally, so a future catalogue that DOES collide
-    // cannot quietly price another provider's alias.
-    if (providerKey(alias.provider) !== providerKey(catalog.provider)) {
-      return undefined;
-    }
-    resolved = alias.modelSnapshot;
-  }
   // Object.hasOwn, not a bare index. `models` is a plain object, so indexing
   // it with an arbitrary model id reaches Object.prototype: looking up
   // "constructor" returned the Object constructor, and every prototype member
@@ -283,8 +286,8 @@ export function lookupModelPricing(
   // the language rather than through a stale table.
   //
   // Found by pr-hero reviewing this module's own PR (#162).
-  if (!Object.hasOwn(catalog.models, resolved)) return undefined;
-  return catalog.models[resolved];
+  if (!Object.hasOwn(catalog.models, modelId)) return undefined;
+  return catalog.models[modelId];
 }
 
 // Whole days, floored: a table fetched this morning is zero days old all day.

@@ -60,8 +60,6 @@ export class UnauthorizedRouteError extends ModelRoutingError {}
 export type { ModelAlias } from "./model-catalog";
 export {
   aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
   isModelAlias,
   lookupAlias,
   MODEL_CATALOG,
@@ -85,7 +83,12 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
       raw: trimmed,
       canonical: aliasInfo.canonical,
       provider: aliasInfo.provider,
-      model: aliasInfo.modelFamily,
+      // #175: the alias IS the model segment now. `parsed.model` feeds both
+      // `modelFamily` and `modelSnapshot` on the default alias route below,
+      // so this is the single line that decides what our provenance claims
+      // an alias run used — and after #175 it claims the name that was
+      // actually sent to the CLI, not a version we never verified.
+      model: aliasInfo.alias,
       alias: trimmed,
     };
   }

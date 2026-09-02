@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { aliasModelSnapshot } from "../src/model-catalog";
 import { resolveStepRoute } from "../src/model-routing";
 import {
   indexPricingCatalogs,
@@ -317,22 +316,31 @@ describe("pricing catalog", () => {
     });
   });
 
-  describe("alias resolution", () => {
-    test("a logical alias resolves through the model catalog", () => {
-      expect(lookupModelPricing(ANTHROPIC, "sonnet")).toEqual(
-        lookupModelPricing(ANTHROPIC, "claude-sonnet-5") as ModelPricing,
-      );
-      expect(lookupModelPricing(ANTHROPIC, "opus")).toEqual(
-        lookupModelPricing(ANTHROPIC, "claude-opus-5") as ModelPricing,
-      );
-      expect(lookupModelPricing(ANTHROPIC, "haiku")).toEqual(
-        lookupModelPricing(ANTHROPIC, "claude-haiku-4-5") as ModelPricing,
-      );
+  describe("bare aliases carry no price", () => {
+    // #175. A bare alias no longer names a version -- `sonnet` is a name the
+    // PROVIDER resolves at spawn time, and this table is keyed on versions.
+    // Pricing one would mean re-deriving the pin #175 removed, from a
+    // mapping nobody verified, which is the confident-wrong-price failure
+    // this whole module exists to refuse.
+    test("an alias has no price even in its own provider's catalogue", () => {
+      for (const alias of ["sonnet", "opus", "haiku"]) {
+        expect(lookupModelPricing(ANTHROPIC, alias)).toBeUndefined();
+        expect(
+          tokenPricingAvailableFor("anthropic", alias, daysAfterFetch(0)),
+        ).toBe(false);
+      }
     });
 
-    test("an alias is available exactly as long as its snapshot is", () => {
+    test("a route that names a snapshot is still priced", () => {
+      // The escape hatch, and the reason the arm above costs nothing: an
+      // operator who wants table pricing pins `modelSnapshot` in the routing
+      // config, and that id is looked up verbatim.
       expect(
-        tokenPricingAvailableFor("anthropic", "sonnet", daysAfterFetch(0)),
+        tokenPricingAvailableFor(
+          "anthropic",
+          "claude-sonnet-5",
+          daysAfterFetch(0),
+        ),
       ).toBe(true);
     });
   });
@@ -686,39 +694,20 @@ describe("pricing catalog", () => {
     });
   });
 
-  describe("alias soundness", () => {
-    test("an Anthropic alias cannot resolve inside a foreign catalogue", () => {
-      // `sonnet|opus|haiku` are Anthropic's aliases and model-catalog.ts is
-      // Anthropic-only, so resolving one against z.ai's table would be asking
-      // z.ai for `claude-sonnet-5`. Today that answers undefined by luck --
-      // no z.ai model is named like an Anthropic snapshot -- and luck is not
-      // a gate, so lookupModelPricing refuses on the alias's PROVIDER before
-      // the model id is ever looked up.
-      for (const alias of ["sonnet", "opus", "haiku"]) {
-        expect(lookupModelPricing(ZAI, alias)).toBeUndefined();
-        expect(
-          tokenPricingAvailableFor("zai", alias, daysAfterZaiFetch(0)),
-        ).toBe(false);
-        // The same alias, on its own provider, still prices -- so the guard
-        // above is refusing the foreign catalogue, not the alias mechanism.
-        expect(
-          tokenPricingAvailableFor("anthropic", alias, daysAfterFetch(0)),
-        ).toBe(true);
-      }
-    });
-
-    test("the guard refuses on PROVIDER, not on the snapshot happening to be absent", () => {
-      // The arm above does NOT discriminate on its own: with the provider
-      // check deleted, `lookupModelPricing(ZAI, "sonnet")` would resolve to
-      // `claude-sonnet-5`, fail to find it in z.ai's table, and answer
-      // undefined anyway -- the right answer for the wrong reason, which is
-      // the "test written against a system that cannot currently fail" trap.
-      //
-      // So: a catalogue that DOES hold a key named like an Anthropic snapshot.
-      // With the guard, the alias is refused before the model id is looked up.
-      // Without it, this returns a price -- z.ai's -- for `sonnet`.
-      // Mutation-checked 2026-09-02: commenting out the provider comparison in
-      // lookupModelPricing turns THIS arm red and leaves the one above green.
+  describe("model ids are looked up verbatim", () => {
+    // #175 replaced the cross-provider alias guard this block used to hold.
+    // That guard existed because `lookupModelPricing` RESOLVED an Anthropic
+    // alias to a snapshot and could therefore ask z.ai's table for
+    // `claude-sonnet-5`. No resolution survives, so the hazard is gone by
+    // construction rather than by a check -- and the arm below is what keeps
+    // it from being reintroduced as an alias-shaped early return, which
+    // would look equivalent and is not.
+    test("a foreign catalogue's own model named like an alias is priced", () => {
+      // The discriminating case. Re-add ANY alias special-casing to
+      // lookupModelPricing -- `if (isModelAlias(modelId)) return undefined`
+      // included -- and this arm reds: z.ai would be refused a price for a
+      // model z.ai published, because pr-hero happens to use that word as an
+      // Anthropic alias. Provider names are the provider's business.
       const colliding = indexPricingCatalogs([
         {
           provider: "zai",
@@ -727,18 +716,24 @@ describe("pricing catalog", () => {
           currency: "USD",
           unit: "per_mtok",
           batch_multiplier: 1,
-          models: { [aliasModelSnapshot("sonnet")]: { ...zeroRates() } },
+          models: { sonnet: { ...zeroRates() } },
         },
       ]).zai;
       if (colliding === undefined) throw new Error("fixture not indexed");
 
-      // The collision is real: the snapshot IS a key of this catalogue...
-      expect(
-        lookupModelPricing(colliding, aliasModelSnapshot("sonnet")),
-      ).toBeDefined();
-      // ...and the alias that resolves to it is still refused, because the
-      // alias belongs to anthropic and this catalogue does not.
-      expect(lookupModelPricing(colliding, "sonnet")).toBeUndefined();
+      expect(lookupModelPricing(colliding, "sonnet")).toEqual(zeroRates());
+    });
+
+    test("an Anthropic alias still finds nothing in a foreign catalogue", () => {
+      // Same outcome as the deleted provider guard produced, reached without
+      // one: z.ai's real table holds no key named `sonnet|opus|haiku`, and
+      // nothing resolves those words into `claude-*` any more.
+      for (const alias of ["sonnet", "opus", "haiku"]) {
+        expect(lookupModelPricing(ZAI, alias)).toBeUndefined();
+        expect(
+          tokenPricingAvailableFor("zai", alias, daysAfterZaiFetch(0)),
+        ).toBe(false);
+      }
     });
   });
 

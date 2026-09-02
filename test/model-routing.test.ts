@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
-  lookupAlias,
-} from "../src/model-catalog";
+import { aliasCanonical, lookupAlias } from "../src/model-catalog";
 import {
   AmbiguousMappingError,
   computeRouteFingerprint,
@@ -30,21 +25,21 @@ describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
     const sonnet = parseLogicalIdentity("sonnet");
     expect(sonnet.canonical).toBe(aliasCanonical("sonnet"));
     expect(sonnet.provider).toBe(lookupAlias("sonnet").provider);
-    expect(sonnet.model).toBe(aliasModelFamily("sonnet"));
+    expect(sonnet.model).toBe("sonnet");
     expect(sonnet.alias).toBe("sonnet");
     expect(sonnet.variant).toBeUndefined();
 
     const opus = parseLogicalIdentity("opus");
     expect(opus.canonical).toBe(aliasCanonical("opus"));
     expect(opus.provider).toBe(lookupAlias("opus").provider);
-    expect(opus.model).toBe(aliasModelFamily("opus"));
+    expect(opus.model).toBe("opus");
     expect(opus.alias).toBe("opus");
     expect(opus.variant).toBeUndefined();
 
     const haiku = parseLogicalIdentity("haiku");
     expect(haiku.canonical).toBe(aliasCanonical("haiku"));
     expect(haiku.provider).toBe(lookupAlias("haiku").provider);
-    expect(haiku.model).toBe(aliasModelFamily("haiku"));
+    expect(haiku.model).toBe("haiku");
     expect(haiku.alias).toBe("haiku");
     expect(haiku.variant).toBeUndefined();
   });
@@ -234,8 +229,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: aliasModelFamily("sonnet"),
-      modelSnapshot: aliasModelSnapshot("sonnet"),
+      modelFamily: "sonnet",
+      modelSnapshot: "sonnet",
     });
 
     const opusRoute = resolveModelRoute("opus");
@@ -243,8 +238,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: aliasModelFamily("opus"),
-      modelSnapshot: aliasModelSnapshot("opus"),
+      modelFamily: "opus",
+      modelSnapshot: "opus",
     });
 
     const haikuRoute = resolveModelRoute("haiku");
@@ -252,8 +247,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: aliasModelFamily("haiku"),
-      modelSnapshot: aliasModelSnapshot("haiku"),
+      modelFamily: "haiku",
+      modelSnapshot: "haiku",
     });
   });
 
@@ -265,8 +260,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
+          modelFamily: "sonnet",
+          modelSnapshot: "claude-sonnet-5-20250219",
         },
         {
           logical: "openai/gpt-4o",
@@ -393,8 +388,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: aliasModelSnapshot("sonnet"),
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
           allowSpend: false,
         },
       ],
@@ -438,8 +433,8 @@ describe("Task 1.1: resolveModelRoute - Gateways, Mappings, Errors", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: aliasModelSnapshot("sonnet"),
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
           disabled: true,
         },
       },
@@ -510,8 +505,8 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
       backend: "claude-code",
       provider: "anthropic",
       gateway: "direct",
-      modelFamily: aliasModelFamily("sonnet"),
-      modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
+      modelFamily: "sonnet",
+      modelSnapshot: "claude-sonnet-5-20250219",
       modelVariant: "thinking",
     };
 
@@ -571,8 +566,8 @@ describe("Task 1.1: Deterministic Fingerprint, Plan Freeze, Secret-Free Guarante
         backend: "claude-code",
         provider: "anthropic",
         gateway: "direct",
-        modelFamily: aliasModelFamily("sonnet"),
-        modelSnapshot: aliasModelSnapshot("sonnet"),
+        modelFamily: "sonnet",
+        modelSnapshot: "sonnet",
       },
       routeFingerprint: "a".repeat(64),
     };
@@ -622,8 +617,8 @@ describe("spawnModelForClaudeCli", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: aliasModelSnapshot("sonnet"),
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
         },
         "sonnet",
       ),
@@ -637,12 +632,33 @@ describe("spawnModelForClaudeCli", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "configured",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: `${aliasModelSnapshot("sonnet")}-20250219`,
+          modelFamily: "sonnet",
+          modelSnapshot: "claude-sonnet-5-20250219",
         },
         "sonnet",
       ),
-    ).toBe(`${aliasModelSnapshot("sonnet")}-20250219`);
+    ).toBe("claude-sonnet-5-20250219");
+  });
+
+  // #175. The reverse lookup is keyed on `provider/alias`, so a VERSIONED
+  // slash-grammar identity no longer collapses to a bare alias -- the
+  // operator named a version and the CLI is handed that version. Before
+  // #175 this returned "sonnet", silently discarding the pin the operator
+  // typed; the catalogue's own `claude-sonnet-5` was what made that
+  // collapse look like a mapping rather than a loss.
+  test("direct gateway keeps an operator's versioned slash-grammar model", () => {
+    expect(
+      spawnModelForClaudeCli(
+        {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5",
+        },
+        "anthropic/claude-sonnet-5",
+      ),
+    ).toBe("claude-sonnet-5");
   });
 
   test("direct gateway maps slash-grammar executionModel back to Claude alias", () => {
@@ -652,8 +668,8 @@ describe("spawnModelForClaudeCli", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: aliasModelSnapshot("sonnet"),
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
         },
         aliasCanonical("sonnet"),
       ),

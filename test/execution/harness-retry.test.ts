@@ -305,6 +305,53 @@ describe("PR0 — live retry decision (§7)", () => {
     expect(witnessSection).toContain("stream errored: boom");
     expect(witnessSection).not.toContain("poll round(s) timed out");
   });
+
+  // #175 half 2: the observed models are only worth parsing if a human can
+  // read them back. The attempt log is where they stop -- see the "where it
+  // stops" note on TransportOutcome.observedModels.
+  test("observed models are persisted in the attempt log", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport(
+      [
+        failOutcome({
+          observedModels: [
+            {
+              model: "claude-haiku-4-5-20251001",
+              canonicalModel: "claude-haiku-4-5",
+            },
+            { model: "claude-sonnet-5-20260115" },
+          ],
+        }),
+        okOutcome(),
+      ],
+      () => "network_transient",
+    );
+    const step = await makeStep(dir, { maxAttempts: 2 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    await harness.run(step);
+
+    const first = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    const second = await Bun.file(
+      path.join(dir, "logs", `${step.name}.2.log`),
+    ).text();
+
+    expect(first).toContain("--- observed models ---");
+    expect(first).toContain(
+      "claude-haiku-4-5-20251001 (canonical: claude-haiku-4-5)",
+    );
+    expect(first).toContain("claude-sonnet-5-20260115");
+    // The section is written even when nothing was observed, so the log
+    // format is fixed rather than varying with what an attempt happened to
+    // see -- the same rule the transport-diagnostics section follows.
+    expect(second).toContain("--- observed models ---");
+  });
 });
 
 describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
