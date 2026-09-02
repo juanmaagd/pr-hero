@@ -1501,6 +1501,48 @@ describe("production runtime PR1", () => {
       // `openai`.
       const UNPRICED_ZAI_MODEL = "zai/glm-5-turbo";
 
+      // THE offline seam, and the reason these arms need one at all:
+      // `MultiProviderRunner.run` pre-confirms the OpenCode SDK before every
+      // opencode attempt (production-runtime.ts), and
+      // `needsOpenCodeSdkProbe()` is false only for a backend a caller
+      // OVERRODE with `registry.register("opencode", ...)`. Every other
+      // opencode arm in this file registers an instance and so never probes;
+      // these arms must NOT, because registering an instance bypasses the
+      // factory — and the factory reading `credentialKind` is the entire
+      // property under test. Injecting `loadSdk` satisfies the probe without
+      // the package: `@opencode-ai/sdk` is an OPTIONAL dependency, absent on
+      // CI, and the suite is offline by contract (CLAUDE.md). The fake is
+      // never called for anything else — `probeOpenCodeSdk()` discards the
+      // result, and `createOpenCodeClient` is on the branch an injected
+      // `openCodeClient` skips.
+      const loadSdk = async () =>
+        ({
+          createOpencodeClient: () => ({ session: {}, event: {} }),
+        }) as unknown as import("../src/transports/opencode-client").OpenCodeSdkLike;
+
+      // A setup failure and the defect are INDISTINGUISHABLE at
+      // `usage.billingMode`: an attempt that never ran emits no record, and
+      // an attempt stamped wrong emits the wrong one — both leave the billing
+      // assertion red. This repo has already paid for that shape ("a test red
+      // against a broken system proves only the first failure"), and CI paid
+      // for it again here: with the SDK absent these arms failed at
+      // `sessionCount() === 0`, which is exactly what the bug would look
+      // like. So the attempt is proven to have RUN first, and the failure
+      // carries the runner's OWN reason — a missing optional SDK, a denied
+      // workspace, an unregistered backend all name themselves in
+      // `stderrTail` — instead of impersonating a billing defect.
+      function assertAttemptRan(result: {
+        status: string;
+        attempts: number;
+        stderrTail: string;
+      }): void {
+        if (result.status !== "ok" || result.attempts !== 1) {
+          throw new Error(
+            `no attempt ran, so nothing below can say anything about how it billed — this is an ENVIRONMENT failure, not a billing one: status=${result.status} attempts=${result.attempts} stderrTail=${result.stderrTail}`,
+          );
+        }
+      }
+
       // Provider-reported $0 beside real output tokens — the exact shape the
       // metered-zero rule refuses, delivered through the REAL
       // OpenCodeSdkTransport rather than a mock's opinion of one. A mock
@@ -1568,6 +1610,7 @@ describe("production runtime PR1", () => {
         const registry = new DefaultTransportRegistry({
           mode: "conformance",
           openCodeClient,
+          loadSdk,
         });
         return {
           step,
@@ -1613,6 +1656,10 @@ describe("production runtime PR1", () => {
           }),
         );
 
+        assertAttemptRan(result);
+        // Proves the attempt reached the TRANSPORT, not merely that the
+        // harness returned ok — the record under assertion is the one this
+        // session produced.
         expect(driven.sessionCount()).toBe(1);
         expect(result.usageV2?.cashCostUsd).toBe(0);
         expect(result.usageV2?.tokens.outputKnown).toBe(5);
@@ -1641,6 +1688,9 @@ describe("production runtime PR1", () => {
             route: step.route,
           }),
         );
+        // Same guard, same reason: a first step that never ran carries no
+        // reservation at all, which reads identically to a $0 that settled.
+        assertAttemptRan(first);
         expect(first.reservations?.[0]?.state).toBe("unresolved_remote");
         expect(first.reservations?.[0]?.knownUsd).toBeUndefined();
         expect(driven.sessionCount()).toBe(1);
