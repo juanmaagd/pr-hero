@@ -12,7 +12,11 @@ import type {
   ExactBindingCapabilityReport,
   RunnerBackend,
 } from "./execution/contracts";
-import { initConfigTemplate } from "./preflight";
+import {
+  GOTCHAS_PLACEHOLDER_MARKER,
+  INIT_GIT_REMINDER,
+  initConfigTemplate,
+} from "./preflight";
 import { collectDoctorExactBindingReports } from "./production-runtime";
 import {
   type CheckSystemToolsOptions,
@@ -592,7 +596,10 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
           if (state.gotchas.entries && state.gotchas.entries.length > 0) {
             gotchasContent = `# Repository Gotchas & Invariants\n\n${state.gotchas.entries.map((e) => `- ${e}`).join("\n")}\n`;
           } else {
-            gotchasContent = `<!-- human-attention-required: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Edit this file with project failure modes.)\n`;
+            // The marker is interpolated, not spelled out: it is the token
+            // `gotchasUnusableReason` refuses this file by, and two literals
+            // that must match are one edit away from not matching.
+            gotchasContent = `<!-- ${GOTCHAS_PLACEHOLDER_MARKER}: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Replace this with your project's real failure modes, then delete the marker line at the top — pr-hero refuses to review while it is there.)\n`;
           }
           await writeFile(gotchasPath, gotchasContent);
         }
@@ -687,7 +694,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       return { completed: true };
     },
     render(
-      _state: WizardState,
+      state: WizardState,
       opts: { styles: boolean; width: number },
     ): string[] {
       const lines: string[] = [];
@@ -696,6 +703,37 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       lines.push(bold("Step 5/5: Verification"));
       lines.push("");
       lines.push(`  ${green("[✓]")} Onboarding completed successfully!`);
+
+      // `runWizard` dispatches no reducer actions, so `commitChoice` is always
+      // undefined and step 4's `git add` / `.gitignore` branches never run:
+      // the `.prhero/` this wizard just scaffolded is left UNTRACKED, which is
+      // exactly what local mode's clean-tree gate refuses. "Run 'pr-hero
+      // review'" as the next line was therefore an instruction that could not
+      // work — the command it names fails on the state this wizard created.
+      // `pr-hero init` has printed INIT_GIT_REMINDER for this since it
+      // shipped; the reminder is IMPORTED rather than restated so the two
+      // cannot say different things.
+      //
+      // The condition is written against what actually happened, not against
+      // the choice: `workspaceCommitted` is false when the commit was
+      // attempted and failed, and that repo is just as untracked as one where
+      // nobody tried.
+      const unfinished =
+        state.repoScaffolded === true &&
+        state.workspaceCommitted !== true &&
+        state.commitChoice !== "ignore";
+      if (unfinished) {
+        lines.push("");
+        lines.push(`  ${INIT_GIT_REMINDER}`);
+        lines.push("");
+        lines.push(
+          "  Then write REAL gotchas in .prhero/gotchas.md — the one just " +
+            "scaffolded is a placeholder, and pr-hero refuses to review while " +
+            `its \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line is there.`,
+        );
+        lines.push("");
+      }
+
       lines.push("  Run 'pr-hero review' to start multi-agent code reviews.");
       return lines;
     },

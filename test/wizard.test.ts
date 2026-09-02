@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
+  GOTCHAS_PLACEHOLDER_MARKER,
+  gotchasUnusableReason,
+  INIT_GIT_REMINDER,
+} from "../src/preflight";
+import {
   CURRENT_ONBOARDING_VERSION,
   createInitialWizardState,
   isMachineOnboarded,
@@ -125,6 +130,12 @@ describe("Wizard state machine & steps", () => {
       expect(gotchasRaw).toContain(
         "<!-- human-attention-required: zero invariants defined during onboarding -->",
       );
+      // The loop that matters, closed on the ACTUAL bytes rather than on a
+      // literal retyped into another test file: what `setup` writes here is
+      // what `review`, the pipeline and `doctor` all refuse. `runWizard`
+      // dispatches no reducer actions, so `gotchas.entries` is always empty
+      // and this file is what EVERY `pr-hero setup` produces.
+      expect(gotchasUnusableReason(gotchasRaw)).toBe("placeholder");
     });
 
     test("apply with commitChoice 'commit' stages .prhero and creates chore commit", async () => {
@@ -560,5 +571,102 @@ describe("Wizard state machine & steps", () => {
       expect(rendered).toContain("probe failed");
       expect(rendered).toContain("credential broker unavailable");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 5 must not end on a lie.
+//
+// `runWizard` dispatches no reducer actions, so `commitChoice` is ALWAYS
+// undefined: neither the `git add` branch nor the `.gitignore` branch in step
+// 4 ever runs, and the `.prhero/` it just scaffolded is left untracked. Step 5
+// then printed "Onboarding completed successfully!" and "Run 'pr-hero review'"
+// — a review that cannot start, because an untracked `.prhero/` is exactly
+// what local mode's clean-tree gate refuses. `pr-hero init` has printed
+// INIT_GIT_REMINDER for this reason since it shipped; the wizard printed
+// nothing.
+// ---------------------------------------------------------------------------
+
+describe("verification step — the unfinished-repo ending", () => {
+  function verificationLines(
+    overrides: Partial<
+      Pick<
+        ReturnType<typeof createInitialWizardState>,
+        "repoScaffolded" | "workspaceCommitted" | "commitChoice"
+      >
+    >,
+    opts: { styles?: boolean } = {},
+  ): string[] {
+    const state = createInitialWizardState();
+    // runWizard leaves stepIndex on the LAST step and renders exactly that
+    // one after the loop, so this is the block a real `pr-hero setup` prints.
+    state.stepIndex = WIZARD_STEPS.length - 1;
+    Object.assign(state, overrides);
+    return renderWizardStep(state, {
+      styles: opts.styles ?? false,
+      width: 80,
+    });
+  }
+
+  test("scaffolded but neither committed nor ignored: the git reminder is printed", () => {
+    const lines = verificationLines({ repoScaffolded: true });
+    const text = lines.join("\n");
+    expect(text).toContain(INIT_GIT_REMINDER);
+  });
+
+  test("...and the reader is told to write real gotchas before reviewing", () => {
+    const lines = verificationLines({ repoScaffolded: true });
+    const text = lines.join("\n");
+    expect(text).toContain(".prhero/gotchas.md");
+    expect(text).toContain(GOTCHAS_PLACEHOLDER_MARKER);
+  });
+
+  test("...and both land BEFORE the line telling you to run a review", () => {
+    // Ordering is the whole point: advice that arrives after the instruction
+    // it qualifies is advice the reader has already acted against.
+    const lines = verificationLines({ repoScaffolded: true });
+    const reviewLine = lines.findIndex((l) => l.includes("pr-hero review"));
+    const reminderLine = lines.findIndex((l) =>
+      l.includes(INIT_GIT_REMINDER.slice(0, 40)),
+    );
+    const gotchasLine = lines.findIndex((l) =>
+      l.includes(GOTCHAS_PLACEHOLDER_MARKER),
+    );
+    expect(reviewLine).toBeGreaterThan(-1);
+    expect(reminderLine).toBeGreaterThan(-1);
+    expect(gotchasLine).toBeGreaterThan(-1);
+    expect(reminderLine).toBeLessThan(reviewLine);
+    expect(gotchasLine).toBeLessThan(reviewLine);
+  });
+
+  test("a committed workspace keeps the short ending", () => {
+    const text = verificationLines({
+      repoScaffolded: true,
+      workspaceCommitted: true,
+    }).join("\n");
+    expect(text).not.toContain(INIT_GIT_REMINDER);
+    expect(text).toContain("pr-hero review");
+  });
+
+  test("a gitignored workspace keeps the short ending", () => {
+    const text = verificationLines({
+      repoScaffolded: true,
+      commitChoice: "ignore",
+    }).join("\n");
+    expect(text).not.toContain(INIT_GIT_REMINDER);
+  });
+
+  test("outside a repo nothing was scaffolded, so there is nothing to commit", () => {
+    const text = verificationLines({ repoScaffolded: false }).join("\n");
+    expect(text).not.toContain(INIT_GIT_REMINDER);
+  });
+
+  test("the longer ending emits zero ANSI bytes with styles off", () => {
+    for (const line of verificationLines(
+      { repoScaffolded: true },
+      { styles: false },
+    )) {
+      expect(line).not.toContain("\x1b");
+    }
   });
 });
