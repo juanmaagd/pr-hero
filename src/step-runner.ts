@@ -228,6 +228,20 @@ export interface ClaudeCodeRunnerOptions {
   onAuthEvent?: (event: AuthEvent) => void;
   // §6.1 D1-05 credential projection; forwarded to the harness.
   credentialBroker?: CredentialBroker;
+  // #177, 2026-09-02: source for the child-env projection, forwarded to the
+  // harness (which has documented it as "injectable so tests never touch the
+  // real process environment" since D1-05 — this entry point just never
+  // passed it, so through THIS runner the injection point was unreachable and
+  // `process.env` was the only source).
+  //
+  // It stopped being cosmetic when the Claude CLI transport began reading
+  // that projected env to decide whether an attempt bills metered: two tests
+  // here assert the subscription cost shape, and without this they assert it
+  // against whatever credentials the developer's own shell carries. Verified,
+  // not assumed — `ANTHROPIC_API_KEY=sk-probe bun test` reddened exactly those
+  // two before this landed. That is #174's defect, and it cost this repo two
+  // wrong diagnoses in one day.
+  childEnv?: Readonly<Record<string, string | undefined>>;
   // §5.3 D1-10b: the pipeline ceiling's cancellation signal. This is the ONLY
   // entry point to the harness's §5.3 sequence (no new attempts, lease fence,
   // abort, bounded grace) — the whole sequence shipped implemented and
@@ -247,6 +261,7 @@ export class ClaudeCodeRunner implements StepRunner {
       admissionGate: options.admissionGate,
       onAuthEvent: options.onAuthEvent,
       credentialBroker: options.credentialBroker,
+      childEnv: options.childEnv,
       spawnFn: options.spawnFn,
       signal: options.signal,
     });

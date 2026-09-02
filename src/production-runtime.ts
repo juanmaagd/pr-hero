@@ -1109,14 +1109,24 @@ export class MultiProviderRunner implements StepRunner {
     //
     // Same reasoning keeps `ClaudeCodeRunner` (step-runner.ts) ledger-free:
     // claude-code resolves to `claude_subscription_oauth` for every provider
-    // (`credentialKindForRoute`), so its usage records are truthfully
-    // `subscription` and the metered-zero rule structurally cannot fire
-    // there. A ledger on that path is a state machine with no guarantee to
-    // enforce. The known limitation, deliberately not addressed here: a
+    // (`credentialKindForRoute`), so the metered-zero rule structurally cannot
+    // fire there. A ledger on that path is a state machine with no guarantee
+    // to enforce. The known limitation, deliberately not addressed here: a
     // claude-code run under a real `ANTHROPIC_API_KEY` does spend money, but
     // the engine models that backend as subscription on purpose — ci-gates.ts
     // documents why deriving it instead is an ADMISSION hazard, and
     // `resolveCiBudgetCeiling` is where that case is handled.
+    //
+    // 2026-09-02, #177: one clause of that paragraph is no longer true and the
+    // correction matters. Its usage RECORDS are no longer "truthfully
+    // subscription" on every route — the Claude CLI transport now stamps
+    // `metered` when the projected child env carries ANTHROPIC_API_KEY or
+    // ANTHROPIC_AUTH_TOKEN, so the run's real spend reaches `cashCostUsd`
+    // instead of being filed as an uncharged list price. This line is
+    // deliberately unchanged: it reads the CAPABILITY REPORT, not the usage
+    // record, so no reservation is opened, nothing is fenced, and no API-key
+    // route loses admission. The record is honest; the gate stays where #161
+    // must move it.
     //
     // A claude-only run therefore records no reservations at all, and the
     // absent `reservations` key on those steps is the truthful signal — not a

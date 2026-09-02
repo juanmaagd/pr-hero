@@ -459,10 +459,23 @@ describe("notionalCostInput — the shell's cash/notional split (#173)", () => {
 // gets a guard of its own, in the same spirit as the repo-hygiene scan in
 // test/preflight-bundled-prompts.test.ts.
 //
-// The invariant, not the line numbers: every call that renders a run's cost
-// carries the notional companion. Adding a third review shell is meant to trip
-// this until it does the same.
-describe("every cost-rendering call site carries the notional split (#173)", () => {
+// The invariant, not the line numbers, and stated at its real width
+// (2026-09-02, #177): every `renderResult(`/`renderReport(` call IN
+// `src/cli.ts` carries the notional companion. There are four today (two per
+// review shell); adding a FIFTH, or a third review shell inside this file, is
+// meant to trip this until it does the same.
+//
+// What is deliberately OUTSIDE it, and would not trip it: every other surface
+// that renders a run's cost — `ci-reporter`'s `cost_usd_est=` in
+// `$GITHUB_OUTPUT`, the `runs`/`run_agents` store and `pr-hero usage`,
+// metrics, the watcher feed, the server, backfill, and diversity's spend cap.
+// They all read `projectLegacyUsage`'s `cost_usd_est`, which is cash-only and
+// has no notional companion to pair with; the `runs` table has no notional
+// column at all, so `pr-hero usage` would mix two semantics across time. That
+// is a store-schema slice (#173's commit body names it), not this one — so
+// this scan pins the shell it can actually pin rather than claiming a
+// guarantee the codebase does not yet make.
+describe("every cost-rendering call site in src/cli.ts carries the notional split (#173)", () => {
   test("renderResult and renderReport are each paired with notionalCostInput", async () => {
     const source = await Bun.file(
       path.resolve(import.meta.dir, "../src/cli.ts"),

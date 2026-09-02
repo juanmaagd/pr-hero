@@ -227,7 +227,13 @@ describe("ClaudeCodeRunner success path", () => {
         ),
       },
     ]);
-    const runner = new ClaudeCodeRunner({ spawnFn });
+    // #177: `childEnv: {}` is load-bearing, not tidiness. The Claude CLI
+    // transport now decides cash-vs-notional from the env the child is
+    // spawned with, and without this the harness projects `process.env` — so
+    // this assertion would pass or fail depending on whether the developer
+    // running it happens to export ANTHROPIC_API_KEY. Verified by probe: with
+    // the key set, this exact test went red before the injection landed.
+    const runner = new ClaudeCodeRunner({ spawnFn, childEnv: {} });
     const stepResult = await runner.run(await makeSpec());
     expect(stepResult.usage.tokens_in).toBe(300);
     expect(stepResult.usage.tokens_out).toBe(40);
@@ -265,7 +271,10 @@ describe("ClaudeCodeRunner transient retry", () => {
     const spec = await makeSpec();
     // Truncated attempt-1 debris: must be gone before attempt 2 runs.
     await Bun.write(spec.outPath, '{"findings": [');
-    const runner = new ClaudeCodeRunner({ spawnFn });
+    // #177: see the note on "captures usage from the envelope" — the
+    // subscription cost shape asserted below is only a fact about this fixture
+    // when the projected child env carries no metered credential.
+    const runner = new ClaudeCodeRunner({ spawnFn, childEnv: {} });
     const stepResult = await runner.run(spec);
     expect(stepResult.status).toBe("ok");
     expect(stepResult.attempts).toBe(2);

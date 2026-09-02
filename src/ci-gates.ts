@@ -73,6 +73,7 @@ import {
   ciReviewSkipDetail,
 } from "./ci-review-admission";
 import type { DeltaRiskAssessment } from "./ci-review-risk";
+import { envBillsMetered } from "./execution/usage-normalized";
 import type { SizeGateVerdict } from "./size-gate";
 
 function usd(amount: number): string {
@@ -288,8 +289,27 @@ export function budgetDisabledWarningMessage(
 
 export type CiBillingMode = "subscription" | "metered";
 
-// A non-empty ANTHROPIC_API_KEY means metered. Everything else, including an
-// OAuth token, means subscription.
+// A non-empty ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN means metered.
+// Everything else, including an OAuth token, means subscription.
+//
+// 2026-09-02, #177: the RULE now lives in `envBillsMetered`
+// (execution/usage-normalized.ts) and this function only narrows it into
+// `CiBillingMode`. It moved because a SECOND caller appeared — the Claude CLI
+// transport, which stamps the billing mode on every usage record it emits —
+// and two copies were two chances for the ceiling and the records to disagree
+// about whether one run bills. They already had: this gate called an API-key
+// route metered while the transport filed that user's real spend as notional
+// ("at list price, not charged"), so budget enforcement, which is cash-only,
+// saw a $0 ceiling.
+//
+// ANTHROPIC_AUTH_TOKEN joined the signal in the same move. It was never
+// excluded by a decision — the doctrine below never mentions it — and
+// `ENV_PASSTHROUGH` (harness.ts) projects it into the child immediately beside
+// ANTHROPIC_API_KEY as the same per-token credential class, so the rule stated
+// two paragraphs down ("the mere PRESENCE of a key keeps the ceiling") already
+// covered it. Nil-delta for the shipped action: action.yml binds only
+// ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN, so no generated workflow can
+// newly acquire a ceiling from it.
 //
 // This repo does NOT settle which credential actually bills when BOTH
 // CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are present, and it is worth
@@ -310,10 +330,15 @@ export type CiBillingMode = "subscription" | "metered";
 // sourcing ANTHROPIC_API_KEY into the shell "is what moves a run from quota to
 // invoice".
 //
-// Trimming is load-bearing, not defensive: action.yml:111 binds the input
-// UNCONDITIONALLY and GitHub renders an unset input as the empty string, so
-// every subscription-route CI run carries `ANTHROPIC_API_KEY=""`. Without the
-// trim, no route would ever resolve as a subscription in Actions.
+// Trimming is load-bearing. 2026-09-02, #177 corrects the overstatement this
+// paragraph used to carry ("without the trim, no route would ever resolve as
+// a subscription in Actions"): action.yml:111 binds the input UNCONDITIONALLY
+// and GitHub renders an unset input as the empty string, so every
+// subscription-route CI run carries `ANTHROPIC_API_KEY=""` — and `""` is
+// already falsy, so that case never needed the trim. What the trim catches is
+// a WHITESPACE-ONLY value, which is truthy and would otherwise impose a
+// ceiling on a subscription route. `test/ci-gates.test.ts` asserts both cases
+// separately, and only the whitespace ones flip when the trim is removed.
 //
 // This is deliberately NOT `provider-capabilities.ts`'s
 // `CLAUDE_CAPABILITY_STATICS.billingMode` (:354-362), and the two must not be
@@ -330,10 +355,15 @@ export type CiBillingMode = "subscription" | "metered";
 // worse than the skipped review this function exists to prevent. This one
 // answers a narrower question — "should CI impose a spend ceiling?" — and
 // reaches nothing but the ceiling.
+//
+// That refusal now guards the shared predicate itself rather than only this
+// caller: `envBillsMetered` carries the same paragraph and names BOTH
+// forbidden consumers, because #177 gave it a second caller that is one
+// careless edit away from the admission path.
 export function deriveCiBillingMode(
   env: Record<string, string | undefined>,
 ): CiBillingMode {
-  return env.ANTHROPIC_API_KEY?.trim() ? "metered" : "subscription";
+  return envBillsMetered(env) ? "metered" : "subscription";
 }
 
 export const CI_DEFAULT_METERED_BUDGET_USD = 10;

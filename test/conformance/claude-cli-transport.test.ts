@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
 import { settlementFromUsage } from "../../src/execution/spend-limiter";
-import { outputTokensKnown } from "../../src/execution/usage-normalized";
+import {
+  outputTokensKnown,
+  sumNormalizedUsage,
+} from "../../src/execution/usage-normalized";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
@@ -767,6 +770,266 @@ describe("ClaudeCodeCliTransport cash vs notional cost (#173)", () => {
     expect(
       settlementFromUsage({ ...outcome.usage, billingMode: "metered" }),
     ).toEqual({ kind: "unresolved", knownUsd: undefined });
+  });
+});
+
+// #177, 2026-09-02. #173's rule is right for the credential it assumed and
+// wrong for the one it did not check. A user running with ANTHROPIC_API_KEY
+// (or ANTHROPIC_AUTH_TOKEN) pays real per-token money, and filing that spend
+// as `notionalCostUsd` renders it "at list price, not charged" while
+// budget enforcement — cash-only by design §8 — sees a $0 ceiling. That is the
+// under-reporting direction this codebase repeatedly names as the worst to be
+// wrong in, so the CLI's figure goes back to `cashCostUsd` whenever the env
+// this transport SPAWNS THE CHILD WITH carries a metered credential.
+//
+// The signal is `request.isolation.env` and not `process.env`: that record is
+// what `projectChildEnv` (harness.ts) built for this exact child, so it is the
+// env the CLI actually bills under, and it keeps the transport free of any
+// ambient environment read. Every arm below supplies it explicitly — a test
+// whose verdict depended on the developer's own shell is the #174 defect.
+describe("ClaudeCodeCliTransport metered-credential cost filing (#177)", () => {
+  const COMPLETE_STDOUT = JSON.stringify({
+    result: "reviewed",
+    total_cost_usd: 0.0455,
+    usage: {
+      input_tokens: 2,
+      cache_read_input_tokens: 18534,
+      cache_creation_input_tokens: 10213,
+      output_tokens: 4,
+    },
+  });
+
+  function transportFor(stdoutBody: string) {
+    const fake = makeFakeProc({ stdoutBody, exitCode: 0 });
+    return new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+  }
+
+  async function runUnder(env: Record<string, string>, stdoutBody: string) {
+    return transportFor(stdoutBody).execute(
+      makeRequest({
+        isolation: {
+          credentialProjectionId: "proj-1",
+          env,
+          syntheticHome: "/tmp/pr-hero-test/home",
+          syntheticConfigHome: "/tmp/pr-hero-test/config",
+          syntheticTmp: "/tmp/pr-hero-test/tmp",
+          verifiedBinaryPath: "/usr/bin/true",
+        },
+      }),
+      { signal: new AbortController().signal },
+    );
+  }
+
+  // Both halves on every arm, for #173's own reason: cash-only would pass a
+  // transport that filed the figure in BOTH fields, and notional-only would
+  // pass one that dropped it.
+  test("an API-key run books the CLI figure as CASH, with no notional companion", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.costSource).toBe("provider");
+    expect(outcome.usage.cashCostUsd).toBe(0.0455);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  test("an ANTHROPIC_AUTH_TOKEN run books cash too — same credential class", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_AUTH_TOKEN: "bearer-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.costSource).toBe("provider");
+    expect(outcome.usage.cashCostUsd).toBe(0.0455);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // The discriminators. Without these an implementation that simply reverted
+  // #173 for every route would pass every arm above.
+  test("an OAuth-token run keeps #173's notional filing", async () => {
+    const outcome = await runUnder(
+      { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  // action.yml:111 binds ANTHROPIC_API_KEY unconditionally and GitHub renders
+  // an unset input as "", so every subscription-route CI run carries the empty
+  // string — the single most common env this transport will ever see, and it
+  // must stay on the subscription arm. (`""` is falsy on its own; the
+  // whitespace-only case the trim exists for is asserted on the predicate
+  // itself in test/usage/normalization.test.ts.)
+  test("an empty ANTHROPIC_API_KEY is not a metered signal", async () => {
+    const outcome = await runUnder({ ANTHROPIC_API_KEY: "" }, COMPLETE_STDOUT);
+
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  test("a partial attempt under an API key files cash on the partial builder too", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("partial");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.costSource).toBe("provider");
+    expect(outcome.usage.cashCostUsd).toBe(0.0455);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // Absence over fabrication, moved to the side the credential pays on. #173's
+  // subscription arm keeps a truthful `cashCostUsd: 0` when the CLI reports no
+  // total, because a subscription really does charge nothing. A METERED
+  // attempt with no reported total is a different fact — real money was spent
+  // and we do not know how much — so the cash stays undefined and
+  // `settlementFromUsage` reports it unresolved rather than settling a
+  // fabricated zero, which is the "$0 on parse failure" collapse §8 exists to
+  // kill.
+  test("a metered run whose CLI reported no total leaves cash undefined, and settles as unresolved", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          cache_creation_input_tokens: 300,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBeUndefined();
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+
+  // #173's mechanical constraint, now owed on BOTH arms: an unclassified
+  // failure legacy-classifies as "format", which retries, so a pre-spawn
+  // denial can be summed with a spawned attempt — and `sumNormalizedUsage`
+  // collapses billingMode AND costSource to "unknown" the moment the two
+  // disagree. A denial that stayed on the subscription basis would erase the
+  // metered run's cost basis on exactly the retry path this transport has.
+  test("a pre-spawn denial under an API key reports the metered basis, and survives the retry sum", async () => {
+    const fake = makeFakeProc({ stdoutBody: "", exitCode: 0 });
+    const denyingTransport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      promptLstatFn: () => ({ mode: 0o100600, isSymbolicLink: true }),
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+    const denial = await denyingTransport.execute(
+      makeRequest({
+        isolation: {
+          credentialProjectionId: "proj-1",
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+          syntheticHome: "/tmp/pr-hero-test/home",
+          syntheticConfigHome: "/tmp/pr-hero-test/config",
+          syntheticTmp: "/tmp/pr-hero-test/tmp",
+          verifiedBinaryPath: "/usr/bin/true",
+        },
+      }),
+      { signal: new AbortController().signal },
+    );
+
+    expect(denial.stderrTail).toContain("prompt integrity denied");
+    expect(denial.usage.billingMode).toBe("metered");
+    expect(denial.usage.costSource).toBe("provider");
+    expect(denial.usage.cashCostUsd).toBe(0);
+
+    const spawned = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      COMPLETE_STDOUT,
+    );
+    const summed = sumNormalizedUsage(denial.usage, spawned.usage);
+    expect(summed.billingMode).toBe("metered");
+    expect(summed.costSource).toBe("provider");
+    expect(summed.cashCostUsd).toBe(0.0455);
+  });
+
+  // The safety property this whole change exists for, proven at the settlement
+  // boundary rather than at the record: budget enforcement is cash-only (§8),
+  // so a metered run's money has to arrive as `actualUsd` or the ceiling is
+  // enforcing against $0.
+  test("a metered run's real spend reaches the spend limiter as settled cash", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0.0455,
+    });
+  });
+
+  // The metered-zero rule (#172) applied to a record this transport can now
+  // actually produce, pinned so the semantics are a decision rather than a
+  // surprise. Scope stated exactly, because inferring it would overstate it:
+  // in production this rule is NOT reachable on a claude-code route today.
+  // `settlementFromUsage` runs only from `finalizeReservation`, which needs a
+  // reservation, and `reservesSpend` (production-runtime.ts) opens one only
+  // when `capabilityReport.billing.mode === "metered"` — still statically
+  // "subscription" for this backend, which is the admission path #177
+  // deliberately does not touch. So no API-key run can be fenced or refused by
+  // this change, and none appears in `result.unresolved`
+  // (`collectUnresolvedSpend` reads reservations, of which a claude-only run
+  // has none). What this arm pins is the RECORD's meaning, so that if a
+  // metered claude-code route is ever admitted (#161), it arrives already
+  // honest instead of settling a zero that is almost certainly wrong.
+  test("a metered run reporting zero cash with output tokens is unresolved, not settled", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outputTokensKnown(outcome.usage.tokens)).toBeGreaterThan(0);
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
   });
 });
 
