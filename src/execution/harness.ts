@@ -283,9 +283,48 @@ const ENV_PASSTHROUGH = [
   // had just handed it. It is the same credential class as ANTHROPIC_API_KEY
   // directly above, and it is the ONLY route on Linux: credential projection
   // needs darwin + /usr/bin/security, so every CI runner falls back to exactly
-  // this enumerated passthrough.
+  // this enumerated passthrough. When a projection IS active it is stripped
+  // again by PROJECTION_OWNED_KEYS below — that path holds the same
+  // credential as a file and must not also see an ambient copy.
   "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
+
+// WHY a projection strips more than HOME/TMPDIR/CLAUDE_CONFIG_DIR: a
+// credential projection's promise is that the child runs on ONE freshly
+// projected credential and nothing else, and until 2026-09-02 that promise
+// covered only the config identity. The enumerated passthrough above carries
+// the credential variables — it must, because CI has no projection — so an
+// ambient ANTHROPIC_API_KEY in the operator's shell survived the overlay
+// untouched on exactly the path whose purpose is isolating the credential.
+//
+// The leak was inert while nothing read it back. #177 ended that: the Claude
+// CLI transport now derives `billingMode`/`costSource` from this very env
+// (`claudeCliCostBasis` → `envBillsMetered`), so a developer running on the
+// projected subscription credential got the review filed as metered cash on
+// the strength of a key the projection was supposed to have replaced. Both
+// readings of the leak are defects — either the CLI honours the leaked key
+// and the isolation promise is false, or it prefers the projected OAuth and
+// the billing label is wrong — and one strip answers both.
+//
+// The rule the list encodes: a projection owns the CREDENTIAL IDENTITY, not
+// just the home. ANTHROPIC_BASE_URL is deliberately NOT here — it is network
+// routing, sitting in the passthrough beside HTTP(S)_PROXY and SSL_CERT_*,
+// and the projection supplies no endpoint of its own, so stripping it would
+// silently send the projection path somewhere the no-projection path does
+// not go, with no defect behind the change.
+//
+// ONE list, not two: the three original `delete` statements and every key
+// added since are the same array, so a future addition cannot land on one
+// side of a drift. `satisfies` ties it to the passthrough — a key stripped
+// here that is not projected there is dead code, and a typo fails tsc.
+const PROJECTION_OWNED_KEYS = [
+  "HOME",
+  "TMPDIR",
+  "CLAUDE_CONFIG_DIR",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+] as const satisfies readonly (typeof ENV_PASSTHROUGH)[number][];
 
 export function projectChildEnv(
   source: Readonly<Record<string, string | undefined>>,
@@ -683,13 +722,18 @@ export class StepExecutionHarness implements StepRunner {
   private buildChildEnv(
     projection: CredentialProjection | undefined,
   ): Record<string, string> {
+    // No projection means CI (credential projection needs darwin plus
+    // /usr/bin/security — `claudeCredentialBroker`, runner-authority.ts), and
+    // that path is byte-identical to what it always was: the enumerated
+    // passthrough, credentials included. Stripping there is what cost
+    // pr-hero's first CI self-review.
     if (projection === undefined) return this.projectedEnv;
-    // The projection owns HOME/TMPDIR/config identity (§6.1); strip the
-    // enumerated-passthrough copies first so real values cannot survive.
+    // The projection owns HOME/TMPDIR/config identity AND the credential
+    // itself (§6.1, and PROJECTION_OWNED_KEYS above for why the credential
+    // joined the list); strip the enumerated-passthrough copies first so real
+    // values cannot survive.
     const stripped = { ...this.projectedEnv };
-    delete stripped.HOME;
-    delete stripped.TMPDIR;
-    delete stripped.CLAUDE_CONFIG_DIR;
+    for (const key of PROJECTION_OWNED_KEYS) delete stripped[key];
     return { ...stripped, ...projection.env };
   }
 

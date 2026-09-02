@@ -37,6 +37,11 @@ export type UsageCostSource =
 // ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN into the child side by side as
 // one credential class — a per-token key and a per-token bearer token.
 // CLAUDE_CODE_OAUTH_TOKEN is deliberately absent: that IS the subscription.
+// 2026-09-02: "projects into the child" holds only where no credential
+// projection is active. When one IS, `buildChildEnv` strips both keys
+// (PROJECTION_OWNED_KEYS, harness.ts) because the projection owns the
+// credential, so this predicate reads subscription on that path — which is
+// the truth there, and was not before the strip.
 // When an OAuth token and a key are both present this repo does not know which
 // one the Claude CLI bills (ci-gates.ts states that gap at length), and does
 // not need to — presence of a key answers metered, because guessing
