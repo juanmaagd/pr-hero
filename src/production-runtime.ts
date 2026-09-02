@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import type { AttemptAdmissionGate } from "./execution/admission";
 import { deriveBucketId, loadOrCreateBucketKey } from "./execution/bucket-id";
 import type {
+  CredentialKind,
   EnvironmentPolicy,
   ExactBindingCapabilityReport,
   IsolationProjection,
@@ -32,6 +33,8 @@ import {
 } from "./provider-capabilities";
 import {
   type BindingAuthorityResolution,
+  credentialKindForRoute,
+  openCodeCredentialBroker,
   prepareProductionRunnerAuthority,
   type ResolvedBindingAuthority,
   type ResolveRunnerAuthorityDeps,
@@ -43,7 +46,7 @@ import {
   validateBindingAdmission,
   validateRouteDrift,
 } from "./security/binding-policy";
-import { OpenCodeAuthBroker } from "./security/credential-broker";
+import { OPENCODE_OAUTH_PROVIDER } from "./security/credential-broker";
 import { authorizeWorkspaceCwd } from "./security/execution-authority";
 import {
   ClaudeCodeRunner,
@@ -273,21 +276,48 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       !report.issues.some(
         (issue) => issue.code === "real_sdk_adapter_deferred_to_d1_11",
       );
+    // #133. ONE effective billing mode, computed once and fed to all THREE
+    // readers below (`pricingApplicable`, `billingMode`,
+    // `cashCostAccountingValid`). They used to read `report.billing.mode`
+    // independently, and that is precisely the trap: upgrading only
+    // `billingMode` would leave `pricingApplicability` at "not_applicable",
+    // the pricing gate would never fire, and a metered route would be
+    // admitted as priced-not-required — executing on real spend while
+    // reporting `cashCostUsd: 0`. Under-reporting is the failure this whole
+    // issue exists to prevent, so the correction has to be applied ONCE,
+    // upstream of every consumer, not per-expression.
+    //
+    // The legacy backend-wide report cannot know this: it is produced before
+    // any route resolves, so it cannot see the provider. The credential KIND
+    // can — `provider_api_token` IS a metered API token by definition
+    // (runner-authority.ts credentialKindForRoute).
+    //
+    // UPGRADE ONLY, never downgrade. An OAuth or subscription kind keeps
+    // whatever the transport reported, `unknown` included — which is what
+    // keeps the narrowing guarantee below true for every other kind.
+    const effectiveBillingMode: ProviderCapabilityReport["billing"]["mode"] =
+      this.credential.kind === "provider_api_token"
+        ? "metered"
+        : report.billing.mode;
     const pricingApplicable =
-      report.billing.mode === "metered" ? "required" : "not_applicable";
+      effectiveBillingMode === "metered" ? "required" : "not_applicable";
     // The legacy report carries THREE billing modes (subscription | metered |
     // unknown) and the exact contract carries two, so `unknown` narrows into
     // "subscription" here. WHY that narrowing is not a lie: it is sound ONLY
-    // because `cashCostAccountingValid` below reads the ORIGINAL three-state
-    // `report.billing.mode` and independently blocks `unknown` — the design
+    // because `cashCostAccountingValid` below reads the three-state
+    // `effectiveBillingMode` and independently blocks `unknown` — the design
     // doc makes `billingMode: "unknown"` a blocking preflight result
     // (docs/multi-runtime-model-diversity-design.md:461), and the pricing
     // gate cannot enforce it because `unknown` is not `metered`, leaving
     // pricingApplicability at "not_applicable". Delete or weaken the
     // cash-cost derivation and this narrowing silently starts claiming that
     // an unknown-billing route bills like a subscription.
+    //
+    // #133 keeps that intact: the effective mode only ever REPLACES `unknown`
+    // with `metered`, and a metered route is caught by the pricing gate
+    // instead. Nothing reaches "subscription" that did not already.
     const billingMode: ExactBindingCapabilityReport["billing"]["mode"] =
-      report.billing.mode === "metered" ? "metered" : "subscription";
+      effectiveBillingMode === "metered" ? "metered" : "subscription";
     // #137. THE place the bundled catalogue is consulted, and the only one:
     // this is the sole site where a provider (`this.route.provider`), a model
     // id (`this.route.modelSnapshot`) and a billing decision are all in
@@ -302,16 +332,18 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // that reports its own cost keeps working when the table expires, and a
     // provider that reports nothing is still priceable from the table.
     //
-    // Observably a NO-OP today, and deliberately so: no route reports
-    // `billingMode: "metered"` yet (the claude-code static is "subscription"
-    // and so is opencode's), so `pricingApplicability` is never "required"
-    // and nothing gates on this value. It goes live the moment #161 derives
-    // a real metered mode — at which point a metered route with a catalogued
-    // model and a CURRENT table is admissible, and one with an expired table
-    // is refused rather than billed at a guessed price. That refusal is
-    // #137's entire point: an old price is worse than no price, because the
-    // gate exists to refuse billing an unknown amount and a stale quote
-    // defeats it by making the unknown look known.
+    // This was a no-op when #137 landed — no route reported
+    // `billingMode: "metered"`, so `pricingApplicability` was never
+    // "required" and nothing gated on this value. #133 made it LIVE: an
+    // OpenCode route on any provider but `openai` resolves to
+    // `provider_api_token`, which the effective mode above reports as
+    // metered. So today a metered route with a catalogued model and a
+    // CURRENT table is admissible, and one with an expired or absent table is
+    // refused rather than billed at a guessed price. That refusal is #137's
+    // entire point: an old price is worse than no price, because the gate
+    // exists to refuse billing an unknown amount and a stale quote defeats it
+    // by making the unknown look known. #161 (a real metered mode derived
+    // from the transport itself) remains the other way into this branch.
     const tokenPricingAvailable =
       report.billing.pricingReady ||
       tokenPricingAvailableFor(
@@ -328,9 +360,9 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // self-contradictory and would strand the route in a gate that no longer
     // has a reason to refuse it.
     const cashCostAccountingValid =
-      report.billing.mode === "subscription"
+      effectiveBillingMode === "subscription"
         ? true
-        : report.billing.mode === "metered"
+        : effectiveBillingMode === "metered"
           ? tokenPricingAvailable
           : false;
     return {
@@ -448,6 +480,9 @@ async function resolveFrozenBindings(
   for (const step of uniqueRoutesByFingerprint(plan)) {
     const authorityResult = await resolveBindingAuthority(
       step.route.backend,
+      // #133: the provider was in scope here all along and was dropped. It is
+      // what decides the credential kind, and through it the billing mode.
+      step.route.provider,
       options,
       deps,
     );
@@ -648,6 +683,45 @@ export interface ProductionAdmissionContext {
   readonly evidence: Map<RunnerBackend, D1_11ReadinessEvidence>;
 }
 
+// #133. The OpenCode server is ONE per backend and outlives every step, so
+// the credential it launches under is a whole-plan fact, not a per-step one.
+// A plan mixing an `openai` OAuth route with a `zai` API-token route would
+// need two credentials behind one server; until a server-per-credential
+// exists, that plan is REFUSED here by name rather than silently served
+// whichever provider happened to be resolved last.
+//
+// Returns the sole provider and the kind it resolves to. The BROKER is not
+// built here — `openCodeCredentialBroker` (runner-authority.ts) owns that
+// pairing for both this site and binding resolution, because two copies of it
+// would be two chances to hand a route a broker that refuses its kind.
+export function soleOpenCodeCredential(plan: ResolvedRoutePlan):
+  | {
+      readonly kind: CredentialKind;
+      readonly provider: string;
+      readonly error?: undefined;
+    }
+  | {
+      readonly error: string;
+      readonly kind?: undefined;
+      readonly provider?: undefined;
+    } {
+  const providers = new Set<string>();
+  for (const step of plan.steps) {
+    if (step.route.backend === "opencode") {
+      providers.add(step.route.provider);
+    }
+  }
+  if (providers.size > 1) {
+    return {
+      error: `plan names ${providers.size} OpenCode providers (${[...providers].sort().join(", ")}); the OpenCode server holds one credential for its whole life, so a mixed-provider plan is not supported yet`,
+    };
+  }
+  // No opencode route: the value is never read, and the OAuth default keeps
+  // the pre-#133 shape for every caller that passes a claude-only plan.
+  const provider = [...providers][0] ?? OPENCODE_OAUTH_PROVIDER;
+  return { kind: credentialKindForRoute("opencode", provider), provider };
+}
+
 export async function prepareProductionAdmissionContext(input: {
   readonly workspaceRoot: string;
   readonly plan: ResolvedRoutePlan;
@@ -658,15 +732,30 @@ export async function prepareProductionAdmissionContext(input: {
   readonly env?: RunnerAuthorityOptions["env"];
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
 }): Promise<ProductionAdmissionContext | { readonly error: string }> {
+  // #133: ONE opencode credential per plan, decided here, because the
+  // OpenCode SERVER is one per backend and outlives every step — it cannot
+  // hold two providers' credentials at once. A plan naming two of them is
+  // refused by NAME rather than served the wrong one.
+  const openCodeCredential = soleOpenCodeCredential(input.plan);
+  if (openCodeCredential.error !== undefined) {
+    return { error: openCodeCredential.error };
+  }
   // #149: resolve the opencode broker ONCE, here, and seed it into the
   // authority so runner-authority.ts binding resolution and the transport
   // registry that launches the server are handed the SAME object. Each side
   // defaulting its own `new OpenCodeAuthBroker()` is the "two brokers,
   // diverging in silence" case: a caller injecting a fake would get the fake
   // at the binding and a real broker at the server.
+  //
+  // #133 adds the second half: the default must MATCH the plan's provider.
+  // An unconditional `new OpenCodeAuthBroker()` here made the api-token route
+  // unreachable on the default path — it would resolve the right kind at the
+  // authority and then be handed a broker that refuses that kind.
   const credentialBrokers = {
     ...input.credentialBrokers,
-    opencode: input.credentialBrokers?.opencode ?? new OpenCodeAuthBroker(),
+    opencode:
+      input.credentialBrokers?.opencode ??
+      openCodeCredentialBroker(openCodeCredential.provider),
   };
   const authorityResult = await prepareProductionRunnerAuthority(
     input.workspaceRoot,
@@ -689,6 +778,10 @@ export async function prepareProductionAdmissionContext(input: {
     env: authorityOptions.env,
     // #149: the SAME instance seeded into the binding authority above.
     credentialBroker: credentialBrokers.opencode,
+    // #133: and the kind it was resolved FOR. The launcher pairs the two;
+    // sending the broker without its kind would leave the launcher defaulting
+    // to the OAuth kind over an api-token broker.
+    credentialKind: openCodeCredential.kind,
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   });
   const probe = await probeBindingsReadiness({
@@ -736,6 +829,10 @@ export async function prepareProductionAdmissionContext(input: {
     env: authorityOptions.env,
     // #149: the SAME instance seeded into the binding authority above.
     credentialBroker: credentialBrokers.opencode,
+    // #133: and the kind it was resolved FOR. The launcher pairs the two;
+    // sending the broker without its kind would leave the launcher defaulting
+    // to the OAuth kind over an api-token broker.
+    credentialKind: openCodeCredential.kind,
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   }) as DefaultTransportRegistry;
 
@@ -1024,24 +1121,29 @@ export function createClaudeCompatibilityRunner(
     if ("error" in resolvedOptions) {
       throw new ProductionRuntimeError(resolvedOptions.error);
     }
-    return resolveBindingAuthority("claude-code", resolvedOptions, deps).then(
-      (result) => {
-        if (result.error !== undefined || result.binding === undefined) {
-          throw new ProductionRuntimeError(
-            result.error ?? "claude authority unavailable",
-          );
-        }
-        const binding = result.binding;
-        return new ClaudeCodeRunner({
-          workspaceRoot: binding.workspaceRoot,
-          binaryPath: binding.binaryPath,
-          executableAllowlist: binding.executableAllowlist,
-          ...(binding.credentialBroker
-            ? { credentialBroker: binding.credentialBroker }
-            : {}),
-        });
-      },
-    );
+    // Claude-only by construction; credentialKindForRoute ignores the
+    // provider for this backend.
+    return resolveBindingAuthority(
+      "claude-code",
+      "anthropic",
+      resolvedOptions,
+      deps,
+    ).then((result) => {
+      if (result.error !== undefined || result.binding === undefined) {
+        throw new ProductionRuntimeError(
+          result.error ?? "claude authority unavailable",
+        );
+      }
+      const binding = result.binding;
+      return new ClaudeCodeRunner({
+        workspaceRoot: binding.workspaceRoot,
+        binaryPath: binding.binaryPath,
+        executableAllowlist: binding.executableAllowlist,
+        ...(binding.credentialBroker
+          ? { credentialBroker: binding.credentialBroker }
+          : {}),
+      });
+    });
   });
 }
 
@@ -1059,7 +1161,21 @@ export function productionFallbackRegistry(options: {
   readonly binaryPath?: string;
   readonly env?: Record<string, string>;
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
+  // #133: optional because this function is also called with a bare
+  // `{ mode }` by callers that never reach an opencode route. When it IS
+  // present it decides the credential KIND, and dropping it here is how this
+  // fallback drifts from the binding authority for the THIRD time — the two
+  // earlier rounds are recorded in the comment above, both found by pr-hero
+  // reviewing its own fix.
+  readonly plan?: ResolvedRoutePlan;
 }): TransportRegistry {
+  const credential =
+    options.plan === undefined
+      ? undefined
+      : soleOpenCodeCredential(options.plan);
+  if (credential?.error !== undefined) {
+    throw new ProductionRuntimeError(credential.error);
+  }
   return createDefaultTransportRegistry({
     mode: options.mode,
     evidence: options.evidence,
@@ -1071,5 +1187,13 @@ export function productionFallbackRegistry(options: {
     ...(options.credentialBrokers?.opencode === undefined
       ? {}
       : { credentialBroker: options.credentialBrokers.opencode }),
+    // The KIND travels even when the broker does not: the registry's own
+    // default broker (openCodeLaunchServerFor) must be built for the plan's
+    // provider, and its default kind must match whatever broker it ends up
+    // with. Without this, a `zai` plan gave the binding an
+    // OpenCodeApiTokenBroker and the server an OAuth broker asking for the
+    // OAuth kind — which would project the operator's OpenAI record under a
+    // zai route. Wrong, not loud, and the worse of the two failure shapes.
+    ...(credential === undefined ? {} : { credentialKind: credential.kind }),
   });
 }

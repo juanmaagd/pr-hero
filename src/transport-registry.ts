@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 // inside OpenCodeSdkTransport is stream → client.close → server (harness owns
 // step timeout and calls destroy on credential projection after transport returns).
 import type {
+  CredentialKind,
   ProviderCapabilityReport,
   ProviderTransport,
   ResolvedModelRoute,
@@ -157,6 +158,9 @@ export interface TransportFactoryOptions {
   // #149: the credential broker the authority resolved for the opencode
   // backend. The server runs under its projection for the servers whole life.
   readonly credentialBroker?: CredentialBroker;
+  // #133: the KIND that broker was resolved for. Travels beside it and is
+  // only ever meaningful as a pair — see openCodeLaunchServerFor.
+  readonly credentialKind?: CredentialKind;
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly mode?: "production" | "conformance";
   readonly routeFingerprint?: string;
@@ -209,6 +213,14 @@ export class DefaultTransportRegistry implements TransportRegistry {
   // guarantee it shipped dead. Identity here is the assertion.
   get openCodeCredentialBroker(): CredentialBroker | undefined {
     return this.defaultOptions.credentialBroker;
+  }
+
+  // #133: the same reason, for the other half of the pair. The kind travels
+  // beside the broker and decides which credential the server projects; a
+  // fallback that silently dropped it would be unobservable from outside, and
+  // an unobservable invariant is how the #149 forwarding shipped dead twice.
+  get openCodeCredentialKind(): CredentialKind | undefined {
+    return this.defaultOptions.credentialKind;
   }
 
   constructor(options: CreateTransportRegistryOptions = {}) {
@@ -595,6 +607,7 @@ export async function admitDiversityRoutePlan(
 export function defaultOpenCodeLaunchServer(options: {
   readonly verifiedBinaryPath: string;
   readonly broker: CredentialBroker;
+  readonly credentialKind: CredentialKind;
   readonly baseEnv?: Readonly<Record<string, string | undefined>>;
   readonly spawnFn?: typeof Bun.spawn;
   readonly killFn?: (pid: number, signal?: string | number) => unknown;
@@ -628,6 +641,18 @@ export function openCodeLaunchServerFor(
     // beside runner-authority.ts, and a caller injecting a fake at the
     // authority would silently get a real one at the server.
     broker: merged.credentialBroker ?? new OpenCodeAuthBroker(),
+    // #133: the kind the authority resolved for that broker. The default
+    // below is the OAuth kind because the default BROKER on the line above is
+    // the OAuth broker — the pair is only ever defaulted together, here.
+    //
+    // The one case where they intentionally MISMATCH: a caller that supplies
+    // a metered `credentialKind` but no broker gets the OAuth default, which
+    // then refuses `provider_api_token` by name. That is deliberate. #149's
+    // invariant is that an absent broker stays absent rather than being
+    // silently stood in for, so the honest outcome is a loud refusal, not a
+    // guess — and never the reverse, an OAuth record projected under a
+    // metered route.
+    credentialKind: merged.credentialKind ?? "opencode_chatgpt_oauth",
     // pr-hero own environment, filtered to operational keys only. The
     // projection owns HOME/TMPDIR/XDG_* and overrides whatever survives;
     // see composeOpenCodeServerEnv.

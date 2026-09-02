@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { CredentialKind } from "../../src/execution/contracts";
 import type { CredentialBroker } from "../../src/security/credential-broker";
 import {
   composeOpenCodeServerEnv,
@@ -403,6 +404,7 @@ describe("projected server launch (#149)", () => {
     const pending = launchProjectedOpenCodeServer({
       verifiedBinaryPath: BIN,
       broker: proj.broker,
+      credentialKind: "opencode_chatgpt_oauth",
       baseEnv: {
         PATH: "/usr/bin",
         LANG: "en_US.UTF-8",
@@ -454,6 +456,7 @@ describe("projected server launch (#149)", () => {
     const pending = launchProjectedOpenCodeServer({
       verifiedBinaryPath: BIN,
       broker: proj.broker,
+      credentialKind: "opencode_chatgpt_oauth",
       baseEnv: { PATH: "/usr/bin" },
       spawnFn: fake.spawnFn,
       killFn: fake.killFn,
@@ -476,6 +479,7 @@ describe("projected server launch (#149)", () => {
     const pending = launchProjectedOpenCodeServer({
       verifiedBinaryPath: BIN,
       broker: proj.broker,
+      credentialKind: "opencode_chatgpt_oauth",
       baseEnv: { PATH: "/usr/bin" },
       spawnFn: fake.spawnFn,
       killFn: (_pid, signal) => {
@@ -502,6 +506,7 @@ describe("projected server launch (#149)", () => {
       launchProjectedOpenCodeServer({
         verifiedBinaryPath: BIN,
         broker: proj.broker,
+        credentialKind: "opencode_chatgpt_oauth",
         baseEnv: { PATH: "/usr/bin" },
         spawnFn: (() => {
           throw new Error("spawn refused");
@@ -520,6 +525,7 @@ describe("projected server launch (#149)", () => {
       launchProjectedOpenCodeServer({
         verifiedBinaryPath: BIN,
         broker: proj.broker,
+        credentialKind: "opencode_chatgpt_oauth",
         baseEnv: { PATH: "/usr/bin" },
         spawnFn: fake.spawnFn,
       }),
@@ -553,6 +559,7 @@ describe("projected server launch (#149)", () => {
     const pending = launchProjectedOpenCodeServer({
       verifiedBinaryPath: BIN,
       broker,
+      credentialKind: "opencode_chatgpt_oauth",
       baseEnv: { PATH: "/usr/bin" },
       spawnFn: fake.spawnFn,
       killFn: fake.killFn,
@@ -564,5 +571,46 @@ describe("projected server launch (#149)", () => {
       kind: "opencode_chatgpt_oauth",
       verifiedBinaryPath: BIN,
     });
+  });
+
+  // #133: the kind is per-ROUTE now (an opencode route on any provider but
+  // `openai` is a metered API token), so the launcher cannot hold a literal.
+  // A hardcoded `opencode_chatgpt_oauth` here would ask the api-token broker
+  // for a kind it refuses — and, worse, would ask an OAuth broker to serve a
+  // metered route if the pairing ever slipped the other way.
+  test("the launcher asks for the credential kind it is given, not a literal", async () => {
+    for (const kind of [
+      "opencode_chatgpt_oauth",
+      "provider_api_token",
+    ] as const) {
+      const fake = fakeServer();
+      let seen: CredentialKind | undefined;
+      const broker: CredentialBroker = {
+        project: async (input) => {
+          seen = input.kind;
+          return {
+            projectionId: "cred-fake",
+            kind: input.kind,
+            syntheticHome: PROJECTION_ENV.HOME,
+            syntheticConfigHome: PROJECTION_ENV.XDG_CONFIG_HOME,
+            syntheticTmp: PROJECTION_ENV.TMPDIR,
+            env: { ...PROJECTION_ENV },
+            files: [],
+            destroy: async () => {},
+          };
+        },
+      };
+      const pending = launchProjectedOpenCodeServer({
+        verifiedBinaryPath: BIN,
+        broker,
+        credentialKind: kind,
+        baseEnv: { PATH: "/usr/bin" },
+        spawnFn: fake.spawnFn,
+        killFn: fake.killFn,
+      });
+      fake.emit(LISTENING);
+      await pending;
+      expect(seen).toBe(kind);
+    }
   });
 });

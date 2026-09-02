@@ -34,6 +34,7 @@ import {
 import {
   type ExecutableAllowlistEntry,
   exactBindingCapabilityGate,
+  exactBindingCapabilityIssues,
 } from "../src/provider-capabilities";
 import {
   resolveBindingAuthority,
@@ -766,6 +767,230 @@ describe("production runtime PR1", () => {
       });
     });
 
+    // #133. The credential KIND is what decides how a route bills, and it is
+    // provider-keyed: an OpenCode route on any provider but `openai` runs on a
+    // metered API token. The legacy backend-wide report cannot know that --
+    // it is produced before any route resolves -- so it keeps saying
+    // "subscription" and the binding corrects it.
+    //
+    // Why the correction has to reach all THREE billing expressions and not
+    // just `billing.mode`: `pricingApplicability`, `mode` and
+    // `cashCostAccountingValid` each read the mode independently. Upgrading
+    // only `mode` leaves `pricingApplicability` at "not_applicable", the
+    // pricing gate never fires, and a metered route is admitted as
+    // priced-not-required -- which is precisely the under-reporting this
+    // issue exists to prevent: the run executes on real spend and reports $0.
+    describe("provider_api_token routes bill as metered", () => {
+      async function openCodeBindingReport(provider: string) {
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const routingConfig: RoutingConfig = {
+          mappings: {
+            "zai/glm-5": {
+              backend: "opencode",
+              provider,
+              modelFamily: "glm-5",
+              modelSnapshot: "glm-5",
+            },
+          },
+        };
+        const step = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "zai/glm-5",
+          routingConfig,
+        });
+        const plan = createResolvedRoutePlan([step]);
+        const registry = new DefaultTransportRegistry();
+        registry.register(
+          "opencode",
+          createMockTransport("opencode", [], {
+            // Load-bearing: the mock's default is `pricingReady: true`, which
+            // would make `tokenPricingAvailable` true from the transport alone
+            // and the arm would prove nothing about the gate.
+            billing: { mode: "subscription", pricingReady: false },
+          }),
+        );
+        const runtime = await createProductionRuntime({
+          workspaceRoot: tmpDir,
+          plan,
+          openCodeBinaryPath: opencodeFixture.canonicalPath,
+          executableAllowlists: {
+            opencode: [
+              {
+                absolutePath: opencodeFixture.canonicalPath,
+                sha256: opencodeFixture.sha256,
+              },
+            ],
+          },
+          registry,
+          mode: "conformance",
+        });
+        const binding = runtime.bindings.get(step.routeFingerprint);
+        if (binding === undefined) throw new Error("missing binding");
+        return { binding, report: await binding.capabilities() };
+      }
+
+      test("an unpriced zai route is refused by the pricing gate, not billed as a subscription", async () => {
+        const { binding, report } = await openCodeBindingReport("zai");
+
+        expect(binding.credential.kind).toBe("provider_api_token");
+        expect(report.auth.kind).toBe("provider_api_token");
+        expect(report.billing.mode).toBe("metered");
+        // The three independent readers must move together.
+        expect(report.billing.pricingApplicability).toBe("required");
+        expect(report.billing.tokenPricingAvailable).toBe(false);
+        expect(report.billing.cashCostAccountingValid).toBe(false);
+
+        const issues = exactBindingCapabilityIssues(report);
+        const pricing = issues.find(
+          (issue) => issue.code === "pricing_table_missing",
+        );
+        expect(pricing).toBeDefined();
+        expect(pricing?.blocking).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(false);
+      });
+
+      test("the openai OAuth route on the same backend still bills as a subscription", async () => {
+        const { binding, report } = await openCodeBindingReport("openai");
+
+        expect(binding.credential.kind).toBe("opencode_chatgpt_oauth");
+        expect(report.billing.mode).toBe("subscription");
+        expect(report.billing.pricingApplicability).toBe("not_applicable");
+        expect(report.billing.cashCostAccountingValid).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
+      });
+
+      // The upgrade is one-way. A metered legacy report on an OAuth route
+      // must NOT be downgraded to subscription, and `unknown` must still
+      // reach `cashCostAccountingValid: false` for every kind that is not
+      // provider_api_token -- that is what keeps the narrowing comment on
+      // FrozenRuntimeBinding.capabilities() true.
+      test("the effective mode only ever upgrades", async () => {
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const routingConfig: RoutingConfig = {
+          mappings: {
+            "openai/gpt-4o": {
+              backend: "opencode",
+              provider: "openai",
+              modelFamily: "gpt-4o",
+              modelSnapshot: "gpt-4o",
+            },
+          },
+        };
+        const step = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "openai/gpt-4o",
+          routingConfig,
+        });
+        const plan = createResolvedRoutePlan([step]);
+        const registry = new DefaultTransportRegistry();
+        registry.register(
+          "opencode",
+          createMockTransport("opencode", [], {
+            billing: { mode: "unknown", pricingReady: false },
+          }),
+        );
+        const runtime = await createProductionRuntime({
+          workspaceRoot: tmpDir,
+          plan,
+          openCodeBinaryPath: opencodeFixture.canonicalPath,
+          executableAllowlists: {
+            opencode: [
+              {
+                absolutePath: opencodeFixture.canonicalPath,
+                sha256: opencodeFixture.sha256,
+              },
+            ],
+          },
+          registry,
+          mode: "conformance",
+        });
+        const binding = runtime.bindings.get(step.routeFingerprint);
+        if (binding === undefined) throw new Error("missing binding");
+        const report = await binding.capabilities();
+
+        expect(binding.credential.kind).toBe("opencode_chatgpt_oauth");
+        expect(report.billing.mode).toBe("subscription");
+        expect(report.billing.cashCostAccountingValid).toBe(false);
+        const decision = exactBindingCapabilityGate(report);
+        expect(decision.ok).toBe(false);
+        expect(decision.reason).toContain("cash_cost_accounting_invalid");
+      });
+
+      // #133 scope note, proven rather than asserted: the OpenCode SERVER is
+      // one per backend and outlives every step, so a plan mixing an `openai`
+      // OAuth route with a `zai` API-token route would need two credentials
+      // behind one server. That is out of scope here -- but it must fail
+      // LOUD, not run one provider's steps under the other's credential.
+      // `resolveFrozenBindings` gates per BINDING, so the unpriced metered
+      // route is refused before anything launches.
+      test("a plan mixing an OAuth provider and an API-token provider is refused per binding", async () => {
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const routingConfig: RoutingConfig = {
+          mappings: {
+            "openai/gpt-4o": {
+              backend: "opencode",
+              provider: "openai",
+              modelFamily: "gpt-4o",
+              modelSnapshot: "gpt-4o",
+            },
+            "zai/glm-5": {
+              backend: "opencode",
+              provider: "zai",
+              modelFamily: "glm-5",
+              modelSnapshot: "glm-5",
+            },
+          },
+        };
+        const oauthStep = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "openai/gpt-4o",
+          routingConfig,
+        });
+        const tokenStep = resolveStepRoute({
+          stepKey: "refuter",
+          role: "refuter",
+          cliModel: "zai/glm-5",
+          routingConfig,
+        });
+        const plan = createResolvedRoutePlan([oauthStep, tokenStep]);
+        const registry = new DefaultTransportRegistry();
+        registry.register(
+          "opencode",
+          createMockTransport("opencode", [], {
+            billing: { mode: "subscription", pricingReady: false },
+          }),
+        );
+
+        const probe = await probeBindingsReadiness({
+          workspaceRoot: tmpDir,
+          plan,
+          openCodeBinaryPath: opencodeFixture.canonicalPath,
+          executableAllowlists: {
+            opencode: [
+              {
+                absolutePath: opencodeFixture.canonicalPath,
+                sha256: opencodeFixture.sha256,
+              },
+            ],
+          },
+          registry,
+          mode: "conformance",
+        });
+
+        expect(probe.decision.ok).toBe(false);
+        expect(probe.decision.reason).toContain("pricing_table_missing");
+        // The two bindings differ: the OAuth one is admissible on its own.
+        const kinds = [...probe.bindings.values()]
+          .map((binding) => binding.credential.kind)
+          .sort();
+        expect(kinds).toEqual(["opencode_chatgpt_oauth", "provider_api_token"]);
+        await probe.dispose();
+      });
+    });
+
     // SUGGESTION-1: capabilities() is deliberately non-memoised (it re-probes
     // by design, and DefaultTransportRegistry.getCapabilityReport calls
     // transport.capabilities() on every call), so a caller that gates and
@@ -1040,6 +1265,7 @@ describe("production runtime PR1", () => {
     test("resolveBindingAuthority rejects unsupported backends without fallback", async () => {
       const result = await resolveBindingAuthority(
         "codex",
+        "openai",
         { workspaceRoot: tmpDir },
         {
           existsFn: () => true,
@@ -1098,6 +1324,7 @@ describe("production runtime PR1", () => {
 
       const result = await resolveBindingAuthority(
         "opencode",
+        "openai",
         {
           workspaceRoot: tmpDir,
           openCodeBinaryPath: canonical,

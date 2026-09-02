@@ -15,6 +15,7 @@
 // collide on. This module asks for an ephemeral port and reads back the URL
 // the server actually prints.
 
+import type { CredentialKind } from "../execution/contracts";
 import type { CredentialBroker } from "../security/credential-broker";
 import type { SpawnedProcess } from "../step-runner";
 import { mcpConfigIsEmpty, type OpenCodeMcpConfig } from "./opencode-mcp";
@@ -311,6 +312,13 @@ export interface LaunchProjectedOpenCodeServerOptions
   // would be a second source of truth beside runner-authority.ts, so the
   // caller supplies the same instance the binding was resolved with.
   readonly broker: CredentialBroker;
+  // #133: REQUIRED, and paired with `broker` above for the same reason it is
+  // not defaulted here. The kind is per-ROUTE now — an opencode route on any
+  // provider but `openai` runs on a metered API token — so a default in this
+  // file would be a second source of truth beside runner-authority.ts, and
+  // the wrong half of the pair would only surface at projection time inside a
+  // live run. Required drags every caller through tsc instead.
+  readonly credentialKind: CredentialKind;
   // pr-hero's own environment, filtered through SERVER_ENV_PASSTHROUGH.
   readonly baseEnv?: Readonly<Record<string, string | undefined>>;
 }
@@ -323,14 +331,27 @@ export interface LaunchProjectedOpenCodeServerOptions
 export async function launchProjectedOpenCodeServer(
   options: LaunchProjectedOpenCodeServerOptions,
 ): Promise<OpenCodeServerHandle> {
-  const { broker, baseEnv = {}, ...launchOptions } = options;
+  const { broker, credentialKind, baseEnv = {}, ...launchOptions } = options;
 
   const projection = await broker.project({
     // Three of these four are voided by the OpenCode broker; `kind` is the one
-    // it reads, and it is the kind runner-authority.ts binds for this backend.
+    // it reads. #133: it is no longer a constant. The kind is decided per
+    // route by runner-authority.ts's credentialKindForRoute, and this server
+    // is handed the one its binding resolved.
+    //
+    // SCOPE NOTE, not solved here: this server is ONE per backend and
+    // outlives every step, so a plan mixing an `openai` OAuth route with a
+    // `zai` API-token route needs two credentials behind one server. That
+    // case is refused upstream — the metered route has no pricing table yet,
+    // so the exact-binding gate blocks it per binding before anything
+    // launches (test/production-runtime.test.ts, "a plan mixing an OAuth
+    // provider and an API-token provider is refused per binding"). When #137
+    // prices those routes, this becomes reachable and needs a server per
+    // credential; until then it must fail LOUD, which it does — a broker
+    // handed the wrong kind refuses it by name.
     sessionId: "opencode-server",
     credentialRef: "opencode-auth",
-    kind: "opencode_chatgpt_oauth",
+    kind: credentialKind,
     verifiedBinaryPath: launchOptions.verifiedBinaryPath,
   });
 

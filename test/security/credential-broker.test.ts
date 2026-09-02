@@ -7,6 +7,7 @@ import {
   CredentialProjectionError,
   KeychainCredentialBroker,
   OPENCODE_AUTH_RELATIVE_PATH,
+  OpenCodeApiTokenBroker,
   OpenCodeAuthBroker,
   openCodeProjectionLayout,
 } from "../../src/security/credential-broker";
@@ -202,6 +203,10 @@ describe("KeychainCredentialBroker", () => {
     );
   });
 
+  // #133 gave `provider_api_token` a broker of its own
+  // (OpenCodeApiTokenBroker). That does not make it projectable HERE: the
+  // keychain holds the Claude subscription record and nothing else, so this
+  // broker must keep refusing both foreign kinds by name.
   test("unsupported kinds fail loud naming the kind", async () => {
     const broker = brokerWithReader(okReader);
     for (const kind of [
@@ -468,6 +473,254 @@ describe("OpenCodeAuthBroker", () => {
         verifiedBinaryPath: "/opt/homebrew/bin/opencode",
       }),
     ).rejects.toThrow(/claude_subscription_oauth/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #133: the metered API-token route (§6.1 "CI metered provider", and the
+// local equivalent). Generic over ANY OpenCode provider — the provider name
+// is a constructor argument, never a literal in the broker.
+//
+// Projection shape proven live (2026-09-01, opencode 1.18.23): a synthetic
+// HOME carrying only `{ <provider>: { type: "api", ... } }` is read as
+// exactly that one credential, with the operator's sibling providers absent,
+// on two different provider keys. Inference under that credential is NOT yet
+// proven — that smoke is blocked on #137's pricing table.
+// ---------------------------------------------------------------------------
+
+function apiTokenBroker(provider: string, readerFn: () => Promise<string>) {
+  return new OpenCodeApiTokenBroker(provider, { readerFn });
+}
+
+async function projectApiToken(broker: OpenCodeApiTokenBroker) {
+  return broker.project({
+    sessionId: "session-1",
+    credentialRef: OPENCODE_AUTH_RELATIVE_PATH,
+    kind: "provider_api_token",
+    verifiedBinaryPath: "/opt/homebrew/bin/opencode",
+  });
+}
+
+describe("OpenCodeApiTokenBroker", () => {
+  // Genericity is the point of the issue, so it is proven on two DIFFERENT
+  // provider names rather than on one that could be a hardcoded literal.
+  for (const provider of ["zai", "zai-coding-plan"]) {
+    test(`projects the ${provider} record and nothing else`, async () => {
+      const broker = apiTokenBroker(provider, async () => FAKE_OPENCODE_STORE);
+      const projection = await projectApiToken(broker);
+      try {
+        const raw = await Bun.file(
+          projectedAuthPath(projection.syntheticHome),
+        ).text();
+        const written = JSON.parse(raw);
+        expect(Object.keys(written)).toEqual([provider]);
+        // The record travels WHOLE, same rule as the OAuth broker.
+        expect(written[provider].type).toBe("api");
+        expect(written[provider].key).toBe(
+          provider === "zai" ? "ZAI-KEY-2-test-fake" : "ZAI-KEY-test-fake",
+        );
+        // Sibling providers — including the operator's OpenAI OAuth record —
+        // never leave the source store.
+        expect(raw).not.toContain("AT-openai-test-fake");
+        expect(raw).not.toContain("RT-openai-test-fake");
+        expect(raw).not.toContain("oauth");
+      } finally {
+        await projection.destroy();
+      }
+    });
+  }
+
+  test("the two providers project disjoint stores from the same source", async () => {
+    const a = await projectApiToken(
+      apiTokenBroker("zai", async () => FAKE_OPENCODE_STORE),
+    );
+    const b = await projectApiToken(
+      apiTokenBroker("zai-coding-plan", async () => FAKE_OPENCODE_STORE),
+    );
+    try {
+      const rawA = await Bun.file(projectedAuthPath(a.syntheticHome)).text();
+      const rawB = await Bun.file(projectedAuthPath(b.syntheticHome)).text();
+      expect(rawA).not.toContain("ZAI-KEY-test-fake");
+      expect(rawB).not.toContain("ZAI-KEY-2-test-fake");
+    } finally {
+      await a.destroy();
+      await b.destroy();
+    }
+  });
+
+  // The MIRROR of the OAuth broker's `type !== "oauth"` lock. This kind
+  // promises a metered API token; projecting an OAuth record under it would
+  // make `billing.mode: "metered"` wrong in the other direction — a
+  // subscription route reported, and gated, as if it spent cash per token.
+  test("an OAuth record is not the API token this kind promises", async () => {
+    const broker = apiTokenBroker("openai", async () => FAKE_OPENCODE_STORE);
+    try {
+      await projectApiToken(broker);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      expect((error as CredentialProjectionError).failureClass).toBe(
+        "missing_provider_record",
+      );
+    }
+  });
+
+  test("a store with no record for this provider fails loud", async () => {
+    const broker = apiTokenBroker("mistral", async () => FAKE_OPENCODE_STORE);
+    try {
+      await projectApiToken(broker);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      expect((error as CredentialProjectionError).failureClass).toBe(
+        "missing_provider_record",
+      );
+    }
+  });
+
+  // pricing-catalog.ts:155-165 records this exact class of bug, found by
+  // pr-hero on its own PR #162: a bare index reaches Object.prototype, so a
+  // lookup answers true for something the store never held.
+  //
+  // This arm asserts the OUTCOME, and it does not discriminate on the
+  // `Object.hasOwn` line alone: `constructor` is the only prototype key the
+  // provider grammar admits, its value is a function, and the broker's
+  // `typeof record !== "object"` check refuses it either way (mutation-checked
+  // 2026-09-01 — deleting the hasOwn guard keeps this suite green). Kept
+  // because the outcome is the contract; the guard's own WHY says the same
+  // thing in the source so nobody mistakes this green for coverage of it.
+  test("an inherited Object.prototype key is not a provider record", async () => {
+    const broker = apiTokenBroker(
+      "constructor",
+      async () => FAKE_OPENCODE_STORE,
+    );
+    try {
+      await projectApiToken(broker);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CredentialProjectionError);
+      expect((error as CredentialProjectionError).failureClass).toBe(
+        "missing_provider_record",
+      );
+    }
+  });
+
+  test("a provider name outside the safe grammar is refused at construction", () => {
+    for (const bad of ["", "../escape", "Zai", "zai/x", "-lead", "a b"]) {
+      expect(() => new OpenCodeApiTokenBroker(bad)).toThrow(/provider/i);
+    }
+    expect(() => new OpenCodeApiTokenBroker("zai-coding-plan")).not.toThrow();
+  });
+
+  test("unsupported kinds fail loud naming the kind", async () => {
+    const broker = apiTokenBroker("zai", async () => FAKE_OPENCODE_STORE);
+    await expect(
+      broker.project({
+        sessionId: "s",
+        credentialRef: OPENCODE_AUTH_RELATIVE_PATH,
+        kind: "opencode_chatgpt_oauth",
+        verifiedBinaryPath: "/opt/homebrew/bin/opencode",
+      }),
+    ).rejects.toThrow(/opencode_chatgpt_oauth/);
+  });
+
+  // The seam CI will use (#136): the record does not have to come from a
+  // file on this machine. A constructed `{type:"api",key}` must project
+  // byte-identically to one read off disk.
+  test("a constructed record projects identically to a read one", async () => {
+    // Same key ORDER as the store fixture: the projection is a
+    // JSON.stringify of the record as read, so the bytes — and therefore the
+    // sha256 the isolation record publishes — follow insertion order.
+    const record = { key: "ZAI-KEY-2-test-fake", type: "api" };
+    const fromStore = await projectApiToken(
+      apiTokenBroker("zai", async () => FAKE_OPENCODE_STORE),
+    );
+    const fromSecret = await projectApiToken(
+      apiTokenBroker("zai", async () => JSON.stringify({ zai: record })),
+    );
+    try {
+      expect(fromSecret.files[0].sha256).toBe(fromStore.files[0].sha256);
+    } finally {
+      await fromStore.destroy();
+      await fromSecret.destroy();
+    }
+  });
+
+  test("layout: every created level is 0700, auth.json is 0600", async () => {
+    const projection = await projectApiToken(
+      apiTokenBroker("zai", async () => FAKE_OPENCODE_STORE),
+    );
+    try {
+      for (const dir of [
+        projection.syntheticHome,
+        path.join(projection.syntheticHome, ".local"),
+        path.join(projection.syntheticHome, ".local", "share"),
+        path.join(projection.syntheticHome, ".local", "share", "opencode"),
+        projection.syntheticTmp,
+      ]) {
+        expect(statSync(dir).mode & 0o777).toBe(0o700);
+      }
+      expect(
+        statSync(projectedAuthPath(projection.syntheticHome)).mode & 0o777,
+      ).toBe(0o600);
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("no component of the projection is a symlink (§6.1 lstat defense)", async () => {
+    const projection = await projectApiToken(
+      apiTokenBroker("zai", async () => FAKE_OPENCODE_STORE),
+    );
+    try {
+      let cursor = projectedAuthPath(projection.syntheticHome);
+      while (cursor.startsWith(projection.syntheticHome)) {
+        expect(lstatSync(cursor).isSymbolicLink()).toBe(false);
+        cursor = path.dirname(cursor);
+      }
+      expect(projection.kind).toBe("provider_api_token");
+      expect(projection.env.XDG_DATA_HOME).toBe(
+        path.join(projection.syntheticHome, ".local", "share"),
+      );
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("reader failure and malformed JSON stay classed and redacted", async () => {
+    const unreadable = apiTokenBroker("zai", async () => {
+      throw new Error("/Users/someone/.local/share/opencode/auth.json ENOENT");
+    });
+    try {
+      await projectApiToken(unreadable);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      const err = error as CredentialProjectionError;
+      expect(err.failureClass).toBe("source_read_failed");
+      expect(err.message).not.toContain("/Users/someone");
+    }
+
+    const malformed = apiTokenBroker(
+      "zai",
+      async () => '{"zai": ZAI-leaked-value',
+    );
+    try {
+      await projectApiToken(malformed);
+      throw new Error("expected a projection failure");
+    } catch (error) {
+      const err = error as CredentialProjectionError;
+      expect(err.failureClass).toBe("malformed_payload");
+      expect(err.message).not.toContain("ZAI-leaked-value");
+    }
+  });
+
+  test("destroy removes the tree and is idempotent", async () => {
+    const projection = await projectApiToken(
+      apiTokenBroker("zai", async () => FAKE_OPENCODE_STORE),
+    );
+    const root = projection.syntheticHome;
+    await projection.destroy();
+    expect(existsSync(root)).toBe(false);
+    await projection.destroy();
+    expect(existsSync(root)).toBe(false);
   });
 });
 

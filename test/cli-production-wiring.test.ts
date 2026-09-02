@@ -12,7 +12,9 @@ import {
   d1_11EvidenceFromExactBinding,
   prepareProductionAdmissionContext,
   productionFallbackRegistry,
+  soleOpenCodeCredential,
 } from "../src/production-runtime";
+import { OpenCodeAuthBroker } from "../src/security/credential-broker";
 import {
   admitRoutePlan,
   type DefaultTransportRegistry,
@@ -237,6 +239,70 @@ describe("CLI production wiring (verify C1/C3)", () => {
     // Absent, not a stand-in: the registry own default is then the single
     // source, and inventing one here would hide a caller that meant to inject.
     expect(registry.openCodeCredentialBroker).toBeUndefined();
+    // With no plan there is no provider to key a kind off, so the launcher's
+    // own OAuth default stands — the pre-#133 shape, unchanged.
+    expect(registry.openCodeCredentialKind).toBeUndefined();
+  });
+
+  // #133, and this is the THIRD round of the same drift the comment above
+  // records: the fallback forwarded the broker and dropped the credential
+  // KIND. A `zai` plan with nothing injected gave the binding authority an
+  // OpenCodeApiTokenBroker while the server built an OAuth broker asking for
+  // the OAuth kind — which would project the operator's OpenAI record under a
+  // metered route. Wrong rather than loud, which is the worse failure.
+  test("the fallback registry carries the plan's credential kind", () => {
+    const zaiStep = resolveStepRoute({
+      stepKey: "refuter",
+      role: "refuter",
+      cliModel: "zai/glm-5",
+      routingConfig: {
+        mappings: {
+          "zai/glm-5": {
+            backend: "opencode",
+            provider: "zai",
+            modelFamily: "glm-5",
+            modelSnapshot: "glm-5",
+          },
+        },
+      },
+    });
+    const registry = productionFallbackRegistry({
+      mode: "production",
+      plan: createResolvedRoutePlan([zaiStep]),
+    }) as DefaultTransportRegistry;
+    expect(registry.openCodeCredentialKind).toBe("provider_api_token");
+    // Still no stand-in broker: #149's invariant is untouched. The server
+    // therefore gets the OAuth default broker and a metered kind, and refuses
+    // by NAME — loud, which is the direction this slice chose.
+    expect(registry.openCodeCredentialBroker).toBeUndefined();
+  });
+
+  test("the fallback registry refuses a mixed-provider plan", () => {
+    const step = (stepKey: string, logical: string, provider: string) =>
+      resolveStepRoute({
+        stepKey,
+        role: stepKey === "refuter" ? "refuter" : "hunter",
+        cliModel: logical,
+        routingConfig: {
+          mappings: {
+            [logical]: {
+              backend: "opencode",
+              provider,
+              modelFamily: logical.split("/")[1],
+              modelSnapshot: logical.split("/")[1],
+            },
+          },
+        },
+      });
+    expect(() =>
+      productionFallbackRegistry({
+        mode: "production",
+        plan: createResolvedRoutePlan([
+          step("hunter-reliability", "openai/gpt-4o", "openai"),
+          step("refuter", "zai/glm-5", "zai"),
+        ]),
+      }),
+    ).toThrow(/one credential/);
   });
 
   test("resolveProductionRoutePlanAtConfirm wires mixed Claude/OpenCode production admission", async () => {
@@ -324,5 +390,129 @@ describe("CLI production wiring (verify C1/C3)", () => {
       },
     };
     expect(d1_11EvidenceFromExactBinding(report).pricingReady).toBe(true);
+  });
+
+  // #133. The OpenCode server is ONE per backend and outlives every step, so
+  // its credential is a whole-plan fact. Two things must hold here, and the
+  // second is what made the api-token route reachable at all:
+  //  1. A plan naming two OpenCode providers is refused BY NAME. Serving it
+  //     would run one provider's steps under the other's credential.
+  //  2. The default broker matches the plan's provider. An unconditional
+  //     `new OpenCodeAuthBroker()` resolved the right KIND at the authority
+  //     and then handed it a broker that refuses that kind — a failure that
+  //     would only surface at projection time, mid-run.
+  describe("the plan's sole opencode credential", () => {
+    function openCodeStep(stepKey: string, logical: string, provider: string) {
+      return resolveStepRoute({
+        stepKey,
+        role: stepKey === "refuter" ? "refuter" : "hunter",
+        cliModel: logical,
+        routingConfig: {
+          mappings: {
+            [logical]: {
+              backend: "opencode",
+              provider,
+              modelFamily: logical.split("/")[1],
+              modelSnapshot: logical.split("/")[1],
+            },
+          },
+        },
+      });
+    }
+
+    async function admit(plan: ReturnType<typeof createResolvedRoutePlan>) {
+      const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-cli-cred-"));
+      const claude = await writeExecutable(
+        tmpDir,
+        "claude",
+        "#!/bin/sh\necho ok\n",
+      );
+      const opencode = await writeExecutable(tmpDir, "opencode", "opencode");
+      try {
+        return await prepareProductionAdmissionContext({
+          workspaceRoot: tmpDir,
+          plan,
+          env: { PATH: tmpDir },
+          loadSdk: mockLoadSdk,
+          authorityDeps: fixtureDeps(tmpDir, claude, opencode),
+        });
+      } finally {
+        await rm(tmpDir, { recursive: true, force: true });
+      }
+    }
+
+    test("a two-provider plan is refused by name", async () => {
+      const plan = createResolvedRoutePlan([
+        openCodeStep("hunter-reliability", "openai/gpt-4o", "openai"),
+        openCodeStep("refuter", "zai/glm-5", "zai"),
+      ]);
+      const admission = await admit(plan);
+      if (!("error" in admission)) {
+        throw new Error("expected a refusal");
+      }
+      expect(admission.error).toContain("openai");
+      expect(admission.error).toContain("zai");
+      expect(admission.error).toContain("one credential");
+    });
+
+    test("a single-provider plan resolves the sole credential", () => {
+      const plan = createResolvedRoutePlan([
+        openCodeStep("hunter-reliability", "zai/glm-5", "zai"),
+        openCodeStep("refuter", "zai/glm-5", "zai"),
+      ]);
+      expect(soleOpenCodeCredential(plan)).toEqual({
+        kind: "provider_api_token",
+        provider: "zai",
+      });
+    });
+
+    // A claude-only plan never reads the value, and must not be refused for a
+    // backend it does not name.
+    test("a plan with no opencode route keeps the pre-#133 OAuth default", () => {
+      const plan = createResolvedRoutePlan([
+        resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "sonnet",
+        }),
+      ]);
+      expect(soleOpenCodeCredential(plan)).toEqual({
+        kind: "opencode_chatgpt_oauth",
+        provider: "openai",
+      });
+    });
+
+    test("the OAuth default broker is still the one both consumers share", async () => {
+      const oauth = await admit(
+        createResolvedRoutePlan([
+          openCodeStep("refuter", "openai/gpt-4o", "openai"),
+        ]),
+      );
+      if ("error" in oauth) throw new Error(oauth.error);
+      expect(oauth.authorityOptions.credentialBrokers?.opencode).toBeInstanceOf(
+        OpenCodeAuthBroker,
+      );
+      // #149: ONE instance, shared with the registry that launches the server.
+      expect(
+        (oauth.registry as DefaultTransportRegistry).openCodeCredentialBroker,
+      ).toBe(oauth.authorityOptions.credentialBrokers?.opencode);
+    });
+
+    // HONEST SCOPE NOTE, asserted rather than claimed: the api-token route is
+    // not yet reachable end-to-end. `prepareProductionAdmissionContext` runs
+    // the readiness probe, and a metered route with no pricing table is
+    // refused there — which is the fail-closed direction #133 chose on
+    // purpose. It goes live when #137 prices these providers. The
+    // kind->broker pairing itself is proven in test/runner-authority.test.ts,
+    // which does not have to get past this gate.
+    test("a metered route is refused for pricing, not silently admitted", async () => {
+      const admission = await admit(
+        createResolvedRoutePlan([openCodeStep("refuter", "zai/glm-5", "zai")]),
+      );
+      if (!("error" in admission)) {
+        throw new Error("expected a refusal");
+      }
+      expect(admission.error).toContain("pricing_table_missing");
+    });
   });
 });
