@@ -1,8 +1,14 @@
-// D1-08 PR4 (§9.1): the transactional spend reservation ledger. Pure/offline
-// — no harness wiring yet (that is PR5b, per the design's own tripwire
-// table: "PR4 | None — pure by design"). These tests exercise
-// `InMemorySpendLedger`, `settlementFromUsage`, `beginStep`/`nextCycle`
-// directly, at the module level.
+// D1-08 PR4 (§9.1): the transactional spend reservation ledger. These tests
+// exercise `InMemorySpendLedger`, `settlementFromUsage`, `beginStep`/
+// `nextCycle` directly, at the module level.
+//
+// 2026-09-02: this header used to add "no harness wiring yet (that is PR5b)",
+// which was the same stale claim `spend-limiter.ts`'s own header carried —
+// PR5b landed and `StepExecutionHarness` calls all four ledger methods. The
+// module-level framing here is still correct, but as a SCOPE choice and not a
+// statement about the harness: `test/harness/spend-wiring.test.ts` owns the
+// harness-observable half, and every pure rule asserted here has a wiring arm
+// there.
 
 import { describe, expect, test } from "bun:test";
 import type { RetryDisposition } from "../../src/execution/failure-policy";
@@ -89,6 +95,130 @@ describe("settlementFromUsage (coupling 1 producer)", () => {
       kind: "unresolved",
       knownUsd: undefined,
     });
+  });
+});
+
+// 2026-09-02, the metered-zero rule. #133 taught the capability report that a
+// `provider_api_token` route bills as METERED; this describe is the same
+// under-reporting failure arriving through the other door — not a missing
+// cost, but a present one that reads $0.
+//
+// The door: the OpenCode client reads the provider's own `cost` field
+// (opencode-client.ts, `asNumber(info.cost)`), and `asNumber` returns 0 for 0
+// rather than undefined. A provider OpenCode holds no price for, or a custom
+// endpoint, reports `cost: 0` — which reaches here as a COMPLETE usage with a
+// defined `cashCostUsd` and settles as a truthful-looking zero wearing the
+// provider's badge.
+//
+// The discriminator is the credential's billing mode, not the number: zero
+// cash cost is truthful for a SUBSCRIPTION credential and is not truthful for
+// a metered one that produced output tokens. Both arms below are needed —
+// either alone would also pass against a rule that simply refuses every zero,
+// which would misfile every genuinely-free subscription attempt.
+describe("settlementFromUsage: a metered zero is not a settlement", () => {
+  test("a metered attempt reporting $0 with output tokens settles unresolved", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0,
+    });
+
+    // `knownUsd` is absent on purpose: the whole point is that 0 is NOT a
+    // known cost here. Carrying it would relocate the same lie into the
+    // unresolved arm, where renderResult would print "$0 known".
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+
+  test("a subscription attempt reporting $0 with output tokens still settles 0", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "subscription",
+      costSource: "provider",
+      cashCostUsd: 0,
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0,
+    });
+  });
+
+  test("a metered attempt that produced no output tokens still settles 0", () => {
+    // The refusal-shaped case: a session that never reached the provider
+    // (opencode-sdk.ts `noSessionUsage`) is a real, truthful $0 even on a
+    // metered route. Gating on output tokens is what keeps it settleable.
+    const usage = normalizeInclusiveUsage({
+      wallMs: 40,
+      inputTotal: 0,
+      outputTotal: 0,
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0,
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0,
+    });
+  });
+
+  test("a metered attempt with a real cost is untouched by the rule", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0.42,
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0.42,
+    });
+  });
+
+  test("a transport that reports only outputVisible is not exempt from the rule", () => {
+    // `outputKnown` is what the OpenCode transport populates, but the rule
+    // must not be dodgeable by a transport that fills the leaves and skips
+    // the rollup — otherwise the exemption is decided by which fields a
+    // transport happens to set rather than by whether tokens were produced.
+    expect(
+      settlementFromUsage({
+        wallMs: 1200,
+        tokens: { outputVisible: 50 },
+        completeness: "complete",
+        billingMode: "metered",
+        costSource: "provider",
+        cashCostUsd: 0,
+      }),
+    ).toEqual({ kind: "unresolved", knownUsd: undefined });
+  });
+
+  test("an unknown billing mode reporting $0 is left to the capability gate", () => {
+    // `billingMode: "unknown"` is already a BLOCKING preflight result
+    // (design doc line 461, enforced by `cashCostAccountingValid`), so no
+    // such route reaches an attempt. Widening this rule to cover it would
+    // add a second, weaker enforcement point for a fact the gate already
+    // refuses outright.
+    expect(
+      settlementFromUsage({
+        wallMs: 1200,
+        tokens: { outputVisible: 50, outputKnown: 50 },
+        completeness: "complete",
+        billingMode: "unknown",
+        costSource: "provider",
+        cashCostUsd: 0,
+      }),
+    ).toEqual({ kind: "settle", actualUsd: 0 });
   });
 });
 

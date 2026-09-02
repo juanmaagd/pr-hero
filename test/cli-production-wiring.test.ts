@@ -498,35 +498,47 @@ describe("CLI production wiring (verify C1/C3)", () => {
       ).toBe(oauth.authorityOptions.credentialBrokers?.opencode);
     });
 
-    // SCOPE NOTE, updated by #137 and asserted rather than claimed. The
-    // api-token route is now reachable end-to-end for a provider whose prices
-    // ship with the engine: `prepareProductionAdmissionContext` runs the
-    // readiness probe, and a metered route is refused there ONLY when nothing
-    // can price it. What stays true is the fail-closed direction #133 chose —
-    // an unpriceable metered route is refused, never billed at a guess — and
-    // `glm-5-turbo` is how that case is still expressible. It is routable in
+    // SCOPE NOTE, updated by #137 and again on 2026-09-02, asserted rather
+    // than claimed. This test used to require a REFUSAL here, on the premise
+    // that a model absent from every bundled table is unpriceable. That
+    // premise is gone: the design's metered rule is "provider cost OR a
+    // versioned rate table" (§8 line 461, provider cost first), and the
+    // OpenCode transport reports provider cost per assistant message. So a
+    // route the TABLE cannot price is priced by the PROVIDER, and admitting
+    // it is correct rather than a loosening — `glm-5-turbo` is routable in
     // OpenCode (`opencode models`, 2026-09-02) and absent from z.ai's
-    // published price table, so it is unpriceable on any clock.
+    // published price table, which is exactly the case provider cost exists
+    // to cover.
     //
-    // Deliberately NOT paired here with a "a priced route gets past this
-    // gate" arm, even though that is #137's headline: this helper has no
-    // `now` seam, so such an arm would read the wall clock and turn red on
-    // the day the bundled zai table crosses PRICING_MAX_AGE_DAYS, with no
-    // commit behind it. That arm lives in test/production-runtime.test.ts,
-    // where the clock is injectable ("a catalogued zai model on a fresh table
-    // passes the same pricing gate"). The kind->broker pairing itself is
-    // proven in test/runner-authority.test.ts, which does not have to get
-    // past this gate.
-    test("an unpriceable metered route is refused for pricing, not silently admitted", async () => {
+    // The fail-closed direction #133 chose is unchanged; it just moved to
+    // where the unknown now actually lives. Admission no longer has an
+    // unknown to refuse, so the guarantee is carried by
+    // `settlementFromUsage`'s metered-zero rule: a metered attempt whose
+    // provider-reported cost is $0 while output tokens were produced settles
+    // UNRESOLVED and fences its bucket, instead of being recorded as free.
+    // A backend that reports no cost at all — the claude-code CLI — still
+    // depends on the table and is still refused without one
+    // (test/production-runtime.test.ts, "the claude-code CLI reports no cost
+    // of its own").
+    //
+    // This helper has no `now` seam, so it deliberately asserts nothing that
+    // reads the wall clock: provider cost does not expire, which is the whole
+    // reason this arm is stable here while a table-priced arm would turn red
+    // on the day the bundled zai table crosses PRICING_MAX_AGE_DAYS. The
+    // clock-sensitive arms live in test/production-runtime.test.ts.
+    test("a metered route no bundled table covers is admitted on the transport's own provider cost", async () => {
       const admission = await admit(
         createResolvedRoutePlan([
           openCodeStep("refuter", "zai/glm-5-turbo", "zai"),
         ]),
       );
-      if (!("error" in admission)) {
-        throw new Error("expected a refusal");
+      if ("error" in admission) {
+        throw new Error(admission.error);
       }
-      expect(admission.error).toContain("pricing_table_missing");
+      // The readiness evidence the gate produced, not a re-derivation: the
+      // pricing prerequisite is met, and it can only have been met by the
+      // transport, since no bundled table carries this model on any clock.
+      expect(admission.evidence.get("opencode")?.pricingReady).toBe(true);
     });
   });
 });

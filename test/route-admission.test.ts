@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DiversityCapabilityError } from "../src/diversity/errors";
 import type {
+  CredentialKind,
   ProviderCapabilityReport,
   ProviderTransport,
   RunnerBackend,
@@ -28,6 +29,7 @@ import {
   OpenCodeProductionGatedError,
   RouteAdmissionError,
 } from "../src/transport-registry";
+import type { OpenCodeSdkTransport } from "../src/transports/opencode-sdk";
 
 function createMockTransport(
   backend: RunnerBackend,
@@ -716,5 +718,52 @@ describe("admitDiversityRoutePlan independent contract (#142 item 4)", () => {
       );
       expect((viaDiversity as Error).message).toBe((direct as Error).message);
     });
+  });
+});
+
+// 2026-09-02. #133 taught the CAPABILITY REPORT that a `provider_api_token`
+// route bills as metered; the usage records the transport emits were still
+// hardcoded `subscription`. The factory is where the two meet: it is the only
+// place that holds the credential kind AND builds the transport.
+//
+// #149's lesson is why `usageBillingMode` is readable at all: the broker
+// forwarding that "guaranteed" a shared instance shipped dead twice because
+// nothing outside could observe it. Deriving a billing mode from a credential
+// kind inside a factory is exactly that shape, so the derivation is
+// observable rather than asserted through an executed attempt.
+describe("OpenCode transport factory derives usage billing mode from the credential kind", () => {
+  const idleClient = {
+    createSession: async () => ({ id: "sess-idle" }),
+    streamEvents: async function* () {},
+    pollStatus: async () => ({ kind: "pending" }) as const,
+    abort: async () => {},
+  };
+
+  function openCodeTransportFor(credentialKind?: CredentialKind) {
+    const registry = createDefaultTransportRegistry({
+      mode: "conformance",
+      openCodeClient: idleClient,
+      ...(credentialKind === undefined ? {} : { credentialKind }),
+    });
+    return registry.get("opencode") as OpenCodeSdkTransport;
+  }
+
+  test("a provider_api_token credential makes the transport stamp metered", () => {
+    expect(openCodeTransportFor("provider_api_token").usageBillingMode).toBe(
+      "metered",
+    );
+  });
+
+  test("the OAuth credential keeps subscription", () => {
+    expect(
+      openCodeTransportFor("opencode_chatgpt_oauth").usageBillingMode,
+    ).toBe("subscription");
+  });
+
+  test("no credential kind keeps subscription, matching the factory's default route", () => {
+    // The same branch that defaults the model to `openai/gpt-4o` — an OAuth,
+    // subscription-billed route. The two defaults have to agree or the
+    // transport would stamp a mode its own default route contradicts.
+    expect(openCodeTransportFor().usageBillingMode).toBe("subscription");
   });
 });

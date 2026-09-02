@@ -10,8 +10,10 @@ import type {
   ResolvedModelRoute,
   RunnerBackend,
 } from "./execution/contracts";
+import type { UsageBillingMode } from "./execution/usage-normalized";
 import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
 import { capabilityGateDecision } from "./provider-capabilities";
+import { credentialKindBillsMetered } from "./runner-authority";
 import {
   type CredentialBroker,
   OpenCodeAuthBroker,
@@ -248,9 +250,45 @@ export class DefaultTransportRegistry implements TransportRegistry {
         }
       }
 
+      // 2026-09-02: the billing mode stamped on every usage record this
+      // transport emits, derived from the credential kind the authority
+      // resolved.
+      //
+      // WHY it cannot disagree with the exact-binding report, stated as the
+      // mechanism rather than as a hope — because the first version of this
+      // comment claimed the guarantee and the code did not make it. The
+      // report's `effectiveBillingMode` reads `binding.credential.kind`
+      // (production-runtime.ts), and `FrozenRuntimeBinding.acquire()` now
+      // forwards THAT SAME field into `options.credentialKind` on the `get()`
+      // that builds this transport. One fact, one source, and
+      // `credentialKindBillsMetered` is the single predicate both sides apply
+      // to it (#133) — so the two are structurally incapable of diverging.
+      //
+      // What the old wording got wrong: "THE factory is the only place that
+      // holds both the kind and the transport" was true, and irrelevant, when
+      // the kind could only arrive from construction-time `defaultOptions`.
+      // Every caller of the public `createProductionRuntime` that supplies
+      // its own registry bypasses the only wiring that sets it
+      // (`productionFallbackRegistry`), so a metered route's records were
+      // stamped "subscription" — which makes `settlementFromUsage`'s
+      // metered-zero rule dead and lets an unaccountable provider $0 settle
+      // as a truthful cost. `defaultOptions.credentialKind` is now the
+      // FALLBACK for callers holding no binding; `get()`'s merge order
+      // (`{ ...defaultOptions, ...options }`) lets the per-binding value win.
+      //
+      // Computed once, above both construction branches — wiring only the
+      // second is how the injected-client path (every test and every doctor
+      // probe) would keep the pre-#133 default.
+      const usageBillingMode: UsageBillingMode =
+        merged.credentialKind !== undefined &&
+        credentialKindBillsMetered(merged.credentialKind)
+          ? "metered"
+          : "subscription";
+
       if (merged.openCodeClient) {
         return new OpenCodeSdkTransport({
           client: merged.openCodeClient,
+          billingMode: usageBillingMode,
         });
       }
 
@@ -293,7 +331,10 @@ export class DefaultTransportRegistry implements TransportRegistry {
         ...(codegraphBinaryPath === undefined ? {} : { codegraphBinaryPath }),
       });
 
-      return new OpenCodeSdkTransport({ client });
+      return new OpenCodeSdkTransport({
+        client,
+        billingMode: usageBillingMode,
+      });
     });
   }
 
@@ -435,6 +476,12 @@ export class DefaultTransportRegistry implements TransportRegistry {
               // be CONSTRUCTED (OpenCodeProductionGatedError), so there is no
               // route, no client and no model behind it — and the report is
               // already blocking on `d1_11_production_gated`.
+              //
+              // 2026-09-02: NOT the case the OpenCode transport's `true`
+              // covers. That claim is a TRANSPORT reporting the provider cost
+              // it reads off each assistant message; here there is no
+              // transport to make the claim, so `false` is the only honest
+              // answer and stays one.
               pricingReady: false,
             },
             issues: [

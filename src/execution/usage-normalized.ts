@@ -67,6 +67,28 @@ function attemptTotalKnown(tokens: NormalizedTokens): number | undefined {
   return tokens.totalKnown ?? tokens.providerReportedTotal;
 }
 
+// 2026-09-02: "did this attempt produce output tokens?", answered from the
+// LEAVES and not from `outputKnown` alone. `outputKnown` is a rollup some
+// builders populate (`normalizeInclusiveUsage`, the OpenCode transport) and
+// others do not, so a reader that consulted it alone would let a transport
+// filling only `outputVisible` slip past — deciding an accounting question by
+// which fields a transport happens to set rather than by whether tokens were
+// produced. The §8 output leaves are disjoint by contract, so summing them is
+// not double counting. One consumer today: `settlementFromUsage`'s
+// metered-zero rule (spend-limiter.ts).
+export function outputTokensKnown(
+  tokens: NormalizedTokens,
+): number | undefined {
+  return (
+    tokens.outputKnown ??
+    sumIfAnyDefined(
+      tokens.outputVisible,
+      tokens.outputReasoning,
+      tokens.outputOther,
+    )
+  );
+}
+
 // §8 line 455: "If a provider total includes detailed cache/reasoning
 // values, split the total into leaves and store only the non-negative
 // residual in inputOther/outputOther; never add the detail to the inclusive
