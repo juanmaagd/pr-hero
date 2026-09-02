@@ -3053,6 +3053,84 @@ export function gotchasUnusableReason(
   return undefined;
 }
 
+// `pr-hero init`'s closing instruction block, as data.
+//
+// WHY it is a function of the outcome rather than a constant: `init` never
+// overwrites, so the file the block talks about is either the scaffold this
+// run just wrote or somebody else's file that was left alone — and those two
+// need different sentences. Printed unconditionally, this block told a repo
+// with real gotchas to "replace the <subsystem> lines" and "delete the
+// marker line", neither of which is in its file. That is the same defect the
+// `gotchas.trim().length === 0` gate was: a message asserting a state nobody
+// checked.
+//
+// The KEPT arms therefore assert nothing of their own. They report what
+// `gotchasUnusableReason` — the one gate every other call site uses — says
+// about the bytes actually on disk, so the block cannot drift from the
+// behaviour a following `pr-hero review` will have.
+//
+// The union is discriminated rather than a pair of optional fields on
+// purpose: there is no `{ written: true, contents }` to get wrong, and no
+// kept arm that forgot to pass the bytes.
+export function initGotchasInstructions(
+  outcome: { written: true } | { written: false; contents: string },
+): string[] {
+  if (outcome.written) {
+    // Safe ONLY on this arm: the file is GOTCHAS_TEMPLATE, so it really does
+    // carry `<subsystem>` lines and the marker.
+    //
+    // "refuses to run without it" was true of an ABSENT file and false of the
+    // one this command just wrote: the scaffold is non-empty, so it used to
+    // sail through the old gate and prime every hunter with `<subsystem>`
+    // placeholders. The marker is what makes the old sentence true, so the
+    // instruction has to name the marker.
+    return [
+      "Then edit .prhero/gotchas.md — two steps, both required:",
+      "  1. replace the <subsystem> lines with facts about this repo",
+      `  2. delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line at the top`,
+      "",
+      "pr-hero refuses to review while that marker is present. It is not " +
+        "pedantry: the file above is non-empty, so without the marker a " +
+        "review would bill in full for hunters primed with placeholder text " +
+        "and report a clean-LOOKING result.",
+    ];
+  }
+
+  const reason = gotchasUnusableReason(outcome.contents);
+  if (reason === "placeholder") {
+    // NOT "replace the <subsystem> lines": a kept scaffold may be `pr-hero
+    // setup`'s fallback (wizard.ts), which carries the marker and has no
+    // `<subsystem>` lines at all. Naming them would be this same defect one
+    // layer down.
+    return [
+      "The .prhero/gotchas.md already on disk is still a scaffold: it carries " +
+        `the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line, and pr-hero ` +
+        "refuses to review while that line is present.",
+      "",
+      "Write facts about THIS repo into it, then delete the marker line.",
+    ];
+  }
+  if (reason === "empty") {
+    // No marker in an empty file, so nothing to delete — saying otherwise
+    // would send the reader looking for a line that is not there.
+    return [
+      "The .prhero/gotchas.md already on disk is empty, and pr-hero refuses " +
+        "to review without gotchas: an empty file makes the whole review a " +
+        "zero-cost no-op that LOOKS like a clean result.",
+      "",
+      "Write facts about THIS repo into it — the deliberate oddities, the " +
+        "invariants enforced somewhere the diff does not show.",
+    ];
+  }
+  // Deliberately modest wording. The gate proves only that the file is
+  // non-empty and marker-free; it does not prove the contents are good, so
+  // this line reports the gate and claims nothing beyond it.
+  return [
+    "The .prhero/gotchas.md already on disk passes the gotchas gate and will " +
+      "be used as-is.",
+  ];
+}
+
 // The pipeline treats unusable gotchas as a fail-loud abort and returns a
 // zero-cost partial run. Correct, but a bare "partial, 0 findings" tells the
 // user nothing — so the CLI checks first and explains.

@@ -211,7 +211,6 @@ import {
   DEFAULT_HOP_BUDGET,
   DEFAULT_SUMMARY_MODEL,
   emptyDiffMessage,
-  GOTCHAS_PLACEHOLDER_MARKER,
   GOTCHAS_TEMPLATE,
   gotchasErrorMessage,
   gotchasUnusableReason,
@@ -219,6 +218,7 @@ import {
   headContainedInBaseMessage,
   INIT_GIT_REMINDER,
   initConfigTemplate,
+  initGotchasInstructions,
   initTemplateOmissions,
   isCiEnvironment,
   isFullCommitId,
@@ -4986,25 +4986,30 @@ async function init(options: CliOptions): Promise<number> {
     );
   }
   log();
+  // Unconditional on purpose, and NOT "consistency-fixed" below: this is
+  // advice ("commit .prhero/ or ignore it"), true in every state this command
+  // can leave the repo in. It asserts nothing about the contents of a file.
   log(INIT_GIT_REMINDER);
   log();
-  // "refuses to run without it" was true of an ABSENT file and false of the
-  // one this command just wrote: the scaffold is non-empty, so it used to
-  // sail through the gate and prime every hunter with `<subsystem>`
-  // placeholders. The marker is what makes the old sentence true, so the
-  // instruction has to name the marker.
-  log("Then edit .prhero/gotchas.md — two steps, both required:");
-  log("  1. replace the <subsystem> lines with facts about this repo");
-  log(
-    `  2. delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line at the top`,
-  );
-  log();
-  log(
-    "pr-hero refuses to review while that marker is present. It is not " +
-      "pedantry: the file above is non-empty, so without the marker a review " +
-      "would bill in full for hunters primed with placeholder text and report " +
-      "a clean-LOOKING result.",
-  );
+  // The block that follows DOES assert file contents, and the write above is
+  // skipped whenever the file already exists — so it is a function of which of
+  // `wrote`/`kept` the gotchas file landed in, never a constant. Printed
+  // unconditionally it told a repo with real gotchas to delete a marker line
+  // that is not in its file. When the file was kept, the only honest source
+  // for what to say about it is the gate itself, over the bytes on disk.
+  const gotchasOutcome = wrote.includes(gotchasPath)
+    ? ({ written: true } as const)
+    : ({
+        written: false,
+        // `.catch("")`: the file was on disk a moment ago — that is why it was
+        // kept — and a read that loses that race must not turn `init` into a
+        // crash. An empty read renders the "empty" arm, which is the correct
+        // advice for a file that is no longer there.
+        contents: await Bun.file(gotchasPath)
+          .text()
+          .catch(() => ""),
+      } as const);
+  for (const line of initGotchasInstructions(gotchasOutcome)) log(line);
   return 0;
 }
 

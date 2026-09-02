@@ -528,6 +528,36 @@ describe("every gotchas gate asks the shared predicate", () => {
     expect(count("gotchasUnusableReason(gotchas)")).toBe(2);
     expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(2);
   });
+
+  // `init` is not exported (it reads the real `os.homedir()`, so driving it
+  // end-to-end would make this suite depend on the machine's
+  // `~/.prhero/config.json`). Its DECISION lives in `initGotchasInstructions`
+  // and is tested exhaustively in test/preflight.test.ts; what is left to
+  // guard here is the wiring — that `init` routes through that helper instead
+  // of printing the block again itself. Source-shape, like the count
+  // assertions above, and for the same reason.
+  test("`pr-hero init` prints its gotchas block through initGotchasInstructions", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+
+    expect(source).toContain("initGotchasInstructions(gotchasOutcome)");
+    // Both arms of the decision are present, so the helper cannot be called
+    // with a constant.
+    expect(source).toContain("wrote.includes(gotchasPath)");
+    expect(source).toContain("{ written: true }");
+    expect(source).toContain("written: false");
+
+    // The assertions themselves moved out. If any of these come back to
+    // cli.ts, they are unconditional again — which is the defect.
+    for (const needle of [
+      "replace the <subsystem> lines",
+      "marker line at the top",
+      "refuses to review while that marker is present",
+    ]) {
+      expect(source).not.toContain(needle);
+    }
+  });
 });
 
 describe("postInlineFindings — step-14 ordering", () => {

@@ -23,6 +23,7 @@ import {
   gotchasUnusableReason,
   headContainedInBaseMessage,
   initConfigTemplate,
+  initGotchasInstructions,
   initTemplateOmissions,
   isFullCommitId,
   type LocalConfig,
@@ -2020,5 +2021,111 @@ describe("gotchasErrorMessage distinguishes the two reasons", () => {
     expect(gotchasErrorMessage("/p/g.md", "empty")).not.toBe(
       gotchasErrorMessage("/p/g.md", "placeholder"),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `pr-hero init`'s closing instruction block.
+//
+// It used to be printed unconditionally, while the write above it is skipped
+// whenever the file already exists. So a repo with real, marker-free gotchas
+// re-ran `init` and was told to delete a marker line that is not in its file
+// and to replace `<subsystem>` placeholders it does not have. README.md now
+// tells readers that re-running `init` after `setup` is harmless and
+// expected, which routes people straight into that message.
+//
+// The rule this block encodes: the message may only assert what this run
+// actually did. When the file was KEPT, the only thing `init` knows about it
+// is what the gate itself says — so the gate is what it reports.
+// ---------------------------------------------------------------------------
+
+describe("initGotchasInstructions — only claims what the run did", () => {
+  const wrote = initGotchasInstructions({ written: true }).join("\n");
+
+  test("a file this run WROTE gets the two-step scaffold instruction", () => {
+    // Safe here and only here: `init` wrote GOTCHAS_TEMPLATE, so the
+    // `<subsystem>` lines and the marker line are both genuinely in the file.
+    expect(wrote).toContain("<subsystem>");
+    expect(wrote).toContain(GOTCHAS_PLACEHOLDER_MARKER);
+    expect(wrote.toLowerCase()).toContain("delete");
+    // The claim has to be true of the bytes actually written.
+    expect(GOTCHAS_TEMPLATE).toContain("<subsystem>");
+    expect(gotchasUnusableReason(GOTCHAS_TEMPLATE)).toBe("placeholder");
+  });
+
+  test("a KEPT file that passes the gate is not accused of anything", () => {
+    const contents =
+      "# Repo gotchas\n\n- billing: a subscription run files notional, not cash.\n";
+    expect(gotchasUnusableReason(contents)).toBeUndefined();
+    const lines = initGotchasInstructions({ written: false, contents });
+    const text = lines.join("\n");
+
+    // Nothing about placeholders, nothing about a marker to delete, and no
+    // `<subsystem>` lines to replace: none of that is true of this file.
+    expect(text).not.toContain(GOTCHAS_PLACEHOLDER_MARKER);
+    expect(text).not.toContain("<subsystem>");
+    expect(text.toLowerCase()).not.toContain("placeholder");
+    expect(text.toLowerCase()).not.toContain("refuses");
+    // It says something useful and checkable instead: the gate is satisfied.
+    expect(text).toContain(".prhero/gotchas.md");
+    expect(lines.length).toBeGreaterThan(0);
+  });
+
+  test("a KEPT file that still carries the marker says so — without inventing <subsystem> lines", () => {
+    // The kept scaffold may be `pr-hero setup`'s fallback, which carries the
+    // marker but has no `<subsystem>` lines at all. Naming them would be the
+    // same defect one layer down.
+    const contents = `<!-- ${GOTCHAS_PLACEHOLDER_MARKER}: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n`;
+    expect(gotchasUnusableReason(contents)).toBe("placeholder");
+    const text = initGotchasInstructions({ written: false, contents }).join(
+      "\n",
+    );
+
+    expect(text).toContain(GOTCHAS_PLACEHOLDER_MARKER);
+    expect(text.toLowerCase()).toContain("delete");
+    expect(text).not.toContain("<subsystem>");
+    // It must not claim this run created the file.
+    expect(text.toLowerCase()).not.toContain("just wrote");
+    expect(text.toLowerCase()).not.toContain("just scaffolded");
+  });
+
+  test("a KEPT file that is empty is told it is empty — there is no marker to delete", () => {
+    const contents = "   \n\t\n";
+    expect(gotchasUnusableReason(contents)).toBe("empty");
+    const text = initGotchasInstructions({ written: false, contents }).join(
+      "\n",
+    );
+
+    expect(text.toLowerCase()).toContain("empty");
+    expect(text).not.toContain(GOTCHAS_PLACEHOLDER_MARKER);
+    expect(text).not.toContain("<subsystem>");
+  });
+
+  test("the four outcomes do not render the same block", () => {
+    const rendered = [
+      wrote,
+      initGotchasInstructions({
+        written: false,
+        contents: "- a real one\n",
+      }).join("\n"),
+      initGotchasInstructions({
+        written: false,
+        contents: `<!-- ${GOTCHAS_PLACEHOLDER_MARKER} -->\n`,
+      }).join("\n"),
+      initGotchasInstructions({ written: false, contents: "" }).join("\n"),
+    ];
+    expect(new Set(rendered).size).toBe(4);
+  });
+
+  test("every line is plain text — this block is printed, not styled", () => {
+    for (const outcome of [
+      { written: true } as const,
+      { written: false as const, contents: "- real\n" },
+      { written: false as const, contents: "" },
+    ]) {
+      for (const line of initGotchasInstructions(outcome)) {
+        expect(line).not.toContain("\x1b");
+      }
+    }
   });
 });
