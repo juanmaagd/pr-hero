@@ -83,11 +83,13 @@ export interface ProductionRuntimeOptions extends RunnerAuthorityOptions {
   readonly signal?: AbortSignal;
   readonly attemptAdmissionGate?: AttemptAdmissionGate;
   readonly graceMarginMs?: number;
-  // #137: the clock the bundled pricing catalogue's freshness is judged
+  // #137: the clock the bundled pricing catalogues' freshness is judged
   // against, forwarded to every binding. A seam and not `new Date()` inline
   // for the same reason doctor.ts has one: a test proving a fresh table
   // prices a route would otherwise turn red on the calendar day the shipped
-  // table crosses PRICING_MAX_AGE_DAYS, with no commit behind it.
+  // table for THAT route's provider crosses PRICING_MAX_AGE_DAYS, with no
+  // commit behind it. Each provider's table expires on its own stamp, so a
+  // test must anchor its clock on the catalogue its route actually reads.
   readonly now?: () => Date;
 }
 
@@ -321,9 +323,11 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // #137. THE place the bundled catalogue is consulted, and the only one:
     // this is the sole site where a provider (`this.route.provider`), a model
     // id (`this.route.modelSnapshot`) and a billing decision are all in
-    // scope. The provider is not decoration -- the catalogue is Anthropic's
-    // and says so, and a route may name any provider beside any model
-    // snapshot. The four `pricingReady: false`
+    // scope. The provider is not decoration -- it SELECTS which provider's
+    // bundled table is consulted, and a route may name any provider beside
+    // any model snapshot, so a route naming a provider no table covers is
+    // refused rather than priced from a neighbour's. The four
+    // `pricingReady: false`
     // sites upstream are backend-wide reports produced before any route
     // resolves, so they stay the honest default and say so in their own
     // comments.

@@ -23,7 +23,11 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "../src/model-routing";
-import { PRICING_CATALOG, PRICING_MAX_AGE_DAYS } from "../src/pricing-catalog";
+import {
+  PRICING_CATALOGS,
+  PRICING_MAX_AGE_DAYS,
+  type PricingCatalog,
+} from "../src/pricing-catalog";
 import {
   collectDoctorExactBindingReports,
   createProductionRuntime,
@@ -582,14 +586,34 @@ describe("production runtime PR1", () => {
     // every arm below is timezone-stable and, more importantly, dateless: an
     // arm that read the wall clock would flip on the calendar day the bundled
     // table crosses PRICING_MAX_AGE_DAYS, with no commit behind it.
-    const catalogAgeClock = (days: number): (() => Date) => {
+    //
+    // #137 made freshness per CATALOGUE, so a clock has to name which table
+    // it is aging. An arm anchored on the wrong provider's stamp still runs
+    // and still passes -- against a table its route never reads.
+    const catalogFor = (provider: string): PricingCatalog => {
+      const catalog = PRICING_CATALOGS[provider];
+      if (catalog === undefined) {
+        throw new Error(`bundled pricing catalogue missing for "${provider}"`);
+      }
+      return catalog;
+    };
+    const catalogAgeClockFor = (
+      provider: string,
+      days: number,
+    ): (() => Date) => {
       const at = new Date(
-        Date.parse(PRICING_CATALOG.fetched_at) + days * 86_400_000,
+        Date.parse(catalogFor(provider).fetched_at) + days * 86_400_000,
       );
       return () => at;
     };
+    const catalogAgeClock = (days: number): (() => Date) =>
+      catalogAgeClockFor("anthropic", days);
     const FRESH_CATALOG = catalogAgeClock(0);
     const STALE_CATALOG = catalogAgeClock(PRICING_MAX_AGE_DAYS);
+    // Anchored on the ZAI stamp, not Anthropic's. The two tables carry
+    // different dates, so FRESH_CATALOG is only incidentally fresh for zai
+    // and STALE_CATALOG is not stale for it at all.
+    const ZAI_FRESH_CATALOG = catalogAgeClockFor("zai", 0);
 
     async function bindingReportForBilling(
       billing: ProviderCapabilityReport["billing"],
@@ -781,22 +805,37 @@ describe("production runtime PR1", () => {
     // priced-not-required -- which is precisely the under-reporting this
     // issue exists to prevent: the run executes on real spend and reports $0.
     describe("provider_api_token routes bill as metered", () => {
-      async function openCodeBindingReport(provider: string) {
+      // #137 repointed the default logical model. `zai/glm-5` used to be
+      // uncatalogued, which is what made "an unpriced zai route" expressible
+      // by naming any zai model at all; the bundled zai table now prices it,
+      // so the unpriced case needs a model the table deliberately omits.
+      // `glm-5-turbo` is routable in OpenCode (`opencode models`, 2026-09-02)
+      // and absent from z.ai's published price table, so it is refused for
+      // the reason these arms are about -- no price -- and stays that way on
+      // any clock, which a promotional or free-tier id would not.
+      const UNPRICED_ZAI_MODEL = "zai/glm-5-turbo";
+
+      async function openCodeBindingReport(
+        provider: string,
+        options?: { readonly logical?: string; readonly now?: () => Date },
+      ) {
+        const logical = options?.logical ?? UNPRICED_ZAI_MODEL;
+        const model = logical.split("/")[1];
         const opencodeFixture = await writeOpenCodeFixture(tmpDir);
         const routingConfig: RoutingConfig = {
           mappings: {
-            "zai/glm-5": {
+            [logical]: {
               backend: "opencode",
               provider,
-              modelFamily: "glm-5",
-              modelSnapshot: "glm-5",
+              modelFamily: model,
+              modelSnapshot: model,
             },
           },
         };
         const step = resolveStepRoute({
           stepKey: "hunter-reliability",
           role: "hunter",
-          cliModel: "zai/glm-5",
+          cliModel: logical,
           routingConfig,
         });
         const plan = createResolvedRoutePlan([step]);
@@ -824,6 +863,7 @@ describe("production runtime PR1", () => {
           },
           registry,
           mode: "conformance",
+          ...(options?.now === undefined ? {} : { now: options.now }),
         });
         const binding = runtime.bindings.get(step.routeFingerprint);
         if (binding === undefined) throw new Error("missing binding");
@@ -848,6 +888,27 @@ describe("production runtime PR1", () => {
         expect(pricing).toBeDefined();
         expect(pricing?.blocking).toBe(true);
         expect(exactBindingCapabilityGate(report).ok).toBe(false);
+      });
+
+      // #137's whole point, and the arm the issue exists to make true: the
+      // route above is refused because nothing can price it, NOT because a
+      // zai route is unpriceable in principle. Same backend, same credential
+      // kind, same metered billing -- only the model changes, to one the
+      // bundled zai table covers.
+      test("a catalogued zai model on a fresh table passes the same pricing gate", async () => {
+        const { binding, report } = await openCodeBindingReport("zai", {
+          logical: "zai/glm-4.6",
+          now: ZAI_FRESH_CATALOG,
+        });
+
+        expect(binding.credential.kind).toBe("provider_api_token");
+        expect(report.billing.mode).toBe("metered");
+        expect(report.billing.pricingApplicability).toBe("required");
+        // The transport still reports nothing (pricingReady: false above), so
+        // the catalogue is the only thing that can be answering here.
+        expect(report.billing.tokenPricingAvailable).toBe(true);
+        expect(report.billing.cashCostAccountingValid).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
       });
 
       test("the openai OAuth route on the same backend still bills as a subscription", async () => {
@@ -935,11 +996,18 @@ describe("production runtime PR1", () => {
               modelFamily: "gpt-4o",
               modelSnapshot: "gpt-4o",
             },
-            "zai/glm-5": {
+            // #137: `glm-5-turbo`, not `glm-5`. The bundled zai table now
+            // prices `glm-5`, and this arm needs the metered binding to be
+            // refused for PRICING so `pricing_table_missing` is still what
+            // proves the per-binding gate ran. `glm-5-turbo` is routable in
+            // OpenCode and absent from z.ai's published table, so it stays
+            // unpriceable on any clock -- which matters here because this
+            // probe reads the wall clock and has no `now` seam.
+            [UNPRICED_ZAI_MODEL]: {
               backend: "opencode",
               provider: "zai",
-              modelFamily: "glm-5",
-              modelSnapshot: "glm-5",
+              modelFamily: UNPRICED_ZAI_MODEL.split("/")[1],
+              modelSnapshot: UNPRICED_ZAI_MODEL.split("/")[1],
             },
           },
         };
@@ -952,7 +1020,7 @@ describe("production runtime PR1", () => {
         const tokenStep = resolveStepRoute({
           stepKey: "refuter",
           role: "refuter",
-          cliModel: "zai/glm-5",
+          cliModel: UNPRICED_ZAI_MODEL,
           routingConfig,
         });
         const plan = createResolvedRoutePlan([oauthStep, tokenStep]);

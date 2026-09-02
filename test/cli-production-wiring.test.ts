@@ -498,16 +498,30 @@ describe("CLI production wiring (verify C1/C3)", () => {
       ).toBe(oauth.authorityOptions.credentialBrokers?.opencode);
     });
 
-    // HONEST SCOPE NOTE, asserted rather than claimed: the api-token route is
-    // not yet reachable end-to-end. `prepareProductionAdmissionContext` runs
-    // the readiness probe, and a metered route with no pricing table is
-    // refused there — which is the fail-closed direction #133 chose on
-    // purpose. It goes live when #137 prices these providers. The
-    // kind->broker pairing itself is proven in test/runner-authority.test.ts,
-    // which does not have to get past this gate.
-    test("a metered route is refused for pricing, not silently admitted", async () => {
+    // SCOPE NOTE, updated by #137 and asserted rather than claimed. The
+    // api-token route is now reachable end-to-end for a provider whose prices
+    // ship with the engine: `prepareProductionAdmissionContext` runs the
+    // readiness probe, and a metered route is refused there ONLY when nothing
+    // can price it. What stays true is the fail-closed direction #133 chose —
+    // an unpriceable metered route is refused, never billed at a guess — and
+    // `glm-5-turbo` is how that case is still expressible. It is routable in
+    // OpenCode (`opencode models`, 2026-09-02) and absent from z.ai's
+    // published price table, so it is unpriceable on any clock.
+    //
+    // Deliberately NOT paired here with a "a priced route gets past this
+    // gate" arm, even though that is #137's headline: this helper has no
+    // `now` seam, so such an arm would read the wall clock and turn red on
+    // the day the bundled zai table crosses PRICING_MAX_AGE_DAYS, with no
+    // commit behind it. That arm lives in test/production-runtime.test.ts,
+    // where the clock is injectable ("a catalogued zai model on a fresh table
+    // passes the same pricing gate"). The kind->broker pairing itself is
+    // proven in test/runner-authority.test.ts, which does not have to get
+    // past this gate.
+    test("an unpriceable metered route is refused for pricing, not silently admitted", async () => {
       const admission = await admit(
-        createResolvedRoutePlan([openCodeStep("refuter", "zai/glm-5", "zai")]),
+        createResolvedRoutePlan([
+          openCodeStep("refuter", "zai/glm-5-turbo", "zai"),
+        ]),
       );
       if (!("error" in admission)) {
         throw new Error("expected a refusal");
