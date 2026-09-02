@@ -60,20 +60,52 @@ bun install && bun link
 
 See [Requirements](#requirements) above — `claude` and `git` are needed by every option.
 
-## Quick start
+## From install to first review
+
+Seven steps, in this order. Steps 2, 5 and 6 are the ones that get skipped, and
+each one breaks the step after it.
 
 ```bash
-# 1. Interactive terminal user interface (TUI)
-pr-hero                          # opens the root interactive menu in a TTY
+# 1. Install (option A shown; B and C put pr-hero on PATH themselves)
+curl -fsSL https://raw.githubusercontent.com/juanmaagd/pr-hero/main/install.sh | bash
 
-# 2. Check system readiness & dependencies (works inside or outside a repo)
+# 2. Put it on THIS shell's PATH. The installer edited your rc file, and an rc
+#    file only reaches shells started after it — the one you are in is not one.
+export PATH="$HOME/.prhero/bin:$PATH"     # fish: set -gx PATH $HOME/.prhero/bin $PATH
+
+# 3. What is installed, what is missing, what blocks a review.
 pr-hero doctor
 
-# 3. Machine-level onboarding & skill/MCP synchronization
-pr-hero setup
+# 4. Skills + MCP registration, and — inside a git repo — scaffold .prhero/.
+cd /path/to/your-repo && pr-hero setup
 
-# 4. Review a branch or pull request
-pr-hero review                   # your checked-out branch vs the merge base
+# 5. Track that scaffold, or ignore it. Local review refuses to run on a dirty
+#    tree, and an untracked .prhero/ is a dirty tree.
+git add .prhero && git commit -m "chore: pr-hero config"   # or: echo '.prhero/' >> .gitignore
+
+# 6. Replace the placeholder gotchas with real ones. Not paperwork — see below.
+$EDITOR .prhero/gotchas.md
+
+# 7. Review the checked-out branch against its merge base.
+pr-hero review
+```
+
+**On step 4.** `setup` is fully non-interactive — it asks nothing and is safe to run
+unattended. It is also optional for reviewing: `review` never checks whether it ran,
+only `pr-hero doctor` reports it. What it buys is the skills, the MCP registration and
+the repo scaffold; skip it and you scaffold the repo yourself with `pr-hero init`.
+
+**On step 6.** `gotchas.md` is injected verbatim into every hunter's system prompt, and
+what `setup`/`init` write there is a placeholder: `- <subsystem>: <the thing that looks
+like a bug but is deliberate, and why>`. A review that reads *that* is a review billed in
+full by hunters who know nothing about your repo, and it comes back looking clean. So
+pr-hero refuses to run while the scaffold's `human-attention-required` marker line is
+still present. Write a handful of true lines, delete the marker.
+
+Other entry points, once the above works:
+
+```bash
+pr-hero                          # the interactive TUI menu, in a TTY
 pr-hero review --pr              # the current branch's PR, in an isolated worktree
 pr-hero review --pr 123          # any PR by number
 ```
@@ -81,6 +113,28 @@ pr-hero review --pr 123          # any PR by number
 > **Breaking change in v2.0**: Invoking `pr-hero` with zero arguments in a TTY now opens the **interactive TUI menu** instead of implicitly starting a local `review`. In non-interactive environments, it prints the help text and exits with code 2. Set `PRHERO_NO_TUI=1` to bypass the TUI in automation.
 
 Every paid run prints a plan and a cost band, then asks for confirmation (`--yes` skips the prompt).
+
+### For AI agents
+
+You are most likely here because someone told you to install pr-hero and review a repo.
+Four things go wrong when an agent runs the sequence above:
+
+1. **Step 2 is not optional, and not deferrable.** If each of your commands runs in its own
+   shell, an `export PATH=...` in one does not reach the next. Either prepend the export to
+   every pr-hero invocation, or call the binary by absolute path: `~/.prhero/bin/pr-hero`.
+2. **Step 5 is yours.** `pr-hero setup` scaffolds `.prhero/` and neither commits nor
+   ignores it, so the next `pr-hero review` fails the clean-tree gate — on files `setup`
+   itself created. Commit them or add `.prhero/` to `.gitignore` before reviewing.
+3. **Write the gotchas yourself (step 6).** You have the repository in context, which makes
+   you the best gotchas author available. Read the code and write the real ones: the
+   deliberate oddity that looks like a bug, the invariant enforced in a file the diff never
+   shows, the ownership rule a newcomer would violate. Leaving the placeholder is not a
+   softer option — the review is refused until you replace it and delete the
+   `human-attention-required` marker line.
+4. **You cannot authenticate `claude`. Stop and ask the human.** pr-hero spawns the Claude
+   Code CLI and inherits its authentication; there is no pr-hero-side key to set. If
+   `pr-hero doctor` reports `claude` missing or unauthenticated, say so and wait — every
+   step after it fails until a person fixes it.
 
 ## Configuration — two layers
 
@@ -91,8 +145,11 @@ There are two config files, and the difference between them is *who they belong 
 | `~/.prhero/config.json` | **yours**, across every repo on this machine | no — it is your machine |
 | `<repo>/.prhero/config.json` | **the team's** | yes, normally — it is shared through git |
 
-`pr-hero init` creates the repo file and `gotchas.md`, and never overwrites existing ones. Commit
-`.prhero/` or add it to `.gitignore` — an untracked one trips local mode's clean-tree gate.
+`pr-hero init` creates the repo file and `gotchas.md`, and never overwrites existing ones —
+`pr-hero setup` scaffolds the same two files when it runs inside a git repo, so a repo you set up
+needs no separate `init`. (Running `init` afterwards is harmless: it keeps what exists and reprints
+the git reminder.) Commit `.prhero/` or add it to `.gitignore` — an untracked one trips local
+mode's clean-tree gate.
 
 **Run `pr-hero config` to see which layer decided what.** It lists every key with its value, the
 layer it came from, and both file paths whether or not they exist. It never edits anything.
@@ -133,9 +190,12 @@ which is a different thing from a committed file asking on your behalf. `--agent
 ### `gotchas.md`
 
 Repo-specific traps the hunters must know (fragile invariants, deliberate oddities, past incidents).
-**Required and must be non-empty** — the engine refuses to review a repo it knows nothing about.
-Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <file>` (and
-`--config <file>`).
+**Required, and it must be real** — not merely non-empty. The file `init`/`setup` scaffold carries a
+`human-attention-required` marker line, and `review` and `doctor` both refuse it by name: a
+placeholder passes any emptiness check while telling every hunter nothing, which buys a full-price
+review that reports clean. Replace the `<subsystem>` lines with facts about your repo, then delete
+the marker line. Reviewing a tree you cannot write to? Supply it from outside with
+`--gotchas <file>` (and `--config <file>`).
 
 ## Commands
 
@@ -146,7 +206,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero review --pr [n]` | Review a GitHub PR: by number, or — bare, no number — the PR that belongs to the current branch (errors loudly if it has none). Resolves the range through `gh`, runs in a detached worktree with its own codegraph index, then compares the result against Greptile's comment on that PR. |
 | `pr-hero review --pr <n> --post` | Same, then publish the report as **one** marked PR comment — re-runs update it in place, never stack. |
 | `pr-hero doctor` | Run diagnostic environment and dependency checks (git, claude auth, gh, codegraph, config). Works inside or outside a repository. |
-| `pr-hero setup` | Run machine-level onboarding, skill synchronization, and MCP registration. Works inside or outside a repository. |
+| `pr-hero setup` | Machine-level onboarding: skill synchronization and MCP registration — and, when run inside a git repo, it also scaffolds that repo's `.prhero/config.json` and `.prhero/gotchas.md`, so no separate `init` is needed there. Fully non-interactive. It does **not** commit or `.gitignore` what it scaffolds; do that yourself before reviewing. |
 | `pr-hero activity [--kill <pid>]` | Inspect running reviews (with elapsed time, PID, repo/PR), watcher spend against daily cap, and completed run history. `--kill <pid>` safely terminates a running review. |
 | `pr-hero post --pr <n> --from <run-dir>` | Replay-publish a previous run's findings onto the PR (same plan as `--pr --post`). `--dry-run` previews at $0. |
 | `pr-hero triage --pr <n> --from <run-dir>` | Read reply threads and bind triage markers onto that run's `comparison.json` ledger rows. |
@@ -157,7 +217,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero config --edit` | Open the interactive configuration editor across Person, Team, and Watcher layers with buffered draft editing, Save/Discard/Clear actions, and capped ceiling annotations. |
 | `pr-hero upgrade [--check]` | Upgrade `pr-hero` to the latest release and reconcile installed skills and MCP registrations. `--check` checks for updates without installing. |
 | `pr-hero uninstall [--purge]` | Managed uninstallation: unloads launchd background daemons, cleans up skills, unregisters MCPs, and optionally purges `~/.prhero` with `--purge`. |
-| `pr-hero init` | Scaffold `.prhero/` in the current repo. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. |
+| `pr-hero init` | Scaffold `.prhero/` in the current repo — the command for every repo after the one you ran `setup` in. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. Idempotent: existing files are kept untouched, and it reprints the commit-or-ignore reminder. |
 | `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
 | `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |
 | `pr-hero watch status` | Read-only, $0: config summary, today's launches vs the cap, launchd state, lock, last activity. |
