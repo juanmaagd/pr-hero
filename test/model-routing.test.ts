@@ -676,3 +676,172 @@ describe("spawnModelForClaudeCli", () => {
     ).toBe("sonnet");
   });
 });
+
+// #175 follow-up, 2026-09-02. The regression this suite pins: #175 made a bare
+// alias parse to the alias WORD (`parsed.model === "sonnet"`), where it used to
+// parse to a pinned family (`claude-sonnet-5`). Every `modelSnapshot ??
+// parsed.model` fallback therefore started handing `"sonnet"` to backends that
+// do not resolve aliases -- `transport-registry.ts` forwards `modelSnapshot`
+// verbatim as the OpenCode SDK's `modelID`, so a working operator config began
+// sending a nonsense identifier to a live API. The fix refuses instead of
+// fabricating; these tests fail if the refusal is removed from ANY of the three
+// fallback sites (array mappings, record mappings, default mapping).
+describe("#175 follow-up: alias routes refuse a fabricated modelSnapshot", () => {
+  test("array mapping: bare alias on a non-claude-code backend without modelSnapshot throws", () => {
+    const config: RoutingConfig = {
+      mappings: [
+        {
+          logical: "sonnet",
+          backend: "opencode",
+          provider: "anthropic",
+        },
+      ],
+    };
+
+    expect(() => resolveModelRoute("sonnet", config)).toThrow(
+      UnmappedRouteError,
+    );
+    let message = "";
+    try {
+      resolveModelRoute("sonnet", config);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("sonnet");
+    expect(message).toContain("opencode");
+    expect(message).toContain("modelSnapshot");
+  });
+
+  test("record mapping: bare alias on a non-claude-code backend without modelSnapshot throws", () => {
+    const config: RoutingConfig = {
+      mappings: {
+        opus: {
+          backend: "opencode",
+          provider: "anthropic",
+        },
+      },
+    };
+
+    expect(() => resolveModelRoute("opus", config)).toThrow(UnmappedRouteError);
+    let message = "";
+    try {
+      resolveModelRoute("opus", config);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("opus");
+    expect(message).toContain("opencode");
+    expect(message).toContain("modelSnapshot");
+  });
+
+  test("default mapping: bare alias falling through to a non-claude-code default without modelSnapshot throws", () => {
+    const config: RoutingConfig = {
+      default: {
+        backend: "opencode",
+        provider: "anthropic",
+      },
+    };
+
+    expect(() => resolveModelRoute("haiku", config)).toThrow(
+      UnmappedRouteError,
+    );
+    let message = "";
+    try {
+      resolveModelRoute("haiku", config);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("haiku");
+    expect(message).toContain("opencode");
+    expect(message).toContain("modelSnapshot");
+  });
+
+  // The canonical form is the SAME alias identity, and it is the key shape this
+  // repo's own configs use (`aliasCanonical("sonnet")`). A guard that only
+  // caught the bare word would be bypassed by the recommended key.
+  test("canonical alias identity is refused the same way as the bare word", () => {
+    const config: RoutingConfig = {
+      mappings: {
+        [aliasCanonical("sonnet")]: {
+          backend: "opencode",
+          provider: "anthropic",
+        },
+      },
+    };
+
+    expect(() => resolveModelRoute(aliasCanonical("sonnet"), config)).toThrow(
+      UnmappedRouteError,
+    );
+  });
+
+  test("an explicit modelSnapshot still resolves and is forwarded verbatim, on every branch", () => {
+    const arrayRoute = resolveModelRoute("sonnet", {
+      mappings: [
+        {
+          logical: "sonnet",
+          backend: "opencode",
+          provider: "anthropic",
+          modelSnapshot: "claude-sonnet-5-20250219",
+        },
+      ],
+    });
+    expect(arrayRoute.modelSnapshot).toBe("claude-sonnet-5-20250219");
+    expect(arrayRoute.backend).toBe("opencode");
+
+    const recordRoute = resolveModelRoute("opus", {
+      mappings: {
+        opus: {
+          backend: "opencode",
+          provider: "openai",
+          modelSnapshot: "gpt-4o",
+        },
+      },
+    });
+    expect(recordRoute.modelSnapshot).toBe("gpt-4o");
+
+    const defaultRoute = resolveModelRoute("haiku", {
+      default: {
+        backend: "opencode",
+        provider: "anthropic",
+        modelSnapshot: "claude-haiku-4-5-20251001",
+      },
+    });
+    expect(defaultRoute.modelSnapshot).toBe("claude-haiku-4-5-20251001");
+  });
+
+  // The whole point of #175: the Claude CLI resolves the alias itself, so the
+  // alias word IS the honest snapshot there. Regressing this would re-pin.
+  test("a bare alias on claude-code still resolves and still carries the alias", () => {
+    const mapped = resolveModelRoute("sonnet", {
+      mappings: [
+        { logical: "sonnet", backend: "claude-code", provider: "anthropic" },
+      ],
+    });
+    expect(mapped.modelSnapshot).toBe("sonnet");
+    expect(mapped.backend).toBe("claude-code");
+
+    const viaDefault = resolveModelRoute("opus", {
+      default: { backend: "claude-code", provider: "anthropic" },
+    });
+    expect(viaDefault.modelSnapshot).toBe("opus");
+
+    const unmapped = resolveModelRoute("haiku");
+    expect(unmapped.modelSnapshot).toBe("haiku");
+    expect(unmapped.backend).toBe("claude-code");
+  });
+
+  test("slash-grammar routes on opencode are untouched: the operator's own words are forwarded", () => {
+    const route = resolveModelRoute("zai/glm-4.6", {
+      mappings: [
+        { logical: "zai/glm-4.6", backend: "opencode", provider: "zai" },
+      ],
+    });
+    expect(route.modelSnapshot).toBe("glm-4.6");
+    expect(route.modelFamily).toBe("glm-4.6");
+
+    const viaDefault = resolveModelRoute("zai/glm-4.6", {
+      default: { backend: "opencode", provider: "zai" },
+    });
+    expect(viaDefault.modelSnapshot).toBe("glm-4.6");
+  });
+});

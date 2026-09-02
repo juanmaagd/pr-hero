@@ -112,6 +112,75 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
   );
 }
 
+// #175 follow-up, 2026-09-02. THE ONE PLACE a route's `modelSnapshot` may fall
+// back to the parsed identity. It exists as a function because the fallback had
+// THREE copies — array mappings, record mappings, default mapping — and a guard
+// added to one of them is the "two copies drift" failure this repo keeps paying
+// for.
+//
+// WHAT IT REFUSES, and why refusing is the only honest option: #175 made a bare
+// alias parse to the alias WORD (`parsed.model === "sonnet"`), where it used to
+// parse to a version pinned in our own catalogue. That pin was the lie #175
+// deleted — only the Claude CLI knows what `sonnet` currently means. But the
+// fallback then started handing the bare word to backends that resolve nothing:
+// `transport-registry.ts` forwards `modelSnapshot` verbatim as the OpenCode
+// SDK's `modelID`, so a `{"sonnet": {"backend": "opencode"}}` config went from
+// sending a real model id to sending the word "sonnet" to a live API.
+//
+// HOW MUCH the old fallback actually got right, measured on `dev` rather than
+// assumed, because it bounds what this guard is restoring: the snapshot came
+// from the CATALOGUE, never from the mapping's `provider`. So `sonnet` ->
+// opencode/`anthropic` did resolve to `claude-sonnet-5`, and that is the config
+// this fix stops breaking — but `sonnet` -> opencode/`openai` sent
+// `claude-sonnet-5` to OpenAI, nonsense before #175 and nonsense after. The
+// guard refuses BOTH, which is why it is a guard and not a restored pin: we
+// cannot know the version, and we must not fabricate one, so the route is
+// refused and the operator is told the one thing that fixes it.
+//
+// THE PREDICATE IS THE ALIAS IDENTITY, not the model segment. `reverseAlias` is
+// set for the bare word AND for its canonical `provider/alias` form — the key
+// shape this repo's own configs use via `aliasCanonical()`, so a guard on the
+// bare word alone would be bypassed by the recommended key. It is unset for
+// slash grammar, where the segment is the operator's own words and forwarding
+// them verbatim is correct. `anthropic/sonnet#high` is not the registered
+// canonical and so passes through: that hole predates #175 (the same
+// `?? parsed.model` produced `"sonnet"` for it on `dev` too) and is not this
+// regression.
+//
+// WHY `modelFamily` KEEPS ITS `?? parsed.model` FALLBACK and is deliberately
+// NOT guarded here — stated so the next reader does not "complete" the fix:
+// (1) it never reaches a provider — the wire identity is `modelSnapshot`, read
+// by `transport-registry.ts` for OpenCode's `modelID`, by
+// `spawnModelForClaudeCli` for `--model`, and by pricing admission in
+// `production-runtime.ts`; (2) `"sonnet"` is a truthful FAMILY label, not a
+// fabricated version, so unlike the snapshot it asserts nothing false; and
+// (3) this guard already refuses the whole route in the only case where an
+// alias-derived family could reach a non-`claude-code` backend with no
+// snapshot. Guarding it too would force operators to supply both fields and
+// buy no safety.
+function routeModelSnapshot(
+  mapping: RouteMapping,
+  parsed: ParsedLogicalIdentity,
+  reverseAlias: ModelAlias | undefined,
+  mappingLabel: string,
+): string {
+  if (mapping.modelSnapshot !== undefined) {
+    return mapping.modelSnapshot;
+  }
+  if (reverseAlias !== undefined && mapping.backend !== "claude-code") {
+    // `UnmappedRouteError` and not a new class: a mapping was found, but it
+    // leaves the alias unmapped to any provider model id, which is what this
+    // error already names. Nothing in src/ catches these classes, so the
+    // choice is about meaning, and a fifth class would have no consumer.
+    throw new UnmappedRouteError(
+      redactDiagnostic(
+        `Model alias "${reverseAlias}" is routed to backend "${mapping.backend}" by the ${mappingLabel}, which supplies no "modelSnapshot". Only the Claude CLI resolves bare aliases, so this route has no provider model id to send. Add an explicit "modelSnapshot" naming the provider's model id to that ${mappingLabel}.`,
+      ),
+    );
+  }
+  return parsed.model;
+}
+
 export function resolveModelRoute(
   logicalInput: string,
   config?: RoutingConfig,
@@ -161,7 +230,12 @@ export function resolveModelRoute(
             provider: m.provider,
             gateway: m.gateway ?? "configured",
             modelFamily: m.modelFamily ?? parsed.model,
-            modelSnapshot: m.modelSnapshot ?? parsed.model,
+            modelSnapshot: routeModelSnapshot(
+              m,
+              parsed,
+              reverseAlias,
+              "routing mapping",
+            ),
             ...(m.modelVariant !== undefined || parsed.variant !== undefined
               ? { modelVariant: m.modelVariant ?? parsed.variant }
               : {}),
@@ -204,7 +278,12 @@ export function resolveModelRoute(
             provider: m.provider,
             gateway: m.gateway ?? "configured",
             modelFamily: m.modelFamily ?? parsed.model,
-            modelSnapshot: m.modelSnapshot ?? parsed.model,
+            modelSnapshot: routeModelSnapshot(
+              m,
+              parsed,
+              reverseAlias,
+              "routing mapping",
+            ),
             ...(m.modelVariant !== undefined || parsed.variant !== undefined
               ? { modelVariant: m.modelVariant ?? parsed.variant }
               : {}),
@@ -225,7 +304,12 @@ export function resolveModelRoute(
         provider: def.provider,
         gateway: def.gateway ?? "configured",
         modelFamily: def.modelFamily ?? parsed.model,
-        modelSnapshot: def.modelSnapshot ?? parsed.model,
+        modelSnapshot: routeModelSnapshot(
+          def,
+          parsed,
+          reverseAlias,
+          "default routing mapping",
+        ),
         ...(def.modelVariant !== undefined || parsed.variant !== undefined
           ? { modelVariant: def.modelVariant ?? parsed.variant }
           : {}),

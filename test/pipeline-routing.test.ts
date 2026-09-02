@@ -392,12 +392,18 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
   test("route admission gate rejects unregistered backend before step execution", async () => {
     const env = await setupTestEnvironment();
     try {
+      // The explicit `modelSnapshot` is load-bearing for the ADMISSION gate
+      // being tested here, not decoration: #175's follow-up refuses an alias
+      // route on a non-`claude-code` backend that supplies no snapshot, and it
+      // refuses during route resolution — before admission runs. Without it
+      // this fixture never reaches the gate it exists to exercise.
       const routingConfig: RoutingConfig = {
         mappings: [
           {
             logical: aliasCanonical("sonnet"),
             backend: "unregistered" as RunnerBackend,
             provider: "unknown",
+            modelSnapshot: "unknown-model",
           },
         ],
       };
@@ -425,9 +431,13 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       const routingConfig: RoutingConfig = {
         mappings: [
           {
+            // Explicit snapshot for the same reason as the fixture above:
+            // route resolution refuses a snapshot-less alias route on a
+            // non-`claude-code` backend before the D1-11 gate can speak.
             logical: aliasCanonical("sonnet"),
             backend: "opencode",
             provider: "openai",
+            modelSnapshot: "gpt-4o",
           },
         ],
       };
