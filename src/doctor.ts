@@ -19,7 +19,7 @@ import {
 } from "./preflight";
 import {
   isPricingCatalogFresh,
-  PRICING_CATALOG,
+  PRICING_CATALOGS,
   PRICING_MAX_AGE_DAYS,
   pricingCatalogAge,
 } from "./pricing-catalog";
@@ -94,7 +94,7 @@ export const PROVIDER_HINTS: Record<string, string> = {
   bounded_events_sink_missing:
     "Usage arrives as a final snapshot until the bounded event sink is wired (D1-08 residual).",
   pricing_table_missing:
-    "A versioned pricing table ships with the engine and its age is reported by the pricing-catalog check; this site simply has no model in scope to price. Notional estimates remain available.",
+    "Versioned pricing tables ship with the engine, one per provider, and each one's age is reported by its own pricing-catalog check; this site simply has no model in scope to price. Notional estimates remain available.",
 };
 
 function pushProviderIssues(
@@ -252,21 +252,33 @@ export async function runDoctor(
   // a truthful $0 and never consult this file. Degraded is the whole point:
   // the metered gate silently returns to refusing, and this line is what makes
   // that refusal traceable to an expired table instead of looking like a bug.
-  const catalogAge = pricingCatalogAge(now());
-  const catalogProvenance = `fetched ${PRICING_CATALOG.fetched_at} from ${PRICING_CATALOG.source_url}`;
-  if (isPricingCatalogFresh(now())) {
-    checks.push({
-      name: "pricing-catalog",
-      severity: "healthy",
-      message: `Model pricing catalogue is ${catalogAge} day(s) old (${catalogProvenance})`,
-    });
-  } else {
-    checks.push({
-      name: "pricing-catalog",
-      severity: "degraded",
-      message: `Model pricing catalogue is ${catalogAge} day(s) old, past the ${PRICING_MAX_AGE_DAYS}-day limit (${catalogProvenance})`,
-      hint: `Re-fetch ${PRICING_CATALOG.source_url} into config/models/anthropic-pricing.json and update fetched_at; until then metered routes stay refused rather than billed at a stale rate.`,
-    });
+  //
+  // ONE CHECK PER CATALOGUE, because freshness is per catalogue. A single
+  // line reporting "the" pricing catalogue's age would have to pick one of
+  // them to name, and the other's age — the one that might be the expired one
+  // — would be invisible in the only place that reports it. Each provider's
+  // table therefore gets its own check, its own age and its own re-fetch
+  // hint.
+  for (const [provider, catalog] of Object.entries(PRICING_CATALOGS)) {
+    const catalogAge = pricingCatalogAge(catalog, now());
+    const catalogProvenance = `fetched ${catalog.fetched_at} from ${catalog.source_url}`;
+    if (isPricingCatalogFresh(catalog, now())) {
+      checks.push({
+        name: `pricing-catalog:${provider}`,
+        severity: "healthy",
+        message: `Model pricing catalogue for ${provider} is ${catalogAge} day(s) old (${catalogProvenance})`,
+      });
+    } else {
+      checks.push({
+        name: `pricing-catalog:${provider}`,
+        severity: "degraded",
+        message: `Model pricing catalogue for ${provider} is ${catalogAge} day(s) old, past the ${PRICING_MAX_AGE_DAYS}-day limit (${catalogProvenance})`,
+        // The bundled files are named `<provider>-pricing.json` by
+        // convention, and the record's key IS that normalised provider, so
+        // the path is derivable rather than a second thing to keep in sync.
+        hint: `Re-fetch ${catalog.source_url} into config/models/${provider}-pricing.json and update fetched_at; until then metered routes on ${provider} stay refused rather than billed at a stale rate.`,
+      });
+    }
   }
 
   // 2. Config layer / agents_dir check

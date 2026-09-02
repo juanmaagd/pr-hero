@@ -13,8 +13,34 @@ import {
 } from "../src/doctor";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import { aliasCanonical } from "../src/model-catalog";
-import { PRICING_CATALOG, PRICING_MAX_AGE_DAYS } from "../src/pricing-catalog";
+import {
+  PRICING_CATALOGS,
+  PRICING_MAX_AGE_DAYS,
+  type PricingCatalog,
+} from "../src/pricing-catalog";
 import { buildDoctorRoutePlan } from "../src/production-runtime";
+
+// #137 made freshness per catalogue, so the tests need each table by name.
+function bundledCatalog(provider: string): PricingCatalog {
+  const catalog = PRICING_CATALOGS[provider];
+  if (catalog === undefined) {
+    throw new Error(`bundled pricing catalogue missing for "${provider}"`);
+  }
+  return catalog;
+}
+
+const ANTHROPIC_PRICING = bundledCatalog("anthropic");
+const ZAI_PRICING = bundledCatalog("zai");
+
+// The NEWEST stamp across every bundled table. A clock pinned to the oldest
+// would leave a younger table reporting a negative age -- "-1 day(s) old" is
+// not a thing doctor should ever print -- while still being fresh, so the
+// all-healthy assertions would pass on nonsense output.
+const NEWEST_FETCHED_AT = new Date(
+  Math.max(
+    ...Object.values(PRICING_CATALOGS).map((c) => Date.parse(c.fetched_at)),
+  ),
+);
 
 // These fixtures fake the MACHINE's filesystem. The engine's own bundle is not
 // on it — in a compiled binary the prompts live inside the executable — so a
@@ -33,12 +59,12 @@ describe("doctor tri-state evaluation", () => {
     const report = await runDoctor({
       cwd: "/repo",
       home: "/home/user",
-      // Pinned to the day the bundled pricing table was fetched. Without this
-      // the assertion below ("every check is healthy") reads the wall clock
-      // through the pricing-catalogue check and turns red on the calendar
-      // date the table crosses PRICING_MAX_AGE_DAYS — a failure with no
-      // commit behind it. What this test is about is unchanged.
-      now: () => new Date(PRICING_CATALOG.fetched_at),
+      // Pinned to the day the newest bundled pricing table was fetched.
+      // Without this the assertion below ("every check is healthy") reads the
+      // wall clock through the pricing-catalogue checks and turns red on the
+      // calendar date a table crosses PRICING_MAX_AGE_DAYS — a failure with
+      // no commit behind it. What this test is about is unchanged.
+      now: () => NEWEST_FETCHED_AT,
       exists: (p) => {
         if (p === "/repo/.prhero/gotchas.md") return true;
         if (p === "/repo/.codegraph") return true;
@@ -729,8 +755,12 @@ describe("doctor tri-state evaluation", () => {
       },
     };
 
+    // Aged against ANTHROPIC's stamp, and every assertion below names the
+    // anthropic check. #137 gives each provider its own table, its own stamp
+    // and therefore its own check: an arm that aged one table and read
+    // another's line would report on a freshness it never set.
     const atAge = (days: number): Date =>
-      new Date(Date.parse(PRICING_CATALOG.fetched_at) + days * 86_400_000);
+      new Date(Date.parse(ANTHROPIC_PRICING.fetched_at) + days * 86_400_000);
 
     test("a fresh catalogue is healthy and names its age and source", async () => {
       const report = await runDoctor({
@@ -738,11 +768,13 @@ describe("doctor tri-state evaluation", () => {
         now: () => atAge(PRICING_MAX_AGE_DAYS - 1),
       });
 
-      const check = report.checks.find((c) => c.name === "pricing-catalog");
+      const check = report.checks.find(
+        (c) => c.name === "pricing-catalog:anthropic",
+      );
       expect(check?.severity).toBe("healthy");
       expect(check?.message).toContain(String(PRICING_MAX_AGE_DAYS - 1));
-      expect(check?.message).toContain(PRICING_CATALOG.source_url);
-      expect(check?.message).toContain(PRICING_CATALOG.fetched_at);
+      expect(check?.message).toContain(ANTHROPIC_PRICING.source_url);
+      expect(check?.message).toContain(ANTHROPIC_PRICING.fetched_at);
     });
 
     test("a catalogue at the age limit is degraded with a re-fetch hint", async () => {
@@ -751,11 +783,17 @@ describe("doctor tri-state evaluation", () => {
         now: () => atAge(PRICING_MAX_AGE_DAYS),
       });
 
-      const check = report.checks.find((c) => c.name === "pricing-catalog");
+      const check = report.checks.find(
+        (c) => c.name === "pricing-catalog:anthropic",
+      );
       expect(check?.severity).toBe("degraded");
       expect(check?.message).toContain(String(PRICING_MAX_AGE_DAYS));
       expect(check?.hint).toBeDefined();
-      expect(check?.hint).toContain(PRICING_CATALOG.source_url);
+      expect(check?.hint).toContain(ANTHROPIC_PRICING.source_url);
+      // The hint names the file to re-fetch INTO, and there is now more than
+      // one, so naming the wrong provider's file would send the operator to
+      // edit a table that is not the expired one.
+      expect(check?.hint).toContain("config/models/anthropic-pricing.json");
     });
 
     test("staleness never blocks: a subscription user is the common case and is unaffected", async () => {
@@ -764,10 +802,53 @@ describe("doctor tri-state evaluation", () => {
         now: () => atAge(PRICING_MAX_AGE_DAYS * 10),
       });
 
-      const check = report.checks.find((c) => c.name === "pricing-catalog");
+      const check = report.checks.find(
+        (c) => c.name === "pricing-catalog:anthropic",
+      );
       expect(check?.severity).toBe("degraded");
       expect(report.overall).not.toBe("blocking");
       expect(report.exitCode).toBe(0);
+    });
+
+    // #137. The reason there is one check per catalogue rather than one line
+    // about "the" pricing table: at this instant Anthropic's table has
+    // expired and z.ai's has not, and BOTH facts are operationally load
+    // bearing -- one provider's metered routes are refused while the other's
+    // are still priced. A single reported age would have to pick one, and the
+    // one it hid could be either.
+    test("each bundled catalogue reports its own age", async () => {
+      const report = await runDoctor({
+        ...pricingOptions,
+        now: () => atAge(PRICING_MAX_AGE_DAYS),
+      });
+
+      const anthropic = report.checks.find(
+        (c) => c.name === "pricing-catalog:anthropic",
+      );
+      const zai = report.checks.find((c) => c.name === "pricing-catalog:zai");
+      expect(anthropic?.severity).toBe("degraded");
+      expect(zai?.severity).toBe("healthy");
+      expect(zai?.message).toContain(ZAI_PRICING.source_url);
+      expect(zai?.message).toContain(ZAI_PRICING.fetched_at);
+      // One expired table is not a reason to stop reviewing on a provider
+      // whose table is current.
+      expect(report.overall).not.toBe("blocking");
+      expect(report.exitCode).toBe(0);
+    });
+
+    test("every bundled catalogue gets a check, with no hardcoded provider list", async () => {
+      // A table added to the bundle and forgotten by doctor would age in
+      // silence, which is the one thing doctor is here to prevent.
+      const report = await runDoctor({
+        ...pricingOptions,
+        now: () => NEWEST_FETCHED_AT,
+      });
+
+      const reported = report.checks
+        .filter((c) => c.name.startsWith("pricing-catalog:"))
+        .map((c) => c.name.slice("pricing-catalog:".length))
+        .sort();
+      expect(reported).toEqual(Object.keys(PRICING_CATALOGS).sort());
     });
   });
 
