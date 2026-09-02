@@ -811,17 +811,37 @@ describe("#175 follow-up: alias routes refuse a fabricated modelSnapshot", () =>
 
   // The whole point of #175: the Claude CLI resolves the alias itself, so the
   // alias word IS the honest snapshot there. Regressing this would re-pin.
-  test("a bare alias on claude-code still resolves and still carries the alias", () => {
+  //
+  // #176 follow-up, 2026-09-02: the two mapped cases below GAINED an explicit
+  // `gateway: "direct"`, and the gain is a correction, not upkeep. As first
+  // written they asserted the defect: without a `gateway` the route resolves to
+  // `"configured"`, on which `spawnModelForClaudeCli` forwards the snapshot
+  // verbatim as `--model` -- so what this test called "still resolves" was the
+  // engine shipping the word "sonnet" to an endpoint that cannot resolve it.
+  // `direct` is the gateway the sentence above was always describing; saying so
+  // is what makes the assertion true. The third case (`resolveModelRoute`
+  // with no config at all) is untouched: it never reaches the guard, because
+  // the alias-default branch builds `gateway: "direct"` itself.
+  test("a bare alias on direct-gateway claude-code still resolves and still carries the alias", () => {
     const mapped = resolveModelRoute("sonnet", {
       mappings: [
-        { logical: "sonnet", backend: "claude-code", provider: "anthropic" },
+        {
+          logical: "sonnet",
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+        },
       ],
     });
     expect(mapped.modelSnapshot).toBe("sonnet");
     expect(mapped.backend).toBe("claude-code");
 
     const viaDefault = resolveModelRoute("opus", {
-      default: { backend: "claude-code", provider: "anthropic" },
+      default: {
+        backend: "claude-code",
+        provider: "anthropic",
+        gateway: "direct",
+      },
     });
     expect(viaDefault.modelSnapshot).toBe("opus");
 
@@ -843,5 +863,219 @@ describe("#175 follow-up: alias routes refuse a fabricated modelSnapshot", () =>
       default: { backend: "opencode", provider: "zai" },
     });
     expect(viaDefault.modelSnapshot).toBe("glm-4.6");
+  });
+});
+
+// #176 follow-up, 2026-09-02. The FIRST guard keyed the refusal on the BACKEND
+// (`mapping.backend !== "claude-code"`), and that is the wrong axis. The
+// question a bare alias asks is "does the eventual consumer resolve this word
+// itself?", and only the GATEWAY answers it: `spawnModelForClaudeCli` forwards
+// `modelSnapshot` verbatim as `--model` on ANY non-`direct` gateway, so a
+// `claude-code` mapping behind `configured` or `openrouter` sends the literal
+// word "sonnet" to an endpoint that never registered pr-hero's aliases -- the
+// exact corruption the first guard claimed to close, left open on its
+// backend-shaped door.
+//
+// The omitted-gateway case is the one the first guard actually let through:
+// route resolution defaults an absent `gateway` to `"configured"`, so the
+// shortest config an operator can write (`{"sonnet": {"backend":
+// "claude-code", "provider": "anthropic"}}`) resolved and shipped the alias.
+describe("#176 follow-up: the refusal is keyed on the gateway, not the backend", () => {
+  test("claude-code with the gateway OMITTED (so `configured`) and no modelSnapshot throws", () => {
+    const config: RoutingConfig = {
+      mappings: [
+        { logical: "sonnet", backend: "claude-code", provider: "anthropic" },
+      ],
+    };
+
+    expect(() => resolveModelRoute("sonnet", config)).toThrow(
+      UnmappedRouteError,
+    );
+    let message = "";
+    try {
+      resolveModelRoute("sonnet", config);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("sonnet");
+    expect(message).toContain("claude-code");
+    expect(message).toContain("configured");
+    expect(message).toContain("modelSnapshot");
+  });
+
+  test("claude-code with an EXPLICIT `configured` gateway and no modelSnapshot throws", () => {
+    const config: RoutingConfig = {
+      mappings: {
+        opus: {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "configured",
+        },
+      },
+    };
+
+    expect(() => resolveModelRoute("opus", config)).toThrow(UnmappedRouteError);
+  });
+
+  test("claude-code behind an `openrouter` gateway and no modelSnapshot throws", () => {
+    const config: RoutingConfig = {
+      mappings: [
+        {
+          logical: "sonnet",
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "openrouter",
+        },
+      ],
+    };
+
+    expect(() => resolveModelRoute("sonnet", config)).toThrow(
+      UnmappedRouteError,
+    );
+    let message = "";
+    try {
+      resolveModelRoute("sonnet", config);
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain("openrouter");
+  });
+
+  test("the default mapping is guarded on the same axis: claude-code + omitted gateway throws", () => {
+    expect(() =>
+      resolveModelRoute("haiku", {
+        default: { backend: "claude-code", provider: "anthropic" },
+      }),
+    ).toThrow(UnmappedRouteError);
+
+    expect(() =>
+      resolveModelRoute("haiku", {
+        default: {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "openrouter",
+        },
+      }),
+    ).toThrow(UnmappedRouteError);
+  });
+
+  // The one shape that genuinely resolves the alias downstream, and therefore
+  // the one shape that may keep the bare word: `spawnModelForClaudeCli` only
+  // hands the CLI an alias when the gateway is `direct`.
+  test("claude-code with an EXPLICIT `direct` gateway still resolves and carries the alias, on every branch", () => {
+    const arrayRoute = resolveModelRoute("sonnet", {
+      mappings: [
+        {
+          logical: "sonnet",
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+        },
+      ],
+    });
+    expect(arrayRoute.modelSnapshot).toBe("sonnet");
+    expect(arrayRoute.gateway).toBe("direct");
+
+    const recordRoute = resolveModelRoute(aliasCanonical("opus"), {
+      mappings: {
+        [aliasCanonical("opus")]: {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+        },
+      },
+    });
+    expect(recordRoute.modelSnapshot).toBe("opus");
+
+    const defaultRoute = resolveModelRoute("haiku", {
+      default: {
+        backend: "claude-code",
+        provider: "anthropic",
+        gateway: "direct",
+      },
+    });
+    expect(defaultRoute.modelSnapshot).toBe("haiku");
+  });
+
+  // The predicate is a CONJUNCTION, and this pins its other half. `direct` on
+  // `opencode` is not the Claude CLI: `transport-registry.ts` still forwards
+  // `modelSnapshot` as the SDK's `modelID`, and the OpenCode SDK has never
+  // heard of pr-hero's aliases whatever the gateway says. A guard narrowed to
+  // `gateway === "direct"` alone would reopen #176's original defect.
+  test("a `direct` gateway does NOT excuse a non-claude-code backend", () => {
+    expect(() =>
+      resolveModelRoute("sonnet", {
+        mappings: [
+          {
+            logical: "sonnet",
+            backend: "opencode",
+            provider: "anthropic",
+            gateway: "direct",
+          },
+        ],
+      }),
+    ).toThrow(UnmappedRouteError);
+
+    expect(() =>
+      resolveModelRoute("opus", {
+        default: {
+          backend: "opencode",
+          provider: "anthropic",
+          gateway: "direct",
+        },
+      }),
+    ).toThrow(UnmappedRouteError);
+  });
+
+  // #175's whole point, and it never reaches the helper: the alias-default
+  // branch builds its own route with `gateway: "direct"`.
+  test("a bare alias with NO mapping at all still resolves to the direct claude-code route", () => {
+    for (const alias of ["sonnet", "opus", "haiku"] as const) {
+      const route = resolveModelRoute(alias);
+      expect(route.backend).toBe("claude-code");
+      expect(route.gateway).toBe("direct");
+      expect(route.modelSnapshot).toBe(alias);
+    }
+  });
+
+  test("an explicit modelSnapshot is forwarded verbatim even on a non-direct gateway", () => {
+    const route = resolveModelRoute("sonnet", {
+      mappings: [
+        {
+          logical: "sonnet",
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "openrouter",
+          modelSnapshot: "anthropic/claude-sonnet-5",
+        },
+      ],
+    });
+    expect(route.modelSnapshot).toBe("anthropic/claude-sonnet-5");
+    expect(route.gateway).toBe("openrouter");
+
+    const viaDefault = resolveModelRoute("opus", {
+      default: {
+        backend: "claude-code",
+        provider: "anthropic",
+        modelSnapshot: "claude-opus-5-20250219",
+      },
+    });
+    expect(viaDefault.modelSnapshot).toBe("claude-opus-5-20250219");
+    expect(viaDefault.gateway).toBe("configured");
+  });
+
+  // Slash grammar is not an alias identity, so no gateway makes it refuse.
+  test("slash grammar on a claude-code `configured` gateway is still forwarded verbatim", () => {
+    const route = resolveModelRoute("anthropic/claude-sonnet-5", {
+      mappings: [
+        {
+          logical: "anthropic/claude-sonnet-5",
+          backend: "claude-code",
+          provider: "anthropic",
+        },
+      ],
+    });
+    expect(route.modelSnapshot).toBe("claude-sonnet-5");
+    expect(route.gateway).toBe("configured");
   });
 });

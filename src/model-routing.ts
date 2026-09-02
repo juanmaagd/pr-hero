@@ -122,10 +122,34 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
 // alias parse to the alias WORD (`parsed.model === "sonnet"`), where it used to
 // parse to a version pinned in our own catalogue. That pin was the lie #175
 // deleted — only the Claude CLI knows what `sonnet` currently means. But the
-// fallback then started handing the bare word to backends that resolve nothing:
-// `transport-registry.ts` forwards `modelSnapshot` verbatim as the OpenCode
-// SDK's `modelID`, so a `{"sonnet": {"backend": "opencode"}}` config went from
-// sending a real model id to sending the word "sonnet" to a live API.
+// fallback then started handing the bare word to consumers that resolve
+// nothing: `transport-registry.ts` forwards `modelSnapshot` verbatim as the
+// OpenCode SDK's `modelID`, so a `{"sonnet": {"backend": "opencode"}}` config
+// went from sending a real model id to sending the word "sonnet" to a live API.
+//
+// #176 follow-up, 2026-09-02. THE AXIS IS THE GATEWAY, NOT THE BACKEND. This
+// guard's first version refused on `mapping.backend !== "claude-code"`, and
+// that door had a hole the size of the defect it closed: `claude-code` only
+// resolves the alias itself when the route's gateway is `direct`.
+// `spawnModelForClaudeCli` is explicit about it — on any other gateway it
+// returns `route.modelSnapshot` verbatim as `--model`, without ever consulting
+// the alias table. So `{"sonnet": {"backend": "claude-code", "provider":
+// "anthropic"}}` sent `--model sonnet` to a CLI pointed at a gateway that never
+// heard of pr-hero's aliases. The predicate below therefore asks the only
+// question that matters — DOES THE CONSUMER RESOLVE THIS WORD? — which is true
+// in exactly one combination: `claude-code` AND `direct`.
+//
+// AND MIND THE TWO DIVERGENT GATEWAY DEFAULTS, because the divergence IS what
+// let the hole open. Route resolution defaults an absent `gateway` to
+// `"configured"` (the three `?? "configured"` call sites below);
+// `spawnModelForClaudeCli` defaults an absent one to `"direct"` (and so does
+// `report.ts`'s renderer). Those are not the same rule, and only the first one
+// is correct here: this guard runs while the route is being BUILT, so it must
+// use the value the route is about to assert, not the value a later reader
+// would infer from a route that omitted it. Hence `gateway` is passed IN, read
+// off the same `?? "configured"` expression that populates the route's own
+// field — a fourth independent copy of that default inside this helper is
+// exactly the drift this helper exists to prevent.
 //
 // HOW MUCH the old fallback actually got right, measured on `dev` rather than
 // assumed, because it bounds what this guard is restoring: the snapshot came
@@ -155,26 +179,31 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
 // `production-runtime.ts`; (2) `"sonnet"` is a truthful FAMILY label, not a
 // fabricated version, so unlike the snapshot it asserts nothing false; and
 // (3) this guard already refuses the whole route in the only case where an
-// alias-derived family could reach a non-`claude-code` backend with no
-// snapshot. Guarding it too would force operators to supply both fields and
-// buy no safety.
+// alias-derived family could reach a consumer that does not resolve aliases
+// with no snapshot. Guarding it too would force operators to supply both fields
+// and buy no safety.
 function routeModelSnapshot(
   mapping: RouteMapping,
   parsed: ParsedLogicalIdentity,
   reverseAlias: ModelAlias | undefined,
+  gateway: ModelGateway,
   mappingLabel: string,
 ): string {
   if (mapping.modelSnapshot !== undefined) {
     return mapping.modelSnapshot;
   }
-  if (reverseAlias !== undefined && mapping.backend !== "claude-code") {
+  // The one combination whose consumer resolves the bare word itself, so the
+  // alias IS the honest snapshot: the Claude CLI, reached directly.
+  const consumerResolvesAlias =
+    mapping.backend === "claude-code" && gateway === "direct";
+  if (reverseAlias !== undefined && !consumerResolvesAlias) {
     // `UnmappedRouteError` and not a new class: a mapping was found, but it
     // leaves the alias unmapped to any provider model id, which is what this
     // error already names. Nothing in src/ catches these classes, so the
     // choice is about meaning, and a fifth class would have no consumer.
     throw new UnmappedRouteError(
       redactDiagnostic(
-        `Model alias "${reverseAlias}" is routed to backend "${mapping.backend}" by the ${mappingLabel}, which supplies no "modelSnapshot". Only the Claude CLI resolves bare aliases, so this route has no provider model id to send. Add an explicit "modelSnapshot" naming the provider's model id to that ${mappingLabel}.`,
+        `Model alias "${reverseAlias}" is routed to backend "${mapping.backend}" over the "${gateway}" gateway by the ${mappingLabel}, which supplies no "modelSnapshot". Only the Claude CLI reached over the "direct" gateway resolves a bare alias; every other gateway forwards the model identity verbatim to an endpoint that never registered pr-hero's aliases, so this route has no provider model id to send. Add an explicit "modelSnapshot" naming the provider's model id to that ${mappingLabel}, or set its "gateway" to "direct" if the Claude CLI really is resolving this alias.`,
       ),
     );
   }
@@ -225,15 +254,19 @@ export function resolveModelRoute(
               ),
             );
           }
+          // One `?? "configured"` per branch, shared by the route field and the
+          // guard, so the value the guard judges is the value the route claims.
+          const gateway = m.gateway ?? "configured";
           return {
             backend: m.backend,
             provider: m.provider,
-            gateway: m.gateway ?? "configured",
+            gateway,
             modelFamily: m.modelFamily ?? parsed.model,
             modelSnapshot: routeModelSnapshot(
               m,
               parsed,
               reverseAlias,
+              gateway,
               "routing mapping",
             ),
             ...(m.modelVariant !== undefined || parsed.variant !== undefined
@@ -273,15 +306,19 @@ export function resolveModelRoute(
               ),
             );
           }
+          // Same shared `?? "configured"` as the array branch: the guard and
+          // the recorded route must never read two different gateways.
+          const gateway = m.gateway ?? "configured";
           return {
             backend: m.backend,
             provider: m.provider,
-            gateway: m.gateway ?? "configured",
+            gateway,
             modelFamily: m.modelFamily ?? parsed.model,
             modelSnapshot: routeModelSnapshot(
               m,
               parsed,
               reverseAlias,
+              gateway,
               "routing mapping",
             ),
             ...(m.modelVariant !== undefined || parsed.variant !== undefined
@@ -299,15 +336,18 @@ export function resolveModelRoute(
           redactDiagnostic("Spend is disabled for default model route"),
         );
       }
+      // Third and last copy of the same shared default, for the same reason.
+      const gateway = def.gateway ?? "configured";
       return {
         backend: def.backend,
         provider: def.provider,
-        gateway: def.gateway ?? "configured",
+        gateway,
         modelFamily: def.modelFamily ?? parsed.model,
         modelSnapshot: routeModelSnapshot(
           def,
           parsed,
           reverseAlias,
+          gateway,
           "default routing mapping",
         ),
         ...(def.modelVariant !== undefined || parsed.variant !== undefined
