@@ -60,8 +60,6 @@ export class UnauthorizedRouteError extends ModelRoutingError {}
 export type { ModelAlias } from "./model-catalog";
 export {
   aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
   isModelAlias,
   lookupAlias,
   MODEL_CATALOG,
@@ -85,7 +83,12 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
       raw: trimmed,
       canonical: aliasInfo.canonical,
       provider: aliasInfo.provider,
-      model: aliasInfo.modelFamily,
+      // #175: the alias IS the model segment now. `parsed.model` feeds both
+      // `modelFamily` and `modelSnapshot` on the default alias route below,
+      // so this is the single line that decides what our provenance claims
+      // an alias run used — and after #175 it claims the name that was
+      // actually sent to the CLI, not a version we never verified.
+      model: aliasInfo.alias,
       alias: trimmed,
     };
   }
@@ -107,6 +110,104 @@ export function parseLogicalIdentity(raw: string): ParsedLogicalIdentity {
   throw new ModelRoutingError(
     `Unknown model identity "${safeRaw}": bare model names must be an alias (sonnet|opus|haiku) or use slash grammar provider/model(#variant)`,
   );
+}
+
+// #175 follow-up, 2026-09-02. THE ONE PLACE a route's `modelSnapshot` may fall
+// back to the parsed identity. It exists as a function because the fallback had
+// THREE copies — array mappings, record mappings, default mapping — and a guard
+// added to one of them is the "two copies drift" failure this repo keeps paying
+// for.
+//
+// WHAT IT REFUSES, and why refusing is the only honest option: #175 made a bare
+// alias parse to the alias WORD (`parsed.model === "sonnet"`), where it used to
+// parse to a version pinned in our own catalogue. That pin was the lie #175
+// deleted — only the Claude CLI knows what `sonnet` currently means. But the
+// fallback then started handing the bare word to consumers that resolve
+// nothing: `transport-registry.ts` forwards `modelSnapshot` verbatim as the
+// OpenCode SDK's `modelID`, so a `{"sonnet": {"backend": "opencode"}}` config
+// went from sending a real model id to sending the word "sonnet" to a live API.
+//
+// #176 follow-up, 2026-09-02. THE AXIS IS THE GATEWAY, NOT THE BACKEND. This
+// guard's first version refused on `mapping.backend !== "claude-code"`, and
+// that door had a hole the size of the defect it closed: `claude-code` only
+// resolves the alias itself when the route's gateway is `direct`.
+// `spawnModelForClaudeCli` is explicit about it — on any other gateway it
+// returns `route.modelSnapshot` verbatim as `--model`, without ever consulting
+// the alias table. So `{"sonnet": {"backend": "claude-code", "provider":
+// "anthropic"}}` sent `--model sonnet` to a CLI pointed at a gateway that never
+// heard of pr-hero's aliases. The predicate below therefore asks the only
+// question that matters — DOES THE CONSUMER RESOLVE THIS WORD? — which is true
+// in exactly one combination: `claude-code` AND `direct`.
+//
+// AND MIND THE TWO DIVERGENT GATEWAY DEFAULTS, because the divergence IS what
+// let the hole open. Route resolution defaults an absent `gateway` to
+// `"configured"` (the three `?? "configured"` call sites below);
+// `spawnModelForClaudeCli` defaults an absent one to `"direct"` (and so does
+// `report.ts`'s renderer). Those are not the same rule, and only the first one
+// is correct here: this guard runs while the route is being BUILT, so it must
+// use the value the route is about to assert, not the value a later reader
+// would infer from a route that omitted it. Hence `gateway` is passed IN, read
+// off the same `?? "configured"` expression that populates the route's own
+// field — a fourth independent copy of that default inside this helper is
+// exactly the drift this helper exists to prevent.
+//
+// HOW MUCH the old fallback actually got right, measured on `dev` rather than
+// assumed, because it bounds what this guard is restoring: the snapshot came
+// from the CATALOGUE, never from the mapping's `provider`. So `sonnet` ->
+// opencode/`anthropic` did resolve to `claude-sonnet-5`, and that is the config
+// this fix stops breaking — but `sonnet` -> opencode/`openai` sent
+// `claude-sonnet-5` to OpenAI, nonsense before #175 and nonsense after. The
+// guard refuses BOTH, which is why it is a guard and not a restored pin: we
+// cannot know the version, and we must not fabricate one, so the route is
+// refused and the operator is told the one thing that fixes it.
+//
+// THE PREDICATE IS THE ALIAS IDENTITY, not the model segment. `reverseAlias` is
+// set for the bare word AND for its canonical `provider/alias` form — the key
+// shape this repo's own configs use via `aliasCanonical()`, so a guard on the
+// bare word alone would be bypassed by the recommended key. It is unset for
+// slash grammar, where the segment is the operator's own words and forwarding
+// them verbatim is correct. `anthropic/sonnet#high` is not the registered
+// canonical and so passes through: that hole predates #175 (the same
+// `?? parsed.model` produced `"sonnet"` for it on `dev` too) and is not this
+// regression.
+//
+// WHY `modelFamily` KEEPS ITS `?? parsed.model` FALLBACK and is deliberately
+// NOT guarded here — stated so the next reader does not "complete" the fix:
+// (1) it never reaches a provider — the wire identity is `modelSnapshot`, read
+// by `transport-registry.ts` for OpenCode's `modelID`, by
+// `spawnModelForClaudeCli` for `--model`, and by pricing admission in
+// `production-runtime.ts`; (2) `"sonnet"` is a truthful FAMILY label, not a
+// fabricated version, so unlike the snapshot it asserts nothing false; and
+// (3) this guard already refuses the whole route in the only case where an
+// alias-derived family could reach a consumer that does not resolve aliases
+// with no snapshot. Guarding it too would force operators to supply both fields
+// and buy no safety.
+function routeModelSnapshot(
+  mapping: RouteMapping,
+  parsed: ParsedLogicalIdentity,
+  reverseAlias: ModelAlias | undefined,
+  gateway: ModelGateway,
+  mappingLabel: string,
+): string {
+  if (mapping.modelSnapshot !== undefined) {
+    return mapping.modelSnapshot;
+  }
+  // The one combination whose consumer resolves the bare word itself, so the
+  // alias IS the honest snapshot: the Claude CLI, reached directly.
+  const consumerResolvesAlias =
+    mapping.backend === "claude-code" && gateway === "direct";
+  if (reverseAlias !== undefined && !consumerResolvesAlias) {
+    // `UnmappedRouteError` and not a new class: a mapping was found, but it
+    // leaves the alias unmapped to any provider model id, which is what this
+    // error already names. Nothing in src/ catches these classes, so the
+    // choice is about meaning, and a fifth class would have no consumer.
+    throw new UnmappedRouteError(
+      redactDiagnostic(
+        `Model alias "${reverseAlias}" is routed to backend "${mapping.backend}" over the "${gateway}" gateway by the ${mappingLabel}, which supplies no "modelSnapshot". Only the Claude CLI reached over the "direct" gateway resolves a bare alias; every other gateway forwards the model identity verbatim to an endpoint that never registered pr-hero's aliases, so this route has no provider model id to send. Add an explicit "modelSnapshot" naming the provider's model id to that ${mappingLabel}, or set its "gateway" to "direct" if the Claude CLI really is resolving this alias.`,
+      ),
+    );
+  }
+  return parsed.model;
 }
 
 export function resolveModelRoute(
@@ -153,12 +254,21 @@ export function resolveModelRoute(
               ),
             );
           }
+          // One `?? "configured"` per branch, shared by the route field and the
+          // guard, so the value the guard judges is the value the route claims.
+          const gateway = m.gateway ?? "configured";
           return {
             backend: m.backend,
             provider: m.provider,
-            gateway: m.gateway ?? "configured",
+            gateway,
             modelFamily: m.modelFamily ?? parsed.model,
-            modelSnapshot: m.modelSnapshot ?? parsed.model,
+            modelSnapshot: routeModelSnapshot(
+              m,
+              parsed,
+              reverseAlias,
+              gateway,
+              "routing mapping",
+            ),
             ...(m.modelVariant !== undefined || parsed.variant !== undefined
               ? { modelVariant: m.modelVariant ?? parsed.variant }
               : {}),
@@ -196,12 +306,21 @@ export function resolveModelRoute(
               ),
             );
           }
+          // Same shared `?? "configured"` as the array branch: the guard and
+          // the recorded route must never read two different gateways.
+          const gateway = m.gateway ?? "configured";
           return {
             backend: m.backend,
             provider: m.provider,
-            gateway: m.gateway ?? "configured",
+            gateway,
             modelFamily: m.modelFamily ?? parsed.model,
-            modelSnapshot: m.modelSnapshot ?? parsed.model,
+            modelSnapshot: routeModelSnapshot(
+              m,
+              parsed,
+              reverseAlias,
+              gateway,
+              "routing mapping",
+            ),
             ...(m.modelVariant !== undefined || parsed.variant !== undefined
               ? { modelVariant: m.modelVariant ?? parsed.variant }
               : {}),
@@ -217,12 +336,20 @@ export function resolveModelRoute(
           redactDiagnostic("Spend is disabled for default model route"),
         );
       }
+      // Third and last copy of the same shared default, for the same reason.
+      const gateway = def.gateway ?? "configured";
       return {
         backend: def.backend,
         provider: def.provider,
-        gateway: def.gateway ?? "configured",
+        gateway,
         modelFamily: def.modelFamily ?? parsed.model,
-        modelSnapshot: def.modelSnapshot ?? parsed.model,
+        modelSnapshot: routeModelSnapshot(
+          def,
+          parsed,
+          reverseAlias,
+          gateway,
+          "default routing mapping",
+        ),
         ...(def.modelVariant !== undefined || parsed.variant !== undefined
           ? { modelVariant: def.modelVariant ?? parsed.variant }
           : {}),

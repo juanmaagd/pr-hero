@@ -1,18 +1,5 @@
 {
   "provider": "anthropic",
   "defaultBackend": "claude-code",
-  "aliases": {
-    "sonnet": {
-      "modelFamily": "claude-sonnet-5",
-      "modelSnapshot": "claude-sonnet-5"
-    },
-    "opus": {
-      "modelFamily": "claude-opus-5",
-      "modelSnapshot": "claude-opus-5"
-    },
-    "haiku": {
-      "modelFamily": "claude-haiku-4-5",
-      "modelSnapshot": "claude-haiku-4-5"
-    }
-  }
+  "aliases": ["sonnet", "opus", "haiku"]
 }

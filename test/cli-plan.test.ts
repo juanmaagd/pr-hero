@@ -19,12 +19,7 @@ import {
   renderPlan,
   renderPrPlan,
 } from "../src/cli";
-import {
-  aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
-  lookupAlias,
-} from "../src/model-catalog";
+import { aliasCanonical, lookupAlias } from "../src/model-catalog";
 import {
   createResolvedRoutePlan,
   type RoutingConfig,
@@ -1042,24 +1037,24 @@ describe("plan card and details route dimensions display", () => {
         backend: "claude-code",
         provider: lookupAlias("sonnet").provider,
         gateway: "direct",
-        modelFamily: aliasModelFamily("sonnet"),
-        modelSnapshot: aliasModelSnapshot("sonnet"),
+        modelFamily: "sonnet",
+        modelSnapshot: "sonnet",
       },
       {
         logical: aliasCanonical("haiku"),
         backend: "claude-code",
         provider: lookupAlias("haiku").provider,
         gateway: "direct",
-        modelFamily: aliasModelFamily("haiku"),
-        modelSnapshot: aliasModelSnapshot("haiku"),
+        modelFamily: "haiku",
+        modelSnapshot: "haiku",
       },
       {
         logical: aliasCanonical("opus"),
         backend: "claude-code",
         provider: lookupAlias("opus").provider,
         gateway: "direct",
-        modelFamily: aliasModelFamily("opus"),
-        modelSnapshot: aliasModelSnapshot("opus"),
+        modelFamily: "opus",
+        modelSnapshot: "opus",
       },
       {
         logical: "openai/o3-mini",

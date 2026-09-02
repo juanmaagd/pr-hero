@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import type { BucketScope } from "../execution/bucket-id";
 import { deriveBucketId } from "../execution/bucket-id";
 import type {
+  ObservedModel,
   ProviderCapabilityReport,
   ProviderTerminalProof,
   ProviderTransport,
@@ -85,6 +86,67 @@ interface RawClaudeCliResult {
     readonly cache_creation_input_tokens?: number;
     readonly cache_read_input_tokens?: number;
   };
+  // #175 half 2. The CLI reports, per model it actually ran, an entry keyed
+  // on the exact snapshot. Only the two identity fields are declared:
+  // `canonicalModel` (the family) and the key itself.
+  //
+  // The real block also carries `costUSD`, `costBasis` and token counts. They
+  // are deliberately NOT read here. Cost already has ONE parse site
+  // (`normalizeClaudeCliUsage`, from `total_cost_usd`) and one filing
+  // decision; a second reader of a second cost field is exactly how two
+  // numbers for one attempt start disagreeing. `costBasis: "list"` on a
+  // subscription run is a real problem and it is #173's, not this slice's.
+  readonly modelUsage?: Readonly<
+    Record<string, { readonly canonicalModel?: unknown } | null | undefined>
+  >;
+}
+
+// #175 half 2: which models the provider says it ran, in the order it
+// reported them.
+//
+// Absence over fabrication, three ways: unparseable stdout, no `modelUsage`
+// key, and an EMPTY `modelUsage` all answer `undefined`. An empty array would
+// assert "we looked and nothing ran", which is a claim about the provider we
+// have no basis for — the same distinction `normalizeUnavailableUsage` draws
+// between an unknown cost and a zero one.
+//
+// Parsed separately from `normalizeClaudeCliUsage` rather than folded into
+// it: that function's contract is the §8 numeric shape, and its every branch
+// is about not fabricating a token count. Identity is a different fact with
+// different failure modes, so it gets its own parse and its own honest
+// absence.
+function observedModelsFromCliResult(
+  rawStdout: string,
+): readonly ObservedModel[] | undefined {
+  let parsed: RawClaudeCliResult;
+  try {
+    parsed = JSON.parse(rawStdout);
+  } catch {
+    return undefined;
+  }
+  const raw = parsed.modelUsage;
+  if (raw === undefined || raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+  const observed: ObservedModel[] = [];
+  for (const [model, entry] of Object.entries(raw)) {
+    if (model.trim().length === 0) continue;
+    // A non-string canonicalModel is dropped rather than coerced: the field
+    // is a model IDENTITY, and `String(someObject)` would put "[object
+    // Object]" into a provenance record that reads as a model name.
+    const canonicalModel =
+      entry !== null &&
+      typeof entry === "object" &&
+      typeof entry.canonicalModel === "string" &&
+      entry.canonicalModel.trim().length > 0
+        ? entry.canonicalModel
+        : undefined;
+    observed.push({
+      model,
+      ...(canonicalModel === undefined ? {} : { canonicalModel }),
+    });
+  }
+  return observed.length === 0 ? undefined : observed;
 }
 
 // §8: `--output-format json`'s usage block is already disjoint-additive —
@@ -595,6 +657,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       }
 
       const usage = normalizeClaudeCliUsage(stdout, wallMs);
+      const observedModels = observedModelsFromCliResult(stdout);
 
       let stderrTail = stderr.slice(-4096);
       if (unreaped) {
@@ -641,6 +704,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         finalText: fullResult,
         usage,
         stderrTail,
+        ...(observedModels === undefined ? {} : { observedModels }),
         ...(exitCode !== undefined ? { exitCode } : {}),
       };
     } finally {

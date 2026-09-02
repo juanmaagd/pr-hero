@@ -20,7 +20,6 @@ import {
   type NormalizedUsage,
   normalizeUnavailableUsage,
 } from "../src/execution/usage-normalized";
-import { aliasModelFamily, aliasModelSnapshot } from "../src/model-catalog";
 import {
   computeRouteFingerprint,
   createResolvedRoutePlan,
@@ -221,8 +220,8 @@ describe("production runtime PR1", () => {
         backend: "claude-code" as const,
         provider: "anthropic",
         gateway: "direct" as const,
-        modelFamily: aliasModelFamily("sonnet"),
-        modelSnapshot: aliasModelSnapshot("sonnet"),
+        modelFamily: "sonnet",
+        modelSnapshot: "sonnet",
       };
       const fpBase = computeRouteFingerprint(
         "anthropic/claude-sonnet-4-5",
@@ -274,10 +273,10 @@ describe("production runtime PR1", () => {
       expect(runtime.bindings.has(refuter.routeFingerprint)).toBe(true);
       expect(
         runtime.bindings.get(hunter.routeFingerprint)?.route.modelFamily,
-      ).toBe(aliasModelFamily("sonnet"));
+      ).toBe("sonnet");
       expect(
         runtime.bindings.get(refuter.routeFingerprint)?.route.modelFamily,
-      ).toBe(aliasModelFamily("opus"));
+      ).toBe("opus");
     });
 
     test("local and PR modes share the same registry for admission and execution", async () => {
@@ -632,6 +631,11 @@ describe("production runtime PR1", () => {
       // model-routing.ts, which pins provider "anthropic" -- the catalogue's
       // own provider. That is what keeps every arm below meaning what it meant
       // before the provider gate existed.
+      //
+      // #175: it no longer pins a MODEL VERSION. A bare `sonnet` route now
+      // carries `modelSnapshot: "sonnet"`, which the version-keyed bundled
+      // table does not hold, so an arm that needs a CATALOGUED model has to
+      // say so -- see PINNED_SNAPSHOT_ROUTE below.
       const step = resolveStepRoute({
         stepKey: "hunter-reliability",
         role: "hunter",
@@ -688,11 +692,17 @@ describe("production runtime PR1", () => {
       expect(exactBindingCapabilityGate(subscription).ok).toBe(true);
 
       // #137: STALE_CATALOG is what keeps this arm meaning what it has always
-      // meant. The route's model (claude-sonnet-5) is now IN the bundled
-      // catalogue, so a fresh table would price this metered route on the
-      // catalogue alone and the arm would stop being the unpriced case it
-      // exists to prove. Expiring the table is how "no pricing is available"
-      // is still expressible — the assertions below are unchanged.
+      // meant. The route's model was `claude-sonnet-5`, which the bundled
+      // catalogue holds, so a fresh table would have priced this metered
+      // route on the catalogue alone and the arm would stop being the
+      // unpriced case it exists to prove. Expiring the table is how "no
+      // pricing is available" stays expressible.
+      //
+      // #175 gives the same arm a SECOND reason to be unpriced -- a bare
+      // alias route names no version -- so the expiry is now belt and braces
+      // rather than the only mechanism. It stays: the day an alias is pinned
+      // again in a routing config, the expiry is what still makes this arm
+      // mean "unpriced" instead of passing by accident.
       const meteredUnpriced = await bindingReportForBilling(
         {
           mode: "metered",
@@ -725,11 +735,46 @@ describe("production runtime PR1", () => {
     // consulted. These arms are the proof that consulting it does what the
     // issue asked: price what is known and current, refuse everything else.
     describe("bundled pricing catalogue as a second pricing source", () => {
-      test("a catalogued model on a fresh table prices a metered route the transport could not price", async () => {
-        // The route resolves to claude-sonnet-5, which the catalogue covers.
+      // #175. The bundled table is keyed on VERSIONS and a bare alias no
+      // longer resolves to one, so every arm that needs a catalogued model
+      // now says which version it means -- the way an operator does, in a
+      // routing config. That is not a workaround for the unpin: it is the
+      // sanctioned way to pin a snapshot, and pinning it HERE rather than in
+      // config/models/anthropic.json is the whole of #175.
+      const PINNED_SNAPSHOT_ROUTE: RoutingConfig = {
+        default: {
+          backend: "claude-code",
+          provider: "anthropic",
+          modelFamily: "claude-sonnet-5",
+          modelSnapshot: "claude-sonnet-5",
+        },
+      };
+
+      test("a bare alias names no version, so the table cannot price it", async () => {
+        // #175's own arm, and the discriminating one: restore an
+        // alias -> snapshot mapping anywhere (the catalogue, or an early
+        // return in lookupModelPricing) and this goes green-to-red. Same
+        // fresh table and same provider as the arm below; only the model id
+        // differs, and it differs because nobody verified what `sonnet` runs.
         const report = await bindingReportForBilling(
           { mode: "metered", pricingReady: false },
           FRESH_CATALOG,
+        );
+
+        expect(report.billing.pricingApplicability).toBe("required");
+        expect(report.billing.tokenPricingAvailable).toBe(false);
+        expect(report.billing.cashCostAccountingValid).toBe(false);
+        const decision = exactBindingCapabilityGate(report);
+        expect(decision.ok).toBe(false);
+        expect(decision.reason).toContain("pricing_table_missing");
+      });
+
+      test("a catalogued model on a fresh table prices a metered route the transport could not price", async () => {
+        // The route names claude-sonnet-5, which the catalogue covers.
+        const report = await bindingReportForBilling(
+          { mode: "metered", pricingReady: false },
+          FRESH_CATALOG,
+          PINNED_SNAPSHOT_ROUTE,
         );
 
         expect(report.billing.pricingApplicability).toBe("required");
@@ -747,6 +792,7 @@ describe("production runtime PR1", () => {
         const report = await bindingReportForBilling(
           { mode: "metered", pricingReady: false },
           STALE_CATALOG,
+          PINNED_SNAPSHOT_ROUTE,
         );
 
         expect(report.billing.tokenPricingAvailable).toBe(false);
@@ -762,6 +808,7 @@ describe("production runtime PR1", () => {
         const report = await bindingReportForBilling(
           { mode: "metered", pricingReady: true },
           STALE_CATALOG,
+          PINNED_SNAPSHOT_ROUTE,
         );
 
         expect(report.billing.tokenPricingAvailable).toBe(true);
@@ -1938,15 +1985,15 @@ describe("production runtime PR1", () => {
             backend: "claude-code",
             provider: "anthropic",
             gateway: "direct",
-            modelFamily: aliasModelFamily("sonnet"),
-            modelSnapshot: aliasModelSnapshot("sonnet"),
+            modelFamily: "sonnet",
+            modelSnapshot: "sonnet",
           },
           haiku: {
             backend: "claude-code",
             provider: "anthropic",
             gateway: "configured",
-            modelFamily: aliasModelFamily("haiku"),
-            modelSnapshot: aliasModelSnapshot("haiku"),
+            modelFamily: "haiku",
+            modelSnapshot: "haiku",
           },
         },
       };

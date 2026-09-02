@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
-import { aliasModelFamily, aliasModelSnapshot } from "../../src/model-catalog";
 import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
@@ -182,8 +181,8 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: aliasModelSnapshot("sonnet"),
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
         },
       }),
       { signal: new AbortController().signal },
@@ -393,6 +392,138 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
 
     expect(outcome.usage.completeness).toBe("unavailable");
     expect(outcome.usage.tokens.inputUncached).toBeUndefined();
+  });
+
+  // #175 half 2, 2026-09-02. The CLI already reports WHICH models ran, in a
+  // `modelUsage` block keyed on the exact snapshot; the engine used to
+  // discard it and assert a snapshot of its own instead. Verified live
+  // against the real CLI on 2026-09-02, including the two-model shape below.
+  test("modelUsage is recorded as the models actually observed, in report order", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        modelUsage: {
+          // TWO models for ONE `--model sonnet` invocation: the CLI runs
+          // haiku for its own internal work. This is why the field is a
+          // LIST -- a scalar "the model that ran" is not a fact about this
+          // provider, and the requested model is not guaranteed to be in it.
+          "claude-haiku-4-5-20251001": {
+            inputTokens: 899,
+            outputTokens: 9,
+            costUSD: 0.000944,
+            canonicalModel: "claude-haiku-4-5",
+            provider: "firstParty",
+            costBasis: "list",
+          },
+          "claude-sonnet-5-20260115": {
+            inputTokens: 4210,
+            outputTokens: 812,
+            costUSD: 0.0142,
+            canonicalModel: "claude-sonnet-5",
+            provider: "firstParty",
+            costBasis: "list",
+          },
+        },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.observedModels).toEqual([
+      {
+        model: "claude-haiku-4-5-20251001",
+        canonicalModel: "claude-haiku-4-5",
+      },
+      { model: "claude-sonnet-5-20260115", canonicalModel: "claude-sonnet-5" },
+    ]);
+  });
+
+  test("a modelUsage entry with no canonicalModel records the snapshot alone", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        modelUsage: { "some-future-model": { inputTokens: 1 } },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.observedModels).toEqual([{ model: "some-future-model" }]);
+  });
+
+  test("a non-string canonicalModel is dropped, never coerced into a name", async () => {
+    // `String({})` is "[object Object]", which would land in a provenance
+    // record reading exactly like a model name. The snapshot key survives
+    // because it IS a string by construction; only the reported family is
+    // discarded.
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        modelUsage: {
+          "claude-sonnet-5-20260115": { canonicalModel: { oops: true } },
+          "claude-haiku-4-5-20251001": { canonicalModel: "" },
+        },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.observedModels).toEqual([
+      { model: "claude-sonnet-5-20260115" },
+      { model: "claude-haiku-4-5-20251001" },
+    ]);
+  });
+
+  test("no modelUsage block is absence, not an empty observation", async () => {
+    // Absence over fabrication, the same rule `normalizeUnavailableUsage`
+    // follows one field over: `[]` would read as "we looked and nothing ran",
+    // which is a claim. `undefined` says we were told nothing.
+    for (const body of [
+      JSON.stringify({ result: "reviewed" }),
+      JSON.stringify({ result: "reviewed", modelUsage: {} }),
+      "this is not json at all {{{",
+    ]) {
+      const fake = makeFakeProc({ stdoutBody: body, exitCode: 0 });
+      const transport = new ClaudeCodeCliTransport({
+        ...okPromptFns,
+        spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+        getPgid: (pid) => pid,
+        killFn: () => {},
+      });
+
+      const outcome = await transport.execute(makeRequest(), {
+        signal: new AbortController().signal,
+      });
+
+      expect(outcome.observedModels).toBeUndefined();
+    }
   });
 
   test("cache-read and cache-write land in distinct disjoint leaves, apart from uncached input", async () => {

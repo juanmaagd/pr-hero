@@ -16,11 +16,7 @@ import type {
   TransportRequest,
 } from "../src/execution/contracts";
 import { armOfRun, scoutFailed } from "../src/floor-test";
-import {
-  aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
-} from "../src/model-catalog";
+import { aliasCanonical } from "../src/model-catalog";
 import {
   createResolvedRoutePlan,
   type RoutingConfig,
@@ -306,14 +302,14 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       );
       expect(hunterStep?.model).toBe("sonnet");
       expect(hunterStep).toBeDefined();
-      expect(hunterStep?.route?.modelFamily).toBe(aliasModelFamily("sonnet"));
+      expect(hunterStep?.route?.modelFamily).toBe("sonnet");
 
       // Check refuter step route
       const refuterStep = runner.executedSteps.find((s) =>
         s.name.startsWith("refuter-"),
       );
       expect(refuterStep).toBeDefined();
-      expect(refuterStep?.route?.modelFamily).toBe(aliasModelFamily("opus"));
+      expect(refuterStep?.route?.modelFamily).toBe("opus");
     } finally {
       await env.cleanup();
     }
@@ -329,8 +325,8 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
             backend: "claude-code",
             provider: "anthropic",
             gateway: "direct",
-            modelFamily: aliasModelFamily("opus"),
-            modelSnapshot: `${aliasModelSnapshot("opus")}-20240229`,
+            modelFamily: "opus",
+            modelSnapshot: "claude-opus-5-20240229",
           },
         ],
       };
@@ -345,10 +341,8 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
 
       for (const refuterStep of refuterSteps) {
         expect(refuterStep.route).toBeDefined();
-        expect(refuterStep.route?.modelFamily).toBe(aliasModelFamily("opus"));
-        expect(refuterStep.route?.modelSnapshot).toBe(
-          `${aliasModelSnapshot("opus")}-20240229`,
-        );
+        expect(refuterStep.route?.modelFamily).toBe("opus");
+        expect(refuterStep.route?.modelSnapshot).toBe("claude-opus-5-20240229");
       }
     } finally {
       await env.cleanup();
@@ -389,7 +383,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       expect(hunterMeta.route).toBeDefined();
       expect(hunterMeta.route.backend).toBe("claude-code");
       expect(hunterMeta.route.provider).toBe("anthropic");
-      expect(hunterMeta.route.modelFamily).toBe(aliasModelFamily("sonnet"));
+      expect(hunterMeta.route.modelFamily).toBe("sonnet");
     } finally {
       await env.cleanup();
     }
@@ -398,12 +392,19 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
   test("route admission gate rejects unregistered backend before step execution", async () => {
     const env = await setupTestEnvironment();
     try {
+      // The explicit `modelSnapshot` is load-bearing for the ADMISSION gate
+      // being tested here, not decoration: #175's follow-up refuses an alias
+      // route whose consumer cannot resolve the alias (anything but the Claude
+      // CLI over a `direct` gateway) and that supplies no snapshot, and it
+      // refuses during route resolution — before admission runs. Without it
+      // this fixture never reaches the gate it exists to exercise.
       const routingConfig: RoutingConfig = {
         mappings: [
           {
             logical: aliasCanonical("sonnet"),
             backend: "unregistered" as RunnerBackend,
             provider: "unknown",
+            modelSnapshot: "unknown-model",
           },
         ],
       };
@@ -431,9 +432,13 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       const routingConfig: RoutingConfig = {
         mappings: [
           {
+            // Explicit snapshot for the same reason as the fixture above:
+            // route resolution refuses a snapshot-less alias route whose
+            // consumer resolves no aliases, before the D1-11 gate can speak.
             logical: aliasCanonical("sonnet"),
             backend: "opencode",
             provider: "openai",
+            modelSnapshot: "gpt-4o",
           },
         ],
       };
@@ -643,8 +648,8 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
             backend: "claude-code",
             provider: "openrouter",
             gateway: "openrouter",
-            modelFamily: aliasModelFamily("opus"),
-            modelSnapshot: aliasModelSnapshot("opus"),
+            modelFamily: "opus",
+            modelSnapshot: "opus",
             modelVariant: "high",
           },
         ],

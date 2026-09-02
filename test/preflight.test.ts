@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  aliasCanonical,
-  aliasModelFamily,
-  aliasModelSnapshot,
-} from "../src/model-catalog";
+import { aliasCanonical } from "../src/model-catalog";
 import type { RoutingConfig } from "../src/model-routing";
 import {
   type AgentsDirConfigSeat,
@@ -1294,8 +1290,8 @@ describe("Task 1.3: D2 Routing in preflight and credential rejection", () => {
           backend: "claude-code",
           provider: "anthropic",
           gateway: "direct",
-          modelFamily: aliasModelFamily("sonnet"),
-          modelSnapshot: aliasModelSnapshot("sonnet"),
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
         },
       ],
       default: {

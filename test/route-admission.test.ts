@@ -12,7 +12,6 @@ import {
   FINDINGS_CONFORMANCE_CASES,
   type FindingsConformanceCase,
 } from "../src/findings-conformance";
-import { aliasModelFamily } from "../src/model-catalog";
 import {
   createResolvedRoutePlan,
   type RoutingConfig,
@@ -214,10 +213,10 @@ describe("Task 2.1 RED: Route Admission & Transport Registry", () => {
       const plan = createResolvedRoutePlan([hunter1, hunter2, refuter]);
 
       expect(hunter1.route.backend).toBe("claude-code");
-      expect(hunter1.route.modelFamily).toBe(aliasModelFamily("sonnet"));
+      expect(hunter1.route.modelFamily).toBe("sonnet");
 
       expect(hunter2.route.backend).toBe("claude-code");
-      expect(hunter2.route.modelFamily).toBe(aliasModelFamily("haiku"));
+      expect(hunter2.route.modelFamily).toBe("haiku");
 
       expect(refuter.route.backend).toBe("opencode");
       expect(refuter.route.provider).toBe("openai");
