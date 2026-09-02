@@ -442,6 +442,35 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     const transport = registry.get(this.route.backend, {
       routeFingerprint: this.key,
       route: this.route,
+      // 2026-09-02: the SAME field `capabilities()` derives
+      // `effectiveBillingMode` from, handed to the transport factory that
+      // derives `usageBillingMode`. One fact, one source — because it was two,
+      // and two derivations of one fact diverge in silence (#149's "two
+      // brokers", identical shape).
+      //
+      // `this.credential.kind` is authoritative and the factory's own
+      // `merged.credentialKind` is not: this kind was resolved BY THIS ROUTE
+      // through `resolveBindingAuthority` -> `credentialKindForRoute(backend,
+      // provider)`, while the factory could only ever read a registry-wide
+      // default fixed at construction. `productionFallbackRegistry` is the
+      // ONLY wiring that sets that default, and it runs only for a caller
+      // that supplies no registry — so the public `createProductionRuntime`,
+      // which accepts an arbitrary `options.registry`, bypassed it entirely
+      // and the factory silently fell back to "subscription" on a metered
+      // route. That stamp is what `settlementFromUsage`'s metered-zero rule
+      // keys on, so the fallback made the rule DEAD: an unaccountable
+      // provider $0 settled as a truthful cost instead of fencing the bucket.
+      // (`collectDoctorExactBindingReports` supplies its own kind-less
+      // registry too, but it only ever calls `capabilities()` — no attempt,
+      // so no usage record, so nothing there could observe the divergence.
+      // Being unobservable is what let it ship.)
+      //
+      // Required on `RuntimeBindingCredential`, so it is forwarded
+      // unconditionally rather than through a conditional spread — and
+      // `get()` merges `{ ...defaultOptions, ...options }`, so this wins over
+      // the construction-time default rather than being shadowed by it. That
+      // default survives as the fallback for callers holding no binding.
+      credentialKind: this.credential.kind,
     });
     const routeKey = this.key;
     this.leaseTracker.register(routeKey);

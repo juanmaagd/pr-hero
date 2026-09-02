@@ -1478,6 +1478,189 @@ describe("production runtime PR1", () => {
       });
     });
 
+    // 2026-09-02, the SECOND derivation of one fact. `capabilities()` reads
+    // the billing mode off `this.credential.kind` — the kind
+    // `resolveBindingAuthority` resolved for THIS route. The OpenCode
+    // transport factory reads it off `merged.credentialKind`, which reaches
+    // it only from the registry's construction-time `defaultOptions` or from
+    // the options `registry.get()` was called with. Two sources for one fact
+    // is how they diverge in silence (#149's "two brokers", same shape).
+    //
+    // The arm above is the one that shipped the gap: it builds a registry
+    // with NO `credentialKind` and asserts `capabilities()` only, so the
+    // transport's stamp was never observed. These arms drive a real attempt
+    // through that same registry and read the emitted record, because the
+    // stamp is what `settlementFromUsage`'s metered-zero rule keys on — a
+    // metered route whose transport stamps "subscription" makes that rule
+    // DEAD, and an unaccountable provider $0 settles as a truthful cost.
+    describe("a registry built without a credential kind still bills a metered route metered", () => {
+      // Routable in OpenCode, absent from every bundled table — so admission
+      // rides on the transport's own provider-cost claim, exactly like the
+      // arm above. `zai` is what makes the credential a
+      // `provider_api_token`: `credentialKindForRoute` gives OAuth only to
+      // `openai`.
+      const UNPRICED_ZAI_MODEL = "zai/glm-5-turbo";
+
+      // Provider-reported $0 beside real output tokens — the exact shape the
+      // metered-zero rule refuses, delivered through the REAL
+      // OpenCodeSdkTransport rather than a mock's opinion of one. A mock
+      // would stamp whatever the fixture says and prove nothing about the
+      // factory.
+      function meteredZeroClient() {
+        let sessions = 0;
+        const client = {
+          createSession: async () => {
+            sessions += 1;
+            return { id: `oc-sess-${sessions}` };
+          },
+          // A fresh generator per call: one shared iterable would be
+          // exhausted by the first attempt and silently deliver nothing to
+          // the second.
+          async *streamEvents() {
+            yield { kind: "delta" as const, text: '{"findings":[]}' };
+            yield {
+              kind: "usage" as const,
+              mode: "snapshot" as const,
+              inputTokens: 10,
+              outputTokens: 5,
+              costUsd: 0,
+            };
+            yield {
+              kind: "terminal" as const,
+              proof: {
+                eventId: "evt-metered-zero",
+                providerStatus: "completed",
+                providerObservedAt: "2026-09-02T00:00:00.000Z",
+              },
+            };
+          },
+          pollStatus: async () => ({ kind: "pending" }) as const,
+          abort: async () => {},
+        };
+        return { client, sessionCount: () => sessions };
+      }
+
+      function zaiRuntimeOptions(
+        opencodeFixture: { canonicalPath: string; sha256: string },
+        openCodeClient: ReturnType<typeof meteredZeroClient>["client"],
+      ) {
+        const model = UNPRICED_ZAI_MODEL.split("/")[1];
+        const step = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: UNPRICED_ZAI_MODEL,
+          routingConfig: {
+            mappings: {
+              [UNPRICED_ZAI_MODEL]: {
+                backend: "opencode",
+                provider: "zai",
+                modelFamily: model,
+                modelSnapshot: model,
+              },
+            },
+          },
+        });
+        // THE construction under test: no `credentialKind`. Every test, every
+        // doctor probe and every caller of the public
+        // `createProductionRuntime` that supplies its own registry lands
+        // here, because only `productionFallbackRegistry` wires the kind at
+        // construction time.
+        const registry = new DefaultTransportRegistry({
+          mode: "conformance",
+          openCodeClient,
+        });
+        return {
+          step,
+          options: {
+            workspaceRoot: tmpDir,
+            plan: createResolvedRoutePlan([step]),
+            openCodeBinaryPath: opencodeFixture.canonicalPath,
+            executableAllowlists: {
+              opencode: [
+                {
+                  absolutePath: opencodeFixture.canonicalPath,
+                  sha256: opencodeFixture.sha256,
+                },
+              ],
+            },
+            registry,
+            mode: "conformance" as const,
+          },
+        };
+      }
+
+      test("the emitted usage record carries the binding's own metered kind", async () => {
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const driven = meteredZeroClient();
+        const { step, options } = zaiRuntimeOptions(
+          opencodeFixture,
+          driven.client,
+        );
+        const runtime = await createProductionRuntime(options);
+
+        const binding = runtime.bindings.get(step.routeFingerprint);
+        if (binding === undefined) throw new Error("missing binding");
+        // The authoritative source, asserted first so a failure below reads
+        // as a divergence and not as a mis-set-up route.
+        expect(binding.credential.kind).toBe("provider_api_token");
+        expect((await binding.capabilities()).billing.mode).toBe("metered");
+
+        const result = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "hunter-reliability",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+
+        expect(driven.sessionCount()).toBe(1);
+        expect(result.usageV2?.cashCostUsd).toBe(0);
+        expect(result.usageV2?.tokens.outputKnown).toBe(5);
+        // The whole point: the record and the report agree because they now
+        // read the SAME field.
+        expect(result.usageV2?.billingMode).toBe("metered");
+      });
+
+      test("and the $0 attempt therefore fences its bucket, so the next step never reaches the transport", async () => {
+        // The consequence the stamp exists for. With the transport stamping
+        // "subscription", `settlementFromUsage` settles this $0 as truthful,
+        // nothing is fenced, and the second step executes — under-reporting
+        // real spend, which is the failure this PR exists to prevent.
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const driven = meteredZeroClient();
+        const { step, options } = zaiRuntimeOptions(
+          opencodeFixture,
+          driven.client,
+        );
+        const runtime = await createProductionRuntime(options);
+
+        const first = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "hunter-reliability",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+        expect(first.reservations?.[0]?.state).toBe("unresolved_remote");
+        expect(first.reservations?.[0]?.knownUsd).toBeUndefined();
+        expect(driven.sessionCount()).toBe(1);
+
+        const second = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "refuter",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+        expect(second.status).toBe("failed");
+        expect(second.stderrTail).toContain("fenced");
+        // Refused inside `reserve()`, before `runAdmittedAttempt` — the
+        // session count staying at 1 is what makes this a fence and not a
+        // report.
+        expect(driven.sessionCount()).toBe(1);
+      });
+    });
+
     // SUGGESTION-1: capabilities() is deliberately non-memoised (it re-probes
     // by design, and DefaultTransportRegistry.getCapabilityReport calls
     // transport.capabilities() on every call), so a caller that gates and

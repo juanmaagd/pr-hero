@@ -252,13 +252,33 @@ export class DefaultTransportRegistry implements TransportRegistry {
 
       // 2026-09-02: the billing mode stamped on every usage record this
       // transport emits, derived from the credential kind the authority
-      // resolved. THE factory is the only place that holds both the kind and
-      // the transport, and `credentialKindBillsMetered` is the one predicate
-      // the exact-binding report derives its own effective mode from (#133),
-      // so the report and the usage records cannot disagree about how an
-      // attempt bills. Computed once, above both construction branches —
-      // wiring only the second is how the injected-client path (every test
-      // and every doctor probe) would keep the pre-#133 default.
+      // resolved.
+      //
+      // WHY it cannot disagree with the exact-binding report, stated as the
+      // mechanism rather than as a hope — because the first version of this
+      // comment claimed the guarantee and the code did not make it. The
+      // report's `effectiveBillingMode` reads `binding.credential.kind`
+      // (production-runtime.ts), and `FrozenRuntimeBinding.acquire()` now
+      // forwards THAT SAME field into `options.credentialKind` on the `get()`
+      // that builds this transport. One fact, one source, and
+      // `credentialKindBillsMetered` is the single predicate both sides apply
+      // to it (#133) — so the two are structurally incapable of diverging.
+      //
+      // What the old wording got wrong: "THE factory is the only place that
+      // holds both the kind and the transport" was true, and irrelevant, when
+      // the kind could only arrive from construction-time `defaultOptions`.
+      // Every caller of the public `createProductionRuntime` that supplies
+      // its own registry bypasses the only wiring that sets it
+      // (`productionFallbackRegistry`), so a metered route's records were
+      // stamped "subscription" — which makes `settlementFromUsage`'s
+      // metered-zero rule dead and lets an unaccountable provider $0 settle
+      // as a truthful cost. `defaultOptions.credentialKind` is now the
+      // FALLBACK for callers holding no binding; `get()`'s merge order
+      // (`{ ...defaultOptions, ...options }`) lets the per-binding value win.
+      //
+      // Computed once, above both construction branches — wiring only the
+      // second is how the injected-client path (every test and every doctor
+      // probe) would keep the pre-#133 default.
       const usageBillingMode: UsageBillingMode =
         merged.credentialKind !== undefined &&
         credentialKindBillsMetered(merged.credentialKind)

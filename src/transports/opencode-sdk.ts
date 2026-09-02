@@ -192,6 +192,17 @@ export interface OpenCodeSdkTransportOptions {
   // because the factory branch that omits the kind is the SAME branch that
   // defaults the route to `openai/gpt-4o` — an OAuth, subscription-billed
   // route. A default of "unknown" would make the two disagree.
+  //
+  // That "SAME branch" is a guarantee only since 2026-09-02, and it was
+  // written here before it was true: `FrozenRuntimeBinding.acquire()` used to
+  // forward the route without the kind, so a registry built without a
+  // construction-time `credentialKind` served a real metered route while this
+  // default stamped it "subscription". `acquire()` now forwards the pair, so
+  // through it — the only production caller that names a route — omitting the
+  // kind really does mean omitting the route, and this default only ever
+  // describes a caller holding no binding at all. `StepExecutionHarness`'s own
+  // registry branch still passes a route without a kind, but no composition in
+  // src/ reaches it: both harness constructions supply an explicit transport.
   readonly billingMode?: UsageBillingMode;
 }
 
