@@ -559,6 +559,12 @@ export async function produceClaudeCapabilityReport(
       // to answer, and neither is in scope until a route resolves, so
       // `false` stays the honest default rather than a price for a model
       // nobody has named yet.
+      //
+      // 2026-09-02: NOT the case the OpenCode transport's `true` covers. That
+      // claim is PROVIDER COST — a cost the provider reports per message,
+      // which needs no model id and no table. The claude-code CLI reports no
+      // such cost, so a rate table really is its only pricing path and this
+      // stays `false`.
       pricingReady: false,
     },
     issues,

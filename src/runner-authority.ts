@@ -311,6 +311,24 @@ export function credentialKindForRoute(
   throw new Error(`No credential authority is bound for backend "${backend}"`);
 }
 
+// 2026-09-02. THE one place that says "a provider API token is a metered
+// credential". Two callers need it and they must not each carry their own
+// copy: `FrozenRuntimeBinding.capabilities()` derives the exact binding's
+// effective billing mode from it (#133), and the OpenCode transport factory
+// derives the billing mode STAMPED ON EVERY USAGE RECORD from it
+// (transport-registry.ts). Two copies would be two chances for the capability
+// report and the usage records to disagree about how one attempt bills — and
+// the metered-zero rule in `settlementFromUsage` reads the usage record, so
+// the disagreement would be silently exploitable rather than merely untidy.
+//
+// A boolean, not a mode: the binding's rule is UPGRADE-ONLY (an OAuth or
+// subscription kind keeps whatever the transport reported, `unknown`
+// included), and returning a mode here would invite a caller to overwrite
+// that instead of asking the question this answers.
+export function credentialKindBillsMetered(kind: CredentialKind): boolean {
+  return kind === "provider_api_token";
+}
+
 // The DEFAULT broker for an opencode route, derived from the same provider
 // that decided the kind. Exported because production-runtime.ts resolves the
 // plan's one shared broker (#149 keeps it a single instance) and must reach

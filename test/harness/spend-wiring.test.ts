@@ -389,6 +389,87 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     expect(ledger.markUnresolvedCalls).toBe(1);
   });
 
+  // 2026-09-02, the metered-zero rule reaching the ledger. `settlementFromUsage`
+  // is the only producer of a SettlementDecision, so this is the harness-
+  // observable half of the same fact `spend-limiter.test.ts` asserts purely:
+  // the CAS transition the harness applies changes with the billing mode, not
+  // just the decision object.
+  //
+  // The pair is the discriminator. A rule that refused every $0 would pass
+  // the first arm and fail the second, and a run under a subscription
+  // credential would fence its own bucket on the first genuinely free step.
+  test("a metered attempt reporting $0 with output tokens lands unresolved_remote, not settled", async () => {
+    const dir = await tempDir();
+    const meteredZero: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0,
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => okOutcome(meteredZero),
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir));
+
+    expect(result.status).toBe("ok");
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    // Not 0: a zero that cannot be trusted is not a known cost, and carrying
+    // it would print "$0 known" beside the fenced bucket.
+    expect(result.reservations?.[0]?.knownUsd).toBeUndefined();
+    expect(ledger.settleCalls).toBe(0);
+    expect(ledger.markUnresolvedCalls).toBe(1);
+  });
+
+  test("a subscription attempt reporting $0 with output tokens still settles, leaving its bucket unfenced", async () => {
+    const dir = await tempDir();
+    const subscriptionZero: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "subscription",
+      costSource: "provider",
+      cashCostUsd: 0,
+    };
+    const transport: ProviderTransport = {
+      backend: "claude-code",
+      capabilities: async () => capabilities(),
+      execute: async () => okOutcome(subscriptionZero),
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const first = await harness.run(await makeStep(dir));
+    expect(first.reservations?.[0]?.state).toBe("settled");
+    expect(ledger.settleCalls).toBe(1);
+    expect(ledger.markUnresolvedCalls).toBe(0);
+
+    // The bucket is still admissible: an unresolved reservation would have
+    // fenced it for the rest of the ledger's life, so a second free step on
+    // the same subscription credential proves the rule did not overreach.
+    const second = await harness.run(
+      await makeStep(dir, { name: "hunter-resilience" }),
+    );
+    expect(second.status).toBe("ok");
+    expect(second.reservations?.[0]?.state).toBe("settled");
+  });
+
   // 5b.7 (threat matrix, mirrors 5a.4): argv/env invariance for the ledger too.
   test("buildStepArgv output is byte-identical with and without a spendLedger configured", async () => {
     const dir = await tempDir();

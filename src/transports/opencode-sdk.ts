@@ -14,6 +14,7 @@ import type {
 import type {
   NormalizedTokens,
   NormalizedUsage,
+  UsageBillingMode,
   UsageModeState,
 } from "../execution/usage-normalized";
 import {
@@ -180,6 +181,18 @@ export interface OpenCodeSdkTransportOptions {
   readonly maxDrainCycles?: number;
   readonly clock?: OpenCodeTransportClock;
   readonly nowIso?: () => string;
+  // 2026-09-02: how the ROUTE this transport serves bills, stamped onto every
+  // usage record it emits. Derived by the registry factory from the
+  // credential kind the authority resolved (`credentialKindBillsMetered`,
+  // runner-authority.ts) — the transport cannot derive it, holding no
+  // credential and, since #137's note, no route.
+  //
+  // Defaults to "subscription" rather than "unknown" so an unconfigured
+  // construction is byte-identical to what this file hardcoded before, and
+  // because the factory branch that omits the kind is the SAME branch that
+  // defaults the route to `openai/gpt-4o` — an OAuth, subscription-billed
+  // route. A default of "unknown" would make the two disagree.
+  readonly billingMode?: UsageBillingMode;
 }
 
 const MARKER_ABORT_UNCONFIRMED =
@@ -276,13 +289,22 @@ function errorMessage(error: unknown): string {
 
 // Session creation failing means no attempt ever reached the provider —
 // genuine zero cost, not "unavailable" (which would misfile a $0 refusal as
-// an unresolved spend once PR5's spend ledger reads completeness).
-function noSessionUsage(wallMs: number): NormalizedUsage {
+// an unresolved spend now that PR5b's spend ledger does read completeness).
+//
+// 2026-09-02: it carries the ROUTE's billing mode like every other usage
+// record here, metered included. That is safe precisely because `tokens` is
+// empty — `settlementFromUsage`'s metered-zero rule gates on output tokens,
+// so this stays settleable at 0 while a metered attempt that actually
+// produced output does not.
+function noSessionUsage(
+  wallMs: number,
+  billingMode: UsageBillingMode,
+): NormalizedUsage {
   return {
     wallMs,
     tokens: {},
     completeness: "complete",
-    billingMode: "subscription",
+    billingMode,
     costSource: "provider",
     cashCostUsd: 0,
   };
@@ -321,6 +343,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   private readonly maxDrainCycles: number;
   private readonly clock: OpenCodeTransportClock;
   private readonly nowIso: () => string;
+  // Public and readonly on purpose. #149's forwarding "guarantee" shipped
+  // dead twice because nothing outside the registry could observe it, and a
+  // billing mode derived from a credential kind inside a factory has exactly
+  // that shape. Reading it is how `test/route-admission.test.ts` proves the
+  // factory wired the kind through, without driving a whole attempt.
+  readonly usageBillingMode: UsageBillingMode;
 
   constructor(options: OpenCodeSdkTransportOptions) {
     this.client = options.client;
@@ -334,6 +362,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     this.maxDrainCycles = options.maxDrainCycles ?? DEFAULT_MAX_DRAIN_CYCLES;
     this.clock = options.clock ?? systemClock;
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
+    this.usageBillingMode = options.billingMode ?? "subscription";
   }
 
   // §11/D1-09 honesty: every unimplemented feature is claimed false with a
@@ -367,17 +396,42 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       },
       billing: {
         mode: "subscription",
-        // D1-08 PR3 does not touch pricing readiness (see the identical note
-        // on ClaudeCodeCliTransport.capabilities) — the real pricing table
-        // is D1-11's job, unrelated to bucketScope.
+        // 2026-09-02: `true`, because this transport reports PROVIDER COST.
         //
-        // #137 shipped an Anthropic table and still leaves this `false`: no
-        // model id is in scope here. The registry factory reads
-        // `options.route` to pick the CLIENT's model and hands this transport
-        // only `{ client }`, so the route is not retained to price. It would
-        // not help if it were — this backend's default route is
-        // `openai/gpt-4o`, which an Anthropic catalogue does not cover.
-        pricingReady: false,
+        // The design's metered rule (§8, docs/multi-runtime-model-diversity-
+        // design.md line 461) is a disjunction and its order is the point:
+        // "Metered routes require provider cost or a versioned rate-table
+        // calculation." Provider cost is named FIRST — it is the primary
+        // path; the rate table is the fallback for a transport that reports
+        // nothing. `tokenPricingAvailable` in production-runtime.ts has read
+        // both disjuncts since #137.
+        //
+        // This transport satisfies the first one. The OpenCode SDK's
+        // `AssistantMessage` carries a NON-OPTIONAL `cost: number` (and so
+        // does `StepFinishPart`); `opencode-client.ts` reads it off every
+        // assistant message, this file accumulates it across the turn, and
+        // the outcome's usage carries it as `cashCostUsd` with
+        // `costSource: "provider"`. That is a provider-reported cost for
+        // whatever model the route named, with no table involved — which is
+        // why it holds for all of models.dev, not the two providers we bundle
+        // a table for, and why it does not expire.
+        //
+        // What this REPLACES, because the old reasoning was not wrong so much
+        // as aimed at the wrong disjunct: it argued that no model id is in
+        // scope here, that the factory hands this transport only `{ client }`,
+        // and that an Anthropic catalogue would not cover `openai/gpt-4o`
+        // anyway. Every clause of that is true OF THE RATE TABLE, which this
+        // transport genuinely cannot consult — and none of it bears on
+        // provider cost, which needs no model id because the provider prices
+        // its own call. Applying a table's limitation to the cost path left
+        // the design's primary source unconnected, so a metered route on any
+        // model outside the two bundled catalogues was refused as unpriceable
+        // while the provider was reporting its price on every message.
+        //
+        // The claim is scoped to THIS transport. The claude-code CLI reports
+        // no cost of its own, and its three `pricingReady: false` siblings say
+        // so in their own comments.
+        pricingReady: true,
       },
       ...(input !== undefined
         ? {
@@ -399,9 +453,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           blocking: false,
         },
         {
+          // 2026-09-02: rewritten, not removed. It used to open "this backend
+          // reports no per-request token cost", which is the same wrong
+          // disjunct `pricingReady` was stuck on — and it now flatly
+          // contradicts the `true` above. What remains true is narrower: no
+          // bundled TABLE can be consulted from here, which is why the
+          // binding, not this transport, is where a table is ever read.
           code: "pricing_table_missing",
           message:
-            "this backend reports no per-request token cost, and the bundled pricing table covers Anthropic models only — this backend's default route is openai/gpt-4o",
+            "capabilities() carries no route, so no bundled pricing table can be consulted here; cash cost comes from the provider's own per-message cost and the runtime binding prices per route when a table is needed",
           blocking: false,
         },
         {
@@ -411,9 +471,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           blocking: false,
         },
         {
+          // NOTIONAL cost, a different fact from the cash cost above: what a
+          // subscription attempt WOULD have cost metered. That still needs a
+          // table and a model id, neither of which is in scope here. #137
+          // shipped a second table (z.ai), so the old "Anthropic-only"
+          // wording was stale as well as beside the point.
           code: "pricing_table_missing",
           message:
-            "the bundled pricing table is Anthropic-only, so notional cost cannot be derived for this backend's models; subscription cash cost stays 0",
+            "no route is in scope here, so notional cost cannot be derived for this backend's models; subscription cash cost stays 0",
           blocking: false,
         },
       ],
@@ -597,7 +662,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         completion: "failed",
         protocolIntegrity: "unverified",
         finalText: "",
-        usage: noSessionUsage(Date.now() - startedWall),
+        usage: noSessionUsage(Date.now() - startedWall, this.usageBillingMode),
         stderrTail: `[pr-hero] opencode sdk: session creation failed: ${errorMessage(error)}`,
       };
     }
@@ -1122,12 +1187,23 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           ? { terminalProof: slotProof }
           : {}),
         finalText: finalParts.join(""),
-        // §8: no usage event ever arriving is a declared capability gap here
-        // (capabilities().protocol.usageMode is "none" until D1-11's real SDK
-        // adapter), not a proven zero — "unavailable" says honestly that the
-        // cost is unknown rather than fabricating a $0 for a session that DID
-        // run. `usageState` defined means at least one usage event landed and
-        // fixed a mode, so the leaves it accumulated are trustworthy.
+        // §8: no usage event ever arriving is not a proven zero —
+        // "unavailable" says honestly that the cost is unknown rather than
+        // fabricating a $0 for a session that DID run. `usageState` defined
+        // means at least one usage event landed and fixed a mode, so the
+        // leaves it accumulated are trustworthy.
+        //
+        // 2026-09-02: the parenthetical here used to read "capabilities().
+        // protocol.usageMode is 'none' until D1-11's real SDK adapter", which
+        // misattributed that field. `usageMode: "none"` is not a gap waiting
+        // on an adapter — it is the honest static answer to a RUNTIME
+        // question, because the aggregation mode is fixed by the first usage
+        // event (§4.2 line 195) and no static snapshot/delta claim can be
+        // defended before one arrives. The transport's own
+        // `usage_mode_client_reported` issue says exactly that. Reading the
+        // old wording as "usage does not arrive yet" is what made
+        // `pricingReady: false` look consistent with a client that has been
+        // reading the provider's cost off every assistant message.
         usage:
           usageState === undefined
             ? normalizeUnavailableUsage({ wallMs: Date.now() - startedWall })
@@ -1145,7 +1221,16 @@ export class OpenCodeSdkTransport implements ProviderTransport {
                       : undefined,
                 },
                 completeness: "complete",
-                billingMode: "subscription",
+                // 2026-09-02: the ROUTE's mode, not a hardcoded
+                // "subscription". #133 established that an OpenCode route on
+                // any provider but `openai` runs on a `provider_api_token`
+                // and therefore bills METERED, and the exact-binding
+                // capability report has said so since. This record used to
+                // contradict it — and the contradiction is exploitable, not
+                // cosmetic: `settlementFromUsage`'s metered-zero rule reads
+                // THIS field, so a metered attempt wearing a subscription
+                // badge settles a provider-reported $0 as truthful.
+                billingMode: this.usageBillingMode,
                 costSource: cashCostUsd !== undefined ? "provider" : "unknown",
                 ...(cashCostUsd !== undefined ? { cashCostUsd } : {}),
               },

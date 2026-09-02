@@ -327,6 +327,13 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         // request (see the BUCKET_IDENTITY_PROVIDER note above), and the
         // registry's claude-code factory forwards only `spawnFn` — the
         // transport never receives `options.route`. Honest default.
+        //
+        // 2026-09-02: NOT the case the OpenCode transport's `true` covers.
+        // That claim is PROVIDER COST — the OpenCode SDK reports a
+        // non-optional `cost` on every assistant message, which needs no
+        // model id and no table. The Claude CLI reports no per-request cash
+        // cost, so the rate table really is this transport's only pricing
+        // path and this stays `false`.
         pricingReady: false,
       },
       ...(input !== undefined

@@ -16,6 +16,10 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../src/execution/contracts";
+import {
+  type NormalizedUsage,
+  normalizeUnavailableUsage,
+} from "../src/execution/usage-normalized";
 import { aliasModelFamily, aliasModelSnapshot } from "../src/model-catalog";
 import {
   computeRouteFingerprint,
@@ -54,6 +58,7 @@ import {
   DefaultTransportRegistry,
   OpenCodeProductionGatedError,
 } from "../src/transport-registry";
+import { ClaudeCodeCliTransport } from "../src/transports/claude-code-cli";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 
@@ -791,6 +796,296 @@ describe("production runtime PR1", () => {
       });
     });
 
+    // 2026-09-02, the spend ledger's PRODUCTION composition. Everything the
+    // ledger does was already built and tested (spend-limiter.test.ts for the
+    // CAS semantics, spend-wiring.test.ts for the harness calls) — and none
+    // of it ran, because nothing in src/ ever constructed a `SpendLedger`.
+    // These arms are about the composition itself: one instance held by
+    // `MultiProviderRunner` for the whole run, handed only to metered
+    // bindings.
+    //
+    // Why that gap mattered enough to be a merge blocker rather than a
+    // follow-up: admitting a metered route on the transport's own provider
+    // cost (the describe above) is only safe because a bogus provider `$0` is
+    // caught downstream. With no ledger, `settlementFromUsage` is never
+    // called and the catch never fires.
+    describe("the run's spend ledger is composed, and fences metered buckets", () => {
+      // Counts execute() calls, which is the whole assertion: the difference
+      // between REPORTING an unresolved reservation and FENCING on it is
+      // whether the next attempt reaches the transport at all.
+      function countingTransport(
+        backend: RunnerBackend,
+        usage: NormalizedUsage,
+        capabilityOverrides: Partial<ProviderCapabilityReport> = {},
+      ) {
+        const base = createMockTransport(backend, [], capabilityOverrides);
+        let executeCount = 0;
+        const transport: ProviderTransport = {
+          ...base,
+          execute: async () => {
+            executeCount += 1;
+            return {
+              completion: "success" as const,
+              protocolIntegrity: "verified" as const,
+              finalText: '{"findings":[]}',
+              usage,
+              stderrTail: "",
+            };
+          },
+        };
+        return { transport, executeCount: () => executeCount };
+      }
+
+      // Provider-reported $0 on a metered attempt that produced output — the
+      // exact shape `settlementFromUsage`'s metered-zero rule refuses.
+      const METERED_ZERO: NormalizedUsage = {
+        wallMs: 10,
+        tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+        completeness: "complete",
+        billingMode: "metered",
+        costSource: "provider",
+        cashCostUsd: 0,
+      };
+
+      // Two steps sharing ONE route, so they share one bucket
+      // (`bindingBucketId` keys on provider + credential).
+      function openCodeOAuthRuntime(
+        opencodeFixture: { canonicalPath: string; sha256: string },
+        transport: ProviderTransport,
+      ) {
+        const step = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "openai/gpt-4o",
+          routingConfig: {
+            mappings: {
+              "openai/gpt-4o": {
+                backend: "opencode",
+                provider: "openai",
+                modelFamily: "gpt-4o",
+                modelSnapshot: "gpt-4o",
+              },
+            },
+          },
+        });
+        const registry = new DefaultTransportRegistry();
+        registry.register("opencode", transport);
+        return {
+          step,
+          registry,
+          options: {
+            workspaceRoot: tmpDir,
+            plan: createResolvedRoutePlan([step]),
+            openCodeBinaryPath: opencodeFixture.canonicalPath,
+            executableAllowlists: {
+              opencode: [
+                {
+                  absolutePath: opencodeFixture.canonicalPath,
+                  sha256: opencodeFixture.sha256,
+                },
+              ],
+            },
+            registry,
+            mode: "conformance" as const,
+            credentialBrokers: {
+              opencode: new OpenCodeAuthBroker({
+                readerFn: async () =>
+                  JSON.stringify({
+                    openai: { type: "oauth", access: "test", refresh: "test" },
+                  }),
+              }),
+            },
+            authorityDeps: {
+              existsFn: (candidate: string) =>
+                candidate === opencodeFixture.canonicalPath ||
+                candidate.startsWith(tmpDir),
+              realpathFn: async (candidate: string) => candidate,
+            },
+          },
+        };
+      }
+
+      test("a metered $0 attempt fences its bucket, and the next step never reaches the transport", async () => {
+        // The metered mode arrives from the TRANSPORT's own report here, not
+        // from a `provider_api_token` credential. Both doors reach the same
+        // `effectiveBillingMode` (production-runtime's #133/#161 note names
+        // them), and splitting them keeps this arm about the WIRING: the
+        // credential->metered derivation is already proven by the
+        // "provider_api_token routes bill as metered" arms above, and the
+        // transport->usage stamping by the OpenCode conformance suite. This
+        // test owns the third link, which is the one that was missing.
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const metered = countingTransport("opencode", METERED_ZERO, {
+          billing: { mode: "metered", pricingReady: true },
+        });
+        const { step, options } = openCodeOAuthRuntime(
+          opencodeFixture,
+          metered.transport,
+        );
+        const runtime = await createProductionRuntime(options);
+
+        const first = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "hunter-reliability",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+        expect(first.reservations?.length).toBe(1);
+        expect(first.reservations?.[0]?.state).toBe("unresolved_remote");
+        expect(first.reservations?.[0]?.knownUsd).toBeUndefined();
+        expect(metered.executeCount()).toBe(1);
+
+        // A DIFFERENT step on the same bucket. Refused inside `reserve()`,
+        // which runs before `runAdmittedAttempt` — so the count staying at 1
+        // is the proof this is a fence and not a report.
+        const second = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "refuter",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+        expect(second.status).toBe("failed");
+        expect(second.stderrTail).toContain("fenced");
+        expect(metered.executeCount()).toBe(1);
+      });
+
+      test("a subscription backend reserves nothing, so an unresolvable attempt cannot fence the next one", async () => {
+        // The discriminator for the deliberate NON-wiring of subscription
+        // bindings. `normalizeUnavailableUsage` is completeness
+        // "unavailable", which `finalizeReservation` routes to
+        // markUnresolvedRemote — so with a ledger attached this would fence
+        // and the second run would be refused. On a subscription bucket that
+        // would refuse the refuter over dollars that cannot be spent, against
+        // a pipeline built to survive a lost hunter.
+        const claude = countingTransport(
+          "claude-code",
+          normalizeUnavailableUsage({ wallMs: 10 }),
+        );
+        const step = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "sonnet",
+        });
+        const registry = new DefaultTransportRegistry();
+        registry.register("claude-code", claude.transport);
+        const runtime = await createProductionRuntime({
+          workspaceRoot: tmpDir,
+          plan: createResolvedRoutePlan([step]),
+          binaryPath: claudeFixture.canonicalPath,
+          executableAllowlists: claudeAllowlist(claudeFixture),
+          registry,
+          mode: "conformance",
+        });
+
+        const first = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "hunter-reliability",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+        const second = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "refuter",
+            routeKey: step.routeFingerprint,
+            route: step.route,
+          }),
+        );
+
+        // Absent, not empty: no reservation was ever attempted. That absence
+        // IS the signal a claude-only run is meant to carry.
+        expect(first.reservations).toBeUndefined();
+        expect(second.reservations).toBeUndefined();
+        expect(claude.executeCount()).toBe(2);
+      });
+
+      test("a fenced metered bucket does not refuse a different credential's steps", async () => {
+        // `bindingBucketId` keys on provider + credential, so the fence lands
+        // on the credential that could not account for its spend. A run
+        // mixing backends must keep going on the ones that still can.
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const openStep = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: "openai/gpt-4o",
+          routingConfig: {
+            mappings: {
+              "openai/gpt-4o": {
+                backend: "opencode",
+                provider: "openai",
+                modelFamily: "gpt-4o",
+                modelSnapshot: "gpt-4o",
+              },
+            },
+          },
+        });
+        const claudeStep = resolveStepRoute({
+          stepKey: "refuter",
+          role: "refuter",
+          cliModel: "sonnet",
+        });
+        const metered = countingTransport("opencode", METERED_ZERO, {
+          billing: { mode: "metered", pricingReady: true },
+        });
+        const claude = countingTransport("claude-code", {
+          wallMs: 10,
+          tokens: { totalKnown: 1 },
+          completeness: "complete",
+          billingMode: "subscription",
+          costSource: "provider",
+          cashCostUsd: 0,
+        });
+        const registry = new DefaultTransportRegistry();
+        registry.register("opencode", metered.transport);
+        registry.register("claude-code", claude.transport);
+        const runtime = await createProductionRuntime({
+          workspaceRoot: tmpDir,
+          plan: createResolvedRoutePlan([openStep, claudeStep]),
+          binaryPath: claudeFixture.canonicalPath,
+          openCodeBinaryPath: opencodeFixture.canonicalPath,
+          executableAllowlists: mixedAllowlists(claudeFixture, opencodeFixture),
+          registry,
+          mode: "conformance",
+          credentialBrokers: {
+            opencode: new OpenCodeAuthBroker({
+              readerFn: async () =>
+                JSON.stringify({
+                  openai: { type: "oauth", access: "test", refresh: "test" },
+                }),
+            }),
+          },
+          authorityDeps: {
+            existsFn: (candidate: string) =>
+              candidate === claudeFixture.canonicalPath ||
+              candidate === opencodeFixture.canonicalPath ||
+              candidate.startsWith(tmpDir),
+            realpathFn: async (candidate: string) => candidate,
+          },
+        });
+
+        const fenced = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "hunter-reliability",
+            routeKey: openStep.routeFingerprint,
+            route: openStep.route,
+          }),
+        );
+        expect(fenced.reservations?.[0]?.state).toBe("unresolved_remote");
+
+        const survivor = await runtime.runner.run(
+          makeStep(tmpDir, {
+            name: "refuter",
+            routeKey: claudeStep.routeFingerprint,
+            route: claudeStep.route,
+          }),
+        );
+        expect(survivor.status).toBe("ok");
+        expect(claude.executeCount()).toBe(1);
+      });
+    });
+
     // #133. The credential KIND is what decides how a route bills, and it is
     // provider-keyed: an OpenCode route on any provider but `openai` runs on a
     // metered API token. The legacy backend-wide report cannot know that --
@@ -1056,6 +1351,130 @@ describe("production runtime PR1", () => {
           .sort();
         expect(kinds).toEqual(["opencode_chatgpt_oauth", "provider_api_token"]);
         await probe.dispose();
+      });
+    });
+
+    // 2026-09-02: provider cost, the design's PRIMARY metered pricing source
+    // (§8: "Metered routes require provider cost or a versioned rate-table
+    // calculation" — provider cost is named FIRST; the table is the
+    // fallback). `tokenPricingAvailable` has been a disjunction since #137,
+    // but the first disjunct was never connected: every transport reported
+    // `pricingReady: false`, so only the table could ever answer.
+    //
+    // These two arms are a PAIR. The first proves the OpenCode transport's
+    // own claim now admits a route no catalogue can price; the second proves
+    // the widening did not leak to the claude-code CLI, which reports no cost
+    // of its own and for which the table really is the only path. Either arm
+    // alone would also pass against a change that widened both.
+    describe("a transport that reports provider cost prices its own routes", () => {
+      // Same model the arms above use for "no catalogue can price this":
+      // routable in OpenCode, absent from z.ai's published table on any
+      // clock. Here it is the whole point — nothing but the transport's own
+      // claim can be answering.
+      const UNPRICED_ZAI_MODEL = "zai/glm-5-turbo";
+
+      // A client that is never driven: `capabilities()` touches none of it.
+      // Constructed rather than mocked so the report under test comes from
+      // the REAL OpenCodeSdkTransport — a mock transport here would assert
+      // the fixture's opinion of pricing readiness, not the transport's.
+      const idleOpenCodeClient = {
+        createSession: async () => ({ id: "sess-idle" }),
+        streamEvents: async function* () {},
+        pollStatus: async () => ({ kind: "pending" }) as const,
+        abort: async () => {},
+      };
+
+      test("an uncatalogued metered model is admitted on the OpenCode transport's own cost reporting", async () => {
+        const opencodeFixture = await writeOpenCodeFixture(tmpDir);
+        const model = UNPRICED_ZAI_MODEL.split("/")[1];
+        const routingConfig: RoutingConfig = {
+          mappings: {
+            [UNPRICED_ZAI_MODEL]: {
+              backend: "opencode",
+              provider: "zai",
+              modelFamily: model,
+              modelSnapshot: model,
+            },
+          },
+        };
+        const step = resolveStepRoute({
+          stepKey: "hunter-reliability",
+          role: "hunter",
+          cliModel: UNPRICED_ZAI_MODEL,
+          routingConfig,
+        });
+        const plan = createResolvedRoutePlan([step]);
+        // No `registry.register("opencode", ...)`: the registry's own factory
+        // builds a real OpenCodeSdkTransport around the idle client.
+        const registry = new DefaultTransportRegistry({
+          mode: "conformance",
+          openCodeClient: idleOpenCodeClient,
+        });
+        const runtime = await createProductionRuntime({
+          workspaceRoot: tmpDir,
+          plan,
+          openCodeBinaryPath: opencodeFixture.canonicalPath,
+          executableAllowlists: {
+            opencode: [
+              {
+                absolutePath: opencodeFixture.canonicalPath,
+                sha256: opencodeFixture.sha256,
+              },
+            ],
+          },
+          registry,
+          mode: "conformance",
+        });
+        const binding = runtime.bindings.get(step.routeFingerprint);
+        if (binding === undefined) throw new Error("missing binding");
+        const report = await binding.capabilities();
+
+        // #133 still decides the billing mode: this is a metered route.
+        expect(binding.credential.kind).toBe("provider_api_token");
+        expect(report.billing.mode).toBe("metered");
+        expect(report.billing.pricingApplicability).toBe("required");
+        // The catalogue cannot answer for this model on ANY clock, so the
+        // transport's own claim is the only thing that can be.
+        expect(report.billing.tokenPricingAvailable).toBe(true);
+        expect(report.billing.cashCostAccountingValid).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
+      });
+
+      test("the claude-code CLI reports no cost of its own, so an uncatalogued model there is still refused", async () => {
+        // `pricingReady` is READ OFF the real ClaudeCodeCliTransport rather
+        // than written as a literal. A literal would keep passing if that
+        // transport were widened too — which is precisely the mistake this
+        // arm exists to catch.
+        const claudeBilling = await new ClaudeCodeCliTransport().capabilities();
+        expect(claudeBilling.billing.pricingReady).toBe(false);
+
+        // An anthropic snapshot the bundled table deliberately does not
+        // carry, so the refusal is about pricing and not about freshness —
+        // no clock seam is involved and the arm cannot rot into a calendar
+        // test.
+        const routingConfig: RoutingConfig = {
+          default: {
+            backend: "claude-code",
+            provider: "anthropic",
+            modelFamily: "claude-sonnet-5",
+            modelSnapshot: "claude-sonnet-4-1",
+          },
+        };
+        const report = await bindingReportForBilling(
+          {
+            mode: "metered",
+            pricingReady: claudeBilling.billing.pricingReady,
+          },
+          undefined,
+          routingConfig,
+        );
+
+        expect(report.billing.pricingApplicability).toBe("required");
+        expect(report.billing.tokenPricingAvailable).toBe(false);
+        expect(report.billing.cashCostAccountingValid).toBe(false);
+        const decision = exactBindingCapabilityGate(report);
+        expect(decision.ok).toBe(false);
+        expect(decision.reason).toContain("pricing_table_missing");
       });
     });
 

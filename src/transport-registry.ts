@@ -10,8 +10,10 @@ import type {
   ResolvedModelRoute,
   RunnerBackend,
 } from "./execution/contracts";
+import type { UsageBillingMode } from "./execution/usage-normalized";
 import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
 import { capabilityGateDecision } from "./provider-capabilities";
+import { credentialKindBillsMetered } from "./runner-authority";
 import {
   type CredentialBroker,
   OpenCodeAuthBroker,
@@ -248,9 +250,25 @@ export class DefaultTransportRegistry implements TransportRegistry {
         }
       }
 
+      // 2026-09-02: the billing mode stamped on every usage record this
+      // transport emits, derived from the credential kind the authority
+      // resolved. THE factory is the only place that holds both the kind and
+      // the transport, and `credentialKindBillsMetered` is the one predicate
+      // the exact-binding report derives its own effective mode from (#133),
+      // so the report and the usage records cannot disagree about how an
+      // attempt bills. Computed once, above both construction branches —
+      // wiring only the second is how the injected-client path (every test
+      // and every doctor probe) would keep the pre-#133 default.
+      const usageBillingMode: UsageBillingMode =
+        merged.credentialKind !== undefined &&
+        credentialKindBillsMetered(merged.credentialKind)
+          ? "metered"
+          : "subscription";
+
       if (merged.openCodeClient) {
         return new OpenCodeSdkTransport({
           client: merged.openCodeClient,
+          billingMode: usageBillingMode,
         });
       }
 
@@ -293,7 +311,10 @@ export class DefaultTransportRegistry implements TransportRegistry {
         ...(codegraphBinaryPath === undefined ? {} : { codegraphBinaryPath }),
       });
 
-      return new OpenCodeSdkTransport({ client });
+      return new OpenCodeSdkTransport({
+        client,
+        billingMode: usageBillingMode,
+      });
     });
   }
 
@@ -435,6 +456,12 @@ export class DefaultTransportRegistry implements TransportRegistry {
               // be CONSTRUCTED (OpenCodeProductionGatedError), so there is no
               // route, no client and no model behind it — and the report is
               // already blocking on `d1_11_production_gated`.
+              //
+              // 2026-09-02: NOT the case the OpenCode transport's `true`
+              // covers. That claim is a TRANSPORT reporting the provider cost
+              // it reads off each assistant message; here there is no
+              // transport to make the claim, so `false` is the only honest
+              // answer and stays one.
               pricingReady: false,
             },
             issues: [

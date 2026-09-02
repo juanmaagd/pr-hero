@@ -320,11 +320,12 @@ export type CiBillingMode = "subscription" | "metered";
 // "unified" later. That constant is static `"subscription"` and making it
 // derived is an ADMISSION hazard, verified before this was written: metered →
 // `pricingApplicability: "required"` (production-runtime.ts:263) →
-// `tokenPricingAvailable = report.billing.pricingReady`
-// (production-runtime.ts:322), and `pricingReady` is hardcoded false in every
-// transport (provider-capabilities.ts:555, claude-code-cli.ts:323,
-// opencode-sdk.ts:373, transport-registry.ts:421) → `pricing_table_missing`
-// with `blocking: true` (provider-capabilities.ts:629-637). A metered
+// `tokenPricingAvailable = report.billing.pricingReady || tokenPricingAvailableFor(...)`
+// (production-runtime.ts), and NEITHER disjunct answers for a claude-code
+// route whose model the bundled table misses: `pricingReady` is false on the
+// claude-code CLI transport (claude-code-cli.ts) and on the backend-wide
+// report producer (provider-capabilities.ts) → `pricing_table_missing` with
+// `blocking: true` (provider-capabilities.ts). A metered
 // claude-code route would be refused admission outright, which is strictly
 // worse than the skipped review this function exists to prevent. This one
 // answers a narrower question — "should CI impose a spend ceiling?" — and

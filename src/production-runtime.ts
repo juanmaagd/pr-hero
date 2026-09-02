@@ -19,6 +19,10 @@ import type {
   VerifiedExecutable,
 } from "./execution/contracts";
 import { StepExecutionHarness } from "./execution/harness";
+import {
+  InMemorySpendLedger,
+  type SpendLedger,
+} from "./execution/spend-limiter";
 import type {
   ResolvedRoutePlan,
   ResolvedStepRoute,
@@ -33,6 +37,7 @@ import {
 } from "./provider-capabilities";
 import {
   type BindingAuthorityResolution,
+  credentialKindBillsMetered,
   credentialKindForRoute,
   openCodeCredentialBroker,
   prepareProductionRunnerAuthority,
@@ -294,11 +299,18 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // can — `provider_api_token` IS a metered API token by definition
     // (runner-authority.ts credentialKindForRoute).
     //
+    // 2026-09-02: that "by definition" moved into `credentialKindBillsMetered`
+    // rather than staying an inline comparison, because a SECOND caller
+    // appeared — the OpenCode transport factory, which stamps the same
+    // billing mode onto every usage record so the report and the records
+    // cannot disagree about one attempt. Two copies of the rule would be two
+    // chances for exactly that disagreement.
+    //
     // UPGRADE ONLY, never downgrade. An OAuth or subscription kind keeps
     // whatever the transport reported, `unknown` included — which is what
     // keeps the narrowing guarantee below true for every other kind.
     const effectiveBillingMode: ProviderCapabilityReport["billing"]["mode"] =
-      this.credential.kind === "provider_api_token"
+      credentialKindBillsMetered(this.credential.kind)
         ? "metered"
         : report.billing.mode;
     const pricingApplicable =
@@ -326,15 +338,22 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // scope. The provider is not decoration -- it SELECTS which provider's
     // bundled table is consulted, and a route may name any provider beside
     // any model snapshot, so a route naming a provider no table covers is
-    // refused rather than priced from a neighbour's. The four
-    // `pricingReady: false`
-    // sites upstream are backend-wide reports produced before any route
-    // resolves, so they stay the honest default and say so in their own
-    // comments.
+    // refused rather than priced from a neighbour's. The three remaining
+    // `pricingReady: false` sites upstream are backend-wide reports produced
+    // before any route resolves, so they stay the honest default and say so
+    // in their own comments.
     //
     // Two INDEPENDENT sources for one fact, either sufficient: a transport
     // that reports its own cost keeps working when the table expires, and a
     // provider that reports nothing is still priceable from the table.
+    //
+    // 2026-09-02: the FIRST disjunct is now connected, and the count above
+    // dropped from four to three. `report.billing.pricingReady` was false at
+    // every site, so only the table could ever answer — which inverted the
+    // design's own ordering (§8 line 461 names provider cost FIRST and the
+    // rate table second). The OpenCode transport reports provider cost per
+    // assistant message and now says so, which is what lets a metered route
+    // on a model no bundled table covers be priced at all.
     //
     // This was a no-op when #137 landed — no route reported
     // `billingMode: "metered"`, so `pricingApplicability` was never
@@ -873,6 +892,22 @@ export class MultiProviderRunner implements StepRunner {
   private readonly attemptAdmissionGate?: AttemptAdmissionGate;
   private readonly graceMarginMs?: number;
   private readonly leaseTracker?: ActiveTransportLeaseTracker;
+  // 2026-09-02: ONE ledger for the whole run, and note the shape — it is
+  // injectable but NOT optional-off, unlike `attemptAdmissionGate` beside it.
+  // That difference is the point: the concurrency gate is an opt-in policy, a
+  // spend ledger is a GUARANTEE. Before 2026-09-02 nothing in src/ built one,
+  // and that absence made `settlementFromUsage` unreachable on every real run
+  // — it is only ever called from `finalizeReservation`, which returns early
+  // when no ledger is configured. An opt-in default would reintroduce exactly
+  // that, one forgetful caller at a time.
+  //
+  // Run-scoped because this runner is: `createProductionRuntime` builds
+  // exactly one `MultiProviderRunner` per run, while `run()` below builds a
+  // FRESH `StepExecutionHarness` per step. A ledger constructed down there
+  // would carry a `fencedBuckets` set that dies with the step — it would look
+  // wired and fence nothing, which is worse than none because it reads as
+  // covered. Holding it here is what makes the fence span the run.
+  private readonly spendLedger: SpendLedger;
 
   constructor(options: {
     readonly workspaceRoot: string;
@@ -884,6 +919,10 @@ export class MultiProviderRunner implements StepRunner {
     readonly attemptAdmissionGate?: AttemptAdmissionGate;
     readonly graceMarginMs?: number;
     readonly leaseTracker?: ActiveTransportLeaseTracker;
+    // Injected only by tests that need to observe the CAS calls; production
+    // takes the default, which is the whole point of defaulting rather than
+    // requiring a caller to remember.
+    readonly spendLedger?: SpendLedger;
   }) {
     this.workspaceRoot = options.workspaceRoot;
     this.bindings = options.bindings;
@@ -894,6 +933,7 @@ export class MultiProviderRunner implements StepRunner {
     this.attemptAdmissionGate = options.attemptAdmissionGate;
     this.graceMarginMs = options.graceMarginMs;
     this.leaseTracker = options.leaseTracker;
+    this.spendLedger = options.spendLedger ?? new InMemorySpendLedger();
   }
 
   resolveBinding(step: StepSpec): RuntimeBinding | undefined {
@@ -1012,6 +1052,48 @@ export class MultiProviderRunner implements StepRunner {
       };
     }
 
+    // 2026-09-02. WHICH steps reserve into the run's ledger: metered ones
+    // only, read off the report the gate above just admitted rather than
+    // re-derived from `binding.credential.kind`. One derivation of one fact —
+    // the same `effectiveBillingMode` #133 computes once and feeds to all
+    // three billing readers — so the fact that decided admission is the fact
+    // that decides reservation.
+    //
+    // WHY not every step. The ledger's guarantee is "an unresolved bucket
+    // blocks the next paid attempt", and `finalizeReservation` reaches it on
+    // more than the metered-zero rule: partial usage, unavailable usage (an
+    // OpenCode attempt where no usage event ever arrived, and ANY backend's
+    // harness watchdog timeout, which normalizes to unavailable), and an
+    // attempt that comes back `cancelled`. Any one of those fences the bucket
+    // for the rest of the ledger's life.
+    //
+    // On a metered bucket that is exactly right and fail-closed: we do not
+    // know what we spent, so we stop spending. On a SUBSCRIPTION bucket it
+    // would refuse later steps over dollars that cannot be spent — and it
+    // would do so against a pipeline built to survive exactly this. Hunters
+    // run under `Promise.allSettled` and `runPipeline` tolerates a lost
+    // hunter (`hunterFailures`, failing the run only when ALL of them fail),
+    // so one hunter whose stdout would not parse would fence the credential
+    // and take the refuter down with it. That trades a degraded run for a
+    // dead one, buying nothing, on the one backend that demonstrably works
+    // today.
+    //
+    // Same reasoning keeps `ClaudeCodeRunner` (step-runner.ts) ledger-free:
+    // claude-code resolves to `claude_subscription_oauth` for every provider
+    // (`credentialKindForRoute`), so its usage records are truthfully
+    // `subscription` and the metered-zero rule structurally cannot fire
+    // there. A ledger on that path is a state machine with no guarantee to
+    // enforce. The known limitation, deliberately not addressed here: a
+    // claude-code run under a real `ANTHROPIC_API_KEY` does spend money, but
+    // the engine models that backend as subscription on purpose — ci-gates.ts
+    // documents why deriving it instead is an ADMISSION hazard, and
+    // `resolveCiBudgetCeiling` is where that case is handled.
+    //
+    // A claude-only run therefore records no reservations at all, and the
+    // absent `reservations` key on those steps is the truthful signal — not a
+    // gap.
+    const reservesSpend = capabilityReport.billing.mode === "metered";
+
     const isolation = minimalIsolationFromExecutable(binding.executable);
     const lease = await binding.acquire(isolation, this.registry);
     const routeKey = binding.key;
@@ -1033,6 +1115,16 @@ export class MultiProviderRunner implements StepRunner {
           ? { attemptAdmissionGate: this.attemptAdmissionGate }
           : {}),
         rateLimitBucketId: binding.credential.bucketId,
+        // The bucket id is per provider+credential (`bindingBucketId`), so a
+        // fence lands on the credential that could not account for its spend
+        // and leaves every other route admissible.
+        //
+        // `reservedUsdPerAttempt` is deliberately left at the harness default
+        // of 0 rather than given an invented number: `reservedUsd` is
+        // RECORDED on the reservation and read by no gate anywhere — the
+        // fence keys on `fencedBuckets`, never on an amount — so a figure
+        // here would be a budget nobody has decided, dressed as one that was.
+        ...(reservesSpend ? { spendLedger: this.spendLedger } : {}),
         ...(this.graceMarginMs !== undefined
           ? { graceMarginMs: this.graceMarginMs }
           : {}),

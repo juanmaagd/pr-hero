@@ -609,7 +609,14 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
     expect(report.cancellation.deadlineMs).toBe(6500);
     expect(report.cancellation.conformance).toBe("passed");
     expect(report.billing.mode).toBe("subscription");
-    expect(report.billing.pricingReady).toBe(false);
+    // 2026-09-02: `true`, and this is not a weakened assertion — it asserted
+    // the wrong disjunct. The design's metered rule is "provider cost OR a
+    // versioned rate table", and this transport reports the FIRST: the SDK's
+    // `AssistantMessage.cost` is non-optional and the client reads it on
+    // every assistant message. The old `false` was reasoning about the rate
+    // table (which this transport genuinely cannot consult, having no model
+    // id in scope) and applying that conclusion to provider cost.
+    expect(report.billing.pricingReady).toBe(true);
     expect(report.issues.length).toBeGreaterThan(0);
     for (const issue of report.issues) expect(issue.blocking).toBe(false);
     expect(
@@ -617,6 +624,83 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
         (issue) => issue.code === "codegraph_policy_unenforced",
       ),
     ).toBe(true);
+  });
+});
+
+// 2026-09-02. The usage records this transport emits used to hardcode
+// `billingMode: "subscription"`, which #133 made false: an OpenCode route on
+// any provider but `openai` runs on a `provider_api_token`, and that IS a
+// metered credential. A usage record disagreeing with the capability report
+// about how its own attempt bills is what lets the metered-zero rule in
+// `settlementFromUsage` be dodged — the rule reads `usage.billingMode`, so a
+// metered attempt wearing a subscription badge settles its $0 as truthful.
+describe("OpenCodeSdkTransport usage records carry the route's billing mode", () => {
+  test("a metered transport stamps its usage records metered", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "usage",
+          mode: "snapshot",
+          inputTokens: 10,
+          outputTokens: 5,
+          costUsd: 0,
+        },
+        { kind: "terminal", proof: completedProof("evt-billing-metered") },
+      ]),
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { billingMode: "metered" },
+    });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+  });
+
+  test("the default stays subscription, matching the factory's default route", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        { kind: "usage", mode: "snapshot", inputTokens: 10, outputTokens: 5 },
+        { kind: "terminal", proof: completedProof("evt-billing-default") },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.usage.billingMode).toBe("subscription");
+  });
+
+  test("a session that never reached the provider carries the same mode", async () => {
+    // `noSessionUsage`: a truthful $0 with no tokens at all. It must carry
+    // the route's real mode too — but it stays SETTLEABLE because the
+    // metered-zero rule gates on output tokens, not on the mode alone.
+    const handle = makeClient({
+      createError: new Error("connect ECONNREFUSED"),
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { billingMode: "metered" },
+    });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.tokens).toEqual({});
   });
 });
 
