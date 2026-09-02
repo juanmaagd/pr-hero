@@ -65,7 +65,23 @@ export interface WizardState {
   skillsSynced: boolean;
   mcpRegistered: boolean;
   setupStateWritten: boolean;
-  repoScaffolded: boolean;
+  // Both of these replace one `repoScaffolded: boolean`, and the split is the
+  // point. That flag was assigned `isRepo` — "cwd is a git repository" — while
+  // its name promised "we scaffolded", and step 5 read it as the trigger for
+  // BOTH halves of its closing warning. Inside a repo whose `.prhero/` already
+  // existed it was true and every word that followed it was false. A name is
+  // not a value: these two record what this run actually DID, and they are
+  // separate because the two halves of that warning have genuinely different
+  // conditions.
+  //
+  // "this run wrote at least one file into `.prhero/`" — i.e. what is now
+  // untracked, which is what INIT_GIT_REMINDER is about.
+  workspaceFilesWritten: boolean;
+  // "this run wrote the PLACEHOLDER gotchas file" — the no-entries fallback
+  // branch, the only one that emits GOTCHAS_PLACEHOLDER_MARKER. Writing
+  // `gotchas.md` is not enough: with entries collected, the file written is
+  // real, carries no marker, and the placeholder warning would be a lie.
+  placeholderGotchasWritten: boolean;
   gotchas: WizardGotchasState;
   commitChoice: "commit" | "ignore" | undefined;
   workspaceCommitted: boolean;
@@ -122,7 +138,8 @@ export function createInitialWizardState(): WizardState {
     skillsSynced: false,
     mcpRegistered: false,
     setupStateWritten: false,
-    repoScaffolded: false,
+    workspaceFilesWritten: false,
+    placeholderGotchasWritten: false,
     gotchas: {
       collected: 0,
       informedSkip: false,
@@ -581,6 +598,13 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       });
       const isRepo = isGit.exitCode === 0;
 
+      // Both writes below are gated on `!exists(...)` — a file already on disk
+      // is the user's work and is never overwritten. So "we are in a repo" and
+      // "we wrote something" are different facts, and step 5 needs the second
+      // one. These start false and are set by the branch that actually writes.
+      let workspaceFilesWritten = false;
+      let placeholderGotchasWritten = false;
+
       if (isRepo) {
         // 1. Write .prhero/config.json if not present
         if (!exists(configPath)) {
@@ -588,6 +612,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
             defaultBase: state.defaultBase || "main",
           });
           await writeFile(configPath, configContent);
+          workspaceFilesWritten = true;
         }
 
         // 2. Write .prhero/gotchas.md if not present
@@ -600,8 +625,13 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
             // `gotchasUnusableReason` refuses this file by, and two literals
             // that must match are one edit away from not matching.
             gotchasContent = `<!-- ${GOTCHAS_PLACEHOLDER_MARKER}: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Replace this with your project's real failure modes, then delete the marker line at the top — pr-hero refuses to review while it is there.)\n`;
+            // Set HERE, in the branch that emits the marker, and nowhere
+            // else: it is the marker that makes step 5's placeholder warning
+            // true, so the flag is set by the code that writes the marker.
+            placeholderGotchasWritten = true;
           }
           await writeFile(gotchasPath, gotchasContent);
+          workspaceFilesWritten = true;
         }
       }
 
@@ -639,7 +669,8 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       }
 
       return {
-        repoScaffolded: isRepo,
+        workspaceFilesWritten,
+        placeholderGotchasWritten,
         setupStateWritten: true,
         workspaceCommitted,
       };
@@ -704,32 +735,55 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       lines.push("");
       lines.push(`  ${green("[✓]")} Onboarding completed successfully!`);
 
-      // `runWizard` dispatches no reducer actions, so `commitChoice` is always
-      // undefined and step 4's `git add` / `.gitignore` branches never run:
-      // the `.prhero/` this wizard just scaffolded is left UNTRACKED, which is
-      // exactly what local mode's clean-tree gate refuses. "Run 'pr-hero
-      // review'" as the next line was therefore an instruction that could not
-      // work — the command it names fails on the state this wizard created.
-      // `pr-hero init` has printed INIT_GIT_REMINDER for this since it
-      // shipped; the reminder is IMPORTED rather than restated so the two
-      // cannot say different things.
+      // Two warnings, two conditions, deliberately NOT one flag.
       //
-      // The condition is written against what actually happened, not against
-      // the choice: `workspaceCommitted` is false when the commit was
-      // attempted and failed, and that repo is just as untracked as one where
-      // nobody tried.
-      const unfinished =
-        state.repoScaffolded === true &&
+      // The git half: `runWizard` dispatches no reducer actions, so
+      // `commitChoice` is always undefined and step 4's `git add` /
+      // `.gitignore` branches never run. Any `.prhero/` file this run wrote is
+      // therefore left UNTRACKED, which is exactly what local mode's
+      // clean-tree gate refuses — so "Run 'pr-hero review'" as the next line
+      // was an instruction that could not work. `pr-hero init` has printed
+      // INIT_GIT_REMINDER for this since it shipped; the reminder is IMPORTED
+      // rather than restated so the two cannot say different things. The
+      // condition is written against what happened, not against the choice:
+      // `workspaceCommitted` is false when a commit was attempted and failed,
+      // and that repo is just as untracked as one where nobody tried.
+      //
+      // The gotchas half: it asserts the CONTENT of a specific file, so it may
+      // only fire when this run wrote that content. It used to share the git
+      // half's flag, which was `isRepo` — so a repo whose `.prhero/gotchas.md`
+      // already held real, marker-free gotchas was told the file was a
+      // placeholder and that reviews would be refused. Both claims false.
+      // `placeholderGotchasWritten` is set by the branch that writes the
+      // marker and by nothing else.
+      const needsGitStep =
+        state.workspaceFilesWritten === true &&
         state.workspaceCommitted !== true &&
         state.commitChoice !== "ignore";
-      if (unfinished) {
+      const needsGotchasStep = state.placeholderGotchasWritten === true;
+
+      if (needsGitStep || needsGotchasStep) {
         lines.push("");
+      }
+      if (needsGitStep) {
         lines.push(`  ${INIT_GIT_REMINDER}`);
         lines.push("");
+      }
+      if (needsGotchasStep) {
+        // The sentence used to open with "Then", which only made sense while
+        // the two halves shared one flag and therefore always appeared
+        // together. Now that they are independent it is written to stand on
+        // its own — deliberately NOT as a `needsGitStep ? "Then write" :
+        // "Write"` conditional, because `needsGitStep` is false here only
+        // when `workspaceCommitted`/`commitChoice` say so, and nothing in
+        // production dispatches the reducer action that sets those. That
+        // branch would be a rendered line no reachable test could ever cover,
+        // which is the same untestable-by-design trap this slice exists to
+        // remove.
         lines.push(
-          "  Then write REAL gotchas in .prhero/gotchas.md — the one just " +
-            "scaffolded is a placeholder, and pr-hero refuses to review while " +
-            `its \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line is there.`,
+          "  Write REAL gotchas in .prhero/gotchas.md — the one just " +
+            "scaffolded is a placeholder, and pr-hero refuses to review " +
+            `while its \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line is there.`,
         );
         lines.push("");
       }
@@ -751,7 +805,17 @@ export function renderWizardStep(
   });
 }
 
-export async function runWizard(deps: WizardDeps = {}): Promise<number> {
+// The state-PRODUCING half of `pr-hero setup`, split out from `runWizard` so
+// it can be driven in a test with injected deps. That split is not cosmetic:
+// while this loop was buried inside `runWizard`, the only way to reach step
+// 5's render was to hand-build a `WizardState`, and a hand-built state can
+// express combinations the loop cannot produce. `repoScaffolded` — a flag that
+// meant "cwd is a git repo" while its name promised "we scaffolded" — survived
+// a green suite for exactly that reason: every test that read it also wrote
+// it.
+export async function runWizardSteps(
+  deps: WizardDeps = {},
+): Promise<WizardState> {
   let state = createInitialWizardState();
 
   for (let i = 0; i < WIZARD_STEPS.length; i++) {
@@ -762,6 +826,12 @@ export async function runWizard(deps: WizardDeps = {}): Promise<number> {
     const applied = await step.apply(state, deps);
     state = { ...state, ...applied };
   }
+
+  return state;
+}
+
+export async function runWizard(deps: WizardDeps = {}): Promise<number> {
+  const state = await runWizardSteps(deps);
 
   const lines = renderWizardStep(state, {
     styles: Boolean(process.stdout.isTTY),
