@@ -487,6 +487,49 @@ describe("every cost-rendering call site in src/cli.ts carries the notional spli
   });
 });
 
+// `review()` and `reviewPr()` are unexported I/O shells, so no offline test
+// reaches their gotchas gate — which is exactly how the gate came to promise
+// something it did not enforce. The predicate itself is unit-tested in
+// test/preflight.test.ts; what has no other guard is that both shells actually
+// ASK it. Same precedent as the notional-split scan above: pin the wiring,
+// state the invariant rather than the line numbers.
+describe("every gotchas gate asks the shared predicate", () => {
+  const sources = ["../src/cli.ts", "../src/pipeline.ts", "../src/doctor.ts"];
+
+  test("no gate re-implements the old empty-only check", async () => {
+    // The exact statements the four gates used before the placeholder was
+    // rejected. The `if (` prefix is load-bearing: without it the guard also
+    // fires on the WHY comments that quote the old expression to explain why
+    // it was wrong, which would make the guard forbid naming its own subject.
+    // Collected into a list rather than asserted with `not.toContain` per
+    // file, because a failing `not.toContain` on a 7000-line source prints
+    // the whole file.
+    const offenders: string[] = [];
+    for (const rel of sources) {
+      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
+      for (const needle of [
+        "if (gotchas.trim().length === 0)",
+        "gotchasContent.trim().length === 0)",
+      ]) {
+        if (source.includes(needle)) offenders.push(`${rel}: ${needle}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("both review shells in src/cli.ts route through gotchasUnusableReason", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    const count = (needle: string) => source.split(needle).length - 1;
+    // Local review and PR review: two gates, two error renders, and every
+    // render carries the reason the predicate returned rather than a
+    // hardcoded one.
+    expect(count("gotchasUnusableReason(gotchas)")).toBe(2);
+    expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(2);
+  });
+});
+
 describe("postInlineFindings — step-14 ordering", () => {
   // Design rework (Juanma's PR #2 feedback item 2): the summary is CREATED
   // FIRST — before any finding is posted — so its position in the

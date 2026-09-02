@@ -70,7 +70,7 @@ import {
 // preflight and not a runtime dependency on it (the same seam size-gate.ts
 // already uses for NumstatFile).
 import type { ConfigSources, LocalConfig } from "./preflight";
-import { agentFilePath } from "./preflight";
+import { agentFilePath, gotchasUnusableReason } from "./preflight";
 import {
   parseAgentFile,
   parseAgentSource,
@@ -1028,14 +1028,22 @@ async function execute(
   deps: PipelineDeps,
   state: RunState,
 ): Promise<PipelineResult> {
-  // Step 2 — gotchas fail-loud. Missing or empty gotchas is a deliberate,
-  // visible failure signal: run_status "partial" with zero findings is
-  // distinguishable from a legitimate "hunters ran, found nothing" complete
-  // run. Never silently proceed as if gotchas were simply empty — no step is
-  // spawned. sessionFailed stays false: no hunter FAILED, none ever ran.
+  // Step 2 — gotchas fail-loud. Gotchas that are missing, empty, or still the
+  // untouched scaffold are a deliberate, visible failure signal: run_status
+  // "partial" with zero findings is distinguishable from a legitimate
+  // "hunters ran, found nothing" complete run. Never silently proceed as if
+  // gotchas were simply empty — no step is spawned. sessionFailed stays
+  // false: no hunter FAILED, none ever ran.
+  //
+  // The scaffold arm is not a nicety: `gotchas.trim().length === 0` passed
+  // every file `init`/`setup` writes, so the run this abort exists to prevent
+  // — hunters primed with `<subsystem>` placeholders, billed in full,
+  // reporting clean — was the DEFAULT outcome right after onboarding.
+  // `gotchasUnusableReason` is shared with the CLI and doctor so the four
+  // gates cannot drift apart again.
   const gotchasFile = Bun.file(input.gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
-  if (gotchas.trim().length === 0) {
+  if (gotchasUnusableReason(gotchas) !== undefined) {
     // The plan is still written, and that is not tidiness — `writePipelinePlan`
     // is the ONLY caller of `fillRereviewProvenance`, and that is the only
     // thing that fills the CLI's `rereview.live` from phase B. Returning

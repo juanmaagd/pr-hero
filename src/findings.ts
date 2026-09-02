@@ -147,7 +147,8 @@ export interface FindingsDocument {
   // "make `post` as permissive as `--pr --post`" suggestion: `run_status:
   // "partial"` with zero findings covers at least THREE distinct situations
   // — every hunter failed (the true sessionFailed case, pipeline.ts:771),
-  // no hunter ran at all because gotchas were missing (pipeline.ts:330-352,
+  // no hunter ran at all because gotchas were unusable — missing, empty, or
+  // still the untouched scaffold (pipeline's step-2 fail-loud,
   // sessionFailed: false), or one hunter died while the others found
   // nothing. `run_status` alone cannot tell these apart, so a permissive
   // `post` verb would publish a clean bill for a review that never ran.

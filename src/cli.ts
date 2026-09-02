@@ -211,8 +211,10 @@ import {
   DEFAULT_HOP_BUDGET,
   DEFAULT_SUMMARY_MODEL,
   emptyDiffMessage,
+  GOTCHAS_PLACEHOLDER_MARKER,
   GOTCHAS_TEMPLATE,
   gotchasErrorMessage,
+  gotchasUnusableReason,
   HELP_TEXT,
   headContainedInBaseMessage,
   INIT_GIT_REMINDER,
@@ -1230,8 +1232,9 @@ async function review(options: CliOptions): Promise<number> {
     : path.join(repoRoot, ".prhero", "gotchas.md");
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
-  if (gotchas.trim().length === 0) {
-    throw new CliError(gotchasErrorMessage(gotchasPath));
+  const gotchasUnusable = gotchasUnusableReason(gotchas);
+  if (gotchasUnusable !== undefined) {
+    throw new CliError(gotchasErrorMessage(gotchasPath, gotchasUnusable));
   }
 
   // 8 — run dir + diff.
@@ -1833,8 +1836,9 @@ async function reviewPr(
     : path.join(operatorRoot, ".prhero", "gotchas.md");
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
-  if (gotchas.trim().length === 0) {
-    throw new CliError(gotchasErrorMessage(gotchasPath));
+  const gotchasUnusable = gotchasUnusableReason(gotchas);
+  if (gotchasUnusable !== undefined) {
+    throw new CliError(gotchasErrorMessage(gotchasPath, gotchasUnusable));
   }
   // Local mode's dirty-tree and HEAD-match gates are both skipped here ON
   // PURPOSE: the hunters read the worktree and never this checkout, and the
@@ -4984,7 +4988,23 @@ async function init(options: CliOptions): Promise<number> {
   log();
   log(INIT_GIT_REMINDER);
   log();
-  log("Then edit .prhero/gotchas.md — pr-hero refuses to run without it.");
+  // "refuses to run without it" was true of an ABSENT file and false of the
+  // one this command just wrote: the scaffold is non-empty, so it used to
+  // sail through the gate and prime every hunter with `<subsystem>`
+  // placeholders. The marker is what makes the old sentence true, so the
+  // instruction has to name the marker.
+  log("Then edit .prhero/gotchas.md — two steps, both required:");
+  log("  1. replace the <subsystem> lines with facts about this repo");
+  log(
+    `  2. delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line at the top`,
+  );
+  log();
+  log(
+    "pr-hero refuses to review while that marker is present. It is not " +
+      "pedantry: the file above is non-empty, so without the marker a review " +
+      "would bill in full for hunters primed with placeholder text and report " +
+      "a clean-LOOKING result.",
+  );
   return 0;
 }
 
