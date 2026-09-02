@@ -37,6 +37,7 @@ import {
   loadEffectiveConfig,
   loadGlobalConfigLayer,
   main,
+  notionalCostInput,
   originUsageScope,
   persistCanonicalReview,
   pipelineConfigInput,
@@ -384,6 +385,105 @@ describe("CLI scout activation (ROADMAP-DOORDASH M5)", () => {
     // No `model:` on purpose — DEFAULT_SCOUT_MODEL owns that seat, so the
     // file's sha256 stays the one M4 ratified.
     expect(frontmatter).not.toContain("model:");
+  });
+});
+
+// #173. The engine has now shipped three fully-built, correct, never-connected
+// mechanisms (the spend ledger #171, the provider-cost disjunct, and
+// `notionalCostUsd` itself), so the LAST wiring step gets its own pin rather
+// than being trusted to the shell. The renderers and the pipeline rollup are
+// covered by their own suites; without this, deleting all four call sites in
+// `review()`/`reviewPr()` flips zero tests — verified by mutation, which is
+// exactly how the previous three stayed invisible.
+describe("notionalCostInput — the shell's cash/notional split (#173)", () => {
+  test("a subscription run's list figure reaches the renderers", () => {
+    expect(
+      notionalCostInput({
+        usageV2: {
+          wallMs: 1,
+          tokens: {},
+          completeness: "complete",
+          billingMode: "subscription",
+          costSource: "subscription",
+          cashCostUsd: 0,
+          notionalCostUsd: 0.0455,
+        },
+      }),
+    ).toEqual({ notionalUsd: 0.0455 });
+  });
+
+  // Absence over fabrication, on both doors into it: a runner that reported no
+  // normalized usage at all, and one that reported usage carrying no list
+  // figure. Both must yield NO key — the renderers omit their notional row on
+  // `undefined`, and a `0` here would print a list-price claim for a run that
+  // never produced one.
+  test("no rollup, and a rollup with no list figure, both stay absent", () => {
+    expect(notionalCostInput({})).toEqual({});
+    expect(
+      notionalCostInput({
+        usageV2: {
+          wallMs: 1,
+          tokens: {},
+          completeness: "unavailable",
+          billingMode: "unknown",
+          costSource: "unknown",
+        },
+      }),
+    ).toEqual({});
+  });
+
+  // A metered route reports real cash and no notional, so it keeps showing a
+  // single figure — the split must not invent a second one for it.
+  test("a metered run with cash and no notional stays single-figure", () => {
+    expect(
+      notionalCostInput({
+        usageV2: {
+          wallMs: 1,
+          tokens: {},
+          completeness: "complete",
+          billingMode: "metered",
+          costSource: "provider",
+          cashCostUsd: 0.42,
+        },
+      }),
+    ).toEqual({});
+  });
+});
+
+// The call sites themselves, guarded by shape rather than by behaviour, and
+// the reason is measured rather than assumed: `review()` and `reviewPr()` are
+// I/O shells no offline test can invoke, so with `notionalCostInput` tested
+// and both renderers tested, DELETING all four call sites still flipped zero
+// tests. That is the precise shape of the defect this issue reports — a
+// correct mechanism whose last wiring step silently never lands — so the wiring
+// gets a guard of its own, in the same spirit as the repo-hygiene scan in
+// test/preflight-bundled-prompts.test.ts.
+//
+// The invariant, not the line numbers, and stated at its real width
+// (2026-09-02, #177): every `renderResult(`/`renderReport(` call IN
+// `src/cli.ts` carries the notional companion. There are four today (two per
+// review shell); adding a FIFTH, or a third review shell inside this file, is
+// meant to trip this until it does the same.
+//
+// What is deliberately OUTSIDE it, and would not trip it: every other surface
+// that renders a run's cost — `ci-reporter`'s `cost_usd_est=` in
+// `$GITHUB_OUTPUT`, the `runs`/`run_agents` store and `pr-hero usage`,
+// metrics, the watcher feed, the server, backfill, and diversity's spend cap.
+// They all read `projectLegacyUsage`'s `cost_usd_est`, which is cash-only and
+// has no notional companion to pair with; the `runs` table has no notional
+// column at all, so `pr-hero usage` would mix two semantics across time. That
+// is a store-schema slice (#173's commit body names it), not this one — so
+// this scan pins the shell it can actually pin rather than claiming a
+// guarantee the codebase does not yet make.
+describe("every cost-rendering call site in src/cli.ts carries the notional split (#173)", () => {
+  test("renderResult and renderReport are each paired with notionalCostInput", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    const count = (needle: string) => source.split(needle).length - 1;
+    const renderCalls = count("renderResult(") + count("renderReport(");
+    expect(renderCalls).toBeGreaterThan(0);
+    expect(count("notionalCostInput(result)")).toBe(renderCalls);
   });
 });
 

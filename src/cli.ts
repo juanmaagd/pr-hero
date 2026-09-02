@@ -625,6 +625,29 @@ async function enforceProviderCapabilityGate(input: {
 // separately because `sources` cannot express it: a global file that exists
 // and says `{}` leaves every source at `repo` or `default`, exactly like no
 // file at all.
+// #173 (§8: "Artifacts and reports show cash and notional totals
+// separately"). The shell's one decision on the cash/notional split, extracted
+// into a pure function for the same reason `pipelineScoutInput` above is one:
+// `review()` and `reviewPr()` are I/O shells nothing can call offline, so a
+// decision left inline in them is a decision no test can reach. That matters
+// more here than usual — `notionalCostUsd` spent three slices fully built and
+// entirely unpopulated, and the step that goes missing in that pattern is
+// always the last wiring one. Deleting the four call sites below must fail a
+// test; without this function it flipped nothing.
+//
+// Absence, never zero: a run whose steps reported no normalized usage, or
+// reported usage carrying no provider figure, yields NO key at all, and both
+// renderers omit their notional line on `undefined`. A `0` default would print
+// "$0.00 at list price" for a run that never produced a list price — the same
+// fabrication `normalizeUnavailableUsage` exists to refuse, relocated to the
+// terminal.
+export function notionalCostInput(
+  result: Pick<PipelineResult, "usageV2">,
+): { notionalUsd: number } | Record<string, never> {
+  const notionalUsd = result.usageV2?.notionalCostUsd;
+  return notionalUsd === undefined ? {} : { notionalUsd };
+}
+
 export function pipelineConfigInput(loaded: EffectiveConfig): {
   config: {
     effective: LocalConfig;
@@ -1567,6 +1590,7 @@ async function review(options: CliOptions): Promise<number> {
       diffStat,
       excludedPaths: effectiveDiff.droppedPaths,
       costUsd: result.usage.cost_usd_est,
+      ...notionalCostInput(result),
       wallMs,
     }),
   );
@@ -1580,6 +1604,7 @@ async function review(options: CliOptions): Promise<number> {
   for (const line of renderResult({
     doc,
     costUsd: result.usage.cost_usd_est,
+    ...notionalCostInput(result),
     wallMs,
     estimate: { low: estimate.low, high: estimate.high },
     runDir,
@@ -2859,6 +2884,7 @@ async function reviewPr(
           diffStat,
           excludedPaths: effectiveDiff.droppedPaths,
           costUsd: result.usage.cost_usd_est,
+          ...notionalCostInput(result),
           wallMs,
         }),
       );
@@ -3033,6 +3059,7 @@ async function reviewPr(
       for (const line of renderResult({
         doc,
         costUsd: result.usage.cost_usd_est,
+        ...notionalCostInput(result),
         wallMs,
         estimate: { low: estimate.low, high: estimate.high },
         runDir,

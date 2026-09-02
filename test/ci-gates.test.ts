@@ -360,6 +360,38 @@ describe("deriveCiBillingMode", () => {
     );
   });
 
+  // 2026-09-02, #177. The rule this function states is "the mere PRESENCE of a
+  // key keeps the ceiling: we cannot rule out that it bills" — and
+  // ANTHROPIC_AUTH_TOKEN is a key by that rule. `ENV_PASSTHROUGH`
+  // (harness.ts) projects it into the child immediately beside
+  // ANTHROPIC_API_KEY as the same credential class, so a route carrying it
+  // spends per token exactly as a route carrying the API key does. Its
+  // omission was never a decision — the doctrine above never mentions it.
+  //
+  // Nil-delta for the shipped action: action.yml binds only
+  // `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`, so no generated
+  // workflow can newly acquire a ceiling from this arm.
+  test("a non-empty ANTHROPIC_AUTH_TOKEN is metered — same credential class", () => {
+    expect(deriveCiBillingMode({ ANTHROPIC_AUTH_TOKEN: "bearer-test" })).toBe(
+      "metered",
+    );
+  });
+
+  // Whitespace-only, not empty — the two are different cases and only this one
+  // needs the trim (`""` is already falsy). Naming it "empty" would be the
+  // same class of overstatement #177 corrected in this function's own comment.
+  test("a whitespace-only ANTHROPIC_AUTH_TOKEN is subscription", () => {
+    expect(deriveCiBillingMode({ ANTHROPIC_AUTH_TOKEN: "  " })).toBe(
+      "subscription",
+    );
+  });
+
+  test("an empty ANTHROPIC_AUTH_TOKEN is subscription", () => {
+    expect(deriveCiBillingMode({ ANTHROPIC_AUTH_TOKEN: "" })).toBe(
+      "subscription",
+    );
+  });
+
   test("an OAuth token alone is subscription", () => {
     expect(
       deriveCiBillingMode({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" }),

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyUsageUpdate,
+  envBillsMetered,
   normalizeInclusiveUsage,
   normalizePartialUsage,
   projectLegacyUsage,
@@ -103,6 +104,62 @@ describe("normalizePartialUsage — unproven inclusion (§8 line 457)", () => {
 
     expect(result.tokens.providerReportedTotal).toBe(42);
     expect(result.completeness).toBe("partial");
+  });
+});
+
+// 2026-09-02, #177. THE one predicate that reads "does this environment carry
+// a per-token credential?", and it has exactly two callers by design:
+// `deriveCiBillingMode` (ci-gates.ts), which turns it into a CI spend ceiling,
+// and the Claude CLI transport, which turns it into the billing mode STAMPED
+// ON EVERY USAGE RECORD. Two copies would be two chances for the ceiling and
+// the records to disagree about whether one run bills — and #177 is exactly
+// that disagreement, found live: ci-gates already called an API-key route
+// metered while the transport filed its spend as "not charged".
+describe("envBillsMetered — the shared metered-credential signal (#177)", () => {
+  test("a non-empty ANTHROPIC_API_KEY bills metered", () => {
+    expect(envBillsMetered({ ANTHROPIC_API_KEY: "sk-test" })).toBe(true);
+  });
+
+  // The variable `ENV_PASSTHROUGH` (harness.ts) projects into the child
+  // immediately beside ANTHROPIC_API_KEY, in the same credential class: a
+  // bearer token for a gateway that bills per token. Omitting it was the
+  // narrower half of #177 — the same real spend, one variable over.
+  test("a non-empty ANTHROPIC_AUTH_TOKEN bills metered", () => {
+    expect(envBillsMetered({ ANTHROPIC_AUTH_TOKEN: "bearer-test" })).toBe(true);
+  });
+
+  // action.yml:111 binds ANTHROPIC_API_KEY UNCONDITIONALLY and GitHub renders
+  // an unset input as the empty string, so every subscription-route CI run
+  // carries `ANTHROPIC_API_KEY=""`. Trimming is load-bearing, not defensive.
+  test("an empty or whitespace-only value is not a metered signal", () => {
+    expect(envBillsMetered({ ANTHROPIC_API_KEY: "" })).toBe(false);
+    expect(envBillsMetered({ ANTHROPIC_API_KEY: "   " })).toBe(false);
+    expect(envBillsMetered({ ANTHROPIC_AUTH_TOKEN: "" })).toBe(false);
+    expect(envBillsMetered({ ANTHROPIC_AUTH_TOKEN: "\t " })).toBe(false);
+  });
+
+  test("an OAuth token alone is not a metered signal — that is the subscription", () => {
+    expect(
+      envBillsMetered({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" }),
+    ).toBe(false);
+  });
+
+  // The conservative direction. This repo does NOT know which credential the
+  // Claude CLI bills when both are present (ci-gates.ts states the gap at
+  // length), and it does not need to: guess "subscription" wrongly and real
+  // money is reported as not charged, which is the under-reporting failure
+  // #177 exists to close.
+  test("an OAuth token beside an API key still bills metered", () => {
+    expect(
+      envBillsMetered({
+        ANTHROPIC_API_KEY: "sk-test",
+        CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test",
+      }),
+    ).toBe(true);
+  });
+
+  test("an empty env is not a metered signal", () => {
+    expect(envBillsMetered({})).toBe(false);
   });
 });
 

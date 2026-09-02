@@ -89,7 +89,21 @@ export interface ResultInput {
   // derived here, from the same bytes that were just written to disk, so the
   // terminal and findings.json cannot disagree about what the run found.
   doc: FindingsDocument;
+  // CASH, and only cash — the figure the header's `$X.XX` reports and the one
+  // budget enforcement is allowed to read (§8: "Budget enforcement uses cash
+  // only"). On a Claude subscription route this is a truthful $0.00.
   costUsd: number;
+  // #173 (§8: "Artifacts and reports show cash and notional totals
+  // separately"). The list-basis figure a subscription run was NOT charged,
+  // kept strictly apart from `costUsd` and rendered with its own label — the
+  // design's "research comparisons may use notional only when clearly
+  // labelled" is a rendering obligation, not just a storage one.
+  //
+  // Optional, and absent means NO ROW rather than a `$0.00` one: a runner that
+  // reports no normalized usage has no list figure to show, and printing one
+  // it never produced is the fabrication the whole usage slice exists to
+  // prevent.
+  notionalUsd?: number;
   wallMs: number;
   estimate: { low: number; high: number };
   // One directory plus the basenames written inside it. The full paths still
@@ -527,6 +541,20 @@ export function renderResult(input: ResultInput): string[] {
       footer,
     ),
   );
+  // #173: the second half of the §8 cash/notional split, and the reason the
+  // header's `$0.00` on a subscription run is informative rather than broken.
+  // Its own row, its own label, and wording that names the basis — a bare
+  // second dollar figure beside the first is exactly the mixing §8 forbids.
+  if (input.notionalUsd !== undefined) {
+    lines.push(
+      ...row(
+        "notional",
+        `$${input.notionalUsd.toFixed(2)} at list price — not charged on a ` +
+          "subscription; budget limits read the cash figure above",
+        footer,
+      ),
+    );
+  }
   // D8: naming the fenced bucket(s) HERE, not only in pipeline.json, is the
   // whole point of this row — see the module-level ResultUnresolved comment.
   if (hasUnresolved) {
