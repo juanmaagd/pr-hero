@@ -49,7 +49,10 @@ import {
   resolveRunnerAuthority,
 } from "../src/runner-authority";
 import type { CredentialBroker } from "../src/security/credential-broker";
-import { OpenCodeAuthBroker } from "../src/security/credential-broker";
+import {
+  OpenCodeApiTokenBroker,
+  OpenCodeAuthBroker,
+} from "../src/security/credential-broker";
 import { authorizeWorkspaceCwd } from "../src/security/execution-authority";
 import { buildStepArgv } from "../src/step-runner";
 import {
@@ -1501,20 +1504,26 @@ describe("production runtime PR1", () => {
       // `openai`.
       const UNPRICED_ZAI_MODEL = "zai/glm-5-turbo";
 
-      // THE offline seam, and the reason these arms need one at all:
       // `MultiProviderRunner.run` pre-confirms the OpenCode SDK before every
-      // opencode attempt (production-runtime.ts), and
-      // `needsOpenCodeSdkProbe()` is false only for a backend a caller
-      // OVERRODE with `registry.register("opencode", ...)`. Every other
-      // opencode arm in this file registers an instance and so never probes;
-      // these arms must NOT, because registering an instance bypasses the
-      // factory — and the factory reading `credentialKind` is the entire
-      // property under test. Injecting `loadSdk` satisfies the probe without
-      // the package: `@opencode-ai/sdk` is an OPTIONAL dependency, absent on
-      // CI, and the suite is offline by contract (CLAUDE.md). The fake is
-      // never called for anything else — `probeOpenCodeSdk()` discards the
-      // result, and `createOpenCodeClient` is on the branch an injected
-      // `openCodeClient` skips.
+      // opencode attempt, and `needsOpenCodeSdkProbe()` is false only for a
+      // backend a caller OVERRODE with `registry.register("opencode", ...)`.
+      // Every other opencode arm in this file registers an instance and so
+      // never probes; these arms must NOT, because registering an instance
+      // bypasses the factory — and the factory reading `credentialKind` is
+      // the entire property under test. So these two are the only arms that
+      // reach the probe, and `@opencode-ai/sdk` is an OPTIONAL dependency: on
+      // any checkout installed without it the probe fails before anything
+      // else, since it runs ahead of `acquire()` and ahead of credential
+      // projection. Injecting `loadSdk` satisfies it without the package —
+      // `probeOpenCodeSdk()` discards the result, and `createOpenCodeClient`
+      // is on the branch an injected `openCodeClient` skips.
+      //
+      // What this seam is NOT: the fix for these arms' CI failure. That was
+      // diagnosed as a missing SDK because hiding the package reproduced the
+      // symptom exactly — and it did, because `sessionCount() === 0` is what
+      // EVERY upstream failure looks like from down here. The real cause was
+      // the credential broker below. A symptom match is not a cause; the
+      // guard that told them apart is `assertAttemptRan`.
       const loadSdk = async () =>
         ({
           createOpencodeClient: () => ({ session: {}, event: {} }),
@@ -1628,6 +1637,31 @@ describe("production runtime PR1", () => {
             },
             registry,
             mode: "conformance" as const,
+            // The defect the CI red actually exposed, and it is worse than a
+            // red build: with no broker injected, `resolveBindingAuthority`
+            // falls through to `openCodeCredentialBroker("zai")` — a real
+            // `OpenCodeApiTokenBroker` reading the OPERATOR's
+            // ~/.local/share/opencode/auth.json. On CI that file is absent and
+            // projection failed (`source_read_failed`); on a developer
+            // machine it SUCCEEDS, so every `bun test` was reading a real
+            // credential store and projecting a real API key into a temp dir.
+            // An offline suite must never touch the operator's credentials —
+            // the green local run was the more dangerous of the two outcomes,
+            // because nothing about it looked wrong.
+            //
+            // `readerFn` is the same seam the OAuth arms above use; only the
+            // broker CLASS differs, because it must match the kind this route
+            // resolves (`provider_api_token`, from `credentialKindForRoute`)
+            // — the broker refuses any other kind by name. Injecting a broker
+            // changes only WHERE the credential comes from, never which kind
+            // the binding resolved, which is why the arms stay non-vacuous;
+            // both assert that kind explicitly.
+            credentialBrokers: {
+              opencode: new OpenCodeApiTokenBroker("zai", {
+                readerFn: async () =>
+                  JSON.stringify({ zai: { type: "api", key: "test-token" } }),
+              }),
+            },
           },
         };
       }
@@ -1680,6 +1714,12 @@ describe("production runtime PR1", () => {
           driven.client,
         );
         const runtime = await createProductionRuntime(options);
+
+        // Non-vacuity, asserted per arm: the fence below is only the
+        // metered-zero rule's consequence if this route really is metered.
+        expect(
+          runtime.bindings.get(step.routeFingerprint)?.credential.kind,
+        ).toBe("provider_api_token");
 
         const first = await runtime.runner.run(
           makeStep(tmpDir, {
