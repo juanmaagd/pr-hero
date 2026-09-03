@@ -178,6 +178,15 @@ export async function isFreeModel(input: IsFreeModelInput): Promise<boolean> {
   }
 }
 
+// Collision-free memo key for (provider, model) verdicts. RouteMapping
+// provider/modelSnapshot are unconstrained strings and model ids may contain
+// "/" (proven by our own header test) — so `${provider}/${model}` collides:
+// ("a","b/c") and ("a/b","c") share one key and one verdict. JSON.stringify
+// of the pair cannot collide: distinct pairs serialize distinctly.
+export function freeVerdictKey(provider: string, model: string): string {
+  return JSON.stringify([provider, model]);
+}
+
 // One probe instance per admission: memoised per (provider, model) so the
 // plan-level server credential and the per-binding upgrades share ONE verdict
 // (the #149 anti-drift rule — two spawns could disagree across a provider
@@ -188,7 +197,7 @@ export function createFreeModelProbe(options: {
 }): FreeModelProbe {
   const cache = new Map<string, Promise<boolean>>();
   return (provider: string, model: string) => {
-    const key = `${provider}/${model}`;
+    const key = freeVerdictKey(provider, model);
     const cached = cache.get(key);
     if (cached !== undefined) return cached;
     const verdict = isFreeModel({

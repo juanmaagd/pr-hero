@@ -23,7 +23,7 @@ import {
   InMemorySpendLedger,
   type SpendLedger,
 } from "./execution/spend-limiter";
-import type { FreeModelProbe } from "./free-model-discovery";
+import { type FreeModelProbe, freeVerdictKey } from "./free-model-discovery";
 import type {
   ResolvedRoutePlan,
   ResolvedStepRoute,
@@ -555,7 +555,10 @@ async function resolveFrozenBindings(
   ): Promise<boolean> => {
     const probe = options.freeModelProbe;
     if (probe === undefined) return false;
-    const key = `${provider}/${model}`;
+    // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
+    // "/" (free-model-discovery.ts header test), so the join collides
+    // ("a","b/c") vs ("a/b","c") — one verdict for two models.
+    const key = freeVerdictKey(provider, model);
     const cached = freeVerdicts.get(key);
     if (cached !== undefined) return cached;
     const verdict = (async () => {
@@ -887,7 +890,11 @@ export async function prepareProductionAdmissionContext(input: {
     const verdicts = new Map<string, Promise<boolean>>();
     const rawProbe = input.freeModelProbe;
     const memoised: FreeModelProbe = (provider: string, model: string) => {
-      const key = `${provider}/${model}`;
+      // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
+      // "/" (free-model-discovery.ts header test), so the join collides
+      // ("a","b/c") vs ("a/b","c") — one verdict for two models. The display
+      // joins below stay human-readable on purpose: they never key a map.
+      const key = freeVerdictKey(provider, model);
       const cached = verdicts.get(key);
       if (cached !== undefined) return cached;
       const verdict = (async () => {
@@ -907,10 +914,13 @@ export async function prepareProductionAdmissionContext(input: {
       const pairs = new Map<string, { provider: string; model: string }>();
       for (const step of input.plan.steps) {
         if (step.route.backend !== "opencode") continue;
-        pairs.set(`${step.route.provider}/${step.route.modelSnapshot}`, {
-          provider: step.route.provider,
-          model: step.route.modelSnapshot,
-        });
+        pairs.set(
+          freeVerdictKey(step.route.provider, step.route.modelSnapshot),
+          {
+            provider: step.route.provider,
+            model: step.route.modelSnapshot,
+          },
+        );
       }
       if (pairs.size > 0) {
         const results = await Promise.all(
@@ -1401,7 +1411,11 @@ export async function createProductionRuntime(
     const rawProbe = options.freeModelProbe;
     const verdicts = new Map<string, Promise<boolean>>();
     const memoised: FreeModelProbe = (provider, model) => {
-      const key = `${provider}/${model}`;
+      // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
+      // "/" (free-model-discovery.ts header test), so the join collides
+      // ("a","b/c") vs ("a/b","c") — one verdict for two models. The display
+      // joins below stay human-readable on purpose: they never key a map.
+      const key = freeVerdictKey(provider, model);
       const cached = verdicts.get(key);
       if (cached !== undefined) return cached;
       const verdict = (async () => {
@@ -1423,7 +1437,7 @@ export async function createProductionRuntime(
       const pairs = new Map<string, { provider: string; model: string }>();
       for (const step of plan.steps) {
         if (step.route.backend !== "opencode") continue;
-        pairs.set(`${step.route.provider}/${step.route.modelSnapshot}`, {
+        pairs.set(freeVerdictKey(step.route.provider, step.route.modelSnapshot), {
           provider: step.route.provider,
           model: step.route.modelSnapshot,
         });

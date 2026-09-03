@@ -7,7 +7,7 @@ import type {
   ProviderCapabilityReport,
   RunnerBackend,
 } from "../src/execution/contracts";
-import { createFreeModelProbe, isFreeModel } from "../src/free-model-discovery";
+import { createFreeModelProbe, freeVerdictKey, isFreeModel } from "../src/free-model-discovery";
 import {
   createResolvedRoutePlan,
   resolveStepRoute,
@@ -392,6 +392,28 @@ describe("#182 isFreeModel strict predicate (live shape, fake spawn)", () => {
     expect(await probe("opencode", "m")).toBe(true);
     expect(calls).toBe(1);
     expect(await probe("opencode", "other")).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  test("freeVerdictKey keeps slash-colliding pairs independent", async () => {
+    // ("a","b/c") and ("a/b","c") share the `${provider}/${model}` join
+    // "a/b/c" — with a colliding key the second probe would reuse the first
+    // verdict without spawning. The counting run proves two spawns happened.
+    expect(freeVerdictKey("a", "b/c")).not.toBe(freeVerdictKey("a/b", "c"));
+    let calls = 0;
+    const probe = createFreeModelProbe({
+      binaryPath: "/fake/opencode",
+      run: async (argv) => {
+        calls++;
+        const provider = argv[2] as string;
+        if (provider === "a") {
+          return { exitCode: 0, stdout: freeStdout("a", "b/c") };
+        }
+        return { exitCode: 0, stdout: "a/b/c\n{}" };
+      },
+    });
+    expect(await probe("a", "b/c")).toBe(true);
+    expect(await probe("a/b", "c")).toBe(false);
     expect(calls).toBe(2);
   });
 });
