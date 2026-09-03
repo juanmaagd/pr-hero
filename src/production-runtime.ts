@@ -23,7 +23,11 @@ import {
   InMemorySpendLedger,
   type SpendLedger,
 } from "./execution/spend-limiter";
-import { type FreeModelProbe, freeVerdictKey } from "./free-model-discovery";
+import {
+  createFreeModelProbe,
+  type FreeModelProbe,
+  freeVerdictKey,
+} from "./free-model-discovery";
 import type {
   ResolvedRoutePlan,
   ResolvedStepRoute,
@@ -885,10 +889,48 @@ export async function prepareProductionAdmissionContext(input: {
     readonly kind: CredentialKind;
     readonly provider: string;
   } = { kind: baseCredential.kind, provider: baseCredential.provider };
+  // #182 follow-up, CLI threading: the authority is resolved BEFORE probe
+  // evaluation (not after) so the probe can be built from the
+  // AUTHORITY-RESOLVED openCodeBinaryPath — never a second binary lookup for
+  // the probe beside the one the authority already did. Reused below as the
+  // final authorityOptions with only the decided broker overlaid, so no
+  // second resolution runs either.
+  const preliminaryAuthority = await prepareProductionRunnerAuthority(
+    input.workspaceRoot,
+    input.plan,
+    input.authorityDeps,
+    {
+      ...(input.env === undefined ? {} : { env: input.env }),
+      ...(input.credentialBrokers === undefined
+        ? {}
+        : { credentialBrokers: input.credentialBrokers }),
+    },
+  );
+  if ("error" in preliminaryAuthority) {
+    return preliminaryAuthority;
+  }
+  // When the caller supplied no probe but the plan names opencode routes and
+  // the authority resolved a binary, probe for real: without this nothing in
+  // src/ ever supplies a freeModelProbe on the CLI path, so real runs never
+  // upgrade and the feature is dead in production. Fail-closed (a spawn
+  // failure probes false) and time-bounded (the probe's own 30s default), so
+  // a missing/broken binary keeps the metered kind instead of hanging
+  // admission. OAuth-only and claude-only plans skip it: no opencode route
+  // means no model to ask about.
+  let probeInput = input.freeModelProbe;
+  if (
+    probeInput === undefined &&
+    preliminaryAuthority.openCodeBinaryPath !== undefined &&
+    input.plan.steps.some((step) => step.route.backend === "opencode")
+  ) {
+    probeInput = createFreeModelProbe({
+      binaryPath: preliminaryAuthority.openCodeBinaryPath,
+    });
+  }
   let sharedFreeProbe: FreeModelProbe | undefined;
-  if (input.freeModelProbe !== undefined) {
+  if (probeInput !== undefined) {
     const verdicts = new Map<string, Promise<boolean>>();
-    const rawProbe = input.freeModelProbe;
+    const rawProbe = probeInput;
     const memoised: FreeModelProbe = (provider: string, model: string) => {
       // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
       // "/" (free-model-discovery.ts header test), so the join collides
@@ -977,19 +1019,12 @@ export async function prepareProductionAdmissionContext(input: {
         openCodeCredential.provider,
       ),
   };
-  const authorityResult = await prepareProductionRunnerAuthority(
-    input.workspaceRoot,
-    input.plan,
-    input.authorityDeps,
-    {
-      ...(input.env === undefined ? {} : { env: input.env }),
-      credentialBrokers,
-    },
-  );
-  if ("error" in authorityResult) {
-    return authorityResult;
-  }
-  const authorityOptions = authorityResult;
+  // The preliminary authority above, with only the decided broker overlaid —
+  // re-resolving here would be a second binary lookup for the same binaries.
+  const authorityOptions: RunnerAuthorityOptions = {
+    ...preliminaryAuthority,
+    credentialBrokers,
+  };
 
   const probeRegistry = createDefaultTransportRegistry({
     mode: "conformance",

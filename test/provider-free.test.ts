@@ -792,6 +792,92 @@ describe("#182 wiring: bindings, server, gates", () => {
     }
   });
 
+  test("CLI threading: admission auto-creates a probe from the resolved binary; a failing binary stays metered without hanging", async () => {
+    // No freeModelProbe supplied — the CLI path. The fixture binary resolves
+    // via PATH discovery but cannot execute (Mach-O prefix + bytes, not a
+    // program), so the live spawn fails fast and fail-closed keeps metered.
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-auto-"));
+    try {
+      const opencode = await writeOpenCodeFixture(tmpDir);
+      const plan = createResolvedRoutePlan([
+        opencodeStep("hunter", "opencode/some-model", "opencode", "some-model"),
+      ]);
+      const start = Date.now();
+      const admission = await prepareProductionAdmissionContext({
+        workspaceRoot: tmpDir,
+        plan,
+        env: { PATH: `${tmpDir}:/usr/bin:/bin` },
+        loadSdk: async () =>
+          ({
+            createOpencodeClient: () => ({ session: {}, event: {} }),
+          }) as never,
+      });
+      expect(Date.now() - start).toBeLessThan(10_000);
+      if ("error" in admission) throw new Error(admission.error);
+      // Metered preserved: the probe ran (and failed closed) rather than the
+      // plan silently upgrading — or silently skipping the probe entirely.
+      expect(admission.registry.openCodeCredentialKind).toBe(
+        "provider_api_token",
+      );
+      expect(admission.freeModelProbe).toBeDefined();
+      expect(opencode.canonicalPath.length).toBeGreaterThan(0);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("CLI threading: the admission's shared probe drives registry-built runtimes free end to end", async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-wired-"));
+    try {
+      const plan = createResolvedRoutePlan([
+        opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+        opencodeStep(
+          "refuter",
+          "opencode/other-free",
+          "opencode",
+          "other-free",
+        ),
+      ]);
+      const admission = await prepareProductionAdmissionContext({
+        workspaceRoot: tmpDir,
+        plan,
+        loadSdk: async () =>
+          ({
+            createOpencodeClient: () => ({ session: {}, event: {} }),
+          }) as never,
+        freeModelProbe: async () => true,
+      });
+      if ("error" in admission) throw new Error(admission.error);
+      expect(admission.registry.openCodeCredentialKind).toBe("provider_free");
+      // Exactly what cli.ts now forwards: the admission's shared instance
+      // into a registry-built runtime — server-free implies bindings-free
+      // with no re-spawn and no divergence refusal.
+      const runtime = await createProductionRuntime({
+        ...admission.authorityOptions,
+        plan,
+        workspaceRoot: tmpDir,
+        registry: admission.registry,
+        mode: "conformance",
+        ...(admission.freeModelProbe === undefined
+          ? {}
+          : { freeModelProbe: admission.freeModelProbe }),
+      });
+      try {
+        expect(
+          (runtime.registry as DefaultTransportRegistry)
+            .openCodeCredentialKind,
+        ).toBe("provider_free");
+        for (const binding of runtime.bindings.values()) {
+          expect(binding.credential.kind).toBe("provider_free");
+        }
+      } finally {
+        await runtime.dispose();
+      }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("soleOpenCodeCredential stays provider-based (free needs the async probe)", () => {
     const plan = createResolvedRoutePlan([
       opencodeStep("h", "opencode/m", "opencode", "m"),
