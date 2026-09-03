@@ -352,6 +352,56 @@ describe("PR0 — live retry decision (§7)", () => {
     // see -- the same rule the transport-diagnostics section follows.
     expect(second).toContain("--- observed models ---");
   });
+
+  test("a watchdog-killed attempt flushes its attempt log with timed_out: true (#185)", async () => {
+    const dir = await tempDir();
+    let calls = 0;
+    const transport: ProviderTransport = {
+      backend: "claude-code",
+      capabilities: async () => CAPABILITIES,
+      execute: async (_req, { signal }) => {
+        calls++;
+        if (calls === 1) {
+          return new Promise<TransportOutcome>((resolve) => {
+            signal.addEventListener("abort", () => {
+              resolve(failOutcome({ timedOut: true }));
+            });
+          });
+        }
+        return okOutcome();
+      },
+      classifyFailure: () => undefined,
+    };
+
+    const step = await makeStep(dir, {
+      timeoutMs: 30,
+      maxAttempts: 2,
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("ok");
+    expect(calls).toBe(2);
+
+    const firstLog = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(firstLog).toContain("timed_out: true");
+    expect(firstLog).toContain("classification: transient");
+    expect(firstLog).toContain("cause: watchdog_timeout");
+    expect(firstLog).toContain("Step timed out after 30ms");
+
+    const secondLog = await Bun.file(
+      path.join(dir, "logs", `${step.name}.2.log`),
+    ).text();
+    expect(secondLog).toContain("timed_out: false");
+    expect(secondLog).toContain("classification: ok");
+  });
 });
 
 describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {

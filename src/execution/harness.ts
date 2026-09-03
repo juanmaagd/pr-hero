@@ -1788,16 +1788,33 @@ export class StepExecutionHarness implements StepRunner {
       return { kind: "delivered", outcome, parsed: execution.delivery.parsed };
     }
 
+    const resolution =
+      execution.delivery?.resolution ??
+      resolveFailureCause({
+        outcome,
+        classifyFailure: transport.classifyFailure,
+        parseThrew: false,
+      });
+
+    // #185: when execution.delivery is undefined (e.g. watchdog timeout),
+    // onData was bypassed, so writeAttemptLog was never called. Flush it
+    // now so the attempt log exists on disk for post-mortem diagnostics.
+    if (execution.delivery === undefined) {
+      const classification = legacyClassificationFromCause(resolution);
+      await writeAttemptLog(
+        step,
+        attempt,
+        kind,
+        outcome,
+        classification,
+        resolution.kind === "cause" ? resolution.cause : "legacy_terminal",
+      ).catch(() => {});
+    }
+
     return {
       kind: "failed",
       outcome,
-      resolution:
-        execution.delivery?.resolution ??
-        resolveFailureCause({
-          outcome,
-          classifyFailure: transport.classifyFailure,
-          parseThrew: false,
-        }),
+      resolution,
     };
   }
 }
