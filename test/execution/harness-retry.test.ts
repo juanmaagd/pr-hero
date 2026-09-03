@@ -402,7 +402,7 @@ describe("PR0 — live retry decision (§7)", () => {
       ).text(),
     );
     expect(firstReceipt.lateWriteFence.closed).toBe(true);
-    expect(firstReceipt.lateWriteFence.rejectedEvents).toBe(0);
+    expect(firstReceipt.lateWriteFence.rejectedEvents).toBe(1);
 
     const secondLog = await Bun.file(
       path.join(dir, "logs", `${step.name}.2.log`),
