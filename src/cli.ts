@@ -213,10 +213,12 @@ import {
   emptyDiffMessage,
   GOTCHAS_TEMPLATE,
   gotchasErrorMessage,
+  gotchasUnusableReason,
   HELP_TEXT,
   headContainedInBaseMessage,
   INIT_GIT_REMINDER,
   initConfigTemplate,
+  initGotchasInstructions,
   initTemplateOmissions,
   isCiEnvironment,
   isFullCommitId,
@@ -1230,8 +1232,9 @@ async function review(options: CliOptions): Promise<number> {
     : path.join(repoRoot, ".prhero", "gotchas.md");
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
-  if (gotchas.trim().length === 0) {
-    throw new CliError(gotchasErrorMessage(gotchasPath));
+  const gotchasUnusable = gotchasUnusableReason(gotchas);
+  if (gotchasUnusable !== undefined) {
+    throw new CliError(gotchasErrorMessage(gotchasPath, gotchasUnusable));
   }
 
   // 8 — run dir + diff.
@@ -1833,8 +1836,9 @@ async function reviewPr(
     : path.join(operatorRoot, ".prhero", "gotchas.md");
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
-  if (gotchas.trim().length === 0) {
-    throw new CliError(gotchasErrorMessage(gotchasPath));
+  const gotchasUnusable = gotchasUnusableReason(gotchas);
+  if (gotchasUnusable !== undefined) {
+    throw new CliError(gotchasErrorMessage(gotchasPath, gotchasUnusable));
   }
   // Local mode's dirty-tree and HEAD-match gates are both skipped here ON
   // PURPOSE: the hunters read the worktree and never this checkout, and the
@@ -4982,9 +4986,30 @@ async function init(options: CliOptions): Promise<number> {
     );
   }
   log();
+  // Unconditional on purpose, and NOT "consistency-fixed" below: this is
+  // advice ("commit .prhero/ or ignore it"), true in every state this command
+  // can leave the repo in. It asserts nothing about the contents of a file.
   log(INIT_GIT_REMINDER);
   log();
-  log("Then edit .prhero/gotchas.md — pr-hero refuses to run without it.");
+  // The block that follows DOES assert file contents, and the write above is
+  // skipped whenever the file already exists — so it is a function of which of
+  // `wrote`/`kept` the gotchas file landed in, never a constant. Printed
+  // unconditionally it told a repo with real gotchas to delete a marker line
+  // that is not in its file. When the file was kept, the only honest source
+  // for what to say about it is the gate itself, over the bytes on disk.
+  const gotchasOutcome = wrote.includes(gotchasPath)
+    ? ({ written: true } as const)
+    : ({
+        written: false,
+        // `.catch("")`: the file was on disk a moment ago — that is why it was
+        // kept — and a read that loses that race must not turn `init` into a
+        // crash. An empty read renders the "empty" arm, which is the correct
+        // advice for a file that is no longer there.
+        contents: await Bun.file(gotchasPath)
+          .text()
+          .catch(() => ""),
+      } as const);
+  for (const line of initGotchasInstructions(gotchasOutcome)) log(line);
   return 0;
 }
 

@@ -21,6 +21,7 @@ import {
   RUNTIME_PREAMBLE,
   runPipeline,
 } from "../src/pipeline";
+import { GOTCHAS_TEMPLATE } from "../src/preflight";
 import type { PriorRecord } from "../src/rereview-classify";
 import type { RereviewProvenance } from "../src/rereview-prepare";
 import type { ScoutLead } from "../src/scout";
@@ -338,6 +339,23 @@ describe("gotchas fail-loud", () => {
     const input = await makeInput({}, { gotchas: "" });
     const result = await runPipeline(input, { runner });
     expect(result.skillOutput).toEqual(PARTIAL_EMPTY);
+    expect(runner.specs.length).toBe(0);
+  });
+
+  // The hole the "empty" gate left open, and the reason it mattered: the file
+  // `pr-hero init` and `pr-hero setup` write is NON-EMPTY, so it passed. The
+  // first review after onboarding therefore spawned every hunter with
+  // `- <subsystem>: <the thing that looks like a bug...>` in its system
+  // prompt, billed for it, and returned a clean-LOOKING result. Zero steps is
+  // the whole assertion: no money moves.
+  test("the scaffolded placeholder short-circuits exactly like an empty file", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput({}, { gotchas: GOTCHAS_TEMPLATE });
+    const result = await runPipeline(input, { runner });
+    expect(result.skillOutput).toEqual(PARTIAL_EMPTY);
+    expect(result.sessionFailed).toBe(false);
+    expect(result.perAgent).toEqual({});
+    expect(result.usage.tokens_total).toBe(0);
     expect(runner.specs.length).toBe(0);
   });
 

@@ -1,12 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
+  GOTCHAS_PLACEHOLDER_MARKER,
+  gotchasUnusableReason,
+  INIT_GIT_REMINDER,
+} from "../src/preflight";
+import {
   CURRENT_ONBOARDING_VERSION,
   createInitialWizardState,
   isMachineOnboarded,
   renderWizardStep,
   runWizard,
+  runWizardSteps,
   WIZARD_STEPS,
+  type WizardDeps,
   wizardReducer,
 } from "../src/wizard";
 
@@ -125,6 +132,51 @@ describe("Wizard state machine & steps", () => {
       expect(gotchasRaw).toContain(
         "<!-- human-attention-required: zero invariants defined during onboarding -->",
       );
+      // The loop that matters, closed on the ACTUAL bytes rather than on a
+      // literal retyped into another test file: what `setup` writes here is
+      // what `review`, the pipeline and `doctor` all refuse. `runWizard`
+      // dispatches no reducer actions, so `gotchas.entries` is always empty
+      // and this file is what `pr-hero setup` produces WHENEVER it writes one
+      // — which, since neither write overwrites, is only in a repo that had
+      // no `.prhero/gotchas.md` yet.
+      expect(gotchasUnusableReason(gotchasRaw)).toBe("placeholder");
+      // ...and the flag step 5 reads before warning about that file agrees
+      // with the bytes just asserted.
+      expect(result?.placeholderGotchasWritten).toBe(true);
+      expect(result?.workspaceFilesWritten).toBe(true);
+    });
+
+    test("a gotchas file already on disk is neither rewritten nor claimed", async () => {
+      // The other half of "never overwrites": when both files exist, this run
+      // wrote nothing into `.prhero/`, and both of step 5's flags must say so.
+      // They used to be one flag assigned `isRepo`, which was true here.
+      const written: Record<string, string> = {
+        "/repo/.prhero/config.json": '{"default_base": "main"}\n',
+        "/repo/.prhero/gotchas.md":
+          "# Repo gotchas\n\n- auth: tokens are refreshed by the broker, never in-process.\n",
+      };
+      const before = { ...written };
+
+      const step = WIZARD_STEPS.find((s) => s.id === "workspace");
+      const result = await step?.apply(createInitialWizardState(), {
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p: string) => Object.hasOwn(written, p),
+        readFile: (p: string) => written[p],
+        writeFile: async (p: string, c: string) => {
+          written[p] = c;
+        },
+        exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      });
+
+      expect(result?.workspaceFilesWritten).toBe(false);
+      expect(result?.placeholderGotchasWritten).toBe(false);
+      expect(written["/repo/.prhero/gotchas.md"]).toBe(
+        before["/repo/.prhero/gotchas.md"],
+      );
+      expect(written["/repo/.prhero/config.json"]).toBe(
+        before["/repo/.prhero/config.json"],
+      );
     });
 
     test("apply with commitChoice 'commit' stages .prhero and creates chore commit", async () => {
@@ -155,7 +207,22 @@ describe("Wizard state machine & steps", () => {
         },
       };
 
-      await step?.apply(initialState, deps);
+      const result = await step?.apply(initialState, deps);
+
+      // The distinction the two flags exist to keep: entries were collected,
+      // so the gotchas file this run wrote is REAL and carries no marker —
+      // step 5's placeholder warning would be false about it. Collapsing the
+      // flag into "we wrote gotchas" is the regression this catches.
+      //
+      // Honest caveat: nothing in production dispatches SET_GOTCHAS_ENTRIES
+      // today, so this branch is reached only through `apply`'s own signature.
+      // It is a contract test for `apply`, not a user-reachable ending — the
+      // reachable endings are asserted through `runWizardSteps` further down.
+      expect(result?.placeholderGotchasWritten).toBe(false);
+      expect(result?.workspaceFilesWritten).toBe(true);
+      expect(written["/repo/.prhero/gotchas.md"]).not.toContain(
+        GOTCHAS_PLACEHOLDER_MARKER,
+      );
 
       expect(executed).toContainEqual(["git", "add", ".prhero"]);
       expect(executed).toContainEqual([
@@ -560,5 +627,184 @@ describe("Wizard state machine & steps", () => {
       expect(rendered).toContain("probe failed");
       expect(rendered).toContain("credential broker unavailable");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The state-production path, driven for real.
+//
+// Every assertion below runs the SAME accumulation loop `pr-hero setup` runs
+// (`runWizardSteps`) and renders whatever state it produced. Nothing here
+// hand-builds a `WizardState`: the previous version of this block did, with
+// `Object.assign(state, { workspaceCommitted: true })` and friends, and that
+// is precisely how a `repoScaffolded` flag that never meant what its name said
+// passed a green suite. A fabricated state proves the RENDERER agrees with
+// itself; it proves nothing about the flag production actually sets.
+// ---------------------------------------------------------------------------
+
+function wizardFixture(input: {
+  isRepo: boolean;
+  files?: Record<string, string>;
+}): {
+  deps: WizardDeps;
+  files: Record<string, string>;
+  executed: string[][];
+} {
+  const files: Record<string, string> = { ...(input.files ?? {}) };
+  const executed: string[][] = [];
+  const deps: WizardDeps = {
+    cwd: "/repo",
+    home: "/home/user",
+    // `Object.hasOwn`, not a truthiness test: an empty file EXISTS, and a
+    // gotchas file that exists-but-is-empty is one of the states this block
+    // has to be able to express.
+    exists: (p: string) => Object.hasOwn(files, p),
+    readFile: (p: string) => files[p],
+    writeFile: async (p: string, c: string) => {
+      files[p] = c;
+    },
+    // Without this the step-1 probe runs the REAL capability collection
+    // against the real workspace — ambient state inside a test that believes
+    // it faked its I/O.
+    probeExactBinding: async () => [],
+    // `null`, matching Bun.which's own return type. No binary is found, so
+    // checkSystemTools issues no version/auth exec of its own and the only
+    // commands reaching `exec` below are the wizard's own git probes.
+    checkToolsOptions: { which: () => null },
+    exec: async (cmd: string[]) => {
+      executed.push(cmd);
+      if (cmd[0] === "git" && !input.isRepo) {
+        return { exitCode: 128, stdout: "", stderr: "not a git repository" };
+      }
+      if (cmd[0] === "git" && cmd[1] === "rev-parse") {
+        return { exitCode: 0, stdout: "true\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  };
+  return { deps, files, executed };
+}
+
+describe("runWizardSteps — the loop `runWizard` renders", () => {
+  test("returns the accumulated state, parked on the last step", async () => {
+    const { deps } = wizardFixture({ isRepo: true });
+    const state = await runWizardSteps(deps);
+    // renderWizardStep reads `stepIndex`, so the step a real `pr-hero setup`
+    // prints is whichever one the loop left it on.
+    expect(state.stepIndex).toBe(WIZARD_STEPS.length - 1);
+    expect(state.completed).toBe(true);
+    expect(state.setupStateWritten).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 5 must not end on a lie — driven through the real state-production
+// path, never a fabricated state.
+//
+// `runWizardSteps` dispatches no reducer actions (nothing in production calls
+// `wizardReducer` at all), so `commitChoice` is ALWAYS undefined here and
+// `workspaceCommitted` is ALWAYS false. Two of the old tests in this block
+// overrode exactly those two fields to assert the short ending; both were
+// asserting branches production cannot reach. They are gone. The short ending
+// is reached below the way a user reaches it: a repo whose `.prhero/` files
+// already exist, so this run wrote nothing.
+// ---------------------------------------------------------------------------
+
+const REAL_GOTCHAS = `# Repo gotchas
+
+- billing: a subscription run files a notional figure, never cash.
+- isolation: a credential projection owns the credential, not just the home.
+`;
+
+async function verificationLines(input: {
+  isRepo: boolean;
+  files?: Record<string, string>;
+  styles?: boolean;
+}): Promise<{ lines: string[]; files: Record<string, string> }> {
+  const { deps, files } = wizardFixture(input);
+  const state = await runWizardSteps(deps);
+  return {
+    lines: renderWizardStep(state, {
+      styles: input.styles ?? false,
+      width: 80,
+    }),
+    files,
+  };
+}
+
+describe("verification step — the ending matches what the run actually did", () => {
+  test("a fresh repo: this run scaffolded both files, so both warnings are printed", async () => {
+    const { lines, files } = await verificationLines({ isRepo: true });
+    const text = lines.join("\n");
+    // Precondition, asserted rather than assumed: the run really did write a
+    // placeholder gotchas file, which is what makes both halves TRUE here.
+    expect(files["/repo/.prhero/config.json"]).toBeDefined();
+    expect(gotchasUnusableReason(files["/repo/.prhero/gotchas.md"])).toBe(
+      "placeholder",
+    );
+
+    expect(text).toContain(INIT_GIT_REMINDER);
+    expect(text).toContain(".prhero/gotchas.md");
+    expect(text).toContain(GOTCHAS_PLACEHOLDER_MARKER);
+  });
+
+  test("...and both land BEFORE the line telling you to run a review", async () => {
+    // Ordering is the whole point: advice that arrives after the instruction
+    // it qualifies is advice the reader has already acted against.
+    const { lines } = await verificationLines({ isRepo: true });
+    const reviewLine = lines.findIndex((l) => l.includes("pr-hero review"));
+    const reminderLine = lines.findIndex((l) =>
+      l.includes(INIT_GIT_REMINDER.slice(0, 40)),
+    );
+    const gotchasLine = lines.findIndex((l) =>
+      l.includes(GOTCHAS_PLACEHOLDER_MARKER),
+    );
+    expect(reviewLine).toBeGreaterThan(-1);
+    expect(reminderLine).toBeGreaterThan(-1);
+    expect(gotchasLine).toBeGreaterThan(-1);
+    expect(reminderLine).toBeLessThan(reviewLine);
+    expect(gotchasLine).toBeLessThan(reviewLine);
+  });
+
+  test("the longer ending emits zero ANSI bytes with styles off", async () => {
+    const { lines } = await verificationLines({ isRepo: true, styles: false });
+    for (const line of lines) {
+      expect(line).not.toContain("\x1b");
+    }
+  });
+
+  // THE regression. A repo that ran `pr-hero setup` in a previous session,
+  // committed `.prhero/`, and wrote real gotchas into it re-runs setup: this
+  // run writes nothing into `.prhero/`, so neither "commit the untracked
+  // .prhero/" nor "the one just scaffolded is a placeholder" is true of it.
+  // Both were printed anyway, because `repoScaffolded` meant "cwd is a git
+  // repo".
+  test("a repo whose .prhero/ already holds real gotchas gets NEITHER warning", async () => {
+    const { lines, files } = await verificationLines({
+      isRepo: true,
+      files: {
+        "/repo/.prhero/config.json": '{"default_base": "main"}\n',
+        "/repo/.prhero/gotchas.md": REAL_GOTCHAS,
+      },
+    });
+    const text = lines.join("\n");
+
+    // The gotchas the user wrote are untouched — the claim the message would
+    // be making is false in both directions.
+    expect(files["/repo/.prhero/gotchas.md"]).toBe(REAL_GOTCHAS);
+    expect(gotchasUnusableReason(REAL_GOTCHAS)).toBeUndefined();
+
+    expect(text).not.toContain(INIT_GIT_REMINDER);
+    expect(text).not.toContain(GOTCHAS_PLACEHOLDER_MARKER);
+    expect(text).toContain("pr-hero review");
+  });
+
+  test("outside a repo nothing was scaffolded, so there is nothing to commit", async () => {
+    const { lines, files } = await verificationLines({ isRepo: false });
+    const text = lines.join("\n");
+    expect(files["/repo/.prhero/config.json"]).toBeUndefined();
+    expect(files["/repo/.prhero/gotchas.md"]).toBeUndefined();
+    expect(text).not.toContain(INIT_GIT_REMINDER);
+    expect(text).not.toContain(GOTCHAS_PLACEHOLDER_MARKER);
   });
 });

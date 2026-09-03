@@ -487,6 +487,79 @@ describe("every cost-rendering call site in src/cli.ts carries the notional spli
   });
 });
 
+// `review()` and `reviewPr()` are unexported I/O shells, so no offline test
+// reaches their gotchas gate — which is exactly how the gate came to promise
+// something it did not enforce. The predicate itself is unit-tested in
+// test/preflight.test.ts; what has no other guard is that both shells actually
+// ASK it. Same precedent as the notional-split scan above: pin the wiring,
+// state the invariant rather than the line numbers.
+describe("every gotchas gate asks the shared predicate", () => {
+  const sources = ["../src/cli.ts", "../src/pipeline.ts", "../src/doctor.ts"];
+
+  test("no gate re-implements the old empty-only check", async () => {
+    // The exact statements the four gates used before the placeholder was
+    // rejected. The `if (` prefix is load-bearing: without it the guard also
+    // fires on the WHY comments that quote the old expression to explain why
+    // it was wrong, which would make the guard forbid naming its own subject.
+    // Collected into a list rather than asserted with `not.toContain` per
+    // file, because a failing `not.toContain` on a 7000-line source prints
+    // the whole file.
+    const offenders: string[] = [];
+    for (const rel of sources) {
+      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
+      for (const needle of [
+        "if (gotchas.trim().length === 0)",
+        "gotchasContent.trim().length === 0)",
+      ]) {
+        if (source.includes(needle)) offenders.push(`${rel}: ${needle}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("both review shells in src/cli.ts route through gotchasUnusableReason", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    const count = (needle: string) => source.split(needle).length - 1;
+    // Local review and PR review: two gates, two error renders, and every
+    // render carries the reason the predicate returned rather than a
+    // hardcoded one.
+    expect(count("gotchasUnusableReason(gotchas)")).toBe(2);
+    expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(2);
+  });
+
+  // `init` is not exported (it reads the real `os.homedir()`, so driving it
+  // end-to-end would make this suite depend on the machine's
+  // `~/.prhero/config.json`). Its DECISION lives in `initGotchasInstructions`
+  // and is tested exhaustively in test/preflight.test.ts; what is left to
+  // guard here is the wiring — that `init` routes through that helper instead
+  // of printing the block again itself. Source-shape, like the count
+  // assertions above, and for the same reason.
+  test("`pr-hero init` prints its gotchas block through initGotchasInstructions", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+
+    expect(source).toContain("initGotchasInstructions(gotchasOutcome)");
+    // Both arms of the decision are present, so the helper cannot be called
+    // with a constant.
+    expect(source).toContain("wrote.includes(gotchasPath)");
+    expect(source).toContain("{ written: true }");
+    expect(source).toContain("written: false");
+
+    // The assertions themselves moved out. If any of these come back to
+    // cli.ts, they are unconditional again — which is the defect.
+    for (const needle of [
+      "replace the <subsystem> lines",
+      "marker line at the top",
+      "refuses to review while that marker is present",
+    ]) {
+      expect(source).not.toContain(needle);
+    }
+  });
+});
+
 describe("postInlineFindings — step-14 ordering", () => {
   // Design rework (Juanma's PR #2 feedback item 2): the summary is CREATED
   // FIRST — before any finding is posted — so its position in the

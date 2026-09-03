@@ -3009,7 +3009,20 @@ export const INIT_GIT_REMINDER =
   "reads the checkout directly, so pr-hero refuses to run on a dirty tree — " +
   "and an untracked .prhero/ is exactly that.";
 
-export const GOTCHAS_TEMPLATE = `# Repo gotchas
+// The token every scaffolded gotchas file carries, and the ONLY thing that
+// distinguishes "nobody has written this yet" from a real file. It is not a
+// new invention: `pr-hero setup`'s fallback already wrote it (wizard.ts), it
+// simply had no reader. `pr-hero init`'s template now carries it too, so both
+// scaffolds are detectable by one token instead of by matching their prose.
+//
+// WHY a marker rather than a heuristic (a `<subsystem>` scan, a length floor):
+// a marker is a file DECLARING itself unfinished. Anything inferred from the
+// prose would eventually reject somebody's real gotchas for looking generic,
+// and the cost of a false positive here is a refused review.
+export const GOTCHAS_PLACEHOLDER_MARKER = "human-attention-required";
+
+export const GOTCHAS_TEMPLATE = `<!-- ${GOTCHAS_PLACEHOLDER_MARKER}: delete THIS line once the gotchas below are real — pr-hero refuses to review while it is here. -->
+# Repo gotchas
 
 Facts a reviewer cannot infer from the diff alone. Each line is injected
 verbatim into every hunter's system prompt, so keep them short and true.
@@ -3019,21 +3032,148 @@ verbatim into every hunter's system prompt, so keep them short and true.
 - <subsystem>: <the naming/ownership rule a newcomer would violate>
 `;
 
-// The pipeline treats missing-or-empty gotchas as a fail-loud abort and
-// returns a zero-cost partial run. Correct, but a bare "partial, 0 findings"
-// tells the user nothing — so the CLI checks first and explains.
-export function gotchasErrorMessage(gotchasPath: string): string {
+export type GotchasUnusableReason = "empty" | "placeholder";
+
+// The one gate every gotchas call site asks — local review, PR review, the
+// pipeline's fail-loud abort, and `doctor`. It is a single exported predicate
+// on purpose: four copies of `gotchas.trim().length === 0` are four things
+// that drift apart, and the one they had already drifted from was the promise
+// printed above them ("pr-hero refuses to run without it").
+//
+// The two arms are disjoint, so their order is NOT observable: a file holding
+// the marker holds a non-whitespace token and therefore cannot also trim to
+// empty. `empty` goes first only because it is the cheaper test. (The two
+// reasons still render different messages — that is about what the caller
+// says, not about which branch wins.)
+export function gotchasUnusableReason(
+  text: string,
+): GotchasUnusableReason | undefined {
+  if (text.trim().length === 0) return "empty";
+  if (text.includes(GOTCHAS_PLACEHOLDER_MARKER)) return "placeholder";
+  return undefined;
+}
+
+// `pr-hero init`'s closing instruction block, as data.
+//
+// WHY it is a function of the outcome rather than a constant: `init` never
+// overwrites, so the file the block talks about is either the scaffold this
+// run just wrote or somebody else's file that was left alone — and those two
+// need different sentences. Printed unconditionally, this block told a repo
+// with real gotchas to "replace the <subsystem> lines" and "delete the
+// marker line", neither of which is in its file. That is the same defect the
+// `gotchas.trim().length === 0` gate was: a message asserting a state nobody
+// checked.
+//
+// The KEPT arms therefore assert nothing of their own. They report what
+// `gotchasUnusableReason` — the one gate every other call site uses — says
+// about the bytes actually on disk, so the block cannot drift from the
+// behaviour a following `pr-hero review` will have.
+//
+// The union is discriminated rather than a pair of optional fields on
+// purpose: there is no `{ written: true, contents }` to get wrong, and no
+// kept arm that forgot to pass the bytes.
+export function initGotchasInstructions(
+  outcome: { written: true } | { written: false; contents: string },
+): string[] {
+  if (outcome.written) {
+    // Safe ONLY on this arm: the file is GOTCHAS_TEMPLATE, so it really does
+    // carry `<subsystem>` lines and the marker.
+    //
+    // "refuses to run without it" was true of an ABSENT file and false of the
+    // one this command just wrote: the scaffold is non-empty, so it used to
+    // sail through the old gate and prime every hunter with `<subsystem>`
+    // placeholders. The marker is what makes the old sentence true, so the
+    // instruction has to name the marker.
+    return [
+      "Then edit .prhero/gotchas.md — two steps, both required:",
+      "  1. replace the <subsystem> lines with facts about this repo",
+      `  2. delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line at the top`,
+      "",
+      "pr-hero refuses to review while that marker is present. It is not " +
+        "pedantry: the file above is non-empty, so without the marker a " +
+        "review would bill in full for hunters primed with placeholder text " +
+        "and report a clean-LOOKING result.",
+    ];
+  }
+
+  const reason = gotchasUnusableReason(outcome.contents);
+  if (reason === "placeholder") {
+    // NOT "replace the <subsystem> lines": a kept scaffold may be `pr-hero
+    // setup`'s fallback (wizard.ts), which carries the marker and has no
+    // `<subsystem>` lines at all. Naming them would be this same defect one
+    // layer down.
+    return [
+      "The .prhero/gotchas.md already on disk is still a scaffold: it carries " +
+        `the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line, and pr-hero ` +
+        "refuses to review while that line is present.",
+      "",
+      "Write facts about THIS repo into it, then delete the marker line.",
+    ];
+  }
+  if (reason === "empty") {
+    // No marker in an empty file, so nothing to delete — saying otherwise
+    // would send the reader looking for a line that is not there.
+    return [
+      "The .prhero/gotchas.md already on disk is empty, and pr-hero refuses " +
+        "to review without gotchas: an empty file makes the whole review a " +
+        "zero-cost no-op that LOOKS like a clean result.",
+      "",
+      "Write facts about THIS repo into it — the deliberate oddities, the " +
+        "invariants enforced somewhere the diff does not show.",
+    ];
+  }
+  // Deliberately modest wording. The gate proves only that the file is
+  // non-empty and marker-free; it does not prove the contents are good, so
+  // this line reports the gate and claims nothing beyond it.
+  return [
+    "The .prhero/gotchas.md already on disk passes the gotchas gate and will " +
+      "be used as-is.",
+  ];
+}
+
+// The pipeline treats unusable gotchas as a fail-loud abort and returns a
+// zero-cost partial run. Correct, but a bare "partial, 0 findings" tells the
+// user nothing — so the CLI checks first and explains.
+export function gotchasErrorMessage(
+  gotchasPath: string,
+  reason: GotchasUnusableReason,
+): string {
+  const why = [
+    "Gotchas are the repo-specific facts a hunter cannot infer from the diff",
+    "— deliberate oddities, invariants enforced elsewhere, conventions worth",
+    "more than they look. They are injected verbatim into every hunter's",
+    "system prompt, and the engine refuses to run without them.",
+  ];
+  if (reason === "placeholder") {
+    return [
+      `gotchas file is still the scaffold nobody filled in: ${gotchasPath}`,
+      "",
+      ...why,
+      "",
+      `It still carries the \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line, which`,
+      "is how `pr-hero init` and `pr-hero setup` mark a file they wrote and",
+      "nobody has edited. Reviewing with it would spend real money feeding",
+      "every hunter placeholder text, and return a clean-LOOKING result.",
+      "",
+      "Replace the placeholder lines with facts about THIS repo, then delete",
+      "the marker line at the top.",
+    ].join("\n");
+  }
   return [
     `missing or empty gotchas file: ${gotchasPath}`,
     "",
-    "Gotchas are the repo-specific facts a hunter cannot infer from the diff",
-    "— deliberate oddities, invariants enforced elsewhere, conventions worth",
-    "more than they look. They are injected into every hunter's system",
-    "prompt, and the engine refuses to run without them: an empty file makes",
-    "the whole review a zero-cost no-op that LOOKS like a clean result.",
+    ...why,
+    "An empty file makes the whole review a zero-cost no-op that LOOKS like a",
+    "clean result.",
     "",
     "Create it with something like:",
     "",
     GOTCHAS_TEMPLATE,
+    // The template above ships the marker, and the marker is itself a
+    // refusal — so a reader who copies this and stops has produced a file
+    // pr-hero still rejects. Saying the last step out loud is not politeness;
+    // without it this message hands you the next error.
+    `Then replace the <subsystem> lines and delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\``,
+    "marker line — pr-hero refuses to review while that line is present.",
   ].join("\n");
 }

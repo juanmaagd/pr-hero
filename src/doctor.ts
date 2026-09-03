@@ -14,6 +14,8 @@ import {
 import type { ExactBindingCapabilityReport } from "./execution/contracts";
 import {
   agentFilePath,
+  GOTCHAS_PLACEHOLDER_MARKER,
+  gotchasUnusableReason,
   localReviewSpec,
   resolveAgentsDirSetting,
 } from "./preflight";
@@ -402,7 +404,22 @@ export async function runDoctor(
     const gotchasContent = exists(gotchasPath)
       ? readFile(gotchasPath)
       : undefined;
-    if (!gotchasContent || gotchasContent.trim().length === 0) {
+    // Same predicate the review gates use, and that is the point: a doctor
+    // that answers this question its own way eventually green-lights a file
+    // the very next command refuses, and the user then hunts for the problem
+    // somewhere it is not.
+    const unusable = gotchasUnusableReason(gotchasContent ?? "");
+    if (unusable === "placeholder") {
+      checks.push({
+        name: "gotchas",
+        severity: "blocking",
+        message:
+          "Repository gotchas file (.prhero/gotchas.md) is still the untouched scaffold",
+        hint:
+          `Replace the placeholder lines with real repository invariants, then delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\` ` +
+          "marker line at the top — pr-hero refuses to review while it is present.",
+      });
+    } else if (unusable !== undefined) {
       checks.push({
         name: "gotchas",
         severity: "blocking",

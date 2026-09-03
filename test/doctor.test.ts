@@ -13,6 +13,7 @@ import {
 } from "../src/doctor";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import { aliasCanonical } from "../src/model-catalog";
+import { GOTCHAS_PLACEHOLDER_MARKER, GOTCHAS_TEMPLATE } from "../src/preflight";
 import {
   PRICING_CATALOGS,
   PRICING_MAX_AGE_DAYS,
@@ -242,6 +243,39 @@ describe("doctor tri-state evaluation", () => {
       expect(report.exitCode).toBe(1);
       const gotchasCheck = report.checks.find((c) => c.name === "gotchas");
       expect(gotchasCheck?.severity).toBe("blocking");
+    });
+
+    // Without this, `doctor` and `review` disagree about the same file:
+    // doctor prints "Repository gotchas present" and a green overall, then
+    // the review the user runs on that advice refuses. A diagnostic whose
+    // healthy verdict does not survive the next command is worse than no
+    // diagnostic — the user believes the problem is elsewhere.
+    test("a still-scaffolded gotchas.md is blocking, not 'present'", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) =>
+          p === "/repo/.prhero/gotchas.md" ||
+          p === "/home/user/.prhero/setup.json",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md" ? GOTCHAS_TEMPLATE : undefined,
+        checkToolsOptions: {
+          which: () => "/bin/tool",
+          exec: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+      });
+
+      // Deliberately NOT asserting report.overall/exitCode here: this fixture
+      // resolves no agents_dir, so `overall` is already "blocking" for an
+      // unrelated reason and would pass whatever the gotchas check said. Only
+      // the gotchas check itself discriminates.
+      const gotchasCheck = report.checks.find((c) => c.name === "gotchas");
+      expect(gotchasCheck?.severity).toBe("blocking");
+      // The message has to name what is wrong with THIS file: "empty or
+      // missing" would send the reader looking for a file they can see.
+      expect(gotchasCheck?.message).not.toContain("empty or missing");
+      expect(gotchasCheck?.hint).toContain(GOTCHAS_PLACEHOLDER_MARKER);
     });
   });
 
