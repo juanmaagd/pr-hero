@@ -1047,6 +1047,7 @@ export class StepExecutionHarness implements StepRunner {
             finalText: "",
             usage: normalizeUnavailableUsage({
               wallMs: harnessWatchdogMs ?? 0,
+              billingMode: transport.billingMode,
             }),
             stderrTail: `Step timed out after ${harnessWatchdogMs}ms`,
             timedOut: true,
@@ -1603,7 +1604,11 @@ export class StepExecutionHarness implements StepRunner {
       // markUnresolvedRemote when usage completeness never became
       // "complete" — coupling 1, spend-limiter.ts).
       if (reservation === undefined) return result;
-      const finalized = await this.finalizeReservation(reservation, result);
+      const finalized = await this.finalizeReservation(
+        reservation,
+        result,
+        transport,
+      );
       // #182 follow-up fail-fast: a free-declared route that settled with
       // reason `free_nonzero_cost` means the model flipped from free to
       // metered mid-flight and the provider priced the work. Unresolved alone
@@ -1713,6 +1718,7 @@ export class StepExecutionHarness implements StepRunner {
   private async finalizeReservation(
     reservation: SpendReservation,
     result: AttemptRunResult,
+    transport?: ProviderTransport,
   ): Promise<{
     readonly reservation: SpendReservation;
     readonly decision: SettlementDecision;
@@ -1783,7 +1789,13 @@ export class StepExecutionHarness implements StepRunner {
     // collectUnresolvedSpend (pipeline.ts) and renderResult (ui-result.ts)
     // only read unresolved_remote reservations, so a released_unstarted free
     // attempt is invisible to both — no floor marker, no unresolved row.
-    if (usage.billingMode === "free" && decision.reason === undefined) {
+    //
+    // #187: watchdog timeout on a free route synthesizes an unavailable usage;
+    // preserving the transport's free billing mode ensures it releases
+    // unstarted instead of fencing the bucket, allowing attempt 2 to retry.
+    const isFreeRoute =
+      usage.billingMode === "free" || transport?.billingMode === "free";
+    if (isFreeRoute && decision.reason === undefined) {
       await ledger.releaseUnstarted(reservation.reservationId, idempotencyKey);
       return {
         reservation: { ...reservation, state: "released_unstarted" },

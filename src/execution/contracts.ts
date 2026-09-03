@@ -9,7 +9,11 @@ import type {
 import type { CredentialBroker } from "../security/credential-broker";
 import type { WorkspaceDenialCode } from "../security/workspace-read-broker";
 import type { StepSpec } from "../step-runner";
-import type { NormalizedTokens, NormalizedUsage } from "./usage-normalized";
+import type {
+  NormalizedTokens,
+  NormalizedUsage,
+  UsageBillingMode,
+} from "./usage-normalized";
 
 export type {
   CredentialKind,
@@ -198,6 +202,7 @@ export type TransportFailureCause =
 
 export interface ProviderTransport {
   readonly backend: RunnerBackend;
+  readonly billingMode?: UsageBillingMode;
   capabilities(): Promise<ProviderCapabilityReport>;
   execute(
     request: TransportRequest,

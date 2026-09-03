@@ -26,7 +26,10 @@ import {
   type SpendReservation,
   SpendReservationFencedError,
 } from "../../src/execution/spend-limiter";
-import type { NormalizedUsage } from "../../src/execution/usage-normalized";
+import {
+  type NormalizedUsage,
+  normalizeUnavailableUsage,
+} from "../../src/execution/usage-normalized";
 import type { Finding, FindingsDocument, Telemetry } from "../../src/findings";
 import { buildStepArgv, type StepSpec } from "../../src/step-runner";
 import { type ResultInput, renderResult } from "../../src/ui-result";
@@ -595,6 +598,73 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     });
 
     const result = await harness.run(await makeStep(dir, { maxAttempts: 3 }));
+
+    expect(result.status).toBe("ok");
+    expect(transportCalls).toBe(2);
+    expect(result.reservations?.length).toBe(2);
+    expect(result.reservations?.[0]?.state).toBe("released_unstarted");
+    expect(result.reservations?.[1]?.state).toBe("settled");
+
+    // The released reservation fenced nothing: a sibling step on the same
+    // ledger reserves and runs fine.
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("ok");
+  });
+
+  test("a free attempt watchdog timeout retries on the same ledger: no fence, sibling steps unaffected (#187)", async () => {
+    const dir = await tempDir();
+    let transportCalls = 0;
+    const freeUsage: NormalizedUsage = {
+      wallMs: 50,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0,
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      billingMode: "free",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async (_req, ctx) => {
+        transportCalls++;
+        if (transportCalls === 1) {
+          // Attempt 1 stalls until watchdog aborts it
+          await new Promise<void>((resolve) => {
+            ctx.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return {
+            completion: "failed" as const,
+            protocolIntegrity: "unverified" as const,
+            finalText: "",
+            usage: normalizeUnavailableUsage({
+              wallMs: 50,
+              billingMode: "free",
+            }),
+            stderrTail: "stalled",
+            timedOut: true,
+          };
+        }
+        return okOutcome(freeUsage);
+      },
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(
+      await makeStep(dir, { maxAttempts: 3, timeoutMs: 50 }),
+    );
 
     expect(result.status).toBe("ok");
     expect(transportCalls).toBe(2);

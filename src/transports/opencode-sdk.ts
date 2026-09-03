@@ -360,6 +360,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   // that shape. Reading it is how `test/route-admission.test.ts` proves the
   // factory wired the kind through, without driving a whole attempt.
   readonly usageBillingMode: UsageBillingMode;
+  get billingMode(): UsageBillingMode {
+    return this.usageBillingMode;
+  }
 
   constructor(options: OpenCodeSdkTransportOptions) {
     this.client = options.client;
@@ -1217,7 +1220,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // reading the provider's cost off every assistant message.
         usage:
           usageState === undefined
-            ? normalizeUnavailableUsage({ wallMs: Date.now() - startedWall })
+            ? normalizeUnavailableUsage({
+                wallMs: Date.now() - startedWall,
+                billingMode: this.usageBillingMode,
+              })
             : {
                 wallMs: Date.now() - startedWall,
                 tokens: {

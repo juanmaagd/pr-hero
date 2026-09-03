@@ -247,6 +247,7 @@ export function normalizePartialUsage(
 // than guessing which one applied.
 export interface UnavailableUsageInput {
   readonly wallMs: number;
+  readonly billingMode?: UsageBillingMode;
 }
 
 export function normalizeUnavailableUsage(
@@ -256,7 +257,7 @@ export function normalizeUnavailableUsage(
     wallMs: input.wallMs,
     tokens: {},
     completeness: "unavailable",
-    billingMode: "unknown",
+    billingMode: input.billingMode ?? "unknown",
     costSource: "unknown",
   };
 }
