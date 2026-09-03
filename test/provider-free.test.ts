@@ -7,7 +7,7 @@ import type {
   ProviderCapabilityReport,
   RunnerBackend,
 } from "../src/execution/contracts";
-import { createFreeModelProbe, freeVerdictKey, isFreeModel } from "../src/free-model-discovery";
+import { createFreeModelProbe, defaultRun, freeVerdictKey, isFreeModel } from "../src/free-model-discovery";
 import {
   createResolvedRoutePlan,
   resolveStepRoute,
@@ -415,6 +415,57 @@ describe("#182 isFreeModel strict predicate (live shape, fake spawn)", () => {
     expect(await probe("a", "b/c")).toBe(true);
     expect(await probe("a/b", "c")).toBe(false);
     expect(calls).toBe(2);
+  });
+
+  test("defaultRun times out a hung spawn fast, kills it, and leaves no lingering proc", async () => {
+    // Offline and darwin-safe: /bin/sleep hangs without network, and the
+    // distinctive duration below is what the lingering-proc check greps for.
+    const marker = "23.731";
+    const start = Date.now();
+    await expect(defaultRun(["/bin/sleep", marker], 50)).rejects.toThrow(
+      /timed out/,
+    );
+    expect(Date.now() - start).toBeLessThan(10_000);
+    const ps = Bun.spawn(["ps", "-A", "-o", "command="], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const out = await new Response(ps.stdout).text();
+    await ps.exited;
+    expect(out).not.toContain(marker);
+  });
+
+  test("isFreeModel fails closed fast on a real spawn with a tiny timeout", async () => {
+    // Real spawn, offline, darwin-safe: /bin/sleep errors immediately on the
+    // non-numeric "models" arg, so this resolves false without hanging — the
+    // contract is fast-false, never a hang, whatever the binary does.
+    const start = Date.now();
+    const ok = await isFreeModel({
+      binaryPath: "/bin/sleep",
+      provider: "opencode",
+      model: "m",
+      timeoutMs: 50,
+    });
+    expect(ok).toBe(false);
+    expect(Date.now() - start).toBeLessThan(10_000);
+  });
+
+  test("the fake-run path ignores timeoutMs: a slow fake still resolves", async () => {
+    const ok = await isFreeModel({
+      binaryPath: "/bin/sleep",
+      provider: "opencode",
+      model: "m",
+      timeoutMs: 50,
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { exitCode: 0, stdout: freeStdout("opencode", "m") };
+      },
+    });
+    // The injected run is the test's own clock: timeoutMs bounds only the
+    // default spawn, so a slow fake still resolves true — existing fake-run
+    // tests stay green with or without the new field. (The /bin/sleep
+    // binaryPath here never spawns; `run` replaces it.)
+    expect(ok).toBe(true);
   });
 });
 

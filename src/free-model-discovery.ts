@@ -51,10 +51,22 @@ export interface IsFreeModelInput {
   readonly run?: (
     argv: readonly string[],
   ) => Promise<FreeModelDiscoveryRunResult>;
+  // Bounds the live spawn below. `models --verbose --refresh` hits the
+  // network, so without this a hung binary hangs admission forever — and the
+  // memoised probe caches the PENDING promise, so one hang poisons every later
+  // caller sharing the instance. With it the memoised promise always settles
+  // (true/false, never pending forever). Applies to the default spawn only;
+  // an injected `run` is the test's own clock. Fail-closed on timeout.
+  readonly timeoutMs?: number;
 }
 
-async function defaultRun(
+const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
+
+// Exported for the timeout test below only: production goes through
+// isFreeModel (a test IS a real consumer, same precedent as cli.ts main).
+export async function defaultRun(
   argv: readonly string[],
+  timeoutMs: number = DEFAULT_PROBE_TIMEOUT_MS,
 ): Promise<FreeModelDiscoveryRunResult> {
   const proc = Bun.spawn([...argv], {
     stdout: "pipe",
@@ -63,10 +75,32 @@ async function defaultRun(
   }) as unknown as {
     readonly stdout: unknown;
     readonly exited: Promise<number>;
+    kill(): void;
   };
-  const stdout = await new Response(proc.stdout as never).text();
-  const exitCode = await proc.exited;
-  return { exitCode, stdout };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const run = (async () => {
+      const stdout = await new Response(proc.stdout as never).text();
+      const exitCode = await proc.exited;
+      return { exitCode, stdout };
+    })();
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("free-model probe timed out")), timeoutMs);
+    });
+    return await Promise.race([run, timeout]);
+  } catch (error) {
+    // Kill the hung child so no `models --refresh` outlives the admission
+    // that gave up on it; the predicate below turns this into fail-closed
+    // false either way.
+    try {
+      proc.kill();
+    } catch {
+      // Best-effort: the throw below is what the caller observes.
+    }
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function isHeaderLine(line: string): boolean {
@@ -146,7 +180,7 @@ export async function isFreeModel(input: IsFreeModelInput): Promise<boolean> {
     ) {
       return false;
     }
-    const run = input.run ?? defaultRun;
+    const run = input.run ?? ((argv) => defaultRun(argv, input.timeoutMs));
     let result: FreeModelDiscoveryRunResult;
     try {
       result = await run([
@@ -194,6 +228,7 @@ export function freeVerdictKey(provider: string, model: string): string {
 export function createFreeModelProbe(options: {
   readonly binaryPath: string;
   readonly run?: IsFreeModelInput["run"];
+  readonly timeoutMs?: number;
 }): FreeModelProbe {
   const cache = new Map<string, Promise<boolean>>();
   return (provider: string, model: string) => {
@@ -205,6 +240,7 @@ export function createFreeModelProbe(options: {
       provider,
       model,
       ...(options.run === undefined ? {} : { run: options.run }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     cache.set(key, verdict);
     return verdict;
