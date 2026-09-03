@@ -7,7 +7,12 @@ import type {
   ProviderCapabilityReport,
   RunnerBackend,
 } from "../src/execution/contracts";
-import { createFreeModelProbe, defaultRun, freeVerdictKey, isFreeModel } from "../src/free-model-discovery";
+import {
+  createFreeModelProbe,
+  defaultRun,
+  freeVerdictKey,
+  isFreeModel,
+} from "../src/free-model-discovery";
 import {
   createResolvedRoutePlan,
   resolveStepRoute,
@@ -706,7 +711,12 @@ describe("#182 wiring: bindings, server, gates", () => {
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan: createResolvedRoutePlan([
-          opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+          opencodeStep(
+            "hunter",
+            "opencode/free-model",
+            "opencode",
+            "free-model",
+          ),
         ]),
         loadSdk: async () =>
           ({
@@ -722,7 +732,12 @@ describe("#182 wiring: bindings, server, gates", () => {
       // at projection (missing_provider_record); the guard refuses loudly.
       const mixedPlan = createResolvedRoutePlan([
         opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
-        opencodeStep("refuter", "opencode/paid-model", "opencode", "paid-model"),
+        opencodeStep(
+          "refuter",
+          "opencode/paid-model",
+          "opencode",
+          "paid-model",
+        ),
       ]);
       let error: unknown;
       try {
@@ -737,9 +752,7 @@ describe("#182 wiring: bindings, server, gates", () => {
       } catch (e) {
         error = e;
       }
-      expect(String((error as Error)?.message ?? error)).toMatch(
-        /paid-model/,
-      );
+      expect(String((error as Error)?.message ?? error)).toMatch(/paid-model/);
       expect(String((error as Error)?.message ?? error)).toMatch(
         /freeModelProbe/,
       );
@@ -754,7 +767,12 @@ describe("#182 wiring: bindings, server, gates", () => {
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan: createResolvedRoutePlan([
-          opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+          opencodeStep(
+            "hunter",
+            "opencode/free-model",
+            "opencode",
+            "free-model",
+          ),
         ]),
         loadSdk: async () =>
           ({
@@ -864,8 +882,7 @@ describe("#182 wiring: bindings, server, gates", () => {
       });
       try {
         expect(
-          (runtime.registry as DefaultTransportRegistry)
-            .openCodeCredentialKind,
+          (runtime.registry as DefaultTransportRegistry).openCodeCredentialKind,
         ).toBe("provider_free");
         for (const binding of runtime.bindings.values()) {
           expect(binding.credential.kind).toBe("provider_free");

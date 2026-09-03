@@ -87,7 +87,10 @@ export async function defaultRun(
       return { exitCode, stdout };
     })();
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("free-model probe timed out")), timeoutMs);
+      timer = setTimeout(
+        () => reject(new Error("free-model probe timed out")),
+        timeoutMs,
+      );
     });
     return await Promise.race([run, timeout]);
   } catch (error) {
@@ -242,7 +245,9 @@ export function createFreeModelProbe(options: {
       provider,
       model,
       ...(options.run === undefined ? {} : { run: options.run }),
-      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.timeoutMs === undefined
+        ? {}
+        : { timeoutMs: options.timeoutMs }),
     });
     cache.set(key, verdict);
     return verdict;

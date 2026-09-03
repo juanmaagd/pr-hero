@@ -1784,10 +1784,7 @@ export class StepExecutionHarness implements StepRunner {
     // only read unresolved_remote reservations, so a released_unstarted free
     // attempt is invisible to both — no floor marker, no unresolved row.
     if (usage.billingMode === "free" && decision.reason === undefined) {
-      await ledger.releaseUnstarted(
-        reservation.reservationId,
-        idempotencyKey,
-      );
+      await ledger.releaseUnstarted(reservation.reservationId, idempotencyKey);
       return {
         reservation: { ...reservation, state: "released_unstarted" },
         decision,

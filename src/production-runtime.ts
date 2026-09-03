@@ -1472,10 +1472,13 @@ export async function createProductionRuntime(
       const pairs = new Map<string, { provider: string; model: string }>();
       for (const step of plan.steps) {
         if (step.route.backend !== "opencode") continue;
-        pairs.set(freeVerdictKey(step.route.provider, step.route.modelSnapshot), {
-          provider: step.route.provider,
-          model: step.route.modelSnapshot,
-        });
+        pairs.set(
+          freeVerdictKey(step.route.provider, step.route.modelSnapshot),
+          {
+            provider: step.route.provider,
+            model: step.route.modelSnapshot,
+          },
+        );
       }
       if (pairs.size > 0) {
         const results = await Promise.all(
