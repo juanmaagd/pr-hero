@@ -452,6 +452,31 @@ function leadIn(claim: string): string {
   return `${cut}…`;
 }
 
+// What a live row prints where its claim would go when there is no claim to
+// print. A prior rebuilt from a posted `<!-- pr-hero-finding -->` marker
+// carries none: the marker never stored one, and `priorsFromPostedMarkers`
+// (rereview-prepare.ts) sets `claim: ""` DELIBERATELY so `claimFingerprint("")`
+// — the single constant every claim-less prior shares — can never act as a
+// tie-break in prior→comment matching (that module's WHY at :534, :570-578
+// and :736-745). That limitation is intentional and stays; what was broken is
+// the RENDER. `leadIn("")` returns "", so the row printed its separator with
+// nothing after it — "- `carried` 🟡 `src/wizard.ts:721` —  (R002)" on PR
+// #179's second review — which reads as a finding whose description is empty
+// rather than one whose claim this surface simply cannot recover. Italic, so
+// it cannot be mistaken for the claim itself, and it says nothing about
+// status or severity: those are on the same line and are known. The reader
+// keeps the location and the id, and the finding's OWN comment — the thing
+// the marker was parsed out of — does carry the claim.
+const CLAIM_UNAVAILABLE =
+  "_claim text unavailable; see this finding's own comment on the PR_";
+
+// `leadIn` is left alone on purpose: every non-empty claim renders exactly as
+// it did, byte for byte.
+function liveClaimText(claim: string): string {
+  const text = leadIn(claim);
+  return text === "" ? CLAIM_UNAVAILABLE : text;
+}
+
 // The summary's one-line-per-finding index (Juanma's PR #2 feedback item 1:
 // the earlier "one finding, one place" decision stripped this list entirely,
 // leaving counts + delta + footer — on first contact that reads as empty).
@@ -737,7 +762,7 @@ function liveFindingLines(rereview: RereviewDelta | undefined): string[] {
     for (const row of listed) {
       const loc = row.locs[0] ?? row.id;
       out.push(
-        `- \`${row.status}\` ${severityEmoji(row.sev)} \`${loc}\` — ${leadIn(row.claim)} (${row.id})`,
+        `- \`${row.status}\` ${severityEmoji(row.sev)} \`${loc}\` — ${liveClaimText(row.claim)} (${row.id})`,
       );
     }
     out.push("");
