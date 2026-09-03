@@ -1406,6 +1406,7 @@ async function execute(
         },
         onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
       };
+      summarizerMeta = stepMeta(summarizerSpec);
       state.steps.push(summarizerMeta);
     } catch {
       recordStepFailure(summarizerMeta);
@@ -2301,6 +2302,17 @@ async function runScout(
     return abandon();
   }
 
+  if (spec.route !== undefined) {
+    meta.route = spec.route;
+    const routedModel =
+      (spec.route as { model?: string }).model ??
+      spec.route.modelSnapshot ??
+      spec.route.modelFamily;
+    if (routedModel) {
+      meta.model = routedModel;
+      record.model = routedModel;
+    }
+  }
   state.steps.push(meta);
   emit(deps, { kind: "scout-started", model: meta.model });
 
@@ -2663,9 +2675,13 @@ function routeForStepKey(
 }
 
 function stepMeta(spec: StepSpec): StepMeta {
+  const model =
+    (spec.route as { model?: string } | undefined)?.model ??
+    spec.route?.modelSnapshot ??
+    spec.model;
   return {
     name: spec.name,
-    model: spec.model,
+    model,
     tools: spec.tools,
     systemPromptPath: spec.systemPromptPath,
     outPath: spec.outPath,

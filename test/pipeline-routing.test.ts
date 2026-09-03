@@ -389,6 +389,42 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
     }
   });
 
+  test("pipeline.json records routed execution model in step.model instead of frontmatter model (#186)", async () => {
+    const env = await setupTestEnvironment();
+    try {
+      const routingConfig: RoutingConfig = {
+        mappings: [
+          {
+            logical: "sonnet",
+            backend: "claude-code",
+            provider: "anthropic",
+            gateway: "direct",
+            modelFamily: "claude-3-5-sonnet",
+            modelSnapshot: "claude-3-5-sonnet-20241022",
+          },
+        ],
+      };
+
+      const runner = new RecordingStepRunner();
+      await runPipeline({ ...env.input, routingConfig }, { runner });
+
+      const pipelineJson = JSON.parse(
+        await Bun.file(path.join(env.runDir, "pipeline.json")).text(),
+      );
+
+      // hunter-reliability prompt frontmatter has model "sonnet"
+      const reliabilityMeta = pipelineJson.steps.find(
+        (s: { name: string }) => s.name === "hunter-reliability",
+      );
+      expect(reliabilityMeta).toBeDefined();
+      expect(reliabilityMeta.route).toBeDefined();
+      // StepMeta.model MUST record the routed execution model snapshot, not frontmatter "sonnet"
+      expect(reliabilityMeta.model).toBe("claude-3-5-sonnet-20241022");
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   test("route admission gate rejects unregistered backend before step execution", async () => {
     const env = await setupTestEnvironment();
     try {
@@ -487,6 +523,15 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
         (s) => s.name === "hunter-reliability",
       );
       expect(hunterStep?.route?.backend).toBe("opencode");
+
+      const pipelineJson = JSON.parse(
+        await Bun.file(path.join(env.runDir, "pipeline.json")).text(),
+      );
+      const hunterMeta = pipelineJson.steps.find(
+        (s: { name: string }) => s.name === "hunter-reliability",
+      );
+      expect(hunterMeta).toBeDefined();
+      expect(hunterMeta.model).toBe("gpt-4o");
     } finally {
       await env.cleanup();
     }
