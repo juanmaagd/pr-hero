@@ -1301,7 +1301,20 @@ export class MultiProviderRunner implements StepRunner {
     // A claude-only run therefore records no reservations at all, and the
     // absent `reservations` key on those steps is the truthful signal — not a
     // gap.
-    const reservesSpend = capabilityReport.billing.mode === "metered";
+    //
+    // #182 follow-up: free OpenCode bindings reserve too — read off the
+    // credential KIND, not the report (which still says subscription for free
+    // routes: capability `BillingMode` stays binary on purpose). Without a
+    // reservation `finalizeReservation` never runs, the free-nonzero rule
+    // (spend-limiter.ts) would be dead in production, and a flipped model
+    // would keep spending attempts instead of fencing the bucket and failing
+    // closed. A free step that stays free settles 0 and never fences, so the
+    // subscription reasoning above ("refusing later steps over dollars that
+    // cannot be spent") does not apply: only a priced flip, partial usage, or
+    // unavailable usage fences a free bucket.
+    const reservesSpend =
+      capabilityReport.billing.mode === "metered" ||
+      binding.credential.kind === "provider_free";
 
     const isolation = minimalIsolationFromExecutable(binding.executable);
     const lease = await binding.acquire(isolation, this.registry);

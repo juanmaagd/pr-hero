@@ -68,6 +68,7 @@ import {
   beginStep,
   nextCycle,
   type ReserveToken,
+  type SettlementDecision,
   type SpendLedger,
   type SpendReservation,
   SpendReservationFencedError,
@@ -1602,11 +1603,55 @@ export class StepExecutionHarness implements StepRunner {
       // markUnresolvedRemote when usage completeness never became
       // "complete" — coupling 1, spend-limiter.ts).
       if (reservation === undefined) return result;
-      const finalReservation = await this.finalizeReservation(
-        reservation,
-        result,
-      );
-      return { ...result, reservation: finalReservation };
+      const finalized = await this.finalizeReservation(reservation, result);
+      // #182 follow-up fail-fast: a free-declared route that settled with
+      // reason `free_nonzero_cost` means the model flipped from free to
+      // metered mid-flight and the provider priced the work. Unresolved alone
+      // only fences the bucket while the retry loop keeps spending attempts on
+      // the flipped model, so the attempt FAILS CLOSED here with no retry —
+      // `legacy_terminal` breaks the run loop before `decideRetryDisposition`
+      // can resurrect it, and the fence from `markUnresolvedRemote` (already
+      // applied inside `finalizeReservation` — the spend may be real) blocks
+      // the next reserve. Free+undefined-cash and incomplete usage carry NO
+      // reason and stay on the existing fence-only path: no cash figure means
+      // no evidence of billing.
+      if (
+        finalized.decision.kind === "unresolved" &&
+        finalized.decision.reason === "free_nonzero_cost"
+      ) {
+        const known =
+          finalized.decision.knownUsd ?? finalized.reservation.knownUsd;
+        const flipNote =
+          `[pr-hero] free-route cost flip: provider reported $${known} cash ` +
+          `on a free-declared route; the model may have flipped from free to ` +
+          `metered — re-probe before retrying (no retry attempted)`;
+        if (result.kind === "cancelled") {
+          return {
+            kind: "failed",
+            outcome: {
+              completion: "failed",
+              protocolIntegrity: "unverified",
+              finalText: "",
+              usage: normalizeUnavailableUsage({ wallMs: 0 }),
+              stderrTail: flipNote,
+            },
+            resolution: { kind: "legacy_terminal" },
+            reservation: finalized.reservation,
+          };
+        }
+        return {
+          kind: "failed",
+          outcome: {
+            ...result.outcome,
+            stderrTail: [result.outcome.stderrTail, flipNote]
+              .filter(Boolean)
+              .join("\n"),
+          },
+          resolution: { kind: "legacy_terminal" },
+          reservation: finalized.reservation,
+        };
+      }
+      return { ...result, reservation: finalized.reservation };
     } catch (error) {
       if (
         error instanceof ConcurrencyAdmissionAbortedError ||
@@ -1639,12 +1684,32 @@ export class StepExecutionHarness implements StepRunner {
   // invoked (executeSession calls the transport unconditionally) but no
   // usage ever arrived — that case can never settle as a number either, so
   // it takes the same unresolved path with `knownUsd: undefined`.
+  //
+  // Returns the decision alongside the terminal reservation so `runAttempt`
+  // can fail closed on `free_nonzero_cost` (#182 follow-up) — the only caller.
   private async finalizeReservation(
     reservation: SpendReservation,
     result: AttemptRunResult,
-  ): Promise<SpendReservation> {
+  ): Promise<{
+    readonly reservation: SpendReservation;
+    readonly decision: SettlementDecision;
+  }> {
     const ledger = this.spendLedger;
-    if (ledger === undefined) return reservation;
+    // Unreachable via `runAttempt` (it returns before calling here when no
+    // reservation was opened, which is exactly when no ledger is configured),
+    // but kept total: report the pure decision without applying any CAS
+    // transition, so the shape holds and no fence is claimed.
+    if (ledger === undefined) {
+      const usage =
+        result.kind === "cancelled" ? undefined : result.outcome.usage;
+      return {
+        reservation,
+        decision:
+          usage === undefined
+            ? { kind: "unresolved", knownUsd: undefined }
+            : settlementFromUsage(usage),
+      };
+    }
     const idempotencyKey = `${reservation.reservationId}:finalize`;
     const usage =
       result.kind === "cancelled" ? undefined : result.outcome.usage;
@@ -1655,18 +1720,24 @@ export class StepExecutionHarness implements StepRunner {
         idempotencyKey,
       );
       return {
-        ...reservation,
-        state: "unresolved_remote",
-        knownUsd: undefined,
+        reservation: {
+          ...reservation,
+          state: "unresolved_remote",
+          knownUsd: undefined,
+        },
+        decision: { kind: "unresolved", knownUsd: undefined },
       };
     }
     const decision = settlementFromUsage(usage);
     if (decision.kind === "settle") {
       await ledger.settle(reservation.reservationId, decision, idempotencyKey);
       return {
-        ...reservation,
-        state: "settled",
-        settledUsd: decision.actualUsd,
+        reservation: {
+          ...reservation,
+          state: "settled",
+          settledUsd: decision.actualUsd,
+        },
+        decision,
       };
     }
     await ledger.markUnresolvedRemote(
@@ -1675,9 +1746,12 @@ export class StepExecutionHarness implements StepRunner {
       idempotencyKey,
     );
     return {
-      ...reservation,
-      state: "unresolved_remote",
-      knownUsd: decision.knownUsd,
+      reservation: {
+        ...reservation,
+        state: "unresolved_remote",
+        knownUsd: decision.knownUsd,
+      },
+      decision,
     };
   }
 
