@@ -1788,16 +1788,38 @@ export class StepExecutionHarness implements StepRunner {
       return { kind: "delivered", outcome, parsed: execution.delivery.parsed };
     }
 
+    const resolution =
+      execution.delivery?.resolution ??
+      resolveFailureCause({
+        outcome,
+        classifyFailure: transport.classifyFailure,
+        parseThrew: false,
+      });
+
+    // Attempt log persistence: the attempt log (logs/<step>.<attempt>.log) is
+    // diagnostic post-mortem persistence, parallel to the settlement receipt.
+    // When execution.delivery is undefined (e.g. watchdog timeout or an onData
+    // throw where onData did not complete), the attempt log must still be
+    // flushed so pipeline.json's attemptLogPath points to a valid file (#185).
+    // This write is deliberately not lease-guarded — the write lease was
+    // already invalidated at fence closure, and refusing diagnostic
+    // persistence would erase the post-mortem record.
+    if (execution.delivery === undefined) {
+      const classification = legacyClassificationFromCause(resolution);
+      await writeAttemptLog(
+        step,
+        attempt,
+        kind,
+        outcome,
+        classification,
+        resolution.kind === "cause" ? resolution.cause : "legacy_terminal",
+      ).catch(() => {});
+    }
+
     return {
       kind: "failed",
       outcome,
-      resolution:
-        execution.delivery?.resolution ??
-        resolveFailureCause({
-          outcome,
-          classifyFailure: transport.classifyFailure,
-          parseThrew: false,
-        }),
+      resolution,
     };
   }
 }
