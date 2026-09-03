@@ -442,8 +442,9 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
   // The pair below is the discriminator. The first arm proves fail-closed: a
   // parse failure classified `network_transient` with maxAttempts 3 would
   // otherwise retry twice, but the flip ends the step on attempt 1. The
-  // second arm proves restraint: free usage with NO cash figure stays on the
-  // existing fence-only path — no evidence of billing, no fail-fast.
+  // second arm proves restraint: free usage with NO cash figure releases
+  // WITHOUT fencing (free-route fence scope) — no evidence of billing, no
+  // fail-fast.
   test("a free attempt reporting priced cost fails the step with no retry and fences its bucket", async () => {
     const dir = await tempDir();
     let transportCalls = 0;
@@ -518,7 +519,7 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     expect(secondTransportCalls).toBe(0);
   });
 
-  test("a free attempt with undefined cash stays fence-only: delivered, no flip note, no fail-fast", async () => {
+  test("a free attempt with undefined cash releases without fencing: delivered, no flip note, no fail-fast", async () => {
     const dir = await tempDir();
     const freeUnknownCash: NormalizedUsage = {
       wallMs: 500,
@@ -543,10 +544,125 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     const result = await harness.run(await makeStep(dir));
 
     expect(result.status).toBe("ok");
-    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    // #182 follow-up, free-route fence scope: no cash figure means no spend
+    // evidence on a free route, so the attempt releases instead of fencing —
+    // collectUnresolvedSpend/renderResult only read unresolved_remote, so this
+    // reservation is invisible to both (no floor marker, no unresolved row).
+    expect(result.reservations?.[0]?.state).toBe("released_unstarted");
     expect(result.reservations?.[0]?.knownUsd).toBeUndefined();
-    expect(ledger.markUnresolvedCalls).toBe(1);
+    expect(ledger.markUnresolvedCalls).toBe(0);
+    expect(ledger.releaseUnstartedCalls).toBe(1);
     expect(result.stderrTail).not.toContain("free-route cost flip");
+  });
+
+  test("a free transient failure retries on the same ledger: no fence, sibling steps unaffected", async () => {
+    const dir = await tempDir();
+    const freeUnknownCash: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+    };
+    let transportCalls = 0;
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => {
+        transportCalls++;
+        if (transportCalls === 1) {
+          return {
+            completion: "failed" as const,
+            protocolIntegrity: "verified" as const,
+            finalText: "not json",
+            usage: freeUnknownCash,
+            stderrTail: "boom",
+          };
+        }
+        return okOutcome({
+          ...freeUnknownCash,
+          cashCostUsd: 0,
+        });
+      },
+      classifyFailure: (outcome) =>
+        outcome.stderrTail.includes("boom") ? "network_transient" : undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir, { maxAttempts: 3 }));
+
+    expect(result.status).toBe("ok");
+    expect(transportCalls).toBe(2);
+    expect(result.reservations?.length).toBe(2);
+    expect(result.reservations?.[0]?.state).toBe("released_unstarted");
+    expect(result.reservations?.[1]?.state).toBe("settled");
+
+    // The released reservation fenced nothing: a sibling step on the same
+    // ledger reserves and runs fine.
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("ok");
+  });
+
+  test("a metered transient failure still fences: no retry, sibling steps refused", async () => {
+    const dir = await tempDir();
+    const meteredPartial: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { providerReportedTotal: 100 },
+      completeness: "partial",
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0.05,
+    };
+    let transportCalls = 0;
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => {
+        transportCalls++;
+        return {
+          completion: "failed" as const,
+          protocolIntegrity: "verified" as const,
+          finalText: "not json",
+          usage: meteredPartial,
+          stderrTail: "boom",
+        };
+      },
+      classifyFailure: (outcome) =>
+        outcome.stderrTail.includes("boom") ? "network_transient" : undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir, { maxAttempts: 3 }));
+
+    // The fence lands before the retry can reserve: one transport call, then
+    // the fenced reserve fails the step without a second spawn.
+    expect(result.status).toBe("failed");
+    expect(transportCalls).toBe(1);
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    expect(ledger.markUnresolvedCalls).toBe(1);
+
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("failed");
+    expect(sibling.stderrTail).toContain("fenced");
+    expect(transportCalls).toBe(1);
   });
 
   test("a subscription attempt reporting $0 with output tokens still settles, leaving its bucket unfenced", async () => {

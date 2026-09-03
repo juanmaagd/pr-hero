@@ -1612,9 +1612,11 @@ export class StepExecutionHarness implements StepRunner {
       // `legacy_terminal` breaks the run loop before `decideRetryDisposition`
       // can resurrect it, and the fence from `markUnresolvedRemote` (already
       // applied inside `finalizeReservation` — the spend may be real) blocks
-      // the next reserve. Free+undefined-cash and incomplete usage carry NO
-      // reason and stay on the existing fence-only path: no cash figure means
-      // no evidence of billing.
+      // the next reserve. Free usage with NO cash figure carries no reason and
+      // releases without fencing (finalizeReservation's free-route fence
+      // scope) — no cash figure means no evidence of billing. Incomplete
+      // usage with a non-free mode still fences: no usage mode to exonerate
+      // it, so fail closed.
       if (
         finalized.decision.kind === "unresolved" &&
         finalized.decision.reason === "free_nonzero_cost"
@@ -1737,6 +1739,36 @@ export class StepExecutionHarness implements StepRunner {
           state: "settled",
           settledUsd: decision.actualUsd,
         },
+        decision,
+      };
+    }
+    // #182 follow-up, free-route fence scope: a free binding reserves so the
+    // free-nonzero rule can fence on a priced flip — but that made EVERY
+    // terminal free outcome fence the shared credential bucket, so one
+    // transient failure (parse failure, watchdog timeout shape) killed the
+    // whole all-free run. That contradicts the neighboring subscription
+    // reasoning in production-runtime.ts MultiProviderRunner.run: on a route
+    // that bills nothing there are no dollars to stop spending over.
+    //
+    // So an unresolved free outcome WITHOUT reason releases instead of
+    // fencing: no cash figure means no spend evidence on a free route, and a
+    // terminal released_unstarted fences nothing — the same-step retry
+    // reserves fine and sibling steps are unaffected. Coupling-1 is
+    // preserved: a non-complete usage still never settles as a number, it
+    // just releases instead of fencing. Cancelled/undefined-usage keeps the
+    // fence (no usage means no evidence either way — fail closed), the
+    // free_nonzero_cost reason keeps the fence (priced work may be real), and
+    // the metered path below is untouched. Downstream-safe:
+    // collectUnresolvedSpend (pipeline.ts) and renderResult (ui-result.ts)
+    // only read unresolved_remote reservations, so a released_unstarted free
+    // attempt is invisible to both — no floor marker, no unresolved row.
+    if (usage.billingMode === "free" && decision.reason === undefined) {
+      await ledger.releaseUnstarted(
+        reservation.reservationId,
+        idempotencyKey,
+      );
+      return {
+        reservation: { ...reservation, state: "released_unstarted" },
         decision,
       };
     }

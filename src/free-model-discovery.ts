@@ -28,8 +28,10 @@
 // the attempt closed with no retry (re-probe is the remedy). Measured first:
 // a legitimate free attempt reports cash 0 (Step-0 probe, "Say OK" on
 // muse-spark-1.3-contributor-free), so the rule cannot misfire on list-price
-// reporting. Free+undefined-cash and incomplete usage stay fence-only without
-// fail-fast — no cash figure means no evidence of billing.
+// reporting. Free usage with NO cash figure releases WITHOUT fencing
+// (harness.ts free-route fence scope) — no cash figure means no evidence of
+// billing. Cancelled/undefined-usage and non-free incomplete usage still
+// fence: no usage mode to exonerate them, so fail closed.
 
 export type FreeModelProbe = (
   provider: string,
