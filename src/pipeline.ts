@@ -64,6 +64,7 @@ import {
   type ResolvedRoutePlan,
   type RoutingConfig,
   type RunnerBackend,
+  spawnModelForClaudeCli,
 } from "./model-routing";
 // Type-only, and deliberately so: the C5 provenance block is recorded
 // verbatim, never re-derived here, so the pipeline gains a shape from
@@ -1406,6 +1407,7 @@ async function execute(
         },
         onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
       };
+      summarizerMeta = stepMeta(summarizerSpec);
       state.steps.push(summarizerMeta);
     } catch {
       recordStepFailure(summarizerMeta);
@@ -2301,6 +2303,12 @@ async function runScout(
     return abandon();
   }
 
+  if (spec.route !== undefined) {
+    meta.route = spec.route;
+    const routedModel = effectiveExecutionModel(spec);
+    meta.model = routedModel;
+    record.model = routedModel;
+  }
   state.steps.push(meta);
   emit(deps, { kind: "scout-started", model: meta.model });
 
@@ -2662,10 +2670,23 @@ function routeForStepKey(
   return routePlan?.steps.find((step) => step.stepKey === stepKey)?.route;
 }
 
+function effectiveExecutionModel(spec: StepSpec): string {
+  if (spec.route === undefined) {
+    return spec.model;
+  }
+  if (spec.route.backend === "claude-code") {
+    return spawnModelForClaudeCli(spec.route, spec.model);
+  }
+  return (
+    (spec.route as { model?: string } | undefined)?.model ??
+    (spec.route.modelSnapshot || spec.model)
+  );
+}
+
 function stepMeta(spec: StepSpec): StepMeta {
   return {
     name: spec.name,
-    model: spec.model,
+    model: effectiveExecutionModel(spec),
     tools: spec.tools,
     systemPromptPath: spec.systemPromptPath,
     outPath: spec.outPath,
