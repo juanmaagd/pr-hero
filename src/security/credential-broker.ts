@@ -615,3 +615,86 @@ export class OpenCodeApiTokenBroker implements CredentialBroker {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// #182: the provider-free route — an OpenCode model the provider itself
+// declares free at runtime (all cost leaves === 0, status active). Ported
+// from buildOpenCodeProjection's layout+lstat defense, MINUS the credential:
+//
+//  1. It reads NOTHING. No readerFn, no auth.json lookup, no source to fail
+//     — so `source_read_failed` is structurally unreachable and there is no
+//     ambient credential to leak. The constructor takes no options on purpose.
+//  2. It writes NO auth file. The projection is an empty 0700 tree (HOME /
+//     TMPDIR / XDG_* pinned to it) with `files: []`. First tried with no file
+//     at all and verified live: `opencode run --model
+//     opencode/muse-spark-1.3-contributor-free` under the projected env
+//     authenticates with nothing and bills $0 (see live ledger in the slice).
+//     If a future binary requires auth.json to exist, the fix is to write
+//     `{}` — not to project any real record.
+//  3. It MUST NEVER throw `missing_subscription_record`. harness.ts degrades
+//     exactly that class to the operator environment, and degrading a free
+//     route onto ambient credentials would be the failure this issue forbids
+//     (a free run silently spending a real token). Only fail-closed classes:
+//     `projection_layout_invalid` on a symlinked layout. Nothing else throws.
+// ---------------------------------------------------------------------------
+export class OpenCodeFreeBroker implements CredentialBroker {
+  async project(input: {
+    readonly sessionId: string;
+    readonly credentialRef: string;
+    readonly kind: CredentialKind;
+    readonly verifiedBinaryPath: string;
+  }): Promise<CredentialProjection> {
+    void input.sessionId;
+    void input.credentialRef;
+    void input.verifiedBinaryPath;
+    if (input.kind !== "provider_free") {
+      throw new Error(
+        `Unsupported credential kind: ${input.kind} (OpenCodeFreeBroker projects only provider_free)`,
+      );
+    }
+
+    const parentDir = path.join(tmpdir(), "prhero-cred-projections");
+    const layout = openCodeProjectionLayout(
+      path.join(parentDir, randomUUID()),
+      parentDir,
+    );
+
+    // Every level explicitly at 0700 — `recursive` alone lets an intermediate
+    // directory inherit the umask. Same rule as buildOpenCodeProjection.
+    for (const dir of layout.directories) {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+
+    // §6.1: lstat every guarded path EXCEPT the auth file, which does not
+    // exist on this route by design. A pre-planted symlink anywhere in the
+    // chain means a directory the child writes into landed outside our
+    // control.
+    for (const component of [parentDir, ...layout.directories]) {
+      if (lstatSync(component).isSymbolicLink()) {
+        rmSync(layout.syntheticHome, { recursive: true, force: true });
+        throw new CredentialProjectionError("projection_layout_invalid");
+      }
+    }
+
+    return {
+      projectionId: `cred-${randomUUID()}`,
+      kind: input.kind,
+      syntheticHome: layout.syntheticHome,
+      syntheticConfigHome: layout.syntheticConfigHome,
+      syntheticTmp: layout.syntheticTmp,
+      env: {
+        HOME: layout.syntheticHome,
+        TMPDIR: layout.syntheticTmp,
+        // Pinned, not merely absent from the harness allowlist: OpenCode reads
+        // XDG_DATA_HOME first, so an inherited value would point the child
+        // straight back at the operator's real store.
+        XDG_DATA_HOME: layout.xdgDataHome,
+        XDG_CONFIG_HOME: layout.xdgConfigHome,
+      },
+      files: [],
+      destroy: async () => {
+        rmSync(layout.syntheticHome, { recursive: true, force: true });
+      },
+    };
+  }
+}

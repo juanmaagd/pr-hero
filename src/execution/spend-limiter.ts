@@ -28,6 +28,13 @@
 // those steps is the truthful signal, not a gap. `ClaudeCodeRunner`
 // (step-runner.ts) stays ledger-free for the same reason.
 //
+// #182 follow-up: the one exception is a FREE OpenCode binding
+// (`provider_free`), which reserves too even though its capability report says
+// subscription. Without a reservation the free-nonzero rule above would be
+// dead in production — `finalizeReservation` never runs, so a flipped model
+// would keep spending attempts instead of fencing and failing closed. A free
+// step that stays free settles 0 and never fences.
+//
 // Two couplings the spec calls out as the easiest to lose across chained
 // PRs are made TYPE-unreachable here rather than asserted at runtime:
 //   1. `settle()`'s second argument is narrowed to the "settle" arm of
@@ -50,7 +57,15 @@ import { type NormalizedUsage, outputTokensKnown } from "./usage-normalized";
 
 export type SettlementDecision =
   | { readonly kind: "settle"; readonly actualUsd: number }
-  | { readonly kind: "unresolved"; readonly knownUsd?: number };
+  | {
+      readonly kind: "unresolved";
+      readonly knownUsd?: number;
+      // #182 follow-up: present ONLY on the free-nonzero arm below. The
+      // harness fail-fasts on it (terminal step failure, no retry); every
+      // other unresolved arm stays fence-only. Optional and additive so all
+      // existing producers/consumers keep compiling — tsc is the net.
+      readonly reason?: "free_nonzero_cost";
+    };
 
 // spec: "Non-Complete Usage Never Settles As A Number" — completeness other
 // than "complete" is ALWAYS the unresolved arm, carrying whatever cash cost
@@ -100,6 +115,35 @@ export function settlementFromUsage(
     (outputTokensKnown(usage.tokens) ?? 0) > 0
   ) {
     return { kind: "unresolved", knownUsd: undefined };
+  }
+  // #182 follow-up, the free-nonzero rule: a model free at probe time can flip
+  // to metered before/during the attempt, and the attempt then runs
+  // credentialless under an empty projection. The flip is observable at
+  // settlement — the transport accumulates provider-reported cost per message
+  // (opencode-sdk.ts `cashCostUsd`, `costSource: "provider"`), so priced work
+  // on a free-declared route arrives here as complete usage with cash > 0.
+  //
+  // NO output-token gate, unlike metered-zero: any priced work on a
+  // free-declared route is unaccountable by definition, and cash > 0 already
+  // implies the provider did priced work. `noSessionUsage` (route-mode stamp +
+  // cash 0 + empty tokens) still settles 0 below — a free attempt that never
+  // reached the provider is a truthful zero, not a flip.
+  //
+  // `knownUsd` IS carried here — the documented asymmetry with metered-zero,
+  // which drops it. A metered 0 is an untrusted number wearing the provider's
+  // badge; a free-route cash figure is the provider's STATED price for work it
+  // claims to have billed, and the fence (`markUnresolvedRemote`) plus the
+  // harness fail-fast message both need the figure to name what happened.
+  if (
+    usage.billingMode === "free" &&
+    usage.completeness === "complete" &&
+    (usage.cashCostUsd ?? 0) > 0
+  ) {
+    return {
+      kind: "unresolved",
+      knownUsd: usage.cashCostUsd,
+      reason: "free_nonzero_cost",
+    };
   }
   return { kind: "settle", actualUsd: usage.cashCostUsd };
 }

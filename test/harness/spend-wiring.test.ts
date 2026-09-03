@@ -26,7 +26,10 @@ import {
   type SpendReservation,
   SpendReservationFencedError,
 } from "../../src/execution/spend-limiter";
-import type { NormalizedUsage } from "../../src/execution/usage-normalized";
+import {
+  type NormalizedUsage,
+  normalizeUnavailableUsage,
+} from "../../src/execution/usage-normalized";
 import type { Finding, FindingsDocument, Telemetry } from "../../src/findings";
 import { buildStepArgv, type StepSpec } from "../../src/step-runner";
 import { type ResultInput, renderResult } from "../../src/ui-result";
@@ -430,6 +433,351 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     expect(result.reservations?.[0]?.knownUsd).toBeUndefined();
     expect(ledger.settleCalls).toBe(0);
     expect(ledger.markUnresolvedCalls).toBe(1);
+  });
+
+  // #182 follow-up: the free-nonzero fail-fast. Unresolved alone only fences
+  // the bucket while the retry loop keeps spending attempts on a flipped
+  // model, so a decision carrying reason `free_nonzero_cost` fails the step
+  // CLOSED with no retry — `legacy_terminal` breaks the loop before
+  // `decideRetryDisposition` can resurrect it. The fence is still applied
+  // (the spend may be real).
+  //
+  // The pair below is the discriminator. The first arm proves fail-closed: a
+  // parse failure classified `network_transient` with maxAttempts 3 would
+  // otherwise retry twice, but the flip ends the step on attempt 1. The
+  // second arm proves restraint: free usage with NO cash figure releases
+  // WITHOUT fencing (free-route fence scope) — no evidence of billing, no
+  // fail-fast.
+  test("a free attempt reporting priced cost fails the step with no retry and fences its bucket", async () => {
+    const dir = await tempDir();
+    let transportCalls = 0;
+    const flipped: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0.06,
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => {
+        transportCalls++;
+        return {
+          completion: "failed" as const,
+          protocolIntegrity: "verified" as const,
+          finalText: "not json",
+          usage: flipped,
+          stderrTail: "boom",
+        };
+      },
+      // Transient would normally buy two more attempts under maxAttempts 3 —
+      // the flip must deny them all.
+      classifyFailure: (outcome) =>
+        outcome.stderrTail.includes("boom") ? "network_transient" : undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir, { maxAttempts: 3 }));
+
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(1);
+    expect(transportCalls).toBe(1);
+    expect(result.reservations?.length).toBe(1);
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    expect(result.reservations?.[0]?.knownUsd).toBe(0.06);
+    expect(ledger.settleCalls).toBe(0);
+    expect(ledger.markUnresolvedCalls).toBe(1);
+    expect(result.stderrTail).toContain("free-route cost flip");
+    expect(result.stderrTail).toContain("$0.06");
+    expect(result.stderrTail).toContain("re-probe");
+
+    // The bucket is fenced for the rest of the run: a second step on the same
+    // ledger is refused before its transport is ever invoked.
+    let secondTransportCalls = 0;
+    const secondTransport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => {
+        secondTransportCalls++;
+        return okOutcome();
+      },
+      classifyFailure: () => undefined,
+    };
+    const secondHarness = new StepExecutionHarness({
+      transport: secondTransport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+    const second = await secondHarness.run(
+      await makeStep(dir, { name: "hunter-resilience" }),
+    );
+    expect(second.status).toBe("failed");
+    expect(secondTransportCalls).toBe(0);
+  });
+
+  test("a free attempt with undefined cash releases without fencing: delivered, no flip note, no fail-fast", async () => {
+    const dir = await tempDir();
+    const freeUnknownCash: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => okOutcome(freeUnknownCash),
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir));
+
+    expect(result.status).toBe("ok");
+    // #182 follow-up, free-route fence scope: no cash figure means no spend
+    // evidence on a free route, so the attempt releases instead of fencing —
+    // collectUnresolvedSpend/renderResult only read unresolved_remote, so this
+    // reservation is invisible to both (no floor marker, no unresolved row).
+    expect(result.reservations?.[0]?.state).toBe("released_unstarted");
+    expect(result.reservations?.[0]?.knownUsd).toBeUndefined();
+    expect(ledger.markUnresolvedCalls).toBe(0);
+    expect(ledger.releaseUnstartedCalls).toBe(1);
+    expect(result.stderrTail).not.toContain("free-route cost flip");
+  });
+
+  test("a free transient failure retries on the same ledger: no fence, sibling steps unaffected", async () => {
+    const dir = await tempDir();
+    const freeUnknownCash: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+    };
+    let transportCalls = 0;
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => {
+        transportCalls++;
+        if (transportCalls === 1) {
+          return {
+            completion: "failed" as const,
+            protocolIntegrity: "verified" as const,
+            finalText: "not json",
+            usage: freeUnknownCash,
+            stderrTail: "boom",
+          };
+        }
+        return okOutcome({
+          ...freeUnknownCash,
+          cashCostUsd: 0,
+        });
+      },
+      classifyFailure: (outcome) =>
+        outcome.stderrTail.includes("boom") ? "network_transient" : undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir, { maxAttempts: 3 }));
+
+    expect(result.status).toBe("ok");
+    expect(transportCalls).toBe(2);
+    expect(result.reservations?.length).toBe(2);
+    expect(result.reservations?.[0]?.state).toBe("released_unstarted");
+    expect(result.reservations?.[1]?.state).toBe("settled");
+
+    // The released reservation fenced nothing: a sibling step on the same
+    // ledger reserves and runs fine.
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("ok");
+  });
+
+  test("a free attempt watchdog timeout retries on the same ledger: no fence, sibling steps unaffected (#187)", async () => {
+    const dir = await tempDir();
+    let transportCalls = 0;
+    const freeUsage: NormalizedUsage = {
+      wallMs: 50,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0,
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      billingMode: "free",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async (_req, ctx) => {
+        transportCalls++;
+        if (transportCalls === 1) {
+          // Attempt 1 stalls until watchdog aborts it
+          await new Promise<void>((resolve) => {
+            ctx.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return {
+            completion: "failed" as const,
+            protocolIntegrity: "unverified" as const,
+            finalText: "",
+            usage: normalizeUnavailableUsage({
+              wallMs: 50,
+              billingMode: "free",
+            }),
+            stderrTail: "stalled",
+            timedOut: true,
+          };
+        }
+        return okOutcome(freeUsage);
+      },
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(
+      await makeStep(dir, { maxAttempts: 3, timeoutMs: 50 }),
+    );
+
+    expect(result.status).toBe("ok");
+    expect(transportCalls).toBe(2);
+    expect(result.reservations?.length).toBe(2);
+    expect(result.reservations?.[0]?.state).toBe("released_unstarted");
+    expect(result.reservations?.[1]?.state).toBe("settled");
+
+    // The released reservation fenced nothing: a sibling step on the same
+    // ledger reserves and runs fine.
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("ok");
+  });
+
+  test("a metered transient failure still fences: no retry, sibling steps refused", async () => {
+    const dir = await tempDir();
+    const meteredPartial: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { providerReportedTotal: 100 },
+      completeness: "partial",
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0.05,
+    };
+    let transportCalls = 0;
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => {
+        transportCalls++;
+        return {
+          completion: "failed" as const,
+          protocolIntegrity: "verified" as const,
+          finalText: "not json",
+          usage: meteredPartial,
+          stderrTail: "boom",
+        };
+      },
+      classifyFailure: (outcome) =>
+        outcome.stderrTail.includes("boom") ? "network_transient" : undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir, { maxAttempts: 3 }));
+
+    // The fence lands before the retry can reserve: one transport call, then
+    // the fenced reserve fails the step without a second spawn.
+    expect(result.status).toBe("failed");
+    expect(transportCalls).toBe(1);
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    expect(ledger.markUnresolvedCalls).toBe(1);
+
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("failed");
+    expect(sibling.stderrTail).toContain("fenced");
+    expect(transportCalls).toBe(1);
+  });
+
+  test("a delivered free attempt reporting priced cost stays delivered with the flip note appended", async () => {
+    const dir = await tempDir();
+    const flipped: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0.06,
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => okOutcome(flipped),
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir));
+
+    // Delivered, not failed: the parsed output was already persisted and the
+    // loop returns ok on delivered — rewriting it would claim an artifact was
+    // never written. The fence is still applied and the note still lands.
+    expect(result.status).toBe("ok");
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    expect(result.reservations?.[0]?.knownUsd).toBe(0.06);
+    expect(result.stderrTail).toContain("free-route cost flip");
+    expect(result.stderrTail).toContain("$0.06");
+
+    // The bucket is still fenced for the rest of the run: fail-closed is not
+    // weakened by preserving the kind.
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("failed");
+    expect(sibling.stderrTail).toContain("fenced");
   });
 
   test("a subscription attempt reporting $0 with output tokens still settles, leaving its bucket unfenced", async () => {

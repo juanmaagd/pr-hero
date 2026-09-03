@@ -279,11 +279,20 @@ export class DefaultTransportRegistry implements TransportRegistry {
       // Computed once, above both construction branches — wiring only the
       // second is how the injected-client path (every test and every doctor
       // probe) would keep the pre-#133 default.
+      //
+      // #182 follow-up: a `provider_free` kind stamps "free", checked BEFORE
+      // the metered test (`credentialKindBillsMetered` is false for free, so
+      // order is what keeps the stamp exact). Everything downstream passes the
+      // mode through generically — the transport stamps it onto every usage
+      // record (incl. `noSessionUsage`, which stays settleable at 0 with empty
+      // tokens) and `settlementFromUsage`'s free-nonzero rule reads it.
       const usageBillingMode: UsageBillingMode =
-        merged.credentialKind !== undefined &&
-        credentialKindBillsMetered(merged.credentialKind)
-          ? "metered"
-          : "subscription";
+        merged.credentialKind === "provider_free"
+          ? "free"
+          : merged.credentialKind !== undefined &&
+              credentialKindBillsMetered(merged.credentialKind)
+            ? "metered"
+            : "subscription";
 
       if (merged.openCodeClient) {
         return new OpenCodeSdkTransport({

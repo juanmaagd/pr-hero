@@ -753,6 +753,13 @@ describe("OpenCode transport factory derives usage billing mode from the credent
     );
   });
 
+  test("a provider_free credential makes the transport stamp free (settlement guard reads it)", () => {
+    // #182 follow-up: checked BEFORE the metered test in the factory — a
+    // subscription badge here would settle a flipped attempt's priced cost as
+    // a truthful zero. Only the free kind stamps free.
+    expect(openCodeTransportFor("provider_free").usageBillingMode).toBe("free");
+  });
+
   test("the OAuth credential keeps subscription", () => {
     expect(
       openCodeTransportFor("opencode_chatgpt_oauth").usageBillingMode,

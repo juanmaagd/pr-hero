@@ -294,11 +294,17 @@ function normalizeClaudeCliUsage(
   try {
     parsed = JSON.parse(rawStdout);
   } catch {
-    return normalizeUnavailableUsage({ wallMs });
+    return normalizeUnavailableUsage({
+      wallMs,
+      billingMode: basis.billingMode,
+    });
   }
   const raw = parsed.usage;
   if (raw === undefined) {
-    return normalizeUnavailableUsage({ wallMs });
+    return normalizeUnavailableUsage({
+      wallMs,
+      billingMode: basis.billingMode,
+    });
   }
   const leafValues = [
     raw.input_tokens,
@@ -418,6 +424,9 @@ async function boundedText(
 
 export class ClaudeCodeCliTransport implements ProviderTransport {
   readonly backend = "claude-code";
+  get billingMode(): NormalizedUsage["billingMode"] {
+    return claudeCliCostBasis(process.env).billingMode;
+  }
   private readonly spawnFn: typeof Bun.spawn;
   private readonly getPgid: (pid: number) => number | undefined;
   private readonly killFn: (pid: number, signal?: string | number) => unknown;

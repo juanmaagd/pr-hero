@@ -1462,6 +1462,12 @@ async function review(options: CliOptions): Promise<number> {
         workspaceRoot: repoRoot,
         registry: productionAdmission.registry,
         evidence: productionAdmission.evidence,
+        // #182 follow-up: without this the admission may decide free-server
+        // while the bindings stay metered, and the runtime's own guard
+        // refuses the divergence — both or neither.
+        ...(productionAdmission.freeModelProbe === undefined
+          ? {}
+          : { freeModelProbe: productionAdmission.freeModelProbe }),
         mode: "production",
         signal: ceilingController.signal,
       });
@@ -2748,6 +2754,12 @@ async function reviewPr(
               workspaceRoot: worktreePath,
               registry: productionAdmission.registry,
               evidence: productionAdmission.evidence,
+              // #182 follow-up: without this the admission may decide
+              // free-server while the bindings stay metered, and the
+              // runtime's own guard refuses the divergence — both or neither.
+              ...(productionAdmission.freeModelProbe === undefined
+                ? {}
+                : { freeModelProbe: productionAdmission.freeModelProbe }),
               mode: "production",
               signal: ceilingController.signal,
             });
