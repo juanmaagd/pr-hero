@@ -560,6 +560,7 @@ describe("#182 wiring: bindings, server, gates", () => {
   test("admission: all-free plan resolves free server credential with the shared broker instance", async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-adm-"));
     try {
+      await writeOpenCodeFixture(tmpDir);
       const step = opencodeStep(
         "hunter",
         "opencode/muse-spark-1.3-contributor-free",
@@ -570,6 +571,7 @@ describe("#182 wiring: bindings, server, gates", () => {
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan,
+        env: { PATH: tmpDir },
         loadSdk: async () =>
           ({
             createOpencodeClient: () => ({ session: {}, event: {} }),
@@ -593,6 +595,7 @@ describe("#182 wiring: bindings, server, gates", () => {
   test("admission: mixed free/metered plan is refused loudly, never silently OAuth", async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-mix-"));
     try {
+      await writeOpenCodeFixture(tmpDir);
       const plan = createResolvedRoutePlan([
         opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
         opencodeStep(
@@ -605,6 +608,7 @@ describe("#182 wiring: bindings, server, gates", () => {
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan,
+        env: { PATH: tmpDir },
         loadSdk: async () =>
           ({
             createOpencodeClient: () => ({ session: {}, event: {} }),
@@ -664,6 +668,7 @@ describe("#182 wiring: bindings, server, gates", () => {
   test("runtime refuses loudly when the server is free but bindings never probed", async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-div-"));
     try {
+      const opencode = await writeOpenCodeFixture(tmpDir);
       const step = opencodeStep(
         "hunter",
         "opencode/muse-spark-1.3-contributor-free",
@@ -675,6 +680,7 @@ describe("#182 wiring: bindings, server, gates", () => {
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan,
+        env: { PATH: tmpDir },
         loadSdk: async () =>
           ({
             createOpencodeClient: () => ({ session: {}, event: {} }),
@@ -691,6 +697,7 @@ describe("#182 wiring: bindings, server, gates", () => {
           ...admission.authorityOptions,
           plan,
           workspaceRoot: tmpDir,
+          openCodeBinaryPath: opencode.canonicalPath,
           registry: admission.registry,
           mode: "conformance",
         });
@@ -708,6 +715,7 @@ describe("#182 wiring: bindings, server, gates", () => {
   test("runtime refuses loudly on the partial mix: free server, some free some metered bindings", async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-partial-"));
     try {
+      await writeOpenCodeFixture(tmpDir);
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan: createResolvedRoutePlan([
@@ -718,6 +726,7 @@ describe("#182 wiring: bindings, server, gates", () => {
             "free-model",
           ),
         ]),
+        env: { PATH: tmpDir },
         loadSdk: async () =>
           ({
             createOpencodeClient: () => ({ session: {}, event: {} }),
@@ -764,6 +773,7 @@ describe("#182 wiring: bindings, server, gates", () => {
   test("runtime admits a free server with all bindings free (partial-mix guard stays quiet)", async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-allfree-"));
     try {
+      await writeOpenCodeFixture(tmpDir);
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan: createResolvedRoutePlan([
@@ -774,6 +784,7 @@ describe("#182 wiring: bindings, server, gates", () => {
             "free-model",
           ),
         ]),
+        env: { PATH: tmpDir },
         loadSdk: async () =>
           ({
             createOpencodeClient: () => ({ session: {}, event: {} }),
@@ -847,6 +858,7 @@ describe("#182 wiring: bindings, server, gates", () => {
   test("CLI threading: the admission's shared probe drives registry-built runtimes free end to end", async () => {
     const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-wired-"));
     try {
+      await writeOpenCodeFixture(tmpDir);
       const plan = createResolvedRoutePlan([
         opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
         opencodeStep(
@@ -859,6 +871,7 @@ describe("#182 wiring: bindings, server, gates", () => {
       const admission = await prepareProductionAdmissionContext({
         workspaceRoot: tmpDir,
         plan,
+        env: { PATH: tmpDir },
         loadSdk: async () =>
           ({
             createOpencodeClient: () => ({ session: {}, event: {} }),
