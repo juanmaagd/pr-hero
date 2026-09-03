@@ -9,7 +9,17 @@
 import type { SessionUsage } from "../usage";
 
 export type UsageCompleteness = "complete" | "partial" | "unavailable";
-export type UsageBillingMode = "subscription" | "metered" | "unknown";
+// #182 follow-up: "free" is a USAGE-layer precision, not a capability mode.
+// A free-declared route bills nothing, but a model free at probe time can flip
+// to metered before/during the attempt — and the transport observes
+// provider-reported cost per message (opencode-sdk.ts cashCostUsd,
+// costSource "provider"). Stamping "subscription" would let
+// `settlementFromUsage`'s free-nonzero rule (spend-limiter.ts) never fire and
+// settle a flipped attempt's priced cost as a truthful zero. Capability
+// `BillingMode` ("subscription"|"metered") stays binary on purpose: the exact
+// binding still reports a free route as subscription/not_applicable, and the
+// spend ledger is composed for it by credential kind (production-runtime.ts).
+export type UsageBillingMode = "subscription" | "metered" | "free" | "unknown";
 export type UsageCostSource =
   | "provider"
   | "versioned_rate_table"

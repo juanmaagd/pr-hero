@@ -702,6 +702,56 @@ describe("OpenCodeSdkTransport usage records carry the route's billing mode", ()
     expect(outcome.usage.completeness).toBe("complete");
     expect(outcome.usage.tokens).toEqual({});
   });
+
+  test("a free transport stamps its usage records free, incl. noSessionUsage", async () => {
+    // #182 follow-up: the mode passes through generically — the factory
+    // stamps "free" for the provider_free kind, and both the priced path and
+    // the never-reached-provider path below carry it. `noSessionUsage` (cash
+    // 0 + empty tokens) stays settleable under the free-nonzero rule, which
+    // fires on cash > 0 alone.
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "usage",
+          mode: "snapshot",
+          inputTokens: 10,
+          outputTokens: 5,
+          costUsd: 0,
+        },
+        { kind: "terminal", proof: completedProof("evt-billing-free") },
+      ]),
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { billingMode: "free" },
+    });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.usage.billingMode).toBe("free");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+
+    const refused = makeClient({
+      createError: new Error("connect ECONNREFUSED"),
+    });
+    const refusedRig = makeRig({
+      client: refused.client,
+      transport: { billingMode: "free" },
+    });
+    const refusedOutcome = await refusedRig.transport.execute(makeRequest(), {
+      signal: refusedRig.controller.signal,
+      events: refusedRig.sink,
+    });
+
+    expect(refusedOutcome.usage.billingMode).toBe("free");
+    expect(refusedOutcome.usage.cashCostUsd).toBe(0);
+    expect(refusedOutcome.usage.completeness).toBe("complete");
+    expect(refusedOutcome.usage.tokens).toEqual({});
+  });
 });
 
 // D1-08 PR3 task 3.11 (§9.2): same optional bucket-scope input as the Claude

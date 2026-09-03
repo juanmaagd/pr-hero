@@ -15,12 +15,21 @@
 // failure must refuse loudly downstream (fail closed → provider_api_token),
 // not silently pass.
 //
-// SCOPE NOTE (residual risk, NOT post-hoc guarded in this slice): between the
-// probe and the attempt the provider could flip a model from free to metered
-// (stale-cache window). The attempt would then run under an empty projection
-// and fail at the provider (loud) rather than silently bill — but there is no
-// post-hoc settlement guard proving the $0. Filed as follow-up; see final
-// report.
+// SCOPE NOTE (residual now guarded, #182 follow-up): between the probe and
+// the attempt the provider could flip a model from free to metered
+// (stale-cache window). The attempt then runs under an empty projection, and
+// the flip is observable at settlement — the transport accumulates
+// provider-reported cost per message (`cashCostUsd`, `costSource: "provider"`,
+// opencode-sdk.ts), stamped with the route's billing mode ("free",
+// transport-registry.ts). `settlementFromUsage`'s free-nonzero rule
+// (spend-limiter.ts) routes complete usage with cash > 0 on a free-declared
+// route to unresolved WITH reason `free_nonzero_cost` (carrying the provider's
+// stated figure), the spend ledger fences the bucket, and the harness fails
+// the attempt closed with no retry (re-probe is the remedy). Measured first:
+// a legitimate free attempt reports cash 0 (Step-0 probe, "Say OK" on
+// muse-spark-1.3-contributor-free), so the rule cannot misfire on list-price
+// reporting. Free+undefined-cash and incomplete usage stay fence-only without
+// fail-fast — no cash figure means no evidence of billing.
 
 export type FreeModelProbe = (
   provider: string,

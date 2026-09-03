@@ -451,7 +451,7 @@ describe("#182 wiring: bindings, server, gates", () => {
     }
   });
 
-  test("registry stamps subscription for the free kind (truthful zero)", async () => {
+  test("registry stamps free for the free kind (settlement guard reads it)", async () => {
     const fakeClient = {
       createSession: async () => ({ id: "s" }),
       async *streamEvents() {},
@@ -473,7 +473,10 @@ describe("#182 wiring: bindings, server, gates", () => {
       },
       credentialKind: "provider_free",
     }) as unknown as { usageBillingMode: string };
-    expect(transport.usageBillingMode).toBe("subscription");
+    // #182 follow-up: "free", not "subscription" — `settlementFromUsage`'s
+    // free-nonzero rule keys on this stamp, and a subscription badge would
+    // settle a flipped attempt's priced cost as a truthful zero.
+    expect(transport.usageBillingMode).toBe("free");
   });
 
   test("admission: all-free plan resolves free server credential with the shared broker instance", async () => {

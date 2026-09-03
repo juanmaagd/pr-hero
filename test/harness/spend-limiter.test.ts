@@ -222,6 +222,117 @@ describe("settlementFromUsage: a metered zero is not a settlement", () => {
   });
 });
 
+// #182 follow-up, the free-nonzero rule: a model free at probe time can flip
+// to metered before/during the attempt, and the attempt then runs
+// credentialless under an empty projection. The transport accumulates
+// provider-reported cost per message, so priced work on a free-declared route
+// arrives here as complete usage with cash > 0 — unaccountable by definition,
+// since the route declared free. Measured first (Step-0 live probe, "Say OK"
+// on muse-spark-1.3-contributor-free): a legitimate free attempt reports cash
+// 0, so this rule cannot misfire on list-price reporting.
+describe("settlementFromUsage: priced work on a free-declared route is unresolved with a reason", () => {
+  test("a free attempt reporting $0 with output tokens still settles 0", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0,
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0,
+    });
+  });
+
+  test("a free attempt that never reached the provider (noSessionUsage shape) settles 0", () => {
+    // Route-mode stamp + cash 0 + empty tokens: a truthful zero, not a flip.
+    // No output-token gate on the free rule is what keeps this settleable —
+    // the discriminator is the cash figure alone.
+    expect(
+      settlementFromUsage({
+        wallMs: 40,
+        tokens: {},
+        completeness: "complete",
+        billingMode: "free",
+        costSource: "provider",
+        cashCostUsd: 0,
+      }),
+    ).toEqual({ kind: "settle", actualUsd: 0 });
+  });
+
+  test("a free attempt reporting $0.06 complete resolves to unresolved WITH reason and knownUsd", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0.06,
+    });
+
+    // Asymmetry with metered-zero (which drops knownUsd) is deliberate: a
+    // metered 0 is an untrusted number, while this cash figure IS the
+    // provider's stated price — the fence and the harness fail-fast message
+    // both need it to name what happened.
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: 0.06,
+      reason: "free_nonzero_cost",
+    });
+  });
+
+  test("a free attempt with undefined cash stays unresolved WITHOUT a reason (no evidence of billing)", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "free",
+      costSource: "provider",
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+
+  test("a free attempt with incomplete usage stays unresolved WITHOUT a reason even when cash is known", () => {
+    // Partial usage never settles as a number and never fail-fasts: the cash
+    // figure on an incomplete record is not settlement-grade evidence.
+    const usage = normalizePartialUsage({
+      wallMs: 800,
+      providerReportedTotal: 500,
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0.06,
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: 0.06,
+    });
+  });
+
+  test("metered-zero arms are unchanged by the free rule (no reason carried)", () => {
+    const usage = normalizeInclusiveUsage({
+      wallMs: 1200,
+      inputTotal: 100,
+      outputTotal: 50,
+      billingMode: "metered",
+      costSource: "provider",
+      cashCostUsd: 0,
+    });
+
+    expect(settlementFromUsage(usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+});
+
 describe("settle() type gate (coupling 1 consumer)", () => {
   // 4.2 RED: settle()'s second argument is
   // Extract<SettlementDecision, {kind:"settle"}> — a raw number must fail
