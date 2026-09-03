@@ -726,6 +726,30 @@ Conformance deadlines are transport-specific: CLI fixtures allow the 5-second TE
 - Project adjudication to `Finding[]` and debug provenance.
 - Run the frozen experiment and promote only under §10.4.
 
+### Credential-less free routes — measured behavior and limits (live, 2026-09-03)
+
+OpenCode serves free models (provider `opencode`) that authenticate with nothing.
+They resolve to credential kind `provider_free` **only** from live provider-declared
+zero cost (`opencode models <provider> --verbose --refresh`: exact id, status
+active, all cost leaves `=== 0`). No model list is bundled anywhere — free
+identities rotate too fast for that. Any discovery failure keeps the metered
+kind (fail closed). A model free at probe time that bills at attempt time is
+refused at settlement (`free_nonzero_cost`: fence the bucket, fail the step,
+no retry).
+
+Mixing rules, as built (spike #184 ran them, not just reviewed them):
+
+- Mixed **opencode providers** (or free+metered) in one plan are **refused**:
+  one server, one credential for its whole life. No silent pick.
+- Mixed **backends** (`claude-code` + `opencode`) in one run **execute**: one
+  hunter per backend, per-credential buckets, `partial` if either leg fails.
+
+Measured limit, stated so nobody learns it from a dead run: free models are
+currently too slow for hunter-size prompts. `muse-spark-1.3` did not finish in
+10 minutes a prompt `haiku` does in ~41 s (2 provider events in that window);
+the watchdog kill yields `unknown` usage, which fences conservatively and fails
+the step. Do not route hunters to free models until throughput is re-measured.
+
 ---
 
 ## 13. Closure checklist and offline acceptance
