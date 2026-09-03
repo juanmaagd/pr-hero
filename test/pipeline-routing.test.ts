@@ -398,7 +398,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
             logical: "sonnet",
             backend: "claude-code",
             provider: "anthropic",
-            gateway: "direct",
+            gateway: "configured",
             modelFamily: "claude-3-5-sonnet",
             modelSnapshot: "claude-3-5-sonnet-20241022",
           },
@@ -418,7 +418,7 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       );
       expect(reliabilityMeta).toBeDefined();
       expect(reliabilityMeta.route).toBeDefined();
-      // StepMeta.model MUST record the routed execution model snapshot, not frontmatter "sonnet"
+      // On non-direct gateway, StepMeta.model MUST record the routed modelSnapshot
       expect(reliabilityMeta.model).toBe("claude-3-5-sonnet-20241022");
     } finally {
       await env.cleanup();
