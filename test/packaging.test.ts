@@ -108,6 +108,7 @@ describe("Packaging & distribution configuration", () => {
     expect(content).toContain("linux-arm64");
     expect(content).toContain("SHA256SUMS");
     expect(content).toContain("--provenance");
+    expect(content).toContain("git tag -fa");
   });
 
   // Until this workflow existed, .github/workflows/ held only release.yml:
