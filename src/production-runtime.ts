@@ -1520,6 +1520,29 @@ export async function createProductionRuntime(
         `OpenCode server holds a free credential but no binding resolved free; refusing to serve metered routes from an empty projection (forward the admission's freeModelProbe so both share one verdict)`,
       );
     }
+    // #182 follow-up: the partial mix — a free server with SOME free and SOME
+    // metered opencode bindings, reachable when the runtime probes with a
+    // different instance than the admission (or none). Without this branch the
+    // slipped metered binding fails closed LATER at projection with
+    // missing_provider_record, and the harness fails the step pre-spawn — a
+    // confusing failure for a wiring divergence. This branch upgrades it into
+    // the actionable refusal the guard exists for, in the same shape as its
+    // neighbors.
+    if (serverKind === "provider_free" && hasFreeBinding) {
+      const meteredNames = [...bindings.values()]
+        .filter(
+          (b) =>
+            b.route.backend === "opencode" &&
+            b.credential.kind !== "provider_free",
+        )
+        .map((b) => `${b.route.provider}/${b.route.modelSnapshot}`)
+        .sort();
+      if (meteredNames.length > 0) {
+        throw new ProductionRuntimeError(
+          `OpenCode server holds a free credential but ${meteredNames.length} binding(s) resolved metered (${meteredNames.join(", ")}); refusing to serve metered routes from an empty projection (forward the admission's freeModelProbe so both share one verdict)`,
+        );
+      }
+    }
   }
   const admitted = await admitRoutePlan(plan, registry, {
     mode: options.mode,

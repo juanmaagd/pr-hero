@@ -700,6 +700,98 @@ describe("#182 wiring: bindings, server, gates", () => {
     }
   });
 
+  test("runtime refuses loudly on the partial mix: free server, some free some metered bindings", async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-partial-"));
+    try {
+      const admission = await prepareProductionAdmissionContext({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([
+          opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+        ]),
+        loadSdk: async () =>
+          ({
+            createOpencodeClient: () => ({ session: {}, event: {} }),
+          }) as never,
+        freeModelProbe: async () => true,
+      });
+      if ("error" in admission) throw new Error(admission.error);
+      expect(admission.registry.openCodeCredentialKind).toBe("provider_free");
+      // The runtime probes with a DIFFERENT verdict set than the admission:
+      // one binding stays free, the other resolves metered behind a free
+      // server. Without the partial-mix branch this would fail closed later
+      // at projection (missing_provider_record); the guard refuses loudly.
+      const mixedPlan = createResolvedRoutePlan([
+        opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+        opencodeStep("refuter", "opencode/paid-model", "opencode", "paid-model"),
+      ]);
+      let error: unknown;
+      try {
+        await createProductionRuntime({
+          ...admission.authorityOptions,
+          plan: mixedPlan,
+          workspaceRoot: tmpDir,
+          registry: admission.registry,
+          mode: "conformance",
+          freeModelProbe: async (_p, m) => m === "free-model",
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(String((error as Error)?.message ?? error)).toMatch(
+        /paid-model/,
+      );
+      expect(String((error as Error)?.message ?? error)).toMatch(
+        /freeModelProbe/,
+      );
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("runtime admits a free server with all bindings free (partial-mix guard stays quiet)", async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-allfree-"));
+    try {
+      const admission = await prepareProductionAdmissionContext({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([
+          opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+        ]),
+        loadSdk: async () =>
+          ({
+            createOpencodeClient: () => ({ session: {}, event: {} }),
+          }) as never,
+        freeModelProbe: async () => true,
+      });
+      if ("error" in admission) throw new Error(admission.error);
+      const allFreePlan = createResolvedRoutePlan([
+        opencodeStep("hunter", "opencode/free-model", "opencode", "free-model"),
+        opencodeStep(
+          "refuter",
+          "opencode/other-free",
+          "opencode",
+          "other-free",
+        ),
+      ]);
+      const runtime = await createProductionRuntime({
+        ...admission.authorityOptions,
+        plan: allFreePlan,
+        workspaceRoot: tmpDir,
+        registry: admission.registry,
+        mode: "conformance",
+        freeModelProbe: async () => true,
+      });
+      try {
+        for (const binding of runtime.bindings.values()) {
+          expect(binding.credential.kind).toBe("provider_free");
+        }
+      } finally {
+        await runtime.dispose();
+      }
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("soleOpenCodeCredential stays provider-based (free needs the async probe)", () => {
     const plan = createResolvedRoutePlan([
       opencodeStep("h", "opencode/m", "opencode", "m"),
