@@ -25,7 +25,15 @@ export type RunnerBackend =
 export type CredentialKind =
   | "claude_subscription_oauth"
   | "opencode_chatgpt_oauth"
-  | "provider_api_token";
+  | "provider_api_token"
+  // #182: an OpenCode route whose model the provider itself declares free at
+  // runtime (all cost leaves === 0, status active, via `opencode models
+  // <provider> --verbose --refresh`). Authenticates with NOTHING — no OAuth
+  // record, no API token — so it is refused at credential projection without
+  // a kind of its own. Not metered (`credentialKindBillsMetered` is false),
+  // so pricing is not_applicable and usage stamps subscription (truthful
+  // zero). Additive: every consumer compares with ===/!== or passes through.
+  | "provider_free";
 
 export type ExecutableDenialCode = "executable_not_approved";
 

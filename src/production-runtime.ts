@@ -23,6 +23,7 @@ import {
   InMemorySpendLedger,
   type SpendLedger,
 } from "./execution/spend-limiter";
+import type { FreeModelProbe } from "./free-model-discovery";
 import type {
   ResolvedRoutePlan,
   ResolvedStepRoute,
@@ -39,7 +40,7 @@ import {
   type BindingAuthorityResolution,
   credentialKindBillsMetered,
   credentialKindForRoute,
-  openCodeCredentialBroker,
+  openCodeCredentialBrokerForKind,
   prepareProductionRunnerAuthority,
   type ResolvedBindingAuthority,
   type ResolveRunnerAuthorityDeps,
@@ -88,6 +89,15 @@ export interface ProductionRuntimeOptions extends RunnerAuthorityOptions {
   readonly signal?: AbortSignal;
   readonly attemptAdmissionGate?: AttemptAdmissionGate;
   readonly graceMarginMs?: number;
+  // #182: live free-model verdicts, injected so `bun test` stays offline.
+  // When present and an opencode route resolved to `provider_api_token`,
+  // `resolveFrozenBindings` asks it about (provider, modelSnapshot) and — on
+  // true — swaps the binding to `provider_free` + the free broker. When
+  // absent, behaviour is unchanged (no spawn, no upgrade). The same instance
+  // must feed the server credential and the bindings (see
+  // prepareProductionAdmissionContext) so the two cannot disagree across a
+  // provider flip — use `createFreeModelProbe` (memoised per provider/model).
+  readonly freeModelProbe?: FreeModelProbe;
   // #137: the clock the bundled pricing catalogues' freshness is judged
   // against, forwarded to every binding. A seam and not `new Date()` inline
   // for the same reason doctor.ts has one: a test proving a fresh table
@@ -398,6 +408,13 @@ class FrozenRuntimeBinding implements RuntimeBinding {
         sha256: this.executable.sha256,
       },
       auth: {
+        // #182 SCOPE NOTE (b): the transport's backend-wide report hardcodes
+        // `kind: "opencode_chatgpt_oauth"` (src/transports/opencode-sdk.ts:389)
+        // because it is produced before any route resolves and cannot see the
+        // provider — let alone the model the free verdict needs. A free route
+        // never observes it: the exact binding overwrites kind with
+        // `this.credential.kind` here, so backend-wide stays a fallback for
+        // kind-less callers and per-route truth lives on the binding.
         kind: this.credential.kind,
         projectionReady: projectionBrokered,
         probe: projectionBrokered ? report.auth.probe : "not_run",
@@ -528,6 +545,30 @@ async function resolveFrozenBindings(
 ): Promise<Map<string, RuntimeBinding>> {
   const bindings = new Map<string, RuntimeBinding>();
   const deps = options.authorityDeps ?? {};
+  // #182: one verdict per (provider, model), shared across every binding in
+  // this resolution — the same cache the admission passes down, so the server
+  // credential and the bindings cannot disagree across two spawns.
+  const freeVerdicts = new Map<string, Promise<boolean>>();
+  const probeFree = async (
+    provider: string,
+    model: string,
+  ): Promise<boolean> => {
+    const probe = options.freeModelProbe;
+    if (probe === undefined) return false;
+    const key = `${provider}/${model}`;
+    const cached = freeVerdicts.get(key);
+    if (cached !== undefined) return cached;
+    const verdict = (async () => {
+      try {
+        return await probe(provider, model);
+      } catch {
+        // Fail closed: a throwing probe is an unknown price, not a free one.
+        return false;
+      }
+    })();
+    freeVerdicts.set(key, verdict);
+    return verdict;
+  };
 
   for (const step of uniqueRoutesByFingerprint(plan)) {
     const authorityResult = await resolveBindingAuthority(
@@ -547,7 +588,33 @@ async function resolveFrozenBindings(
       );
     }
 
-    const authority = authorityResult.binding;
+    // #182: the free verdict needs (provider, modelSnapshot), and this is the
+    // one place the route is in scope — `resolveBindingAuthority` only
+    // receives the provider. When the authority resolved metered and the
+    // live probe says free, swap in kind `provider_free` + the free broker
+    // (selected via the kind-based selector, never a second kind derivation).
+    // Fail closed: any probe failure keeps the metered kind.
+    let authority = authorityResult.binding;
+    if (
+      step.route.backend === "opencode" &&
+      authority.credentialKind === "provider_api_token" &&
+      options.freeModelProbe !== undefined
+    ) {
+      const free = await probeFree(
+        step.route.provider,
+        step.route.modelSnapshot,
+      );
+      if (free) {
+        const freeBroker =
+          options.credentialBrokers?.opencode ??
+          openCodeCredentialBrokerForKind("provider_free", step.route.provider);
+        authority = {
+          ...authority,
+          credentialKind: "provider_free",
+          credentialBroker: freeBroker,
+        };
+      }
+    }
     const executable = toVerifiedExecutable(authority);
     const binding = new FrozenRuntimeBinding({
       key: step.routeFingerprint,
@@ -733,6 +800,10 @@ export interface ProductionAdmissionContext {
   readonly registry: DefaultTransportRegistry;
   readonly authorityOptions: RunnerAuthorityOptions;
   readonly evidence: Map<RunnerBackend, D1_11ReadinessEvidence>;
+  // #182: the memoised probe this admission decided the server credential
+  // with. A caller building a runtime from this admission should forward the
+  // SAME instance so bindings reuse its verdicts instead of re-spawning.
+  readonly freeModelProbe?: FreeModelProbe;
 }
 
 // #133. The OpenCode server is ONE per backend and outlives every step, so
@@ -743,9 +814,13 @@ export interface ProductionAdmissionContext {
 // whichever provider happened to be resolved last.
 //
 // Returns the sole provider and the kind it resolves to. The BROKER is not
-// built here — `openCodeCredentialBroker` (runner-authority.ts) owns that
+// built here — `openCodeCredentialBrokerForKind` (runner-authority.ts) owns that
 // pairing for both this site and binding resolution, because two copies of it
 // would be two chances to hand a route a broker that refuses its kind.
+//
+// #182: provider-level only — it cannot see modelSnapshot, so a free MODEL
+// verdict is resolved async in prepareProductionAdmissionContext (which has
+// the route in scope) and upgrades this result. See there.
 export function soleOpenCodeCredential(plan: ResolvedRoutePlan):
   | {
       readonly kind: CredentialKind;
@@ -783,14 +858,90 @@ export async function prepareProductionAdmissionContext(input: {
   >;
   readonly env?: RunnerAuthorityOptions["env"];
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
+  // #182: see ProductionRuntimeOptions.freeModelProbe. When present, the
+  // server credential below is upgraded to `provider_free` when EVERY
+  // opencode route in the plan probes free, and the plan is REFUSED when free
+  // and metered mix behind one server. The memoised wrapper is returned so
+  // the runtime built from this admission reuses its verdicts.
+  readonly freeModelProbe?: FreeModelProbe;
 }): Promise<ProductionAdmissionContext | { readonly error: string }> {
   // #133: ONE opencode credential per plan, decided here, because the
   // OpenCode SERVER is one per backend and outlives every step — it cannot
   // hold two providers' credentials at once. A plan naming two of them is
   // refused by NAME rather than served the wrong one.
-  const openCodeCredential = soleOpenCodeCredential(input.plan);
-  if (openCodeCredential.error !== undefined) {
-    return { error: openCodeCredential.error };
+  const baseCredential = soleOpenCodeCredential(input.plan);
+  if (baseCredential.error !== undefined) {
+    return { error: baseCredential.error };
+  }
+  // #182: the SAME verdict feeds the server credential here and the bindings
+  // in resolveFrozenBindings below — computed once per (provider, model) and
+  // shared. The wrapper memoises, so the probe spawns at most once per pair
+  // no matter how many steps name it, and the bindings (which receive this
+  // same instance) never re-spawn for a verdict already taken.
+  let openCodeCredential: {
+    readonly kind: CredentialKind;
+    readonly provider: string;
+  } = { kind: baseCredential.kind, provider: baseCredential.provider };
+  let sharedFreeProbe: FreeModelProbe | undefined;
+  if (input.freeModelProbe !== undefined) {
+    const verdicts = new Map<string, Promise<boolean>>();
+    const rawProbe = input.freeModelProbe;
+    const memoised: FreeModelProbe = (provider: string, model: string) => {
+      const key = `${provider}/${model}`;
+      const cached = verdicts.get(key);
+      if (cached !== undefined) return cached;
+      const verdict = (async () => {
+        try {
+          return await rawProbe(provider, model);
+        } catch {
+          return false;
+        }
+      })();
+      verdicts.set(key, verdict);
+      return verdict;
+    };
+    sharedFreeProbe = memoised;
+    // Only opencode routes that resolved metered can upgrade; OAuth routes
+    // never probe (a subscription model is not free by declaration).
+    if (openCodeCredential.kind === "provider_api_token") {
+      const pairs = new Map<string, { provider: string; model: string }>();
+      for (const step of input.plan.steps) {
+        if (step.route.backend !== "opencode") continue;
+        pairs.set(`${step.route.provider}/${step.route.modelSnapshot}`, {
+          provider: step.route.provider,
+          model: step.route.modelSnapshot,
+        });
+      }
+      if (pairs.size > 0) {
+        const results = await Promise.all(
+          [...pairs.values()].map(async ({ provider, model }) => ({
+            provider,
+            model,
+            free: await memoised(provider, model),
+          })),
+        );
+        const freeCount = results.filter((r) => r.free).length;
+        if (freeCount > 0 && freeCount < results.length) {
+          const freeNames = results
+            .filter((r) => r.free)
+            .map((r) => `${r.provider}/${r.model}`)
+            .sort();
+          const paidNames = results
+            .filter((r) => !r.free)
+            .map((r) => `${r.provider}/${r.model}`)
+            .sort();
+          return {
+            error: `plan mixes provider_free (${freeNames.join(", ")}) and metered (${paidNames.join(", ")}) OpenCode routes; the OpenCode server holds one credential for its whole life, so a mixed free/metered plan is not supported yet`,
+          };
+        }
+        if (freeCount === results.length) {
+          openCodeCredential = {
+            kind: "provider_free",
+            provider: openCodeCredential.provider,
+          };
+        }
+      }
+    }
   }
   // #149: resolve the opencode broker ONCE, here, and seed it into the
   // authority so runner-authority.ts binding resolution and the transport
@@ -803,11 +954,18 @@ export async function prepareProductionAdmissionContext(input: {
   // An unconditional `new OpenCodeAuthBroker()` here made the api-token route
   // unreachable on the default path — it would resolve the right kind at the
   // authority and then be handed a broker that refuses that kind.
+  //
+  // #182: selected from the already-resolved kind (single derivation) so a
+  // free plan gets the free broker here, at the bindings, and at the server —
+  // never an OAuth broker silently projecting a real record under a free route.
   const credentialBrokers = {
     ...input.credentialBrokers,
     opencode:
       input.credentialBrokers?.opencode ??
-      openCodeCredentialBroker(openCodeCredential.provider),
+      openCodeCredentialBrokerForKind(
+        openCodeCredential.kind,
+        openCodeCredential.provider,
+      ),
   };
   const authorityResult = await prepareProductionRunnerAuthority(
     input.workspaceRoot,
@@ -843,6 +1001,11 @@ export async function prepareProductionAdmissionContext(input: {
     registry: probeRegistry,
     mode: "conformance",
     authorityDeps: input.authorityDeps,
+    // #182: the SAME memoised instance the server credential above was
+    // decided with — bindings reuse its verdicts instead of re-spawning.
+    ...(sharedFreeProbe === undefined
+      ? {}
+      : { freeModelProbe: sharedFreeProbe }),
   });
   if (!probe.decision.ok) {
     await probe.dispose();
@@ -888,7 +1051,14 @@ export async function prepareProductionAdmissionContext(input: {
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   }) as DefaultTransportRegistry;
 
-  return { registry, authorityOptions, evidence };
+  return {
+    registry,
+    authorityOptions,
+    evidence,
+    ...(sharedFreeProbe === undefined
+      ? {}
+      : { freeModelProbe: sharedFreeProbe }),
+  };
 }
 
 function createImmutableBindingsMap(
@@ -1206,15 +1376,124 @@ export async function createProductionRuntime(
   }
 
   const plan = freezeRoutePlan(options.plan);
-  const registry = options.registry ?? productionFallbackRegistry(options);
+  // #182: when a probe is supplied but no registry is, decide the free
+  // verdict BEFORE building the fallback so the server and the bindings share
+  // one verdict. The memoised wrapper is what bindings resolve with below —
+  // one spawn per (provider, model), never two that could disagree.
+  let effectiveOptions = options;
+  let soleOverride:
+    | { readonly kind: CredentialKind; readonly provider: string }
+    | undefined;
+  if (options.freeModelProbe !== undefined && options.registry === undefined) {
+    const rawProbe = options.freeModelProbe;
+    const verdicts = new Map<string, Promise<boolean>>();
+    const memoised: FreeModelProbe = (provider, model) => {
+      const key = `${provider}/${model}`;
+      const cached = verdicts.get(key);
+      if (cached !== undefined) return cached;
+      const verdict = (async () => {
+        try {
+          return await rawProbe(provider, model);
+        } catch {
+          return false;
+        }
+      })();
+      verdicts.set(key, verdict);
+      return verdict;
+    };
+    effectiveOptions = { ...options, freeModelProbe: memoised };
+    const base = soleOpenCodeCredential(plan);
+    if (base.error !== undefined) {
+      throw new ProductionRuntimeError(base.error);
+    }
+    if (base.kind === "provider_api_token" && base.provider !== undefined) {
+      const pairs = new Map<string, { provider: string; model: string }>();
+      for (const step of plan.steps) {
+        if (step.route.backend !== "opencode") continue;
+        pairs.set(`${step.route.provider}/${step.route.modelSnapshot}`, {
+          provider: step.route.provider,
+          model: step.route.modelSnapshot,
+        });
+      }
+      if (pairs.size > 0) {
+        const results = await Promise.all(
+          [...pairs.values()].map(async ({ provider, model }) => ({
+            provider,
+            model,
+            free: await memoised(provider, model),
+          })),
+        );
+        const freeCount = results.filter((r) => r.free).length;
+        if (freeCount > 0 && freeCount < results.length) {
+          const freeNames = results
+            .filter((r) => r.free)
+            .map((r) => `${r.provider}/${r.model}`)
+            .sort();
+          const paidNames = results
+            .filter((r) => !r.free)
+            .map((r) => `${r.provider}/${r.model}`)
+            .sort();
+          throw new ProductionRuntimeError(
+            `plan mixes provider_free (${freeNames.join(", ")}) and metered (${paidNames.join(", ")}) OpenCode routes; the OpenCode server holds one credential for its whole life, so a mixed free/metered plan is not supported yet`,
+          );
+        }
+        if (freeCount === results.length) {
+          soleOverride = {
+            kind: "provider_free",
+            provider: base.provider,
+          };
+        }
+      }
+    }
+  }
+  const registry =
+    effectiveOptions.registry ??
+    productionFallbackRegistry({
+      mode: effectiveOptions.mode,
+      evidence: effectiveOptions.evidence,
+      binaryPath: effectiveOptions.binaryPath,
+      env: effectiveOptions.env,
+      credentialBrokers: effectiveOptions.credentialBrokers,
+      plan,
+      ...(soleOverride === undefined
+        ? {}
+        : { soleCredentialOverride: soleOverride }),
+    });
 
   const leaseTracker = new DefaultActiveTransportLeaseTracker();
   const bindings = await resolveFrozenBindings(
     plan,
-    options,
+    effectiveOptions,
     registry,
     leaseTracker,
   );
+  // #182: never silently project OAuth for a free route. A free binding behind
+  // a non-free server (or a free server with no free binding) is a wiring
+  // divergence, not a fallback — refuse loudly. The precedent is the existing
+  // mixed-provider refusal above: one server, one credential, no silent pick.
+  if (registry instanceof DefaultTransportRegistry) {
+    const serverKind = registry.openCodeCredentialKind;
+    const hasFreeBinding = [...bindings.values()].some(
+      (b) => b.credential.kind === "provider_free",
+    );
+    const hasOpenCodeBinding = [...bindings.values()].some(
+      (b) => b.route.backend === "opencode",
+    );
+    if (hasFreeBinding && serverKind !== "provider_free") {
+      throw new ProductionRuntimeError(
+        `free OpenCode binding resolved but the server credential is ${serverKind ?? "unset"}; refusing to project a non-free credential under a free route (forward the admission's freeModelProbe so both share one verdict)`,
+      );
+    }
+    if (
+      serverKind === "provider_free" &&
+      hasOpenCodeBinding &&
+      !hasFreeBinding
+    ) {
+      throw new ProductionRuntimeError(
+        `OpenCode server holds a free credential but no binding resolved free; refusing to serve metered routes from an empty projection (forward the admission's freeModelProbe so both share one verdict)`,
+      );
+    }
+  }
   const admitted = await admitRoutePlan(plan, registry, {
     mode: options.mode,
     evidence: options.evidence,
@@ -1303,14 +1582,42 @@ export function productionFallbackRegistry(options: {
   // earlier rounds are recorded in the comment above, both found by pr-hero
   // reviewing its own fix.
   readonly plan?: ResolvedRoutePlan;
+  // #182: async callers (createProductionRuntime with a freeModelProbe) decide
+  // the free verdict BEFORE building the fallback — this sync function cannot
+  // spawn — and hand the decided credential here so the server and the
+  // bindings share one verdict instead of two spawns that could disagree.
+  readonly soleCredentialOverride?: {
+    readonly kind: CredentialKind;
+    readonly provider: string;
+  };
 }): TransportRegistry {
   const credential =
-    options.plan === undefined
-      ? undefined
-      : soleOpenCodeCredential(options.plan);
-  if (credential?.error !== undefined) {
-    throw new ProductionRuntimeError(credential.error);
+    options.soleCredentialOverride !== undefined
+      ? options.soleCredentialOverride
+      : options.plan === undefined
+        ? undefined
+        : soleOpenCodeCredential(options.plan);
+  if (
+    credential !== undefined &&
+    "error" in credential &&
+    (credential as { error?: string }).error !== undefined
+  ) {
+    throw new ProductionRuntimeError((credential as { error: string }).error);
   }
+  const kind =
+    credential === undefined
+      ? undefined
+      : (credential as { kind: CredentialKind }).kind;
+  // #182: when the decided kind is free and no broker was supplied, default to
+  // the free broker — NOT the OAuth default in openCodeLaunchServerFor. That
+  // default pairs an OAuth broker with whatever kind travels, and pairing it
+  // with `provider_free` would refuse by name (loud but useless). Substituting
+  // a fresh broker here is safe UNLIKE the metered/OAuth case the comment
+  // below guards: the free broker reads nothing, so "no preference" and "use
+  // THIS one" are indistinguishable — there is no operator store to touch.
+  const needsFreeDefault =
+    kind === "provider_free" &&
+    options.credentialBrokers?.opencode === undefined;
   return createDefaultTransportRegistry({
     mode: options.mode,
     evidence: options.evidence,
@@ -1320,7 +1627,14 @@ export function productionFallbackRegistry(options: {
     // fresh broker here would erase the difference between "no preference"
     // and "use THIS one", which is the whole defect.
     ...(options.credentialBrokers?.opencode === undefined
-      ? {}
+      ? needsFreeDefault
+        ? {
+            credentialBroker: openCodeCredentialBrokerForKind(
+              "provider_free",
+              (credential as { provider: string }).provider,
+            ),
+          }
+        : {}
       : { credentialBroker: options.credentialBrokers.opencode }),
     // The KIND travels even when the broker does not: the registry's own
     // default broker (openCodeLaunchServerFor) must be built for the plan's
@@ -1329,6 +1643,6 @@ export function productionFallbackRegistry(options: {
     // OpenCodeApiTokenBroker and the server an OAuth broker asking for the
     // OAuth kind — which would project the operator's OpenAI record under a
     // zai route. Wrong, not loud, and the worse of the two failure shapes.
-    ...(credential === undefined ? {} : { credentialKind: credential.kind }),
+    ...(credential === undefined ? {} : { credentialKind: kind }),
   });
 }

@@ -17,6 +17,7 @@ import {
   OPENCODE_OAUTH_PROVIDER,
   OpenCodeApiTokenBroker,
   OpenCodeAuthBroker,
+  OpenCodeFreeBroker,
 } from "./security/credential-broker";
 
 export interface RunnerAuthorityOptions {
@@ -335,10 +336,29 @@ export function credentialKindBillsMetered(kind: CredentialKind): boolean {
 // the same answer: two copies of this pairing would be two chances to hand a
 // route a broker that refuses its kind — a failure that surfaces only at
 // projection time, inside a live run.
+//
+// #182: kind-based selection — the single derivation (the #149 anti-drift
+// rule). Callers that already resolved the kind pass it here and never derive
+// it twice; `openCodeCredentialBroker` below is the thin wrapper for callers
+// holding only a provider.
+export function openCodeCredentialBrokerForKind(
+  kind: CredentialKind,
+  provider: string,
+): CredentialBroker {
+  if (kind === "provider_free") {
+    return new OpenCodeFreeBroker();
+  }
+  if (kind === "provider_api_token") {
+    return new OpenCodeApiTokenBroker(provider);
+  }
+  return new OpenCodeAuthBroker();
+}
+
 export function openCodeCredentialBroker(provider: string): CredentialBroker {
-  return credentialKindForRoute("opencode", provider) === "provider_api_token"
-    ? new OpenCodeApiTokenBroker(provider)
-    : new OpenCodeAuthBroker();
+  return openCodeCredentialBrokerForKind(
+    credentialKindForRoute("opencode", provider),
+    provider,
+  );
 }
 
 export async function resolveBindingAuthority(
@@ -419,7 +439,9 @@ export async function resolveBindingAuthority(
         credentialRef: `opencode-auth:${provider}`,
         credentialBroker:
           options.credentialBrokers?.opencode ??
-          openCodeCredentialBroker(provider),
+          // #182: the kind above, not a second derivation — deriving again
+          // here is how the broker and the kind drift apart unobserved.
+          openCodeCredentialBrokerForKind(credentialKind, provider),
         bucketId: "opencode",
       },
     };
