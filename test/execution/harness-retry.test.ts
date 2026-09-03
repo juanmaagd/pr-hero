@@ -396,6 +396,14 @@ describe("PR0 — live retry decision (§7)", () => {
     expect(firstLog).toContain("cause: watchdog_timeout");
     expect(firstLog).toContain("Step timed out after 30ms");
 
+    const firstReceipt = JSON.parse(
+      await Bun.file(
+        path.join(dir, `settlement.${step.name}.attempt1.json`),
+      ).text(),
+    );
+    expect(firstReceipt.lateWriteFence.closed).toBe(true);
+    expect(firstReceipt.lateWriteFence.rejectedEvents).toBe(0);
+
     const secondLog = await Bun.file(
       path.join(dir, "logs", `${step.name}.2.log`),
     ).text();

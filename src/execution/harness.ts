@@ -989,13 +989,6 @@ export class StepExecutionHarness implements StepRunner {
       const raced = await Promise.race(racers);
 
       if (raced === "watchdog") {
-        settlement.markAbortRequested();
-        if (lease.valid) {
-          lease.invalidate("harness watchdog timeout");
-          settlement.markLeaseInvalidated();
-        }
-        fenceClosed = true;
-        sink.close();
         controller.abort();
 
         const graceMs = deadlineMs + this.graceMarginMs;
@@ -1003,6 +996,36 @@ export class StepExecutionHarness implements StepRunner {
           execGuarded,
           new Promise<void>((resolve) => setTimeout(resolve, graceMs)),
         ]);
+
+        const timeoutOutcome: TransportOutcome = {
+          completion: "failed",
+          protocolIntegrity: "unverified",
+          finalText: "",
+          usage: normalizeUnavailableUsage({
+            wallMs: harnessWatchdogMs ?? 0,
+          }),
+          stderrTail: `Step timed out after ${harnessWatchdogMs}ms`,
+          timedOut: true,
+        };
+
+        // Data-plane delivery (#185) runs while the lease is still valid,
+        // routing writeAttemptLog and transient cleanup through
+        // guardedDataPlaneWrite. Sink closure, lease invalidation, and
+        // receipt persistence happen strictly after it.
+        let delivery: AttemptDelivery | undefined;
+        try {
+          delivery = await onData(timeoutOutcome, settlement);
+        } catch {
+          // If onData throws, proceed to invalidate lease and settle
+        }
+
+        settlement.markAbortRequested();
+        if (lease.valid) {
+          lease.invalidate("harness watchdog timeout");
+          settlement.markLeaseInvalidated();
+        }
+        fenceClosed = true;
+        sink.close();
 
         const transportTerminal = settlement.terminal;
         let receipt: SettlementReceipt;
@@ -1040,16 +1063,8 @@ export class StepExecutionHarness implements StepRunner {
         return {
           session,
           settlement,
-          outcome: {
-            completion: "failed",
-            protocolIntegrity: "unverified",
-            finalText: "",
-            usage: normalizeUnavailableUsage({
-              wallMs: harnessWatchdogMs ?? 0,
-            }),
-            stderrTail: `Step timed out after ${harnessWatchdogMs}ms`,
-            timedOut: true,
-          },
+          outcome: timeoutOutcome,
+          delivery,
           cancelled: false,
           receipt,
         };
@@ -1795,21 +1810,6 @@ export class StepExecutionHarness implements StepRunner {
         classifyFailure: transport.classifyFailure,
         parseThrew: false,
       });
-
-    // #185: when execution.delivery is undefined (e.g. watchdog timeout),
-    // onData was bypassed, so writeAttemptLog was never called. Flush it
-    // now so the attempt log exists on disk for post-mortem diagnostics.
-    if (execution.delivery === undefined) {
-      const classification = legacyClassificationFromCause(resolution);
-      await writeAttemptLog(
-        step,
-        attempt,
-        kind,
-        outcome,
-        classification,
-        resolution.kind === "cause" ? resolution.cause : "legacy_terminal",
-      ).catch(() => {});
-    }
 
     return {
       kind: "failed",
