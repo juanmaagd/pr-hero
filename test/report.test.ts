@@ -9,6 +9,7 @@ import {
   estimateCost,
   formatElapsed,
   type ReportMeta,
+  type RereviewLiveRow,
   renderInlineComment,
   renderIssueFindingComment,
   renderPrComment,
@@ -1156,6 +1157,90 @@ describe("renderPrComment", () => {
     expect(body).not.toContain("(R003)");
     expect(body).toContain("1 finding suppressed");
     expect(body).toContain("🔴 1 critical · 🟡 1 warning");
+  });
+
+  // The three below pin the WHOLE rendered row, not a substring. O-2b's
+  // `toContain` assertions cannot see a gap INSIDE the line, and that is
+  // exactly what PR #179's second review posted:
+  //   - `carried` 🟡 `src/wizard.ts:721` —  (R002)
+  // a separator with nothing after it. A live row rebuilt from a posted
+  // `<!-- pr-hero-finding -->` marker has no claim BY DESIGN — the marker
+  // never carried one and `priorsFromPostedMarkers` sets `claim: ""` so that
+  // `claimFingerprint("")`, the one constant every claim-less prior shares,
+  // can never act as a tie-break (rereview-prepare.ts's WHY at :534 and
+  // :570-578). So the data stays as it is and the RENDER has to say so.
+  const liveRowBody = (row: RereviewLiveRow): string =>
+    renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          live: [row],
+        },
+      },
+      [],
+      undefined,
+    );
+
+  const liveRowLine = (body: string, id: string): string | undefined =>
+    body.split("\n").find((line) => line.includes(`(${id})`));
+
+  test("O-2c — a live row with a claim renders it verbatim after the separator", () => {
+    const body = liveRowBody({
+      id: "R001",
+      sev: "WARNING",
+      status: "carried",
+      locs: ["src/wizard.ts:721"],
+      claim: "the wizard writes before it validates",
+    });
+    expect(liveRowLine(body, "R001")).toBe(
+      "- `carried` 🟡 `src/wizard.ts:721` — the wizard writes before it validates (R001)",
+    );
+    expect(body).not.toContain("\x1b");
+  });
+
+  test("O-2d — a live row with no claim says so, never a bare separator", () => {
+    const body = liveRowBody({
+      id: "R002",
+      sev: "WARNING",
+      status: "carried",
+      locs: ["src/wizard.ts:721"],
+      claim: "",
+    });
+    const line = liveRowLine(body, "R002");
+    expect(line).toBe(
+      "- `carried` 🟡 `src/wizard.ts:721` — _claim text unavailable; " +
+        "see this finding's own comment on the PR_ (R002)",
+    );
+    expect(line).not.toContain("—  ");
+    expect(body).not.toContain("\x1b");
+  });
+
+  test("O-2e — a whitespace-only claim is the same case as an empty one", () => {
+    const body = liveRowBody({
+      id: "R003",
+      sev: "CRITICAL",
+      status: "deferred",
+      locs: ["src/pr.ts:42"],
+      claim: "  \n\t ",
+    });
+    const line = liveRowLine(body, "R003");
+    expect(line).toBe(
+      "- `deferred` 🔴 `src/pr.ts:42` — _claim text unavailable; " +
+        "see this finding's own comment on the PR_ (R003)",
+    );
+    expect(line).not.toContain("—  ");
   });
 
   test("D4 — force-push case banners the full-range review", () => {
