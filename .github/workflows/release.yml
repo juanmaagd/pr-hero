@@ -139,9 +139,20 @@ jobs:
             release-binaries/SHA256SUMS
           generate_release_notes: true
 
+      - name: Update major floating tag
+        run: |
+          MAJOR="${GITHUB_REF_NAME%%.*}"
+          if [[ "${MAJOR}" =~ ^v[0-9]+$ ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -fa "${MAJOR}" -m "Release ${GITHUB_REF_NAME}"
+            git push origin "${MAJOR}" --force
+          fi
+
       - name: Publish to NPM
         if: env.NODE_AUTH_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           npm publish --provenance --access public
+
