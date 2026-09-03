@@ -126,4 +126,25 @@ fi
 
 echo ""
 echo "=== pr-hero installation complete! ==="
-echo "Run 'pr-hero' or 'pr-hero setup' to get started."
+echo ""
+echo "The binary is at ${BIN_PATH}."
+echo ""
+# The rc-file edits above only take effect in shells started AFTER them, so the
+# very next command in THIS shell is 'pr-hero: command not found'. Telling the
+# reader to "run pr-hero" without this line is an instruction that cannot work.
+echo "This shell does not have ${INSTALL_DIR} on PATH yet. Add it here and now:"
+echo ""
+case "${SHELL:-}" in
+  *fish)
+    echo '  set -gx PATH $HOME/.prhero/bin $PATH'
+    ;;
+  *)
+    echo '  export PATH="$HOME/.prhero/bin:$PATH"'
+    ;;
+esac
+echo ""
+echo "New shells pick it up from the shell config this installer just edited."
+echo ""
+echo "Then:"
+echo "  pr-hero doctor    # what is installed, what is missing, what blocks a review"
+echo "  pr-hero setup     # skills + MCP registration; also scaffolds .prhero/ in a git repo"
