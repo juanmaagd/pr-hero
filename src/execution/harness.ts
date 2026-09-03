@@ -1641,6 +1641,27 @@ export class StepExecutionHarness implements StepRunner {
             reservation: finalized.reservation,
           };
         }
+        // A DELIVERED attempt already persisted its parsed output
+        // (writeJsonAtomically in runAdmittedAttempt) and the loop returns ok
+        // on delivered without consulting the resolution — so rewriting it to
+        // failed would claim an artifact was never written. Preserve the
+        // delivered kind and append the flip note to stderrTail instead. The
+        // fence is already applied above, and no retry follows delivered
+        // anyway, so nothing about fail-closed is weakened: the next reserve
+        // on this bucket still refuses.
+        if (result.kind === "delivered") {
+          return {
+            kind: "delivered",
+            outcome: {
+              ...result.outcome,
+              stderrTail: [result.outcome.stderrTail, flipNote]
+                .filter(Boolean)
+                .join("\n"),
+            },
+            parsed: result.parsed,
+            reservation: finalized.reservation,
+          };
+        }
         return {
           kind: "failed",
           outcome: {

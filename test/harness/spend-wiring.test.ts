@@ -665,6 +665,51 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     expect(transportCalls).toBe(1);
   });
 
+  test("a delivered free attempt reporting priced cost stays delivered with the flip note appended", async () => {
+    const dir = await tempDir();
+    const flipped: NormalizedUsage = {
+      wallMs: 500,
+      tokens: { outputVisible: 120, outputKnown: 120, totalKnown: 300 },
+      completeness: "complete",
+      billingMode: "free",
+      costSource: "provider",
+      cashCostUsd: 0.06,
+    };
+    const transport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => capabilities({ backend: "opencode" }),
+      execute: async () => okOutcome(flipped),
+      classifyFailure: () => undefined,
+    };
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    });
+
+    const result = await harness.run(await makeStep(dir));
+
+    // Delivered, not failed: the parsed output was already persisted and the
+    // loop returns ok on delivered — rewriting it would claim an artifact was
+    // never written. The fence is still applied and the note still lands.
+    expect(result.status).toBe("ok");
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+    expect(result.reservations?.[0]?.knownUsd).toBe(0.06);
+    expect(result.stderrTail).toContain("free-route cost flip");
+    expect(result.stderrTail).toContain("$0.06");
+
+    // The bucket is still fenced for the rest of the run: fail-closed is not
+    // weakened by preserving the kind.
+    const sibling = await new StepExecutionHarness({
+      transport,
+      spendLedger: ledger,
+      spawnFn: fakeSpawn,
+    }).run(await makeStep(dir, { name: "hunter-resilience" }));
+    expect(sibling.status).toBe("failed");
+    expect(sibling.stderrTail).toContain("fenced");
+  });
+
   test("a subscription attempt reporting $0 with output tokens still settles, leaving its bucket unfenced", async () => {
     const dir = await tempDir();
     const subscriptionZero: NormalizedUsage = {
