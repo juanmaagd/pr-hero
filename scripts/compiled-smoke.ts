@@ -178,8 +178,12 @@ function check(name: string, ok: boolean, detail: string): boolean {
 async function main(): Promise<number> {
   // Release CI already built the real artifact for its target; re-compiling it
   // here would smoke a DIFFERENT binary from the one it uploads.
-  const provided = process.argv[2];
-  const binary = provided ? path.resolve(provided) : compileBinary();
+  const rawProvided = process.argv[2];
+  const provided =
+    rawProvided !== undefined && rawProvided.trim().length > 0
+      ? path.resolve(rawProvided)
+      : undefined;
+  const binary = provided ?? compileBinary();
   console.log(
     `compiled-smoke: ${provided ? "using provided binary" : "compiled"} ${binary}`,
   );
