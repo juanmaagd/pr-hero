@@ -47,6 +47,12 @@ function run(
     // Reviews shell out to git, so PATH must survive.
     env,
   });
+  if (result.error) {
+    return {
+      code: 1,
+      output: result.error.message,
+    };
+  }
   return {
     code: result.status ?? 1,
     output: `${result.stdout ?? ""}${result.stderr ?? ""}`,
@@ -172,7 +178,11 @@ function check(name: string, ok: boolean, detail: string): boolean {
 async function main(): Promise<number> {
   // Release CI already built the real artifact for its target; re-compiling it
   // here would smoke a DIFFERENT binary from the one it uploads.
-  const provided = process.argv[2];
+  const rawProvided = process.argv[2];
+  const provided =
+    rawProvided !== undefined && rawProvided.trim().length > 0
+      ? path.resolve(rawProvided)
+      : undefined;
   const binary = provided ?? compileBinary();
   console.log(
     `compiled-smoke: ${provided ? "using provided binary" : "compiled"} ${binary}`,
