@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-04
+
+### Added
+
+#### Multi-Runtime Execution Harness (D1)
+- **Decoupled StepExecutionHarness**: Extracted provider-agnostic harness (`src/execution/harness.ts`) managing process-group lifecycle (`PGID`), signal escalation (`TERM → KILL → reap`), and terminal proofs.
+- **Concurrency & Spend Limiter**: Integrated `concurrency-limiter` and `spend-limiter` with transactional spend reservation ledgers, protecting operators from runaway API spend.
+- **Cross-Provider Usage Normalization**: Standardized token usage and cost accounting across models and transports (`src/execution/usage-normalized.ts`).
+- **OpenCode SDK Transport Foundations**: Initial client adapter, server launcher, and event-stream mapping for OpenCode runtime support.
+
+#### Security & Isolation Architecture
+- **WorkspaceReadBroker**: Canonical path resolution and boundary verification, preventing symlink traversal and reads outside the workspace.
+- **CredentialBroker**: Ephemeral credential projection isolating sensitive tokens from agent child processes.
+- **Diagnostic Redaction**: Automated scrubbing of sensitive environment variables and credentials from diagnostic error tails.
+- **Security Policy**: Added `SECURITY.md` establishing coordinated vulnerability disclosure through GitHub Private Vulnerability Reporting.
+
+#### Distribution, CI & Packaging (Pillar 3)
+- **CI Run Directory Upload**: Automatic upload of run artifacts (`findings.json`, `diff.patch`, `report.md`) from GitHub Actions runs, enabling local triage via `pr-hero triage reply`.
+- **Automated Floating Major Tag**: Release pipeline now automatically updates the floating `v1` tag upon publishing stable semantic releases.
+- **Compiled Binary Smoke Verification**: Added `scripts/compiled-smoke.ts` exercising 18 integrity checks on standalone compiled binaries prior to release artifact distribution.
+
+### Fixed
+- **BunFS Asset Resolution**: Corrected asset path resolution inside compiled Bun executables so bundled prompts and skills resolve reliably without filesystem dependencies.
+- **Install Script Shell PATH Guidance**: Updated `install.sh` to explicitly instruct operators on exporting `$HOME/.prhero/bin` in the current shell session, preventing `command not found` on fresh installs.
+- **Floating Tag Prerelease Exclusion**: Restricted floating major tag updates to stable semantic releases (`^v[0-9]+\.[0-9]+\.[0-9]+$`), preventing `-beta` or `-rc` builds from moving production tags.
+
 ## [1.0.0] - 2026-08-25
 
 ### Added
@@ -63,5 +89,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spend & Size Safety Gates**: Automated budget guards (`max-changed-lines`, `max-changed-files`, `budget-usd`) skipping oversized or cost-prohibitive PRs cleanly with explicit skip status annotations.
 - **CI Automated Scaffolding**: `pr-hero setup --ci` and `pr-hero ci init` commands generating byte-accurate `.github/workflows/pr-hero.yml` configurations, complemented by the `pr-hero-ci-setup` agent skill.
 
-[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/juanmaagd/pr-hero/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.0.0
