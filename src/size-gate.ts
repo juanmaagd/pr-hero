@@ -14,13 +14,18 @@
 // miss came from a 7-file PR. Nothing here — comment, message or flag help —
 // may imply otherwise.
 
+import {
+  BUILTIN_IGNORE_RULES,
+  compileIgnoreRules,
+  type IgnoreRule,
+} from "./ignore-file";
 import type { NumstatDiffStat, NumstatFile } from "./preflight";
 
 export interface SizeGateConfig {
   // <= 0 disables the limit. Both knobs, independently.
   maxChangedLines: number;
   maxChangedFiles: number;
-  excludeGlobs: string[];
+  excludeRules: IgnoreRule[];
 }
 
 // The shipped defaults. 1500 lines sits above the everyday PR and well below
@@ -51,24 +56,18 @@ export interface SizeGateConfig {
 // bench tree, this number is the thing to revisit — with a measurement, not
 // another extrapolation.
 //
-// The exclusion list is generated-content only: lockfiles, minified bundles
-// and jest-style snapshots are enormous, mechanical, and nothing a hunter can
-// usefully read. Excluding them keeps the gate from firing on a PR whose real
-// change is ten lines beside a regenerated lockfile.
+// The default RULES — not a hand-written glob list — are generated-content
+// only: lockfiles, minified bundles and jest-style snapshots are enormous,
+// mechanical, and nothing a hunter can usefully read. Excluding them keeps
+// the gate from firing on a PR whose real change is ten lines beside a
+// regenerated lockfile. `BUILTIN_IGNORE_RULES` (src/ignore-file.ts) parses
+// these same 9 exclusions from plain gitignore LINES through the exact
+// dialect a user's own `.prheroignore` goes through, so the shape here is
+// `IgnoreRule[]`, not `string[]`.
 export const DEFAULT_SIZE_GATE: SizeGateConfig = {
   maxChangedLines: 1500,
   maxChangedFiles: 150,
-  excludeGlobs: [
-    "**/bun.lock",
-    "**/package-lock.json",
-    "**/yarn.lock",
-    "**/pnpm-lock.yaml",
-    "**/Cargo.lock",
-    "**/go.sum",
-    "**/*.min.js",
-    "**/*.min.css",
-    "**/*.snap",
-  ],
+  excludeRules: BUILTIN_IGNORE_RULES,
 };
 
 export type SizeGateVerdict =
@@ -126,14 +125,14 @@ export function evaluateSizeGate(
   files: NumstatFile[],
   config: SizeGateConfig,
 ): SizeGateVerdict {
-  const globs = config.excludeGlobs.map((pattern) => new Bun.Glob(pattern));
+  const matcher = compileIgnoreRules(config.excludeRules);
   let effectiveLines = 0;
   let effectiveFiles = 0;
   let excludedLines = 0;
   let excludedFiles = 0;
   for (const file of files) {
     const lines = file.insertions + file.deletions;
-    if (globs.some((glob) => glob.match(file.path))) {
+    if (matcher.match(file.path) !== undefined) {
       excludedFiles++;
       excludedLines += lines;
       continue;
@@ -188,45 +187,68 @@ export function evaluateSizeGate(
 //
 // So the excluded files fall out of the REVIEWED DIFF itself: `diff.patch` is
 // this function's output, which makes it literally what the hunters saw, and
-// the cost basis is `effectiveDiffStat` over the same glob list.
+// the cost basis is `effectiveDiffStat` over the SAME rule set — both now
+// share the one matcher this module builds via `compileIgnoreRules`, so they
+// cannot independently drift on what counts as excluded (the "Single Shared
+// Matcher" requirement this consolidation exists to satisfy).
 //
 // Filtering a unified diff by path has to be done on RECORDS, never on lines:
 // a `diff --git ` header at column 0 starts a record and everything up to the
 // next one belongs to it (content lines always carry a ` `/`+`/`-`/`\` prefix,
 // so they can never be mistaken for a header). Whole records are dropped or
 // kept — never individual hunks.
+export interface ExcludedPath {
+  path: string;
+  // The excluding rule's source line — see IgnoreRule.pattern.
+  pattern: string;
+  source: "builtin" | "user";
+  line?: number;
+}
+
 export interface DiffFilterResult {
   // The effective diff: every record whose destination path matched an
-  // exclusion glob removed. Byte-identical to the input when nothing matched.
+  // exclusion rule removed. Byte-identical to the input when nothing matched.
   patch: string;
   // Destination paths of the dropped records, in diff order. Empty means the
   // filter was a no-op — callers use this to decide whether a raw copy of the
   // diff is worth keeping and what to report as provenance.
   droppedPaths: string[];
+  // Per-path provenance: which rule (and source) excluded it, in diff order,
+  // parallel to droppedPaths.
+  exclusions: ExcludedPath[];
 }
 
-export function filterDiffByGlobs(
+export function filterDiffByIgnoreRules(
   patch: string,
-  excludeGlobs: string[],
+  rules: readonly IgnoreRule[],
 ): DiffFilterResult {
   const records = splitDiffRecords(patch);
-  if (records.length === 0) return { patch, droppedPaths: [] };
-  const globs = excludeGlobs.map((pattern) => new Bun.Glob(pattern));
+  if (records.length === 0) return { patch, droppedPaths: [], exclusions: [] };
+  const matcher = compileIgnoreRules(rules);
   const kept: string[] = [];
   const droppedPaths: string[] = [];
+  const exclusions: ExcludedPath[] = [];
   for (const record of records) {
     const target = diffRecordPath(record);
     // A record whose path cannot be resolved is KEPT. Failing open here is
     // the conservative direction: the worst case is paying to review a file
     // that could have been excluded, where failing closed would silently
-    // delete real changed code out of the reviewed diff.
-    if (target !== undefined && globs.some((glob) => glob.match(target))) {
+    // delete real changed code out of the reviewed diff. PRESERVED across
+    // this rename/consolidation — see the pin in test/size-gate.test.ts.
+    const hit = target !== undefined ? matcher.match(target) : undefined;
+    if (target !== undefined && hit !== undefined) {
       droppedPaths.push(target);
+      exclusions.push({
+        path: target,
+        pattern: hit.pattern,
+        source: hit.source,
+        line: hit.line,
+      });
       continue;
     }
     kept.push(record);
   }
-  return { patch: kept.join(""), droppedPaths };
+  return { patch: kept.join(""), droppedPaths, exclusions };
 }
 
 // Split on column-0 `diff --git ` headers, keeping each record's own bytes
@@ -371,14 +393,14 @@ export function unquotePath(field: string): string {
 // raw stat would price a lockfile the hunters never see.
 export function effectiveDiffStat(
   files: NumstatFile[],
-  excludeGlobs: string[],
+  rules: readonly IgnoreRule[],
 ): NumstatDiffStat {
-  const globs = excludeGlobs.map((pattern) => new Bun.Glob(pattern));
+  const matcher = compileIgnoreRules(rules);
   let count = 0;
   let insertions = 0;
   let deletions = 0;
   for (const file of files) {
-    if (globs.some((glob) => glob.match(file.path))) continue;
+    if (matcher.match(file.path) !== undefined) continue;
     count++;
     insertions += file.insertions;
     deletions += file.deletions;
@@ -486,6 +508,13 @@ export function evaluateSizeGateAggregate(
 // The CLI's own knobs on top of the defaults. Undefined means "not asked
 // for", never 0 — 0 is a real value here (it DISABLES the limit), so the
 // two cannot be collapsed.
+//
+// `userRules` is ADDITIVE and optional on purpose: no caller passes it yet
+// (that lands with the local/base-ref `.prheroignore` reads), and omitting
+// it must reproduce today's exact behavior byte-for-byte — that is what
+// keeps `sizeGateConfig({})` equal to `DEFAULT_SIZE_GATE` even after this
+// parameter exists. Builtins are always FIRST, user rules LAST, matching
+// the dialect's own evaluation order (see compileIgnoreRules).
 export function sizeGateConfig(
   overrides: {
     maxChangedLines?: number;
@@ -495,6 +524,7 @@ export function sizeGateConfig(
     max_changed_lines?: number;
     max_changed_files?: number;
   },
+  userRules?: readonly IgnoreRule[],
 ): SizeGateConfig {
   return {
     maxChangedLines:
@@ -505,7 +535,10 @@ export function sizeGateConfig(
       overrides.maxChangedFiles ??
       config?.max_changed_files ??
       DEFAULT_SIZE_GATE.maxChangedFiles,
-    excludeGlobs: DEFAULT_SIZE_GATE.excludeGlobs,
+    excludeRules:
+      userRules !== undefined
+        ? [...BUILTIN_IGNORE_RULES, ...userRules]
+        : DEFAULT_SIZE_GATE.excludeRules,
   };
 }
 

@@ -5,8 +5,11 @@
 // Escape-passthrough probe (run once, by hand, before these tests were
 // written — see the session transcript, not re-run here): `bun -e` against
 // this repo's Bun 1.3.14 confirmed Bun.Glob's OWN backslash-escape handling
-// already does what gitignore's dialect needs for `\!`, `\#` and an escaped
-// trailing space, with NO further unescaping required on our side:
+// already does what gitignore's dialect needs for `\!` and `\#` — this
+// parser leaves both untouched and lets Bun.Glob resolve them at match
+// time. An escaped trailing space is handled on OUR side instead (the
+// escaping backslash is dropped, the space is kept as a plain literal
+// character, which needs no escaping of its own):
 //   new Bun.Glob("\\!foo").match("!foo")  === true
 //   new Bun.Glob("\\#foo").match("#foo")  === true
 //   new Bun.Glob("foo\\ ").match("foo ")  === true  (and "foo" === false)

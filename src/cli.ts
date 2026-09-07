@@ -300,7 +300,7 @@ import {
   effectiveDiffStat,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
-  filterDiffByGlobs,
+  filterDiffByIgnoreRules,
   type SizeGateVerdict,
   sizeGateConfig,
   sizeGateDisposition,
@@ -1253,10 +1253,13 @@ async function review(options: CliOptions): Promise<number> {
   // The EFFECTIVE diff is what lands in diff.patch, because diff.patch is
   // what the pipeline hands to every hunter: excluded files must fall out of
   // the reviewed diff itself, or the gate discounts a lockfile the bill still
-  // pays for in full (see filterDiffByGlobs). diff.raw.patch keeps the
+  // pays for in full (see filterDiffByIgnoreRules). diff.raw.patch keeps the
   // unfiltered bytes for audit, and only when there is a difference to audit.
   const gateConfig = sizeGateConfig(options, loaded.effective);
-  const effectiveDiff = filterDiffByGlobs(diff.stdout, gateConfig.excludeGlobs);
+  const effectiveDiff = filterDiffByIgnoreRules(
+    diff.stdout,
+    gateConfig.excludeRules,
+  );
   if (effectiveDiff.patch.trim().length === 0) {
     throw new CliError(allExcludedMessage(effectiveDiff.droppedPaths));
   }
@@ -1295,7 +1298,7 @@ async function review(options: CliOptions): Promise<number> {
   }
   const diffStat: DiffStat = effectiveDiffStat(
     parseNumstatFiles(numstat.stdout),
-    gateConfig.excludeGlobs,
+    gateConfig.excludeRules,
   );
   const sizeGate = evaluateSizeGate(
     parseNumstatFiles(gateNumstat.stdout),
@@ -2242,7 +2245,7 @@ async function reviewPr(
     const gateConfig = sizeGateConfig(options, config);
     const effectiveDiff = skipPlannedDiscovery
       ? { patch: "", droppedPaths: [] as string[] }
-      : filterDiffByGlobs(rawDiff, gateConfig.excludeGlobs);
+      : filterDiffByIgnoreRules(rawDiff, gateConfig.excludeRules);
     if (
       prepared.plan.emptyDeltaIsError &&
       effectiveDiff.patch.trim().length === 0
@@ -2360,7 +2363,7 @@ async function reviewPr(
       }
       diffStat = effectiveDiffStat(
         parseNumstatFiles(numstat.stdout),
-        gateConfig.excludeGlobs,
+        gateConfig.excludeRules,
       );
       sizeGate = evaluateSizeGate(
         parseNumstatFiles(gateNumstat.stdout),
@@ -2462,8 +2465,8 @@ async function reviewPr(
       headSha,
     );
     // diff.patch is the EFFECTIVE diff — exactly what the hunters read (see
-    // filterDiffByGlobs); diff.raw.patch preserves the unfiltered bytes, and
-    // only when the filter actually dropped something.
+    // filterDiffByIgnoreRules); diff.raw.patch preserves the unfiltered
+    // bytes, and only when the filter actually dropped something.
     const diffPath = path.join(runDir, "diff.patch");
     await Bun.write(diffPath, effectiveDiff.patch);
     if (effectiveDiff.droppedPaths.length > 0) {

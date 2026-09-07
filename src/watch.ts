@@ -275,7 +275,7 @@ async function gatherRepoFacts(
     const gateConfig = {
       maxChangedLines: entry.maxChangedLines,
       maxChangedFiles: entry.maxChangedFiles,
-      excludeGlobs: DEFAULT_SIZE_GATE.excludeGlobs,
+      excludeRules: DEFAULT_SIZE_GATE.excludeRules,
     };
     const remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[] =
       [];
