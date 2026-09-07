@@ -482,6 +482,16 @@ describe("doctor tri-state evaluation", () => {
       );
       expect(providerCheck?.severity).toBe("degraded");
       expect(providerCheck?.hint).toBeDefined();
+      // #197. `toBeDefined()` passes on any text, which is how the hint kept
+      // claiming "Versioned pricing tables ship with the engine, one per
+      // provider, and each one's age is reported by its own pricing-catalog
+      // check" after both halves became false. The hint is still reachable
+      // (the OpenCode transport emits this code non-blocking, and
+      // pushProviderIssues attaches a hint to every non-blocking issue), so
+      // the fix was honest text rather than deletion — and this is what pins
+      // it.
+      expect(providerCheck?.hint).not.toContain("Versioned pricing tables");
+      expect(providerCheck?.hint).not.toContain("pricing-catalog");
     });
 
     test("a throwing producer fails loud as blocking", async () => {

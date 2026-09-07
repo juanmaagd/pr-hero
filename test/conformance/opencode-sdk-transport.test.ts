@@ -618,6 +618,23 @@ describe("OpenCodeSdkTransport capabilities honesty (§11/D1-09)", () => {
     // id in scope) and applying that conclusion to provider cost.
     expect(report.billing.pricingReady).toBe(true);
     expect(report.issues.length).toBeGreaterThan(0);
+    // #197. `length > 0` could not see this list change, which is how the
+    // deleted bundled-table entry slipped through: it said "no bundled
+    // pricing table can be consulted here; ... the runtime binding prices per
+    // route when a table is needed", and no table exists to consult or to
+    // price from any more. A "missing table" issue standing beside
+    // `pricingReady: true` also reads as a contradiction wherever doctor
+    // renders it as a degraded row.
+    //
+    // Exactly ONE survives — the NOTIONAL one, a different fact from the cash
+    // cost above — and the assertion names the count because two entries
+    // sharing a code is precisely the shape that hid the stale one.
+    const pricingIssues = report.issues.filter(
+      (issue) => issue.code === "pricing_table_missing",
+    );
+    expect(pricingIssues).toHaveLength(1);
+    expect(pricingIssues[0]?.message).toContain("notional cost");
+    expect(pricingIssues[0]?.message).not.toContain("table");
     for (const issue of report.issues) expect(issue.blocking).toBe(false);
     expect(
       report.issues.some(
