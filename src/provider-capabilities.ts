@@ -510,13 +510,6 @@ export async function produceClaudeCapabilityReport(
     blocking: false,
   });
 
-  issues.push({
-    code: "pricing_table_missing",
-    message:
-      "a versioned Anthropic pricing table is bundled, but this report is backend-wide and produced before any route resolves, so it has no model to price; per-route pricing is decided at the runtime binding",
-    blocking: false,
-  });
-
   if (resolved.error !== undefined) {
     issues.unshift({
       code: "binary_unresolved",
@@ -560,20 +553,21 @@ export async function produceClaudeCapabilityReport(
     },
     billing: {
       mode: CLAUDE_CAPABILITY_STATICS.billingMode,
-      // #137 left hardcoded ON PURPOSE: no model id is in scope here.
-      // ProduceClaudeCapabilityReportOptions carries binary/env/auth probes
-      // only, because this is a BACKEND-wide report produced before any route
-      // is resolved. `tokenPricingAvailableFor` needs a provider AND a model
-      // to answer, and neither is in scope until a route resolves, so
-      // `false` stays the honest default rather than a price for a model
-      // nobody has named yet.
+      // #197. The old `false` reasoned about a model id: this is a
+      // BACKEND-wide report produced before any route resolves, and
+      // `tokenPricingAvailableFor` needed a provider AND a model to answer.
+      // That function and the tables behind it are deleted, and the flag it
+      // fed never meant what the comment assumed — `pricingReady` asserts
+      // "will this transport tell you what the attempt cost?", which is a
+      // backend-wide fact needing no model. The claude-code CLI reports
+      // `total_cost_usd`, so the honest answer here is `true`.
       //
-      // 2026-09-02: NOT the case the OpenCode transport's `true` covers. That
-      // claim is PROVIDER COST — a cost the provider reports per message,
-      // which needs no model id and no table. The claude-code CLI reports no
-      // such cost, so a rate table really is its only pricing path and this
-      // stays `false`.
-      pricingReady: false,
+      // Kept IDENTICAL to ClaudeCodeCliTransport.capabilities() on purpose:
+      // "the transport contradicts the producer in no environment"
+      // (test/provider-capabilities.test.ts) is a structural guard, and a
+      // producer disagreeing with the transport that actually runs the route
+      // is the drift it exists to catch.
+      pricingReady: true,
     },
     issues,
   };

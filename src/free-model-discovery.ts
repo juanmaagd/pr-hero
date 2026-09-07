@@ -9,11 +9,16 @@
 // provider itself declares: exact model id present AND status active AND
 // input===0 AND output===0 AND cache.read===0 AND cache.write===0.
 //
-// WHY `--refresh`: the repo's pricing doctrine (src/pricing-catalog.ts:4-31)
-// says a stale price is a confident wrong number. A cached all-zero cost
-// that has since become metered would admit a paid run as free; offline
-// failure must refuse loudly downstream (fail closed → provider_api_token),
-// not silently pass.
+// WHY `--refresh`: a stale price is a CONFIDENT WRONG NUMBER, which is worse
+// than no price — the gate exists to refuse billing an unknown amount, and a
+// stale quote defeats it by making the unknown look known. That doctrine used
+// to live in src/pricing-catalog.ts, whose bundled rate tables #197 deleted
+// for failing it (they aged on our release cadence and then refused the very
+// routes they existed to price); it is restated here rather than pointed at,
+// because it is this function's reason and now has no other home. A cached
+// all-zero cost that has since become metered would admit a paid run as free;
+// offline failure must refuse loudly downstream (fail closed →
+// provider_api_token), not silently pass.
 //
 // SCOPE NOTE (residual now guarded, #182 follow-up): between the probe and
 // the attempt the provider could flip a model from free to metered

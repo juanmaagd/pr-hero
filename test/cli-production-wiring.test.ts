@@ -516,16 +516,15 @@ describe("CLI production wiring (verify C1/C3)", () => {
     // `settlementFromUsage`'s metered-zero rule: a metered attempt whose
     // provider-reported cost is $0 while output tokens were produced settles
     // UNRESOLVED and fences its bucket, instead of being recorded as free.
-    // A backend that reports no cost at all — the claude-code CLI — still
-    // depends on the table and is still refused without one
-    // (test/production-runtime.test.ts, "the claude-code CLI reports no cost
-    // of its own").
+    // #197 finished the move this note describes: the bundled tables are
+    // gone, so provider cost is not merely FIRST, it is the only source. The
+    // claude-code CLI answers for itself too now, from `total_cost_usd`
+    // (test/production-runtime.test.ts, "the claude-code CLI reports its own
+    // cost, so an unpriceable model there is admitted").
     //
-    // This helper has no `now` seam, so it deliberately asserts nothing that
-    // reads the wall clock: provider cost does not expire, which is the whole
-    // reason this arm is stable here while a table-priced arm would turn red
-    // on the day the bundled zai table crosses PRICING_MAX_AGE_DAYS. The
-    // clock-sensitive arms live in test/production-runtime.test.ts.
+    // No `now` seam is needed anywhere any more: a reported cost does not
+    // expire, so no arm in this file or in production-runtime's can turn red
+    // on a calendar date.
     test("a metered route no bundled table covers is admitted on the transport's own provider cost", async () => {
       const admission = await admit(
         createResolvedRoutePlan([

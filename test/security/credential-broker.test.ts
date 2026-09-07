@@ -576,7 +576,7 @@ describe("OpenCodeApiTokenBroker", () => {
     }
   });
 
-  // `lookupModelPricing` in pricing-catalog.ts:277-287 records this exact
+  // `lookupModelPricing` (pricing catalogue, deleted by #197) hit this exact
   // class of bug, found by
   // pr-hero on its own PR #162: a bare index reaches Object.prototype, so a
   // lookup answers true for something the store never held.

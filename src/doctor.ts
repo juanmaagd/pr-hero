@@ -20,12 +20,6 @@ import {
   resolveAgentsDirSetting,
 } from "./preflight";
 import {
-  isPricingCatalogFresh,
-  PRICING_CATALOGS,
-  PRICING_MAX_AGE_DAYS,
-  pricingCatalogAge,
-} from "./pricing-catalog";
-import {
   exactBindingCapabilityIssues,
   type ProviderCapabilityReport,
 } from "./provider-capabilities";
@@ -57,11 +51,6 @@ export interface RunDoctorOptions {
   checkToolsOptions?: CheckSystemToolsOptions;
   exists?: (p: string) => boolean;
   readFile?: (p: string) => string | undefined;
-  // Injected so the pricing-catalogue check is not a dated time bomb in the
-  // suite: it goes degraded once the bundled table passes
-  // PRICING_MAX_AGE_DAYS, which would flip any wall-clock test asserting an
-  // all-healthy report red on a calendar date nobody edited.
-  now?: () => Date;
   // Exact-binding facts from the binding that would execute the route.
   // When present, these win over produceCapabilityReport (stale caller
   // readiness booleans must not determine doctor verdict).
@@ -96,7 +85,7 @@ export const PROVIDER_HINTS: Record<string, string> = {
   bounded_events_sink_missing:
     "Usage arrives as a final snapshot until the bounded event sink is wired (D1-08 residual).",
   pricing_table_missing:
-    "Versioned pricing tables ship with the engine, one per provider, and each one's age is reported by its own pricing-catalog check; this site simply has no model in scope to price. Notional estimates remain available.",
+    "Nothing is priced at this level: the report is produced before any route resolves. An attempt's cash cost is whatever its transport reports, and a metered route whose transport reports none is refused at admission.",
 };
 
 function pushProviderIssues(
@@ -143,8 +132,6 @@ export async function runDoctor(
         return undefined;
       }
     });
-
-  const now = options.now ?? (() => new Date());
 
   const repoDir = options.repoRoot ?? options.cwd;
 
@@ -246,41 +233,6 @@ export async function runDoctor(
       severity: "healthy",
       message: `CodeGraph is installed (${tools.codegraph.version ?? "unknown"}) and repository is indexed`,
     });
-  }
-
-  // Bundled pricing catalogue (#137). Reported, never enforced here: doctor's
-  // blocking tier is for things that stop a review, and a stale price table
-  // stops nothing for a subscription user — the common case, whose routes bill
-  // a truthful $0 and never consult this file. Degraded is the whole point:
-  // the metered gate silently returns to refusing, and this line is what makes
-  // that refusal traceable to an expired table instead of looking like a bug.
-  //
-  // ONE CHECK PER CATALOGUE, because freshness is per catalogue. A single
-  // line reporting "the" pricing catalogue's age would have to pick one of
-  // them to name, and the other's age — the one that might be the expired one
-  // — would be invisible in the only place that reports it. Each provider's
-  // table therefore gets its own check, its own age and its own re-fetch
-  // hint.
-  for (const [provider, catalog] of Object.entries(PRICING_CATALOGS)) {
-    const catalogAge = pricingCatalogAge(catalog, now());
-    const catalogProvenance = `fetched ${catalog.fetched_at} from ${catalog.source_url}`;
-    if (isPricingCatalogFresh(catalog, now())) {
-      checks.push({
-        name: `pricing-catalog:${provider}`,
-        severity: "healthy",
-        message: `Model pricing catalogue for ${provider} is ${catalogAge} day(s) old (${catalogProvenance})`,
-      });
-    } else {
-      checks.push({
-        name: `pricing-catalog:${provider}`,
-        severity: "degraded",
-        message: `Model pricing catalogue for ${provider} is ${catalogAge} day(s) old, past the ${PRICING_MAX_AGE_DAYS}-day limit (${catalogProvenance})`,
-        // The bundled files are named `<provider>-pricing.json` by
-        // convention, and the record's key IS that normalised provider, so
-        // the path is derivable rather than a second thing to keep in sync.
-        hint: `Re-fetch ${catalog.source_url} into config/models/${provider}-pricing.json and update fetched_at; until then metered routes on ${provider} stay refused rather than billed at a stale rate.`,
-      });
-    }
   }
 
   // 2. Config layer / agents_dir check

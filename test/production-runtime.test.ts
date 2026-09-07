@@ -27,11 +27,6 @@ import {
   resolveStepRoute,
 } from "../src/model-routing";
 import {
-  PRICING_CATALOGS,
-  PRICING_MAX_AGE_DAYS,
-  type PricingCatalog,
-} from "../src/pricing-catalog";
-import {
   collectDoctorExactBindingReports,
   createProductionRuntime,
   MultiProviderRunner,
@@ -589,42 +584,11 @@ describe("production runtime PR1", () => {
     // explicit that `billingMode: "unknown"` is a blocking preflight result
     // (docs/multi-runtime-model-diversity-design.md:461), and the pricing
     // gate cannot catch it because `unknown` is not `metered`.
-    // #137 clock seam. Built from Date.parse of the catalogue's own stamp so
-    // every arm below is timezone-stable and, more importantly, dateless: an
-    // arm that read the wall clock would flip on the calendar day the bundled
-    // table crosses PRICING_MAX_AGE_DAYS, with no commit behind it.
-    //
-    // #137 made freshness per CATALOGUE, so a clock has to name which table
-    // it is aging. An arm anchored on the wrong provider's stamp still runs
-    // and still passes -- against a table its route never reads.
-    const catalogFor = (provider: string): PricingCatalog => {
-      const catalog = PRICING_CATALOGS[provider];
-      if (catalog === undefined) {
-        throw new Error(`bundled pricing catalogue missing for "${provider}"`);
-      }
-      return catalog;
-    };
-    const catalogAgeClockFor = (
-      provider: string,
-      days: number,
-    ): (() => Date) => {
-      const at = new Date(
-        Date.parse(catalogFor(provider).fetched_at) + days * 86_400_000,
-      );
-      return () => at;
-    };
-    const catalogAgeClock = (days: number): (() => Date) =>
-      catalogAgeClockFor("anthropic", days);
-    const FRESH_CATALOG = catalogAgeClock(0);
-    const STALE_CATALOG = catalogAgeClock(PRICING_MAX_AGE_DAYS);
-    // Anchored on the ZAI stamp, not Anthropic's. The two tables carry
-    // different dates, so FRESH_CATALOG is only incidentally fresh for zai
-    // and STALE_CATALOG is not stale for it at all.
-    const ZAI_FRESH_CATALOG = catalogAgeClockFor("zai", 0);
-
+    // #197 removed the clock seam these arms used to carry. There is no
+    // bundled table left to age, so no arm below can rot on a calendar date
+    // and none needs to name which provider's stamp it is anchored on.
     async function bindingReportForBilling(
       billing: ProviderCapabilityReport["billing"],
-      now?: () => Date,
       routingConfig?: RoutingConfig,
     ) {
       // No routingConfig resolves through the alias fallback in
@@ -655,7 +619,6 @@ describe("production runtime PR1", () => {
         executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
-        ...(now === undefined ? {} : { now }),
       });
       const binding = runtime.bindings.get(step.routeFingerprint);
       if (binding === undefined) throw new Error("missing binding");
@@ -691,26 +654,16 @@ describe("production runtime PR1", () => {
       expect(subscription.billing.cashCostAccountingValid).toBe(true);
       expect(exactBindingCapabilityGate(subscription).ok).toBe(true);
 
-      // #137: STALE_CATALOG is what keeps this arm meaning what it has always
-      // meant. The route's model was `claude-sonnet-5`, which the bundled
-      // catalogue holds, so a fresh table would have priced this metered
-      // route on the catalogue alone and the arm would stop being the
-      // unpriced case it exists to prove. Expiring the table is how "no
-      // pricing is available" stays expressible.
-      //
-      // #175 gives the same arm a SECOND reason to be unpriced -- a bare
-      // alias route names no version -- so the expiry is now belt and braces
-      // rather than the only mechanism. It stays: the day an alias is pinned
-      // again in a routing config, the expiry is what still makes this arm
-      // mean "unpriced" instead of passing by accident.
-      const meteredUnpriced = await bindingReportForBilling(
-        {
-          mode: "metered",
-          pricingReady: false,
-        },
-        STALE_CATALOG,
-      );
-      // Spec: metered routes require provider cost or a versioned rate table.
+      // #197: "unpriced" is now simply a transport that reports no cost.
+      // This arm used to need an EXPIRED bundled table beside it, because a
+      // fresh one would have priced the route on the catalogue alone and the
+      // arm would have stopped being the unpriced case it exists to prove.
+      // With the table deleted there is one source, so the flag says it all.
+      const meteredUnpriced = await bindingReportForBilling({
+        mode: "metered",
+        pricingReady: false,
+      });
+      // Spec: metered routes require provider cost.
       expect(meteredUnpriced.billing.cashCostAccountingValid).toBe(false);
       // The cash gate stays silent for metered (its guard is
       // `pricingApplicability !== "required"`); pricing_table_missing is the
@@ -730,17 +683,18 @@ describe("production runtime PR1", () => {
       expect(exactBindingCapabilityGate(meteredPriced).ok).toBe(true);
     });
 
-    // #137. The binding is the ONLY place a model id and a billing decision
-    // are both in scope, so it is the only place the bundled catalogue can be
-    // consulted. These arms are the proof that consulting it does what the
-    // issue asked: price what is known and current, refuse everything else.
-    describe("bundled pricing catalogue as a second pricing source", () => {
-      // #175. The bundled table is keyed on VERSIONS and a bare alias no
-      // longer resolves to one, so every arm that needs a catalogued model
-      // now says which version it means -- the way an operator does, in a
-      // routing config. That is not a workaround for the unpin: it is the
-      // sanctioned way to pin a snapshot, and pinning it HERE rather than in
-      // config/models/anthropic.json is the whole of #175.
+    // #197 deleted the bundled catalogue and the `||` arm that read it, so
+    // `tokenPricingAvailable` is the transport's own claim and nothing else.
+    // These two arms are what keeps that a decision rather than an accident:
+    // the ONE thing that used to rescue a transport reporting no cost is gone,
+    // and re-adding any second source turns the first arm red.
+    describe("the transport's own claim is the only pricing source", () => {
+      // #175's pinned snapshot, kept verbatim. It names
+      // `claude-sonnet-5` — the exact model the deleted anthropic table
+      // covered — so this route is the strongest possible case for a table
+      // fallback, and it is refused anyway. A bare alias would have been
+      // refused for a second reason (no version to look up), which is why the
+      // pin is load-bearing here rather than incidental.
       const PINNED_SNAPSHOT_ROUTE: RoutingConfig = {
         default: {
           backend: "claude-code",
@@ -750,15 +704,10 @@ describe("production runtime PR1", () => {
         },
       };
 
-      test("a bare alias names no version, so the table cannot price it", async () => {
-        // #175's own arm, and the discriminating one: restore an
-        // alias -> snapshot mapping anywhere (the catalogue, or an early
-        // return in lookupModelPricing) and this goes green-to-red. Same
-        // fresh table and same provider as the arm below; only the model id
-        // differs, and it differs because nobody verified what `sonnet` runs.
+      test("a formerly-catalogued model no longer rescues a transport that reports no cost", async () => {
         const report = await bindingReportForBilling(
           { mode: "metered", pricingReady: false },
-          FRESH_CATALOG,
+          PINNED_SNAPSHOT_ROUTE,
         );
 
         expect(report.billing.pricingApplicability).toBe("required");
@@ -769,80 +718,15 @@ describe("production runtime PR1", () => {
         expect(decision.reason).toContain("pricing_table_missing");
       });
 
-      test("a catalogued model on a fresh table prices a metered route the transport could not price", async () => {
-        // The route names claude-sonnet-5, which the catalogue covers.
-        const report = await bindingReportForBilling(
-          { mode: "metered", pricingReady: false },
-          FRESH_CATALOG,
-          PINNED_SNAPSHOT_ROUTE,
-        );
-
-        expect(report.billing.pricingApplicability).toBe("required");
-        expect(report.billing.tokenPricingAvailable).toBe(true);
-        // Coherence: the design line this file already quotes says metered
-        // needs "provider cost or a versioned rate table". A bundled,
-        // date-stamped table IS the second half of that sentence, so the
-        // cash-cost fact must move with the pricing fact — a report claiming
-        // priced-but-not-accountable would be self-contradictory.
-        expect(report.billing.cashCostAccountingValid).toBe(true);
-        expect(exactBindingCapabilityGate(report).ok).toBe(true);
-      });
-
-      test("an expired table refuses the same route rather than billing a guessed price", async () => {
-        const report = await bindingReportForBilling(
-          { mode: "metered", pricingReady: false },
-          STALE_CATALOG,
-          PINNED_SNAPSHOT_ROUTE,
-        );
-
-        expect(report.billing.tokenPricingAvailable).toBe(false);
-        const decision = exactBindingCapabilityGate(report);
-        expect(decision.ok).toBe(false);
-        expect(decision.reason).toContain("pricing_table_missing");
-      });
-
-      test("the transport's own pricingReady still suffices when the table is expired", async () => {
-        // Two INDEPENDENT sources for one fact; either alone is enough. A
-        // provider that reports its own cost must not be held hostage by the
-        // freshness of a table it never needed.
+      test("the transport's own pricingReady is what admits the same route", async () => {
         const report = await bindingReportForBilling(
           { mode: "metered", pricingReady: true },
-          STALE_CATALOG,
           PINNED_SNAPSHOT_ROUTE,
         );
 
         expect(report.billing.tokenPricingAvailable).toBe(true);
+        expect(report.billing.cashCostAccountingValid).toBe(true);
         expect(exactBindingCapabilityGate(report).ok).toBe(true);
-      });
-
-      test("a foreign provider on a catalogued model is refused, not billed at Anthropic's rates", async () => {
-        // The finding: pr-hero reviewing PR #162 on the OpenCode route,
-        // refuter verdict `corroborated`. `parseRouteMapping`
-        // (preflight.ts) validates `provider` as any non-empty string and
-        // never cross-checks it against `modelSnapshot`, so this mapping is
-        // admissible -- and the predicate, seeing only the model id, priced
-        // it from the Anthropic-only catalogue. Same fresh table, same
-        // catalogued model as the arm above; only the provider differs.
-        const routingConfig: RoutingConfig = {
-          default: {
-            backend: "claude-code",
-            provider: "openai",
-            modelFamily: "claude-sonnet-5",
-            modelSnapshot: "claude-sonnet-5",
-          },
-        };
-        const report = await bindingReportForBilling(
-          { mode: "metered", pricingReady: false },
-          FRESH_CATALOG,
-          routingConfig,
-        );
-
-        expect(report.billing.pricingApplicability).toBe("required");
-        expect(report.billing.tokenPricingAvailable).toBe(false);
-        expect(report.billing.cashCostAccountingValid).toBe(false);
-        const decision = exactBindingCapabilityGate(report);
-        expect(decision.ok).toBe(false);
-        expect(decision.reason).toContain("pricing_table_missing");
       });
     });
 
@@ -1150,19 +1034,17 @@ describe("production runtime PR1", () => {
     // priced-not-required -- which is precisely the under-reporting this
     // issue exists to prevent: the run executes on real spend and reports $0.
     describe("provider_api_token routes bill as metered", () => {
-      // #137 repointed the default logical model. `zai/glm-5` used to be
-      // uncatalogued, which is what made "an unpriced zai route" expressible
-      // by naming any zai model at all; the bundled zai table now prices it,
-      // so the unpriced case needs a model the table deliberately omits.
-      // `glm-5-turbo` is routable in OpenCode (`opencode models`, 2026-09-02)
-      // and absent from z.ai's published price table, so it is refused for
-      // the reason these arms are about -- no price -- and stays that way on
-      // any clock, which a promotional or free-tier id would not.
+      // #137 repointed this at a model the bundled zai table deliberately
+      // omitted; #197 deleted that table, so "unpriced" is decided by the
+      // mock transport's `pricingReady: false` alone and any zai model would
+      // now do. `glm-5-turbo` stays: it is routable in OpenCode
+      // (`opencode models`, 2026-09-02), so the arm keeps naming a model that
+      // really exists rather than a placeholder.
       const UNPRICED_ZAI_MODEL = "zai/glm-5-turbo";
 
       async function openCodeBindingReport(
         provider: string,
-        options?: { readonly logical?: string; readonly now?: () => Date },
+        options?: { readonly logical?: string },
       ) {
         const logical = options?.logical ?? UNPRICED_ZAI_MODEL;
         const model = logical.split("/")[1];
@@ -1208,7 +1090,6 @@ describe("production runtime PR1", () => {
           },
           registry,
           mode: "conformance",
-          ...(options?.now === undefined ? {} : { now: options.now }),
         });
         const binding = runtime.bindings.get(step.routeFingerprint);
         if (binding === undefined) throw new Error("missing binding");
@@ -1233,27 +1114,6 @@ describe("production runtime PR1", () => {
         expect(pricing).toBeDefined();
         expect(pricing?.blocking).toBe(true);
         expect(exactBindingCapabilityGate(report).ok).toBe(false);
-      });
-
-      // #137's whole point, and the arm the issue exists to make true: the
-      // route above is refused because nothing can price it, NOT because a
-      // zai route is unpriceable in principle. Same backend, same credential
-      // kind, same metered billing -- only the model changes, to one the
-      // bundled zai table covers.
-      test("a catalogued zai model on a fresh table passes the same pricing gate", async () => {
-        const { binding, report } = await openCodeBindingReport("zai", {
-          logical: "zai/glm-4.6",
-          now: ZAI_FRESH_CATALOG,
-        });
-
-        expect(binding.credential.kind).toBe("provider_api_token");
-        expect(report.billing.mode).toBe("metered");
-        expect(report.billing.pricingApplicability).toBe("required");
-        // The transport still reports nothing (pricingReady: false above), so
-        // the catalogue is the only thing that can be answering here.
-        expect(report.billing.tokenPricingAvailable).toBe(true);
-        expect(report.billing.cashCostAccountingValid).toBe(true);
-        expect(exactBindingCapabilityGate(report).ok).toBe(true);
       });
 
       test("the openai OAuth route on the same backend still bills as a subscription", async () => {
@@ -1490,18 +1350,19 @@ describe("production runtime PR1", () => {
         expect(exactBindingCapabilityGate(report).ok).toBe(true);
       });
 
-      test("the claude-code CLI reports no cost of its own, so an uncatalogued model there is still refused", async () => {
-        // `pricingReady` is READ OFF the real ClaudeCodeCliTransport rather
-        // than written as a literal. A literal would keep passing if that
-        // transport were widened too — which is precisely the mistake this
-        // arm exists to catch.
+      test("the claude-code CLI reports its own cost, so an unpriceable model there is admitted (#197)", async () => {
+        // THE widening #197 asked for, asserted as an outcome rather than as
+        // a flag. `pricingReady` is READ OFF the real ClaudeCodeCliTransport
+        // rather than written as a literal: the literal would keep this arm
+        // green if the transport were narrowed back, which is the direction
+        // that would silently start refusing routes again.
         const claudeBilling = await new ClaudeCodeCliTransport().capabilities();
-        expect(claudeBilling.billing.pricingReady).toBe(false);
+        expect(claudeBilling.billing.pricingReady).toBe(true);
 
-        // An anthropic snapshot the bundled table deliberately does not
-        // carry, so the refusal is about pricing and not about freshness —
-        // no clock seam is involved and the arm cannot rot into a calendar
-        // test.
+        // An anthropic snapshot no bundled table ever carried — the point
+        // being that no table is consulted at all any more. Before #197 this
+        // exact route was REFUSED (`pricing_table_missing`, blocking); the
+        // CLI's `total_cost_usd` is what admits it now.
         const routingConfig: RoutingConfig = {
           default: {
             backend: "claude-code",
@@ -1515,16 +1376,13 @@ describe("production runtime PR1", () => {
             mode: "metered",
             pricingReady: claudeBilling.billing.pricingReady,
           },
-          undefined,
           routingConfig,
         );
 
         expect(report.billing.pricingApplicability).toBe("required");
-        expect(report.billing.tokenPricingAvailable).toBe(false);
-        expect(report.billing.cashCostAccountingValid).toBe(false);
-        const decision = exactBindingCapabilityGate(report);
-        expect(decision.ok).toBe(false);
-        expect(decision.reason).toContain("pricing_table_missing");
+        expect(report.billing.tokenPricingAvailable).toBe(true);
+        expect(report.billing.cashCostAccountingValid).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
       });
     });
 

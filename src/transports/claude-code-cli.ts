@@ -78,10 +78,13 @@ function hashPromptFile(promptPath: string): string {
 // the change that set out to stop it.
 //
 // The fix is deliberately NARROW: it does not derive `credentialKindForRoute`,
-// and it does not touch route admission. See the guard on `envBillsMetered` —
-// a metered claude-code route would be REFUSED for lack of pricing, so API-key
-// users would stop being able to run at all. This only decides how an attempt
-// that already ran gets FILED.
+// and it does not touch route admission. See the guard on `envBillsMetered`.
+// #197 removed the REASON that guard used to give — a metered claude-code
+// route is no longer refused for lack of pricing, because `pricingReady` is
+// now `true` for this transport — but not the guard: which credential a route
+// runs on is `credentialKindForRoute`'s single decision (#161's slice), and
+// deriving it from the env HERE would fork it. This only decides how an
+// attempt that already ran gets FILED.
 //
 // What each arm claims:
 //   * metered  — `costSource: "provider"` because the CLI's own figure is what
@@ -508,37 +511,45 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       },
       billing: {
         mode: CLAUDE_CAPABILITY_STATICS.billingMode,
-        // D1-08 PR3 does not touch pricing readiness: a per-model pricing
-        // table is explicitly out of scope for the whole D1-08 change (the
-        // proposal's Out of Scope list) and unrelated to bucketScope — a
-        // bucket ID says WHICH rate-limit pool a credential shares, not
-        // whether its cost can be priced. Still `false`, tracked by the
-        // pre-existing "pricing_table_missing" issue below.
+        // #197. WHAT THIS FLAG ASSERTS, which is narrower than it reads.
+        // `pricingReady` lives inside `capabilities()`, built from
+        // CLAUDE_CAPABILITY_STATICS — a STATIC claim made at admission,
+        // before any spawn. No cost figure exists at the moment it is asked,
+        // for any transport, so it cannot be answering "is this attempt's
+        // cost a provider invoice?". It answers "will this transport tell you
+        // what the attempt cost?", and this one will: the CLI reports
+        // `total_cost_usd`, which #177 files as cash on a metered credential
+        // and as notional on a subscription.
         //
-        // #137 shipped that table and still leaves this `false`: no model id
-        // is in scope here. capabilities() takes only a credential
-        // fingerprint and bucket scope, it is called before any specific
-        // request (see the BUCKET_IDENTITY_PROVIDER note above), and the
-        // registry's claude-code factory forwards only `spawnFn` — the
-        // transport never receives `options.route`. Honest default.
+        // That is why the list-vs-invoice objection this comment used to
+        // carry does not survive. It rejected the CLI's figure for being a
+        // LIST computation (`costBasis: "list"`) while the alternative it
+        // preferred — the bundled `config/models/*-pricing.json` — was a
+        // hand-transcribed snapshot of the same published list prices. The
+        // choice was never invoice-over-list; it was OUR list price over the
+        // CLI's, on a ground that convicted our own. The tables are gone
+        // (#197); the CLI's figure tracks the tool the user already upgrades.
         //
-        // 2026-09-02: NOT the case the OpenCode transport's `true` covers.
-        // That claim is PROVIDER COST — the OpenCode SDK reports a
-        // non-optional `cost` on every assistant message, which needs no
-        // model id and no table. The Claude CLI reports no per-request cash
-        // cost, so the rate table really is this transport's only pricing
-        // path and this stays `false`.
+        // THIS DELIBERATELY WIDENS ADMISSION, and that is the intent rather
+        // than a side effect to discover later. `tokenPricingAvailable`
+        // (production-runtime.ts) is now this flag and nothing else, so a
+        // metered claude-code route that the old gate refused for a missing
+        // or expired table is admitted and runs on the cost the CLI reports.
+        // Stated with the precision the code supports: no claude-code route
+        // resolves metered TODAY — `credentialKindForRoute`
+        // (runner-authority.ts) returns `claude_subscription_oauth` for this
+        // backend unconditionally — so what changes today is the GATE's
+        // answer, and the widening becomes observable when #161 derives a
+        // real metered mode for the backend.
         //
-        // #177 files the CLI's `total_cost_usd` as CASH on a metered
-        // credential, and that still does not flip this. Two reasons, and the
-        // first alone settles it: this flag is an ADMISSION input
-        // (`tokenPricingAvailable`, production-runtime.ts), so flipping it
-        // would change which routes are allowed to run — a far larger claim
-        // than "how did this attempt's money get filed?". The second is that
-        // the figure is a CLI-side LIST computation (`costBasis: "list"`), not
-        // a provider invoice, so it is not the per-request provider cost this
-        // flag asserts.
-        pricingReady: false,
+        // The one gap this opens is settled, not hand-waved: `total_cost_usd`
+        // is OPTIONAL on `RawClaudeCliResult`, so a metered attempt can
+        // complete with no figure. It settles `unresolved` with no
+        // `knownUsd` rather than a fabricated $0 (`costFor` above,
+        // `settlementFromUsage` in spend-limiter.ts), pinned by "a metered
+        // run reporting no cash figure at all" in
+        // test/conformance/claude-cli-transport.test.ts.
+        pricingReady: true,
       },
       ...(input !== undefined
         ? {
@@ -563,12 +574,6 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
           code: "bounded_events_sink_missing",
           message:
             "bounded event streaming is not wired: the event sink is currently a no-op and usage arrives as a final snapshot",
-          blocking: false,
-        },
-        {
-          code: "pricing_table_missing",
-          message:
-            "a versioned Anthropic pricing table is bundled, but capabilities() carries no route, so this transport cannot name the model to price; the runtime binding prices per route",
           blocking: false,
         },
       ],

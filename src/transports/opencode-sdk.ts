@@ -442,9 +442,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // model outside the two bundled catalogues was refused as unpriceable
         // while the provider was reporting its price on every message.
         //
-        // The claim is scoped to THIS transport. The claude-code CLI reports
-        // no cost of its own, and its three `pricingReady: false` siblings say
-        // so in their own comments.
+        // #197: the claim is no longer scoped to this transport. The
+        // claude-code CLI reports `total_cost_usd`, so its transport and its
+        // backend-wide producer now answer `true` for the same reason this
+        // one does. The remaining `false` is transport-registry.ts's
+        // synthetic report for a backend whose transport could not be
+        // CONSTRUCTED — no transport, so no claim.
         pricingReady: true,
       },
       ...(input !== undefined
@@ -467,18 +470,6 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           blocking: false,
         },
         {
-          // 2026-09-02: rewritten, not removed. It used to open "this backend
-          // reports no per-request token cost", which is the same wrong
-          // disjunct `pricingReady` was stuck on — and it now flatly
-          // contradicts the `true` above. What remains true is narrower: no
-          // bundled TABLE can be consulted from here, which is why the
-          // binding, not this transport, is where a table is ever read.
-          code: "pricing_table_missing",
-          message:
-            "capabilities() carries no route, so no bundled pricing table can be consulted here; cash cost comes from the provider's own per-message cost and the runtime binding prices per route when a table is needed",
-          blocking: false,
-        },
-        {
           code: "usage_mode_client_reported",
           message:
             "usage aggregation mode (§4.2 line 195) is fixed at runtime by the first client usage event, so no static snapshot/delta claim can be defended; usageMode is 'none'",
@@ -486,10 +477,16 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         },
         {
           // NOTIONAL cost, a different fact from the cash cost above: what a
-          // subscription attempt WOULD have cost metered. That still needs a
-          // table and a model id, neither of which is in scope here. #137
-          // shipped a second table (z.ai), so the old "Anthropic-only"
-          // wording was stale as well as beside the point.
+          // subscription attempt WOULD have cost metered. No route is in
+          // scope here to name a model, and since #197 there is no bundled
+          // table to look one up in either — a subscription attempt's
+          // notional figure now comes from whatever the transport reports for
+          // the attempt, not from this report.
+          //
+          // #197 removed this list's OTHER `pricing_table_missing` entry,
+          // which said no bundled table could be consulted from here: both
+          // halves of it died with the tables, and a "missing table" issue
+          // beside `pricingReady: true` read as a contradiction.
           code: "pricing_table_missing",
           message:
             "no route is in scope here, so notional cost cannot be derived for this backend's models; subscription cash cost stays 0",

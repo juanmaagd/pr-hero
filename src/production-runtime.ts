@@ -34,7 +34,6 @@ import type {
   RoutingConfig,
 } from "./model-routing";
 import { buildResolvedRoutePlan, freezeRoutePlan } from "./model-routing";
-import { tokenPricingAvailableFor } from "./pricing-catalog";
 import type { ProviderCapabilityReport } from "./provider-capabilities";
 import {
   type CapabilityGateDecision,
@@ -102,14 +101,6 @@ export interface ProductionRuntimeOptions extends RunnerAuthorityOptions {
   // prepareProductionAdmissionContext) so the two cannot disagree across a
   // provider flip — use `createFreeModelProbe` (memoised per provider/model).
   readonly freeModelProbe?: FreeModelProbe;
-  // #137: the clock the bundled pricing catalogues' freshness is judged
-  // against, forwarded to every binding. A seam and not `new Date()` inline
-  // for the same reason doctor.ts has one: a test proving a fresh table
-  // prices a route would otherwise turn red on the calendar day the shipped
-  // table for THAT route's provider crosses PRICING_MAX_AGE_DAYS, with no
-  // commit behind it. Each provider's table expires on its own stamp, so a
-  // test must anchor its clock on the catalogue its route actually reads.
-  readonly now?: () => Date;
 }
 
 export interface ProductionRuntime {
@@ -232,7 +223,6 @@ interface FrozenRuntimeBindingOptions {
     backend: RunnerBackend,
   ) => Promise<ProviderCapabilityReport>;
   readonly leaseTracker: ActiveTransportLeaseTracker;
-  readonly now?: () => Date;
 }
 
 function minimalIsolationFromExecutable(
@@ -268,7 +258,6 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     backend: RunnerBackend,
   ) => Promise<ProviderCapabilityReport>;
   private readonly leaseTracker: ActiveTransportLeaseTracker;
-  private readonly now: () => Date;
 
   constructor(options: FrozenRuntimeBindingOptions) {
     this.key = options.key;
@@ -282,10 +271,6 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     this.authority = options.authority;
     this.getCapabilityReport = options.getCapabilityReport;
     this.leaseTracker = options.leaseTracker;
-    // Resolved into a field BEFORE Object.freeze(this), like every other
-    // injected dependency here — the instance is frozen, so a clock added
-    // after this line could never be assigned.
-    this.now = options.now ?? (() => new Date());
     Object.freeze(this);
   }
 
@@ -346,56 +331,38 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     // instead. Nothing reaches "subscription" that did not already.
     const billingMode: ExactBindingCapabilityReport["billing"]["mode"] =
       effectiveBillingMode === "metered" ? "metered" : "subscription";
-    // #137. THE place the bundled catalogue is consulted, and the only one:
-    // this is the sole site where a provider (`this.route.provider`), a model
-    // id (`this.route.modelSnapshot`) and a billing decision are all in
-    // scope. The provider is not decoration -- it SELECTS which provider's
-    // bundled table is consulted, and a route may name any provider beside
-    // any model snapshot, so a route naming a provider no table covers is
-    // refused rather than priced from a neighbour's. The three remaining
-    // `pricingReady: false` sites upstream are backend-wide reports produced
-    // before any route resolves, so they stay the honest default and say so
-    // in their own comments.
+    // #197. ONE source, and it is the transport's own claim. This used to be
+    // a disjunction — the transport's `pricingReady` OR a bundled per-model
+    // rate table selected by `this.route.provider` — and the table half is
+    // deleted, along with the loader, the 90-day freshness window and the
+    // `config/models/*-pricing.json` files behind it.
     //
-    // Two INDEPENDENT sources for one fact, either sufficient: a transport
-    // that reports its own cost keeps working when the table expires, and a
-    // provider that reports nothing is still priceable from the table.
+    // WHY the table lost, given the design line (§8 line 461) names "provider
+    // cost or a versioned rate table": our table was a hand-transcribed
+    // snapshot of the same published LIST prices the transports report, and
+    // it aged on our release cadence rather than the tool's. It expired after
+    // 90 days and REFUSED the route it was meant to enable, it covered only
+    // what someone remembered to transcribe (the zai table priced 11 of the
+    // 16 models `opencode models` reports, five days after it landed), and a
+    // new model was absent until noticed. The transports report a live figure
+    // for whatever they actually ran.
     //
-    // 2026-09-02: the FIRST disjunct is now connected, and the count above
-    // dropped from four to three. `report.billing.pricingReady` was false at
-    // every site, so only the table could ever answer — which inverted the
-    // design's own ordering (§8 line 461 names provider cost FIRST and the
-    // rate table second). The OpenCode transport reports provider cost per
-    // assistant message and now says so, which is what lets a metered route
-    // on a model no bundled table covers be priced at all.
-    //
-    // This was a no-op when #137 landed — no route reported
-    // `billingMode: "metered"`, so `pricingApplicability` was never
-    // "required" and nothing gated on this value. #133 made it LIVE: an
-    // OpenCode route on any provider but `openai` resolves to
-    // `provider_api_token`, which the effective mode above reports as
-    // metered. So today a metered route with a catalogued model and a
-    // CURRENT table is admissible, and one with an expired or absent table is
-    // refused rather than billed at a guessed price. That refusal is #137's
-    // entire point: an old price is worse than no price, because the gate
-    // exists to refuse billing an unknown amount and a stale quote defeats it
-    // by making the unknown look known. #161 (a real metered mode derived
-    // from the transport itself) remains the other way into this branch.
-    const tokenPricingAvailable =
-      report.billing.pricingReady ||
-      tokenPricingAvailableFor(
-        this.route.provider,
-        this.route.modelSnapshot,
-        this.now(),
-      );
+    // Both backends now answer for themselves: OpenCode reads a non-optional
+    // `cost` off every assistant message, and the Claude CLI reports
+    // `total_cost_usd` (#197 flipped that flag). A transport that reports NO
+    // cost is refused — which is the gate's whole purpose, unchanged: refuse
+    // to bill an unknown amount. What moved is where the unknown is answered.
+    // A missing figure is now caught at SETTLEMENT, where the answer is
+    // actually known (`settlementFromUsage`, spend-limiter.ts: complete usage
+    // with no cash cost settles `unresolved`, never 0), instead of being
+    // guessed at admission from a table that might be stale.
+    const tokenPricingAvailable = report.billing.pricingReady;
     // Spec (same design line): subscription OAuth may truthfully report
-    // `cashCostUsd: 0`; metered routes require provider cost or a versioned
-    // rate table; unknown is blocking. The catalogue IS "a versioned rate
-    // table", so this reads the SAME combined fact as tokenPricingAvailable
-    // above — deriving it from the raw transport flag instead would ship a
-    // metered report claiming priced-but-not-accountable, which is
-    // self-contradictory and would strand the route in a gate that no longer
-    // has a reason to refuse it.
+    // `cashCostUsd: 0`; metered routes require a cost source; unknown is
+    // blocking. Read off `tokenPricingAvailable` rather than the raw flag so
+    // the two cannot drift — a metered report claiming
+    // priced-but-not-accountable is self-contradictory and would strand the
+    // route in a gate that no longer has a reason to refuse it.
     const cashCostAccountingValid =
       effectiveBillingMode === "subscription"
         ? true
@@ -628,7 +595,6 @@ async function resolveFrozenBindings(
       route: step.route,
       authority,
       executable,
-      ...(options.now === undefined ? {} : { now: options.now }),
       credential: {
         kind: authority.credentialKind,
         ref: authority.credentialRef,

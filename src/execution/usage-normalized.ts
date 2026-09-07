@@ -79,14 +79,21 @@ export type UsageCostSource =
 //   * `FrozenRuntimeBinding.capabilities()` (production-runtime.ts) — which
 //     derives the exact binding's mode from `credential.kind`.
 //
-// Making either derived turns a metered claude-code route into
-// `pricingApplicability: "required"`, and NEITHER pricing disjunct answers for
-// it: `pricingReady` is false on this transport, and the bundled table is
-// keyed per model. The route would be refused admission outright
-// (`pricing_table_missing`, blocking) and API-key users would stop being able
-// to run at all — strictly worse than the mis-labelled cost this predicate
-// exists to fix. This answers only "how does this attempt's money get FILED?",
-// and it reaches nothing but the usage record and the CI ceiling.
+// The BAN outlives its original reason, so read both. Until #197 the reason
+// was safety: making either derived turned a metered claude-code route into
+// `pricingApplicability: "required"` with no pricing source to answer, so the
+// route was refused admission outright (`pricing_table_missing`, blocking) and
+// API-key users stopped being able to run at all. #197 flipped the
+// claude-code transport's `pricingReady` to `true`, so that refusal can no
+// longer happen and the fail-closed argument is spent.
+//
+// What remains is ownership, and it is enough: which credential a route runs
+// on — and therefore how it bills — is `credentialKindForRoute`'s single
+// decision (#161's slice), with the projection and rate-limit-bucket changes
+// that implies. A second derivation here would fork it, and the two would
+// disagree about one attempt in silence. This answers only "how does this
+// attempt's money get FILED?", and it reaches nothing but the usage record and
+// the CI ceiling.
 // ---------------------------------------------------------------------------
 export function envBillsMetered(
   env: Readonly<Record<string, string | undefined>>,
