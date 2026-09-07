@@ -341,20 +341,22 @@ export type CiBillingMode = "subscription" | "metered";
 // separately, and only the whitespace ones flip when the trim is removed.
 //
 // This is deliberately NOT `provider-capabilities.ts`'s
-// `CLAUDE_CAPABILITY_STATICS.billingMode` (:354-362), and the two must not be
-// "unified" later. That constant is static `"subscription"` and making it
-// derived is an ADMISSION hazard, verified before this was written: metered →
-// `pricingApplicability: "required"` (production-runtime.ts:263) →
-// `tokenPricingAvailable = report.billing.pricingReady || tokenPricingAvailableFor(...)`
-// (production-runtime.ts), and NEITHER disjunct answers for a claude-code
-// route whose model the bundled table misses: `pricingReady` is false on the
-// claude-code CLI transport (claude-code-cli.ts) and on the backend-wide
-// report producer (provider-capabilities.ts) → `pricing_table_missing` with
-// `blocking: true` (provider-capabilities.ts). A metered
-// claude-code route would be refused admission outright, which is strictly
-// worse than the skipped review this function exists to prevent. This one
-// answers a narrower question — "should CI impose a spend ceiling?" — and
-// reaches nothing but the ceiling.
+// `CLAUDE_CAPABILITY_STATICS.billingMode`, and the two must not be "unified"
+// later — but the REASON changed under it, so do not quote the old one.
+//
+// Until #197 the reason was an ADMISSION hazard: metered →
+// `pricingApplicability: "required"` → `tokenPricingAvailable`, which nothing
+// could answer for a claude-code route (`pricingReady` was false on both the
+// CLI transport and the backend-wide producer, and the bundled table was keyed
+// per model) → `pricing_table_missing`, blocking. #197 flipped that flag to
+// `true` on the strength of the CLI's own `total_cost_usd`, so a metered
+// claude-code route is no longer refused for lack of pricing and the hazard is
+// gone.
+//
+// The separation stands on ownership instead: how a route bills follows from
+// which credential it runs on, which is `credentialKindForRoute`'s single
+// decision (#161's slice). This one answers a narrower question — "should CI
+// impose a spend ceiling?" — and reaches nothing but the ceiling.
 //
 // That refusal now guards the shared predicate itself rather than only this
 // caller: `envBillsMetered` carries the same paragraph and names BOTH

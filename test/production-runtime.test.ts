@@ -1490,18 +1490,19 @@ describe("production runtime PR1", () => {
         expect(exactBindingCapabilityGate(report).ok).toBe(true);
       });
 
-      test("the claude-code CLI reports no cost of its own, so an uncatalogued model there is still refused", async () => {
-        // `pricingReady` is READ OFF the real ClaudeCodeCliTransport rather
-        // than written as a literal. A literal would keep passing if that
-        // transport were widened too — which is precisely the mistake this
-        // arm exists to catch.
+      test("the claude-code CLI reports its own cost, so an unpriceable model there is admitted (#197)", async () => {
+        // THE widening #197 asked for, asserted as an outcome rather than as
+        // a flag. `pricingReady` is READ OFF the real ClaudeCodeCliTransport
+        // rather than written as a literal: the literal would keep this arm
+        // green if the transport were narrowed back, which is the direction
+        // that would silently start refusing routes again.
         const claudeBilling = await new ClaudeCodeCliTransport().capabilities();
-        expect(claudeBilling.billing.pricingReady).toBe(false);
+        expect(claudeBilling.billing.pricingReady).toBe(true);
 
-        // An anthropic snapshot the bundled table deliberately does not
-        // carry, so the refusal is about pricing and not about freshness —
-        // no clock seam is involved and the arm cannot rot into a calendar
-        // test.
+        // An anthropic snapshot no bundled table ever carried — the point
+        // being that no table is consulted at all any more. Before #197 this
+        // exact route was REFUSED (`pricing_table_missing`, blocking); the
+        // CLI's `total_cost_usd` is what admits it now.
         const routingConfig: RoutingConfig = {
           default: {
             backend: "claude-code",
@@ -1520,11 +1521,9 @@ describe("production runtime PR1", () => {
         );
 
         expect(report.billing.pricingApplicability).toBe("required");
-        expect(report.billing.tokenPricingAvailable).toBe(false);
-        expect(report.billing.cashCostAccountingValid).toBe(false);
-        const decision = exactBindingCapabilityGate(report);
-        expect(decision.ok).toBe(false);
-        expect(decision.reason).toContain("pricing_table_missing");
+        expect(report.billing.tokenPricingAvailable).toBe(true);
+        expect(report.billing.cashCostAccountingValid).toBe(true);
+        expect(exactBindingCapabilityGate(report).ok).toBe(true);
       });
     });
 

@@ -442,9 +442,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // model outside the two bundled catalogues was refused as unpriceable
         // while the provider was reporting its price on every message.
         //
-        // The claim is scoped to THIS transport. The claude-code CLI reports
-        // no cost of its own, and its three `pricingReady: false` siblings say
-        // so in their own comments.
+        // #197: the claim is no longer scoped to this transport. The
+        // claude-code CLI reports `total_cost_usd`, so its transport and its
+        // backend-wide producer now answer `true` for the same reason this
+        // one does. The remaining `false` is transport-registry.ts's
+        // synthetic report for a backend whose transport could not be
+        // CONSTRUCTED — no transport, so no claim.
         pricingReady: true,
       },
       ...(input !== undefined

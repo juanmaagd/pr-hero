@@ -100,13 +100,12 @@ describe("produceClaudeCapabilityReport", () => {
     expect(report.isolation.codegraphPolicy).toBe(false);
     expect(report.protocol.terminalProof).toBe(true);
     expect(report.protocol.boundedEvents).toBe(false);
-    expect(report.billing.pricingReady).toBe(false);
+    expect(report.billing.pricingReady).toBe(true);
     expect(report.cancellation.deadlineMs).toBe(7500);
     expect(report.cancellation.conformance).toBe("passed");
     expect(report.issues.map((i) => i.code).sort()).toEqual([
       "bounded_events_sink_missing",
       "codegraph_policy_unenforced",
-      "pricing_table_missing",
     ]);
     expect(report.issues.every((i) => !i.blocking)).toBe(true);
   });
@@ -382,32 +381,28 @@ describe("transport/producer parity (§11)", () => {
   // suite green while contradicting the static transport in every API-key
   // environment. Nothing else in this file asserts the constant's value at
   // all. These two tests close that hole.
-  test("billingMode is a deliberate static, and stays one until pricing exists", async () => {
+  test("billingMode is a deliberate static, and pricing readiness no longer holds it there", async () => {
     // Pinning the value, not endorsing it. CLAUDE_CAPABILITY_STATICS declares
     // "fields every claude-code route claims independent of host environment",
     // and for billing that claim is knowingly false: an ANTHROPIC_API_KEY user
     // is billed per token and is reported as a subscription anyway.
     //
-    // It is left false ON PURPOSE, because deriving it today fails CLOSED in
-    // the worst direction. Verified in the code, not assumed:
+    // WHY IT IS STILL STATIC, and why the old reason is gone. This block used
+    // to argue that deriving the mode fails CLOSED: metered ->
+    // pricingApplicability "required" -> tokenPricingAvailable, which no
+    // disjunct could answer because every transport hardcoded
+    // `pricingReady: false` and the only other source was a bundled rate
+    // table keyed per model. #197 deleted that table and flipped the flag: the
+    // pricing gate now ANSWERS for a claude-code route, so a derived metered
+    // mode would no longer be refused for lack of pricing.
     //
-    //   billing.mode "metered"
-    //     -> pricingApplicability "required"        production-runtime.ts:263
-    //     -> tokenPricingAvailable = pricingReady   production-runtime.ts:322
-    //     -> pricingReady is hardcoded false in every transport
-    //        (provider-capabilities.ts:555, claude-code-cli.ts:323,
-    //         opencode-sdk.ts:373, transport-registry.ts:421)
-    //     -> pricing_table_missing, blocking: true  provider-capabilities.ts:629-637
+    // What remains is scope, not safety. Deriving the mode from the host
+    // environment is #161's slice (a real metered mode carried by the
+    // credential, alongside the projection and bucket changes it implies), and
+    // `credentialKindForRoute` returning `claude_subscription_oauth`
+    // unconditionally is the single place that decision belongs. Changing the
+    // constant here would fork it.
     //
-    // A metered claude-code route would be refused ADMISSION outright, so an
-    // API-key user would go from "review skipped at the budget ceiling" to
-    // "review never runs". config/models/anthropic.json is a model-alias
-    // catalogue with no prices in it, so pricingReady cannot become true by
-    // reading what already ships.
-    //
-    // If this test just went red: you are on the right track and the
-    // prerequisite is issue #137 (a real per-provider pricing catalogue), not
-    // this constant. Land pricing first, then derive, then delete this test.
     // Issue #156's CI budget ceiling deliberately does NOT read this field --
     // see deriveCiBillingMode in src/ci-gates.ts, which answers the narrower
     // "should CI impose a spend ceiling?" and reaches nothing but the ceiling.
@@ -418,7 +413,9 @@ describe("transport/producer parity (§11)", () => {
       env: { PATH: "/bin", ANTHROPIC_API_KEY: "sk-test" },
     });
     expect(withApiKey.billing.mode).toBe("subscription");
-    expect(withApiKey.billing.pricingReady).toBe(false);
+    // Environment-independent, like every other CLAUDE_CAPABILITY_STATICS
+    // field: the CLI reports `total_cost_usd` whoever is paying.
+    expect(withApiKey.billing.pricingReady).toBe(true);
   });
 
   test("the transport contradicts the producer in no environment", async () => {

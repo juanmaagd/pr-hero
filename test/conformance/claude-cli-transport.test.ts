@@ -1087,6 +1087,39 @@ describe("ClaudeCodeCliTransport metered-credential cost filing (#177)", () => {
 // rateLimitBucketId on ProviderCapabilityReport. Calling with no argument —
 // every existing call site — must keep reporting rateLimitBucketId as
 // undefined, byte-identical to pre-PR3 behavior.
+// #197. `pricingReady` is a STATIC capability claim, read at admission
+// before any spawn: no cost figure exists at the moment it is asked, for any
+// transport. So it cannot be answering "is this attempt's cost a provider
+// invoice?" — it answers "will this transport tell you what the attempt
+// cost?", and this one will: the CLI reports `total_cost_usd`.
+//
+// Asserted HERE, on the transport's own report, because
+// `DefaultTransportRegistry.getCapabilityReport` returns exactly this object
+// to `FrozenRuntimeBinding.capabilities()` — this value IS the admission
+// input, not a report about one.
+describe("ClaudeCodeCliTransport.capabilities pricing readiness (#197)", () => {
+  test("the transport claims it will report what the attempt cost", async () => {
+    const report = await new ClaudeCodeCliTransport().capabilities();
+    expect(report.billing.pricingReady).toBe(true);
+  });
+
+  // The issue that used to sit beside `pricingReady: false` said "a versioned
+  // Anthropic pricing table is bundled, but capabilities() carries no route".
+  // Both halves died with #197: no table is bundled any more, and nothing is
+  // missing on this backend — cash comes from `total_cost_usd` on a metered
+  // credential and notional from it on a subscription. A non-blocking issue
+  // named `pricing_table_missing` beside a `true` flag is a contradiction
+  // doctor would render as a degraded row.
+  test("no pricing_table_missing issue is reported beside the claim", async () => {
+    const report = await new ClaudeCodeCliTransport().capabilities();
+    expect(report.issues.map((i) => i.code).sort()).toEqual([
+      "bounded_events_sink_missing",
+      "codegraph_policy_unenforced",
+    ]);
+    expect(report.issues.every((i) => !i.blocking)).toBe(true);
+  });
+});
+
 describe("ClaudeCodeCliTransport.capabilities bucket identity (D1-08 PR3)", () => {
   test("no bucket-scope argument leaves rateLimitBucketId undefined (regression pin)", async () => {
     const transport = new ClaudeCodeCliTransport(okPromptFns);
