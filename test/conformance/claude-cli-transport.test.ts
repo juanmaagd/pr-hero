@@ -1031,6 +1031,54 @@ describe("ClaudeCodeCliTransport metered-credential cost filing (#177)", () => {
       knownUsd: undefined,
     });
   });
+
+  // #197, the arm this change MAKES REACHABLE. Flipping this transport's
+  // `pricingReady` to true is what lets a metered claude-code route past the
+  // pricing gate at all, so the settlement question it hands downstream stops
+  // being hypothetical: the CLI's `total_cost_usd` is OPTIONAL
+  // (`RawClaudeCliResult`), so a metered attempt can complete with every token
+  // leaf present and no cost figure whatsoever.
+  //
+  // The answer is absence, never zero. `costFor` leaves `cashCostUsd`
+  // undefined on the metered arm and `settlementFromUsage`'s
+  // `cashCostUsd === undefined` guard turns that into `unresolved` with no
+  // `knownUsd` — the spend ledger fences the bucket instead of booking a
+  // fabricated $0 against the ceiling. Both halves are asserted because
+  // `kind` alone would pass an implementation that carried a bogus figure,
+  // and `knownUsd` alone would pass the guard's own deletion: without it the
+  // record falls through the metered-zero rule (cash is undefined, not 0) and
+  // the free-nonzero rule (mode is metered) to `{ kind: "settle", actualUsd:
+  // undefined }` — which also has no `knownUsd`. Mutation-checked, 2026-09-07.
+  //
+  // SCOPE, stated exactly rather than inferred: no claude-code route resolves
+  // metered TODAY. `credentialKindForRoute` (runner-authority.ts) returns
+  // `claude_subscription_oauth` for this backend unconditionally, so
+  // `effectiveBillingMode` never upgrades and `reservesSpend` opens no
+  // reservation. What this pins is the RECORD's meaning, so the arm #161
+  // opens arrives already honest.
+  test("a metered run reporting no cash figure at all is unresolved with nothing known", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBeUndefined();
+    expect(outputTokensKnown(outcome.usage.tokens)).toBeGreaterThan(0);
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
 });
 
 // D1-08 PR3 task 3.11 (§9.2): capabilities() gains an OPTIONAL bucket-scope
