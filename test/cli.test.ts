@@ -48,7 +48,6 @@ import {
   postInlineIfEligible,
   postingExitCode,
   readBaseRefIgnoreRules,
-  readLocalIgnoreRules,
   releaseCommitStatusLock,
   reportFatalCiError,
   resolvePrDryRunSizeGate,
@@ -61,6 +60,7 @@ import {
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
+import { readLocalIgnoreRules } from "../src/ignore-read";
 import type { StoredComparison } from "../src/ledger";
 import {
   ADMISSION_CHECK_RUN_NAME,
@@ -583,6 +583,24 @@ describe("both review shells thread .prheroignore rules into their gate config",
     expect(source).toContain(
       "sizeGateConfig(\n    options,\n    loaded.effective,\n    userIgnore.rules,\n  )",
     );
+  });
+
+  // `ghPrFiles` is bounded by GH_PR_VIEW_TIMEOUT_MS, so a stalled GitHub now
+  // THROWS where it used to hang. The dry run is a PLAN — it must degrade to
+  // the aggregate estimate, which resolvePrDryRunSizeGate's own note already
+  // calls "truncated or unavailable", not abort the command.
+  //
+  // The `null` matters more than the catch: `[].length >= 0` is true, so
+  // routing an empty list through the trustworthiness check would hand the
+  // per-file gate zero lines and produce a PASSING verdict out of a failed
+  // fetch. Pinned because both halves are one line each and neither has an
+  // offline reach into this shell.
+  test("the dry run degrades to the aggregate estimate when ghPrFiles fails", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain("let perFile: NumstatFile[] | null;\n    try {");
+    expect(source).toContain("    } catch {\n      perFile = null;\n    }");
   });
 
   test("PR review reads the operator root eagerly for non-CI, and never reads worktreePath (O-8)", async () => {

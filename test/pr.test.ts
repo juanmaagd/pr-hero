@@ -28,6 +28,7 @@ import {
 import { SKIP_SIZE_COMMENT_MARKER } from "../src/ci-gates";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
+import { GH_PR_VIEW_TIMEOUT_MS } from "../src/gc-preflight";
 import {
   CommentsTruncatedError,
   fetchCommitStatuses,
@@ -35,6 +36,7 @@ import {
   fetchPrComments,
   fetchPrReviewComments,
   GRAPHQL_COMMENT_MAX_PAGES,
+  ghPrFiles,
   ghPrHeadSha,
   listAdmissionCheckRuns,
   parseCompareChangedFiles,
@@ -1721,6 +1723,54 @@ describe("postCommitStatus bounds", () => {
       timeoutMs: CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
     });
     expect(timeouts).toHaveLength(1);
+  });
+});
+
+// ghPrFiles moved onto the WATCH TICK path with the pre-launch exclusion
+// veto (PR #205), and pr-hero's own review of that PR flagged it as
+// unbounded: `gh()`'s watchdog only arms when a `timeoutMs` is passed, so an
+// accepted-but-unanswered `gh pr view` parked on `proc.exited` forever and
+// took the tick — and watch.lock with it — down with it. `fetchCommitStatuses`
+// on the same path already states the rule ("a 403, a hung gh (timeout), or
+// garbage jq must not take the watch tick down"). Pinned with an injected
+// spawn fake, the convention "postCommitStatus bounds" above already uses,
+// because the bound travels as Bun.spawn's `timeout` option.
+describe("ghPrFiles bounds", () => {
+  function makeTimeoutRecordingGh(stdout: string): {
+    spawnFn: typeof Bun.spawn;
+    timeouts: (number | undefined)[];
+  } {
+    const timeouts: (number | undefined)[] = [];
+    const encoder = new TextEncoder();
+    const spawnFn = ((_argv: string[], opts?: { timeout?: number }) => {
+      timeouts.push(opts?.timeout);
+      const stream = (text: string) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(text));
+            controller.close();
+          },
+        });
+      return {
+        stdout: stream(stdout),
+        stderr: stream(""),
+        exited: Promise.resolve(0),
+        kill() {},
+      };
+    }) as unknown as typeof Bun.spawn;
+    return { spawnFn, timeouts };
+  }
+
+  test("the per-file fetch is bounded at the same 15s `gh pr view` bound the GC uses", async () => {
+    const { spawnFn, timeouts } = makeTimeoutRecordingGh('{"files":[]}');
+
+    const out = await ghPrFiles(OPERATOR_ROOT, 42, { spawnFn });
+
+    expect(out).toBe('{"files":[]}');
+    expect(timeouts).toEqual([GH_PR_VIEW_TIMEOUT_MS]);
+    // Not merely "some number": an unbounded call records `undefined`, which
+    // is exactly the defect this pins.
+    expect(timeouts[0]).not.toBeUndefined();
   });
 });
 
