@@ -22,6 +22,7 @@ Load when the user asks to:
 - **Assistant posture:** pr-hero is a reviewer, not a merge gate (`exit 0` on findings).
 - **Required permissions:** `contents: read`, `pull-requests: write`, `issues: write`, `statuses: write`, **`checks: write`** (admission ledger). Template in `assets/workflow.yml` includes all five.
 - **Admission config is repo-level:** Write `.prhero/config.json` on the default branch, not in a PR branch. Authors must not use it to suppress their own reviews.
+- **`.prheroignore` is read from the base ref, not the PR branch, in CI:** the same reasoning as the config line above — a PR author must not be able to widen their own review's exclusions from within the PR itself.
 
 ## Decision Gates
 

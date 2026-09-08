@@ -302,7 +302,7 @@ describe("renderPlan", () => {
     const text = joined(
       renderPlan(planContext({ droppedPaths: ["bun.lock"] }), false),
     );
-    expect(text).toContain("exclusions: 1 generated file(s) dropped");
+    expect(text).toContain("exclusions: 1 excluded file(s) dropped");
     expect(text).toContain("diff.raw.patch");
   });
 

@@ -503,7 +503,8 @@ Options:
                       Size gate: skip the review when the diff has more than
                       n effective changed lines (insertions + deletions,
                       generated files like lockfiles and minified bundles
-                      excluded). Default ${DEFAULT_SIZE_GATE.maxChangedLines}; 0 disables the limit.
+                      excluded, plus anything a repo's own .prheroignore
+                      names). Default ${DEFAULT_SIZE_GATE.maxChangedLines}; 0 disables the limit.
                       With watch add: record the threshold for the repo
   --max-changed-files <n>
                       Size gate: same, on the effective changed-FILE count.
@@ -1678,7 +1679,7 @@ export function emptyDiffMessage(
 // reading nothing is a bill for no review at all.
 export function allExcludedMessage(droppedPaths: string[]): string {
   return (
-    `every changed file is excluded from review as generated content ` +
+    `every changed file is excluded from review ` +
     `(${listPaths(droppedPaths)}), so the effective diff is empty and there ` +
     "is nothing to review. Nothing was spawned and nothing was spent."
   );

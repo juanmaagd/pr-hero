@@ -12,7 +12,7 @@
 // the summary comment — both hit the same `issues/<pr>/comments` endpoint).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveEngineAssets } from "../src/assets";
@@ -30,6 +30,7 @@ import {
   createRunDir,
   deriveEngineIdentity,
   engineIdentity,
+  type GitRunner,
   heldCommitStatusLock,
   holdCommitStatusLock,
   type InlinePostOutcome,
@@ -46,8 +47,11 @@ import {
   postInlineFindings,
   postInlineIfEligible,
   postingExitCode,
+  readBaseRefIgnoreRules,
+  readLocalIgnoreRules,
   releaseCommitStatusLock,
   reportFatalCiError,
+  resolvePrDryRunSizeGate,
   runDoctorCommand,
   runPostCommand,
   runTriageCommand,
@@ -76,11 +80,14 @@ import {
   CliUsageError,
   DEFAULT_MAX_VERIFICATION_STEPS,
   EMPTY_LOCAL_CONFIG,
+  type NumstatDiffStat,
+  type NumstatFile,
   resolveMaxVerificationSteps,
   resolveSummary,
   type SummarySettings,
 } from "../src/preflight";
 import type { RereviewProvenance } from "../src/rereview-prepare";
+import { DEFAULT_SIZE_GATE, type SizeGateConfig } from "../src/size-gate";
 import { triageMarker } from "../src/triage";
 
 // ---------------------------------------------------------------------------
@@ -557,6 +564,58 @@ describe("every gotchas gate asks the shared predicate", () => {
     ]) {
       expect(source).not.toContain(needle);
     }
+  });
+});
+
+// Same precedent as the gotchas-gate scan above: `review()` and `reviewPr()`
+// are unexported I/O shells, so nothing offline reaches them directly. What
+// has to be pinned here is that BOTH shells actually thread the rules a
+// `.prheroignore` read produced into their `sizeGateConfig` call, rather than
+// silently reading the file and then ignoring the result (exactly the kind
+// of drift a `.excludeRules`-only rename could not catch, because the third
+// argument is what carries user-defined rules at all).
+describe("both review shells thread .prheroignore rules into their gate config", () => {
+  test("local review reads the working tree AND passes its rules to sizeGateConfig", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain("readLocalIgnoreRules(repoRoot)");
+    expect(source).toContain(
+      "sizeGateConfig(\n    options,\n    loaded.effective,\n    userIgnore.rules,\n  )",
+    );
+  });
+
+  test("PR review reads the operator root eagerly for non-CI, and never reads worktreePath (O-8)", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain("readLocalIgnoreRules(operatorRoot)");
+    expect(source).not.toContain("readLocalIgnoreRules(worktreePath)");
+  });
+
+  test("PR review's base-ref read takes the RESOLVED baseSha, not target.baseRef/baseRefName", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    // The read must run against the sha `resolveCommit` already canonicalized
+    // (a merged PR's baseRef is a `<sha>^1` EXPRESSION, not a sha — see
+    // pr-preflight.ts's PrTarget.baseRef comment), never the raw PrTarget
+    // field, and never gitDirOwner's cwd-relative form.
+    expect(source).toContain(
+      "readBaseRefIgnoreRules(git, gitDirOwner, baseSha)",
+    );
+    expect(source).not.toContain(
+      "readBaseRefIgnoreRules(git, gitDirOwner, target.baseRef)",
+    );
+  });
+
+  test("both sizeGateConfig(options, config, ...) calls in reviewPr receive a rules argument, not just (options, config)", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    const bareCalls =
+      source.split("sizeGateConfig(options, config)").length - 1;
+    expect(bareCalls).toBe(0);
   });
 });
 
@@ -3467,6 +3526,292 @@ describe("createRunDir — --out product fix D (W4 Phase 6)", () => {
       await repo.cleanup();
       await rm(outDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prheroignore Phase 3 — the read paths (local working tree, base-ref)
+// ---------------------------------------------------------------------------
+
+describe("readLocalIgnoreRules — the working-tree read (local review, PR review without --ci)", () => {
+  test("absent file: defaults only, no error", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ignore-local-"));
+    try {
+      expect(await readLocalIgnoreRules(dir)).toEqual({
+        rules: [],
+        found: false,
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("valid file: its rules parse as user rules", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ignore-local-"));
+    try {
+      await Bun.write(path.join(dir, ".prheroignore"), "vendor/**\n");
+      const result = await readLocalIgnoreRules(dir);
+      expect(result.found).toBe(true);
+      expect(result.rules).toHaveLength(1);
+      expect(result.rules[0]?.pattern).toBe("vendor/**");
+      expect(result.rules[0]?.source).toBe("user");
+      expect(result.rules[0]?.line).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("malformed file: loud abort naming the resolved path, line, and text — aborts the WHOLE file", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ignore-local-"));
+    try {
+      await Bun.write(path.join(dir, ".prheroignore"), "ok/**\n!\n");
+      const ignorePath = path.join(dir, ".prheroignore");
+      const escaped = ignorePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      await expect(readLocalIgnoreRules(dir)).rejects.toThrow(
+        new RegExp(`^${escaped}:2: .*offending line.*"!"`),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("directory named .prheroignore: loud abort, never treated as absent", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ignore-local-"));
+    try {
+      await mkdir(path.join(dir, ".prheroignore"));
+      await expect(readLocalIgnoreRules(dir)).rejects.toThrow(
+        /is not a regular file/,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("unreadable file (permission denied): loud abort, never treated as absent", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ignore-local-"));
+    const ignorePath = path.join(dir, ".prheroignore");
+    try {
+      await Bun.write(ignorePath, "vendor/**\n");
+      await chmod(ignorePath, 0o000);
+      await expect(readLocalIgnoreRules(dir)).rejects.toThrow(
+        /could not be read/,
+      );
+    } finally {
+      await chmod(ignorePath, 0o644).catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Fake GitRunner: records every call's repo+args (in order) and answers from
+// a small script keyed on the git subcommand — enough to discriminate
+// absent-vs-failure and to PROVE a rejected/absent branch never falls
+// through to a second call (the retry/fallback bug a bare "it throws"
+// assertion would miss).
+function fakeGit(
+  script: (
+    args: string[],
+  ) => { ok: boolean; stdout?: string; stderr?: string } | null,
+): { runner: GitRunner; calls: { repo: string; args: string[] }[] } {
+  const calls: { repo: string; args: string[] }[] = [];
+  const runner: GitRunner = async (repo, args) => {
+    calls.push({ repo, args });
+    const scripted = script(args);
+    if (scripted === null) {
+      throw new Error(`unscripted git call: ${args.join(" ")}`);
+    }
+    return {
+      ok: scripted.ok,
+      stdout: scripted.stdout ?? "",
+      stderr: scripted.stderr ?? "",
+    };
+  };
+  return { runner, calls };
+}
+
+describe("readBaseRefIgnoreRules — the base-ref read (CI mode, design D2)", () => {
+  const SHA = "a".repeat(40);
+
+  test("absent at base ref (ls-tree exit 0, empty stdout): defaults only, no error, no cat-file call", async () => {
+    const { runner, calls } = fakeGit((args) =>
+      args[0] === "ls-tree" ? { ok: true, stdout: "" } : null,
+    );
+    const result = await readBaseRefIgnoreRules(runner, "/repo", SHA);
+    expect(result).toEqual({ rules: [], found: false });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.repo).toBe("/repo");
+    expect(calls[0]?.args).toContain("--full-tree");
+    expect(calls[0]?.args).toContain(SHA);
+    expect(calls.some((c) => c.args[0] === "cat-file")).toBe(false);
+  });
+
+  test("ls-tree lookup failure (non-zero exit): loud abort, zero cat-file calls, never falls back to defaults", async () => {
+    const { runner, calls } = fakeGit((args) =>
+      args[0] === "ls-tree"
+        ? { ok: false, stderr: "fatal: bad revision" }
+        : null,
+    );
+    await expect(readBaseRefIgnoreRules(runner, "/repo", SHA)).rejects.toThrow(
+      /lookup failed/,
+    );
+    expect(calls.filter((c) => c.args[0] === "cat-file")).toHaveLength(0);
+  });
+
+  test("valid blob (mode 100644): reads via cat-file and parses as user rules", async () => {
+    const blobSha = "b".repeat(40);
+    const { runner } = fakeGit((args) => {
+      if (args[0] === "ls-tree") {
+        return { ok: true, stdout: `100644 blob ${blobSha}\t.prheroignore` };
+      }
+      if (args[0] === "cat-file") return { ok: true, stdout: "vendor/**\n" };
+      return null;
+    });
+    const result = await readBaseRefIgnoreRules(runner, "/repo", SHA);
+    expect(result.found).toBe(true);
+    expect(result.rules).toHaveLength(1);
+    expect(result.rules[0]?.pattern).toBe("vendor/**");
+  });
+
+  test("mode 100755 (executable) is accepted the same as 100644", async () => {
+    const blobSha = "b".repeat(40);
+    const { runner } = fakeGit((args) => {
+      if (args[0] === "ls-tree") {
+        return { ok: true, stdout: `100755 blob ${blobSha}\t.prheroignore` };
+      }
+      if (args[0] === "cat-file") return { ok: true, stdout: "vendor/**\n" };
+      return null;
+    });
+    expect((await readBaseRefIgnoreRules(runner, "/repo", SHA)).found).toBe(
+      true,
+    );
+  });
+
+  test.each([["120000"], ["040000"], ["160000"]])(
+    "mode %s is rejected, never read as a blob — the link/tree/gitlink hazard",
+    async (mode) => {
+      const { runner, calls } = fakeGit((args) =>
+        args[0] === "ls-tree"
+          ? {
+              ok: true,
+              stdout: `${mode} blob ${"c".repeat(40)}\t.prheroignore`,
+            }
+          : null,
+      );
+      await expect(
+        readBaseRefIgnoreRules(runner, "/repo", SHA),
+      ).rejects.toThrow(new RegExp(`mode ${mode}`));
+      expect(calls.filter((c) => c.args[0] === "cat-file")).toHaveLength(0);
+    },
+  );
+
+  test("cat-file failure: loud abort", async () => {
+    const blobSha = "b".repeat(40);
+    const { runner } = fakeGit((args) => {
+      if (args[0] === "ls-tree") {
+        return { ok: true, stdout: `100644 blob ${blobSha}\t.prheroignore` };
+      }
+      if (args[0] === "cat-file") {
+        return { ok: false, stderr: "fatal: bad object" };
+      }
+      return null;
+    });
+    await expect(readBaseRefIgnoreRules(runner, "/repo", SHA)).rejects.toThrow(
+      /blob read failed/,
+    );
+  });
+
+  test("malformed blob content: loud abort naming the <sha>:.prheroignore locator, not the literal '.prheroignore'", async () => {
+    const blobSha = "b".repeat(40);
+    const { runner } = fakeGit((args) => {
+      if (args[0] === "ls-tree") {
+        return { ok: true, stdout: `100644 blob ${blobSha}\t.prheroignore` };
+      }
+      if (args[0] === "cat-file") return { ok: true, stdout: "ok/**\n!\n" };
+      return null;
+    });
+    await expect(readBaseRefIgnoreRules(runner, "/repo", SHA)).rejects.toThrow(
+      new RegExp(`^${SHA}:\\.prheroignore:2:`),
+    );
+  });
+});
+
+// PR1b Addition 1 (#5557): the aggregate-only dry-run estimate cannot express
+// exclusions at all — no per-file paths, so `.prheroignore` widens what was
+// already a "wrong in the conservative direction" gap from tens of lines
+// (lockfiles) to potentially thousands (a whole ignored directory). Ported
+// from watch.ts's tier-2 pattern: when gh's per-file list is TRUSTWORTHY (not
+// truncated), evaluate the real per-file gate; otherwise fall back to the
+// aggregate estimate and label it.
+describe("resolvePrDryRunSizeGate — the PR --dry-run size-gate estimate (Addition 1)", () => {
+  const gateConfig: SizeGateConfig = {
+    ...DEFAULT_SIZE_GATE,
+    maxChangedLines: 1500,
+    excludeRules: [
+      {
+        pattern: "openspec/**",
+        negated: false,
+        globs: ["**/openspec/**"],
+        source: "user",
+        line: 1,
+      },
+    ],
+  };
+
+  function file(path: string, lines: number): NumstatFile {
+    return { path, insertions: lines, deletions: 0, binary: false };
+  }
+
+  test("per-file data available: excluded files are subtracted BEFORE the limit check (the central scenario)", () => {
+    // 29 files x 100 lines under openspec/ (excluded) + one 100-line file —
+    // 3000 raw lines, 100 effective. The aggregate-only estimate would SKIP a
+    // PR the real per-file gate accepts; this is exactly that reproduction.
+    const perFile: NumstatFile[] = [
+      ...Array.from({ length: 29 }, (_, i) =>
+        file(`openspec/changes/thing/f${i}.md`, 100),
+      ),
+      file("src/cli.ts", 100),
+    ];
+    const ghDiffStat: NumstatDiffStat = {
+      files: 30,
+      insertions: 3000,
+      deletions: 0,
+    };
+    const result = resolvePrDryRunSizeGate({ ghDiffStat, perFile, gateConfig });
+    expect(result.verdict.ok).toBe(true);
+    if (result.verdict.ok) {
+      expect(result.verdict.effectiveLines).toBe(100);
+      expect(result.verdict.excludedFiles).toBe(29);
+    }
+    expect(result.note).not.toContain("truncated");
+  });
+
+  test("per-file list is null (truncated/unavailable): falls back to the aggregate estimate, labelled", () => {
+    const ghDiffStat: NumstatDiffStat = {
+      files: 30,
+      insertions: 3000,
+      deletions: 0,
+    };
+    const result = resolvePrDryRunSizeGate({
+      ghDiffStat,
+      perFile: null,
+      gateConfig,
+    });
+    // The aggregate path cannot apply exclusions at all — same reproduction
+    // as above, but this time the SKIP is real: gh's own truncated list left
+    // no trustworthy per-file answer to fall back on.
+    expect(result.verdict.ok).toBe(false);
+    expect(result.note).toContain("truncated");
+  });
+
+  test("small PR: both per-file and aggregate agree it passes", () => {
+    const perFile: NumstatFile[] = [file("src/a.ts", 10)];
+    const ghDiffStat: NumstatDiffStat = {
+      files: 1,
+      insertions: 10,
+      deletions: 0,
+    };
+    const result = resolvePrDryRunSizeGate({ ghDiffStat, perFile, gateConfig });
+    expect(result.verdict.ok).toBe(true);
   });
 });
 

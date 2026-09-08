@@ -190,7 +190,8 @@ and backed by a durable attempt ledger stored in GitHub Check Runs (`checks: wri
 ### Policy configuration (`.prhero/config.json`)
 
 These keys live in the **repository** config (not the PR branch worktree). A PR author cannot change
-them to suppress review of their own PR.
+them to suppress review of their own PR. The same rule applies to `.prheroignore` (size-gate/diff
+exclusions, see the README): under CI it is read from the PR's base ref, never the PR's own branch.
 
 | Key | Default | Meaning |
 |---|---|---|

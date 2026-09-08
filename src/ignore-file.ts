@@ -6,6 +6,14 @@
 // point it happens, never silent: this repo matches a FINITE DIFF FILE LIST,
 // not a tree walk, so some of git's own tree-walk optimizations (and their
 // side effects) do not apply here and are not reproduced.
+//
+// Case sensitivity is DELIBERATE, not an accident of what Bun.Glob happens to
+// do: matching is case-SENSITIVE, matching git's own behavior (git tracks
+// paths case-sensitively regardless of the filesystem), and DIVERGING on
+// purpose from the `ignore` npm package's case-INSENSITIVE default — the
+// thing most JS users' intuitions come from, and which that package's own
+// README documents as its deviation from git. See the pin in
+// test/ignore-file.test.ts.
 
 const FILE_NAME = ".prheroignore";
 
@@ -192,6 +200,39 @@ function hasTrailingUnescapedBackslash(line: string): boolean {
 // `foo/bar` alone does NOT cover the directory's own contents (verified:
 // Bun.Glob("foo/bar").match("foo/bar/x.ts") is false), so the `/**` form is
 // a real gap, not redundant.
+//
+// KNOWN DIVERGENCE from real git, found by the differential test
+// (test/ignore-file-differential.test.ts) and left as-is rather than
+// "fixed": a trailing-slash rule's directory-only emission requires content
+// AFTER the directory name (`**/frotz/**`), so a BARE path string equal to
+// the directory's own name never matches here — there is no way to tell
+// from a string alone whether "frotz" names a file or a directory. Real
+// git, given an actual directory on disk, knows and matches it. This is
+// architecturally forced: a string alone cannot say what it names.
+//
+// This comment previously called that case UNREACHABLE, reasoning that a
+// diff's changed-path list only ever contains leaves. That was WRONG, and
+// the counter-example is ordinary: a SUBMODULE BUMP is a bare
+// directory-shaped entry. Measured — `git diff --numstat` emits `1 1 sub`
+// and the patch header is `diff --git a/sub b/sub` with mode 160000 — so a
+// gitlink flows through parseNumstatFiles and diffRecordPath like any other
+// path. A repo whose author writes `sub/` to ignore submodule bumps ignores
+// NOTHING.
+//
+// The workaround is exact and already works: write `sub`, with no trailing
+// slash. That dual-emits `**/sub` AND `**/sub/**`, and `**/sub` matches the
+// bare gitlink. Pinned by "a trailing-slash rule does not match a bare
+// gitlink path" in test/ignore-file.test.ts, because a claim of
+// unreachability is exactly what stops the next person from testing it.
+// Note the differential suite cannot catch this on its own: its scratch
+// repo contains files and directories, never a submodule.
+//
+// Closing it here is NOT possible and must not be attempted: emitting the
+// bare form for a trailing-slash rule would make `build/` match a FILE
+// named `build`, which is the exact wrong the "ONLY" rows above exist to
+// prevent. A string cannot carry what it names. The door, if anyone wants
+// it, is one layer up — the patch header already carries mode 160000, so a
+// caller that knows an entry is a gitlink could decide it separately.
 function translatePattern(pattern: string): string[] {
   const trailingSlash = pattern.endsWith("/");
   const body = trailingSlash ? pattern.slice(0, -1) : pattern;
