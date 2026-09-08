@@ -272,6 +272,20 @@ async function gatherRepoFacts(
     // candidate, while the one-review-per-PR default is done after ANY
     // local review of that number (reviewed-prior-head from local facts
     // alone), so its comments fetch is skipped too.
+    // KNOWN GAP, recorded rather than hidden: this is builtins-only. The
+    // watcher never reads `.prheroignore`, so a repo's own exclusions do not
+    // reach either check below — the aggregate one or the per-file rescue.
+    // A PR whose rules would bring it back under the limit is pushed to
+    // `tooLarge` and skipped PERMANENTLY, because the decision is recomputed
+    // from live counters every tick and a diff does not shrink on its own,
+    // while the identical PR reviews fine through `--pr <n>` and through CI.
+    //
+    // Found by pr-hero's own review of PR #204 (CRITICAL, blocking) — the
+    // feature is silently inert in exactly one of its three modes, which is
+    // the half-state the delivery slicing was chosen to avoid and then
+    // reintroduced here by cutting at this seam. Documented in the README's
+    // `.prheroignore` section until the watcher slice threads the real rules
+    // through; the doc exists so the silence is not the way anyone finds out.
     const gateConfig = {
       maxChangedLines: entry.maxChangedLines,
       maxChangedFiles: entry.maxChangedFiles,
