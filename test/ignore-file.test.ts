@@ -403,3 +403,33 @@ describe("case sensitivity — deliberate, matches git, diverges from `ignore`",
     expect(excludes("README.md", "README.md")).toBe(true);
   });
 });
+
+// A trailing-slash rule is directory-only, so it emits ONLY `**/<name>/**`
+// — content after the directory name. A SUBMODULE BUMP is the case that
+// makes this reachable rather than theoretical: git reports a gitlink as a
+// bare directory-shaped path (`git diff --numstat` emits `1 1 sub`, the
+// patch header is `diff --git a/sub b/sub` with mode 160000), so it arrives
+// here as the string "sub" with nothing after it.
+//
+// The first assertion pins a real user-visible gap: `sub/` does NOT ignore
+// submodule bumps. The second pins the workaround that does. Both are here
+// because ignore-file.ts once claimed this case was unreachable, and an
+// unreachability claim is precisely what stops the next person from testing
+// it — the differential suite cannot cover it either, since its scratch
+// repo has no submodule.
+describe("bare directory-shaped paths — the submodule gitlink case", () => {
+  test("a trailing-slash rule does not match a bare gitlink path", () => {
+    expect(excludes("sub/", "sub")).toBe(false);
+    expect(excludes("vendor/lib/", "vendor/lib")).toBe(false);
+  });
+
+  test("the no-trailing-slash form is the workaround, and it does match", () => {
+    expect(excludes("sub", "sub")).toBe(true);
+    expect(excludes("vendor/lib", "vendor/lib")).toBe(true);
+  });
+
+  test("both forms still cover paths nested under the directory", () => {
+    expect(excludes("sub/", "sub/a.ts")).toBe(true);
+    expect(excludes("sub", "sub/a.ts")).toBe(true);
+  });
+});

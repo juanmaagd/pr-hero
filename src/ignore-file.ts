@@ -208,12 +208,31 @@ function hasTrailingUnescapedBackslash(line: string): boolean {
 // the directory's own name never matches here — there is no way to tell
 // from a string alone whether "frotz" names a file or a directory. Real
 // git, given an actual directory on disk, knows and matches it. This is
-// architecturally forced and UNREACHABLE in practice: every path this
-// matcher ever sees comes from a diff's changed-FILE list, which never
-// contains a bare directory entry, only leaves — so a diff-real file named
-// exactly "frotz" (no extension) is the only case this could even affect,
-// and it is arguably the SAFER answer for that (a file is not excluded by
-// a directory-only rule bearing its name).
+// architecturally forced: a string alone cannot say what it names.
+//
+// This comment previously called that case UNREACHABLE, reasoning that a
+// diff's changed-path list only ever contains leaves. That was WRONG, and
+// the counter-example is ordinary: a SUBMODULE BUMP is a bare
+// directory-shaped entry. Measured — `git diff --numstat` emits `1 1 sub`
+// and the patch header is `diff --git a/sub b/sub` with mode 160000 — so a
+// gitlink flows through parseNumstatFiles and diffRecordPath like any other
+// path. A repo whose author writes `sub/` to ignore submodule bumps ignores
+// NOTHING.
+//
+// The workaround is exact and already works: write `sub`, with no trailing
+// slash. That dual-emits `**/sub` AND `**/sub/**`, and `**/sub` matches the
+// bare gitlink. Pinned by "a trailing-slash rule does not match a bare
+// gitlink path" in test/ignore-file.test.ts, because a claim of
+// unreachability is exactly what stops the next person from testing it.
+// Note the differential suite cannot catch this on its own: its scratch
+// repo contains files and directories, never a submodule.
+//
+// Closing it here is NOT possible and must not be attempted: emitting the
+// bare form for a trailing-slash rule would make `build/` match a FILE
+// named `build`, which is the exact wrong the "ONLY" rows above exist to
+// prevent. A string cannot carry what it names. The door, if anyone wants
+// it, is one layer up — the patch header already carries mode 160000, so a
+// caller that knows an entry is a gitlink could decide it separately.
 function translatePattern(pattern: string): string[] {
   const trailingSlash = pattern.endsWith("/");
   const body = trailingSlash ? pattern.slice(0, -1) : pattern;
