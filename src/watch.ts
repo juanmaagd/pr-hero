@@ -726,13 +726,26 @@ async function runTick(
       ),
     );
   }
+  // ONE count, used by BOTH tick-end lines. They diverged the moment the
+  // fall-through landed: the old single-candidate veto nulled the launch
+  // whenever it fired, so `launched=1` was unreachable with a vetoed
+  // candidate and the two branches could not disagree. `selectLaunchAfterVeto`
+  // makes `launch !== null` and `vetoed.length > 0` coexist BY DESIGN — it is
+  // the headline case, a lower-numbered PR vetoed and a higher-numbered one
+  // launched in the same tick — and the launched branch was still reporting
+  // the pre-fall-through count.
+  //
+  // Computed once rather than corrected in place: two call sites deriving the
+  // same number is what let them drift, and the operator's only window into a
+  // tick is this log.
+  const skippedThisTick = decision.skips.length + selection.vetoed.length;
   const launch = selection.launch;
   if (launch === null) {
     await appendLog(
       paths.logPath,
       logLine(
         localIsoTimestamp(new Date()),
-        `tick end launched=0 skipped=${decision.skips.length + selection.vetoed.length}`,
+        `tick end launched=0 skipped=${skippedThisTick}`,
       ),
     );
     return 0;
@@ -826,7 +839,7 @@ async function runTick(
     paths.logPath,
     logLine(
       localIsoTimestamp(new Date()),
-      `tick end launched=1 skipped=${decision.skips.length}`,
+      `tick end launched=1 skipped=${skippedThisTick}`,
     ),
   );
   return 0;

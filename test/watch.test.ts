@@ -499,6 +499,43 @@ describe("applyPreLaunchVeto (D6 — the pre-launch exclusion veto)", () => {
 // "consumes no daily-cap unit" reduces to "the veto call happens before that
 // log line is appended" — a source-text pin, same precedent test/cli.test.ts
 // already uses for an unexported I/O shell's wiring.
+// Both tick-end lines must derive their skipped count from the SAME local.
+// They diverged the moment the fall-through landed: the old single-candidate
+// veto nulled the launch whenever it fired, so `launched=1` was unreachable
+// with a vetoed candidate and the two branches could not disagree. The
+// fall-through makes `launch !== null` and `vetoed.length > 0` coexist by
+// design, and the launched branch kept reporting the pre-fall-through count.
+//
+// Pinned as "neither line interpolates its own expression" rather than as two
+// expected strings: the defect was two call sites deriving one number, so what
+// must not come back is the second derivation, whatever it computes.
+describe("runTick source-text pin — both tick-end lines share one skipped count", () => {
+  test("neither tick-end line derives its own count", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/watch.ts"),
+    ).text();
+    // These two are the SOURCE TEXT being asserted on, placeholder included —
+    // a real template string here would interpolate it away and the pin would
+    // assert nothing.
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserted, not evaluated
+    const noLaunchTickEnd = "`tick end launched=0 skipped=${skippedThisTick}`";
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserted, not evaluated
+    const launchedTickEnd = "`tick end launched=1 skipped=${skippedThisTick}`";
+    expect(source).toContain(noLaunchTickEnd);
+    expect(source).toContain(launchedTickEnd);
+    // The shared local is computed once, before the launch/no-launch split.
+    const localIndex = source.indexOf("const skippedThisTick =");
+    const firstLine = source.indexOf("`tick end launched=0");
+    const secondLine = source.indexOf("`tick end launched=1");
+    expect(localIndex).toBeGreaterThan(-1);
+    expect(localIndex).toBeLessThan(firstLine);
+    expect(localIndex).toBeLessThan(secondLine);
+    // No tick-end line may reconstruct the sum inline again.
+    expect(source).not.toContain("launched=0 skipped=${decision.skips.length");
+    expect(source).not.toContain("launched=1 skipped=${decision.skips.length");
+  });
+});
+
 describe("runTick source-text pin — the veto settles before the daily-cap-consuming log line", () => {
   test("selectLaunchAfterVeto is invoked, and re-checked for null, before launchedLine is ever appended", async () => {
     const source = await Bun.file(
