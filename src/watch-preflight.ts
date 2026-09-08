@@ -13,7 +13,11 @@ import type { SelfInvocation } from "./assets";
 import { type PrheroLayout, prheroLayout } from "./home-preflight";
 import { PR_COMMENT_MARKER_PREFIX } from "./pr-preflight";
 import { CliUsageError, isFullCommitId, type NumstatFile } from "./preflight";
-import { DEFAULT_SIZE_GATE } from "./size-gate";
+import {
+  DEFAULT_SIZE_GATE,
+  evaluateSizeGate,
+  type SizeGateConfig,
+} from "./size-gate";
 
 // ---------------------------------------------------------------------------
 // ~/.prhero/ layout — one source for every path the watcher owns, so the
@@ -931,6 +935,32 @@ function candidateSkipReason(
     )?.count ?? 0;
   if (attempts >= MAX_WATCH_ATTEMPTS) return "attempts-exhausted";
   return null;
+}
+
+// The pre-launch exclusion veto's pure half (design D6, prheroignore Phase
+// 6): tier 2 in gatherRepoFacts (watch.ts) only runs a per-file rescue for a
+// candidate whose AGGREGATE already exceeds a limit, so a PR whose aggregate
+// is already under both limits — but whose changed files are ALL excluded
+// content — never gets a per-file evaluation at all. Without this veto it
+// launches straight into an empty effective diff, the CLI exits before
+// creating a run dir, and with no run dir the attempts guard cannot see it —
+// so it relaunches every tick, burning the daily cap and the tick's one
+// launch slot on a PR the size gate would have rescued anyway.
+//
+// SAME truncation guard as tier 2 (`perFile.length >= candidateChangedFiles`),
+// carried here because under-counting in THIS direction is the OPPOSITE
+// failure of tier 2's own under-count risk: tier 2 under-counting falsely
+// RESCUES a monster PR, while under-counting here would falsely VETO a
+// launch tier 1 already cleared — silently dropping a real review. Both
+// directions are closed by the same one-line guard.
+export function preLaunchExclusionVeto(
+  perFile: NumstatFile[],
+  candidateChangedFiles: number,
+  gateConfig: SizeGateConfig,
+): boolean {
+  if (perFile.length < candidateChangedFiles) return false;
+  const verdict = evaluateSizeGate(perFile, gateConfig);
+  return verdict.ok && verdict.effectiveFiles === 0;
 }
 
 // ---------------------------------------------------------------------------

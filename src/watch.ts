@@ -14,8 +14,29 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { selfInvocation } from "./assets";
+// `readLocalIgnoreRules`/`IgnoreFileReadResult` are the ONE reuse across a
+// shell boundary in this module, and deliberate: cli.ts already carries the
+// full read (stat/malformed/unreadable handling, IgnoreFileError
+// re-contextualizing), and duplicating that — unlike the tiny 15-line `git`
+// spawn wrapper each shell copies on purpose — would risk the two reads
+// drifting on what "malformed" or "unreadable" means.
+//
+// This makes cli.ts and watch.ts import EACH OTHER (cli.ts imports
+// `watchCommand` from here for dispatch). That is safe ONLY because
+// `readLocalIgnoreRules` is an `export async function` DECLARATION: function
+// declarations are hoisted and bound at module-link time, before either
+// module's top-level statements run, so `productionWatchIo` below can
+// reference it at this module's own top level even though cli.ts's body may
+// not have executed yet. If cli.ts ever becomes
+// `export const readLocalIgnoreRules = async (...) => ...`, that binding is
+// in the temporal dead zone until cli.ts's body runs — and since watch.ts is
+// the one being required first in the real dispatch path (`cli.ts` imports
+// `watch.ts`), this module would crash at import time with a
+// ReferenceError. Keep it a `function` declaration, or break the cycle.
+import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./cli";
 import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
+import type { IgnoreRule } from "./ignore-file";
 import { parseComparisonJson } from "./ledger";
 import {
   fetchCommitStatuses,
@@ -36,11 +57,14 @@ import {
   type CliOptions,
   CliUsageError,
   DEFAULT_WATCH_INTERVAL_MIN,
+  type NumstatFile,
 } from "./preflight";
 import {
   DEFAULT_SIZE_GATE,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
+  type SizeGateConfig,
+  sizeGateConfig,
 } from "./size-gate";
 import {
   box,
@@ -76,6 +100,7 @@ import {
   parsePrList,
   parseWatchConfig,
   pendingReviewsToSettle,
+  preLaunchExclusionVeto,
   prheroHomePaths,
   type ReviewOutcome,
   type RunDirFact,
@@ -84,6 +109,7 @@ import {
   renderWatchStatus,
   skipLine,
   type TickDecision,
+  type TickLaunch,
   type TickRepoFacts,
   tickGate,
   upsertWatchRepo,
@@ -148,7 +174,39 @@ async function resolveRepoRoot(repoOption: string): Promise<string> {
 // ---------------------------------------------------------------------------
 // The tick.
 
-interface WatchedRepoFacts extends TickRepoFacts {
+// The DI seam gatherRepoFacts needs to be unit-testable (prheroignore Phase
+// 6, design D6): one shape per I/O call it makes, mirroring RereviewGit's
+// pattern (src/rereview-prepare.ts) rather than inventing a new one. Every
+// OTHER I/O gatherRepoFacts touches — resolveRepoHome, scanRunDirs,
+// fetchPrComments, fetchCommitStatuses — is left as real I/O on purpose: a
+// candidate that clears the size gate reaches those unconditionally, and a
+// throwaway tmpdir git repo already exercises resolveRepoHome/scanRunDirs
+// faithfully offline (test/watch.test.ts). Faking the comments/statuses
+// fetch too would need a live-looking `gh` response for every eligible
+// candidate an offline test can never safely construct, so test/watch.test.ts
+// deliberately never lets a fixture PR become eligible through
+// gatherRepoFacts itself — see that file's own header comment.
+export interface WatchIo {
+  git: (
+    repo: string,
+    args: string[],
+  ) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+  ghPrList: (repoRoot: string) => Promise<string>;
+  ghPrFiles: (repoRoot: string, pr: number) => Promise<string>;
+  readIgnoreFile: (root: string) => Promise<IgnoreFileReadResult>;
+}
+
+// Production wiring: the real subprocess/gh/fs calls this module already
+// carries. Tests construct their own WatchIo (or a narrower Pick<...>) with
+// scripted fakes instead.
+const productionWatchIo: WatchIo = {
+  git,
+  ghPrList,
+  ghPrFiles,
+  readIgnoreFile: readLocalIgnoreRules,
+};
+
+export interface WatchedRepoFacts extends TickRepoFacts {
   // TickRepoFacts.path is the resolved toplevel; the runs root rides along
   // for the post-run outcome scan.
   runsRoot: string;
@@ -157,6 +215,11 @@ interface WatchedRepoFacts extends TickRepoFacts {
   // real numstat, and it must be told the same numbers this tick used.
   maxChangedLines: number;
   maxChangedFiles: number;
+  // The MERGED exclude rules (builtins + this repo's own `.prheroignore`)
+  // gatherRepoFacts already read and built via sizeGateConfig() — carried
+  // alongside the two limits above so applyPreLaunchVeto can rebuild the
+  // EXACT same SizeGateConfig without a second `.prheroignore` read.
+  excludeRules: IgnoreRule[];
 }
 
 async function watchOnce(dryRun: boolean): Promise<number> {
@@ -226,13 +289,17 @@ async function watchOnce(dryRun: boolean): Promise<number> {
       // cannot pin watch.lock and silence every later tick.
       await runGc({ home: os.homedir(), dryRun: false });
     }
-    const repos = await gatherRepoFacts(config, os.homedir());
+    const repos = await gatherRepoFacts(
+      config,
+      os.homedir(),
+      productionWatchIo,
+    );
     const decision = decideTick({ ...gateInput, repos });
     if (dryRun) {
       printDryRun(paths, config, gateInput.launchedToday, decision, repos);
       return 0;
     }
-    return await runTick(paths, decision, repos);
+    return await runTick(paths, decision, repos, productionWatchIo.ghPrFiles);
   } finally {
     if (!dryRun) await rm(paths.lockPath, { force: true });
   }
@@ -241,14 +308,15 @@ async function watchOnce(dryRun: boolean): Promise<number> {
 // Reads everything the pure decision needs, per configured repo. Read-only
 // throughout (gh api GETs, git rev-parse, artifact reads) — safe for the
 // dry run by construction.
-async function gatherRepoFacts(
+export async function gatherRepoFacts(
   config: WatchConfig,
   home: string,
+  io: WatchIo,
 ): Promise<WatchedRepoFacts[]> {
   const repos: WatchedRepoFacts[] = [];
   for (const entry of config.repos) {
     const expanded = expandTilde(entry.path, home);
-    const toplevel = await git(expanded, ["rev-parse", "--show-toplevel"]);
+    const toplevel = await io.git(expanded, ["rev-parse", "--show-toplevel"]);
     if (!toplevel.ok) {
       throw new CliError(
         `watch.json repo ${entry.path} is not a git repository ` +
@@ -263,7 +331,7 @@ async function gatherRepoFacts(
     });
     const runsRoot = repoHome.paths.runs;
     const runDirs = await scanRunDirs(runsRoot);
-    const prs = parsePrList(await ghPrList(repoRoot));
+    const prs = parsePrList(await io.ghPrList(repoRoot));
 
     // The remote guard costs one gh call per PR, so it only runs for
     // candidates the free checks have not already killed — the pure
@@ -272,25 +340,33 @@ async function gatherRepoFacts(
     // candidate, while the one-review-per-PR default is done after ANY
     // local review of that number (reviewed-prior-head from local facts
     // alone), so its comments fetch is skipped too.
-    // KNOWN GAP, recorded rather than hidden: this is builtins-only. The
-    // watcher never reads `.prheroignore`, so a repo's own exclusions do not
-    // reach either check below — the aggregate one or the per-file rescue.
-    // A PR whose rules would bring it back under the limit is pushed to
-    // `tooLarge` and skipped PERMANENTLY, because the decision is recomputed
-    // from live counters every tick and a diff does not shrink on its own,
-    // while the identical PR reviews fine through `--pr <n>` and through CI.
     //
-    // Found by pr-hero's own review of PR #204 (CRITICAL, blocking) — the
-    // feature is silently inert in exactly one of its three modes, which is
-    // the half-state the delivery slicing was chosen to avoid and then
-    // reintroduced here by cutting at this seam. Documented in the README's
-    // `.prheroignore` section until the watcher slice threads the real rules
-    // through; the doc exists so the silence is not the way anyone finds out.
-    const gateConfig = {
-      maxChangedLines: entry.maxChangedLines,
-      maxChangedFiles: entry.maxChangedFiles,
-      excludeRules: DEFAULT_SIZE_GATE.excludeRules,
-    };
+    // `.prheroignore` is read ONCE per repo, here, from the operator's own
+    // working tree — never a base ref. This is NOT the CI base-ref case
+    // (design D1-D3, cli.ts): CI reads from a ref the PR author cannot
+    // influence because the PR author supplies the checkout being reviewed.
+    // The watcher runs from an OPERATOR's own machine, against repos that
+    // operator explicitly opted into `pr-hero watch add` — there is no PR
+    // author supplying this checkout, so the operator's own working tree IS
+    // the trusted source here, the same way local (non-CI) review already
+    // treats it (O-8). Do not "harden" this into a base-ref read; that would
+    // require a `gh`/git fetch per repo per tick this mode has no PR context
+    // to anchor, and would re-break the CLI-mode-vs-watcher parity found by
+    // pr-hero's own review of PR #204 (CRITICAL, blocking) — the reason
+    // this fix exists at all. The merged rule set (builtins + this repo's
+    // `.prheroignore`) is built through the SAME sizeGateConfig() the CLI
+    // paths use, so the watcher's gate agrees with what a real review would
+    // decide, and it is carried on WatchedRepoFacts.excludeRules so the
+    // pre-launch veto below can reuse it without a second read.
+    const userIgnore = await io.readIgnoreFile(repoRoot);
+    const gateConfig = sizeGateConfig(
+      {
+        maxChangedLines: entry.maxChangedLines,
+        maxChangedFiles: entry.maxChangedFiles,
+      },
+      undefined,
+      userIgnore.rules,
+    );
     const remoteHeads: { pr: number; heads: string[]; markerSeen: boolean }[] =
       [];
     const tooLarge: number[] = [];
@@ -333,7 +409,9 @@ async function gatherRepoFacts(
           gateConfig,
         ).ok
       ) {
-        const perFile = parsePrFiles(await ghPrFiles(repoRoot, candidate.pr));
+        const perFile = parsePrFiles(
+          await io.ghPrFiles(repoRoot, candidate.pr),
+        );
         // gh's `files` list can be truncated on a very large PR. A short
         // list under-counts, and under-counting here FALSELY RESCUES exactly
         // the monster the gate exists to stop — so a count that disagrees
@@ -392,6 +470,7 @@ async function gatherRepoFacts(
       runsRoot,
       maxChangedLines: entry.maxChangedLines,
       maxChangedFiles: entry.maxChangedFiles,
+      excludeRules: gateConfig.excludeRules,
     });
   }
   return repos;
@@ -465,10 +544,61 @@ async function settleOrphanPendings(
   }
 }
 
+export interface PreLaunchVetoResult {
+  launch: TickLaunch | null;
+  vetoed: boolean;
+}
+
+// The pre-launch veto's impure half (design D6): orchestrates the ONE
+// ghPrFiles call the pure preLaunchExclusionVeto (watch-preflight.ts) needs,
+// for the CHOSEN launch only, then re-decides. `io` is narrowed to just
+// ghPrFiles — the only I/O this needs — so tests never have to stub the
+// rest of WatchIo to exercise it.
+export async function applyPreLaunchVeto(
+  io: Pick<WatchIo, "ghPrFiles">,
+  launch: TickLaunch,
+  repos: readonly WatchedRepoFacts[],
+): Promise<PreLaunchVetoResult> {
+  const repo = repos.find((r) => r.path === launch.repo);
+  const candidate = repo?.prs.find(
+    (c) => c.pr === launch.pr && c.head === launch.head,
+  );
+  // Unreachable in production: `launch` always comes from decideTick(repos),
+  // so it is derived FROM this same repos array. Kept as a defensive
+  // fail-open rather than a non-null assertion, because a launch this
+  // function cannot place is exactly the kind of surprise that must never
+  // block a review it has no evidence against.
+  if (repo === undefined || candidate === undefined) {
+    return { launch, vetoed: false };
+  }
+  let perFile: NumstatFile[];
+  try {
+    perFile = parsePrFiles(await io.ghPrFiles(repo.path, launch.pr));
+  } catch {
+    // Fails open (D6): the size gate's own WHY above (gatherRepoFacts) already
+    // treats an unfetched PR as unguarded, and the CLI gate stays the backstop
+    // (see the WHY on sizeArgs in runTick). Failing closed here would
+    // silently re-create the exact daily-cap burn this veto exists to stop.
+    return { launch, vetoed: false };
+  }
+  const gateConfig: SizeGateConfig = {
+    maxChangedLines: repo.maxChangedLines,
+    maxChangedFiles: repo.maxChangedFiles,
+    excludeRules: repo.excludeRules,
+  };
+  const vetoed = preLaunchExclusionVeto(
+    perFile,
+    candidate.changedFiles,
+    gateConfig,
+  );
+  return { launch: vetoed ? null : launch, vetoed };
+}
+
 async function runTick(
   paths: PrheroHomePaths,
   decision: TickDecision,
   repos: WatchedRepoFacts[],
+  ghPrFilesFn: WatchIo["ghPrFiles"],
 ): Promise<number> {
   await appendLog(
     paths.logPath,
@@ -487,13 +617,46 @@ async function runTick(
     );
   }
   await settleOrphanPendings(repos, decision.skips);
-  const launch = decision.launch;
+
+  // Pre-launch exclusion veto (design D6, prheroignore Phase 6, built after
+  // pr-hero's own review of PR #204 flagged the shape of this gap): a PR
+  // whose files are ALL excluded generated content but whose AGGREGATE is
+  // under both limits never reaches gatherRepoFacts's tier-2 per-file fetch,
+  // so `nothingToReview` cannot see it there. Without this veto it launches,
+  // the CLI exits on the empty effective diff before createPrRunDir, and it
+  // relaunches every tick — $0 each time, but `launched` is logged at spawn
+  // (below) BEFORE that exit, so it burns the daily cap and the tick's one
+  // launch slot reviewing nothing. ONE extra ghPrFiles call, for the CHOSEN
+  // launch only, buys the same rescue tier 2 already gives a PR whose
+  // aggregate happened to exceed a limit — see applyPreLaunchVeto for the
+  // fail-open contract on a ghPrFiles failure.
+  const veto =
+    decision.launch === null
+      ? { launch: null, vetoed: false }
+      : await applyPreLaunchVeto(
+          { ghPrFiles: ghPrFilesFn },
+          decision.launch,
+          repos,
+        );
+  if (veto.vetoed && decision.launch !== null) {
+    await appendLog(
+      paths.logPath,
+      skipLine(
+        localIsoTimestamp(new Date()),
+        path.basename(decision.launch.repo),
+        decision.launch.pr,
+        decision.launch.head,
+        "nothing-to-review",
+      ),
+    );
+  }
+  const launch = veto.launch;
   if (launch === null) {
     await appendLog(
       paths.logPath,
       logLine(
         localIsoTimestamp(new Date()),
-        `tick end launched=0 skipped=${decision.skips.length}`,
+        `tick end launched=0 skipped=${decision.skips.length + (veto.vetoed ? 1 : 0)}`,
       ),
     );
     return 0;
@@ -508,16 +671,6 @@ async function runTick(
   // happens before createPrRunDir, so it leaves no run dir, so the attempts
   // guard never sees it: the same PR would be relaunched every tick and eat
   // the whole daily cap, every day, reviewing nothing.
-  //
-  // KNOWN GAP of the same shape, recorded rather than fixed: a PR whose files
-  // are ALL excluded generated content (a lockfile-only bump) but whose
-  // AGGREGATE is under both limits never reaches the tier-2 per-file fetch,
-  // so `nothingToReview` cannot see it. It launches, the CLI exits on the
-  // empty effective diff before createPrRunDir, and it relaunches next tick —
-  // $0 each time, but `launched` is logged at spawn, so it consumes the daily
-  // cap and the tick's single launch slot. The cheap fix is a pre-launch veto
-  // (one ghPrFiles call for the chosen PR only, then re-decide); it is not
-  // built because it costs a gh call per tick and the call is Juanma's.
   //
   // Deliberately NOT --force: the CLI gate stays live as the backstop (it
   // sees the true diff, not GitHub's counters). It just has to agree with

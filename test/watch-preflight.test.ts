@@ -5,7 +5,8 @@
 // render, and the notification args. All offline, literal in → literal out.
 
 import { describe, expect, test } from "bun:test";
-import { CliUsageError, parseArgs } from "../src/preflight";
+import { parseIgnoreFile } from "../src/ignore-file";
+import { CliUsageError, type NumstatFile, parseArgs } from "../src/preflight";
 import { DEFAULT_SIZE_GATE } from "../src/size-gate";
 import {
   contractTilde,
@@ -35,6 +36,7 @@ import {
   parsePrList,
   parseWatchConfig,
   pendingReviewsToSettle,
+  preLaunchExclusionVeto,
   prheroHomePaths,
   removeWatchRepo,
   renderWatchPlist,
@@ -48,6 +50,10 @@ import {
   type WatchPrCandidate,
   type WatchStatusFacts,
 } from "../src/watch-preflight";
+
+function file(path: string, insertions: number, deletions = 0): NumstatFile {
+  return { path, insertions, deletions, binary: false };
+}
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
@@ -1199,6 +1205,56 @@ describe("decideTick", () => {
     expect(decision.gate).toBe("open");
     expect(decision.launch).toBeNull();
     expect(decision.skips).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// preLaunchExclusionVeto — the pure half of D6's pre-launch veto
+// (prheroignore Phase 6): a PR whose aggregate already cleared tier 1 but
+// whose changed files are ALL excluded content must not launch into an
+// empty effective diff.
+
+describe("preLaunchExclusionVeto", () => {
+  const CONFIG = {
+    maxChangedLines: 1500,
+    maxChangedFiles: 150,
+    excludeRules: parseIgnoreFile("vendor/**\n", "user"),
+  };
+
+  test("every changed file excluded, a trustworthy count — vetoed", () => {
+    expect(
+      preLaunchExclusionVeto([file("vendor/bundle.js", 500)], 1, CONFIG),
+    ).toBe(true);
+  });
+
+  test("one surviving (non-excluded) file — not vetoed", () => {
+    expect(
+      preLaunchExclusionVeto(
+        [file("vendor/bundle.js", 500), file("src/real.ts", 10)],
+        2,
+        CONFIG,
+      ),
+    ).toBe(false);
+  });
+
+  // Same truncation guard as tier 2 (gatherRepoFacts in watch.ts): a short
+  // list must never be trusted to justify a veto, even when every file it
+  // DOES list is excluded — the opposite failure direction from tier 2's own
+  // under-count risk, closed by the same guard.
+  test("a truncated (shorter than changedFiles) list never vetoes", () => {
+    expect(
+      preLaunchExclusionVeto([file("vendor/bundle.js", 500)], 2, CONFIG),
+    ).toBe(false);
+  });
+
+  test("an exact-count list at the boundary is trusted", () => {
+    expect(
+      preLaunchExclusionVeto(
+        [file("vendor/a.js", 1), file("vendor/b.js", 1)],
+        2,
+        CONFIG,
+      ),
+    ).toBe(true);
   });
 });
 
