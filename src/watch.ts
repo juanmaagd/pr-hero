@@ -14,29 +14,10 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { selfInvocation } from "./assets";
-// `readLocalIgnoreRules`/`IgnoreFileReadResult` are the ONE reuse across a
-// shell boundary in this module, and deliberate: cli.ts already carries the
-// full read (stat/malformed/unreadable handling, IgnoreFileError
-// re-contextualizing), and duplicating that — unlike the tiny 15-line `git`
-// spawn wrapper each shell copies on purpose — would risk the two reads
-// drifting on what "malformed" or "unreadable" means.
-//
-// This makes cli.ts and watch.ts import EACH OTHER (cli.ts imports
-// `watchCommand` from here for dispatch). That is safe ONLY because
-// `readLocalIgnoreRules` is an `export async function` DECLARATION: function
-// declarations are hoisted and bound at module-link time, before either
-// module's top-level statements run, so `productionWatchIo` below can
-// reference it at this module's own top level even though cli.ts's body may
-// not have executed yet. If cli.ts ever becomes
-// `export const readLocalIgnoreRules = async (...) => ...`, that binding is
-// in the temporal dead zone until cli.ts's body runs — and since watch.ts is
-// the one being required first in the real dispatch path (`cli.ts` imports
-// `watch.ts`), this module would crash at import time with a
-// ReferenceError. Keep it a `function` declaration, or break the cycle.
-import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./cli";
 import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
 import type { IgnoreRule } from "./ignore-file";
+import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./ignore-read";
 import { parseComparisonJson } from "./ledger";
 import {
   fetchCommitStatuses,

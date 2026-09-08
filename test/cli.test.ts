@@ -48,7 +48,6 @@ import {
   postInlineIfEligible,
   postingExitCode,
   readBaseRefIgnoreRules,
-  readLocalIgnoreRules,
   releaseCommitStatusLock,
   reportFatalCiError,
   resolvePrDryRunSizeGate,
@@ -61,6 +60,7 @@ import {
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
+import { readLocalIgnoreRules } from "../src/ignore-read";
 import type { StoredComparison } from "../src/ledger";
 import {
   ADMISSION_CHECK_RUN_NAME,

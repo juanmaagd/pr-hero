@@ -114,10 +114,14 @@ import {
 } from "./home-preflight";
 import {
   IgnoreFileError,
-  type IgnoreRule,
   parseIgnoreFile,
   parseIgnoreLsTree,
 } from "./ignore-file";
+import {
+  type IgnoreFileReadResult,
+  readLocalIgnoreRules,
+  reContextualizeIgnoreError,
+} from "./ignore-read";
 import {
   buildPostPlan,
   type PostedFindingComment,
@@ -735,80 +739,6 @@ async function git(
 // a lookup failure here must never silently fall back to defaults-only, and
 // a malformed file aborts the WHOLE review before any spend (same register
 // as gotchasErrorMessage).
-
-export interface IgnoreFileReadResult {
-  rules: IgnoreRule[];
-  found: boolean;
-}
-
-// `IgnoreFileError` hardcodes its file name to the literal ".prheroignore"
-// (see ignore-file.ts) because that pure parser never sees which PHYSICAL
-// path it was asked to read — a working-tree file and a base-ref blob share
-// the same dialect and the same parser. Every caller here re-contextualizes
-// the message with whichever path it actually resolved, so the abort names
-// something a human can go look at (local: a real filesystem path; CI: a
-// `<sha>:.prheroignore` locator, since there is no working-tree path to
-// name).
-function reContextualizeIgnoreError(
-  error: IgnoreFileError,
-  resolvedLocation: string,
-): string {
-  return error.message.replace(/^\.prheroignore:/, `${resolvedLocation}:`);
-}
-
-// Local working-tree read — local review, and PR review without --ci (O-8:
-// always `operatorRoot`, never `worktreePath`; see design D3/O-8 and
-// isCiEnvironment's own WHY at cli.ts's isCi read sites).
-//
-// Absent is NOT an error (`.exists()`-style check would suffice for that
-// alone), but `Bun.file(...).exists()` ALSO reports false for a directory —
-// verified directly — so an absent-vs-directory distinction needs `stat`,
-// not `.exists()`. A directory named `.prheroignore`, or one this process
-// cannot read, must abort loudly and must NEVER be treated as "absent,
-// defaults apply": that silent equivalence is exactly the kind of quiet
-// partial review this whole design exists to prevent.
-export async function readLocalIgnoreRules(
-  root: string,
-): Promise<IgnoreFileReadResult> {
-  const ignorePath = path.join(root, ".prheroignore");
-  let fileStat: Awaited<ReturnType<typeof stat>>;
-  try {
-    fileStat = await stat(ignorePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { rules: [], found: false };
-    }
-    throw new CliError(
-      `.prheroignore at ${ignorePath} could not be accessed: ` +
-        `${(error as Error).message}`,
-    );
-  }
-  if (!fileStat.isFile()) {
-    throw new CliError(
-      `.prheroignore at ${ignorePath} is not a regular file (found a ` +
-        "directory or special file); refusing to read it as ignore rules",
-    );
-  }
-  let text: string;
-  try {
-    text = await Bun.file(ignorePath).text();
-  } catch (error) {
-    // The `stat` above already proved it is a regular file, so a read
-    // failure here is something else — most likely permission denied.
-    throw new CliError(
-      `.prheroignore at ${ignorePath} could not be read: ` +
-        `${(error as Error).message}`,
-    );
-  }
-  try {
-    return { rules: parseIgnoreFile(text, "user"), found: true };
-  } catch (error) {
-    if (error instanceof IgnoreFileError) {
-      throw new CliError(reContextualizeIgnoreError(error, ignorePath));
-    }
-    throw error;
-  }
-}
 
 // The git runner shape `readBaseRefIgnoreRules` needs — the private `git()`
 // above has no injectable seam of its own (unlike `gh()`'s `spawnFn`), so

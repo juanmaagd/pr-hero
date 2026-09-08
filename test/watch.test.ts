@@ -40,8 +40,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readLocalIgnoreRules } from "../src/cli";
 import { parseIgnoreFile } from "../src/ignore-file";
+import { readLocalIgnoreRules } from "../src/ignore-read";
 import { DEFAULT_SIZE_GATE, sizeGateConfig } from "../src/size-gate";
 import {
   applyPreLaunchVeto,
