@@ -1128,7 +1128,7 @@ function runLines(doc: FindingsDocument, meta: ReportMeta): string[] {
   if (excluded.length > 0) {
     lines.push("");
     lines.push(
-      `${excluded.length} generated file${excluded.length === 1 ? " was" : "s were"} ` +
+      `${excluded.length} file${excluded.length === 1 ? " was" : "s were"} ` +
         `excluded from the reviewed diff: ${excluded.join(", ")}. The counts ` +
         "above, and the diff the hunters read, are after that exclusion " +
         "(`diff.raw.patch` holds the unfiltered diff).",

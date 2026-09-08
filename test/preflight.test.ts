@@ -21,6 +21,7 @@ import {
   GOTCHAS_TEMPLATE,
   gotchasErrorMessage,
   gotchasUnusableReason,
+  HELP_TEXT,
   headContainedInBaseMessage,
   initConfigTemplate,
   initGotchasInstructions,
@@ -1894,12 +1895,30 @@ describe("allExcludedMessage", () => {
     expect(message).toContain("nothing was spent");
   });
 
+  // A `.prheroignore` user rule can exclude anything, not only generated
+  // content (lockfiles, minified bundles) — the wording must not claim a
+  // reason it cannot know.
+  test("does not claim every exclusion is generated content", () => {
+    const message = allExcludedMessage(["vendor/thing.ts"]);
+    expect(message).not.toContain("generated content");
+  });
+
   test("a long list is truncated rather than dumped", () => {
     const message = allExcludedMessage(
       Array.from({ length: 9 }, (_, i) => `pkg/${i}/bun.lock`),
     );
     expect(message).toContain("+4 more");
     expect(message).not.toContain("pkg/8/bun.lock");
+  });
+});
+
+// The default exclusions are generated content, but a `.prheroignore` rule
+// can drop anything the operator names — the help text must say so, or a
+// user who defines their own rules never learns the flag interacts with
+// them at all.
+describe("HELP_TEXT — --max-changed-lines names .prheroignore", () => {
+  test("mentions .prheroignore beside the generated-file examples", () => {
+    expect(HELP_TEXT).toContain(".prheroignore");
   });
 });
 

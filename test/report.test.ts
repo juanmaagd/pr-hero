@@ -1906,12 +1906,12 @@ describe("renderReport exclusions", () => {
   // An exclusion MUTATES the diff the hunters read, so the report has to say
   // so: "3 files, +120 −45" beside a review that never saw the lockfile is
   // only honest if the dropped files are named.
-  test("dropped generated files are named, with the raw diff pointed at", () => {
+  test("dropped files are named, with the raw diff pointed at", () => {
     const markdown = renderReport(doc({}), {
       ...META,
       excludedPaths: ["bun.lock", "dist/app.min.js"],
     });
-    expect(markdown).toContain("2 generated files were excluded");
+    expect(markdown).toContain("2 files were excluded");
     expect(markdown).toContain("bun.lock, dist/app.min.js");
     expect(markdown).toContain("diff.raw.patch");
   });
@@ -1919,7 +1919,7 @@ describe("renderReport exclusions", () => {
   test("one dropped file reads in the singular", () => {
     expect(
       renderReport(doc({}), { ...META, excludedPaths: ["bun.lock"] }),
-    ).toContain("1 generated file was excluded");
+    ).toContain("1 file was excluded");
   });
 
   // No exclusions must add no noise at all — the common case stays silent.
