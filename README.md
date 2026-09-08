@@ -437,12 +437,12 @@ changes from its own review. Local review, and local `--pr <n>` review without C
 working tree instead. A malformed file aborts the whole review before anything is spent, naming the
 file, line number, and offending text.
 
-> **`pr-hero watch` does not honor `.prheroignore` yet.** The watcher's per-tick scheduling filter
-> applies only the 9 built-in exclusions, so a PR that your rules would bring back under the limit is
-> marked too-large and never scheduled — permanently, since the watcher re-reads live counters each
-> tick and a diff does not shrink on its own. The same PR reviews normally through `--pr <n>` and
-> through the GitHub Actions workflow. If you adopted `.prheroignore` to make large PRs reviewable,
-> use those paths until this lands.
+`pr-hero watch` honors `.prheroignore` too, in its per-tick scheduling filter (both the aggregate
+check and the per-file rescue), and in a one-call pre-launch check that catches a PR whose files are
+all excluded but whose aggregate alone would not have flagged it. It reads `.prheroignore` from the
+watched repo's own working tree on the machine running the watcher — never a base ref — because the
+watcher runs from an operator's own checkout of a repo that operator explicitly opted in, with no PR
+author supplying that checkout the way CI's PR-triggered runs have one.
 
 The count is also **whitespace-blind wherever git is reachable** (local mode and PR mode count from
 `git diff -w --ignore-blank-lines --numstat`), so a formatter or linter sweep does not consume the
