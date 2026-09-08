@@ -375,3 +375,31 @@ describe("parseIgnoreLsTree", () => {
     });
   });
 });
+
+// Case sensitivity: DELIBERATE, pinned here so it cannot flip silently (a
+// future matcher swap, or Bun changing a default, would otherwise pass every
+// existing test while quietly changing this). Matches git's own behavior —
+// git tracks paths case-sensitively regardless of the filesystem — and
+// DELIBERATELY diverges from the `ignore` npm package's case-INSENSITIVE
+// default, which is where most JS users' intuitions come from (its README
+// documents that as its own deviation from git). Probed directly at THIS
+// layer (compileIgnoreRules(parseIgnoreFile(...)), never bare Bun.Glob:
+// probing the primitive in isolation answers a different question than
+// probing it through the actual translation pipeline (see the order-swap /
+// re-inclusion lessons elsewhere in this file) — on Bun 1.3.14:
+// `**/README.md` vs `readme.md` => false, `**/*.MD` vs `a.md` => false.
+describe("case sensitivity — deliberate, matches git, diverges from `ignore`", () => {
+  test("a pattern does not match a differently-cased path", () => {
+    expect(excludes("README.md", "readme.md")).toBe(false);
+    expect(excludes("readme.md", "README.md")).toBe(false);
+  });
+
+  test("a case-varying extension pattern does not match", () => {
+    expect(excludes("*.MD", "a.md")).toBe(false);
+    expect(excludes("*.md", "a.MD")).toBe(false);
+  });
+
+  test("an exact-case match still fires", () => {
+    expect(excludes("README.md", "README.md")).toBe(true);
+  });
+});
