@@ -46,6 +46,8 @@ import { DEFAULT_SIZE_GATE, sizeGateConfig } from "../src/size-gate";
 import {
   applyPreLaunchVeto,
   gatherRepoFacts,
+  PRE_LAUNCH_VETO_MAX_ATTEMPTS,
+  selectLaunchAfterVeto,
   type WatchedRepoFacts,
   type WatchIo,
 } from "../src/watch";
@@ -498,13 +500,16 @@ describe("applyPreLaunchVeto (D6 — the pre-launch exclusion veto)", () => {
 // log line is appended" — a source-text pin, same precedent test/cli.test.ts
 // already uses for an unexported I/O shell's wiring.
 describe("runTick source-text pin — the veto settles before the daily-cap-consuming log line", () => {
-  test("applyPreLaunchVeto is invoked, and re-checked for null, before launchedLine is ever appended", async () => {
+  test("selectLaunchAfterVeto is invoked, and re-checked for null, before launchedLine is ever appended", async () => {
     const source = await Bun.file(
       path.resolve(import.meta.dir, "../src/watch.ts"),
     ).text();
     const runTickStart = source.indexOf("async function runTick(");
     expect(runTickStart).toBeGreaterThan(-1);
-    const vetoCallIndex = source.indexOf("applyPreLaunchVeto(", runTickStart);
+    const vetoCallIndex = source.indexOf(
+      "selectLaunchAfterVeto(",
+      runTickStart,
+    );
     const nullCheckIndex = source.indexOf(
       "if (launch === null) {",
       vetoCallIndex,
@@ -513,5 +518,270 @@ describe("runTick source-text pin — the veto settles before the daily-cap-cons
     expect(vetoCallIndex).toBeGreaterThan(runTickStart);
     expect(nullCheckIndex).toBeGreaterThan(vetoCallIndex);
     expect(launchedLineIndex).toBeGreaterThan(nullCheckIndex);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectLaunchAfterVeto — the LIVELOCK fix (pr-hero's own review of PR #205,
+// BLOCKER). The veto as first built returned `{launch: null}` and runTick
+// returned 0 for the tick, so an all-excluded PR that is nevertheless
+// ELIGIBLE (its aggregate is under both limits, so gatherRepoFacts's tier 2
+// never sees it) won the tick's single launch slot, was vetoed, left no
+// artifact any later tick could read back — and did it all again next tick,
+// forever, starving every other eligible PR in every configured repo.
+//
+// Nothing is persisted to fix it (constraint (b) on candidateSkipReason: a
+// force-push that shrinks a PR must make it eligible again on the very next
+// tick, so no veto marker may survive the tick). The fix is to stop WASTING
+// the slot: fall through to the next eligible candidate inside the same tick.
+
+const HEAD_B = "b".repeat(40);
+const HEAD_C = "c".repeat(40);
+
+function candidate(
+  pr: number,
+  head: string,
+  over: Partial<WatchPrCandidate> = {},
+): WatchPrCandidate {
+  return {
+    pr,
+    head,
+    isDraft: false,
+    additions: 50,
+    deletions: 0,
+    changedFiles: 1,
+    ...over,
+  };
+}
+
+// The eligible list built by the REAL decideTick, never hand-ordered: the
+// ascending-PR sort that makes the lower-numbered PR win the slot is the
+// precondition the headline test below depends on, so it must come from the
+// production sorter rather than from the fixture's array order.
+function eligibleFor(repos: WatchedRepoFacts[]): TickLaunch[] {
+  const decision = decideTick({
+    window: null,
+    localMinutes: 0,
+    dailyCap: 5,
+    launchedToday: 0,
+    repos,
+  });
+  expect(decision.gate).toBe("open");
+  return [...decision.eligible];
+}
+
+// Keyed per PR: an all-excluded PR answers with one vendor file, a reviewable
+// one answers with a source file. `calls` is the gh-call budget under test.
+function ghPrFilesByPr(excluded: readonly number[]): {
+  ghPrFiles: (repoRoot: string, pr: number) => Promise<string>;
+  calls: number[];
+} {
+  const calls: number[] = [];
+  return {
+    calls,
+    ghPrFiles: async (_repoRoot: string, pr: number) => {
+      calls.push(pr);
+      return excluded.includes(pr)
+        ? ghPrFilesJson([{ path: "vendor/x.js", additions: 50 }])
+        : ghPrFilesJson([{ path: "src/real.ts", additions: 50 }]);
+    },
+  };
+}
+
+describe("selectLaunchAfterVeto (the #205 livelock fix)", () => {
+  // THE headline test. A test asserting only `vetoed === true` passes against
+  // the broken code and proves nothing — the entire defect is what happens
+  // AFTER the veto, so the assertion has to be on which PR launches.
+  test("the lower-numbered PR being all-excluded launches the HIGHER-numbered one, in the same tick", async () => {
+    const repos = [
+      watchedRepoFacts({
+        prs: [candidate(42, HEAD_A), candidate(43, HEAD_B)],
+      }),
+    ];
+    const eligible = eligibleFor(repos);
+    // Precondition, asserted rather than assumed: 42 is the one that would
+    // win the single launch slot, so the fall-through is what is under test.
+    expect(eligible.map((e) => e.pr)).toEqual([42, 43]);
+    const io = ghPrFilesByPr([42]);
+
+    const result = await selectLaunchAfterVeto(io, eligible, repos);
+
+    expect(result.launch?.pr).toBe(43);
+    expect(result.launch?.head).toBe(HEAD_B);
+    expect(result.vetoed.map((v) => v.pr)).toEqual([42]);
+    expect(result.capReached).toBe(false);
+    // One call per candidate considered, and it STOPS at the first survivor.
+    expect(io.calls).toEqual([42, 43]);
+  });
+
+  test("the fall-through crosses repo boundaries — the queue is global, so starvation would be too", async () => {
+    const repos = [
+      watchedRepoFacts({ path: "/x/one", prs: [candidate(10, HEAD_A)] }),
+      watchedRepoFacts({ path: "/x/two", prs: [candidate(11, HEAD_B)] }),
+    ];
+    const io = ghPrFilesByPr([10]);
+
+    const result = await selectLaunchAfterVeto(io, eligibleFor(repos), repos);
+
+    expect(result.launch?.pr).toBe(11);
+    expect(result.launch?.repo).toBe("/x/two");
+  });
+
+  test("no veto at all launches the first candidate and spends exactly one gh call", async () => {
+    const repos = [
+      watchedRepoFacts({
+        prs: [candidate(42, HEAD_A), candidate(43, HEAD_B)],
+      }),
+    ];
+    const io = ghPrFilesByPr([]);
+
+    const result = await selectLaunchAfterVeto(io, eligibleFor(repos), repos);
+
+    expect(result.launch?.pr).toBe(42);
+    expect(result.vetoed).toEqual([]);
+    expect(io.calls).toEqual([42]);
+  });
+
+  test("a ghPrFiles failure still fails open — the first candidate launches, no fall-through", async () => {
+    const repos = [
+      watchedRepoFacts({
+        prs: [candidate(42, HEAD_A), candidate(43, HEAD_B)],
+      }),
+    ];
+    let calls = 0;
+    const io = {
+      ghPrFiles: async () => {
+        calls++;
+        throw new Error("gh: rate limited");
+      },
+    };
+
+    const result = await selectLaunchAfterVeto(io, eligibleFor(repos), repos);
+
+    expect(result.launch?.pr).toBe(42);
+    expect(result.vetoed).toEqual([]);
+    expect(result.capReached).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  test("nothing eligible spends no gh call at all", async () => {
+    const io = ghPrFilesByPr([]);
+
+    const result = await selectLaunchAfterVeto(io, [], []);
+
+    expect(result).toEqual({ launch: null, vetoed: [], capReached: false });
+    expect(io.calls).toEqual([]);
+  });
+
+  // The cap. Without it the fall-through is an unbounded `gh pr view` loop
+  // inside one tick — a dependabot flood would turn each tick into one API
+  // call per open PR.
+  test("more all-excluded candidates than the cap stops at the cap: bounded gh calls, nothing launched", async () => {
+    const prs = Array.from(
+      { length: PRE_LAUNCH_VETO_MAX_ATTEMPTS + 2 },
+      (_, i) => candidate(100 + i, HEAD_A),
+    );
+    const excludedPrs = prs
+      .slice(0, PRE_LAUNCH_VETO_MAX_ATTEMPTS + 1)
+      .map((p) => p.pr);
+    const repos = [watchedRepoFacts({ prs })];
+    const io = ghPrFilesByPr(excludedPrs);
+
+    const result = await selectLaunchAfterVeto(io, eligibleFor(repos), repos);
+
+    // The LAST candidate is reviewable, so an uncapped loop would launch it —
+    // this asserts the cap fired instead of the queue being exhausted.
+    expect(result.launch).toBeNull();
+    expect(result.capReached).toBe(true);
+    expect(io.calls).toHaveLength(PRE_LAUNCH_VETO_MAX_ATTEMPTS);
+    expect(result.vetoed).toHaveLength(PRE_LAUNCH_VETO_MAX_ATTEMPTS);
+  });
+
+  // The boundary the cap test above must NOT be confused with: the cap
+  // bounds ATTEMPTS (gh calls), so a survivor reached on the very last
+  // affordable attempt still launches. Off-by-one the other way and the fix
+  // would give up one candidate too early, every tick.
+  test("a survivor reached on the last affordable attempt still launches", async () => {
+    const prs = Array.from({ length: PRE_LAUNCH_VETO_MAX_ATTEMPTS }, (_, i) =>
+      candidate(200 + i, HEAD_C),
+    );
+    const excludedPrs = prs
+      .slice(0, PRE_LAUNCH_VETO_MAX_ATTEMPTS - 1)
+      .map((p) => p.pr);
+    const repos = [watchedRepoFacts({ prs })];
+    const io = ghPrFilesByPr(excludedPrs);
+
+    const result = await selectLaunchAfterVeto(io, eligibleFor(repos), repos);
+
+    expect(result.launch?.pr).toBe(200 + PRE_LAUNCH_VETO_MAX_ATTEMPTS - 1);
+    expect(result.capReached).toBe(false);
+    expect(io.calls).toHaveLength(PRE_LAUNCH_VETO_MAX_ATTEMPTS);
+  });
+
+  // capReached distinguishes "gave up with work left" from "ran out of
+  // queue". Both launch nothing; only the first is worth a log line, and
+  // only the first means a reviewable PR may be sitting unreached.
+  test("an exhausted queue of all-excluded PRs is not the cap case", async () => {
+    const prs = Array.from(
+      { length: PRE_LAUNCH_VETO_MAX_ATTEMPTS - 2 },
+      (_, i) => candidate(300 + i, HEAD_C),
+    );
+    const repos = [watchedRepoFacts({ prs })];
+    const io = ghPrFilesByPr(prs.map((p) => p.pr));
+
+    const result = await selectLaunchAfterVeto(io, eligibleFor(repos), repos);
+
+    expect(result.launch).toBeNull();
+    expect(result.capReached).toBe(false);
+    expect(result.vetoed).toHaveLength(PRE_LAUNCH_VETO_MAX_ATTEMPTS - 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The one pin that catches a DEAD fix in production: every unit test above
+// hands `selectLaunchAfterVeto` an `eligible` array directly, so a runTick
+// wired to pass `[decision.launch]` (or `decision.launch` alone) would leave
+// all of them green while the fall-through never runs against a real tick.
+// Only the wiring itself discriminates that, and only in source text —
+// runTick spawns a real child process end to end (see this file's header).
+describe("runTick source-text pin — the selector is fed the WHOLE eligible queue", () => {
+  test("runTick passes decision.eligible, not just the single chosen launch", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/watch.ts"),
+    ).text();
+    const runTickStart = source.indexOf("async function runTick(");
+    const selectorIndex = source.indexOf(
+      "selectLaunchAfterVeto(",
+      runTickStart,
+    );
+    expect(selectorIndex).toBeGreaterThan(runTickStart);
+    const callSite = source.slice(selectorIndex, selectorIndex + 220);
+    expect(callSite).toContain("decision.eligible");
+    expect(callSite).not.toContain("[decision.launch]");
+  });
+
+  // `capReached` is the selector's own tested output; that runTick actually
+  // LOGS it is the operator's only signal that a reviewable PR may be sitting
+  // unreached behind a run of all-excluded ones — and a silent cap is
+  // indistinguishable from an idle tick in watch.log.
+  test("the cap emits its own log line, between the selector call and the launch", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/watch.ts"),
+    ).text();
+    const runTickStart = source.indexOf("async function runTick(");
+    const selectorIndex = source.indexOf(
+      "selectLaunchAfterVeto(",
+      runTickStart,
+    );
+    const capLogIndex = source.indexOf("veto-cap-reached", selectorIndex);
+    const nullCheckIndex = source.indexOf(
+      "if (launch === null) {",
+      selectorIndex,
+    );
+    expect(capLogIndex).toBeGreaterThan(selectorIndex);
+    expect(capLogIndex).toBeLessThan(nullCheckIndex);
+    expect(source.slice(selectorIndex, capLogIndex)).toContain(
+      "selection.capReached",
+    );
   });
 });

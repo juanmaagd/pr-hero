@@ -575,6 +575,84 @@ export async function applyPreLaunchVeto(
   return { launch: vetoed ? null : launch, vetoed };
 }
 
+// How many candidates one tick will veto before it gives up and launches
+// nothing. WHY a cap exists at all, and WHY this number (paid for by
+// pr-hero's own review of PR #205, BLOCKER): the fall-through below is what
+// stops the veto from starving the queue, but an UNBOUNDED fall-through
+// turns a single tick into one `gh pr view` per open PR — a dependabot
+// flood, or any repo whose front-of-queue is a run of lockfile bumps, would
+// have every tick spend the whole GitHub budget walking the same list.
+//
+// 5 is anchored to cost, not to taste: it bounds the veto's added spend at 5
+// `gh pr view` calls per tick, against the tick's ALREADY per-candidate
+// `gh pr list` + comments + statuses traffic, and it is comfortably longer
+// than any realistic run of consecutive all-excluded PRs at the low-numbered
+// end of the queue.
+//
+// The ACCEPTED tradeoff, stated so the next reader does not rediscover it as
+// a bug: with more than 5 all-excluded PRs ahead of a reviewable one, the
+// reviewable one is still starved — bounded per tick, but stably, tick after
+// tick, because nothing here is persisted. That is deliberate. The forbidden
+// alternative is the unbounded loop; the other alternative, remembering the
+// veto across ticks, is ruled out by constraint (b) on candidateSkipReason
+// (a force-push that shrinks a PR must make it eligible again NEXT tick), so
+// no veto verdict may survive the tick that computed it. A repo that hits
+// this cap has a systemic flood that one launch slot per tick cannot fix
+// anyway; the `tick veto-cap-reached` log line is how the operator sees it.
+export const PRE_LAUNCH_VETO_MAX_ATTEMPTS = 5;
+
+export interface LaunchSelection {
+  launch: TickLaunch | null;
+  // Every candidate this tick vetoed, in the order they were considered —
+  // runTick logs one skip line each. Never persisted anywhere (constraint
+  // (b) above); a vetoed PR is re-examined from live counters next tick.
+  vetoed: TickLaunch[];
+  capReached: boolean;
+}
+
+// The fix for the #205 LIVELOCK, and the whole reason this sits between
+// decideTick and the spawn. decideTick returns at most ONE launch per tick
+// ACROSS ALL configured repos (`eligible[0]`, ascending by PR number). The
+// veto as first built turned that single slot into `null` and the tick
+// returned 0 — so an all-excluded PR that is nevertheless ELIGIBLE (its
+// aggregate is under both limits, so gatherRepoFacts's tier 2 never fetches
+// its file list and `nothingToReview` cannot see it) won the slot, was
+// vetoed, wrote no artifact any later tick could read back, and did it all
+// again on the next tick, forever — starving every other eligible PR in
+// every configured repo. The veto swapped "launch and waste the slot" for
+// "veto and waste the slot".
+//
+// So: fall through to the next eligible candidate INSIDE the same tick. The
+// vetoed PR still costs one `ghPrFiles` call every tick forever, which is
+// accepted — it is far cheaper than the per-tick spawn it replaced, and it
+// is the only shape compatible with never persisting the verdict.
+//
+// applyPreLaunchVeto stays strictly per-candidate (it never sees the list):
+// its fail-open contract on a `ghPrFiles` failure is per-PR reasoning, and
+// widening it to the queue would make that contract answer a question it
+// has no evidence for.
+export async function selectLaunchAfterVeto(
+  io: Pick<WatchIo, "ghPrFiles">,
+  eligible: readonly TickLaunch[],
+  repos: readonly WatchedRepoFacts[],
+): Promise<LaunchSelection> {
+  const vetoed: TickLaunch[] = [];
+  for (const candidate of eligible) {
+    // Checked BEFORE the call, so the cap bounds gh calls and not merely
+    // vetoes. It can only fire with a candidate still unconsidered, which is
+    // exactly when "launched nothing" is a decision rather than an empty
+    // queue — hence capReached, which runTick logs.
+    if (vetoed.length >= PRE_LAUNCH_VETO_MAX_ATTEMPTS) {
+      return { launch: null, vetoed, capReached: true };
+    }
+    const result = await applyPreLaunchVeto(io, candidate, repos);
+    if (!result.vetoed)
+      return { launch: result.launch, vetoed, capReached: false };
+    vetoed.push(candidate);
+  }
+  return { launch: null, vetoed, capReached: false };
+}
+
 async function runTick(
   paths: PrheroHomePaths,
   decision: TickDecision,
@@ -607,37 +685,54 @@ async function runTick(
   // the CLI exits on the empty effective diff before createPrRunDir, and it
   // relaunches every tick — $0 each time, but `launched` is logged at spawn
   // (below) BEFORE that exit, so it burns the daily cap and the tick's one
-  // launch slot reviewing nothing. ONE extra ghPrFiles call, for the CHOSEN
-  // launch only, buys the same rescue tier 2 already gives a PR whose
-  // aggregate happened to exceed a limit — see applyPreLaunchVeto for the
-  // fail-open contract on a ghPrFiles failure.
-  const veto =
+  // launch slot reviewing nothing. An extra ghPrFiles call per candidate
+  // considered — at most PRE_LAUNCH_VETO_MAX_ATTEMPTS of them, see
+  // selectLaunchAfterVeto — buys the same rescue tier 2 already gives a PR
+  // whose aggregate happened to exceed a limit; applyPreLaunchVeto carries
+  // the fail-open contract on a ghPrFiles failure.
+  //
+  // The WHOLE eligible queue goes in, NOT `[decision.launch]`: passing the
+  // single chosen launch would leave every unit test on selectLaunchAfterVeto
+  // green while the fall-through — the actual fix for the #205 livelock —
+  // was dead in production. `decision.launch === null` still short-circuits,
+  // because a closed window or a spent daily cap leaves `eligible` populated
+  // while nothing at all may launch.
+  const selection: LaunchSelection =
     decision.launch === null
-      ? { launch: null, vetoed: false }
-      : await applyPreLaunchVeto(
+      ? { launch: null, vetoed: [], capReached: false }
+      : await selectLaunchAfterVeto(
           { ghPrFiles: ghPrFilesFn },
-          decision.launch,
+          decision.eligible,
           repos,
         );
-  if (veto.vetoed && decision.launch !== null) {
+  for (const vetoed of selection.vetoed) {
     await appendLog(
       paths.logPath,
       skipLine(
         localIsoTimestamp(new Date()),
-        path.basename(decision.launch.repo),
-        decision.launch.pr,
-        decision.launch.head,
+        path.basename(vetoed.repo),
+        vetoed.pr,
+        vetoed.head,
         "nothing-to-review",
       ),
     );
   }
-  const launch = veto.launch;
+  if (selection.capReached) {
+    await appendLog(
+      paths.logPath,
+      logLine(
+        localIsoTimestamp(new Date()),
+        `tick veto-cap-reached attempts=${PRE_LAUNCH_VETO_MAX_ATTEMPTS}`,
+      ),
+    );
+  }
+  const launch = selection.launch;
   if (launch === null) {
     await appendLog(
       paths.logPath,
       logLine(
         localIsoTimestamp(new Date()),
-        `tick end launched=0 skipped=${decision.skips.length + (veto.vetoed ? 1 : 0)}`,
+        `tick end launched=0 skipped=${decision.skips.length + selection.vetoed.length}`,
       ),
     );
     return 0;
