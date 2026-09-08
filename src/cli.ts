@@ -2245,9 +2245,26 @@ async function reviewPr(
     // under-counting here would falsely RESCUE exactly the monster this gate
     // exists to stop, so a count that disagrees with GitHub's own
     // `changedFiles` counter is never trusted to produce a passing verdict.
-    const rawFiles = parsePrFiles(await ghPrFiles(operatorRoot, prNumber));
-    const perFile =
-      rawFiles.length >= target.ghDiffStat.files ? rawFiles : null;
+    // UNAVAILABLE is the same answer as TRUNCATED here, and the note
+    // resolvePrDryRunSizeGate renders already says so in those words. A dry
+    // run creates nothing and is a PLAN, so it must degrade to the aggregate
+    // estimate rather than abort: `ghPrFiles` is bounded by
+    // GH_PR_VIEW_TIMEOUT_MS, and without this catch a stalled GitHub would
+    // turn `--dry-run` from "conservative estimate" into "command failed" —
+    // trading a hang for a hard stop when the fallback was already built and
+    // labelled.
+    // `null` DIRECTLY on failure, never an empty list routed through the
+    // length check below: `[].length >= 0` is true, so an empty list would
+    // sail through as trustworthy and hand the per-file gate zero lines to
+    // measure — a PASSING verdict produced by a failed fetch, which is the
+    // one outcome a size gate must never invent.
+    let perFile: NumstatFile[] | null;
+    try {
+      const rawFiles = parsePrFiles(await ghPrFiles(operatorRoot, prNumber));
+      perFile = rawFiles.length >= target.ghDiffStat.files ? rawFiles : null;
+    } catch {
+      perFile = null;
+    }
     const { verdict: estimated, note: baseSizeGateNote } =
       resolvePrDryRunSizeGate({
         ghDiffStat: target.ghDiffStat,
