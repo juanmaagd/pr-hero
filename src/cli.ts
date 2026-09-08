@@ -113,6 +113,12 @@ import {
   worktreeLockPath,
 } from "./home-preflight";
 import {
+  IgnoreFileError,
+  type IgnoreRule,
+  parseIgnoreFile,
+  parseIgnoreLsTree,
+} from "./ignore-file";
+import {
   buildPostPlan,
   type PostedFindingComment,
   type PostPlan,
@@ -158,6 +164,7 @@ import {
   fetchPrReviewComments,
   ghCompareChangedFilesWithStatus,
   ghCurrentBranchPr,
+  ghPrFiles,
   ghPrHeadSha,
   ghPrHeroWorkflowRunHeads,
   ghPrView,
@@ -226,6 +233,8 @@ import {
   listPaths,
   localReviewSpec,
   mergeConfig,
+  type NumstatDiffStat,
+  type NumstatFile,
   parseArgs,
   parseGlobalConfig,
   parseLocalConfig,
@@ -297,10 +306,12 @@ import {
   resolveRunnerAuthority,
 } from "./runner-authority";
 import {
+  type ExcludedPath,
   effectiveDiffStat,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
   filterDiffByIgnoreRules,
+  type SizeGateConfig,
   type SizeGateVerdict,
   sizeGateConfig,
   sizeGateDisposition,
@@ -386,7 +397,11 @@ import { watchCommand } from "./watch";
 // declaration so the delta line's "since <sha>" clause is free (report.ts's
 // PrCommentDelta.previousHeadSha), the exact reuse watch-preflight.ts's own
 // header describes for the cross-machine guard.
-import { markerCommentSeen, parseMarkerHead } from "./watch-preflight";
+import {
+  markerCommentSeen,
+  parseMarkerHead,
+  parsePrFiles,
+} from "./watch-preflight";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
@@ -673,6 +688,11 @@ const EMPTY_MCP_CONFIG = { mcpServers: {} };
 // two more were dropped, and where the unfiltered bytes went. It sits in the
 // decision block because an exclusion is what the size gate's numbers were
 // computed after.
+//
+// "excluded file(s)", not "generated file(s)": the 9 built-in defaults are
+// generated content, but a `.prheroignore` user rule can drop anything —
+// this line describes what happened to the diff, not why the operator chose
+// to.
 function exclusionLines(
   droppedPaths: string[],
   styles: boolean,
@@ -681,7 +701,7 @@ function exclusionLines(
   if (droppedPaths.length === 0) return [];
   return markerRowLines(
     "!",
-    `exclusions: ${droppedPaths.length} generated file(s) dropped from the ` +
+    `exclusions: ${droppedPaths.length} excluded file(s) dropped from the ` +
       `reviewed diff (${listPaths(droppedPaths)}); the unfiltered diff is ` +
       "kept as diff.raw.patch",
     dim,
@@ -707,6 +727,169 @@ async function git(
     proc.exited,
   ]);
   return { ok: exitCode === 0, stdout, stderr };
+}
+
+// ---------------------------------------------------------------------------
+// `.prheroignore` reads (ROADMAP prheroignore, Phase 3): local working tree
+// and base-ref, mirroring the gotchas read's shape but never its fallback —
+// a lookup failure here must never silently fall back to defaults-only, and
+// a malformed file aborts the WHOLE review before any spend (same register
+// as gotchasErrorMessage).
+
+export interface IgnoreFileReadResult {
+  rules: IgnoreRule[];
+  found: boolean;
+}
+
+// `IgnoreFileError` hardcodes its file name to the literal ".prheroignore"
+// (see ignore-file.ts) because that pure parser never sees which PHYSICAL
+// path it was asked to read — a working-tree file and a base-ref blob share
+// the same dialect and the same parser. Every caller here re-contextualizes
+// the message with whichever path it actually resolved, so the abort names
+// something a human can go look at (local: a real filesystem path; CI: a
+// `<sha>:.prheroignore` locator, since there is no working-tree path to
+// name).
+function reContextualizeIgnoreError(
+  error: IgnoreFileError,
+  resolvedLocation: string,
+): string {
+  return error.message.replace(/^\.prheroignore:/, `${resolvedLocation}:`);
+}
+
+// Local working-tree read — local review, and PR review without --ci (O-8:
+// always `operatorRoot`, never `worktreePath`; see design D3/O-8 and
+// isCiEnvironment's own WHY at cli.ts's isCi read sites).
+//
+// Absent is NOT an error (`.exists()`-style check would suffice for that
+// alone), but `Bun.file(...).exists()` ALSO reports false for a directory —
+// verified directly — so an absent-vs-directory distinction needs `stat`,
+// not `.exists()`. A directory named `.prheroignore`, or one this process
+// cannot read, must abort loudly and must NEVER be treated as "absent,
+// defaults apply": that silent equivalence is exactly the kind of quiet
+// partial review this whole design exists to prevent.
+export async function readLocalIgnoreRules(
+  root: string,
+): Promise<IgnoreFileReadResult> {
+  const ignorePath = path.join(root, ".prheroignore");
+  let fileStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    fileStat = await stat(ignorePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { rules: [], found: false };
+    }
+    throw new CliError(
+      `.prheroignore at ${ignorePath} could not be accessed: ` +
+        `${(error as Error).message}`,
+    );
+  }
+  if (!fileStat.isFile()) {
+    throw new CliError(
+      `.prheroignore at ${ignorePath} is not a regular file (found a ` +
+        "directory or special file); refusing to read it as ignore rules",
+    );
+  }
+  let text: string;
+  try {
+    text = await Bun.file(ignorePath).text();
+  } catch (error) {
+    // The `stat` above already proved it is a regular file, so a read
+    // failure here is something else — most likely permission denied.
+    throw new CliError(
+      `.prheroignore at ${ignorePath} could not be read: ` +
+        `${(error as Error).message}`,
+    );
+  }
+  try {
+    return { rules: parseIgnoreFile(text, "user"), found: true };
+  } catch (error) {
+    if (error instanceof IgnoreFileError) {
+      throw new CliError(reContextualizeIgnoreError(error, ignorePath));
+    }
+    throw error;
+  }
+}
+
+// The git runner shape `readBaseRefIgnoreRules` needs — the private `git()`
+// above has no injectable seam of its own (unlike `gh()`'s `spawnFn`), so
+// this function takes one explicitly and production wiring passes `git`
+// itself; tests pass a scripted fake.
+export type GitRunner = (
+  repo: string,
+  args: string[],
+) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+
+// Base-ref read (CI mode) — design D2: `ls-tree` then `cat-file`, never
+// `git show`, because `git show <ref>:<path>` exits 128 for BOTH an absent
+// file and a bad rev, and this needs to tell those apart without parsing
+// stderr. `ls-tree` alone does: exit 0 + empty stdout is absent (normal,
+// defaults apply); non-zero exit is a genuine lookup failure.
+//
+// NEVER falls back to the working tree on any failure branch: the entire
+// point of a base-ref read is that the PR author cannot choose which
+// `.prheroignore` governs their own review (design D1), and a fallback here
+// would silently reopen that hole the moment the lookup itself failed —
+// trading a loud, cheap abort for a quiet, expensive one.
+export async function readBaseRefIgnoreRules(
+  runGit: GitRunner,
+  repo: string,
+  baseSha: string,
+): Promise<IgnoreFileReadResult> {
+  // `--full-tree` makes the pathspec repo-root-relative regardless of what
+  // `repo` itself is cwd-ed to — see D2.
+  const lsTree = await runGit(repo, [
+    "ls-tree",
+    "--full-tree",
+    baseSha,
+    "--",
+    ".prheroignore",
+  ]);
+  if (!lsTree.ok) {
+    throw new CliError(
+      `.prheroignore lookup failed at ${baseSha}: git ls-tree exited ` +
+        `non-zero — ${lsTree.stderr.trim()}`,
+    );
+  }
+  const parsed = parseIgnoreLsTree(lsTree.stdout);
+  if (parsed.kind === "absent") return { rules: [], found: false };
+  if (parsed.kind === "reject") {
+    // A root SYMLINK commits as mode 120000 with type `blob` (verified in a
+    // scratch repo — see #5518): a type check alone would pass it through,
+    // and `cat-file blob` on it returns the link TARGET (e.g. `/etc/passwd`)
+    // for the parser to read as ignore patterns. Only the mode allowlist
+    // (100644/100755) catches it; 040000 (tree/submodule-as-directory) and
+    // 160000 (gitlink) are rejected the same way.
+    throw new CliError(
+      `.prheroignore at ${baseSha} has mode ${parsed.mode}, not a regular ` +
+        "file (100644/100755); refusing to read it as ignore rules",
+    );
+  }
+  // parsed.kind === "blob". The sha came back from a subprocess, so it is
+  // still untrusted input here — validated before it is handed to a SECOND
+  // git invocation.
+  if (!isFullCommitId(parsed.sha)) {
+    throw new CliError(
+      `.prheroignore blob sha from git ls-tree is not a 40-hex sha: ` +
+        JSON.stringify(parsed.sha),
+    );
+  }
+  const catFile = await runGit(repo, ["cat-file", "blob", parsed.sha]);
+  if (!catFile.ok) {
+    throw new CliError(
+      `.prheroignore blob read failed at ${baseSha}: git cat-file exited ` +
+        `non-zero — ${catFile.stderr.trim()}`,
+    );
+  }
+  try {
+    return { rules: parseIgnoreFile(catFile.stdout, "user"), found: true };
+  } catch (error) {
+    if (error instanceof IgnoreFileError) {
+      throw new CliError(
+        reContextualizeIgnoreError(error, `${baseSha}:.prheroignore`),
+      );
+    }
+    throw error;
+  }
 }
 
 async function gitCommitExists(repo: string, sha: string): Promise<boolean> {
@@ -1237,6 +1420,13 @@ async function review(options: CliOptions): Promise<number> {
     throw new CliError(gotchasErrorMessage(gotchasPath, gotchasUnusable));
   }
 
+  // 7.5 — `.prheroignore`, read from the WORKING TREE. Local review has no
+  // PR-author trust boundary to defend (there is no "someone else's commit"
+  // here — repoRoot is the operator's own checkout), so it is read from
+  // exactly the tree the diff below comes from, the same way gotchas.md just
+  // was.
+  const userIgnore = await readLocalIgnoreRules(repoRoot);
+
   // 8 — run dir + diff.
   const { runDir, repoId } = await createRunDir(options, repoRoot, headSha);
   const diffPath = path.join(runDir, "diff.patch");
@@ -1255,7 +1445,11 @@ async function review(options: CliOptions): Promise<number> {
   // the reviewed diff itself, or the gate discounts a lockfile the bill still
   // pays for in full (see filterDiffByIgnoreRules). diff.raw.patch keeps the
   // unfiltered bytes for audit, and only when there is a difference to audit.
-  const gateConfig = sizeGateConfig(options, loaded.effective);
+  const gateConfig = sizeGateConfig(
+    options,
+    loaded.effective,
+    userIgnore.rules,
+  );
   const effectiveDiff = filterDiffByIgnoreRules(
     diff.stdout,
     gateConfig.excludeRules,
@@ -1488,6 +1682,8 @@ async function review(options: CliOptions): Promise<number> {
         worktree: repoRoot,
         diffPath,
         excludedPaths: effectiveDiff.droppedPaths,
+        exclusions: effectiveDiff.exclusions,
+        ignoreFile: { readFrom: "working-tree", found: userIgnore.found },
         gotchasPath,
         agentsDir,
         ...(agents.files ? { agentFiles: agents.files } : {}),
@@ -1771,6 +1967,19 @@ async function reviewPr(
     CI: process.env.CI,
   });
   options = { ...options, scout, post, yes: options.yes || isCi };
+  // `.prheroignore`, read EAGERLY here for the non-CI case only: the
+  // operator's working tree (`operatorRoot`, NEVER `worktreePath` — O-8) is
+  // available with no fetch, so both the free dry-run exit below and the
+  // real run can share this one read. Under CI the read instead needs to
+  // come from the BASE REF — the PR author must never be able to choose
+  // which `.prheroignore` governs their own review (design D1) — which
+  // needs `baseSha` resolved AND the commit fetched, neither of which exists
+  // yet here; that read happens later, after both (see readBaseRefIgnoreRules
+  // below). `localIgnore` therefore stays `undefined` under CI on purpose —
+  // there is nothing safe to read at this point in that branch.
+  const localIgnore = isCi
+    ? undefined
+    : await readLocalIgnoreRules(operatorRoot);
   // Issue #156: resolve the ceiling ONCE, here, and use this same value at
   // the budget gate far below. Resolving twice invites the announcement and
   // the gate drifting apart. Deliberately NOT folded back into
@@ -2076,9 +2285,18 @@ async function reviewPr(
     }
   }
 
-  // 3 — the free exit, BEFORE the fetch: a PR-mode dry run creates NOTHING —
-  // no fetch, no run dir, no worktree — so the cost band rides on GitHub's
-  // own counters instead of a local numstat.
+  // 3 — the free exit, BEFORE the git fetch: a PR-mode dry run still creates
+  // NOTHING — no `git fetch`, no worktree, no run dir — but it does now make
+  // a SECOND read-only `gh` call, alongside the `ghPrView` one at step 1
+  // above. That call was always there; "fetches nothing" never meant "talks
+  // to GitHub zero times", only that nothing GIT-side happens. Overriding
+  // the original all-aggregate estimate (PR1b Addition 1 / #5557): the
+  // aggregate counters carry no per-file paths, so `.prheroignore`
+  // exclusions were structurally impossible to apply here, and that gap
+  // widens from "tens of lines" (lockfiles) to "potentially thousands" (a
+  // whole ignored directory) the moment a user defines their own rules — a
+  // dry run that says SKIP for a PR the real per-file run happily accepts
+  // reads as a broken tool, not a conservative estimate.
   if (options.dryRun) {
     const hunterCount = dryRunHunterCount(spec, config);
     const estimate = estimateCost(
@@ -2087,20 +2305,36 @@ async function reviewPr(
       summary.enabled,
       options.scout,
     );
-    // The gate, ESTIMATED. A PR dry run creates nothing and fetches nothing,
-    // so the only size facts on hand are GitHub's own aggregate counters —
-    // no per-file paths, therefore no exclusions. Fetching `gh pr view
-    // --json files` here would buy exactness at the price of the "nothing
-    // was fetched" contract, and the estimate is only ever wrong in the
-    // conservative direction (a gate that fires here may pass for real once
-    // lockfiles come off, and GitHub's counters carry no whitespace
-    // information, so a formatter sweep counts in full here and counts zero
-    // in the real git-side gate). Labelled on both counts, in the plan's own
-    // decision block, so nobody reads it as the verdict.
-    const estimated = evaluateSizeGateAggregate(
-      target.ghDiffStat,
-      sizeGateConfig(options, config),
+    const dryRunGateConfig = sizeGateConfig(
+      options,
+      config,
+      localIgnore?.rules,
     );
+    // gh's `files` list can be TRUNCATED on a very large PR (same hazard as
+    // watch.ts:322-327's tier 2). A short list under-counts, and
+    // under-counting here would falsely RESCUE exactly the monster this gate
+    // exists to stop, so a count that disagrees with GitHub's own
+    // `changedFiles` counter is never trusted to produce a passing verdict.
+    const rawFiles = parsePrFiles(await ghPrFiles(operatorRoot, prNumber));
+    const perFile =
+      rawFiles.length >= target.ghDiffStat.files ? rawFiles : null;
+    const { verdict: estimated, note: baseSizeGateNote } =
+      resolvePrDryRunSizeGate({
+        ghDiffStat: target.ghDiffStat,
+        perFile,
+        gateConfig: dryRunGateConfig,
+      });
+    // Under CI, `localIgnore` is intentionally undefined (see its own
+    // comment above) — the base-ref read needs a fetch a dry run does not
+    // perform — so this estimate applies only the 9 BUILT-IN default
+    // exclusions, never a repo's user-defined `.prheroignore` rules. Said
+    // out loud rather than discovered: a CI dry run that quietly ignored
+    // `.prheroignore` would look like the SAME bug Addition 1 exists to fix.
+    const sizeGateNote = isCi
+      ? `${baseSizeGateNote} User-defined \`.prheroignore\` rules are not ` +
+        "applied to this estimate under --ci; only the built-in defaults " +
+        "are (the base ref is not fetched until a real run)."
+      : baseSizeGateNote;
     const dryRunPlan: PrPlanContext = {
       options,
       operatorRoot,
@@ -2123,9 +2357,7 @@ async function reviewPr(
       estimate,
       hunterCount,
       sizeGate: estimated,
-      sizeGateNote:
-        "(estimate from GitHub's aggregate counters; exclusions not " +
-        "applied and the count is not whitespace-adjusted)",
+      sizeGateNote,
       droppedPaths: [],
       // On the dry run too, and it is the case that matters most: this is the
       // free card an operator reads BEFORE deciding to spend, so a value
@@ -2178,6 +2410,33 @@ async function reviewPr(
           "nothing to review",
       );
     }
+
+    // `.prheroignore` — CI reads the RESOLVED base sha (never `target.baseRef`
+    // / `target.baseRefName` directly: a merged PR's baseRef is a `<sha>^1`
+    // EXPRESSION, and only `baseSha` above is the canonical sha `ls-tree`
+    // needs). `baseSource` — "base-branch" for an open/closed-unmerged PR,
+    // "merge-commit-parent" for a merged one — decides WHICH historical
+    // revision this is (see pr-preflight.ts's PrTarget.baseRef comment): a
+    // merged-PR replay (exactly what the lab/bench does) therefore reads the
+    // `.prheroignore` as of the MERGE, not today's tip. Neither revision is
+    // author-controlled, so the security property design D1 wants
+    // (the PR author cannot choose which `.prheroignore` governs their own
+    // review) holds for both.
+    //
+    // Non-CI already read `operatorRoot` eagerly above (`localIgnore`), and
+    // that read is reused here rather than re-read — the same value must
+    // decide the dry-run estimate and the real run.
+    //
+    // NOTE (recorded, not fixed — see design's Open Questions): this read
+    // cannot precede fetchPrRefs above, so a lookup failure here burns one CI
+    // admission attempt already reserved (the ciAdmissionLedger reservation).
+    // A persistent misconfig therefore exhausts `ci_max_attempts` into
+    // manual-required — the correct outcome for a repo-level misconfig, not a
+    // reason to reorder a settled CI mechanism.
+    const prIgnore = isCi
+      ? await readBaseRefIgnoreRules(git, gitDirOwner, baseSha)
+      : // isCi is false on this branch, so `localIgnore` above is defined.
+        (localIgnore as IgnoreFileReadResult);
     const headLabel = `PR #${prNumber} head`;
     const diffFromSha = await resolveDiffFrom(
       gitDirOwner,
@@ -2242,9 +2501,13 @@ async function reviewPr(
     if (shouldAbortEmptyDiscovery(prepared.plan, rawDiff)) {
       throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
     }
-    const gateConfig = sizeGateConfig(options, config);
+    const gateConfig = sizeGateConfig(options, config, prIgnore.rules);
     const effectiveDiff = skipPlannedDiscovery
-      ? { patch: "", droppedPaths: [] as string[] }
+      ? {
+          patch: "",
+          droppedPaths: [] as string[],
+          exclusions: [] as ExcludedPath[],
+        }
       : filterDiffByIgnoreRules(rawDiff, gateConfig.excludeRules);
     if (
       prepared.plan.emptyDeltaIsError &&
@@ -2794,6 +3057,12 @@ async function reviewPr(
               worktree: worktreePath,
               diffPath,
               excludedPaths: effectiveDiff.droppedPaths,
+              exclusions: effectiveDiff.exclusions,
+              ignoreFile: {
+                readFrom: isCi ? "base-ref" : "working-tree",
+                ...(isCi ? { ref: baseSha } : {}),
+                found: prIgnore.found,
+              },
               gotchasPath,
               agentsDir,
               ...(agents.files ? { agentFiles: agents.files } : {}),
@@ -6156,6 +6425,51 @@ function dryRunHunterCount(spec: ReviewSpec, config: LocalConfig): number {
       a.role === "hunter" &&
       (a.trigger === undefined || config.parity_trigger_paths.length > 0),
   ).length;
+}
+
+export interface PrDryRunSizeGateResult {
+  verdict: SizeGateVerdict;
+  note: string;
+}
+
+// PR1b Addition 1 (#5557): the PR `--dry-run` size-gate estimate, fixed to
+// use per-file data when it is trustworthy — pure, so the truncation-guard
+// branching is unit-testable without a live `gh` call.
+//
+// Ported from watch.ts's tier-2 pattern, not rewritten: the aggregate path
+// (`{files, insertions, deletions}`, no paths) cannot express exclusions at
+// all, so `.prheroignore` widens what was already a "wrong in the
+// conservative direction" gap (see the WHY this replaces at the call site)
+// from tens of lines (lockfiles) to potentially thousands (a whole ignored
+// directory) — a gate that SKIPs a PR the real per-file run happily accepts
+// reads as a broken tool, not a conservative estimate.
+//
+// `perFile: null` is the caller's signal that gh's own `files` list was
+// truncated or unavailable — see watch.ts:322-327's identical guard: a SHORT
+// list under-counts, and under-counting here would falsely RESCUE exactly
+// the monster this gate exists to stop, so an untrustworthy list is never
+// used to compute a passing verdict.
+export function resolvePrDryRunSizeGate(input: {
+  ghDiffStat: NumstatDiffStat;
+  perFile: NumstatFile[] | null;
+  gateConfig: SizeGateConfig;
+}): PrDryRunSizeGateResult {
+  if (input.perFile !== null) {
+    return {
+      verdict: evaluateSizeGate(input.perFile, input.gateConfig),
+      note:
+        "(estimate from gh's per-file list; `.prheroignore` exclusions " +
+        "apply, but the count is still not whitespace-adjusted — GitHub's " +
+        "counters carry no whitespace information)",
+    };
+  }
+  return {
+    verdict: evaluateSizeGateAggregate(input.ghDiffStat, input.gateConfig),
+    note:
+      "(estimate from GitHub's aggregate counters; gh's per-file list was " +
+      "truncated or unavailable, so exclusions are not applied and the " +
+      "count is not whitespace-adjusted)",
+  };
 }
 
 // Predicted, not decided: the ensure step runs only after the confirm gate,

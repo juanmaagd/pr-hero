@@ -110,6 +110,7 @@ import {
   scoutPrompt,
   validateScoutLeads,
 } from "./scout";
+import type { ExcludedPath } from "./size-gate";
 import {
   type AgentSpec,
   defaultReviewSpec,
@@ -147,6 +148,21 @@ export interface PipelineInput {
   // Provenance only — the paths the driver excluded from that diff. Recorded
   // in pipeline.json so a run's diff.patch can be told apart from its range.
   excludedPaths?: string[];
+  // Same exclusion event, per-RULE (design D4): which pattern/source/line
+  // excluded each path, additive beside excludedPaths' flat list — every
+  // existing excluded_paths consumer stays unchanged, and a reader who wants
+  // to know WHY a path is missing from diff.patch has somewhere to look.
+  exclusions?: ExcludedPath[];
+  // Where the `.prheroignore` that produced this run's user rules came from.
+  // `ref` is recorded UNCONDITIONALLY when readFrom is "base-ref", even when
+  // nothing was found there: the question this exists to answer is "I merged
+  // .prheroignore to dev, why did CI not apply it?", which needs the sha CI
+  // actually checked, not just whether a file turned up.
+  ignoreFile?: {
+    readFrom: "base-ref" | "working-tree";
+    ref?: string;
+    found: boolean;
+  };
   gotchasPath: string;
   agentsDir: string;
   // Logical agent filename -> readable path, present only when the prompt set
@@ -2512,6 +2528,20 @@ async function writePipelinePlan(
     head_sha: input.headSha,
     out_path: input.outPath,
     excluded_paths: input.excludedPaths ?? [],
+    // Same event, per-rule (D4) — travels with excluded_paths, so it
+    // defaults the same way: [] when the caller filtered nothing.
+    exclusions: input.exclusions ?? [],
+    ...(input.ignoreFile === undefined
+      ? {}
+      : {
+          ignore_file: {
+            read_from: input.ignoreFile.readFrom,
+            ...(input.ignoreFile.ref === undefined
+              ? {}
+              : { ref: input.ignoreFile.ref }),
+            found: input.ignoreFile.found,
+          },
+        }),
     parity_hunter_fired: state.parityFired,
     // The three provenance fields §3.2 found missing, filled while the
     // artifact was open. `generated_at` is stamped HERE, from the clock,

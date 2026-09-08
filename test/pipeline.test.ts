@@ -2073,6 +2073,90 @@ describe("assembly", () => {
     expect(plan.excluded_paths).toEqual([]);
   });
 
+  // prheroignore design D4: per-path AND per-rule provenance, additive
+  // beside excluded_paths (which stays the flat path list every existing
+  // consumer reads). No schema bump — see PIPELINE_SCHEMA_VERSION's own
+  // "versioned writer, tolerant readers" comment.
+  test("pipeline.json records per-path AND per-rule exclusion provenance", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline(
+      {
+        ...input,
+        excludedPaths: ["vendor/thing.ts"],
+        exclusions: [
+          {
+            path: "vendor/thing.ts",
+            pattern: "vendor/**",
+            source: "user",
+            line: 1,
+          },
+        ],
+        ignoreFile: { readFrom: "working-tree", found: true },
+      },
+      { runner },
+    );
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      exclusions: unknown;
+      ignore_file: unknown;
+    };
+    expect(plan.exclusions).toEqual([
+      {
+        path: "vendor/thing.ts",
+        pattern: "vendor/**",
+        source: "user",
+        line: 1,
+      },
+    ]);
+    expect(plan.ignore_file).toEqual({
+      read_from: "working-tree",
+      found: true,
+    });
+  });
+
+  // The diagnostic this exists for: "I merged .prheroignore to dev, why did
+  // CI not apply it?" needs the sha CI actually checked, even when nothing
+  // was found there — so `ref` is recorded UNCONDITIONALLY under
+  // read_from: "base-ref", not only on a hit.
+  test("pipeline.json records the base-ref sha even when no .prheroignore was found there", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline(
+      {
+        ...input,
+        ignoreFile: {
+          readFrom: "base-ref",
+          ref: "a".repeat(40),
+          found: false,
+        },
+      },
+      { runner },
+    );
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      ignore_file: unknown;
+    };
+    expect(plan.ignore_file).toEqual({
+      read_from: "base-ref",
+      ref: "a".repeat(40),
+      found: false,
+    });
+  });
+
+  test("pipeline.json defaults exclusions to [] (mirrors excluded_paths) and omits ignore_file when the caller never passed it", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput();
+    await runPipeline(input, { runner });
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as Record<string, unknown>;
+    expect(plan.exclusions).toEqual([]);
+    expect("ignore_file" in plan).toBe(false);
+  });
+
   // C5 O-6 / D7. A global ~/.prhero/config.json is a new invisible input to
   // every run — it can change the prompt set, the summarizer and the
   // verification ceiling from a file that is not in the checkout. M6's pilot
