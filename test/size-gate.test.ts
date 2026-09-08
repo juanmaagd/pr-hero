@@ -2,6 +2,7 @@
 // money — so every branch of it is pinned here, offline.
 
 import { describe, expect, test } from "bun:test";
+import { parseIgnoreFile } from "../src/ignore-file";
 import { type NumstatFile, parseNumstatFiles } from "../src/preflight";
 import {
   DEFAULT_SIZE_GATE,
@@ -9,7 +10,7 @@ import {
   effectiveDiffStat,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
-  filterDiffByGlobs,
+  filterDiffByIgnoreRules,
   sizeGateConfig,
   sizeGateDisposition,
   sizeGateLine,
@@ -27,7 +28,7 @@ function file(
 const CONFIG = {
   maxChangedLines: 100,
   maxChangedFiles: 5,
-  excludeGlobs: DEFAULT_SIZE_GATE.excludeGlobs,
+  excludeRules: DEFAULT_SIZE_GATE.excludeRules,
 };
 
 describe("evaluateSizeGate", () => {
@@ -161,7 +162,7 @@ describe("evaluateSizeGate", () => {
       evaluateSizeGate(monster, {
         maxChangedLines: 0,
         maxChangedFiles: 0,
-        excludeGlobs: [],
+        excludeRules: [],
       }).ok,
     ).toBe(true);
   });
@@ -466,11 +467,14 @@ describe("diffRecordPath", () => {
   });
 });
 
-describe("filterDiffByGlobs", () => {
-  const globs = DEFAULT_SIZE_GATE.excludeGlobs;
+describe("filterDiffByIgnoreRules", () => {
+  const rules = DEFAULT_SIZE_GATE.excludeRules;
 
   test("drops whole excluded records and keeps the rest byte-for-byte", () => {
-    const result = filterDiffByGlobs(`${ORDINARY}${LOCKFILE}${NESTED}`, globs);
+    const result = filterDiffByIgnoreRules(
+      `${ORDINARY}${LOCKFILE}${NESTED}`,
+      rules,
+    );
     expect(result.patch).toBe(`${ORDINARY}${NESTED}`);
     expect(result.droppedPaths).toEqual(["bun.lock"]);
   });
@@ -479,15 +483,15 @@ describe("filterDiffByGlobs", () => {
   // artifact, and a filter that reflows bytes would break replay.
   test("with nothing to drop the patch is byte-identical", () => {
     const patch = `${ORDINARY}${NESTED}`;
-    const result = filterDiffByGlobs(patch, globs);
+    const result = filterDiffByIgnoreRules(patch, rules);
     expect(result.patch).toBe(patch);
     expect(result.droppedPaths).toEqual([]);
   });
 
   test("renames, binaries, deletions and additions all drop by destination", () => {
-    const result = filterDiffByGlobs(
+    const result = filterDiffByIgnoreRules(
       `${RENAME}${ORDINARY}${BINARY}${DELETED}${CREATED}`,
-      globs,
+      rules,
     );
     expect(result.patch).toBe(ORDINARY);
     expect(result.droppedPaths).toEqual([
@@ -501,29 +505,63 @@ describe("filterDiffByGlobs", () => {
   // The case the CLI turns into "nothing to review": every record excluded
   // leaves an EMPTY patch, never three hunters spawned on nothing.
   test("an all-excluded diff produces an empty patch", () => {
-    const result = filterDiffByGlobs(`${LOCKFILE}${CREATED}`, globs);
+    const result = filterDiffByIgnoreRules(`${LOCKFILE}${CREATED}`, rules);
     expect(result.patch).toBe("");
     expect(result.droppedPaths).toEqual(["bun.lock", "go.sum"]);
   });
 
   test("an empty patch stays empty", () => {
-    expect(filterDiffByGlobs("", globs)).toEqual({
+    expect(filterDiffByIgnoreRules("", rules)).toEqual({
       patch: "",
       droppedPaths: [],
+      exclusions: [],
     });
   });
 
-  // Failing OPEN is deliberate: an unresolvable record is kept, because the
-  // cost of keeping it is money and the cost of dropping it is a silent hole
-  // in the review.
-  test("a record with no resolvable path is kept", () => {
+  // Failing OPEN is deliberate and PRESERVED across the rename/consolidation:
+  // an unresolvable record is kept, because the cost of keeping it is money
+  // and the cost of dropping it is a silent hole in the review — deleting
+  // real changed code out of the diff the hunters are handed.
+  test("a record with no resolvable path is kept (fail-open, pinned)", () => {
     const weird = "diff --git nonsense\n@@ -1 +1 @@\n-a\n+b\n";
-    expect(filterDiffByGlobs(weird, globs).patch).toBe(weird);
+    expect(filterDiffByIgnoreRules(weird, rules).patch).toBe(weird);
+    expect(filterDiffByIgnoreRules(weird, rules).droppedPaths).toEqual([]);
   });
 
-  test("no globs drops nothing", () => {
+  test("no rules drops nothing", () => {
     const patch = `${ORDINARY}${LOCKFILE}`;
-    expect(filterDiffByGlobs(patch, []).patch).toBe(patch);
+    expect(filterDiffByIgnoreRules(patch, []).patch).toBe(patch);
+  });
+
+  // Per-path exclusion provenance: which rule and source excluded a path,
+  // for pipeline.json (a later PR) and any diagnostic message that needs to
+  // answer "why was this file not reviewed".
+  test("provenance names the excluding rule and its source", () => {
+    const result = filterDiffByIgnoreRules(LOCKFILE, rules);
+    expect(result.exclusions).toEqual([
+      {
+        path: "bun.lock",
+        pattern: "bun.lock",
+        source: "builtin",
+        line: undefined,
+      },
+    ]);
+  });
+
+  test("a user rule's provenance carries its line number", () => {
+    const userRules = parseIgnoreFile("vendor/**\n", "user");
+    const patch =
+      "diff --git a/vendor/lib.js b/vendor/lib.js\n" +
+      "index 1111111..2222222 100644\n" +
+      "--- a/vendor/lib.js\n" +
+      "+++ b/vendor/lib.js\n" +
+      "@@ -1 +1 @@\n" +
+      "-a\n" +
+      "+b\n";
+    const result = filterDiffByIgnoreRules(patch, userRules);
+    expect(result.exclusions).toEqual([
+      { path: "vendor/lib.js", pattern: "vendor/**", source: "user", line: 1 },
+    ]);
   });
 });
 
@@ -534,7 +572,7 @@ describe("effectiveDiffStat", () => {
     expect(
       effectiveDiffStat(
         [file("src/a.ts", 10, 5), file("bun.lock", 900, 800)],
-        DEFAULT_SIZE_GATE.excludeGlobs,
+        DEFAULT_SIZE_GATE.excludeRules,
       ),
     ).toEqual({ files: 1, insertions: 10, deletions: 5 });
   });
@@ -548,7 +586,7 @@ describe("effectiveDiffStat", () => {
         parseNumstatFiles(
           '10\t5\tsrc/a.ts\n900\t800\t"canci\\303\\263n.min.js"\n',
         ),
-        DEFAULT_SIZE_GATE.excludeGlobs,
+        DEFAULT_SIZE_GATE.excludeRules,
       ),
     ).toEqual({ files: 1, insertions: 10, deletions: 5 });
   });
@@ -557,8 +595,60 @@ describe("effectiveDiffStat", () => {
     expect(
       effectiveDiffStat(
         [file("bun.lock", 900), file("dist/x.min.js", 40)],
-        DEFAULT_SIZE_GATE.excludeGlobs,
+        DEFAULT_SIZE_GATE.excludeRules,
       ),
     ).toEqual({ files: 0, insertions: 0, deletions: 0 });
+  });
+});
+
+// THE ORDER-SWAP TEST, at the size-gate integration level (the unit-level
+// version lives in test/ignore-file.test.ts). This is the only test that
+// proves the THREE consumers were actually consolidated onto ONE per-RULE
+// last-match-wins fold, rather than cosmetically renamed while still
+// running `.some()` under the hood: `.some()` over a flat glob list cannot
+// tell forward order from swapped order, so it would return the SAME
+// verdict for both and this test would fail to discriminate.
+describe("consolidated fold — order-swap discriminates all three consumers", () => {
+  const forward = [
+    ...parseIgnoreFile("*.md", "user"),
+    ...parseIgnoreFile("!docs/a.md", "user"),
+  ];
+  const swapped = [
+    ...parseIgnoreFile("!docs/a.md", "user"),
+    ...parseIgnoreFile("*.md", "user"),
+  ];
+  const DOC_DIFF =
+    "diff --git a/docs/a.md b/docs/a.md\n" +
+    "index 1111111..2222222 100644\n" +
+    "--- a/docs/a.md\n" +
+    "+++ b/docs/a.md\n" +
+    "@@ -1 +1 @@\n" +
+    "-old\n" +
+    "+new\n";
+
+  test("evaluateSizeGate: forward includes, swapped excludes", () => {
+    const gateConfig = { maxChangedLines: 100, maxChangedFiles: 5 };
+    const forwardVerdict = evaluateSizeGate([file("docs/a.md", 10)], {
+      ...gateConfig,
+      excludeRules: forward,
+    });
+    expect(forwardVerdict.effectiveFiles).toBe(1);
+    const swappedVerdict = evaluateSizeGate([file("docs/a.md", 10)], {
+      ...gateConfig,
+      excludeRules: swapped,
+    });
+    expect(swappedVerdict.effectiveFiles).toBe(0);
+  });
+
+  test("filterDiffByIgnoreRules: forward keeps, swapped drops", () => {
+    expect(filterDiffByIgnoreRules(DOC_DIFF, forward).droppedPaths).toEqual([]);
+    expect(filterDiffByIgnoreRules(DOC_DIFF, swapped).droppedPaths).toEqual([
+      "docs/a.md",
+    ]);
+  });
+
+  test("effectiveDiffStat: forward counts, swapped does not", () => {
+    expect(effectiveDiffStat([file("docs/a.md", 10)], forward).files).toBe(1);
+    expect(effectiveDiffStat([file("docs/a.md", 10)], swapped).files).toBe(0);
   });
 });
