@@ -37,6 +37,7 @@ import {
 import { renderComparison } from "./compare-report";
 import { THREAD_PAGE_SIZE } from "./corpus-preflight";
 import type { Finding, RunStatus } from "./findings";
+import { GH_PR_VIEW_TIMEOUT_MS } from "./gc-preflight";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
@@ -251,17 +252,30 @@ export async function ghPrList(operatorRoot: string): Promise<string> {
 // Field names verified live against `gh pr view <n> -R cli/cli --json files`
 // on 2026-08-11: `{"files":[{"path":…,"additions":…,"deletions":…,
 // "changeType":…}]}`.
+//
+// BOUNDED, and the bound is load-bearing since PR #205 put this call on the
+// WATCH TICK path (the pre-launch exclusion veto in watch.ts calls it every
+// tick, for the chosen launch). `gh()`'s watchdog only arms when a timeoutMs
+// is passed, so without this an accepted-but-unanswered `gh pr view` parks on
+// `proc.exited` forever, and the tick that is holding watch.lock never
+// returns — silencing every later tick, exactly what GH_PR_VIEW_TIMEOUT_MS's
+// own WHY (gc-preflight.ts) exists to prevent, and what fetchCommitStatuses
+// on the same path already spells out. Same constant as the GC's `gh pr
+// view` because this IS a `gh pr view`. A timeout surfaces as a thrown
+// CliError, which the veto's fail-open turns into "launch anyway" — the
+// correct direction: an unreadable file list is no evidence against a PR.
 export async function ghPrFiles(
   operatorRoot: string,
   pr: number,
+  options?: { spawnFn?: typeof Bun.spawn },
 ): Promise<string> {
-  const result = await gh(operatorRoot, [
-    "pr",
-    "view",
-    String(pr),
-    "--json",
-    "files",
-  ]);
+  const result = await gh(
+    operatorRoot,
+    ["pr", "view", String(pr), "--json", "files"],
+    undefined,
+    options?.spawnFn,
+    GH_PR_VIEW_TIMEOUT_MS,
+  );
   if (!result.ok) {
     throw new CliError(
       `gh pr view ${pr} --json files failed: ${result.stderr.trim()}`,
