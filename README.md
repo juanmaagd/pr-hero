@@ -396,14 +396,46 @@ because an unattended watcher must not be the thing that discovers it.
 dilution was tested and falsified (`fixtures/scale-probe.ts`), and the one measured Greptile-only
 miss came from a 7-file PR. If a large diff is worth its price, `--force` reviews it.
 
-The gate counts **effective** changed lines (insertions + deletions) and files — generated content is
-excluded first, so a regenerated lockfile beside a ten-line change does not trip it. Excluded by
+The gate counts **effective** changed lines (insertions + deletions) and files — excluded content is
+subtracted first, so a regenerated lockfile beside a ten-line change does not trip it. Excluded by
 default: `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`,
-`*.min.js`, `*.min.css`, `*.snap`.
+`*.min.js`, `*.min.css`, `*.snap`. A repo can add its own exclusions with `.prheroignore` — see
+below.
 
 Those exclusions come out of the **reviewed diff itself**: `diff.patch` is what the hunters are
 handed, so the number the gate measures is the number that gets paid for. If every changed file is
 excluded, there is nothing to review — pr-hero exits without spawning anything.
+
+### `.prheroignore` — repo-defined exclusions
+
+A `.prheroignore` file at the **repo root** adds your own exclusions on top of the 9 defaults above.
+The dialect is a **subset of gitignore(5)**, not a full reimplementation — most everyday patterns
+work exactly like `.gitignore`, but two things are worth knowing before you rely on it:
+
+- **Only one file, at the repo root, is read.** Nested per-directory `.prheroignore` files (the way
+  git supports a `.gitignore` in every directory) are **not** read. A file at
+  `openspec/.prheroignore` is silently ignored — put every rule in the one at the repo root instead.
+- **Matching is case-sensitive**, matching git's own behavior. This is a deliberate departure from
+  the `ignore` npm package (the common JS gitignore implementation), which is case-insensitive by
+  default — if that is where your intuition comes from, `README.md` will not match `readme.md` here.
+
+Supported: comments (`#`) and blank lines, negation (`!pattern` re-includes), anchoring
+(a leading or interior `/`), trailing-slash directory-only rules, `*`/`?`/`[a-z]`-style classes,
+`**` at any position (including matching zero directories), and literal `{`/`}` (this dialect has no
+brace-alternation syntax — braces are always literal characters, unlike some glob libraries).
+The **last matching rule wins**, builtins evaluated first, then your file's rules in order — so a
+rule can re-include one of the 9 defaults (`!bun.lock`) or exclude something the defaults do not.
+
+One documented deviation from real git: unlike `git`, which cannot re-include a file whose parent
+directory is itself excluded (gitignore(5) states this outright — it is a tree-walk optimization),
+this engine matches a finite diff file list, not a tree walk, so `docs/` then `!docs/keep.md` DOES
+re-include `docs/keep.md` here.
+
+Under CI (GitHub Actions, or any `CI`/`GITHUB_ACTIONS` environment), `.prheroignore` is read from
+the PR's **base ref**, never the PR's own branch — a PR cannot widen its own exclusions to hide
+changes from its own review. Local review, and local `--pr <n>` review without CI, read it from your
+working tree instead. A malformed file aborts the whole review before anything is spent, naming the
+file, line number, and offending text.
 
 The count is also **whitespace-blind wherever git is reachable** (local mode and PR mode count from
 `git diff -w --ignore-blank-lines --numstat`), so a formatter or linter sweep does not consume the
@@ -425,8 +457,8 @@ pr-hero watch add --max-changed-lines 800       # per-repo threshold for the wat
 ```
 
 A skipped review exits 1 with a one-line reason and no stack. In watch mode it logs
-`skipped … reason=too-large` (or `reason=nothing-to-review`, when every changed file is excluded
-generated content) and costs nothing further: it does **not** consume a poison-PR attempt,
+`skipped … reason=too-large` (or `reason=nothing-to-review`, when every changed file is excluded)
+and costs nothing further: it does **not** consume a poison-PR attempt,
 writes no review marker, and does not arm the one-review-per-PR state — a force-push that shrinks the
 PR makes it eligible again on the next tick, because the gate is recomputed every tick.
 
