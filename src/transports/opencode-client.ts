@@ -861,6 +861,18 @@ export function createOpenCodeClient(
     return state;
   }
 
+  // Shared by createSession's unwind and abort(). `states` alone cannot
+  // answer "is anyone using this?" while a sibling is still establishing,
+  // so both counters have to be zero.
+  async function releaseIdleServer(): Promise<void> {
+    if (establishing !== 0 || states.size !== 0) return;
+    const dying = server;
+    serverPromise = undefined;
+    server = undefined;
+    launchedMcp = undefined;
+    if (dying !== undefined) await dying.close().catch(() => {});
+  }
+
   return {
     async createSession(
       input: OpenCodeCreateSessionInput,
@@ -955,15 +967,33 @@ export function createOpenCodeClient(
           Object.keys(mcpConfig),
         );
 
-        // The tool surface comes next, and inside the try on purpose. It is
-        // the one thing this call must establish before anything else exists: a
-        // session whose isolation cannot be expressed is the runtime being
-        // unavailable, and failing here unwinds through the `finally` below
-        // that releases the shared server (F004's hazard, already paid for).
-        // There is deliberately NO hardcoded fallback list and no partial
-        // map — either one would rebuild the "we believe this is enforced"
-        // claim the defect was made of, while production-runtime.ts keeps
-        // reporting `allowMapEnforced: true` to the admission gate.
+        const created = await api.session.create({
+          body: { title: "pr-hero review step" },
+        });
+        sessionId = unwrap(created, "session.create").id;
+
+        // Subscribed BEFORE the prompt, and the ordering is not stylistic.
+        // event.subscribe() is live and unbuffered, so a subscription opened
+        // afterwards silently loses the early events — the ones carrying the
+        // first deltas. The contract splits createSession and streamEvents
+        // into separate calls, so unless the buffering happens here that
+        // window cannot be closed at all.
+        const subscription = await api.event.subscribe();
+
+        // #128: enumerate AFTER create+subscribe, immediately before the
+        // prompt. The map is a snapshot of tool.ids(); an id registered in
+        // the window is an absent key, and OpenCode's default is "all tools
+        // enabled". There is no atomic tools surface (open map, no wildcard),
+        // so this is the remaining narrowing: [ids → prompt] instead of
+        // [ids → create → subscribe → prompt]. Still inside the try after
+        // `establishing += 1` so a failure unwinds through `finally`.
+        //
+        // WHY before the pump, not after. Starting the pump and THEN awaiting
+        // tool.ids lets a finite stream drain into the queue during that
+        // HTTP round-trip. The live provider has no turn events yet (the
+        // prompt has not fired), so nothing is lost by enumerating first;
+        // a test fixture that yields its whole stream synchronously would
+        // otherwise dump every delta into one stall window.
         let reported: readonly string[];
         try {
           reported = unwrap(
@@ -998,18 +1028,6 @@ export function createOpenCodeClient(
           mcpToolIdsFor(mcpConfig),
         );
 
-        const created = await api.session.create({
-          body: { title: "pr-hero review step" },
-        });
-        sessionId = unwrap(created, "session.create").id;
-
-        // Subscribed BEFORE the prompt, and the ordering is not stylistic.
-        // event.subscribe() is live and unbuffered, so a subscription opened
-        // afterwards silently loses the early events — the ones carrying the
-        // first deltas. The contract splits createSession and streamEvents
-        // into separate calls, so unless the buffering happens here that
-        // window cannot be closed at all.
-        const subscription = await api.event.subscribe();
         const state: SessionState = {
           api,
           queue: [],
@@ -1133,20 +1151,10 @@ export function createOpenCodeClient(
         throw error;
       } finally {
         establishing -= 1;
-        // Close only when NOBODY is left — no registered session and no call
-        // still establishing one. On a successful call states is non-empty,
-        // so this never fires; on the last failure with no siblings it
-        // releases the subprocess instead of leaking it.
+        // Do not await on the success path: an extra tick lets a finite
+        // fixture stream drain into one stall window before execute() starts.
         if (establishing === 0 && states.size === 0) {
-          const dying = server;
-          serverPromise = undefined;
-          server = undefined;
-          // Cleared WITH the server it describes. The fingerprint is only
-          // meaningful while a launched server exists; keeping the two in step
-          // is what makes "compare against the launch" a local invariant
-          // rather than an ordering the next reader has to reconstruct.
-          launchedMcp = undefined;
-          if (dying !== undefined) await dying.close().catch(() => {});
+          await releaseIdleServer();
         }
       }
     },
@@ -1175,7 +1183,16 @@ export function createOpenCodeClient(
     async pollStatus(
       session: OpenCodeClientSession,
     ): Promise<OpenCodePollResult> {
-      const state = stateFor(session);
+      const state = states.get(session.id);
+      // #131: abort() owns the release. A throw here is a failed observation
+      // the harness counts and retries forever; a `failed` result is a
+      // successful observation that the session is gone.
+      if (state === undefined) {
+        return {
+          kind: "failed",
+          detail: `opencode session already released: ${session.id}`,
+        };
+      }
 
       // #127: the BOUNDARY first, and from a different endpoint. This observer
       // has no event stream, so it cannot see `session.idle`; scanning
@@ -1266,7 +1283,8 @@ export function createOpenCodeClient(
     },
 
     async abort(session: OpenCodeClientSession): Promise<void> {
-      const state = stateFor(session);
+      const state = states.get(session.id);
+      if (state === undefined) return;
       // The result is CHECKED, not discarded. Awaiting the error arm proves
       // nothing on its own — it resolves — so a provider-side refusal used to
       // return here as an ordinary success and the caller recorded a confirmed
@@ -1279,6 +1297,14 @@ export function createOpenCodeClient(
         await state.api.session.abort({ path: { id: session.id } }),
         "session.abort",
       );
+      // #131: abort is the attempt's teardown, so it owns the Map release.
+      // streamEvents already holds this object by reference, so in-flight
+      // readers survive the delete; later pollStatus/abort see the gap.
+      state.ended = true;
+      state.wake?.();
+      state.wake = undefined;
+      states.delete(session.id);
+      await releaseIdleServer();
     },
 
     async close(): Promise<void> {
