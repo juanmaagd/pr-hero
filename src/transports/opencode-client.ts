@@ -929,6 +929,7 @@ export function createOpenCodeClient(
       const api = sdk.createOpencodeClient({ baseUrl: handle.url });
 
       let sessionId: string | undefined;
+      let subscription: { stream: AsyncIterable<unknown> } | undefined;
       establishing += 1;
       try {
         // §E, and FIRST: the OpenCode analogue of claude-code's
@@ -978,7 +979,7 @@ export function createOpenCodeClient(
         // first deltas. The contract splits createSession and streamEvents
         // into separate calls, so unless the buffering happens here that
         // window cannot be closed at all.
-        const subscription = await api.event.subscribe();
+        subscription = await api.event.subscribe();
 
         // #128: enumerate AFTER create+subscribe, immediately before the
         // prompt. The map is a snapshot of tool.ids(); an id registered in
@@ -1114,6 +1115,15 @@ export function createOpenCodeClient(
         // was a hunter narrating tool use it never performed.
         return { id: sessionId, toolMap: Object.freeze(tools) };
       } catch (error) {
+        // #128 opened subscribe() before tool.ids. If enumeration fails, the
+        // pump never starts, so this is the only chance to close the global
+        // SSE. `return()` on a never-started iterator is how AsyncIterable
+        // cancellation is expressed; ignoring it leaks one unread stream
+        // against the shared server for as long as a sibling keeps it alive.
+        if (subscription !== undefined) {
+          const iterator = subscription.stream[Symbol.asyncIterator]();
+          await iterator.return?.();
+        }
         // Unwind whatever this call managed to create. Without this the
         // caller gets an exception and no id, so nothing can be released by
         // hand afterwards.
@@ -1184,14 +1194,15 @@ export function createOpenCodeClient(
       session: OpenCodeClientSession,
     ): Promise<OpenCodePollResult> {
       const state = states.get(session.id);
-      // #131: abort() owns the release. A throw here is a failed observation
-      // the harness counts and retries forever; a `failed` result is a
-      // successful observation that the session is gone.
+      // #131: abort() owns the Map release. Absence must not throw (a throw
+      // is a failed observation the harness counts and retries forever). It
+      // also must not be `{kind:"failed"}`: runPoll treats that as
+      // session_failed and first-write-wins against the abortConfirmMs
+      // window (opencode-sdk.ts runAbortSequence). Pending lets the stream
+      // still deliver a provider terminal, or the timer settle
+      // abort_unconfirmed.
       if (state === undefined) {
-        return {
-          kind: "failed",
-          detail: `opencode session already released: ${session.id}`,
-        };
+        return { kind: "pending" };
       }
 
       // #127: the BOUNDARY first, and from a different endpoint. This observer

@@ -49,6 +49,7 @@ const OPENCODE_TOOL_IDS = [
 interface FakeSdk {
   sdk: OpenCodeSdkLike;
   iterators: () => number;
+  streamReturns: () => number;
   promptCalls: () => Array<Record<string, unknown>>;
   abortCalls: () => number;
   createdAt: () => number;
@@ -100,6 +101,7 @@ function fakeSdk(
   let ended = false;
 
   let iterators = 0;
+  let streamReturns = 0;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: {
@@ -139,20 +141,32 @@ function fakeSdk(
       event: {
         subscribe: async () => {
           subscribedAt = ++order;
-          return {
-            stream: {
-              async *[Symbol.asyncIterator]() {
-                iterators += 1;
-                for (;;) {
-                  while (queue.length > 0) yield queue.shift();
-                  if (ended) return;
-                  await new Promise<void>((r) => {
-                    notify = r;
-                  });
-                }
-              },
+          // One iterator object. Bun does not run an async-generator
+          // `finally` on `return()` if `next()` never ran, so the close
+          // signal is the `return` method itself — that is also what the
+          // catch-path unwind calls.
+          const inner = (async function* subscribeStream() {
+            iterators += 1;
+            for (;;) {
+              while (queue.length > 0) yield queue.shift();
+              if (ended) return;
+              await new Promise<void>((r) => {
+                notify = r;
+              });
+            }
+          })();
+          const stream = {
+            [Symbol.asyncIterator]() {
+              return stream;
             },
+            next: (value?: undefined) => inner.next(value),
+            return: async () => {
+              streamReturns += 1;
+              return await inner.return();
+            },
+            throw: (error?: unknown) => inner.throw(error),
           };
+          return { stream };
         },
       },
     }),
@@ -161,6 +175,7 @@ function fakeSdk(
   return {
     sdk,
     iterators: () => iterators,
+    streamReturns: () => streamReturns,
     promptCalls: () => prompts,
     abortCalls: () => aborts,
     createdAt: () => createdAt,
@@ -500,6 +515,7 @@ describe("createOpenCodeClient tool-surface failure (#122)", () => {
     await expect(client.createSession(INPUT)).rejects.toThrow(/tool/i);
     expect(fake.promptCalls()).toHaveLength(0);
     expect(fake.abortCalls()).toBe(1);
+    expect(fake.streamReturns()).toBe(1);
   });
 
   test("an empty surface is refused rather than treated as 'deny nothing'", async () => {
@@ -1018,17 +1034,16 @@ describe("createOpenCodeClient", () => {
   // #131: the Map entry used to live until whole-client close(). abort() is
   // the attempt's teardown, so it owns the release. pollStatus must not
   // throw afterwards — a throw is a failed observation the harness counts
-  // and retries forever (opencode-sdk.ts:707).
+  // and retries forever (opencode-sdk.ts:707). It also must not answer
+  // `{kind:"failed"}`: runPoll would settle session_failed and steal the
+  // abortConfirmMs window.
   test("abort releases the session so a later poll does not throw", async () => {
     const fake = fakeSdk();
     const client = rig(fake);
     const session = await client.createSession(INPUT);
     await client.abort(session);
     const result = await client.pollStatus(session);
-    expect(result.kind).toBe("failed");
-    if (result.kind === "failed") {
-      expect(result.detail).toMatch(/released/i);
-    }
+    expect(result.kind).toBe("pending");
   });
 
   test("abort is idempotent after the session is released", async () => {
