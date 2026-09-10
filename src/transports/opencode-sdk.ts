@@ -128,12 +128,11 @@ export type OpenCodeClientEvent =
   // all the transport needs to tell a turn that reasoned and never answered
   // apart from one that produced nothing at all.
   | { readonly kind: "reasoning" }
-  // #214: a tool-call part the mapper COUNTED. Deliberately carries no
-  // payload — not the tool name, not the call id. Those are provider
-  // vocabulary, and `notes` is classifyFailure's witness; the same reason
-  // reasoning arrives empty. The transport only needs the fact that a tool
-  // ran, once per call, so it can stamp `toolInvocations`.
-  | { readonly kind: "tool" }
+  // #214: a COMPLETED tool-call part. Pending/running/error restatements are
+  // dropped at the mapper — announcing Read is not looking. `tool` is the
+  // provider id (`read`, `grep`, …), never arguments or output: those are
+  // model-adjacent and must not reach `notes`.
+  | { readonly kind: "tool"; readonly tool?: string }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
@@ -715,6 +714,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // consume the answer's §4.2 content budget.
     let sawReasoning = false;
     let toolInvocations = 0;
+    const completedToolIds: string[] = [];
     // §4.1/§8: the first usage event fixes the attempt's aggregation mode;
     // `applyUsageUpdate` is the pure snapshot-replaces/delta-accumulates state
     // machine, shared with every other transport that folds a usage stream.
@@ -908,9 +908,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               break;
             }
             case "tool": {
-              // Same shape as reasoning: counted, never forwarded, never a
-              // witness. The mapper already deduped restatements of one call.
+              // Completed invocations only — the mapper dropped pending/error.
+              // Never a witness: tool ids ride diagnosticsTail with the count.
               toolInvocations += 1;
+              if (event.tool !== undefined && event.tool.length > 0) {
+                completedToolIds.push(event.tool);
+              }
               break;
             }
             case "heartbeat": {
@@ -1143,8 +1146,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       // tool-call parts", and the live hunt that posted a clean bill could
       // not even prove that fact. Session-creation failure never reaches
       // here, so it correctly omits the count.
+      const toolIds =
+        completedToolIds.length === 0
+          ? ""
+          : ` (${completedToolIds.join(", ")})`;
       diagnostics.push(
-        `[pr-hero] opencode sdk: observed ${toolInvocations} tool invocation(s)`,
+        `[pr-hero] opencode sdk: observed ${toolInvocations} completed tool invocation(s)${toolIds}`,
       );
 
       let completion: TransportOutcome["completion"];

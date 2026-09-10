@@ -371,6 +371,7 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
     partId: string,
     callID: string,
     tool = "read",
+    status = "completed",
   ): Record<string, unknown> {
     return {
       type: "message.part.updated",
@@ -383,7 +384,7 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
           type: "tool",
           callID,
           tool,
-          state: { status: "completed" },
+          state: { status },
         },
       },
     };
@@ -393,18 +394,57 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
     expect(mapAll().filter((event) => event.kind === "tool")).toEqual([]);
   });
 
-  test("a tool part on an assistant message emits one tool event", () => {
+  test("a completed tool part on an assistant message emits one tool event", () => {
     const state = announceAssistant();
     expect(
       mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
-    ).toEqual([{ kind: "tool" }]);
+    ).toEqual([{ kind: "tool", tool: "read" }]);
   });
 
-  test("restatements of the same callID are one invocation, not three", () => {
+  test("pending and error updates are not a look", () => {
+    const state = announceAssistant();
+    expect(
+      mapOpenCodeEvents(
+        toolPart("prt_t1", "call_1", "read", "pending"),
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+    expect(
+      mapOpenCodeEvents(
+        toolPart("prt_t1", "call_1", "read", "running"),
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+    expect(
+      mapOpenCodeEvents(
+        toolPart("prt_t1", "call_1", "read", "error"),
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+  });
+
+  test("pending then completed is one invocation, counted at completed", () => {
+    const state = announceAssistant();
+    expect(
+      mapOpenCodeEvents(
+        toolPart("prt_t1", "call_1", "read", "pending"),
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+    expect(
+      mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
+    ).toEqual([{ kind: "tool", tool: "read" }]);
+  });
+
+  test("restatements of the same completed callID are one invocation, not three", () => {
     const state = announceAssistant();
     expect(
       mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
-    ).toEqual([{ kind: "tool" }]);
+    ).toEqual([{ kind: "tool", tool: "read" }]);
     expect(
       mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
     ).toEqual([]);
@@ -417,10 +457,10 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
     const state = announceAssistant();
     expect(
       mapOpenCodeEvents(toolPart("prt_a", "call_a"), SESSION_ID, state),
-    ).toEqual([{ kind: "tool" }]);
+    ).toEqual([{ kind: "tool", tool: "read" }]);
     expect(
       mapOpenCodeEvents(toolPart("prt_b", "call_b"), SESSION_ID, state),
-    ).toEqual([{ kind: "tool" }]);
+    ).toEqual([{ kind: "tool", tool: "read" }]);
   });
 
   test("step-start and step-finish are not tool invocations", () => {

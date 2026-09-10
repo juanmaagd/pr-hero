@@ -384,16 +384,24 @@ export function mapOpenCodeEvents(
       } else if (part?.type === "reasoning") {
         remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
       } else if (part?.type === "tool") {
-        // Count the CALL, not the part update. callID is the provider's own
-        // id for that invocation; fall back to the part id when a build
-        // omits it rather than dropping the fact.
+        // Count a LOOK, not an announcement. `message.part.updated` restates
+        // pending → running → completed (or error) for the same callID; the
+        // live spark hunt on musive #1817 stamped tool_invocations: 2 off the
+        // first pending update, dumped `{"findings":[]}`, and posted a clean
+        // bill. Only `completed` is the instance fact "the tool ran".
+        const toolState = asRecord(part.state);
+        if (toolState?.status !== "completed") return [];
         const callId =
           typeof part.callID === "string" && part.callID.length > 0
             ? part.callID
             : partId;
         if (state.toolCalls.has(callId)) return [];
         rememberId(state.toolCalls, callId, MAX_TRACKED_PARTS);
-        return [{ kind: "tool" }];
+        const tool =
+          typeof part.tool === "string" && part.tool.length > 0
+            ? part.tool
+            : "unknown";
+        return [{ kind: "tool", tool }];
       }
       return [];
     }

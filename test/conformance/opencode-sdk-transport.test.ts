@@ -1279,7 +1279,9 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
 
     expect(outcome.completion).toBe("success");
     expect(outcome.toolInvocations).toBe(0);
-    expect(outcome.diagnosticsTail).toContain("observed 0 tool invocation(s)");
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 0 completed tool invocation(s)",
+    );
     expect(outcome.stderrTail).not.toContain("tool invocation");
   });
 
@@ -1303,7 +1305,9 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
 
     expect(outcome.toolInvocations).toBe(2);
     expect(outcome.finalText).toBe('{"findings":[]}');
-    expect(outcome.diagnosticsTail).toContain("observed 2 tool invocation(s)");
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 2 completed tool invocation(s)",
+    );
   });
 
   test("session creation failure omits the count — it never opened a turn", async () => {

@@ -411,7 +411,9 @@ describe("tool-call parts survive the SSE path (#214)", () => {
     expect(outcome.completion).toBe("success");
     expect(outcome.finalText).toBe(DUMP);
     expect(outcome.toolInvocations).toBe(0);
-    expect(outcome.diagnosticsTail).toContain("observed 0 tool invocation(s)");
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 0 completed tool invocation(s)",
+    );
   });
 
   test("one Read call then empty findings stamps 1", async () => {
@@ -445,6 +447,42 @@ describe("tool-call parts survive the SSE path (#214)", () => {
     expect(outcome.completion).toBe("success");
     expect(outcome.finalText).toBe(ANSWER);
     expect(outcome.toolInvocations).toBe(1);
-    expect(outcome.diagnosticsTail).toContain("observed 1 tool invocation(s)");
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 1 completed tool invocation(s)",
+    );
+    expect(outcome.diagnosticsTail).toContain("(read)");
+  });
+
+  test("a pending Read announcement then a dump stamps 0 — announcing is not looking", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          part: {
+            id: TOOL_PART,
+            messageID: ASSISTANT_MESSAGE,
+            sessionID: SESSION_ID,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "pending" },
+          },
+        },
+      },
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
+      partDelta(ANSWER_PART, DUMP),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", DUMP),
+      COMPLETED,
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(DUMP);
+    expect(outcome.toolInvocations).toBe(0);
   });
 });
