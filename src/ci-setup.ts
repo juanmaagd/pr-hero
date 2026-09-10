@@ -179,15 +179,16 @@ jobs:
             echo ""
             echo "\${MSG}"
             echo ""
-            echo "Wire ONE secret to turn reviews on:"
+            echo "Wire a Claude secret, or OpenCode (secret plus routing variable):"
             echo ""
             echo '\`\`\`bash'
             echo "claude setup-token   # prints a long-lived token; paste it below"
             echo "gh secret set CLAUDE_CODE_OAUTH_TOKEN"
             echo "# ...or, for pay-as-you-go billing:"
             echo "gh secret set ANTHROPIC_API_KEY"
-            echo "# ...or, for OpenCode:"
+            echo "# ...or, for OpenCode (needs both):"
             echo "gh secret set OPENCODE_AUTH_JSON"
+            echo "gh variable set PRHERO_ROUTING --body '<routing-object-json>'"
             echo '\`\`\`'
             echo ""
             echo 'Adding a secret does not re-run past workflows — use \`gh run rerun\` on this run.'

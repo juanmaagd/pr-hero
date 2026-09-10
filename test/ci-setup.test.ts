@@ -373,6 +373,8 @@ describe("generateCiWorkflowTemplate (pure)", () => {
 
   // Threat matrix RED (8): the skip notice must name the OpenCode secret so
   // an OpenCode-only operator can wire it. It must never echo a value.
+  // OpenCode also needs PRHERO_ROUTING; naming only the secret sent operators
+  // to a Claude-default fail-closed job.
   test("the skip notice names OPENCODE_AUTH_JSON and never a secret value", () => {
     const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
       jobs: {
@@ -395,6 +397,8 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       (step) => step.id === "notice",
     );
     expect(notice?.run).toContain("OPENCODE_AUTH_JSON");
+    expect(notice?.run).toContain("PRHERO_ROUTING");
+    expect(notice?.run).not.toContain("Wire ONE secret");
     expect(notice?.run).not.toMatch(/sk-ant-|ghp_|ghs_/);
     expect(notice?.run).not.toContain("oc-ci-fixture-not-a-secret");
     expect(generateCiWorkflowTemplate()).not.toMatch(/"type"\s*:\s*"api"/);
