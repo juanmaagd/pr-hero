@@ -33,8 +33,17 @@ describe("resolveEngineAssets", () => {
       expect(existsSync(filePath)).toBe(true);
     }
 
-    // CI setup skill files all exist on disk
-    expect(Object.keys(assets.ciSetupSkillFiles).length).toBe(2);
+    // CI setup skill files all exist on disk. The OpenCode operator
+    // procedure and admission refs must ship with SKILL.md so wizard
+    // sync does not tell agents to read files that were never copied.
+    expect(Object.keys(assets.ciSetupSkillFiles).sort()).toEqual(
+      [
+        "SKILL.md",
+        "assets/workflow.yml",
+        "references/ci-admission.md",
+        "references/opencode-ci.md",
+      ].sort(),
+    );
     for (const [logicalName, filePath] of Object.entries(
       assets.ciSetupSkillFiles,
     )) {
