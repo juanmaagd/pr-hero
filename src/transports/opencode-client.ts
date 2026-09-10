@@ -169,6 +169,10 @@ export interface OpenCodeTurnState {
   // written to prevent, re-entering through the door the fix had to open.
   readonly assistantMessages: Set<string>;
   readonly parts: Map<string, "answer" | "reasoning">;
+  // #214: unique provider call ids for `type: "tool"` parts. A tool part is
+  // restated pending → running → completed; counting each restatement would
+  // make "looked" a function of how chatty the provider is about one Read.
+  readonly toolCalls: Set<string>;
   // #127: the turn's usage, kept per MESSAGE ID rather than as one running
   // figure. Each step message restates its OWN totals, so within a message the
   // newest value replaces the older one — and the recorded probe
@@ -212,6 +216,7 @@ export function createTurnState(): OpenCodeTurnState {
   return {
     assistantMessages: new Set(),
     parts: new Map(),
+    toolCalls: new Set(),
     usage: new Map(),
     carriedUsage: {},
     boundaryReported: false,
@@ -378,6 +383,17 @@ export function mapOpenCodeEvents(
         remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
       } else if (part?.type === "reasoning") {
         remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+      } else if (part?.type === "tool") {
+        // Count the CALL, not the part update. callID is the provider's own
+        // id for that invocation; fall back to the part id when a build
+        // omits it rather than dropping the fact.
+        const callId =
+          typeof part.callID === "string" && part.callID.length > 0
+            ? part.callID
+            : partId;
+        if (state.toolCalls.has(callId)) return [];
+        rememberId(state.toolCalls, callId, MAX_TRACKED_PARTS);
+        return [{ kind: "tool" }];
       }
       return [];
     }

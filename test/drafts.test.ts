@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type DraftFinding,
   extractJsonObject,
+  isVacuousEmptyHunt,
   validateHunterDraft,
   validateRefuterResult,
   validateSummary,
@@ -335,5 +336,77 @@ describe("proof_refs resolvability", () => {
     expect(() => validateHunterDraft(candidate, { resolveProofRef })).toThrow(
       /findings\[1\]/,
     );
+  });
+});
+
+describe("isVacuousEmptyHunt (#214)", () => {
+  const empty = { findings: [] };
+  const found = { findings: [draft()] };
+
+  test("tools given, zero invocations, empty findings — vacuous", () => {
+    expect(
+      isVacuousEmptyHunt({
+        tools: ["Read", "Grep"],
+        toolInvocations: 0,
+        parsed: empty,
+      }),
+    ).toBe(true);
+  });
+
+  test("looked and found nothing is not vacuous", () => {
+    expect(
+      isVacuousEmptyHunt({
+        tools: ["Read"],
+        toolInvocations: 1,
+        parsed: empty,
+      }),
+    ).toBe(false);
+  });
+
+  test("unknown count stays ungated", () => {
+    expect(
+      isVacuousEmptyHunt({
+        tools: ["Read"],
+        toolInvocations: undefined,
+        parsed: empty,
+      }),
+    ).toBe(false);
+  });
+
+  test("scout tools:[] is out of the rule even at zero invocations", () => {
+    expect(
+      isVacuousEmptyHunt({
+        tools: [],
+        toolInvocations: 0,
+        parsed: empty,
+      }),
+    ).toBe(false);
+  });
+
+  test("a finding without tools is a different problem, not this gate", () => {
+    expect(
+      isVacuousEmptyHunt({
+        tools: ["Read"],
+        toolInvocations: 0,
+        parsed: found,
+      }),
+    ).toBe(false);
+  });
+
+  test("refuter and scout shapes have no findings array, so they do not trip", () => {
+    expect(
+      isVacuousEmptyHunt({
+        tools: ["Read"],
+        toolInvocations: 0,
+        parsed: { results: [] },
+      }),
+    ).toBe(false);
+    expect(
+      isVacuousEmptyHunt({
+        tools: ["Read"],
+        toolInvocations: 0,
+        parsed: { leads: [] },
+      }),
+    ).toBe(false);
   });
 });

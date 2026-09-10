@@ -348,6 +348,139 @@ describe("terminalProofFromAssistant", () => {
   });
 });
 
+describe("mapOpenCodeEvents tool-call parts (#214)", () => {
+  const ASSISTANT_ID = "msg_hunter";
+
+  function announceAssistant(): ReturnType<typeof createTurnState> {
+    const state = createTurnState();
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: { id: ASSISTANT_ID, role: "assistant", time: { created: 1 } },
+        },
+      },
+      SESSION_ID,
+      state,
+    );
+    return state;
+  }
+
+  function toolPart(
+    partId: string,
+    callID: string,
+    tool = "read",
+  ): Record<string, unknown> {
+    return {
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: partId,
+          messageID: ASSISTANT_ID,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID,
+          tool,
+          state: { status: "completed" },
+        },
+      },
+    };
+  }
+
+  test("the recorded PONG probe issued no tool-call parts", () => {
+    expect(mapAll().filter((event) => event.kind === "tool")).toEqual([]);
+  });
+
+  test("a tool part on an assistant message emits one tool event", () => {
+    const state = announceAssistant();
+    expect(
+      mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
+    ).toEqual([{ kind: "tool" }]);
+  });
+
+  test("restatements of the same callID are one invocation, not three", () => {
+    const state = announceAssistant();
+    expect(
+      mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
+    ).toEqual([{ kind: "tool" }]);
+    expect(
+      mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
+    ).toEqual([]);
+    expect(
+      mapOpenCodeEvents(toolPart("prt_t1", "call_1"), SESSION_ID, state),
+    ).toEqual([]);
+  });
+
+  test("two callIDs are two invocations", () => {
+    const state = announceAssistant();
+    expect(
+      mapOpenCodeEvents(toolPart("prt_a", "call_a"), SESSION_ID, state),
+    ).toEqual([{ kind: "tool" }]);
+    expect(
+      mapOpenCodeEvents(toolPart("prt_b", "call_b"), SESSION_ID, state),
+    ).toEqual([{ kind: "tool" }]);
+  });
+
+  test("step-start and step-finish are not tool invocations", () => {
+    const state = announceAssistant();
+    for (const type of ["step-start", "step-finish"]) {
+      expect(
+        mapOpenCodeEvents(
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: SESSION_ID,
+              part: {
+                id: `prt_${type}`,
+                messageID: ASSISTANT_ID,
+                type,
+              },
+            },
+          },
+          SESSION_ID,
+          state,
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  test("a user-owned tool part is dropped (TRAP 2 still holds)", () => {
+    const state = createTurnState();
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: { id: "msg_user", role: "user", time: { created: 1 } },
+        },
+      },
+      SESSION_ID,
+      state,
+    );
+    expect(
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESSION_ID,
+            part: {
+              id: "prt_user_tool",
+              messageID: "msg_user",
+              type: "tool",
+              callID: "call_user",
+              tool: "read",
+            },
+          },
+        },
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("retryHintFromStatus", () => {
   // SessionStatus has a `retry {attempt, message, next}` arm and `next` is a
   // timestamp. This is the provider-issued backoff hint decideRetryDisposition

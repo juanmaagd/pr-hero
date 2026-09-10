@@ -1259,3 +1259,65 @@ describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
     expect(outcome.stderrTail).not.toContain("resolved tool map");
   });
 });
+
+describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
+  test("a completed turn with no tool events stamps 0, on diagnostics not the witness", async () => {
+    const proof = completedProof("evt-empty-hunt");
+    const handle = makeClient({
+      stream: streamOf([
+        { kind: "delta", text: '{"findings":[]}' },
+        { kind: "terminal", proof },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(0);
+    expect(outcome.diagnosticsTail).toContain("observed 0 tool invocation(s)");
+    expect(outcome.stderrTail).not.toContain("tool invocation");
+  });
+
+  test("each tool event increments the stamped count", async () => {
+    const proof = completedProof("evt-looked");
+    const handle = makeClient({
+      stream: streamOf([
+        { kind: "tool" },
+        { kind: "tool" },
+        { kind: "delta", text: '{"findings":[]}' },
+        { kind: "terminal", proof },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.toolInvocations).toBe(2);
+    expect(outcome.finalText).toBe('{"findings":[]}');
+    expect(outcome.diagnosticsTail).toContain("observed 2 tool invocation(s)");
+  });
+
+  test("session creation failure omits the count — it never opened a turn", async () => {
+    const handle = makeClient({
+      createError: new Error("refused"),
+    });
+    const rig = makeRig({ client: handle.client });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.toolInvocations).toBeUndefined();
+    expect(outcome.diagnosticsTail ?? "").not.toContain("tool invocation");
+  });
+});
