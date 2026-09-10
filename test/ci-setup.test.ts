@@ -8,20 +8,38 @@
 // fully injected exists/env, never real process.env, network, or spawn.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   CI_WORKFLOW_RELATIVE_PATH,
   generateCiWorkflowTemplate,
+  materializeCiOpenCodeData,
   OWN_CI_WORKFLOW_OPTIONS,
   runCiSetup,
 } from "../src/ci-setup";
 import { runDoctor } from "../src/doctor";
+import { prheroLayout } from "../src/home-preflight";
 import { DEFAULT_PIPELINE_TIMEOUT_MS } from "../src/pipeline";
-import { parseArgs } from "../src/preflight";
+import {
+  parseArgs,
+  parseGlobalConfig,
+  parseLocalConfig,
+} from "../src/preflight";
 import { resolveOpenCodeAuthPath } from "../src/security/credential-broker";
 import { checkCiConfiguration } from "../src/system-tools";
+
+const OPENCODE_CI_ROUTING = JSON.stringify({
+  default: {
+    backend: "opencode",
+    provider: "deepseek",
+  },
+});
+
+const OPENCODE_CI_AUTH = JSON.stringify({
+  deepseek: { type: "api", key: "oc-ci-fixture-not-a-secret" },
+});
 
 describe("generateCiWorkflowTemplate (pure)", () => {
   test("produces syntactically valid YAML", () => {
@@ -322,6 +340,192 @@ describe("generateCiWorkflowTemplate (pure)", () => {
     expect(template).toMatch(/triage reply --from/);
     expect(template).toMatch(/ephemeral/i);
     expect(template).toMatch(/public repositor/i);
+  });
+
+  // Threat matrix RED (5): vars must be quoted so an unset PRHERO_ROUTING
+  // becomes the empty string instead of breaking YAML. The auth secret is
+  // referenced by name, never inlined.
+  test("quoted with.routing is vars.PRHERO_ROUTING and with.opencode-auth is secrets.OPENCODE_AUTH_JSON", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).toContain(`routing: "\${{ vars.PRHERO_ROUTING }}"`);
+    const parsed = Bun.YAML.parse(template) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    const step = parsed.jobs.review.steps.find(
+      (s) => s.name === "Run pr-hero",
+    ) as { with?: Record<string, string> } | undefined;
+    expect(step?.with?.routing).toBe(`\${{ vars.PRHERO_ROUTING }}`);
+    expect(step?.with?.["opencode-auth"]).toBe(
+      `\${{ secrets.OPENCODE_AUTH_JSON }}`,
+    );
+  });
+
+  // Threat matrix RED (6): job-level `if` cannot read `secrets` (S11/S12).
+  // Presence is detected in the credentials job env and consumed via needs.
+  test("the review job if does not read secrets", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { if?: string } };
+    };
+    const reviewIf = String(parsed.jobs.review.if ?? "");
+    expect(reviewIf).not.toContain("secrets.");
+    expect(reviewIf).toContain("needs.credentials.outputs.has_creds");
+  });
+
+  // Threat matrix RED (8): the skip notice must name the OpenCode secret so
+  // an OpenCode-only operator can wire it. It must never echo a value.
+  // OpenCode also needs PRHERO_ROUTING; naming only the secret sent operators
+  // to a Claude-default fail-closed job.
+  test("the skip notice names OPENCODE_AUTH_JSON and never a secret value", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: {
+        credentials: {
+          steps: Array<{
+            id?: string;
+            env?: Record<string, string>;
+            run?: string;
+          }>;
+        };
+      };
+    };
+    const detect = parsed.jobs.credentials.steps.find(
+      (step) => step.id === "detect",
+    );
+    expect(detect?.env?.HAS_CREDS).toContain("secrets.OPENCODE_AUTH_JSON");
+    expect(detect?.env?.HAS_CREDS).toContain("secrets.ANTHROPIC_API_KEY");
+    expect(detect?.env?.HAS_CREDS).toContain("secrets.CLAUDE_CODE_OAUTH_TOKEN");
+    const notice = parsed.jobs.credentials.steps.find(
+      (step) => step.id === "notice",
+    );
+    expect(notice?.run).toContain("OPENCODE_AUTH_JSON");
+    expect(notice?.run).toContain("PRHERO_ROUTING");
+    expect(notice?.run).not.toContain("Wire ONE secret");
+    expect(notice?.run).not.toMatch(/sk-ant-|ghp_|ghs_/);
+    expect(notice?.run).not.toContain("oc-ci-fixture-not-a-secret");
+    expect(generateCiWorkflowTemplate()).not.toMatch(/"type"\s*:\s*"api"/);
+  });
+});
+
+describe("materializeCiOpenCodeData (impure edge)", () => {
+  async function withFixture<T>(
+    fn: (paths: { home: string; workspace: string }) => Promise<T>,
+  ): Promise<T> {
+    const root = await mkdtemp(path.join(tmpdir(), "pr-hero-ci-opencode-"));
+    const home = path.join(root, "home");
+    const workspace = path.join(root, "workspace");
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    try {
+      return await fn({ home, workspace });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // Threat matrix RED (1): person-layer writes use prheroLayout(home), never
+  // the workspace checkout's .prhero/config.json (repo parser rejects routing).
+  test("writes routing at prheroLayout(home).reviewConfigPath and not the workspace", async () => {
+    await withFixture(async ({ home, workspace }) => {
+      const workspaceConfig = path.join(workspace, ".prhero", "config.json");
+      await mkdir(path.dirname(workspaceConfig), { recursive: true });
+      const workspaceBefore = `${JSON.stringify({ max_changed_lines: 50 })}\n`;
+      await writeFile(workspaceConfig, workspaceBefore);
+
+      await materializeCiOpenCodeData({
+        home,
+        env: { HOME: home },
+        routing: OPENCODE_CI_ROUTING,
+        opencodeAuth: "",
+      });
+
+      const expected = prheroLayout(home).reviewConfigPath;
+      expect(expected).toBe(path.join(home, ".prhero", "config.json"));
+      expect(existsSync(expected)).toBe(true);
+      const layer = parseGlobalConfig(await readFile(expected, "utf8"));
+      expect(layer.routing?.default?.backend).toBe("opencode");
+      expect(layer.routing?.default?.provider).toBe("deepseek");
+
+      expect(await readFile(workspaceConfig, "utf8")).toBe(workspaceBefore);
+      expect(parseLocalConfig(workspaceBefore)).not.toHaveProperty("routing");
+    });
+  });
+
+  // Threat matrix RED (2): the whole auth store lands 0600 at the broker path.
+  test("writes 0600 auth.json at resolveOpenCodeAuthPath()", async () => {
+    await withFixture(async ({ home }) => {
+      const env = { HOME: home };
+      await materializeCiOpenCodeData({
+        home,
+        env,
+        routing: "",
+        opencodeAuth: OPENCODE_CI_AUTH,
+      });
+
+      const authPath = resolveOpenCodeAuthPath(env, home);
+      expect(authPath).toBe(
+        path.join(home, ".local", "share", "opencode", "auth.json"),
+      );
+      expect(existsSync(authPath)).toBe(true);
+      expect(statSync(authPath).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(await readFile(authPath, "utf8"))).toEqual(
+        JSON.parse(OPENCODE_CI_AUTH),
+      );
+    });
+  });
+
+  // Threat matrix RED (3): empty HOME fails loud; never fall back to cwd.
+  test("empty HOME is non-zero and leaves cwd untouched", async () => {
+    await withFixture(async ({ workspace }) => {
+      const workspaceConfig = path.join(workspace, ".prhero", "config.json");
+      await expect(
+        materializeCiOpenCodeData({
+          env: { HOME: "" },
+          routing: OPENCODE_CI_ROUTING,
+          opencodeAuth: OPENCODE_CI_AUTH,
+        }),
+      ).rejects.toThrow(/HOME/);
+
+      expect(existsSync(workspaceConfig)).toBe(false);
+      expect(existsSync(path.join(workspace, ".prhero"))).toBe(false);
+      expect(existsSync(path.join(workspace, ".local"))).toBe(false);
+
+      const proc = Bun.spawn(
+        ["bun", path.resolve(__dirname, "..", "src", "ci-setup.ts")],
+        {
+          cwd: workspace,
+          env: {
+            ...process.env,
+            HOME: "",
+            ROUTING_INPUT: OPENCODE_CI_ROUTING,
+            OPENCODE_AUTH_INPUT: OPENCODE_CI_AUTH,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [stderr, exitCode] = await Promise.all([
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).not.toContain("oc-ci-fixture-not-a-secret");
+      expect(existsSync(workspaceConfig)).toBe(false);
+      expect(existsSync(path.join(workspace, ".local"))).toBe(false);
+    });
+  });
+
+  test("empty routing skips the person-layer write", async () => {
+    await withFixture(async ({ home }) => {
+      await materializeCiOpenCodeData({
+        home,
+        env: { HOME: home },
+        routing: "",
+        opencodeAuth: OPENCODE_CI_AUTH,
+      });
+      expect(existsSync(prheroLayout(home).reviewConfigPath)).toBe(false);
+      expect(existsSync(resolveOpenCodeAuthPath({ HOME: home }, home))).toBe(
+        true,
+      );
+    });
   });
 });
 

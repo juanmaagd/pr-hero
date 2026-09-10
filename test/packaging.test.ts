@@ -457,6 +457,46 @@ describe("Packaging & distribution configuration", () => {
       }
     });
 
+    // Threat matrix RED (4): every composite `run:` body, not just
+    // run-pr-hero. env: may bind inputs; the script text may not.
+    test("every step run: interpolation is github.action_path only", () => {
+      const action = parsedAction();
+      let seen = 0;
+      for (const step of action.runs.steps) {
+        const script = typeof step.run === "string" ? step.run : "";
+        const interpolations = script.match(/\$\{\{[^}]*\}\}/g) ?? [];
+        seen += interpolations.length;
+        for (const token of interpolations) {
+          expect(token).toContain("github.action_path");
+        }
+      }
+      expect(seen).toBeGreaterThan(0);
+    });
+
+    // Threat matrix RED (7): pin is its own step so GITHUB_PATH applies to
+    // later steps. Never `latest`. Install `if` may read inputs, not secrets.
+    test("OpenCode CLI install is not run-pr-hero, pins 1.18.23, and gates on inputs", () => {
+      const action = parsedAction();
+      const install = action.runs.steps.find((step) =>
+        String(step.run ?? "").includes("opencode.ai/install"),
+      ) as
+        | { id?: string; name?: string; if?: string; run?: string }
+        | undefined;
+      const run = action.runs.steps.find((step) => step.id === "run-pr-hero");
+      expect(install).toBeDefined();
+      expect(install).not.toBe(run);
+      expect(install?.id).not.toBe("run-pr-hero");
+      expect(String(install?.if)).toContain("inputs.");
+      expect(String(install?.if)).not.toContain("secrets.");
+      expect(install?.run).toContain("--version 1.18.23");
+      expect(install?.run).not.toContain("latest");
+      expect(install?.run).toContain("GITHUB_PATH");
+      const installAt = action.runs.steps.indexOf(install as never);
+      const runAt = action.runs.steps.indexOf(run as never);
+      expect(installAt).toBeGreaterThan(-1);
+      expect(runAt).toBeGreaterThan(installAt);
+    });
+
     test("never embeds a secret value — references secrets by name only", () => {
       const raw = readFileSync(actionPath, "utf-8");
       expect(raw).not.toMatch(/sk-ant-|ghp_|ghs_/);
@@ -491,6 +531,28 @@ describe("Packaging & distribution configuration", () => {
     expect(existsSync(assetPath)).toBe(true);
     const assetContent = readFileSync(assetPath, "utf-8");
     expect(assetContent).toBe(generateCiWorkflowTemplate());
+  });
+
+  test(".agents/skills/pr-hero-ci-setup/assets/workflow.yml matches the skills workflow asset", () => {
+    const skillsPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow.yml",
+    );
+    const agentsPath = path.join(
+      rootDir,
+      ".agents",
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow.yml",
+    );
+    expect(existsSync(agentsPath)).toBe(true);
+    expect(readFileSync(agentsPath, "utf-8")).toBe(
+      readFileSync(skillsPath, "utf-8"),
+    );
   });
 
   // A consumer repo has no copy of this action's source, so it must resolve
