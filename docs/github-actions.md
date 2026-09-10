@@ -7,14 +7,21 @@ merge on its own findings.
 ## Quick path
 
 1. **Add one auth secret** (Settings → Secrets and variables → Actions → New repository secret):
-   `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Pick one — never both blank.
+   `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Pick one — never both blank. Leave OpenCode unset:
+   that is today's Claude CI.
 2. **Add the workflow file.** Either run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your
    repo, or copy this repository's own `.github/workflows/pr-hero.yml` verbatim — the two are guaranteed
-   byte-identical (`test/packaging.test.ts` asserts it).
-3. **Open a pull request.** pr-hero comments inline, posts a summary review, and writes a
-   `$GITHUB_STEP_SUMMARY` block within a few minutes.
+   byte-identical (`test/packaging.test.ts` asserts it). The generator already wires a credentials job
+   plus quoted `routing` / `opencode-auth` inputs; empty values are absent, so Claude-only repos keep
+   those lines.
+3. **Open a pull request** from a branch in this repository (not a fork). pr-hero comments inline, posts
+   a summary review, and writes a `$GITHUB_STEP_SUMMARY` block within a few minutes.
 4. **Verify readiness any time** with `pr-hero doctor` — it checks for the required secrets when run
    inside Actions, and for the workflow file's presence locally.
+
+To review with OpenCode instead of (or mixed with) Claude, add `OPENCODE_AUTH_JSON` and
+`PRHERO_ROUTING` after step 1 — see [OpenCode in CI](#opencode-in-ci). You do not need a different
+Action.
 
 ## What the workflow does
 
@@ -35,8 +42,23 @@ permissions:
   checks: write # admission attempt ledger
 
 jobs:
+  credentials:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_creds: ${{ steps.detect.outputs.has_creds }}
+    steps:
+      - id: detect
+        env:
+          # Secrets are legal in job env, never in a job-level `if`.
+          HAS_CREDS: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.OPENCODE_AUTH_JSON != '' }}
+        run: echo "has_creds=${HAS_CREDS}" >> "$GITHUB_OUTPUT"
+
   review:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    needs: credentials
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.credentials.outputs.has_creds == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +70,9 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          routing: "${{ vars.PRHERO_ROUTING }}"
+          opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}
       - name: Upload pr-hero run directory # see "Triaging a CI review" below
         if: always() && steps.pr-hero.outputs.run-dir != ''
         uses: actions/upload-artifact@v4
@@ -60,8 +85,13 @@ jobs:
           retention-days: 7
 ```
 
-`pr-hero setup --ci` generates exactly this shape (see `src/ci-setup.ts`'s `generateCiWorkflowTemplate`).
-It refuses to overwrite a customized workflow already at that path unless you pass `--force`.
+`pr-hero setup --ci` generates this operator-facing surface (credentials union, quoted routing var,
+OpenCode auth secret) plus skip-notice copy and comments — see `src/ci-setup.ts`'s
+`generateCiWorkflowTemplate`. It refuses to overwrite a customized workflow already at that path
+unless you pass `--force`. Keep every `with:` line even when you only use Claude: an unset secret or
+var expands to empty, which the Action treats as absent. Deleting the line for the credential you *did*
+set is what breaks. The quotes around `vars.PRHERO_ROUTING` are load-bearing — an unset repository
+variable must become the empty string, not broken YAML.
 
 ### Why `fetch-depth: 0`
 
@@ -72,15 +102,18 @@ trim it.
 
 ## Authentication
 
-| Secret | Required | Notes |
-|---|---|---|
-| `GITHUB_TOKEN` | Yes (auto-provided) | GitHub injects this automatically; the action's `github-token` input defaults to it — you rarely need to set it explicitly. |
-| `CLAUDE_CODE_OAUTH_TOKEN` | One of these two | The long-lived token printed by `claude setup-token` (valid ~1 year). Consumes directly from your Claude subscription (Pro/Team/Enterprise) with **zero extra API billing/costs**. Must come from that command — see the warning under Option 1. |
-| `ANTHROPIC_API_KEY` | One of these two | A standard Anthropic API key, billed per token via your Anthropic Console account. |
+| Name | Kind | Required | Notes |
+|---|---|---|---|
+| `GITHUB_TOKEN` | secret | Yes (auto-provided) | GitHub injects this automatically; the action's `github-token` input defaults to it — you rarely need to set it explicitly. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | secret | One of the three credential secrets | The long-lived token printed by `claude setup-token` (valid ~1 year). Consumes directly from your Claude subscription (Pro/Team/Enterprise) with **zero extra API billing/costs**. Must come from that command — see the warning under Option 1. |
+| `ANTHROPIC_API_KEY` | secret | One of the three credential secrets | A standard Anthropic API key, billed per token via your Anthropic Console account. |
+| `OPENCODE_AUTH_JSON` | secret | One of the three credential secrets | Whole OpenCode `auth.json` blob (not a single key field). Cap **48 KB**. Never echo, log, or paste it into the workflow. The Action writes it `0600` at the OpenCode auth path. Leave unset for Claude-only CI. |
+| `PRHERO_ROUTING` | repository **variable** | OpenCode path (with the secret above) | JSON object with the same shape as `config.routing` — the routing object, not the whole `~/.prhero/config.json`. Quoted in workflow `with.routing`. Unset = empty string. Cap **48 KB**. Written to the person-layer `$HOME/.prhero/config.json` on the runner. Repo `.prhero/config.json` **rejects** `routing`. |
 
-Reference every secret **by name** (`${{ secrets.ANTHROPIC_API_KEY }}`) — never paste a literal key into
-the workflow file, a log line, or a PR comment. The action itself follows the same rule: it never echoes,
-logs, or truncates a secret value anywhere in its output.
+The credentials job treats Anthropic key **or** Claude OAuth **or** `OPENCODE_AUTH_JSON` as present.
+Reference every secret **by name** (`${{ secrets.ANTHROPIC_API_KEY }}`, `${{ secrets.OPENCODE_AUTH_JSON }}`)
+— never paste a literal key into the workflow file, a log line, or a PR comment. The action itself
+follows the same rule: it never echoes, logs, or truncates a secret value anywhere in its output.
 
 ### How to obtain and configure credentials
 
@@ -114,13 +147,80 @@ logs, or truncates a secret value anywhere in its output.
   ```bash
   gh secret set CLAUDE_CODE_OAUTH_TOKEN # or ANTHROPIC_API_KEY
   ```
-  Paste the token when prompted.
+  Paste the token when prompted. For OpenCode, see [OpenCode in CI](#opencode-in-ci) (`gh secret set`
+  plus `gh variable set` — routing is a variable, not a secret).
 * **Via GitHub Web UI:**
   1. Go to `https://github.com/<owner>/<repo>/settings/secrets/actions`.
   2. Click **New repository secret**.
   3. Enter Name (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`).
   4. Paste the token into Secret and click **Add secret**.
 
+## OpenCode in CI
+
+Leave `OPENCODE_AUTH_JSON` and `PRHERO_ROUTING` unset to keep today's Claude CI. To run OpenCode, set
+**both** — the Action is backend-agnostic; the next provider is DATA (routing JSON + one `auth.json`
+secret), not a new Action input.
+
+### Wire it
+
+1. **Repository variable** `PRHERO_ROUTING` — the routing object only (`default` / `mappings` /
+   `disabled`), same shape as person-layer `config.routing`. Do not wrap it in `{"routing": ...}` and
+   do not put credentials inside it.
+
+   ```bash
+   gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek"}}'
+   ```
+
+2. **Repository secret** `OPENCODE_AUTH_JSON` — the whole `auth.json` store as one JSON object. Never
+   echo it. Cap 48 KB (same as the routing variable).
+
+   ```bash
+   gh secret set OPENCODE_AUTH_JSON < auth.json   # paste or redirect; do not cat into logs
+   ```
+
+   Shape (placeholder keys only — never a real credential):
+
+   ```json
+   {
+     "deepseek": { "type": "api", "key": "sk-test-fake" }
+   }
+   ```
+
+3. Keep the generated workflow `with:` lines (`routing: "${{ vars.PRHERO_ROUTING }}"` and
+   `opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}`). Open a same-repo PR.
+
+The Action writes routing to `$HOME/.prhero/config.json` on the runner (person layer) wrapping
+`{"routing": <parsed>}`. It never writes repo `.prhero/config.json`; that file's parser rejects
+`routing`. Empty or unset routing skips the person-layer write, so Claude-default CI stays available.
+`OPENCODE_AUTH_JSON` is written `0600` at the OpenCode auth path; brokers read that file. Invalid JSON
+fails the job loud.
+
+### Pin 1.18.23
+
+The Action installs OpenCode CLI **1.18.23** in its own step, only when `opencode-auth` is non-empty
+**or** `routing` contains `opencode`. It never uses `latest`. The install appends `$HOME/.opencode/bin`
+to `GITHUB_PATH` so a **later** step (Run pr-hero) sees the binary — the install step itself is not
+the review. Claude-only CI (no OpenCode secret, routing does not mention `opencode`) skips this
+install and still starts.
+
+### openai vs deepseek
+
+| Provider in `auth.json` | CI outcome |
+|---|---|
+| Non-openai API token (tested: **deepseek** `type: "api"`) | Executable metered path. Presence of the auth file applies the default spend ceiling — this is an invoice route, not an unlimited subscription. |
+| `openai` with `type: "api"` | **Refused.** The engine maps openai to ChatGPT OAuth; a pay-as-you-go API key is not remapped. Do not put an openai API key in `OPENCODE_AUTH_JSON` and expect it to run. |
+| Mixed OpenCode providers in one run | Out of scope ([#195](https://github.com/juanmaagd/pr-hero/issues/195)). One OpenCode provider per run. |
+| `claude-code` + one OpenCode provider | Already works. Mix Claude credentials with one OpenCode `auth.json` entry and routing that names both backends. |
+
+### Edges
+
+- **Fork PRs** still skip: GitHub does not give forks repository secrets. The review job `if` never
+  reads `secrets` — see [Fork pull requests](#fork-pull-requests).
+- **OpenCode-only** (only `OPENCODE_AUTH_JSON` set, no Claude secret) **does** start the review job.
+- **Mismatch fails closed:** Claude credentials plus OpenCode routing but no `OPENCODE_AUTH_JSON`
+  starts the job (the skip union is already satisfied) and then **fails**, rather than skipping as a
+  clean review.
+- **48 KB** is the GitHub secret/variable size cap for both `OPENCODE_AUTH_JSON` and `PRHERO_ROUTING`.
 
 ## Token permissions
 
@@ -136,13 +236,28 @@ The workflow's `permissions:` block needs four scopes, each for a specific reaso
 ## Security considerations
 
 ### Fork pull requests
-In GitHub Actions, pull requests originating from forks do not receive repository secrets (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`). This is GitHub's intentional security boundary to prevent untrusted pull requests from exfiltrating credentials or consuming API budget.
+In GitHub Actions, pull requests originating from forks do not receive repository secrets
+(`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENCODE_AUTH_JSON`). This is GitHub's intentional
+security boundary to prevent untrusted pull requests from exfiltrating credentials or consuming API
+budget. Repository **variables** (`PRHERO_ROUTING`) are visible; that is why routing must not contain
+credentials.
 
-The generated workflow includes:
+The generated workflow still skips forks, then uses a credentials job so the review job `if` never
+reads `secrets`:
+
 ```yaml
-if: github.event.pull_request.head.repo.full_name == github.repository
+# credentials job — secrets are legal in this job's env, not in a job-level `if`
+HAS_CREDS: ${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.OPENCODE_AUTH_JSON != '' }}
+
+# review job — github + needs only
+if: >-
+  github.event.pull_request.head.repo.full_name == github.repository &&
+  needs.credentials.outputs.has_creds == 'true'
 ```
-This ensures the review job only runs on internal branch PRs where credentials are present, skipping cleanly on fork PRs instead of failing with missing credential errors.
+
+Same-repo PRs with none of the three credential secrets skip (with a notice that names all three)
+instead of failing. Fork PRs skip without that notice — they never receive secrets, so warning on
+every fork would be noise.
 
 ### Action version pinning
 The default workflow targets the floating major tag `uses: juanmaagd/pr-hero@v1` to automatically receive backward-compatible bug fixes and optimizations. If your organization enforces strict immutable SHA pinning, you can pin the full commit SHA directly:
@@ -166,13 +281,16 @@ gates, not quality gates, and never fail the job.
 **Leaving `budget-usd` unset resolves the ceiling from how the run is billed.** A Claude
 subscription route (`CLAUDE_CODE_OAUTH_TOKEN`) draws on quota rather than a per-token invoice, so its
 real cash cost is `$0.00` and there is no dollar figure to gate on — no ceiling is applied, and the run
-emits a `::notice::` saying so. A metered route (`ANTHROPIC_API_KEY`) gets a `10.00` default, because
-that is the case where a runaway PR really does produce an invoice. Setting `budget-usd` explicitly is
-honoured verbatim on either route.
+emits a `::notice::` saying so. A metered route (`ANTHROPIC_API_KEY`, or OpenCode API-token auth via
+`OPENCODE_AUTH_JSON`) gets a `10.00` default, because that is the case where a runaway PR really does
+produce an invoice. Setting `budget-usd` explicitly is honoured verbatim on either route.
 
-If **both** credentials are set, the ceiling is applied: this project does not record which one the
-Claude CLI actually bills, and a wrongly-removed ceiling costs money while a wrongly-applied one costs
-one skipped review you can clear with `budget-usd: 0`.
+If **both** Claude credentials are set, the ceiling is applied: this project does not record which one
+the Claude CLI actually bills, and a wrongly-removed ceiling costs money while a wrongly-applied one
+costs one skipped review you can clear with `budget-usd: 0`. The same conservative rule applies when
+the OpenCode auth file is present: CI treats the run as able to invoice (metered ceiling) even if a
+Claude subscription token is also set. That does **not** stamp Claude CLI usage as metered solely
+because OpenCode auth is present — OpenCode API-token billing is beside Claude's subscription quota.
 
 **A `budget-usd` of `0` or below does not mean "spend nothing" — it disables the ceiling.** This
 matches the sibling size-gate knobs' documented convention (`<= 0` disables the limit). Reading it the
@@ -377,14 +495,18 @@ Three properties of the upload step are load-bearing:
 | `scout` | `false` | Experimental diff-only pre-hunt stage; off by default. |
 | `post` | `true` | Set `false` to run the review and write outputs/summary without posting to the PR. |
 | `step-summary` | `true` | Set `false` to skip the `$GITHUB_STEP_SUMMARY` write. |
+| `routing` | empty | Person-layer routing JSON (`config.routing` object). Wire from `vars.PRHERO_ROUTING` (quoted). See [OpenCode in CI](#opencode-in-ci). |
+| `opencode-auth` | empty | Whole OpenCode `auth.json` blob. Wire from `secrets.OPENCODE_AUTH_JSON`. Never echo. |
 
 ## Troubleshooting
 
 - **`pr-hero doctor`** locally reports whether `.github/workflows/pr-hero.yml` exists; inside Actions it
-  reports whether the required secrets are present (never their values).
+  reports whether the required secrets (or OpenCode auth file) are present (never their values).
 - **No comment appears on the PR** — check `permissions: pull-requests: write` is present, and that at
-  least one of the two auth secrets is set.
+  least one of the three credential secrets is set (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or
+  `OPENCODE_AUTH_JSON`). Fork PRs never receive those secrets. OpenCode also needs `PRHERO_ROUTING`.
 - **The review job is red** — never because of findings. Read `status` to tell the three causes apart:
   `error` is a fatal failure and the `::error::` annotation in the log names it; an **empty** `status`
   means every hunter died (the log shows their failures); `reviewed` means the review itself succeeded
-  but some comments could not be posted. See "Assistant posture" above.
+  but some comments could not be posted. See "Assistant posture" above. OpenCode routing without
+  `OPENCODE_AUTH_JSON` fails closed rather than skipping.
