@@ -66,7 +66,9 @@ describe("doctor tri-state evaluation", () => {
         if (
           p.endsWith("SKILL.md") ||
           p.endsWith("adjudicator.md") ||
-          p.endsWith("workflow.yml")
+          p.endsWith("workflow.yml") ||
+          p.endsWith("ci-admission.md") ||
+          p.endsWith("opencode-ci.md")
         ) {
           // If reading either the upstream asset or the synced copy, return the same content
           return "same mock content";
