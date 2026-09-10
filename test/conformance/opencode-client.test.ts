@@ -49,9 +49,12 @@ const OPENCODE_TOOL_IDS = [
 interface FakeSdk {
   sdk: OpenCodeSdkLike;
   iterators: () => number;
+  streamReturns: () => number;
   promptCalls: () => Array<Record<string, unknown>>;
   abortCalls: () => number;
+  createdAt: () => number;
   subscribedAt: () => number;
+  toolIdsAt: () => number;
   promptedAt: () => number;
   toolIdsCalls: () => Array<Record<string, unknown> | undefined>;
   emit: (event: unknown) => void;
@@ -68,13 +71,19 @@ function fakeSdk(
     // `undefined` means "the live surface". An Error rejects the call; an
     // array (including an empty one) resolves with exactly those ids.
     toolIds?: readonly string[] | Error;
+    // Distinct ids per createSession, in call order. Default is SESSION_ID
+    // for every create, which is what the single-session tests pin.
+    sessionIds?: readonly string[];
   } = {},
 ): FakeSdk {
   const prompts: Array<Record<string, unknown>> = [];
   const toolIdsCalls: Array<Record<string, unknown> | undefined> = [];
   let aborts = 0;
   let order = 0;
+  let creates = 0;
+  let createdAt = 0;
   let subscribedAt = 0;
+  let toolIdsAt = 0;
   let promptedAt = 0;
   let messages: unknown[] = [];
   // #127: GET /session/status, the poll observer's turn boundary. Measured
@@ -92,6 +101,7 @@ function fakeSdk(
   let ended = false;
 
   let iterators = 0;
+  let streamReturns = 0;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: {
@@ -102,13 +112,19 @@ function fakeSdk(
       },
       tool: {
         ids: async (opts) => {
+          toolIdsAt = ++order;
           toolIdsCalls.push(opts as Record<string, unknown> | undefined);
           if (options.toolIds instanceof Error) throw options.toolIds;
           return { data: [...(options.toolIds ?? OPENCODE_TOOL_IDS)] };
         },
       },
       session: {
-        create: async () => ({ data: { id: SESSION_ID } }),
+        create: async () => {
+          createdAt = ++order;
+          const id = options.sessionIds?.[creates] ?? SESSION_ID;
+          creates += 1;
+          return { data: { id } };
+        },
         prompt: async (opts) => {
           promptedAt = ++order;
           prompts.push(opts as Record<string, unknown>);
@@ -125,20 +141,32 @@ function fakeSdk(
       event: {
         subscribe: async () => {
           subscribedAt = ++order;
-          return {
-            stream: {
-              async *[Symbol.asyncIterator]() {
-                iterators += 1;
-                for (;;) {
-                  while (queue.length > 0) yield queue.shift();
-                  if (ended) return;
-                  await new Promise<void>((r) => {
-                    notify = r;
-                  });
-                }
-              },
+          // One iterator object. Bun does not run an async-generator
+          // `finally` on `return()` if `next()` never ran, so the close
+          // signal is the `return` method itself — that is also what the
+          // catch-path unwind calls.
+          const inner = (async function* subscribeStream() {
+            iterators += 1;
+            for (;;) {
+              while (queue.length > 0) yield queue.shift();
+              if (ended) return;
+              await new Promise<void>((r) => {
+                notify = r;
+              });
+            }
+          })();
+          const stream = {
+            [Symbol.asyncIterator]() {
+              return stream;
             },
+            next: (value?: undefined) => inner.next(value),
+            return: async () => {
+              streamReturns += 1;
+              return await inner.return();
+            },
+            throw: (error?: unknown) => inner.throw(error),
           };
+          return { stream };
         },
       },
     }),
@@ -147,9 +175,12 @@ function fakeSdk(
   return {
     sdk,
     iterators: () => iterators,
+    streamReturns: () => streamReturns,
     promptCalls: () => prompts,
     abortCalls: () => aborts,
+    createdAt: () => createdAt,
     subscribedAt: () => subscribedAt,
+    toolIdsAt: () => toolIdsAt,
     promptedAt: () => promptedAt,
     toolIdsCalls: () => toolIdsCalls,
     emit: (event) => {
@@ -276,6 +307,23 @@ describe("createOpenCodeClient", () => {
     expect(fake.subscribedAt()).toBeGreaterThan(0);
     expect(fake.promptedAt()).toBeGreaterThan(0);
     expect(fake.subscribedAt()).toBeLessThan(fake.promptedAt());
+  });
+
+  // #128: the allow map is a snapshot of tool.ids(), and an id registered
+  // between that call and session.prompt() is an ABSENT key — OpenCode's
+  // default is "all tools enabled". No construction-level fix exists (the
+  // prompt body types `tools` as an open map, no wildcard). The remaining
+  // narrowing is to take the snapshot adjacent to the prompt, after the
+  // awaited create+subscribe round-trips, so the window is [ids → prompt]
+  // instead of [ids → create → subscribe → prompt].
+  test("enumerates the tool surface after subscribe and immediately before prompt", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+    expect(fake.createdAt()).toBeGreaterThan(0);
+    expect(fake.subscribedAt()).toBeGreaterThan(fake.createdAt());
+    expect(fake.toolIdsAt()).toBeGreaterThan(fake.subscribedAt());
+    expect(fake.promptedAt()).toBe(fake.toolIdsAt() + 1);
   });
 
   // session.prompt is a BLOCKING call that returns the finished message —
@@ -456,6 +504,18 @@ describe("createOpenCodeClient tool-surface failure (#122)", () => {
 
     await expect(client.createSession(INPUT)).rejects.toThrow(/tool/i);
     expect(fake.promptCalls()).toHaveLength(0);
+  });
+
+  // #128 moved enumeration after session.create, so a surface failure now
+  // has a remote session to unwind. The prompt still must not fire.
+  test("a rejecting tool.ids still aborts a session that already exists", async () => {
+    const fake = fakeSdk({ toolIds: new Error("boom") });
+    const client = rig(fake);
+
+    await expect(client.createSession(INPUT)).rejects.toThrow(/tool/i);
+    expect(fake.promptCalls()).toHaveLength(0);
+    expect(fake.abortCalls()).toBe(1);
+    expect(fake.streamReturns()).toBe(1);
   });
 
   test("an empty surface is refused rather than treated as 'deny nothing'", async () => {
@@ -969,6 +1029,69 @@ describe("createOpenCodeClient", () => {
     const session = await client.createSession(INPUT);
     await client.abort(session);
     expect(fake.abortCalls()).toBe(1);
+  });
+
+  // #131: the Map entry used to live until whole-client close(). abort() is
+  // the attempt's teardown, so it owns the release. pollStatus must not
+  // throw afterwards — a throw is a failed observation the harness counts
+  // and retries forever (opencode-sdk.ts:707). It also must not answer
+  // `{kind:"failed"}`: runPoll would settle session_failed and steal the
+  // abortConfirmMs window.
+  test("abort releases the session so a later poll does not throw", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+    await client.abort(session);
+    const result = await client.pollStatus(session);
+    expect(result.kind).toBe("pending");
+  });
+
+  test("abort is idempotent after the session is released", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+    await client.abort(session);
+    await client.abort(session);
+    expect(fake.abortCalls()).toBe(1);
+  });
+
+  test("abort of the last session releases the shared server", async () => {
+    const fake = fakeSdk();
+    let closed = 0;
+    const client = rig(fake, {
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {
+          closed += 1;
+        },
+      }),
+    });
+    const session = await client.createSession(INPUT);
+    expect(closed).toBe(0);
+    await client.abort(session);
+    expect(closed).toBe(1);
+  });
+
+  test("abort of one session does not kill a sibling's server", async () => {
+    const fake = fakeSdk({ sessionIds: ["ses_a", "ses_b"] });
+    let closed = 0;
+    const client = rig(fake, {
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {
+          closed += 1;
+        },
+      }),
+    });
+    const first = await client.createSession(INPUT);
+    const second = await client.createSession(INPUT);
+    await client.abort(first);
+    expect(closed).toBe(0);
+    expect((await client.pollStatus(second)).kind).toBe("pending");
+    await client.abort(second);
+    expect(closed).toBe(1);
   });
 
   // pr-hero ships with ZERO runtime dependencies; the SDK is an optional
