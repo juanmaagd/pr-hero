@@ -128,6 +128,11 @@ export type OpenCodeClientEvent =
   // all the transport needs to tell a turn that reasoned and never answered
   // apart from one that produced nothing at all.
   | { readonly kind: "reasoning" }
+  // #214: a COMPLETED tool-call part. Pending/running/error restatements are
+  // dropped at the mapper — announcing Read is not looking. `tool` is the
+  // provider id (`read`, `grep`, …), never arguments or output: those are
+  // model-adjacent and must not reach `notes`.
+  | { readonly kind: "tool"; readonly tool?: string }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
@@ -708,6 +713,8 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // `aggregateBytes` either — reasoning is not the answer, so it must not
     // consume the answer's §4.2 content budget.
     let sawReasoning = false;
+    let toolInvocations = 0;
+    const completedToolIds: string[] = [];
     // §4.1/§8: the first usage event fixes the attempt's aggregation mode;
     // `applyUsageUpdate` is the pure snapshot-replaces/delta-accumulates state
     // machine, shared with every other transport that folds a usage stream.
@@ -898,6 +905,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               // the content was dropped at the client boundary and only this
               // one bit survives it.
               sawReasoning = true;
+              break;
+            }
+            case "tool": {
+              // Completed invocations only — the mapper dropped pending/error.
+              // Never a witness: tool ids ride diagnosticsTail with the count.
+              toolInvocations += 1;
+              if (event.tool !== undefined && event.tool.length > 0) {
+                completedToolIds.push(event.tool);
+              }
               break;
             }
             case "heartbeat": {
@@ -1126,6 +1142,17 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           `[pr-hero] opencode sdk: ${invalidProofs} invalid terminal proof(s) ignored`,
         );
       }
+      // #214: always, including 0. 0 is the claim "this session issued no
+      // tool-call parts", and the live hunt that posted a clean bill could
+      // not even prove that fact. Session-creation failure never reaches
+      // here, so it correctly omits the count.
+      const toolIds =
+        completedToolIds.length === 0
+          ? ""
+          : ` (${completedToolIds.join(", ")})`;
+      diagnostics.push(
+        `[pr-hero] opencode sdk: observed ${toolInvocations} completed tool invocation(s)${toolIds}`,
+      );
 
       let completion: TransportOutcome["completion"];
       let protocolIntegrity: TransportOutcome["protocolIntegrity"];
@@ -1257,6 +1284,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           diagnostics.join("\n"),
           MAX_STDERR_TAIL_BYTES,
         ),
+        // #214: stamped after a session ran, including 0. Absence is reserved
+        // for transports that cannot observe tools (and for this transport's
+        // own session-creation failure, which never opened a turn).
+        toolInvocations,
       };
 
       // §4.1: the transport normally supplies the attempt's ONE terminal event.

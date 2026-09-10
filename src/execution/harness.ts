@@ -1,5 +1,3 @@
-import { mkdir } from "node:fs/promises";
-import path from "node:path";
 // Lifecycle ownership (§2 docs/multi-runtime-model-diversity-design.md):
 //   HARNESS — StepSpec.timeoutMs watchdog, cancellation coordinator, retry/
 //   parse, write leases + settlement receipts, event sink, spend reservations,
@@ -7,6 +5,9 @@ import path from "node:path";
 //   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
 //   protocol events, return TransportOutcome, classify provider/transport causes.
 //   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { isVacuousEmptyHunt } from "../drafts";
 import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
@@ -386,6 +387,9 @@ async function writeAttemptLog(
       `timed_out: ${outcome.timedOut ?? false}`,
       `classification: ${classification}`,
       ...(cause !== undefined ? [`cause: ${cause}`] : []),
+      ...(outcome.toolInvocations !== undefined
+        ? [`tool_invocations: ${outcome.toolInvocations}`]
+        : []),
       "--- stderr tail (4096) ---",
       // §6.3: redaction before persistence — nothing unredacted hits disk.
       redactDiagnostic(outcome.stderrTail),
@@ -1848,6 +1852,33 @@ export class StepExecutionHarness implements StepRunner {
       onData: async (outcome, settlement): Promise<AttemptDelivery> => {
         try {
           const parsed = step.parse(outcome.finalText);
+          if (
+            isVacuousEmptyHunt({
+              tools: step.tools,
+              toolInvocations: outcome.toolInvocations,
+              parsed,
+            })
+          ) {
+            // The JSON parsed. format_violation would spend a paid reminder
+            // retry on the same dump. §7 has no cause for "did not look";
+            // inventing one drifts the frozen vocabulary, so this is the
+            // legacy_terminal ruling — stop, no retry. The attempt log
+            // carries `tool_invocations: 0` as the fact.
+            await this.guardedDataPlaneWrite(settlement, () =>
+              writeAttemptLog(
+                step,
+                attempt,
+                kind,
+                outcome,
+                "terminal",
+                "legacy_terminal",
+              ),
+            ).catch(() => {});
+            return {
+              delivered: false,
+              resolution: { kind: "legacy_terminal" },
+            };
+          }
           await this.guardedDataPlaneWrite(settlement, () =>
             writeAttemptLog(step, attempt, kind, outcome, "ok"),
           );

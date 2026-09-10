@@ -304,6 +304,7 @@ describe("a reasoning model's thinking is not the answer", () => {
     expect(outcome.finalText).not.toContain(REASONING_A);
     expect(outcome.finalText).not.toContain(REASONING_B);
     expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(0);
   });
 
   // TRAP 2 in its second form. The fix has to consume `message.part.updated`
@@ -386,5 +387,102 @@ describe("a turn that reasoned and never answered", () => {
         stderrTail: `${outcome.stderrTail}\n[pr-hero] opencode sdk: stream errored: 401 unauthorized`,
       }),
     ).toBe("auth_invalid");
+  });
+});
+
+describe("tool-call parts survive the SSE path (#214)", () => {
+  const TOOL_PART = "prt_tool_read";
+  const DUMP =
+    'Building the value ledger to check the tab geometry for contradictions.{"findings":[]}';
+
+  test("a one-step prose dump with no tool parts stamps 0", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
+      partDelta(ANSWER_PART, DUMP),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", DUMP),
+      COMPLETED,
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(DUMP);
+    expect(outcome.toolInvocations).toBe(0);
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 0 completed tool invocation(s)",
+    );
+  });
+
+  test("one Read call then empty findings stamps 1", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          part: {
+            id: TOOL_PART,
+            messageID: ASSISTANT_MESSAGE,
+            sessionID: SESSION_ID,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "completed" },
+          },
+        },
+      },
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
+      partDelta(ANSWER_PART, ANSWER),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ANSWER),
+      COMPLETED,
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(ANSWER);
+    expect(outcome.toolInvocations).toBe(1);
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 1 completed tool invocation(s)",
+    );
+    expect(outcome.diagnosticsTail).toContain("(read)");
+  });
+
+  test("a pending Read announcement then a dump stamps 0 — announcing is not looking", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          part: {
+            id: TOOL_PART,
+            messageID: ASSISTANT_MESSAGE,
+            sessionID: SESSION_ID,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "pending" },
+          },
+        },
+      },
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
+      partDelta(ANSWER_PART, DUMP),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", DUMP),
+      COMPLETED,
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(DUMP);
+    expect(outcome.toolInvocations).toBe(0);
   });
 });

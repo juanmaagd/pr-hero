@@ -1473,6 +1473,10 @@ describe("production runtime PR1", () => {
           // exhausted by the first attempt and silently deliver nothing to
           // the second.
           async *streamEvents() {
+            // A hunter step is given Read. #214 fails a tools-given empty
+            // draft that issued no tool-call parts; this fixture is about
+            // billing, not vacuity, so it looks, then finds nothing.
+            yield { kind: "tool" as const };
             yield { kind: "delta" as const, text: '{"findings":[]}' };
             yield {
               kind: "usage" as const,

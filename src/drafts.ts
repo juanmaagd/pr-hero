@@ -21,6 +21,30 @@ export interface HunterDraft {
   findings: DraftFinding[];
 }
 
+// #214: an empty `findings` array is a LEGAL draft (the hunter looked and
+// found nothing). It is not a legal SUCCESS when the step was given tools
+// and the transport observed zero tool calls — that is a review that did
+// not look, wearing the shape of a clean bill.
+//
+// Unknown counts stay ungated: a transport that cannot observe tools must
+// not invent a failure, and must not invent a pass by stamping a 0 it did
+// not see. OpenCode stamps the count (including 0). Claude Code omits it.
+// Scout is out of this rule because the engine forces `tools: []`.
+export function isVacuousEmptyHunt(input: {
+  readonly tools: readonly string[];
+  readonly toolInvocations: number | undefined;
+  readonly parsed: unknown;
+}): boolean {
+  if (input.toolInvocations === undefined) return false;
+  if (input.tools.length === 0) return false;
+  if (input.toolInvocations !== 0) return false;
+  if (typeof input.parsed !== "object" || input.parsed === null) {
+    return false;
+  }
+  const findings = (input.parsed as { findings?: unknown }).findings;
+  return Array.isArray(findings) && findings.length === 0;
+}
+
 // `downgraded-latent` (ROADMAP A2): the claim holds as a real defect, but
 // nothing can execute it at this commit. Distinct from `refuted`, which
 // deletes the finding — the G6 lesson is that a latent defect must stay
