@@ -362,10 +362,22 @@ export type CiBillingMode = "subscription" | "metered";
 // caller: `envBillsMetered` carries the same paragraph and names BOTH
 // forbidden consumers, because #177 gave it a second caller that is one
 // careless edit away from the admission path.
+//
+// Optional `openCodeAuthPresent` is the OpenCode half of the same ceiling
+// question — "could this run invoice?" — ORed beside the Anthropic env
+// predicate, never folded into it. `envBillsMetered` stamps Claude CLI
+// usage and must stay Anthropic-env-only. Omit the option (or leave it
+// undefined/false) and this function stays env-only. Presence of the 0600
+// auth.json is enough: we cannot rule out an invoice, same conservative
+// doctrine as Anthropic keys. The instance is the file, not a parsed
+// provider name.
 export function deriveCiBillingMode(
   env: Record<string, string | undefined>,
+  opts?: { openCodeAuthPresent?: boolean },
 ): CiBillingMode {
-  return envBillsMetered(env) ? "metered" : "subscription";
+  return envBillsMetered(env) || opts?.openCodeAuthPresent === true
+    ? "metered"
+    : "subscription";
 }
 
 export const CI_DEFAULT_METERED_BUDGET_USD = 10;

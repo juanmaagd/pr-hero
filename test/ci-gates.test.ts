@@ -419,6 +419,61 @@ describe("deriveCiBillingMode", () => {
   test("an empty env is subscription", () => {
     expect(deriveCiBillingMode({})).toBe("subscription");
   });
+
+  // omit ⇒ env-only. OpenCode env blobs must not become a second Anthropic
+  // key: envBillsMetered stays the Claude usage-stamp, and this ceiling ORs
+  // file presence through the optional second argument only.
+  test("omitting openCodeAuthPresent is env-only — OpenCode env blobs do not meter", () => {
+    expect(
+      deriveCiBillingMode({
+        OPENCODE_AUTH_JSON: '{"deepseek":{"type":"api","key":"sk-test-fake"}}',
+      }),
+    ).toBe("subscription");
+    expect(
+      deriveCiBillingMode(
+        {
+          OPENCODE_AUTH_JSON:
+            '{"deepseek":{"type":"api","key":"sk-test-fake"}}',
+        },
+        {},
+      ),
+    ).toBe("subscription");
+  });
+
+  // Presence of the 0600 auth.json means we cannot rule out an invoice —
+  // same conservative doctrine as Anthropic keys. The executable CI path
+  // is a deepseek (or any non-openai) API-token store; we do not parse the
+  // file here. openai type:api is refused at the broker, not remapped.
+  test("openCodeAuthPresent is metered with no Anthropic env — deepseek API-token CI", () => {
+    expect(deriveCiBillingMode({}, { openCodeAuthPresent: true })).toBe(
+      "metered",
+    );
+  });
+
+  test("openCodeAuthPresent beside Claude OAuth is still metered", () => {
+    expect(
+      deriveCiBillingMode(
+        { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
+        { openCodeAuthPresent: true },
+      ),
+    ).toBe("metered");
+  });
+
+  test("openCodeAuthPresent false is env-only", () => {
+    expect(deriveCiBillingMode({}, { openCodeAuthPresent: false })).toBe(
+      "subscription",
+    );
+  });
+
+  test("deepseek-style OpenCode auth gets the default metered ceiling", () => {
+    const billingMode = deriveCiBillingMode({}, { openCodeAuthPresent: true });
+    expect(
+      resolveCiBudgetCeiling({ configured: undefined, billingMode }),
+    ).toEqual({
+      budgetUsd: CI_DEFAULT_METERED_BUDGET_USD,
+      source: "default-metered",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
