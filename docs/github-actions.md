@@ -164,15 +164,25 @@ secret), not a new Action input.
 ### Wire it
 
 1. **Repository variable** `PRHERO_ROUTING` — the routing object only (`default` / `mappings` /
-   `disabled`), same shape as person-layer `config.routing`. Do not wrap it in `{"routing": ...}` and
-   do not put credentials inside it.
+   `disabled`), same shape as person-layer `config.routing`. Do not wrap it in `{"routing": ...}`
+   and do not put credentials inside it (the variable is public). OpenCode does not resolve pr-hero
+   aliases (`sonnet` / `haiku`): set `modelSnapshot` to an id `opencode models` lists. Routing maps
+   **logical model**, not hunter vs refuter (default hunters+refuter = `sonnet`).
 
    ```bash
-   gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek"}}'
+   gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}}'
    ```
 
-2. **Repository secret** `OPENCODE_AUTH_JSON` — the whole `auth.json` store as one JSON object. Never
-   echo it. Cap 48 KB (same as the routing variable).
+   Mixed Claude summarizer (`haiku`) + OpenCode default (hunters+refuter):
+
+   ```bash
+   gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},"mappings":[{"logical":"haiku","backend":"claude-code","provider":"anthropic","gateway":"direct"}]}'
+   ```
+
+2. **Repository secret** `OPENCODE_AUTH_JSON` — one JSON object in OpenCode's `auth.json` shape. Never
+   echo it. Cap 48 KB. If the personal store also has ChatGPT OAuth or extra providers, upload a
+   **CI-only** subset (one non-openai `type: "api"` record). Do not put a personal OAuth session in
+   GitHub.
 
    ```bash
    gh secret set OPENCODE_AUTH_JSON < auth.json   # paste or redirect; do not cat into logs

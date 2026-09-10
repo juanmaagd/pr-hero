@@ -25,6 +25,12 @@ import summarizerPrompt from "../prompts/summarizer.md" with { type: "file" };
 import ciSetupWorkflow from "../skills/pr-hero-ci-setup/assets/workflow.yml" with {
   type: "file",
 };
+import ciSetupAdmissionRef from "../skills/pr-hero-ci-setup/references/ci-admission.md" with {
+  type: "file",
+};
+import ciSetupOpenCodeRef from "../skills/pr-hero-ci-setup/references/opencode-ci.md" with {
+  type: "file",
+};
 import ciSetupSkill from "../skills/pr-hero-ci-setup/SKILL.md" with {
   type: "file",
 };
@@ -54,4 +60,6 @@ export const TRIAGE_SKILL_FILES: Record<string, string> = {
 export const CI_SETUP_SKILL_FILES: Record<string, string> = {
   "SKILL.md": ciSetupSkill,
   "assets/workflow.yml": ciSetupWorkflow,
+  "references/ci-admission.md": ciSetupAdmissionRef,
+  "references/opencode-ci.md": ciSetupOpenCodeRef,
 };

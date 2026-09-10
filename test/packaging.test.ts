@@ -533,6 +533,31 @@ describe("Packaging & distribution configuration", () => {
     expect(assetContent).toBe(generateCiWorkflowTemplate());
   });
 
+  test("ci-setup skill points at the OpenCode operator procedure and that file exists", () => {
+    const skillPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "SKILL.md",
+    );
+    const refPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "references",
+      "opencode-ci.md",
+    );
+    expect(existsSync(skillPath)).toBe(true);
+    expect(existsSync(refPath)).toBe(true);
+    const skill = readFileSync(skillPath, "utf-8");
+    expect(skill).toContain("references/opencode-ci.md");
+    expect(skill).toContain("OPENCODE_AUTH_JSON");
+    expect(skill).toContain("PRHERO_ROUTING");
+    const ref = readFileSync(refPath, "utf-8");
+    expect(ref).toContain("modelSnapshot");
+    expect(ref).toContain("Do **not** create `OPENAI_API_KEY`");
+  });
+
   test(".agents/skills/pr-hero-ci-setup/assets/workflow.yml matches the skills workflow asset", () => {
     const skillsPath = path.join(
       rootDir,
