@@ -161,6 +161,23 @@ describe("envBillsMetered — the shared metered-credential signal (#177)", () =
   test("an empty env is not a metered signal", () => {
     expect(envBillsMetered({})).toBe(false);
   });
+
+  // #136 / opencode-ci: mixed `claude-code` subscription + OpenCode API-token
+  // must not stamp Claude usage via this function. The CI ceiling ORs file
+  // presence beside deriveCiBillingMode; this predicate stays Anthropic-env-only.
+  test("OpenCode credentials are not an envBillsMetered signal — Claude stamp stays Anthropic-env-only", () => {
+    expect(
+      envBillsMetered({
+        CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test",
+        OPENCODE_AUTH_JSON: '{"deepseek":{"type":"api","key":"sk-test-fake"}}',
+      }),
+    ).toBe(false);
+    expect(
+      envBillsMetered({
+        DEEPSEEK_API_KEY: "sk-test-fake",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("cash and notional cost stay separate", () => {

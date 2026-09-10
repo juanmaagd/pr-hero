@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CI_WORKFLOW_RELATIVE_PATH } from "./ci-setup";
+import { resolveOpenCodeAuthPath } from "./security/credential-broker";
 
 export type SystemTool = "git" | "claude" | "gh" | "codegraph";
 
@@ -261,7 +262,8 @@ export async function installSystemTool(
 // can happen in — see spec.md §4.1's two scenarios:
 //   - Inside GitHub Actions: are the required secrets present? Presence
 //     only, NEVER a value, a prefix, or a length — see CLAUDE.md's "Never
-//     leak secrets into generated output" rule.
+//     leak secrets into generated output" rule. Review auth is Anthropic
+//     env OR the OpenCode auth file at resolveOpenCodeAuthPath().
 //   - In a local repo: is a pr-hero workflow configured at all?
 // Deliberately does NOT verify the workflow file is git-committed (spec's
 // "present and committed" local scenario) — that needs a git call, and the
@@ -289,20 +291,23 @@ export function checkCiConfiguration(
   const env = options.env ?? process.env;
 
   if (options.isCi) {
+    const exists = options.exists ?? existsSync;
     const hasGithubToken = Boolean(env.GITHUB_TOKEN?.trim());
     const hasClaudeAuth =
       Boolean(env.ANTHROPIC_API_KEY?.trim()) ||
       Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
+    const hasOpenCodeAuth = exists(resolveOpenCodeAuthPath(env));
+    const hasReviewAuth = hasClaudeAuth || hasOpenCodeAuth;
 
     const missing: string[] = [];
     if (!hasGithubToken) missing.push("GITHUB_TOKEN");
-    if (!hasClaudeAuth) missing.push("ANTHROPIC_API_KEY");
+    if (!hasReviewAuth) missing.push("ANTHROPIC_API_KEY");
 
     if (missing.length === 0) {
       return {
         configured: true,
         message:
-          "Required CI secrets are present (GITHUB_TOKEN, Anthropic/Claude auth)",
+          "Required CI secrets are present (GITHUB_TOKEN, Anthropic/Claude or OpenCode auth)",
       };
     }
     return {

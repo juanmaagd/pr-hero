@@ -309,6 +309,7 @@ import {
   type RunnerAuthorityResolution,
   resolveRunnerAuthority,
 } from "./runner-authority";
+import { resolveOpenCodeAuthPath } from "./security/credential-broker";
 import {
   type ExcludedPath,
   effectiveDiffStat,
@@ -1918,7 +1919,11 @@ async function reviewPr(
   // `options.budgetUsd` would make it look configured.
   const ciBudgetCeiling = resolveCiBudgetCeiling({
     configured: options.budgetUsd,
-    billingMode: deriveCiBillingMode(process.env),
+    billingMode: deriveCiBillingMode(process.env, {
+      // File presence, not envBillsMetered: that predicate stamps Claude
+      // usage and must stay Anthropic-env-only.
+      openCodeAuthPresent: existsSync(resolveOpenCodeAuthPath()),
+    }),
   });
   // Spec 3.1: a silent disable is indistinguishable from a passing gate, so
   // an EXPLICIT `--budget-usd <= 0` warns even though it never skips a run.

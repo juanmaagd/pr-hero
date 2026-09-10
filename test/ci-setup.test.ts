@@ -20,6 +20,7 @@ import {
 import { runDoctor } from "../src/doctor";
 import { DEFAULT_PIPELINE_TIMEOUT_MS } from "../src/pipeline";
 import { parseArgs } from "../src/preflight";
+import { resolveOpenCodeAuthPath } from "../src/security/credential-broker";
 import { checkCiConfiguration } from "../src/system-tools";
 
 describe("generateCiWorkflowTemplate (pure)", () => {
@@ -417,6 +418,7 @@ describe("checkCiConfiguration (pure diagnostic, system-tools.ts)", () => {
     const status = checkCiConfiguration({
       isCi: true,
       env: { GITHUB_TOKEN: "ghs_realtoken12345" },
+      exists: () => false,
     });
     expect(status.configured).toBe(false);
     expect(status.message).toContain("ANTHROPIC_API_KEY");
@@ -424,10 +426,28 @@ describe("checkCiConfiguration (pure diagnostic, system-tools.ts)", () => {
   });
 
   test("GitHub Actions context: reports both secrets missing distinctly", () => {
-    const status = checkCiConfiguration({ isCi: true, env: {} });
+    const status = checkCiConfiguration({
+      isCi: true,
+      env: {},
+      exists: () => false,
+    });
     expect(status.configured).toBe(false);
     expect(status.message).toContain("GITHUB_TOKEN");
     expect(status.message).toContain("ANTHROPIC_API_KEY");
+  });
+
+  test("GitHub Actions context: OpenCode auth file satisfies review auth without Anthropic", () => {
+    const env = {
+      GITHUB_TOKEN: "ghs_realtoken",
+      XDG_DATA_HOME: "/xdg-data",
+    };
+    const authPath = resolveOpenCodeAuthPath(env);
+    const status = checkCiConfiguration({
+      isCi: true,
+      env,
+      exists: (p) => p === authPath,
+    });
+    expect(status.configured).toBe(true);
   });
 });
 
@@ -525,6 +545,27 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
           GITHUB_TOKEN: "ghs_realtoken",
           ANTHROPIC_API_KEY: "sk-ant-realkey",
         },
+      },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("healthy");
+  });
+
+  test("GitHub Actions context: healthy when GITHUB_TOKEN and OpenCode auth file are present", async () => {
+    const env = {
+      GITHUB_ACTIONS: "true",
+      GITHUB_TOKEN: "ghs_realtoken",
+      XDG_DATA_HOME: "/xdg-data",
+    };
+    const authPath = resolveOpenCodeAuthPath(env);
+    const report = await runDoctor({
+      cwd: "/repo",
+      home: "/home/user",
+      exists: (p) => p === authPath,
+      readFile: () => undefined,
+      checkToolsOptions: {
+        ...installedTools,
+        env,
       },
     });
     const ciCheck = report.checks.find((c) => c.name === "ci");
