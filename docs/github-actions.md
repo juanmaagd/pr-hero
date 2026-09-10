@@ -9,11 +9,13 @@ merge on its own findings.
 1. **Add one auth secret** (Settings → Secrets and variables → Actions → New repository secret):
    `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Pick one — never both blank. Leave OpenCode unset:
    that is today's Claude CI.
-2. **Add the workflow file.** Either run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your
-   repo, or copy this repository's own `.github/workflows/pr-hero.yml` verbatim — the two are guaranteed
-   byte-identical (`test/packaging.test.ts` asserts it). The generator already wires a credentials job
-   plus quoted `routing` / `opencode-auth` inputs; empty values are absent, so Claude-only repos keep
-   those lines.
+2. **Add the workflow file.** Run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your repo.
+   That writes the consumer template (`uses: juanmaagd/pr-hero@v1`). Do **not** copy this repository's
+   own `.github/workflows/pr-hero.yml`: that file is generated with `OWN_CI_WORKFLOW_OPTIONS` so this
+   repo can dogfood the checkout (`uses: ./` and `max-changed-lines: 1500`). `test/packaging.test.ts`
+   asserts each file against its own generator options; it does **not** assert the two files are
+   byte-identical. The consumer template already wires a credentials job plus quoted `routing` /
+   `opencode-auth` inputs; empty values are absent, so Claude-only repos keep those lines.
 3. **Open a pull request** from a branch in this repository (not a fork). pr-hero comments inline, posts
    a summary review, and writes a `$GITHUB_STEP_SUMMARY` block within a few minutes.
 4. **Verify readiness any time** with `pr-hero doctor` — it checks for the required secrets when run
