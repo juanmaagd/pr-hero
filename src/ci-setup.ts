@@ -17,8 +17,11 @@
 // committed file's bytes equal generateCiWorkflowTemplate()'s output exactly.
 
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { prheroLayout } from "./home-preflight";
+import { parseRoutingConfig } from "./preflight";
+import { resolveOpenCodeAuthPath } from "./security/credential-broker";
 
 export const CI_WORKFLOW_RELATIVE_PATH = path.join(
   ".github",
@@ -157,7 +160,7 @@ jobs:
     steps:
       - id: detect
         env:
-          HAS_CREDS: \${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          HAS_CREDS: \${{ secrets.ANTHROPIC_API_KEY != '' || secrets.CLAUDE_CODE_OAUTH_TOKEN != '' || secrets.OPENCODE_AUTH_JSON != '' }}
         run: echo "has_creds=\${HAS_CREDS}" >> "$GITHUB_OUTPUT"
 
       # This notice lives HERE, not in the review job, because the review job
@@ -169,7 +172,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           steps.detect.outputs.has_creds == 'false'
         run: |
-          MSG="pr-hero review SKIPPED: no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN secret is set, so this PR was not reviewed."
+          MSG="pr-hero review SKIPPED: no ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or OPENCODE_AUTH_JSON secret is set, so this PR was not reviewed."
           echo "::notice title=pr-hero review skipped::\${MSG}"
           {
             echo "### :warning: pr-hero did not review this PR"
@@ -183,6 +186,8 @@ jobs:
             echo "gh secret set CLAUDE_CODE_OAUTH_TOKEN"
             echo "# ...or, for pay-as-you-go billing:"
             echo "gh secret set ANTHROPIC_API_KEY"
+            echo "# ...or, for OpenCode:"
+            echo "gh secret set OPENCODE_AUTH_JSON"
             echo '\`\`\`'
             echo ""
             echo 'Adding a secret does not re-run past workflows — use \`gh run rerun\` on this run.'
@@ -229,12 +234,12 @@ jobs:
         uses: ${actionRef}
         with:
           github-token: \${{ secrets.GITHUB_TOKEN }}
-          # Provide ONE of the two secrets below (never leave both blank).
-          # BOTH inputs are wired unconditionally: an unset secret expands to
-          # the empty string, which the action treats as absent, so leaving
-          # the one you do not use in place costs nothing. Deleting the line
-          # for the secret you DID set is what breaks — the credential never
-          # reaches the action, and it fails to authenticate silently.
+          # Provide a Claude credential and/or OpenCode auth (never leave every
+          # credential blank). Inputs are wired unconditionally: an unset secret
+          # or var expands to empty, which the action treats as absent, so
+          # leaving the one you do not use in place costs nothing. Deleting the
+          # line for the secret you DID set is what breaks — the credential
+          # never reaches the action, and it fails to authenticate silently.
           #   ANTHROPIC_API_KEY       — pay-as-you-go key (billed per token via Anthropic Console), or
           #   CLAUDE_CODE_OAUTH_TOKEN — from \`claude setup-token\`: a long-lived
           #     (~1 year) token that draws on your Claude subscription at no
@@ -243,8 +248,13 @@ jobs:
           #     kept alive by a refresh token CI does not have, so pasting that
           #     one here yields a secret that works for a day and then breaks
           #     reviews with no signal.
+          #   OPENCODE_AUTH_JSON      — whole OpenCode auth.json store
+          #   vars.PRHERO_ROUTING     — person-layer routing JSON; quoted so an
+          #     unset var is the empty string rather than broken YAML
           anthropic-api-key: \${{ secrets.ANTHROPIC_API_KEY }}
-          claude-token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}${sizeGateLine}${budgetLine}
+          claude-token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          routing: "\${{ vars.PRHERO_ROUTING }}"
+          opencode-auth: \${{ secrets.OPENCODE_AUTH_JSON }}${sizeGateLine}${budgetLine}
 
       # Without this step the triage half of the review loop has no input.
       # \`pr-hero triage reply --pr <n> --from <run-dir> --finding F00N\` is the
@@ -346,4 +356,92 @@ export async function runCiSetup(
     status: alreadyExisted ? "overwritten" : "created",
     path: targetPath,
   };
+}
+
+export interface MaterializeCiOpenCodeDataOptions {
+  routing?: string;
+  opencodeAuth?: string;
+  home?: string;
+  env?: Readonly<Record<string, string | undefined>>;
+}
+
+// CI data plane: person-layer routing + 0600 auth.json. HOME must be a real
+// directory — empty/unset fails loud with no cwd fallback, because falling
+// back would write routing into the checkout (.prhero/config.json), which
+// the repo parser rejects. Never log the auth blob; never inject readerFn.
+export async function materializeCiOpenCodeData(
+  options: MaterializeCiOpenCodeDataOptions = {},
+): Promise<void> {
+  const env = options.env ?? process.env;
+  const home = options.home ?? env.HOME ?? "";
+  if (home.trim() === "") {
+    throw new Error(
+      "HOME is empty or unset; refusing to materialize OpenCode CI data",
+    );
+  }
+
+  const routingRaw = options.routing ?? env.ROUTING_INPUT ?? "";
+  const authRaw = options.opencodeAuth ?? env.OPENCODE_AUTH_INPUT ?? "";
+
+  let routingConfig: ReturnType<typeof parseRoutingConfig> | null = null;
+  if (routingRaw.trim() !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(routingRaw);
+    } catch (error) {
+      throw new Error(
+        `CI routing input is not valid JSON: ${(error as Error).message}`,
+      );
+    }
+    routingConfig = parseRoutingConfig(parsed, "~/.prhero/config.json");
+    if (routingConfig === undefined) {
+      throw new Error("CI routing input must be a JSON object");
+    }
+  }
+
+  let authBody: string | undefined;
+  if (authRaw.trim() !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(authRaw);
+    } catch {
+      throw new Error("CI opencode-auth is not valid JSON");
+    }
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error("CI opencode-auth must be a JSON object");
+    }
+    authBody = authRaw;
+  }
+
+  if (routingConfig !== null) {
+    const layout = prheroLayout(home);
+    await mkdir(layout.dir, { recursive: true });
+    await writeFile(
+      layout.reviewConfigPath,
+      `${JSON.stringify({ routing: routingConfig }, null, 2)}\n`,
+    );
+  }
+
+  if (authBody !== undefined) {
+    const authPath = resolveOpenCodeAuthPath(env, home);
+    await mkdir(path.dirname(authPath), { recursive: true });
+    await writeFile(authPath, authBody, { mode: 0o600 });
+    await chmod(authPath, 0o600);
+  }
+}
+
+if (import.meta.main) {
+  try {
+    await materializeCiOpenCodeData();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    process.stderr.write(
+      `pr-hero: failed to materialize OpenCode CI data: ${message}\n`,
+    );
+    process.exit(1);
+  }
 }

@@ -16,6 +16,13 @@ inputs:
   claude-token:
     description: 'Claude Code OAuth token. Omit if anthropic-api-key is supplied.'
     required: false
+  routing:
+    description: 'Person-layer routing JSON (the config.routing object). Unset or empty leaves Claude-default CI. Written to $HOME/.prhero/config.json, never the repo file.'
+    required: false
+    default: ''
+  opencode-auth:
+    description: 'Whole OpenCode auth.json store. Written 0600 at the OpenCode auth path. Never logged.'
+    required: false
   pr-number:
     description: 'Pull request number. Defaults to the triggering pull_request/issue_comment event.'
     required: false
@@ -96,6 +103,23 @@ runs:
         if ! command -v claude >/dev/null 2>&1; then
           npm install -g @anthropic-ai/claude-code
         fi
+
+    - name: Materialize OpenCode CI data
+      shell: bash
+      env:
+        ROUTING_INPUT: ${{ inputs.routing }}
+        OPENCODE_AUTH_INPUT: ${{ inputs.opencode-auth }}
+      run: bun "${{ github.action_path }}/src/ci-setup.ts"
+
+    # Pin 1.18.23 as its own step so GITHUB_PATH updates later steps only
+    # (install ≠ Run pr-hero). Never unpinned. Digest verify of the official
+    # installer is named, not built.
+    - name: Install OpenCode CLI
+      if: ${{ inputs.opencode-auth != '' || contains(inputs.routing, 'opencode') }}
+      shell: bash
+      run: |
+        curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.23
+        echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
     - name: Run pr-hero
       id: run-pr-hero
