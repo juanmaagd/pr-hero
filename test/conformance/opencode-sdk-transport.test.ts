@@ -1259,3 +1259,205 @@ describe("OpenCodeSdkTransport resolved tool map diagnostics (#122)", () => {
     expect(outcome.stderrTail).not.toContain("resolved tool map");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Unit 1: OA1a actual /v2 wire format & OA1b bounded version admission policy
+// ---------------------------------------------------------------------------
+
+function makeV2MockFetch() {
+  let requestedUrl = "";
+  let requestMethod = "";
+  let requestBody: Record<string, unknown> = {};
+  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr =
+      input instanceof URL
+        ? input.toString()
+        : typeof input === "string"
+          ? input
+          : input.url;
+    const parsedPath = new URL(urlStr, "http://127.0.0.1:4096").pathname;
+    const method =
+      (typeof init?.method === "string" ? init.method : undefined) ??
+      (typeof input === "object" && input !== null && "method" in input
+        ? (input as Request).method
+        : "GET");
+    if (parsedPath === "/session" && method.toUpperCase() === "POST") {
+      return new Response(JSON.stringify({ id: "ses-adapter-1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (urlStr.includes("/mcp") || urlStr.includes("/tool/ids")) {
+      const data = urlStr.includes("/tool/ids") ? ["read", "bash"] : {};
+      return new Response(JSON.stringify(data), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    requestedUrl = urlStr;
+    requestMethod =
+      init?.method ??
+      (typeof input === "object" && input !== null && "method" in input
+        ? (input as Request).method
+        : "GET");
+    const text =
+      typeof init?.body === "string"
+        ? init.body
+        : typeof input === "object" &&
+            input !== null &&
+            "text" in input &&
+            typeof (input as Request).text === "function"
+          ? await (input as Request).text()
+          : "{}";
+    requestBody = JSON.parse(text) as Record<string, unknown>;
+    return new Response(JSON.stringify({ id: "msg-1" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof globalThis.fetch;
+  return {
+    fetch,
+    getUrl: () => requestedUrl,
+    getMethod: () => requestMethod,
+    getBody: () => requestBody,
+  };
+}
+
+describe("OpenCode SDK /v2 session wire conformance (OA1a)", () => {
+  test("submitting session, directory, model and variant through @opencode-ai/sdk/v2 results in /session/:sessionID/message?directory=... with top-level variant and model", async () => {
+    const { createOpencodeClient } = await import("@opencode-ai/sdk/v2");
+    const mock = makeV2MockFetch();
+    const actualClient = createOpencodeClient({
+      baseUrl: "http://127.0.0.1:4096",
+      fetch: mock.fetch,
+    });
+
+    await actualClient.session.prompt({
+      sessionID: "ses-u1-42",
+      directory: "/workspace/project-root",
+      model: { providerID: "openai", modelID: "gpt-4o" },
+      variant: "high",
+      system: "system prompt here",
+      tools: { read: true, bash: false },
+      parts: [{ type: "text", text: "hello review" }],
+    });
+
+    const parsed = new URL(mock.getUrl());
+    expect(parsed.pathname).toBe("/session/ses-u1-42/message");
+    expect(parsed.pathname).not.toContain("/api");
+    expect(parsed.searchParams.get("directory")).toBe(
+      "/workspace/project-root",
+    );
+    expect(mock.getMethod()).toBe("POST");
+    expect(mock.getBody().model).toEqual({
+      providerID: "openai",
+      modelID: "gpt-4o",
+    });
+    expect(mock.getBody().variant).toBe("high");
+    expect(
+      (mock.getBody().model as Record<string, unknown> | undefined)?.variant,
+    ).toBeUndefined();
+    expect(mock.getBody().system).toBe("system prompt here");
+  });
+
+  test("createOpenCodeClient submits sessionID, directory, model and variant with flattened parameters and top-level variant", async () => {
+    const { createOpenCodeClient } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const sdkModule = await import("@opencode-ai/sdk/v2");
+    const mock = makeV2MockFetch();
+
+    const client = createOpenCodeClient({
+      model: { providerID: "openai", modelID: "gpt-4o", variant: "high" },
+      variant: "high",
+      loadSdk: async () => ({
+        createOpencodeClient: (cfg) =>
+          sdkModule.createOpencodeClient({
+            ...cfg,
+            fetch: mock.fetch,
+          }) as never,
+      }),
+      launchServer: async () => ({
+        url: "http://127.0.0.1:4096",
+        pid: 12345,
+        close: async () => {},
+      }),
+      readSystemPrompt: async () => "SYSTEM PROMPT",
+    });
+
+    const session = await client.createSession({
+      cwd: "/workspace/adapter-cwd",
+      systemPromptPath: "/tmp/sys.md",
+      tools: ["Read"],
+      userPrompt: "run review",
+    });
+
+    expect(session.id).toBe("ses-adapter-1");
+    for (let i = 0; i < 20 && !mock.getUrl(); i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const parsed = new URL(mock.getUrl());
+    expect(parsed.pathname).toBe("/session/ses-adapter-1/message");
+    expect(parsed.pathname).not.toContain("/api");
+    expect(parsed.searchParams.get("directory")).toBe("/workspace/adapter-cwd");
+    expect(mock.getBody().model).toEqual({
+      providerID: "openai",
+      modelID: "gpt-4o",
+    });
+    expect(mock.getBody().variant).toBe("high");
+    expect(
+      (mock.getBody().model as Record<string, unknown> | undefined)?.variant,
+    ).toBeUndefined();
+  });
+});
+
+describe("OpenCode bounded version admission policy (OA1b)", () => {
+  test("admits exact SDK 1.18.25 and server 1.18.30 pair", async () => {
+    const {
+      admitOpenCodeVersionPair,
+      SUPPORTED_OPENCODE_SDK_VERSION,
+      SUPPORTED_OPENCODE_SERVER_VERSION,
+    } = await import("../../src/transport-registry");
+    const admitted = admitOpenCodeVersionPair({
+      sdkVersion: "1.18.25",
+      serverVersion: "1.18.30",
+    });
+    expect(admitted).toEqual({
+      sdkVersion: "1.18.25",
+      serverVersion: "1.18.30",
+    });
+    expect(SUPPORTED_OPENCODE_SDK_VERSION).toBe("1.18.25");
+    expect(SUPPORTED_OPENCODE_SERVER_VERSION).toBe("1.18.30");
+  });
+
+  test("rejects unsupported, malformed, or missing versions explicitly without auto-upgrade", async () => {
+    const { admitOpenCodeVersionPair, OpenCodeVersionAdmissionError } =
+      await import("../../src/transport-registry");
+    const unsupp = /Unsupported OpenCode version pair/;
+    const miss = /malformed or missing/;
+    const rejectedCases: ReadonlyArray<
+      [
+        string | undefined,
+        string | undefined,
+        RegExp | typeof OpenCodeVersionAdmissionError,
+      ]
+    > = [
+      ["1.18.23", "1.18.30", OpenCodeVersionAdmissionError],
+      ["1.18.26", "1.18.30", unsupp],
+      ["1.18.25", "1.18.23", OpenCodeVersionAdmissionError],
+      ["1.18.25", "1.18.31", unsupp],
+      ["1.18", "1.18.30", unsupp],
+      ["^1.18.25", "1.18.30", unsupp],
+      ["1.18.25", "latest", unsupp],
+      ["", "1.18.30", miss],
+      [undefined, "1.18.30", miss],
+      ["1.18.25", undefined, miss],
+    ];
+    for (const [sdk, server, err] of rejectedCases) {
+      expect(() =>
+        admitOpenCodeVersionPair({ sdkVersion: sdk, serverVersion: server }),
+      ).toThrow(err as unknown as RegExp);
+    }
+  });
+});

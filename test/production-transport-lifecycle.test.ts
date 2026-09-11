@@ -509,9 +509,11 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
           session: {
             create: async () => ({ data: { id: "oc-sess-1" } }),
             prompt: async (options: {
-              body: { model: { providerID: string; modelID: string } };
+              model?: { providerID: string; modelID: string };
+              body?: { model: { providerID: string; modelID: string } };
             }) => {
-              promptModels.push(options.body.model);
+              const model = options.model ?? options.body?.model;
+              if (model) promptModels.push(model);
               return { data: {} };
             },
             messages: async () => ({ data: {} }),

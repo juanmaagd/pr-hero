@@ -44,10 +44,69 @@ import {
 // have noticed the local interface named a factory the SDK does not export.
 async function loadOpenCodeSdk(): Promise<OpenCodeSdkLike> {
   const dynamicImport = new Function("specifier", "return import(specifier)");
-  return assertOpenCodeSdk(await dynamicImport("@opencode-ai/sdk"));
+  let sdkPackage: { version?: string } | undefined;
+  try {
+    sdkPackage = await dynamicImport("@opencode-ai/sdk/package.json");
+  } catch {
+    // If package metadata cannot be read directly, module export assertion guards
+  }
+  const installedVersion = sdkPackage?.version;
+  if (
+    installedVersion !== undefined &&
+    installedVersion !== SUPPORTED_OPENCODE_SDK_VERSION
+  ) {
+    throw new OpenCodeVersionAdmissionError(
+      `Unsupported OpenCode SDK version "${installedVersion}". Expected exact version "${SUPPORTED_OPENCODE_SDK_VERSION}".`,
+    );
+  }
+  return assertOpenCodeSdk(await dynamicImport("@opencode-ai/sdk/v2"));
 }
 
 export class RouteAdmissionError extends Error {}
+
+export const SUPPORTED_OPENCODE_SDK_VERSION = "1.18.25" as const;
+export const SUPPORTED_OPENCODE_SERVER_VERSION = "1.18.30" as const;
+
+export class OpenCodeVersionAdmissionError extends RouteAdmissionError {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenCodeVersionAdmissionError";
+  }
+}
+
+export function admitOpenCodeVersionPair(pair: {
+  readonly sdkVersion?: unknown;
+  readonly serverVersion?: unknown;
+}): {
+  readonly sdkVersion: typeof SUPPORTED_OPENCODE_SDK_VERSION;
+  readonly serverVersion: typeof SUPPORTED_OPENCODE_SERVER_VERSION;
+} {
+  const { sdkVersion, serverVersion } = pair;
+  if (typeof sdkVersion !== "string" || sdkVersion.trim() === "") {
+    throw new OpenCodeVersionAdmissionError(
+      `OpenCode SDK version is malformed or missing (got ${JSON.stringify(sdkVersion)}). Required exact version is "${SUPPORTED_OPENCODE_SDK_VERSION}".`,
+    );
+  }
+  if (typeof serverVersion !== "string" || serverVersion.trim() === "") {
+    throw new OpenCodeVersionAdmissionError(
+      `OpenCode server version is malformed or missing (got ${JSON.stringify(serverVersion)}). Required exact version is "${SUPPORTED_OPENCODE_SERVER_VERSION}".`,
+    );
+  }
+  if (
+    sdkVersion !== SUPPORTED_OPENCODE_SDK_VERSION ||
+    serverVersion !== SUPPORTED_OPENCODE_SERVER_VERSION
+  ) {
+    throw new OpenCodeVersionAdmissionError(
+      `Unsupported OpenCode version pair: SDK "${sdkVersion}" and server "${serverVersion}". ` +
+        `Only SDK "${SUPPORTED_OPENCODE_SDK_VERSION}" and server "${SUPPORTED_OPENCODE_SERVER_VERSION}" are admitted. ` +
+        "Auto-upgrade, fallback, and version inference are denied.",
+    );
+  }
+  return {
+    sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
+    serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
+  };
+}
 
 export class OpenCodeProductionGatedError extends RouteAdmissionError {
   readonly missingPrerequisites: readonly string[];
@@ -167,6 +226,9 @@ export interface TransportFactoryOptions {
   readonly mode?: "production" | "conformance";
   readonly routeFingerprint?: string;
   readonly route?: ResolvedModelRoute;
+  readonly sdkVersion?: string;
+  readonly serverVersion?: string;
+  readonly openCodeServerVersion?: string;
   [key: string]: unknown;
 }
 
@@ -250,6 +312,21 @@ export class DefaultTransportRegistry implements TransportRegistry {
         }
       }
 
+      // Check bounded version admission policy (OA1b)
+      if (
+        merged.sdkVersion !== undefined ||
+        merged.serverVersion !== undefined ||
+        merged.openCodeServerVersion !== undefined
+      ) {
+        admitOpenCodeVersionPair({
+          sdkVersion: merged.sdkVersion ?? SUPPORTED_OPENCODE_SDK_VERSION,
+          serverVersion:
+            merged.serverVersion ??
+            merged.openCodeServerVersion ??
+            SUPPORTED_OPENCODE_SERVER_VERSION,
+        });
+      }
+
       // 2026-09-02: the billing mode stamped on every usage record this
       // transport emits, derived from the credential kind the authority
       // resolved.
@@ -312,11 +389,17 @@ export class DefaultTransportRegistry implements TransportRegistry {
           ? {
               providerID: route.provider,
               modelID: route.modelSnapshot,
+              ...(route.modelVariant !== undefined
+                ? { variant: route.modelVariant }
+                : {}),
             }
           : {
               providerID: "openai",
               modelID: "gpt-4o",
             },
+        ...(route?.modelVariant !== undefined
+          ? { variant: route.modelVariant }
+          : {}),
         loadSdk: merged.loadSdk ?? loadOpenCodeSdk,
         launchServer: merged.launchServer ?? openCodeLaunchServerFor(merged),
         readSystemPrompt:
