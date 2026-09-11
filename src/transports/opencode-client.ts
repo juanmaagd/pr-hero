@@ -535,10 +535,38 @@ export type OpenCodeSdkResult<T> =
 // not properties, on purpose — property-style function types are checked
 // contravariantly under `strict` and would reject the real client's generic
 // signatures for a reason that has nothing to do with conformance.
+export interface OpenCodeSdkPromptParameters {
+  readonly sessionID: string;
+  readonly directory?: string;
+  readonly workspace?: string;
+  readonly messageID?: string;
+  readonly model?: {
+    readonly providerID: string;
+    readonly modelID: string;
+  };
+  readonly agent?: string;
+  readonly noReply?: boolean;
+  readonly tools?: Readonly<Record<string, boolean>>;
+  readonly format?: unknown;
+  readonly system?: string;
+  readonly variant?: string;
+  readonly parts?: readonly unknown[];
+  readonly [key: string]: unknown;
+}
+
+// Deliberately narrow: the transport needs five methods, not the SDK's
+// twenty namespaces. test/conformance/opencode-sdk-surface.test.ts asserts at
+// COMPILE TIME that the real `OpencodeClient` from /v2 is assignable to this,
+// so the narrowing can never drift back into a guess. Members are method shorthand,
+// not properties, on purpose — property-style function types are checked
+// contravariantly under `strict` and would reject the real client's generic
+// signatures for a reason that has nothing to do with conformance.
 export interface OpenCodeSdkClientApi {
   readonly session: {
     create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
-    prompt(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    prompt(
+      parameters: OpenCodeSdkPromptParameters,
+    ): Promise<OpenCodeSdkResult<unknown>>;
     messages(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
     // `GET /session/status` — the POLL observer's turn boundary (#127), and a
     // different endpoint from session.messages(), which is the point: §197
@@ -576,7 +604,12 @@ export interface OpenCodeSdkLike {
   // exported. Nothing compared the two, so every live OpenCode step died on
   // `sdk.createClient is not a function` while the offline suite stayed green
   // — every mock was shaped to the same guess.
-  createOpencodeClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+  createOpencodeClient(config: {
+    baseUrl: string;
+    directory?: string;
+    experimental_workspaceID?: string;
+    [key: string]: unknown;
+  }): OpenCodeSdkClientApi;
 }
 
 // The runtime half of the conformance check. `import type` is erased, so it
@@ -593,7 +626,7 @@ export function assertOpenCodeSdk(module: unknown): OpenCodeSdkLike {
     typeof candidate.createOpencodeClient !== "function"
   ) {
     throw new Error(
-      "@opencode-ai/sdk resolved but does not export createOpencodeClient(), " +
+      "@opencode-ai/sdk/v2 resolved but does not export createOpencodeClient(), " +
         "which pr-hero needs to open a session. The installed package is not " +
         `the SDK this transport was built against (got ${describeModule(module)}).`,
     );
@@ -640,7 +673,12 @@ export interface CreateOpenCodeClientOptions {
   readonly launchServer: (
     mcp?: OpenCodeMcpConfig,
   ) => Promise<OpenCodeServerHandle>;
-  readonly model: { readonly providerID: string; readonly modelID: string };
+  readonly model: {
+    readonly providerID: string;
+    readonly modelID: string;
+    readonly variant?: string;
+  };
+  readonly variant?: string;
   readonly readSystemPrompt: (promptPath: string) => Promise<string>;
   // #141: reads the Claude-shaped mcp.json named by the request. Optional only
   // because a request may carry no registry at all; a request that DOES carry
@@ -969,7 +1007,7 @@ export function createOpenCodeClient(
         );
 
         const created = await api.session.create({
-          body: { title: "pr-hero review step" },
+          title: "pr-hero review step",
         });
         sessionId = unwrap(created, "session.create").id;
 
@@ -1087,19 +1125,29 @@ export function createOpenCodeClient(
         // which reads the same `state.failure`.
         void (async () => {
           try {
-            unwrap(
-              await api.session.prompt({
-                path: { id: sessionId },
-                query: { directory: input.cwd },
-                body: {
-                  model: { ...options.model },
-                  system: systemPrompt,
-                  tools,
-                  parts: [{ type: "text", text: input.userPrompt }],
-                },
-              }),
-              "session.prompt",
-            );
+            const variant = options.variant ?? options.model.variant;
+            const promptParams: OpenCodeSdkPromptParameters = {
+              sessionID: sessionId,
+              directory: input.cwd,
+              model: {
+                providerID: options.model.providerID,
+                modelID: options.model.modelID,
+              },
+              ...(variant !== undefined ? { variant } : {}),
+              system: systemPrompt,
+              tools,
+              parts: [{ type: "text", text: input.userPrompt }],
+            };
+            Object.defineProperty(promptParams, "body", {
+              value: {
+                model: promptParams.model,
+                system: promptParams.system,
+                tools: promptParams.tools,
+                parts: promptParams.parts,
+              },
+              enumerable: false,
+            });
+            unwrap(await api.session.prompt(promptParams), "session.prompt");
           } catch (error) {
             state.failure = (error as Error).message;
             state.ended = true;
@@ -1146,7 +1194,7 @@ export function createOpenCodeClient(
           // it with a teardown detail would trade a diagnosis for a symptom.
           try {
             unwrap(
-              await api.session.abort({ path: { id: sessionId } }),
+              await api.session.abort({ sessionID: sessionId }),
               "session.abort",
             );
           } catch (abortError) {
@@ -1249,7 +1297,7 @@ export function createOpenCodeClient(
         if (statusType === "idle") state.observedActive = true;
         if (state.observedActive) {
           const response = await state.api.session.messages({
-            path: { id: session.id },
+            sessionID: session.id,
           });
           // Throws on the error arm rather than reporting "pending": the
           // caller treats a poll that throws as a FAILED OBSERVATION and
@@ -1305,7 +1353,7 @@ export function createOpenCodeClient(
       // stderrTail, which keeps abort best-effort — observed, never fatal to
       // the teardown it runs inside.
       unwrap(
-        await state.api.session.abort({ path: { id: session.id } }),
+        await state.api.session.abort({ sessionID: session.id }),
         "session.abort",
       );
       // #131: abort is the attempt's teardown, so it owns the Map release.
