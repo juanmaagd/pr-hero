@@ -217,6 +217,8 @@ export interface OpenCodeTurnState {
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   readonly usage: Map<string, StepUsage>;
+  readonly evictedUsageIds: Set<string>;
+  usageCapped: boolean;
   carriedUsage: StepUsage;
   lastProof?: ProviderTerminalProof;
   boundaryReported: boolean;
@@ -250,6 +252,8 @@ export function createTurnState(
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     usage: new Map(),
+    evictedUsageIds: new Set(),
+    usageCapped: false,
     carriedUsage: {},
     boundaryReported: false,
   };
@@ -361,6 +365,10 @@ function rememberUsage(
   messageId: string,
   usage: StepUsage,
 ): void {
+  if (state.evictedUsageIds.has(messageId)) {
+    state.usageCapped = true;
+    return;
+  }
   state.usage.set(messageId, usage);
   while (state.usage.size > MAX_TRACKED_MESSAGES) {
     const oldest = state.usage.keys().next();
@@ -369,6 +377,8 @@ function rememberUsage(
     state.usage.delete(oldest.value);
     if (evicted !== undefined) {
       state.carriedUsage = addUsage(state.carriedUsage, evicted);
+      rememberId(state.evictedUsageIds, oldest.value, MAX_TRACKED_MESSAGES);
+      state.usageCapped = true;
     }
   }
 }
@@ -641,6 +651,22 @@ export function reconcileMessages(
         if (isToolCalls) msgDetail.hasToolCalls = true;
       }
 
+      const tokens = asRecord(info.tokens);
+      const inputTokens = asNumber(tokens?.input);
+      const outputTokens = asNumber(tokens?.output);
+      const costUsd = asNumber(info.cost);
+      if (
+        inputTokens !== undefined ||
+        outputTokens !== undefined ||
+        costUsd !== undefined
+      ) {
+        rememberUsage(state, id, {
+          ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(outputTokens !== undefined ? { outputTokens } : {}),
+          ...(costUsd !== undefined ? { costUsd } : {}),
+        });
+      }
+
       const parts = Array.isArray(itemRec?.parts)
         ? (itemRec?.parts as unknown[])
         : Array.isArray(info.content)
@@ -873,7 +899,13 @@ export function mapOpenCodeEvents(
           ...(outputTokens !== undefined ? { outputTokens } : {}),
           ...(costUsd !== undefined ? { costUsd } : {}),
         });
-        out.push({ kind: "usage", mode: "snapshot", ...turnUsage(state) });
+        out.push({
+          kind: "usage",
+          id,
+          mode: "snapshot",
+          ...(state.usageCapped ? { incomplete: true } : {}),
+          ...turnUsage(state),
+        });
       }
 
       const proof = terminalProofFromAssistant(info, state);
