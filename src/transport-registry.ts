@@ -371,14 +371,22 @@ export class DefaultTransportRegistry implements TransportRegistry {
             ? "metered"
             : "subscription";
 
+      const route = merged.route;
+      const admissionIdentity = {
+        executable: "opencode",
+        provider: route?.provider ?? "opencode",
+      };
+      const defaultRoute: ResolvedModelRoute | undefined = route;
+
       if (merged.openCodeClient) {
         return new OpenCodeSdkTransport({
           client: merged.openCodeClient,
           billingMode: usageBillingMode,
+          admissionIdentity,
+          defaultRoute,
         });
       }
 
-      const route = merged.route;
       // Resolved ONCE per client, before the options object is built: the
       // lookup hits the filesystem, and a spread that called it twice would
       // pay for it twice for one value.
@@ -426,6 +434,8 @@ export class DefaultTransportRegistry implements TransportRegistry {
       return new OpenCodeSdkTransport({
         client,
         billingMode: usageBillingMode,
+        admissionIdentity,
+        defaultRoute,
       });
     });
   }

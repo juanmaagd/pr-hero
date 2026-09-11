@@ -553,6 +553,84 @@ export class StepExecutionHarness implements StepRunner {
       }
     }
 
+    // Generic execution facts resolution & validation
+    const admissionIdentity =
+      transport.admissionIdentity ??
+      (transport.backend === "claude-code"
+        ? { executable: "claude", provider: "anthropic" }
+        : this.isTestFake
+          ? {
+              executable:
+                transport.backend === "opencode" ? "opencode" : "claude",
+              provider:
+                transport.backend === "opencode" ? "opencode" : "anthropic",
+            }
+          : undefined);
+
+    const cancellationSemantics =
+      transport.cancellationSemantics ??
+      (transport.backend === "claude-code"
+        ? "process-exit"
+        : this.isTestFake
+          ? transport.backend === "opencode"
+            ? "provider-proof"
+            : "process-exit"
+          : undefined);
+
+    if (
+      admissionIdentity === undefined ||
+      cancellationSemantics === undefined
+    ) {
+      const missing = [
+        ...(admissionIdentity === undefined ? ["admissionIdentity"] : []),
+        ...(cancellationSemantics === undefined
+          ? ["cancellationSemantics"]
+          : []),
+      ].join(", ");
+      this.onAuthEvent?.({
+        kind: "executable",
+        status: "denied",
+        reason: `Missing required generic execution facts for backend "${transport.backend}" (${missing})`,
+      });
+      return {
+        name: step.name,
+        status: "failed",
+        denialCode: "executable_not_approved",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: `Missing required generic execution facts for backend "${transport.backend}" (${missing})`,
+        resultText: "",
+      };
+    }
+
+    // Provider mismatch / credential isolation check:
+    // When step.route specifies a provider, it must match the transport's configured provider,
+    // unless transport has a generic opencode provider that matches opencode routes.
+    if (
+      step.route?.provider !== undefined &&
+      admissionIdentity.provider !== undefined &&
+      step.route.provider !== admissionIdentity.provider &&
+      !(
+        admissionIdentity.provider === "opencode" &&
+        step.route.backend === "opencode"
+      )
+    ) {
+      this.onAuthEvent?.({
+        kind: "executable",
+        status: "denied",
+        reason: `Provider mismatch: step specifies provider "${step.route.provider}" but transport is configured for "${admissionIdentity.provider}"`,
+      });
+      return {
+        name: step.name,
+        status: "failed",
+        denialCode: "executable_not_approved",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: `Provider mismatch: step specifies provider "${step.route.provider}" but transport is configured for "${admissionIdentity.provider}"`,
+        resultText: "",
+      };
+    }
+
     // 1. Workspace authorization
     if (this.workspaceRoot !== undefined) {
       const workspaceBroker = new WorkspaceReadBroker({
@@ -589,9 +667,7 @@ export class StepExecutionHarness implements StepRunner {
     let verifiedBinaryPath: string;
 
     if (this.allowlist !== undefined) {
-      const candidate =
-        this.binaryPath ??
-        (transport.backend === "opencode" ? "opencode" : "claude");
+      const candidate = this.binaryPath ?? admissionIdentity.executable;
       const execResult = await verifyExecutableAuthority({
         candidatePath: candidate,
         allowlist: this.allowlist,
@@ -618,9 +694,7 @@ export class StepExecutionHarness implements StepRunner {
     } else if (this.isTestFake) {
       // Offline unit test runner with fake spawn
       this.onAuthEvent?.({ kind: "executable", status: "approved" });
-      verifiedBinaryPath =
-        this.binaryPath ??
-        (transport.backend === "opencode" ? "opencode" : "claude");
+      verifiedBinaryPath = this.binaryPath ?? admissionIdentity.executable;
     } else {
       // Production without configured allowlist -> fail closed
       this.onAuthEvent?.({
@@ -700,6 +774,7 @@ export class StepExecutionHarness implements StepRunner {
         childEnv: this.buildChildEnv(projection),
         projection,
         transport,
+        admissionIdentity,
       });
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
@@ -1007,28 +1082,38 @@ export class StepExecutionHarness implements StepRunner {
 
         const transportTerminal = settlement.terminal;
         let receipt: SettlementReceipt;
+        const cancellationSemantics =
+          transport.cancellationSemantics ??
+          (transport.backend === "claude-code"
+            ? "process-exit"
+            : this.isTestFake
+              ? transport.backend === "opencode"
+                ? "provider-proof"
+                : "process-exit"
+              : undefined);
+        const isProviderProof = cancellationSemantics === "provider-proof";
+
         if (
           transportTerminal !== undefined &&
-          transportTerminal.origin !== "harness"
+          transportTerminal.origin !== "harness" &&
+          (!isProviderProof || transportTerminal.proof !== undefined)
         ) {
           receipt = finalize(() =>
             settlement.receipt("failed", {
-              confirmation: transportTerminal.proof
-                ? "process_group_exited"
-                : "sdk_abort_confirmed",
-              processGroupAlive: "unknown",
+              confirmation:
+                cancellationSemantics === "process-exit"
+                  ? "process_group_exited"
+                  : "sdk_abort_confirmed",
+              processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
               remoteStatus: "failed",
             }),
           );
         } else {
           settlement.acceptTerminal("harness", "failed");
-          const isSdkBackedTransport = transport.backend !== "claude-code";
           receipt = finalize(() =>
             synthesizeUnconfirmed(settlement, {
-              processGroupAlive: isSdkBackedTransport
-                ? "not_applicable"
-                : "unknown",
-              outcome: isSdkBackedTransport
+              processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
+              outcome: isProviderProof
                 ? "local_fenced_remote_unconfirmed"
                 : undefined,
               warning: `Step timed out after ${harnessWatchdogMs}ms (harness-owned watchdog)`,
@@ -1154,16 +1239,29 @@ export class StepExecutionHarness implements StepRunner {
       // confirmed within grace; otherwise §5.3 steps 5–6 apply.
       const transportTerminal = settlement.terminal;
       let receipt: SettlementReceipt;
+      const cancellationSemantics =
+        transport.cancellationSemantics ??
+        (transport.backend === "claude-code"
+          ? "process-exit"
+          : this.isTestFake
+            ? transport.backend === "opencode"
+              ? "provider-proof"
+              : "process-exit"
+            : undefined);
+      const isProviderProof = cancellationSemantics === "provider-proof";
+
       if (
         transportTerminal !== undefined &&
-        transportTerminal.origin !== "harness"
+        transportTerminal.origin !== "harness" &&
+        (!isProviderProof || transportTerminal.proof !== undefined)
       ) {
         receipt = finalize(() =>
           settlement.receipt("cancelled_confirmed", {
-            confirmation: transportTerminal.proof
-              ? "process_group_exited"
-              : "sdk_abort_confirmed",
-            processGroupAlive: "unknown",
+            confirmation:
+              cancellationSemantics === "process-exit"
+                ? "process_group_exited"
+                : "sdk_abort_confirmed",
+            processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
             remoteStatus: "cancelled",
           }),
         );
@@ -1171,21 +1269,11 @@ export class StepExecutionHarness implements StepRunner {
         // §5.3 step 5: exactly one harness-origin non-success terminal, won
         // atomically by the compare-and-set slot.
         settlement.acceptTerminal("harness", "cancelled");
-        // D1-08 (design doc line 290): a non-CLI (SDK-backed) transport's
-        // abort() call carries no confirmed-stopped guarantee the way the
-        // CLI's process-group signalling does — that is exactly the
-        // "SDK abort without provider confirmation" case whose receipt is
-        // local_fenced_remote_unconfirmed, not the generic
-        // local_termination_unconfirmed. §9.2's circuit breaker (runAttempt)
-        // keys off precisely this outcome to fence the bucket.
-        const isSdkBackedTransport = transport.backend !== "claude-code";
         // §5.3 step 6: no transport receipt facts → synthesize + quarantine.
         receipt = finalize(() =>
           synthesizeUnconfirmed(settlement, {
-            processGroupAlive: isSdkBackedTransport
-              ? "not_applicable"
-              : "unknown",
-            outcome: isSdkBackedTransport
+            processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
+            outcome: isProviderProof
               ? "local_fenced_remote_unconfirmed"
               : undefined,
           }),
@@ -1212,6 +1300,10 @@ export class StepExecutionHarness implements StepRunner {
     readonly childEnv: Readonly<Record<string, string>>;
     readonly projection?: CredentialProjection;
     readonly transport: ProviderTransport;
+    readonly admissionIdentity: {
+      readonly executable: string;
+      readonly provider: string;
+    };
   }): Promise<StepResult> {
     const {
       step,
@@ -1220,6 +1312,7 @@ export class StepExecutionHarness implements StepRunner {
       childEnv,
       projection,
       transport,
+      admissionIdentity,
     } = args;
 
     // 3. Admission gate: called once after successful authorization
@@ -1319,14 +1412,23 @@ export class StepExecutionHarness implements StepRunner {
         sessionId: `${step.name}-${Date.now()}-${attempts}`,
         attempt: attempts,
         executionModel: step.model,
-        route: step.route ?? {
-          backend: transport.backend,
-          provider:
-            transport.backend === "claude-code" ? "anthropic" : "opencode",
-          modelFamily:
-            transport.backend === "claude-code" ? "claude" : "opencode",
-          modelSnapshot: step.model,
-        },
+        route:
+          step.route ??
+          (transport.defaultRoute
+            ? {
+                ...transport.defaultRoute,
+                modelSnapshot:
+                  step.model || transport.defaultRoute.modelSnapshot,
+              }
+            : {
+                backend: transport.backend,
+                provider: admissionIdentity.provider,
+                modelFamily:
+                  transport.backend === "claude-code"
+                    ? "claude"
+                    : admissionIdentity.provider,
+                modelSnapshot: step.model,
+              }),
         systemPromptPath: step.systemPromptPath,
         systemPromptSha256,
         userPrompt: pendingFormatPrompt ?? step.prompt,
