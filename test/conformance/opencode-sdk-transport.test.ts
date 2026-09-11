@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type BenchmarkRunRecord,
+  computeQualifiedBenchmarkMetrics,
+  discriminateReviewCompletion,
+  evaluateResumeOutcome,
+} from "../../scripts/martian-judge";
+import {
   classifyWitnessEvidence,
   type SessionWitness,
   sanitizeWitness,
@@ -2668,5 +2674,190 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(unfinishedWitness, "")).toBe("inconclusive");
+  });
+});
+
+describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, and complete-empty discrimination", () => {
+  test("EQ1b: existing files with missing or incomplete witness/proof retain incomplete/inconclusive classification and do not falsely resume as success", () => {
+    // Missing terminal proof
+    const missingProof = evaluateResumeOutcome({
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      terminalProof: undefined,
+      finishStatus: "stop",
+    });
+    expect(missingProof).toBe("incomplete");
+
+    // Unverified protocol integrity
+    const unverifiedIntegrity = evaluateResumeOutcome({
+      runStatus: "complete",
+      protocolIntegrity: "unverified",
+      terminalProof: completedProof("evt-1"),
+      finishStatus: "stop",
+    });
+    expect(unverifiedIntegrity).toBe("incomplete");
+
+    // Truncated / missing finish status
+    const truncatedFinish = evaluateResumeOutcome({
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      terminalProof: completedProof("evt-2"),
+      finishStatus: undefined,
+      truncated: true,
+    });
+    expect(truncatedFinish).toBe("incomplete");
+
+    // Unconfirmed cessation (abort requested without confirmation)
+    const unconfirmedCessation = evaluateResumeOutcome({
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      terminalProof: completedProof("evt-3"),
+      finishStatus: "stop",
+      abortRequested: true,
+      abortConfirmed: false,
+    });
+    expect(unconfirmedCessation).toBe("incomplete");
+
+    // Partial run status on disk
+    const partialRun = evaluateResumeOutcome({
+      runStatus: "partial",
+      protocolIntegrity: "verified",
+      terminalProof: completedProof("evt-4"),
+      finishStatus: "stop",
+      sessionFailed: true,
+    });
+    expect(partialRun).toBe("incomplete");
+
+    // Verified complete artifact DOES resume as complete
+    const validComplete = evaluateResumeOutcome({
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      terminalProof: completedProof("evt-5"),
+      finishStatus: "stop",
+      abortRequested: false,
+      abortConfirmed: false,
+      sessionFailed: false,
+    });
+    expect(validComplete).toBe("complete");
+  });
+
+  test("EQ2a: benchmark metrics calculate separate completion and coverage denominators, cost-per-complete, and do not fold partial runs into completed totals", () => {
+    const runs: BenchmarkRunRecord[] = [
+      {
+        pr: 101,
+        status: "complete",
+        wallMs: 40000,
+        costUsd: 0.1,
+        tp: 2,
+        fp: 1,
+        fn: 1,
+      },
+      {
+        pr: 102,
+        status: "complete",
+        wallMs: 60000,
+        costUsd: 0.2,
+        tp: 1,
+        fp: 0,
+        fn: 2,
+      },
+      {
+        pr: 103,
+        status: "complete",
+        wallMs: 50000,
+        costUsd: 0.15,
+        tp: 3,
+        fp: 2,
+        fn: 0,
+      },
+      {
+        pr: 104,
+        status: "partial",
+        wallMs: 120000,
+        costUsd: 0.05,
+        quarantineReason: "gateway_500_hang",
+      },
+    ];
+
+    const metrics = computeQualifiedBenchmarkMetrics(runs);
+
+    // Denominators are separated: 3 complete vs 4 attempted
+    expect(metrics.attempted).toBe(4);
+    expect(metrics.completed).toBe(3);
+    expect(metrics.partial).toBe(1);
+    expect(metrics.completionRate).toBe(0.75);
+    expect(metrics.coverage).toBe(0.75);
+
+    // Spend is accounted honestly
+    expect(metrics.completedSpendUsd).toBeCloseTo(0.45, 5);
+    expect(metrics.partialSpendUsd).toBeCloseTo(0.05, 5);
+    expect(metrics.totalSpendUsd).toBeCloseTo(0.5, 5);
+
+    // Cost-per-complete is strictly completedSpend / completed (0.45 / 3 = 0.15),
+    // NOT total / attempted or folding partial into completed
+    expect(metrics.costPerComplete).toBeCloseTo(0.15, 5);
+
+    // Wall-clock per complete
+    expect(metrics.completedWallMs).toBe(150000);
+    expect(metrics.wallMsPerComplete).toBe(50000);
+
+    // Quality metrics computed on completed runs
+    expect(metrics.quality.tp).toBe(6);
+    expect(metrics.quality.fp).toBe(3);
+    expect(metrics.quality.fn).toBe(3);
+    expect(metrics.quality.precision).toBeCloseTo(6 / 9, 4);
+    expect(metrics.quality.recall).toBeCloseTo(6 / 9, 4);
+
+    // Quarantined runs labeled
+    expect(metrics.quarantinedRuns).toHaveLength(1);
+    expect(metrics.quarantinedRuns[0]?.pr).toBe(104);
+    expect(metrics.quarantinedRuns[0]?.reason).toBe("gateway_500_hang");
+  });
+
+  test("EQ2b: complete-empty MUSE finding set is explicitly distinguished from transport blanks / infrastructure drops", () => {
+    // Complete-empty MUSE review (0 issues found, verified completion)
+    const completeEmpty = discriminateReviewCompletion({
+      hasFindingsDocument: true,
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      terminalProof: completedProof("evt-empty-1"),
+      finishStatus: "stop",
+      findings: [],
+      stdout: "{}",
+    });
+    expect(completeEmpty.classification).toBe("complete_empty");
+    expect(completeEmpty.isCompletedReview).toBe(true);
+    expect(completeEmpty.isCompleteEmpty).toBe(true);
+    expect(completeEmpty.isTransportBlank).toBe(false);
+
+    // Transport blank failure (dropped output, unverified finish, empty stdout)
+    const transportBlank = discriminateReviewCompletion({
+      hasFindingsDocument: false,
+      runStatus: "partial",
+      protocolIntegrity: "unverified",
+      terminalProof: undefined,
+      finishStatus: undefined,
+      findings: [],
+      stdout: "",
+    });
+    expect(transportBlank.classification).toBe("transport_blank");
+    expect(transportBlank.isCompletedReview).toBe(false);
+    expect(transportBlank.isCompleteEmpty).toBe(false);
+    expect(transportBlank.isTransportBlank).toBe(true);
+
+    // Regular complete review with findings
+    const completeWithFindings = discriminateReviewCompletion({
+      hasFindingsDocument: true,
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      terminalProof: completedProof("evt-find-1"),
+      finishStatus: "stop",
+      findings: [{ id: "find-1" }],
+      stdout: '{"findings":[{"id":"find-1"}]}',
+    });
+    expect(completeWithFindings.classification).toBe("complete_with_findings");
+    expect(completeWithFindings.isCompletedReview).toBe(true);
+    expect(completeWithFindings.isCompleteEmpty).toBe(false);
+    expect(completeWithFindings.isTransportBlank).toBe(false);
   });
 });

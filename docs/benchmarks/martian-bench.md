@@ -310,6 +310,101 @@ bun run scripts/martian-cal.ts plan|check|run|score   # default = 3-PR pilot; --
 bun run scripts/martian-judge.ts                      # Surface A on existing runs
 ```
 
+## Cal.com 10 arm `opencode-glm` (2026-09-11, Surface A)
+
+Second methodology arm. One variable vs `hunters`: the model route —
+`opus` logical → `opencode-go/glm-5.3-flash#high [configured, opencode]` for
+all 5 steps (`--model opus`; frontmatter `sonnet` overridden by CLI
+precedence), same prompt set `slice3b-lifecycle-v6-clean`
+(`sha256: 5ac28df9`), scout off, summarizer off, parity never fires. Local
+`--two-dot`, never `--pr`. Runs: `~/Desktop/martian-cal/runs/cal-*-opencode-glm`.
+Judge artifact: `~/Desktop/martian-cal/runs/martian-judge-opencode-glm.json`.
+
+**Judge (Surface A):** Martian `JUDGE_PROMPT`, Claude Code CLI, `sonnet`,
+`tools: []` — same judge shape as the baseline (gateway + model labelled, not
+Martian's Opus 4.5 rows). Sibling `path:line` not extra FPs. Unreplicated.
+Cal.com only. **Do not quote as the 50-PR offline board.**
+
+Reviews **$0.84** (~2.5 h serial). Judge **$0.00** (subscription). **Total $0.84.**
+
+| | P | R | F1 | tp | fp | fn | gold |
+|---|---|---|---|---|---|---|---|
+| **All** (what the script scored) | 0.47 | 0.51 | 0.49 | 21 | 24 | 20 | 41 |
+| **High+Critical recall (headline)** | — | **0.68** | — | 13 | — | 6 | 19 |
+| Strict recall, gold-side only (`bug/security/concurrency/data/api`) | — | 0.60 | — | 21 | — | 14 | 35 |
+
+Delta vs `hunters` (tp/fp/fn): All P 0.44→0.47, R 0.41→0.51, F1 0.43→0.49;
+Strict recall 17/35→21/35; **High+Critical recall 13/19 identical with
+different composition.**
+
+| PR | Findings | tp/fp/fn (`hunters`) | vs goldens (judge) |
+|---|---|---|---|
+| 14943 | 4 | 1/3/1 (1/0/1) | Same High/bug hit (unscoped `deleteMany`), +3 FP |
+| 8330 | 6 | 2/4/0 (0/1/2) | **Best delta: both Medium/bug goldens HIT** (dayjs `===`, slot arithmetic) — the baseline's zero cell |
+| 8087 | 4 | 1/0/1 (1/1/1) | Same Critical/concurrency `forEach` hit, FP 0 (was 1) |
+| 10600 | 4 | 2/2/3 (1/4/4) | Kept High/concurrency TOCTOU, +Medium/bug, fewer FP |
+| 10967 | 13 | 5/5/1 (3/5/3) | +2 TP (extra High/bug ×2); miss Low/api contract stands |
+| 22345 | 1 | 0/1/2 (0/0/2) | Still ~empty (Insights/`Prisma.sql` outside hunter profile), +1 FP |
+| 7232 | 11 | 2/4/1 (2/1/1) | Same Medium/concurrency + High/data hits, +3 FP |
+| 11059 | 6 | 5/0/4 (6/3/3) | −1 TP (miss Salesforce-adjacent High), **zero FP** (was 3) |
+| 14740 | 2 | 1/1/5 (2/5/4) | **Regression cell:** missed High/security blacklist bypass (baseline hit) and still misses Critical `&&` vs `\|\|`; sparse (2 findings) |
+| 22532 | 8 | 2/4/2 (1/2/3) | Medium/bug + High/api hits (pair confidences not audited; baseline's TP was a flagged-weak 0.65) |
+
+Profile: small-local-logic goldens (8330) now hit — the baseline's counterexamples
+are shrinking. 14740 is the new counterexample (sparse + missed security High).
+Cost per review collapsed ($0.04–0.19 vs $2–7): opencode-go/glm pricing, provider-reported.
+
+How this arm came to be (one line each, full story in the session):
+1. `hunters` re-run on the current global routing silently became an opencode
+   arm (logical `sonnet` → default `opencode-go/deepseek-flash#high`).
+2. That arm died 8/10 empty: gateway `UnknownError` 500s (instant) + 30-min
+   silent hangs. Proved provider-side via `scripts/opencode-prompt-probe.ts`
+   (new): model/variant/parallelism/size/tools/system-prompt all exonerated.
+3. The provider leg `deepseek-flash` is down (500s + empty completions, still
+   down at ledger time); `glm-5.3-flash` on the same backend is healthy
+   (2.3 kch real text, ~15 s). Arm redefined to the working leg — global
+   config untouched.
+4. Three transport hardenings landed (all offline-tested, suite 3417/3418
+   with 1 pre-existing fail, typecheck + biome clean):
+   Fix 1 — gateway-500 prompt refusal → `network_transient` (was terminal
+   `runtime_unavailable`), bounded retry; Fix 2 — provider-silence tripwire
+   (600 quiet poll rounds → `protocol_truncation`, caps hangs under the
+   30-min watchdog); Fix 3 — prompt-refused-before-start reports genuine
+   $0 (was "unavailable" → fenced the shared bucket, killing retries AND
+   siblings). Fix 1+3 verified live (transient retries admitted, settled
+   reservations); Fix 2 offline only (no hang recurred to prove it live).
+5. Engine for this arm: `24115ab` + uncommitted `src/transports/opencode-sdk.ts`
+   (Fix 1–3), `test/conformance/opencode-sdk-transport.test.ts`,
+   `test/harness/spend-wiring.test.ts`, `scripts/martian-cal.ts` (`--arm`,
+   `--model`), `scripts/martian-judge.ts` (`--arm`, 0600 fix),
+   `scripts/opencode-prompt-probe.ts` (new). Harness `--arm`/`--model` support
+   is arm infrastructure, not a methodology variable.
+6. A same-night `opencode` (deepseek) arm attempt is NOT scored: provider down,
+   0/10 PRs with findings on the final try (`cal-*-opencode` dirs stand,
+   empty, as outage evidence). Only `hunters` and `opencode-glm` are scored.
+7. Regression gates: `bun run fixture-eval` pass (planted bug hit; runs
+   `haiku`→glm-low route); refuter untouched so `refuter-probe` not re-run.
+
+Surface B: **not run** (stored vendor reviews not bucketed for the ten).
+
+## Benchmark qualification gates and metrics (Unit 7)
+
+Honest reporting requires separating qualification gates, run resumption, and completion denominators:
+
+1. **Resumption gate (EQ1b):**
+   Existing directories or cached witness artifacts on disk must not falsely resume as completed reviews when outcomes or witnesses are incomplete. Specifically, unverified protocol integrity, missing terminal proofs, truncated turns (`finishStatus !== "stop"` or `truncated: true`), unconfirmed cessations (`abortRequested && !abortConfirmed`), or partial statuses (`run_status: "partial"`, `sessionFailed: true`) retain their `incomplete` or `inconclusive` classification and are barred from resuming as success.
+
+2. **Honest qualification denominators (EQ2a):**
+   Benchmark metrics separate completed runs from attempted runs:
+   - `completion_rate` and `coverage`: `completed / attempted`
+   - Wall-clock and spend metrics are computed honestly per completed review (`cost_per_complete = completed_spend / completed`, `wall_ms_per_complete = completed_wall_ms / completed`).
+   - Incomplete runs (e.g. provider outages, gateway 500 hangs, truncated sessions) are quarantined with their explicit failure reason and never folded into completed totals to distort unit costs or artificially deflate recall denominators.
+
+3. **MUSE complete-empty discrimination (EQ2b):**
+   A valid completed review that found 0 issues (such as Cal.com PR 22345, or zero-defect clean diffs under the MUSE test corpus) is distinct from an infrastructure drop or blank transport failure:
+   - **MUSE complete-empty:** Verified completion (`protocolIntegrity === "verified"`, valid terminal proof, `run_status === "complete"`), produces schema-valid `findings: []`, and is honestly included in the completed denominator with 0 TPs and 0 FPs.
+   - **Transport blank / drop:** Unverified finish, missing terminal proof, or empty stdout without a completed findings document. Classified as `transport_blank`, quarantined, and excluded from completed totals.
+
 ## Sources
 
 - https://codereview.withmartian.com/
@@ -318,3 +413,4 @@ bun run scripts/martian-judge.ts                      # Surface A on existing ru
 - https://github.com/withmartian/code-review-benchmark/blob/main/methodology/full.md
 - https://huggingface.co/datasets/code-review-bench/code-review-bench
 - Internal: `ROADMAP.md` (THE PIVOT, C10, D3), `docs/review-strategies.md`, `docs/doordash-dashbench-trust.md`, `src/compare.ts`
+

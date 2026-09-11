@@ -31,9 +31,24 @@ const LAB_AGENTS_DIR =
   "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
 
 const ROOT = path.join(import.meta.dir, "..");
-const CASES_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-cases.json");
-const GOLDENS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-goldens.json");
-const GOTCHAS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-gotchas.md");
+const CASES_PATH = path.join(
+  ROOT,
+  "docs",
+  "benchmarks",
+  "martian-cal-cases.json",
+);
+const GOLDENS_PATH = path.join(
+  ROOT,
+  "docs",
+  "benchmarks",
+  "martian-cal-goldens.json",
+);
+const GOTCHAS_PATH = path.join(
+  ROOT,
+  "docs",
+  "benchmarks",
+  "martian-cal-gotchas.md",
+);
 const DEFAULT_REPO = path.join(homedir(), "Desktop", "martian-cal", "cal.com");
 const DEFAULT_RUNS = path.join(homedir(), "Desktop", "martian-cal", "runs");
 const HUNTERS = 3;
@@ -72,7 +87,7 @@ function argValue(flag: string): string | undefined {
 const mode = Bun.argv[2];
 if (mode !== "plan" && mode !== "check" && mode !== "run" && mode !== "score") {
   fail(
-    "usage: bun run scripts/martian-cal.ts plan|check|run|score [--all] [--only 14943,8330] [--repo …] [--runs …]",
+    "usage: bun run scripts/martian-cal.ts plan|check|run|score [--all] [--only 14943,8330] [--arm <id>] [--model <logical>] [--hunter-model <l>] [--refuter-model <l>] [--repo …] [--runs …]",
   );
 }
 
@@ -82,6 +97,25 @@ const repo = argValue("--repo") ?? DEFAULT_REPO;
 const runsRoot = argValue("--runs") ?? DEFAULT_RUNS;
 const onlyRaw = argValue("--only");
 const all = Bun.argv.includes("--all");
+// New methodology arm (one variable vs the `hunters` baseline): the arm id is
+// the run-dir suffix (`cal-<pr>-<arm>`). Default keeps the frozen baseline
+// dirs byte-for-byte addressable. `run` skips dirs that already hold
+// findings.json, so a new arm never overwrites the baseline.
+const arm = argValue("--arm") ?? "hunters";
+if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(arm)) {
+  fail(`--arm must match [a-zA-Z0-9_-]+, got: ${arm}`);
+}
+// Logical-model override for the arm (CLI --model precedence: flag > spec >
+// frontmatter). Lets an arm name a working route without touching the
+// operator's global routing config — e.g. --model opus resolves through the
+// global opus mapping (opencode/glm-5.3-flash#high) while frontmatter says
+// sonnet. Empty = frontmatter (the `hunters` baseline shape).
+const model = argValue("--model");
+// Per-role models (--hunter-model / --refuter-model set AgentSpec.model per
+// role). Lets one arm split hunters and refuter across two routes with the
+// prompt set byte-identical.
+const hunterModel = argValue("--hunter-model");
+const refuterModel = argValue("--refuter-model");
 
 function parseOnly(raw: string): number[] {
   return raw.split(",").map((s) => {
@@ -105,7 +139,7 @@ const rows: CaseRow[] = selected.map((pr) => {
 });
 
 function runDirFor(pr: number): string {
-  return path.join(runsRoot, `cal-${pr}-hunters`);
+  return path.join(runsRoot, `cal-${pr}-${arm}`);
 }
 
 function git(args: string[]): { ok: boolean; stdout: string; stderr: string } {
@@ -168,6 +202,9 @@ async function review(row: CaseRow, dryRun: boolean): Promise<number> {
     "--no-summary",
     "--agents",
     LAB_AGENTS_DIR,
+    ...(model === undefined ? [] : ["--model", model]),
+    ...(hunterModel === undefined ? [] : ["--hunter-model", hunterModel]),
+    ...(refuterModel === undefined ? [] : ["--refuter-model", refuterModel]),
     "--gotchas",
     GOTCHAS_PATH,
     "--out",
@@ -230,6 +267,13 @@ if (mode === "plan") {
   console.log(
     `${rows.length} PR(s). Estimated ${HUNTERS} hunters + refuter, summarizer off, scout off, parity never fires.`,
   );
+  console.log(`arm: ${arm}  (run dirs: cal-<pr>-${arm})`);
+  console.log(
+    `model: ${model ?? "(frontmatter)"}  (CLI --model precedence over frontmatter)`,
+  );
+  console.log(
+    `role models: hunters ${hunterModel ?? "(frontmatter)"} / refuter ${refuterModel ?? "(frontmatter)"}`,
+  );
   console.log(`band sum: $${low.toFixed(2)}–$${high.toFixed(2)}`);
   console.log(
     "Gate column is GitHub aggregate counters (no exclusions, no whitespace). Conservative.",
@@ -272,7 +316,7 @@ if (mode === "check") {
 
 if (mode === "run") {
   console.error(
-    `martian-cal run: ${rows.length} PR(s), pipeline hunters, into ${runsRoot}`,
+    `martian-cal run: ${rows.length} PR(s), pipeline hunters, arm ${arm}, model ${model ?? "(frontmatter)"}, hunters ${hunterModel ?? "(frontmatter)"}, refuter ${refuterModel ?? "(frontmatter)"}, into ${runsRoot}`,
   );
   const failures: string[] = [];
   let skipped = 0;
