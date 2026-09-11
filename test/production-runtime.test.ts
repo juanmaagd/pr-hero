@@ -126,6 +126,26 @@ function createMockTransport(
 ): ProviderTransport {
   return {
     backend,
+    admissionIdentity:
+      backend === "claude-code"
+        ? { executable: "claude", provider: "anthropic" }
+        : { executable: "opencode", provider: "opencode" },
+    cancellationSemantics:
+      backend === "claude-code" ? "process-exit" : "provider-proof",
+    defaultRoute:
+      backend === "claude-code"
+        ? {
+            backend: "claude-code",
+            provider: "anthropic",
+            modelFamily: "claude",
+            modelSnapshot: "sonnet",
+          }
+        : {
+            backend: "opencode",
+            provider: "opencode",
+            modelFamily: "opencode",
+            modelSnapshot: "gpt-4o",
+          },
     capabilities: async (): Promise<ProviderCapabilityReport> => ({
       backend,
       status: "ready",

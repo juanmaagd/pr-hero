@@ -7,6 +7,7 @@ import type {
   ProviderEventBase,
   ProviderTerminalProof,
   ProviderTransport,
+  ResolvedModelRoute,
   TransportFailureCause,
   TransportOutcome,
   TransportRequest,
@@ -224,6 +225,11 @@ export interface OpenCodeSdkTransportOptions {
   // registry branch still passes a route without a kind, but no composition in
   // src/ reaches it: both harness constructions supply an explicit transport.
   readonly billingMode?: UsageBillingMode;
+  readonly admissionIdentity?: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly defaultRoute?: ResolvedModelRoute;
 }
 
 const MARKER_ABORT_UNCONFIRMED =
@@ -396,6 +402,12 @@ function isValidProof(proof: ProviderTerminalProof): boolean {
 
 export class OpenCodeSdkTransport implements ProviderTransport {
   readonly backend = "opencode" as const;
+  readonly admissionIdentity: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly cancellationSemantics = "provider-proof" as const;
+  readonly defaultRoute?: ResolvedModelRoute;
   private readonly client: OpenCodeClientLike;
   private readonly stallDeadlineMs: number;
   private readonly abortConfirmMs: number;
@@ -419,6 +431,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   }
 
   constructor(options: OpenCodeSdkTransportOptions) {
+    this.admissionIdentity = options.admissionIdentity ?? {
+      executable: "opencode",
+      provider: "opencode",
+    };
+    this.cancellationSemantics = "provider-proof";
+    this.defaultRoute = options.defaultRoute;
     this.client = options.client;
     this.stallDeadlineMs = options.stallDeadlineMs ?? DEFAULT_STALL_DEADLINE_MS;
     this.abortConfirmMs = options.abortConfirmMs ?? SDK_ABORT_CONFIRM_MS;

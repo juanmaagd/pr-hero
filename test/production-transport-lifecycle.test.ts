@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   chmod,
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -38,6 +39,7 @@ import { createProductionRuntime } from "../src/production-runtime";
 import type { ExecutableAllowlistEntry } from "../src/provider-capabilities";
 import type { CredentialBroker } from "../src/security/credential-broker";
 import { OpenCodeAuthBroker } from "../src/security/credential-broker";
+import { WorkspaceReadBroker } from "../src/security/workspace-read-broker";
 import { type StepSpec, settlementReceiptPath } from "../src/step-runner";
 import type {
   D1_11ReadinessEvidence,
@@ -125,6 +127,26 @@ function createRecordingTransport(
 ): ProviderTransport {
   return {
     backend,
+    admissionIdentity:
+      backend === "claude-code"
+        ? { executable: "claude", provider: "anthropic" }
+        : { executable: "opencode", provider: "opencode" },
+    cancellationSemantics:
+      backend === "claude-code" ? "process-exit" : "provider-proof",
+    defaultRoute:
+      backend === "claude-code"
+        ? {
+            backend: "claude-code",
+            provider: "anthropic",
+            modelFamily: "claude",
+            modelSnapshot: "sonnet",
+          }
+        : {
+            backend: "opencode",
+            provider: "opencode",
+            modelFamily: "opencode",
+            modelSnapshot: "gpt-4o",
+          },
     capabilities: async (): Promise<ProviderCapabilityReport> => ({
       backend,
       status: "ready",
@@ -1065,6 +1087,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       const captured: TransportRequest[] = [];
       const hangingTransport: ProviderTransport = {
         backend: "opencode",
+        admissionIdentity: { executable: "opencode", provider: "opencode" },
+        cancellationSemantics: "provider-proof",
         capabilities: async () => {
           const base = await createRecordingTransport(
             [],
@@ -1194,6 +1218,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       let transportCalls = 0;
       const hangingTransport: ProviderTransport = {
         backend: "opencode",
+        admissionIdentity: { executable: "opencode", provider: "opencode" },
+        cancellationSemantics: "provider-proof",
         capabilities: async () => {
           const base = await createRecordingTransport(
             [],
@@ -1904,5 +1930,702 @@ describe("Task 3.1 RED U3 BE1a/b: terminal arbitration, stalled observation, and
     expect(elapsedMs).toBeLessThan(400);
     expect(outcome.completion).toBe("failed");
     expect(outcome.protocolIntegrity).toBe("unverified");
+  });
+});
+
+describe("Task 5.1 RED U5 BE3a/b: generic facts, isolation safeguards, and concurrent parity", () => {
+  let tmpDir: string;
+  let claudeFixture: { canonicalPath: string; sha256: string };
+  let opencodeFixture: { canonicalPath: string; sha256: string };
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(
+      path.join(tmpdir(), "pr-hero-u5-generic-isolation-"),
+    );
+    claudeFixture = await writeClaudeFixture(tmpDir);
+    opencodeFixture = await writeOpenCodeFixture(tmpDir);
+    await writeFile(path.join(tmpDir, "system.md"), "system prompt content");
+    await writeFile(
+      path.join(tmpDir, "mcp.json"),
+      JSON.stringify({ mcpServers: { codegraph: { command: "codegraph" } } }),
+    );
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  // --- CWD and Path resolution ---
+  test("git -C, relative paths, and absolute paths each resolve authorized canonical cwd; mismatch denies", async () => {
+    const broker = new WorkspaceReadBroker({ workspaceRoot: tmpDir });
+    const subDir = path.join(tmpDir, "packages", "core");
+    await mkdir(subDir, { recursive: true });
+    const canonicalSub = await realpath(subDir);
+
+    // 1. Relative path resolution
+    const relAuth = broker.authorizePath(path.join("packages", "core"));
+    expect(relAuth.approved).toBe(true);
+    if (relAuth.approved) {
+      expect(relAuth.canonicalPath).toBe(canonicalSub);
+    }
+
+    // 2. Absolute path resolution
+    const absAuth = broker.authorizePath(subDir);
+    expect(absAuth.approved).toBe(true);
+    if (absAuth.approved) {
+      expect(absAuth.canonicalPath).toBe(canonicalSub);
+    }
+
+    // 3. git -C resolution
+    const gitAuth = broker.authorizeGitArgs(["-C", "packages/core", "status"]);
+    expect(gitAuth.approved).toBe(true);
+    if (gitAuth.approved) {
+      expect(gitAuth.canonicalPath).toBe(canonicalSub);
+    }
+
+    // 4. Mismatch / escape path denial
+    const escapeAuth = broker.authorizePath(path.join(tmpDir, "..", "outside"));
+    expect(escapeAuth.approved).toBe(false);
+    expect(escapeAuth.code).toBe("path_not_approved");
+
+    // 5. git -C escape denial
+    const gitEscapeAuth = broker.authorizeGitArgs([
+      "-C",
+      "../outside",
+      "status",
+    ]);
+    expect(gitEscapeAuth.approved).toBe(false);
+    expect(gitEscapeAuth.code).toBe("path_not_approved");
+
+    // 6. Symlink escape denial through harness
+    const outsideDir = await mkdtemp(path.join(tmpdir(), "outside-sandbox-"));
+    const symlinkEscape = path.join(tmpDir, "escaped_link");
+    await symlink(outsideDir, symlinkEscape);
+    try {
+      const harness = new StepExecutionHarness({
+        transport: createRecordingTransport([], "claude-code"),
+        workspaceRoot: tmpDir,
+        binaryPath: claudeFixture.canonicalPath,
+        executableAllowlist: [
+          {
+            absolutePath: claudeFixture.canonicalPath,
+            sha256: claudeFixture.sha256,
+          },
+        ],
+      });
+      const res = await harness.run(
+        makeStep(tmpDir, {
+          cwd: symlinkEscape,
+        }),
+      );
+      expect(res.status).toBe("failed");
+      expect(res.denialCode).toBe("path_not_approved");
+      expect(res.stderrTail).toMatch(/escapes workspace root/i);
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  test("every SDK operation receives and verifies authorized canonical cwd", async () => {
+    const subDir = path.join(tmpDir, "subproject");
+    await mkdir(subDir, { recursive: true });
+    const canonicalSub = await realpath(subDir);
+
+    let recordedCwdOnCreate: string | undefined;
+    const client: OpenCodeClientLike = {
+      createSession: async (input) => {
+        recordedCwdOnCreate = input.cwd;
+        return { id: "sess-cwd-1" };
+      },
+      streamEvents: () =>
+        (async function* () {
+          yield { kind: "delta", text: '{"findings":[]}' };
+        })(),
+      pollStatus: async () => ({
+        kind: "terminal",
+        proof: {
+          eventId: "evt-cwd-1",
+          providerStatus: "completed",
+          providerObservedAt: new Date().toISOString(),
+        },
+      }),
+      abort: async () => {},
+      close: async () => {},
+    };
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      pollIntervalMs: 5,
+      pollRoundMs: 10,
+    });
+
+    const harness = new StepExecutionHarness({
+      transport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+    });
+
+    const result = await harness.run(
+      makeStep(tmpDir, {
+        cwd: subDir,
+        route: {
+          backend: "opencode",
+          provider: "opencode",
+          modelFamily: "opencode",
+          modelSnapshot: "gpt-4o",
+        },
+      }),
+    );
+
+    expect(result.status).toBe("ok");
+    expect(recordedCwdOnCreate).toBe(canonicalSub);
+  });
+
+  // --- BE3a: Concurrent parity & sibling survival ---
+  test("BE3a concurrent parity: Claude outcomes remain unchanged while concurrent OpenCode session runs", async () => {
+    const claudeRequests: TransportRequest[] = [];
+    const claudeTransport = createRecordingTransport(
+      claudeRequests,
+      "claude-code",
+    );
+
+    let opencodeDone = false;
+    const opencodeClient: OpenCodeClientLike = {
+      createSession: async () => ({ id: "sess-oc-parity" }),
+      streamEvents: () =>
+        (async function* () {
+          yield { kind: "delta", text: '{"findings":[]}' };
+        })(),
+      pollStatus: async () => {
+        opencodeDone = true;
+        return {
+          kind: "terminal",
+          proof: {
+            eventId: "proof-oc",
+            providerStatus: "completed",
+            providerObservedAt: new Date().toISOString(),
+          },
+        };
+      },
+      abort: async () => {},
+      close: async () => {},
+    };
+
+    const opencodeTransport = new OpenCodeSdkTransport({
+      client: opencodeClient,
+      pollIntervalMs: 5,
+      pollRoundMs: 10,
+    });
+
+    const claudeHarness = new StepExecutionHarness({
+      transport: claudeTransport,
+      workspaceRoot: tmpDir,
+      binaryPath: claudeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: claudeFixture.canonicalPath,
+          sha256: claudeFixture.sha256,
+        },
+      ],
+    });
+
+    const opencodeHarness = new StepExecutionHarness({
+      transport: opencodeTransport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+    });
+
+    const [claudeResult, opencodeResult] = await Promise.all([
+      claudeHarness.run(
+        makeStep(tmpDir, {
+          name: "claude-parity-step",
+          route: {
+            backend: "claude-code",
+            provider: "anthropic",
+            modelFamily: "claude",
+            modelSnapshot: "sonnet",
+          },
+        }),
+      ),
+      opencodeHarness.run(
+        makeStep(tmpDir, {
+          name: "opencode-concurrent-step",
+          route: {
+            backend: "opencode",
+            provider: "opencode",
+            modelFamily: "opencode",
+            modelSnapshot: "gpt-4o",
+          },
+        }),
+      ),
+    ]);
+
+    expect(claudeResult.status).toBe("ok");
+    expect(claudeResult.attempts).toBe(1);
+    expect(claudeRequests).toHaveLength(1);
+    expect(claudeRequests[0].route.provider).toBe("anthropic");
+
+    expect(opencodeResult.status).toBe("ok");
+    expect(opencodeDone).toBe(true);
+  });
+
+  test("BE3a sibling survival: cancelling or aborting one session leaves sibling session and server unaffected", async () => {
+    let session1Aborted = false;
+    let session2Completed = false;
+
+    // Single shared client / transport representing shared server
+    const client: OpenCodeClientLike = {
+      createSession: async (input) => ({
+        id: input.userPrompt.includes("session-1") ? "sess-1" : "sess-2",
+      }),
+      streamEvents: (sess) =>
+        (async function* () {
+          if (sess.id === "sess-1") {
+            // Hung session 1 yielding streamed content
+            for (;;) {
+              await new Promise((r) => setTimeout(r, 5));
+              yield { kind: "delta", text: "session-1 partial" };
+            }
+          } else {
+            yield { kind: "delta", text: '{"findings":[]}' };
+          }
+        })(),
+      pollStatus: async (sess) => {
+        if (sess.id === "sess-1") {
+          return { kind: "pending" };
+        }
+        session2Completed = true;
+        return {
+          kind: "terminal",
+          proof: {
+            eventId: "sess-2-proof",
+            providerStatus: "completed",
+            providerObservedAt: new Date().toISOString(),
+          },
+        };
+      },
+      abort: async (sess) => {
+        if (sess.id === "sess-1") {
+          session1Aborted = true;
+        }
+      },
+      close: async () => {},
+    };
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      pollIntervalMs: 5,
+      pollRoundMs: 10,
+      abortConfirmMs: 20,
+    });
+
+    const cancelController = new AbortController();
+    const harness1 = new StepExecutionHarness({
+      transport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+      signal: cancelController.signal,
+      graceMarginMs: 10,
+    });
+
+    const harness2 = new StepExecutionHarness({
+      transport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+    });
+
+    // Start session 1
+    const p1 = harness1.run(
+      makeStep(tmpDir, {
+        prompt: "session-1 prompt",
+        route: {
+          backend: "opencode",
+          provider: "opencode",
+          modelFamily: "opencode",
+          modelSnapshot: "gpt-4o",
+        },
+      }),
+    );
+
+    // Cancel session 1 shortly after
+    setTimeout(() => cancelController.abort(), 10);
+
+    // Run sibling session 2
+    const res2 = await harness2.run(
+      makeStep(tmpDir, {
+        prompt: "session-2 prompt",
+        route: {
+          backend: "opencode",
+          provider: "opencode",
+          modelFamily: "opencode",
+          modelSnapshot: "gpt-4o",
+        },
+      }),
+    );
+
+    const res1 = await p1;
+
+    expect(res1.status).toBe("failed");
+    expect(res1.stderrTail).toMatch(/cancel/i);
+    expect(session1Aborted).toBe(true);
+
+    // Sibling session 2 completed successfully and undisturbed
+    expect(res2.status).toBe("ok");
+    expect(session2Completed).toBe(true);
+    expect(res2.resultText).toBe('{"findings":[]}');
+  });
+
+  // --- BE3b: Unsafe lifecycle, generic facts, and refusal safeguards ---
+  test("BE3b unsafe lifecycle: unauthorized tools are denied before transport execute", async () => {
+    const requests: TransportRequest[] = [];
+    const transport = createRecordingTransport(requests, "opencode");
+
+    const step = resolveStepRoute({
+      stepKey: "hunter-reliability",
+      role: "hunter",
+      cliModel: "openai/gpt-4o",
+      routingConfig: openCodeRoutingConfig(),
+    });
+
+    const registry = new DefaultTransportRegistry();
+    registry.register("opencode", transport);
+
+    const runtime = await createProductionRuntime({
+      workspaceRoot: tmpDir,
+      plan: createResolvedRoutePlan([step]),
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlists: {
+        opencode: [
+          {
+            absolutePath: opencodeFixture.canonicalPath,
+            sha256: opencodeFixture.sha256,
+          },
+        ],
+      },
+      registry,
+      mode: "conformance",
+    });
+
+    const result = await runtime.runner.run(
+      makeStep(tmpDir, {
+        tools: ["Read", "bash"],
+        routeKey: step.routeFingerprint,
+        route: step.route,
+      }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(requests).toHaveLength(0);
+    expect(result.stderrTail).toMatch(/bash|allow.?map|tool/i);
+  });
+
+  test("BE3b unsafe lifecycle: missing non-Claude generic facts fail-closed refusal", async () => {
+    // Non-Claude transport missing admissionIdentity and cancellationSemantics
+    const bareTransport: ProviderTransport = {
+      backend: "opencode",
+      capabilities: async () => ({
+        backend: "opencode",
+        status: "ready",
+        issues: [],
+        auth: {
+          kind: "opencode_chatgpt_oauth",
+          projectionReady: true,
+          probe: "passed",
+        },
+        isolation: {
+          syntheticHome: true,
+          workspaceReadBroker: true,
+          codegraphPolicy: true,
+        },
+        protocol: {
+          terminalProof: true,
+          boundedEvents: true,
+          usageMode: "snapshot",
+        },
+        cancellation: { deadlineMs: 5000, conformance: "passed" },
+        billing: { mode: "subscription", pricingReady: true },
+      }),
+      execute: async () => {
+        throw new Error("Should never be called");
+      },
+      classifyFailure: () => undefined,
+    };
+
+    const harness = new StepExecutionHarness({
+      transport: bareTransport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+    });
+
+    const result = await harness.run(
+      makeStep(tmpDir, {
+        route: {
+          backend: "opencode",
+          provider: "opencode",
+          modelFamily: "opencode",
+          modelSnapshot: "gpt-4o",
+        },
+      }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.denialCode).toBe("executable_not_approved");
+    expect(result.attempts).toBe(0);
+    expect(result.stderrTail).toMatch(
+      /missing required generic execution facts/i,
+    );
+  });
+
+  test("BE3b unsafe lifecycle: legacy Claude preserves defaults when generic facts are omitted", async () => {
+    const requests: TransportRequest[] = [];
+    const bareClaudeTransport: ProviderTransport = {
+      backend: "claude-code",
+      capabilities: async () => ({
+        backend: "claude-code",
+        status: "ready",
+        issues: [],
+        auth: {
+          kind: "claude_subscription_oauth",
+          projectionReady: true,
+          probe: "passed",
+        },
+        isolation: {
+          syntheticHome: true,
+          workspaceReadBroker: true,
+          codegraphPolicy: true,
+        },
+        protocol: {
+          terminalProof: true,
+          boundedEvents: true,
+          usageMode: "snapshot",
+        },
+        cancellation: { deadlineMs: 5000, conformance: "passed" },
+        billing: { mode: "subscription", pricingReady: true },
+      }),
+      execute: async (req) => {
+        requests.push(req);
+        return {
+          completion: "success",
+          protocolIntegrity: "verified",
+          finalText: '{"findings":[]}',
+          usage: {
+            wallMs: 10,
+            tokens: { inputKnown: 10, outputKnown: 5, totalKnown: 15 },
+            completeness: "complete",
+            billingMode: "subscription",
+            costSource: "subscription",
+          },
+          stderrTail: "",
+        };
+      },
+      classifyFailure: () => undefined,
+    };
+
+    const harness = new StepExecutionHarness({
+      transport: bareClaudeTransport,
+      workspaceRoot: tmpDir,
+      binaryPath: claudeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: claudeFixture.canonicalPath,
+          sha256: claudeFixture.sha256,
+        },
+      ],
+    });
+
+    const result = await harness.run(makeStep(tmpDir));
+    expect(result.status).toBe("ok");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].route.provider).toBe("anthropic");
+    expect(requests[0].route.backend).toBe("claude-code");
+  });
+
+  test("BE3b unsafe lifecycle: mixed-provider refusal preserves credential isolation", async () => {
+    // Transport declared for provider 'openai'
+    const openAiTransport: ProviderTransport = {
+      backend: "opencode",
+      admissionIdentity: {
+        executable: "opencode",
+        provider: "openai",
+      },
+      cancellationSemantics: "provider-proof",
+      defaultRoute: {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o",
+      },
+      capabilities: async () => ({
+        backend: "opencode",
+        status: "ready",
+        issues: [],
+        auth: {
+          kind: "opencode_chatgpt_oauth",
+          projectionReady: true,
+          probe: "passed",
+        },
+        isolation: {
+          syntheticHome: true,
+          workspaceReadBroker: true,
+          codegraphPolicy: true,
+        },
+        protocol: {
+          terminalProof: true,
+          boundedEvents: true,
+          usageMode: "snapshot",
+        },
+        cancellation: { deadlineMs: 5000, conformance: "passed" },
+        billing: { mode: "subscription", pricingReady: true },
+      }),
+      execute: async () => {
+        throw new Error("Should not execute with mismatched provider");
+      },
+      classifyFailure: () => undefined,
+    };
+
+    const harness = new StepExecutionHarness({
+      transport: openAiTransport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+    });
+
+    // Step specifies anthropic provider under openai transport
+    const result = await harness.run(
+      makeStep(tmpDir, {
+        route: {
+          backend: "opencode",
+          provider: "anthropic",
+          modelFamily: "claude",
+          modelSnapshot: "sonnet",
+        },
+      }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.denialCode).toBe("executable_not_approved");
+    expect(result.attempts).toBe(0);
+    expect(result.stderrTail).toMatch(/provider mismatch/i);
+  });
+
+  test("BE3b unsafe lifecycle: unconfirmed abort distinguishes request vs ack vs confirmation without claiming remote cessation", async () => {
+    let abortCalled = false;
+    const client: OpenCodeClientLike = {
+      createSession: async () => ({ id: "sess-unconfirmed" }),
+      streamEvents: () =>
+        (async function* () {
+          for (;;) {
+            await new Promise((r) => setTimeout(r, 5));
+            yield { kind: "delta", text: "unconfirmed partial" };
+          }
+        })(),
+      pollStatus: async () => ({ kind: "pending" }),
+      abort: async () => {
+        abortCalled = true;
+        // Simulates remote provider that never confirms cessation
+      },
+      close: async () => {},
+    };
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      abortConfirmMs: 20,
+      cleanupMs: 10,
+      pollIntervalMs: 5,
+      pollRoundMs: 10,
+    });
+
+    const cancelController = new AbortController();
+    let settledReceipt: SettlementReceipt | undefined;
+
+    const harness = new StepExecutionHarness({
+      transport,
+      workspaceRoot: tmpDir,
+      binaryPath: opencodeFixture.canonicalPath,
+      executableAllowlist: [
+        {
+          absolutePath: opencodeFixture.canonicalPath,
+          sha256: opencodeFixture.sha256,
+        },
+      ],
+      signal: cancelController.signal,
+      graceMarginMs: 10,
+      onSessionSettled: (ev) => {
+        settledReceipt = ev.receipt;
+      },
+    });
+
+    const runPromise = harness.run(
+      makeStep(tmpDir, {
+        route: {
+          backend: "opencode",
+          provider: "opencode",
+          modelFamily: "opencode",
+          modelSnapshot: "gpt-4o",
+        },
+      }),
+    );
+
+    setTimeout(() => cancelController.abort(), 10);
+    const result = await runPromise;
+
+    expect(abortCalled).toBe(true);
+    expect(result.status).toBe("failed");
+    expect(settledReceipt).toBeDefined();
+
+    // 1. Abort requested timestamp exists (request)
+    expect(settledReceipt?.timestamps.abortRequestedAt).toBeDefined();
+
+    // 2. Lease invalidated timestamp exists (acknowledgement / local fence)
+    expect(settledReceipt?.timestamps.leaseInvalidatedAt).toBeDefined();
+
+    // 3. Confirmation is unconfirmed (no remote cessation claim)
+    expect(settledReceipt?.termination.requested).toBe(true);
+    expect(settledReceipt?.termination.confirmation).toBe("unconfirmed");
+
+    // 4. Remote status honestly reports unknown_may_continue
+    expect(settledReceipt?.resources.remoteStatus).toBe("unknown_may_continue");
+
+    // 5. Process group alive is not_applicable for SDK transport
+    expect(settledReceipt?.resources.processGroupAlive).toBe("not_applicable");
+
+    // 6. Outcome is local_fenced_remote_unconfirmed
+    expect(settledReceipt?.outcome).toBe("local_fenced_remote_unconfirmed");
   });
 });

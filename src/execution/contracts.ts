@@ -203,6 +203,12 @@ export type TransportFailureCause =
 export interface ProviderTransport {
   readonly backend: RunnerBackend;
   readonly billingMode?: UsageBillingMode;
+  readonly admissionIdentity?: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly cancellationSemantics?: "process-exit" | "provider-proof";
+  readonly defaultRoute?: ResolvedModelRoute;
   capabilities(): Promise<ProviderCapabilityReport>;
   execute(
     request: TransportRequest,
@@ -313,6 +319,12 @@ export interface RuntimeBinding {
   readonly environment: EnvironmentPolicy;
   readonly tools: ToolPolicy;
   readonly mcp: McpPolicy;
+  readonly admissionIdentity?: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly cancellationSemantics?: "process-exit" | "provider-proof";
+  readonly defaultRoute?: ResolvedModelRoute;
   capabilities(): Promise<ExactBindingCapabilityReport>;
   acquire(
     isolation: IsolationProjection,
