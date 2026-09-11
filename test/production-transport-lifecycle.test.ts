@@ -18,6 +18,7 @@ import type {
   AsyncEventSink,
   IsolationProjection,
   ProviderCapabilityReport,
+  ProviderEvent,
   ProviderTerminalProof,
   ProviderTransport,
   ResolvedModelRoute,
@@ -48,7 +49,12 @@ import {
 } from "../src/transport-registry";
 import type { OpenCodeSdkLike } from "../src/transports/opencode-client";
 import { createOpenCodeClient } from "../src/transports/opencode-client";
-import type { OpenCodeClientLike } from "../src/transports/opencode-sdk";
+import {
+  type OpenCodeClientEvent,
+  type OpenCodeClientLike,
+  type OpenCodePollResult,
+  OpenCodeSdkTransport,
+} from "../src/transports/opencode-sdk";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 
@@ -1581,5 +1587,322 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       expect(requests).toHaveLength(1);
       expect(requests[0]).not.toHaveProperty("timeoutMs");
     });
+  });
+});
+
+describe("Task 3.1 RED U3 BE1a/b: terminal arbitration, stalled observation, and bounded settlement", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-u3-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function createStubClient(overrides: {
+    stream?: AsyncIterable<OpenCodeClientEvent>;
+    pollStatus?: () => Promise<OpenCodePollResult>;
+    abort?: () => Promise<void>;
+    close?: () => Promise<void>;
+  }): OpenCodeClientLike {
+    return {
+      createSession: async () => ({ id: "oc-sess-test" }),
+      streamEvents: () => overrides.stream ?? (async function* () {})(),
+      pollStatus: overrides.pollStatus ?? (async () => ({ kind: "pending" })),
+      abort: overrides.abort ?? (async () => {}),
+      close: overrides.close ?? (async () => {}),
+    };
+  }
+
+  function createStubRequest(dir: string): TransportRequest {
+    return {
+      sessionId: "test-session-u3",
+      attempt: 1,
+      route: {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt-4o",
+        modelSnapshot: "gpt-4o",
+      },
+      executionModel: "gpt-4o",
+      systemPromptPath: path.join(dir, "system.md"),
+      systemPromptSha256: "deadbeef",
+      userPrompt: "review this code",
+      cwd: dir,
+      tools: ["Read"],
+      isolation: ISOLATION_STUB,
+    };
+  }
+
+  function createStubSink(): AsyncEventSink & { events: ProviderEvent[] } {
+    const events: ProviderEvent[] = [];
+    return {
+      events,
+      push: async (event) => {
+        events.push(event);
+        return "accepted";
+      },
+      close: () => {},
+    };
+  }
+
+  // --- BE1a: Completion race ---
+  test("BE1a completion race: cancellation admitted before settlement fences success even with completed terminal proof", async () => {
+    const proof: ProviderTerminalProof = {
+      eventId: "evt-proof-1",
+      providerStatus: "completed",
+      providerObservedAt: new Date().toISOString(),
+    };
+
+    async function* stream(): AsyncIterable<OpenCodeClientEvent> {
+      yield { kind: "delta", text: "result text" };
+      yield { kind: "terminal", proof };
+    }
+
+    const client = createStubClient({ stream: stream() });
+    const transport = new OpenCodeSdkTransport({
+      client,
+      cleanupMs: 50,
+      abortConfirmMs: 50,
+    });
+
+    const sink = createStubSink();
+    const controller = new AbortController();
+    const executePromise = transport.execute(createStubRequest(tmpDir), {
+      signal: controller.signal,
+      events: sink,
+    });
+
+    // Wait for stream to emit terminal candidate into the slot (drain window starts)
+    await sleep(10);
+    // Admit cancellation before the drain window settles
+    controller.abort();
+
+    const outcome = await executePromise;
+
+    // Cancellation admitted before settlement fences success
+    expect(outcome.completion).toBe("cancelled");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.terminalProof?.eventId).toBe("evt-proof-1");
+    expect(outcome.finalText).toBe("result text");
+  });
+
+  test("BE1a completion race: settled outcome is immutable against late conflict or late stream error", async () => {
+    const winnerProof: ProviderTerminalProof = {
+      eventId: "evt-winner",
+      providerStatus: "completed",
+      providerObservedAt: new Date().toISOString(),
+    };
+    const conflictingProof: ProviderTerminalProof = {
+      eventId: "evt-conflict",
+      providerStatus: "failed",
+      providerObservedAt: new Date().toISOString(),
+    };
+
+    let pollCount = 0;
+    let emitLateError: (() => void) | undefined;
+    async function* stream(): AsyncIterable<OpenCodeClientEvent> {
+      yield { kind: "delta", text: "done" };
+      yield { kind: "terminal", proof: winnerProof };
+      await new Promise<void>((resolve) => {
+        emitLateError = resolve;
+      });
+      throw new Error("late stream disconnect");
+    }
+
+    const client = createStubClient({
+      stream: stream(),
+      pollStatus: async () => {
+        pollCount += 1;
+        if (pollCount > 3) {
+          return { kind: "terminal", proof: conflictingProof };
+        }
+        return { kind: "pending" };
+      },
+    });
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      cleanupMs: 10,
+      pollIntervalMs: 5,
+    });
+
+    const sink = createStubSink();
+    const outcome = await transport.execute(createStubRequest(tmpDir), {
+      signal: new AbortController().signal,
+      events: sink,
+    });
+
+    // Settled as success
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.terminalProof?.eventId).toBe("evt-winner");
+
+    // Trigger late error and poll conflict after settlement
+    emitLateError?.();
+    await sleep(20);
+
+    // Outcome must remain immutable and not overwritten
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+  });
+
+  test("BE1a completion race: late terminal proof after abort_unconfirmed settlement does not overwrite outcome", async () => {
+    let lateProofReady = false;
+    const lateProof: ProviderTerminalProof = {
+      eventId: "evt-late",
+      providerStatus: "completed",
+      providerObservedAt: new Date().toISOString(),
+    };
+
+    const client = createStubClient({
+      stream: (async function* () {
+        await sleep(100);
+        yield { kind: "terminal", proof: lateProof };
+      })(),
+      pollStatus: async () => {
+        if (lateProofReady) {
+          return { kind: "terminal", proof: lateProof };
+        }
+        return { kind: "pending" };
+      },
+    });
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      abortConfirmMs: 15,
+      cleanupMs: 10,
+    });
+
+    const controller = new AbortController();
+    const executePromise = transport.execute(createStubRequest(tmpDir), {
+      signal: controller.signal,
+      events: createStubSink(),
+    });
+
+    await sleep(5);
+    controller.abort();
+
+    const outcome = await executePromise;
+
+    // Unconfirmed abort settles
+    expect(outcome.completion).toBe("cancelled");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.terminalProof).toBeUndefined();
+
+    // Late proof arrives after settlement
+    lateProofReady = true;
+    await sleep(20);
+
+    // Outcome must remain unchanged
+    expect(outcome.completion).toBe("cancelled");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.terminalProof).toBeUndefined();
+  });
+
+  // --- BE1b: Stalled observation ---
+  test("BE1b stalled observation: repeated heartbeats do not extend deadline and trip quiet bound as protocol_truncation", async () => {
+    let heartbeatCount = 0;
+    async function* heartbeatStream(): AsyncIterable<OpenCodeClientEvent> {
+      for (;;) {
+        await sleep(2);
+        heartbeatCount += 1;
+        yield { kind: "heartbeat" };
+      }
+    }
+
+    const client = createStubClient({
+      stream: heartbeatStream(),
+      pollStatus: async () => ({ kind: "pending" }),
+    });
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      pollIntervalMs: 5,
+      pollRoundMs: 5,
+      maxQuietRounds: 3,
+    });
+
+    const sink = createStubSink();
+    const outcome = await transport.execute(createStubRequest(tmpDir), {
+      signal: new AbortController().signal,
+      events: sink,
+    });
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("truncated");
+    expect(outcome.stderrTail).toContain("quiet-round budget");
+    expect(transport.classifyFailure(outcome)).toBe("protocol_truncation");
+    expect(heartbeatCount).toBeGreaterThan(0);
+  });
+
+  test("BE1b stalled observation: hung poll requests time out boundedly and trip quiet bound", async () => {
+    const client = createStubClient({
+      stream: (async function* () {})(),
+      pollStatus: async () => {
+        // Hung request: never resolves
+        await new Promise<never>(() => {});
+        return { kind: "pending" };
+      },
+    });
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      pollRoundMs: 10,
+      pollIntervalMs: 5,
+      maxQuietRounds: 3,
+    });
+
+    const startTime = Date.now();
+    const outcome = await transport.execute(createStubRequest(tmpDir), {
+      signal: new AbortController().signal,
+      events: createStubSink(),
+    });
+    const elapsedMs = Date.now() - startTime;
+
+    expect(elapsedMs).toBeLessThan(500);
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("truncated");
+    expect(outcome.stderrTail).toContain("quiet-round budget");
+    expect(transport.classifyFailure(outcome)).toBe("protocol_truncation");
+  });
+
+  test("BE1b bounded cleanup: hung client.abort is capped by cleanup budget during teardown", async () => {
+    let abortCalled = false;
+    const client = createStubClient({
+      stream: {
+        [Symbol.asyncIterator]() {
+          return {
+            next: async () => {
+              throw new Error("stream failure");
+            },
+          };
+        },
+      },
+      abort: async () => {
+        abortCalled = true;
+        // Hung abort: never resolves
+        await new Promise<never>(() => {});
+      },
+    });
+
+    const transport = new OpenCodeSdkTransport({
+      client,
+      cleanupMs: 20,
+    });
+
+    const startTime = Date.now();
+    const outcome = await transport.execute(createStubRequest(tmpDir), {
+      signal: new AbortController().signal,
+      events: createStubSink(),
+    });
+    const elapsedMs = Date.now() - startTime;
+
+    expect(abortCalled).toBe(true);
+    expect(elapsedMs).toBeLessThan(400);
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("unverified");
   });
 });
