@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import {
+  classifyWitnessEvidence,
+  type SessionWitness,
+  sanitizeWitness,
+  type WitnessClassification,
+} from "../../scripts/opencode-prompt-probe";
 import type {
   AsyncEventSink,
   ProviderEvent,
@@ -2431,5 +2437,236 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
 
     expect(outcome.completion).toBe("failed");
     expect(outcome.protocolIntegrity).not.toBe("verified");
+  });
+});
+
+describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classification", () => {
+  function makeBaseWitness(
+    overrides: Partial<SessionWitness> = {},
+  ): SessionWitness {
+    return {
+      identities: {
+        runId: "run-probe-1",
+        attemptId: "att-1",
+        sessionId: "sess-1",
+        userMessageId: "msg-user-1",
+        gitCommitSha: "deadbeefcafebabe",
+        sdkVersion: "1.18.25",
+        serverVersion: "1.18.30",
+        route: {
+          provider: "openai",
+          modelSnapshot: "gpt-5.6-luna",
+          modelVariant: "high",
+        },
+        cwd: "/workspace/pr-hero",
+        credentialCategory: "operator_oauth",
+        sanitizedEndpoint: "http://127.0.0.1:4096/v1",
+      },
+      requestWire: {
+        sanitizedPath: "/session/sess-1/message",
+        sanitizedQuery: {},
+        sanitizedBody: { prompt: "review PR" },
+        timestamps: { sentAt: 1000, receivedAt: 2000 },
+        status: 200,
+      },
+      events: [
+        {
+          timestamp: 1050,
+          seq: 1,
+          eventType: "message.part.updated",
+          partId: "prt-1",
+          textDelta: "LGTM",
+        },
+      ],
+      readback: {
+        directory: "/workspace/pr-hero",
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-1",
+            finishStatus: "stop",
+            parts: [{ id: "prt-1", type: "text", text: "LGTM" }],
+            finalText: "LGTM",
+          },
+        ],
+      },
+      settlement: {
+        status: "completed",
+        readbackAttempts: 1,
+        arbiterTerminalReason: "completed",
+        abortRequested: false,
+        abortAcknowledged: false,
+        abortConfirmed: false,
+        usageCompleteness: "complete",
+      },
+      ...overrides,
+    };
+  }
+
+  test("redaction: keys, authorization headers, and secret tokens in URL and body are completely redacted", () => {
+    const dirty = makeBaseWitness({
+      identities: {
+        ...makeBaseWitness().identities,
+        credentialCategory: "operator_oauth",
+      },
+      requestWire: {
+        sanitizedPath:
+          "/session/sess-1/message?token=ghp_ABC12345678901234567890&apiKey=secret-key-1234",
+        sanitizedQuery: {
+          key: "sk-openai-secret-token-abcdef123456",
+          safe: "public-value",
+        },
+        sanitizedBody: {
+          headers: {
+            authorization: "Bearer my-secret-jwt-token-12345",
+            "x-api-key": "secret-api-key-9999",
+          },
+          password: "supersecretpassword",
+          secret: "confidential",
+          userPrompt:
+            "Please use token ghp_99999999999999999999 to authenticate with sk-key12345678",
+        },
+        timestamps: { sentAt: 1000, receivedAt: 2000 },
+        status: 200,
+      },
+    });
+
+    const sanitized = sanitizeWitness(dirty);
+
+    const serialized = JSON.stringify(sanitized);
+    expect(serialized).not.toContain("ghp_ABC12345678901234567890");
+    expect(serialized).not.toContain("secret-key-1234");
+    expect(serialized).not.toContain("sk-openai-secret-token-abcdef123456");
+    expect(serialized).not.toContain("my-secret-jwt-token-12345");
+    expect(serialized).not.toContain("secret-api-key-9999");
+    expect(serialized).not.toContain("supersecretpassword");
+    expect(serialized).not.toContain("confidential");
+    expect(serialized).not.toContain("ghp_99999999999999999999");
+    expect(serialized).not.toContain("sk-key12345678");
+
+    expect(sanitized.identities.credentialCategory).toBe("operator_oauth");
+    expect(
+      (sanitized.requestWire.sanitizedQuery as Record<string, string>).safe,
+    ).toBe("public-value");
+    expect(sanitized.identities.runId).toBe("run-probe-1");
+  });
+
+  test("demonstrated reconstruction defect: classifies as demonstrated_reconstruction_defect when readback persists text but local text is empty", () => {
+    const witness = makeBaseWitness({
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-1",
+            finishStatus: "stop",
+            parts: [
+              { id: "prt-1", type: "text", text: "Approved with no defects." },
+            ],
+            finalText: "Approved with no defects.",
+          },
+        ],
+      },
+    });
+
+    const classification: WitnessClassification = classifyWitnessEvidence(
+      witness,
+      "",
+    );
+    expect(classification).toBe("demonstrated_reconstruction_defect");
+  });
+
+  test("persisted final empty: classifies as persisted_final_empty when server completes with empty assistant text", () => {
+    const witness = makeBaseWitness({
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-1",
+            finishStatus: "stop",
+            parts: [],
+            finalText: "",
+          },
+        ],
+      },
+    });
+
+    const classification = classifyWitnessEvidence(witness, "");
+    expect(classification).toBe("persisted_final_empty");
+  });
+
+  test("external rejection: classifies admission error, HTTP 4xx/5xx, or provider refusal as external_rejection", () => {
+    const httpErrorWitness = makeBaseWitness({
+      requestWire: {
+        sanitizedPath: "/session/sess-1/message",
+        sanitizedQuery: {},
+        sanitizedBody: {},
+        timestamps: { sentAt: 1000 },
+        status: 500,
+        error: "Internal Server Error",
+      },
+    });
+    expect(classifyWitnessEvidence(httpErrorWitness, "")).toBe(
+      "external_rejection",
+    );
+
+    const providerRefusalWitness = makeBaseWitness({
+      settlement: {
+        status: "failed",
+        readbackAttempts: 1,
+        arbiterTerminalReason: "prompt_refused",
+        abortRequested: false,
+        usageCompleteness: "incomplete",
+      },
+    });
+    expect(classifyWitnessEvidence(providerRefusalWitness, "")).toBe(
+      "external_rejection",
+    );
+
+    const admissionErrorWitness = makeBaseWitness({
+      settlement: {
+        status: "admission-error",
+        readbackAttempts: 0,
+        arbiterTerminalReason: "admission_refused",
+        abortRequested: false,
+        usageCompleteness: "incomplete",
+      },
+    });
+    expect(classifyWitnessEvidence(admissionErrorWitness, "")).toBe(
+      "external_rejection",
+    );
+  });
+
+  test("inconclusive: classifies dropped or missing readback or partial evidence as inconclusive", () => {
+    const noReadbackWitness = makeBaseWitness({
+      readback: null,
+    });
+    expect(classifyWitnessEvidence(noReadbackWitness, "")).toBe("inconclusive");
+
+    const emptyMessagesWitness = makeBaseWitness({
+      readback: {
+        messages: [],
+      },
+    });
+    expect(classifyWitnessEvidence(emptyMessagesWitness, "")).toBe(
+      "inconclusive",
+    );
+
+    const unfinishedWitness = makeBaseWitness({
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-1",
+            finishStatus: undefined,
+            parts: [{ id: "prt-1", type: "text", text: "partial" }],
+          },
+        ],
+      },
+    });
+    expect(classifyWitnessEvidence(unfinishedWitness, "")).toBe("inconclusive");
   });
 });
