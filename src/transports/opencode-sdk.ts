@@ -122,11 +122,13 @@ export type OpenCodeClientEvent =
   | { readonly kind: "delta"; readonly text: string }
   | {
       readonly kind: "usage";
+      readonly id?: string;
       readonly mode: "snapshot" | "delta";
       readonly final?: boolean;
       readonly inputTokens?: number;
       readonly outputTokens?: number;
       readonly costUsd?: number;
+      readonly incomplete?: boolean;
     }
   | {
       readonly kind: "diagnostic";
@@ -346,6 +348,30 @@ function noSessionUsage(
     costSource: "provider",
     cashCostUsd: 0,
   };
+}
+
+// A prompt refusal that arrived before any provider event: the failure
+// detail IS the refusal (session.prompt rejected at call time —
+// opencode-client.ts: a refused prompt creates no message and therefore no
+// events), and not a single delta, reasoning part, tool invocation, or usage
+// event was ever observed. The model provably never started, so the
+// noSessionUsage assertion holds exactly as it does for session-creation
+// failure. Anything else — a refusal after partial delivery, a non-refusal
+// stream death, a poll-observed failure with no refusal text — keeps the
+// fail-closed "unavailable".
+function promptRefusedBeforeStart(
+  reason: SettleReason,
+  finalPartsLength: number,
+  sawReasoning: boolean,
+  sawContentEvent: boolean,
+): boolean {
+  if (reason.kind !== "stream_error" && reason.kind !== "session_failed") {
+    return false;
+  }
+  if (!reason.detail.includes(MARKER_PROMPT_REFUSED)) {
+    return false;
+  }
+  return finalPartsLength === 0 && !sawReasoning && !sawContentEvent;
 }
 
 // Matching means the poll observes the SAME terminal identity the slot already
@@ -750,6 +776,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // `aggregateBytes` either — reasoning is not the answer, so it must not
     // consume the answer's §4.2 content budget.
     let sawReasoning = false;
+    let sawContentEvent = false;
+    const seenUsageIds = new Set<string>();
+    let usageIncomplete = false;
     // §4.1/§8: the first usage event fixes the attempt's aggregation mode;
     // `applyUsageUpdate` is the pure snapshot-replaces/delta-accumulates state
     // machine, shared with every other transport that folds a usage stream.
@@ -839,7 +868,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           // the provider alive. Heartbeats are keepalives, not signs of life
           // for a session that must DELIVER — excluding them is what makes a
           // heartbeat-only hang trip instead of idling to the watchdog.
-          if (event.kind !== "heartbeat") noteContentEvent();
+          if (event.kind !== "heartbeat") {
+            noteContentEvent();
+            sawContentEvent = true;
+          }
           switch (event.kind) {
             case "delta": {
               // #132: set BEFORE the push, not after it. The window must count
@@ -878,6 +910,17 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               break;
             }
             case "usage": {
+              if (event.incomplete) {
+                usageIncomplete = true;
+              }
+              if (event.id !== undefined) {
+                if (seenUsageIds.has(event.id)) {
+                  if (event.mode === "delta") {
+                    break;
+                  }
+                }
+                seenUsageIds.add(event.id);
+              }
               // §4.2 line 195: the first usage event fixes the attempt's
               // aggregation mode; a later flip throws rather than silently
               // mixing snapshot and delta semantics.
@@ -1314,10 +1357,17 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // reading the provider's cost off every assistant message.
         usage:
           usageState === undefined
-            ? normalizeUnavailableUsage({
-                wallMs: Date.now() - startedWall,
-                billingMode: this.usageBillingMode,
-              })
+            ? promptRefusedBeforeStart(
+                reason,
+                finalParts.length,
+                sawReasoning,
+                sawContentEvent,
+              )
+              ? noSessionUsage(Date.now() - startedWall, this.usageBillingMode)
+              : normalizeUnavailableUsage({
+                  wallMs: Date.now() - startedWall,
+                  billingMode: this.usageBillingMode,
+                })
             : {
                 wallMs: Date.now() - startedWall,
                 tokens: {
@@ -1331,7 +1381,18 @@ export class OpenCodeSdkTransport implements ProviderTransport {
                         (usageState.tokens.outputVisible ?? 0)
                       : undefined,
                 },
-                completeness: "complete",
+                completeness:
+                  usageIncomplete ||
+                  reason.kind === "abort_unconfirmed" ||
+                  reason.kind === "usage_flip" ||
+                  reason.kind === "conflict" ||
+                  reason.kind === "silence" ||
+                  reason.kind === "stream_error" ||
+                  reason.kind === "session_failed" ||
+                  reason.kind === "stall" ||
+                  reason.kind === "bound"
+                    ? "partial"
+                    : "complete",
                 // 2026-09-02: the ROUTE's mode, not a hardcoded
                 // "subscription". #133 established that an OpenCode route on
                 // any provider but `openai` runs on a `provider_api_token`
@@ -1471,6 +1532,21 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|network (error|failure)|\b(?:502|503|504)\b|overloaded/i.test(
         witness,
       )
+    ) {
+      return "network_transient";
+    }
+    // The gateway's 500 surfacing as a refused prompt (Martian `opencode`
+    // arm, 2026-09-10: `opencode session.prompt failed:
+    // {"name":"UnknownError","data":{"message":"Unexpected server error…"}}`
+    // killed 7/10 PRs with no retry, while the same route self-healed within
+    // seconds hours later). A refused prompt whose text IS the provider's own
+    // 500 is a transient gateway failure, not the runtime being unavailable —
+    // the terminal marker below must not swallow it. Placed beside the
+    // network patterns under the same ordering rule: auth/rate-limit above
+    // still win, and a local TypeError with no provider-500 text still falls
+    // through to the terminal marker.
+    if (
+      /unexpected server error|internal server error|\b500\b/i.test(witness)
     ) {
       return "network_transient";
     }
