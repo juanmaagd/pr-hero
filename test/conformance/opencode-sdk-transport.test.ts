@@ -1461,3 +1461,975 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Unit 2: OA2a canonical final snapshots & OA2b identity reconciliation
+// ---------------------------------------------------------------------------
+
+interface ControlledSdkHandle {
+  sdk: import("../../src/transports/opencode-client").OpenCodeSdkLike;
+  emit: (event: Record<string, unknown>) => void;
+  endStream: () => void;
+  setStatus: (status: Record<string, unknown> | undefined) => void;
+  setMessages: (
+    messages: unknown[] | { data: unknown[]; cursor?: { next?: string } },
+  ) => void;
+  setPromptResponse: (res: unknown) => void;
+}
+
+function makeControlledSdk(options: {
+  sessionId?: string;
+  toolIds?: string[];
+  initialMessages?: unknown[];
+  initialStatus?: Record<string, unknown>;
+  promptResponse?: unknown;
+}): ControlledSdkHandle {
+  const sessionId = options.sessionId ?? "ses-controlled-1";
+  const queue: unknown[] = [];
+  let notify: (() => void) | undefined;
+  let ended = false;
+  let statuses: Record<string, unknown> =
+    options.initialStatus !== undefined
+      ? { [sessionId]: options.initialStatus }
+      : {};
+  let messages: unknown = options.initialMessages ?? [];
+  let promptRes: unknown = options.promptResponse ?? {};
+
+  const sdk: import("../../src/transports/opencode-client").OpenCodeSdkLike = {
+    createOpencodeClient: () => ({
+      mcp: { status: async () => ({ data: {} }) },
+      tool: {
+        ids: async () => ({
+          data: options.toolIds ?? ["read", "grep", "glob"],
+        }),
+      },
+      session: {
+        create: async () => ({ data: { id: sessionId } }),
+        prompt: async () => ({ data: promptRes }),
+        messages: async () => ({ data: messages }),
+        status: async () => ({ data: statuses }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({
+          stream: {
+            async *[Symbol.asyncIterator]() {
+              for (;;) {
+                while (queue.length > 0) yield queue.shift();
+                if (ended) return;
+                await new Promise<void>((resolve) => {
+                  notify = resolve;
+                });
+              }
+            },
+          },
+        }),
+      },
+    }),
+  };
+
+  return {
+    sdk,
+    emit: (event) => {
+      queue.push(event);
+      notify?.();
+      notify = undefined;
+    },
+    endStream: () => {
+      ended = true;
+      notify?.();
+      notify = undefined;
+    },
+    setStatus: (status) => {
+      statuses = status === undefined ? {} : { [sessionId]: status };
+    },
+    setMessages: (msgs) => {
+      messages = msgs;
+    },
+    setPromptResponse: (res) => {
+      promptRes = res;
+    },
+  };
+}
+
+function makeControlledRig(
+  controlled: ControlledSdkHandle,
+  _sessionId = "ses-controlled-1",
+) {
+  const {
+    createOpenCodeClient,
+  } = require("../../src/transports/opencode-client");
+  const clock = new ManualClock();
+  const sink = new RecordingSink();
+  const controller = new AbortController();
+  const client = createOpenCodeClient({
+    loadSdk: async () => controlled.sdk,
+    launchServer: async () => ({
+      url: "http://127.0.0.1:4096",
+      pid: 1000,
+      close: async () => {},
+    }),
+    model: { providerID: "openai", modelID: "gpt-4o" },
+    readSystemPrompt: async () => "SYSTEM PROMPT",
+  });
+  const transport = new OpenCodeSdkTransport({
+    client,
+    clock,
+    stallDeadlineMs: 100,
+    abortConfirmMs: 500,
+    cleanupMs: 50,
+    pollIntervalMs: 10,
+    pollRoundMs: 20,
+  });
+  return { clock, sink, controller, transport, client };
+}
+
+describe("OpenCode canonical final snapshots & missing observations (OA2a)", () => {
+  const SESS = "ses-oa2a";
+
+  test("dropped deltas: recovers persisted final answer once from canonical snapshot readback", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    // User prompt message
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    // Assistant part announced, but deltas are completely dropped in stream!
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+
+    // Completed assistant message
+    const completedAssistant = {
+      id: "msg-asst-1",
+      sessionID: SESS,
+      role: "assistant",
+      parentID: "msg-user-1",
+      finish: "stop",
+      time: { created: 1000, completed: 2000 },
+      tokens: { input: 100, output: 20 },
+      cost: 0.01,
+    };
+
+    // The persisted final answer is present in readback messages with its snapshot part
+    controlled.setMessages([
+      {
+        info: completedAssistant,
+        parts: [
+          {
+            id: "prt-ans-1",
+            messageID: "msg-asst-1",
+            sessionID: SESS,
+            type: "text",
+            text: "persisted final answer",
+          },
+        ],
+      },
+    ]);
+
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "persisted final answer",
+        },
+      },
+    });
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.finalText).toBe("persisted final answer");
+    expect(outcome.terminalProof?.eventId).toBe("msg-asst-1");
+  });
+
+  test("duplicate deltas: deduplicates identical observations and delivers answer once", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+
+    // Delivers delta "hello "
+    controlled.emit({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg-asst-1",
+        partID: "prt-ans-1",
+        field: "text",
+        delta: "hello ",
+      },
+    });
+
+    // Duplicate delta delivery of "hello "
+    controlled.emit({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg-asst-1",
+        partID: "prt-ans-1",
+        field: "text",
+        delta: "hello ",
+      },
+    });
+
+    const completedAssistant = {
+      id: "msg-asst-1",
+      sessionID: SESS,
+      role: "assistant",
+      parentID: "msg-user-1",
+      finish: "stop",
+      time: { created: 1000, completed: 2000 },
+      tokens: { input: 10, output: 5 },
+      cost: 0,
+    };
+
+    controlled.setMessages([
+      {
+        info: completedAssistant,
+        parts: [
+          {
+            id: "prt-ans-1",
+            messageID: "msg-asst-1",
+            sessionID: SESS,
+            type: "text",
+            text: "hello ",
+          },
+        ],
+      },
+    ]);
+
+    // Snapshot event restating "hello "
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "hello ",
+        },
+      },
+    });
+
+    // Duplicate completed assistant message events
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe("hello ");
+  });
+
+  test("user prompt text, reasoning, and intermediate tool-step text are excluded from final answer", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    // 1. User prompt message with its text part
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-user-1",
+          messageID: "msg-user-1",
+          sessionID: SESS,
+          type: "text",
+          text: "Please review this pull request in detail",
+        },
+      },
+    });
+
+    // 2. Intermediate step 1: tool call step with plan narration text and tool part
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: {
+          id: "msg-step-1",
+          role: "assistant",
+          parentID: "msg-user-1",
+          sessionID: SESS,
+          finish: "tool-calls",
+          time: { created: 100, completed: 500 },
+        },
+      },
+    });
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-plan-1",
+          messageID: "msg-step-1",
+          sessionID: SESS,
+          type: "text",
+          text: "I will first read the files to check for defects",
+        },
+      },
+    });
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-tool-1",
+          messageID: "msg-step-1",
+          sessionID: SESS,
+          type: "tool",
+          callID: "call-1",
+          tool: "read",
+          state: {
+            status: "completed",
+            output: "file contents",
+            title: "read",
+          },
+        },
+      },
+    });
+
+    // 3. Final step: reasoning part and final answer text
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: {
+          id: "msg-final",
+          role: "assistant",
+          parentID: "msg-step-1",
+          sessionID: SESS,
+          finish: "stop",
+          time: { created: 600, completed: 1200 },
+        },
+      },
+    });
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-reason-1",
+          messageID: "msg-final",
+          sessionID: SESS,
+          type: "reasoning",
+          text: "Thinking about edge cases in the codebase...",
+        },
+      },
+    });
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-final",
+          messageID: "msg-final",
+          sessionID: SESS,
+          type: "text",
+          text: "Found no vulnerabilities. Verification passed.",
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(
+      "Found no vulnerabilities. Verification passed.",
+    );
+    expect(outcome.finalText).not.toContain("Please review");
+    expect(outcome.finalText).not.toContain("I will first read");
+    expect(outcome.finalText).not.toContain("Thinking about edge cases");
+  });
+
+  test("synthetic and ignored text parts are excluded from final answer", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: {
+          id: "msg-final",
+          role: "assistant",
+          parentID: "msg-user-1",
+          sessionID: SESS,
+          finish: "stop",
+          time: { created: 100, completed: 200 },
+        },
+      },
+    });
+
+    // Synthetic part
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-synth-1",
+          messageID: "msg-final",
+          sessionID: SESS,
+          type: "text",
+          text: "[SYSTEM REMINDER]",
+          synthetic: true,
+        },
+      },
+    });
+
+    // Ignored part
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ignore-1",
+          messageID: "msg-final",
+          sessionID: SESS,
+          type: "text",
+          text: "[IGNORED CONTEXT]",
+          ignored: true,
+        },
+      },
+    });
+
+    // Real answer part
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-real-1",
+          messageID: "msg-final",
+          sessionID: SESS,
+          type: "text",
+          text: "Real answer text.",
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe("Real answer text.");
+  });
+});
+
+describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
+  const SESS = "ses-oa2b";
+
+  test("acknowledgement or absent/idle status alone never establishes success", async () => {
+    // Prompt acknowledges (returns data: {}), but no assistant message is completed
+    const controlled = makeControlledSdk({
+      sessionId: SESS,
+      initialStatus: { type: "idle" },
+      initialMessages: [
+        { info: { id: "msg-user-1", role: "user", sessionID: SESS } },
+      ],
+      promptResponse: { id: "ack-1" },
+    });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 4);
+
+    // Session is idle, prompt acked, but no completed assistant exists
+    // The attempt must NOT complete successfully
+    let settled = false;
+    pending.then(() => {
+      settled = true;
+    });
+    await flush();
+
+    expect(settled).toBe(false);
+    rig.controller.abort();
+    await advance(rig.clock, 6);
+  });
+
+  test("completed tool-calls finish or unknown finish never establishes success", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    // Assistant with finish: "tool-calls"
+    const toolStepAssistant = {
+      id: "msg-step-1",
+      role: "assistant",
+      parentID: "msg-user-1",
+      sessionID: SESS,
+      finish: "tool-calls",
+      time: { created: 100, completed: 500 },
+    };
+
+    controlled.setMessages([{ info: toolStepAssistant }]);
+    controlled.setStatus({ type: "idle" });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: toolStepAssistant },
+    });
+
+    await advance(rig.clock, 4);
+
+    let settled = false;
+    pending.then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+
+    rig.controller.abort();
+    await advance(rig.clock, 6);
+  });
+
+  test("outstanding tools prevent acceptance of completion", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    // Assistant message finished, BUT tool call is still running
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: {
+          id: "msg-asst-1",
+          role: "assistant",
+          parentID: "msg-user-1",
+          sessionID: SESS,
+          finish: "stop",
+          time: { created: 100, completed: 200 },
+        },
+      },
+    });
+
+    // Tool call still running
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-tool-running",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "tool",
+          callID: "call-outstanding",
+          tool: "read",
+          state: { status: "running", input: { path: "a.ts" } },
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 4);
+
+    let settled = false;
+    pending.then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+
+    rig.controller.abort();
+    await advance(rig.clock, 6);
+  });
+
+  test("missing ownership: unowned assistant message does not establish success", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-real", role: "user", sessionID: SESS },
+      },
+    });
+
+    // Completed assistant message links to an UNRELATED user message
+    const unownedAssistant = {
+      id: "msg-asst-unowned",
+      role: "assistant",
+      parentID: "msg-user-unrelated",
+      sessionID: SESS,
+      finish: "stop",
+      time: { created: 100, completed: 200 },
+    };
+
+    controlled.setMessages([{ info: unownedAssistant }]);
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: unownedAssistant },
+    });
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 4);
+
+    let settled = false;
+    pending.then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(settled).toBe(false);
+
+    rig.controller.abort();
+    await advance(rig.clock, 6);
+  });
+});
+
+describe("OpenCode reconciliation fail-closed integrity", () => {
+  const SESS = "ses-fail-closed";
+
+  test("conflicting completed snapshots fail closed with malformed integrity", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: {
+          id: "msg-asst-1",
+          role: "assistant",
+          parentID: "msg-user-1",
+          sessionID: SESS,
+          finish: "stop",
+          time: { created: 100, completed: 200 },
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-conflict-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+
+    // Stream delivers delta "Hello World"
+    controlled.emit({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg-asst-1",
+        partID: "prt-conflict-1",
+        field: "text",
+        delta: "Hello World",
+      },
+    });
+
+    // But completed snapshot claims completely conflicting text "Goodbye Moon"
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-conflict-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "Goodbye Moon",
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).not.toBe("verified");
+  });
+
+  test("removal of required content fails closed", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: {
+          id: "msg-asst-1",
+          role: "assistant",
+          parentID: "msg-user-1",
+          sessionID: SESS,
+          finish: "stop",
+          time: { created: 100, completed: 200 },
+        },
+      },
+    });
+
+    // Assistant part with answer
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-req-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "Required answer",
+        },
+      },
+    });
+
+    // Now the required part is removed / tombstoned!
+    controlled.emit({
+      type: "message.part.removed",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg-asst-1",
+        partID: "prt-req-1",
+      },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).not.toBe("verified");
+  });
+
+  test("capacity bound exhaustion fails closed rather than guessing", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    // Flood with unknown-owner observations past MAX_UNKNOWN_OWNER_BUFFER (256)
+    for (let i = 0; i < 300; i += 1) {
+      controlled.emit({
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: `prt-unknown-${i}`,
+            messageID: `msg-unknown-${i}`,
+            sessionID: SESS,
+            type: "text",
+            text: `noise ${i}`,
+          },
+        },
+      });
+    }
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).not.toBe("verified");
+  });
+});

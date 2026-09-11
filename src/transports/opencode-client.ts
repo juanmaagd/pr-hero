@@ -73,6 +73,7 @@ function asNumber(value: unknown): number | undefined {
 // and pollStatus below.
 export function terminalProofFromAssistant(
   info: unknown,
+  state?: OpenCodeTurnState,
 ): ProviderTerminalProof | undefined {
   const message = asRecord(info);
   if (message === undefined) return undefined;
@@ -86,6 +87,16 @@ export function terminalProofFromAssistant(
   // the moment its step starts; only `time.completed` says the step ended and
   // therefore that there is anything here to quote as proof.
   if (completed === undefined) return undefined;
+
+  if (state !== undefined) {
+    if (state.tombstones.has(id)) return undefined;
+    if (message.error === undefined) {
+      // Completed tool-calls or unknown finish never establishes success
+      if (message.finish !== "stop") return undefined;
+      if (hasOutstandingTools(state)) return undefined;
+      if (!isMessageOwned(id, state)) return undefined;
+    }
+  }
 
   // providerStatus is a NORMALISED field, not a passthrough. The transport
   // maps "completed" to success, "cancelled" to cancelled and EVERYTHING ELSE
@@ -161,38 +172,55 @@ export function retryHintFromStatus(
 // Eviction is oldest-first (a Map iterates in insertion order), which is the
 // safe direction — parts are announced and streamed in order, so the oldest
 // entry is the one no delta can still name.
+export interface TrackedPartDetail {
+  readonly id: string;
+  messageId?: string;
+  type: string;
+  text?: string;
+  synthetic?: boolean;
+  ignored?: boolean;
+  emittedText: string;
+  toolStatus?: "pending" | "running" | "completed" | "error";
+  toolCallId?: string;
+}
+
+export interface TrackedMessageDetail {
+  readonly id: string;
+  readonly role: "user" | "assistant" | string;
+  parentID?: string;
+  time?: { created?: number; completed?: number };
+  finish?: string;
+  error?: unknown;
+  hasToolCalls?: boolean;
+  partIds: string[];
+}
+
+export interface UnknownOwnerObservation {
+  readonly type: "part.updated" | "part.delta";
+  readonly partId: string;
+  readonly messageId?: string;
+  readonly raw: Record<string, unknown>;
+}
+
 export interface OpenCodeTurnState {
-  // Assistant-owned message ids. TRAP 2 lives here now: `message.part.updated`
-  // fires for the USER message too, and the recorded one carried the prompt
-  // text itself, so registering every text part would make a delta naming the
-  // user's part echo the prompt into finalText — the exact defect TRAP 2 was
-  // written to prevent, re-entering through the door the fix had to open.
+  readonly sessionId?: string;
+  currentUserId?: string;
   readonly assistantMessages: Set<string>;
   readonly parts: Map<string, "answer" | "reasoning">;
-  // #127: the turn's usage, kept per MESSAGE ID rather than as one running
-  // figure. Each step message restates its OWN totals, so within a message the
-  // newest value replaces the older one — and the recorded probe
-  // (test/fixtures/opencode/probe-events.json, indices 21 and 22) emits the
-  // completed message twice, byte for byte, which a per-event sum would
-  // double-count. Across messages the values are added, because each step is a
-  // separately billed provider call.
+  readonly partDetails: Map<string, TrackedPartDetail>;
+  readonly messageDetails: Map<string, TrackedMessageDetail>;
+  readonly parentLinks: Map<string, string>;
+  readonly toolStates: Map<
+    string,
+    "pending" | "running" | "completed" | "error"
+  >;
+  readonly tombstones: Set<string>;
+  readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   readonly usage: Map<string, StepUsage>;
-  // What the bounded map above has already forgotten. The cap is a MEMORY
-  // bound and must never become an accounting one: summing only the entries
-  // still present made an evicted step's tokens vanish from every later total
-  // — and the running figure could go DOWN at the instant of eviction, which
-  // is the under-reporting direction this file calls the worst one to be wrong
-  // in. Folding the evicted value in here keeps the figure whole while the map
-  // stays bounded.
   carriedUsage: StepUsage;
-  // The most recent completion record observed for this turn. This is the
-  // proof CONTENT the boundary quotes; it is never itself a boundary.
   lastProof?: ProviderTerminalProof;
-  // One terminal per turn. `session.idle` should fire once, but a second one
-  // must not be able to manufacture a second proof — §197's slot reads a
-  // repeat as a confirmation and a DIFFERENT proof as a conflict, so the
-  // cheapest place to guarantee "once" is here, at the source.
   boundaryReported: boolean;
+  integrityFailure?: string;
 }
 
 interface StepUsage {
@@ -201,21 +229,103 @@ interface StepUsage {
   readonly costUsd?: number;
 }
 
-// Generous on purpose: a long hunter turn announces a part per tool call, per
-// step boundary and per text block, and evicting a part that is still being
-// streamed would DROP answer text. The bound exists to make growth impossible,
-// not to be reached.
 const MAX_TRACKED_PARTS = 4096;
 const MAX_TRACKED_MESSAGES = 512;
+const MAX_UNKNOWN_OWNER_BUFFER = 256;
+const MAX_TOMBSTONES = 1024;
 
-export function createTurnState(): OpenCodeTurnState {
+export function createTurnState(
+  sessionId?: string,
+  currentUserId?: string,
+): OpenCodeTurnState {
   return {
+    sessionId,
+    currentUserId,
     assistantMessages: new Set(),
     parts: new Map(),
+    partDetails: new Map(),
+    messageDetails: new Map(),
+    parentLinks: new Map(),
+    toolStates: new Map(),
+    tombstones: new Set(),
+    unknownOwnerBuffer: [],
     usage: new Map(),
     carriedUsage: {},
     boundaryReported: false,
   };
+}
+
+export function isMessageOwned(
+  messageId: string,
+  state: OpenCodeTurnState,
+): boolean {
+  if (state.currentUserId === undefined) return true;
+  const parentId = state.parentLinks.get(messageId);
+  if (parentId === undefined) {
+    return true;
+  }
+  let current: string | undefined = messageId;
+  const visited = new Set<string>();
+  while (current !== undefined) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+    if (current === state.currentUserId) return true;
+    current = state.parentLinks.get(current);
+  }
+  return false;
+}
+
+export function hasOutstandingTools(state: OpenCodeTurnState): boolean {
+  for (const status of state.toolStates.values()) {
+    if (status === "pending" || status === "running") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function evaluateFinalAssistant(
+  info: unknown,
+  state: OpenCodeTurnState,
+): { valid: boolean; reason?: string } {
+  const message = asRecord(info);
+  if (message?.role !== "assistant") {
+    return { valid: false, reason: "not an assistant message" };
+  }
+  const id = typeof message.id === "string" ? message.id : undefined;
+  if (!id) return { valid: false, reason: "missing id" };
+
+  if (state.tombstones.has(id)) {
+    return { valid: false, reason: "message tombstoned" };
+  }
+
+  const completed = asNumber(asRecord(message.time)?.completed);
+  if (completed === undefined) {
+    return { valid: false, reason: "not completed" };
+  }
+
+  if (message.error !== undefined) {
+    return { valid: true };
+  }
+
+  if (message.finish !== "stop") {
+    return {
+      valid: false,
+      reason: `unsupported finish: ${String(message.finish)}`,
+    };
+  }
+
+  if (hasOutstandingTools(state)) {
+    return { valid: false, reason: "outstanding tools in progress" };
+  }
+
+  if (state.currentUserId !== undefined) {
+    if (!isMessageOwned(id, state)) {
+      return { valid: false, reason: "missing or invalid ownership" };
+    }
+  }
+
+  return { valid: true };
 }
 
 function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
@@ -227,10 +337,6 @@ function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
   }
 }
 
-// Field-wise addition, and every field is INDEPENDENT: a field stays absent
-// unless at least one step reported it. The mapper has never invented a zero,
-// and a fabricated 0 would be indistinguishable from a real one to §8's
-// "unavailable vs proven zero" distinction downstream.
 function addField(
   base: number | undefined,
   step: number | undefined,
@@ -250,19 +356,6 @@ function addUsage(base: StepUsage, step: StepUsage): StepUsage {
   };
 }
 
-// The usage map's OWN eviction path, deliberately not the generic `remember`.
-// A generic helper shared with `state.parts` would have to grow an eviction
-// callback that exactly one of its two callers passes, and an optional hook
-// that silently changes what a caller keeps is the same hazard as an absent
-// tool key in resolveToolMap: the question gets made moot instead of answered.
-// Parts want the evicted entry GONE — an id no delta can still name — while
-// usage wants its value kept and its key forgotten. Those are different needs
-// and they get different code.
-//
-// A message evicted and then restated is counted twice, and that is the
-// accepted residual: bounded memory over an unbounded id space cannot dedupe
-// perfectly, and the leftover error is an OVER-count — spend made visible,
-// never hidden, which is the direction this transport chooses everywhere else.
 function rememberUsage(
   state: OpenCodeTurnState,
   messageId: string,
@@ -274,17 +367,12 @@ function rememberUsage(
     if (oldest.done === true) return;
     const evicted = state.usage.get(oldest.value);
     state.usage.delete(oldest.value);
-    // Folded BEFORE the entry is unreachable, so no path deletes a value the
-    // carried total has not already absorbed.
     if (evicted !== undefined) {
       state.carriedUsage = addUsage(state.carriedUsage, evicted);
     }
   }
 }
 
-// The turn's figure: everything the map has forgotten, plus every step
-// message's LATEST snapshot still in it. Starting from the carried total is
-// what makes the cap a memory bound rather than an accounting one.
 function turnUsage(state: OpenCodeTurnState): StepUsage {
   let total = state.carriedUsage;
   for (const step of state.usage.values()) total = addUsage(total, step);
@@ -300,202 +388,558 @@ function rememberId(set: Set<string>, id: string, cap: number): void {
   }
 }
 
-// Returns a LIST because one raw event can carry two facts: the assistant's
-// completed `message.updated` is both the attempt's real usage figure and its
-// terminal proof. Usage is emitted FIRST so the transport has banked it before
-// the terminal can settle the attempt out from under it.
-//
-// STATEFUL since #124, and the index is a REQUIRED parameter rather than an
-// optional one. An optional index would need a default for "no index", and
-// both available defaults are wrong: accepting every delta is the defect, and
-// dropping every delta is an empty answer. An absent argument that silently
-// changes what the mapper harvests is the same hazard as the absent tool key
-// in resolveToolMap — the question is made moot instead of answered.
+function handlePartUpdated(
+  p: Record<string, unknown>,
+  state: OpenCodeTurnState,
+): OpenCodeClientEvent[] {
+  const part = asRecord(p.part);
+  if (!part) return [];
+  const partId = typeof part.id === "string" ? part.id : undefined;
+  const messageId =
+    typeof part.messageID === "string" ? part.messageID : undefined;
+  if (!partId || !messageId) return [];
+
+  if (state.tombstones.has(partId) || state.tombstones.has(messageId)) {
+    return [];
+  }
+
+  // If message owner is unknown, buffer observation
+  if (
+    !state.messageDetails.has(messageId) &&
+    !state.assistantMessages.has(messageId)
+  ) {
+    if (state.unknownOwnerBuffer.length >= MAX_UNKNOWN_OWNER_BUFFER) {
+      state.integrityFailure =
+        "[pr-hero] opencode client: unknown-owner buffer cap exceeded (cap exhaustion)";
+      throw new Error(state.integrityFailure);
+    }
+    state.unknownOwnerBuffer.push({
+      type: "part.updated",
+      partId,
+      messageId,
+      raw: p,
+    });
+    return [];
+  }
+
+  const msgDetail = state.messageDetails.get(messageId);
+  if (msgDetail && !msgDetail.partIds.includes(partId)) {
+    msgDetail.partIds.push(partId);
+  }
+
+  const partType = part.type;
+  if (partType === "tool") {
+    const toolState = asRecord(part.state);
+    const status = toolState?.status as
+      | "pending"
+      | "running"
+      | "completed"
+      | "error"
+      | undefined;
+    const callId = typeof part.callID === "string" ? part.callID : partId;
+    if (status) {
+      state.toolStates.set(callId, status);
+    }
+    if (msgDetail) msgDetail.hasToolCalls = true;
+    return [];
+  }
+
+  if (partType === "reasoning") {
+    remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+    return [];
+  }
+
+  if (msgDetail?.role === "user" || !state.assistantMessages.has(messageId)) {
+    return [];
+  }
+
+  if (partType === "text") {
+    const isSynthetic = part.synthetic === true;
+    const isIgnored = part.ignored === true;
+    const isIntermediateToolStep = msgDetail?.hasToolCalls === true;
+
+    if (isSynthetic || isIgnored || isIntermediateToolStep) {
+      return [];
+    }
+
+    remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
+
+    let detail = state.partDetails.get(partId);
+    if (!detail) {
+      detail = {
+        id: partId,
+        messageId,
+        type: "text",
+        synthetic: isSynthetic,
+        ignored: isIgnored,
+        emittedText: "",
+      };
+      state.partDetails.set(partId, detail);
+    }
+
+    const snapshotText = typeof part.text === "string" ? part.text : undefined;
+    if (snapshotText !== undefined && snapshotText.length > 0) {
+      detail.text = snapshotText;
+      const alreadyEmitted = detail.emittedText;
+      if (alreadyEmitted === snapshotText) {
+        return [];
+      }
+      if (alreadyEmitted.length === 0) {
+        detail.emittedText = snapshotText;
+        return [{ kind: "delta", text: snapshotText }];
+      }
+      if (snapshotText.startsWith(alreadyEmitted)) {
+        const suffix = snapshotText.slice(alreadyEmitted.length);
+        detail.emittedText = snapshotText;
+        return [{ kind: "delta", text: suffix }];
+      }
+      state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot observed for part ${partId}`;
+      throw new Error(state.integrityFailure);
+    }
+  }
+
+  return [];
+}
+
+function handlePartDelta(
+  p: Record<string, unknown>,
+  state: OpenCodeTurnState,
+): OpenCodeClientEvent[] {
+  if (p.field !== "text") return [];
+  const delta = p.delta;
+  if (typeof delta !== "string" || delta.length === 0) return [];
+  const partId = p.partID;
+  if (typeof partId !== "string") return [];
+  const messageId = typeof p.messageID === "string" ? p.messageID : undefined;
+
+  if (
+    state.tombstones.has(partId) ||
+    (messageId && state.tombstones.has(messageId))
+  ) {
+    return [];
+  }
+
+  const kind = state.parts.get(partId);
+  if (kind === "reasoning") {
+    return [{ kind: "reasoning" }];
+  }
+  if (kind === "answer") {
+    let detail = state.partDetails.get(partId);
+    if (!detail) {
+      detail = {
+        id: partId,
+        messageId,
+        type: "text",
+        emittedText: "",
+      };
+      state.partDetails.set(partId, detail);
+    }
+    if (detail.emittedText.endsWith(delta)) {
+      return [];
+    }
+    detail.emittedText += delta;
+    return [{ kind: "delta", text: delta }];
+  }
+
+  if (
+    messageId &&
+    !state.messageDetails.has(messageId) &&
+    !state.assistantMessages.has(messageId)
+  ) {
+    if (state.unknownOwnerBuffer.length >= MAX_UNKNOWN_OWNER_BUFFER) {
+      state.integrityFailure =
+        "[pr-hero] opencode client: unknown-owner buffer cap exceeded (cap exhaustion)";
+      throw new Error(state.integrityFailure);
+    }
+    state.unknownOwnerBuffer.push({
+      type: "part.delta",
+      partId,
+      messageId,
+      raw: p,
+    });
+  }
+
+  return [];
+}
+
+function reconcileUnknownOwnerBuffer(
+  messageId: string,
+  state: OpenCodeTurnState,
+): OpenCodeClientEvent[] {
+  const events: OpenCodeClientEvent[] = [];
+  const remaining: UnknownOwnerObservation[] = [];
+  for (const obs of state.unknownOwnerBuffer) {
+    if (obs.messageId === messageId) {
+      if (obs.type === "part.updated") {
+        events.push(...handlePartUpdated(obs.raw, state));
+      } else if (obs.type === "part.delta") {
+        events.push(...handlePartDelta(obs.raw, state));
+      }
+    } else {
+      remaining.push(obs);
+    }
+  }
+  state.unknownOwnerBuffer.length = 0;
+  state.unknownOwnerBuffer.push(...remaining);
+  return events;
+}
+
+export function reconcileMessages(
+  list: unknown[],
+  state: OpenCodeTurnState,
+): {
+  events: OpenCodeClientEvent[];
+  terminalProof?: ProviderTerminalProof;
+  failure?: string;
+} {
+  for (const item of list) {
+    const itemRec = asRecord(item);
+    const info = asRecord(itemRec?.info ?? item);
+    if (!info) continue;
+    const id = typeof info.id === "string" ? info.id : undefined;
+    const role = info.role;
+    if (!id) continue;
+
+    if (role === "user") {
+      if (state.currentUserId === undefined) {
+        state.currentUserId = id;
+      }
+      if (!state.messageDetails.has(id)) {
+        state.messageDetails.set(id, { id, role: "user", partIds: [] });
+      }
+    } else if (role === "assistant") {
+      rememberId(state.assistantMessages, id, MAX_TRACKED_MESSAGES);
+      const parentID =
+        typeof info.parentID === "string" ? info.parentID : undefined;
+      if (parentID) state.parentLinks.set(id, parentID);
+
+      const finish = typeof info.finish === "string" ? info.finish : undefined;
+      const isToolCalls = finish === "tool-calls" || finish === "tool_calls";
+      let msgDetail = state.messageDetails.get(id);
+      if (!msgDetail) {
+        msgDetail = {
+          id,
+          role: "assistant",
+          parentID,
+          time: asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined,
+          finish,
+          error: info.error,
+          hasToolCalls: isToolCalls,
+          partIds: [],
+        };
+        state.messageDetails.set(id, msgDetail);
+      } else {
+        msgDetail.parentID = parentID ?? msgDetail.parentID;
+        msgDetail.finish = finish ?? msgDetail.finish;
+        msgDetail.error = info.error ?? msgDetail.error;
+        msgDetail.time =
+          (asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined) ?? msgDetail.time;
+        if (isToolCalls) msgDetail.hasToolCalls = true;
+      }
+
+      const parts = Array.isArray(itemRec?.parts)
+        ? (itemRec?.parts as unknown[])
+        : Array.isArray(info.content)
+          ? (info.content as unknown[])
+          : [];
+      for (const p of parts) {
+        const part = asRecord(p);
+        if (!part) continue;
+        const partId = typeof part.id === "string" ? part.id : undefined;
+        if (!partId) continue;
+        if (!msgDetail.partIds.includes(partId)) msgDetail.partIds.push(partId);
+
+        const partType = part.type;
+        if (partType === "tool") {
+          const toolState = asRecord(part.state);
+          const status = toolState?.status as
+            | "pending"
+            | "running"
+            | "completed"
+            | "error"
+            | undefined;
+          const callId = typeof part.callID === "string" ? part.callID : partId;
+          if (status) state.toolStates.set(callId, status);
+          msgDetail.hasToolCalls = true;
+        } else if (partType === "reasoning") {
+          remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+        } else if (partType === "text") {
+          const isSynthetic = part.synthetic === true;
+          const isIgnored = part.ignored === true;
+          if (!isSynthetic && !isIgnored && !msgDetail.hasToolCalls) {
+            remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
+            let detail = state.partDetails.get(partId);
+            if (!detail) {
+              detail = {
+                id: partId,
+                messageId: id,
+                type: "text",
+                emittedText: "",
+              };
+              state.partDetails.set(partId, detail);
+            }
+            if (typeof part.text === "string") {
+              detail.text = part.text;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const itemRec = asRecord(list[i]);
+    const info = asRecord(itemRec?.info ?? list[i]);
+    if (info?.role !== "assistant") continue;
+    const id = typeof info.id === "string" ? info.id : undefined;
+    if (!id) continue;
+
+    if (info.error !== undefined) {
+      const proof = terminalProofFromAssistant(info, state);
+      if (proof) return { events: [], terminalProof: proof };
+    }
+
+    const evalRes = evaluateFinalAssistant(info, state);
+    if (!evalRes.valid) continue;
+
+    const proof = terminalProofFromAssistant(info, state);
+    if (proof === undefined) continue;
+
+    const events: OpenCodeClientEvent[] = [];
+    const msgDetail = state.messageDetails.get(id);
+    if (msgDetail) {
+      for (const partId of msgDetail.partIds) {
+        const detail = state.partDetails.get(partId);
+        if (
+          detail &&
+          detail.type === "text" &&
+          !detail.synthetic &&
+          !detail.ignored
+        ) {
+          const snapshotText = detail.text ?? "";
+          const alreadyEmitted = detail.emittedText;
+          if (alreadyEmitted === snapshotText) {
+            continue;
+          }
+          if (alreadyEmitted.length === 0) {
+            detail.emittedText = snapshotText;
+            events.push({ kind: "delta", text: snapshotText });
+          } else if (snapshotText.startsWith(alreadyEmitted)) {
+            const suffix = snapshotText.slice(alreadyEmitted.length);
+            detail.emittedText = snapshotText;
+            events.push({ kind: "delta", text: suffix });
+          } else {
+            return {
+              events: [],
+              failure: `[pr-hero] opencode client: conflicting snapshot in readback for part ${partId}`,
+            };
+          }
+        }
+      }
+    }
+
+    return { events, terminalProof: proof };
+  }
+
+  return { events: [] };
+}
+
 export function mapOpenCodeEvents(
   raw: unknown,
   sessionId: string,
   state: OpenCodeTurnState,
 ): OpenCodeClientEvent[] {
+  if (state.integrityFailure !== undefined) {
+    throw new Error(state.integrityFailure);
+  }
+
   const type = (raw as RawEvent)?.type;
   if (typeof type !== "string") return [];
   const p = props(raw);
   if (p === undefined) return [];
 
-  // TRAP 1: event.subscribe() is GLOBAL, not scoped to a session. One trivial
-  // prompt produced 71 events, 45 of them `plugin.added`. Every event that
-  // matters carries properties.sessionID and none of the noise does, so this
-  // one check is both the session filter and the noise filter.
   if (p.sessionID !== sessionId) return [];
 
   switch (type) {
-    // TRAP 2: text deltas come from `message.part.delta` ONLY.
-    // `message.part.updated` also fires for the USER message — the recorded
-    // one carried the prompt text itself — so an adapter that treated every
-    // text part as a delta would echo the prompt into finalText and hand it
-    // to StepSpec.parse as though the model had written it.
-    case "message.part.delta": {
-      if (p.field !== "text") return [];
-      const delta = p.delta;
-      if (typeof delta !== "string" || delta.length === 0) return [];
+    case "message.removed": {
+      const messageId = p.messageID;
+      if (typeof messageId === "string") {
+        rememberId(state.tombstones, messageId, MAX_TOMBSTONES);
+        if (
+          messageId === state.currentUserId ||
+          (state.lastProof && state.lastProof.eventId === messageId)
+        ) {
+          state.integrityFailure = `[pr-hero] opencode client: required message removed: ${messageId}`;
+          throw new Error(state.integrityFailure);
+        }
+      }
+      return [];
+    }
+
+    case "message.part.removed": {
       const partId = p.partID;
-      if (typeof partId !== "string") return [];
-      // TRAP 4: the part's KIND decides, never the field name.
-      //
-      // An UNANNOUNCED part id is dropped, and that choice is deliberate. The
-      // recorded probe settles the ordering question it turns on: the part is
-      // announced by `message.part.updated` (type "text", text "") and only
-      // then delta'd, and its owning `message.updated` precedes that — so a
-      // delta whose part was never announced is not a race the provider is
-      // known to run. Both directions can be wrong, and they are not equally
-      // wrong: accepting an unannounced delta re-opens THIS bug for every part
-      // type the provider adds next, silently, while dropping one costs at
-      // worst an answer that arrives short — which fails the harness's parse
-      // loudly and buys a fresh attempt on the transient budget.
-      const kind = state.parts.get(partId);
-      if (kind === "answer") return [{ kind: "delta", text: delta }];
-      // Discarded HERE, at the boundary: the text does not travel, only the
-      // fact that it existed. Dropping it downstream instead would spend the
-      // answer's §4.2 content budget on text that is not the answer.
-      if (kind === "reasoning") return [{ kind: "reasoning" }];
+      if (typeof partId === "string") {
+        rememberId(state.tombstones, partId, MAX_TOMBSTONES);
+        const detail = state.partDetails.get(partId);
+        if (
+          detail &&
+          detail.type === "text" &&
+          (detail.emittedText.length > 0 ||
+            (detail.text && detail.text.length > 0))
+        ) {
+          state.integrityFailure = `[pr-hero] opencode client: required part removed: ${partId}`;
+          throw new Error(state.integrityFailure);
+        }
+      }
       return [];
     }
 
-    // Consumed for the part's TYPE, never for its content — the TRAP 2
-    // reasoning above is unchanged and this arm still maps to nothing. What it
-    // does is register what the following deltas are allowed to become.
+    case "message.part.delta": {
+      return handlePartDelta(p, state);
+    }
+
     case "message.part.updated": {
-      const part = asRecord(p.part);
-      const partId = part?.id;
-      const messageId = part?.messageID;
-      if (typeof partId !== "string" || typeof messageId !== "string") {
-        return [];
-      }
-      // Assistant-owned parts only. The user's message has a text part too,
-      // carrying the prompt itself, and it must never become a channel the
-      // answer can be assembled from.
-      if (!state.assistantMessages.has(messageId)) return [];
-      if (part?.type === "text") {
-        remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
-      } else if (part?.type === "reasoning") {
-        remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
-      }
-      return [];
+      return handlePartUpdated(p, state);
     }
-
-    // `session.updated` is deliberately NOT a usage source. Its info.tokens
-    // stayed {input:0, output:0, ...} for the ENTIRE recorded run while the
-    // real figures (24012 in / 6 out) only ever appeared on the assistant
-    // message. Since §4.2 snapshot mode REPLACES the counters, a zero
-    // snapshot arriving after a real one would wipe the attempt's usage —
-    // silently, and in the direction that under-reports spend.
 
     case "message.updated": {
       const info = asRecord(p.info);
-      if (info === undefined || info.role !== "assistant") return [];
-      // Registered before the early returns below: this event is the ONLY
-      // place the provider says which message is the assistant's, and the
-      // part index needs that fact even on the mid-turn restatements that
-      // carry neither usage nor a proof.
-      if (typeof info.id === "string" && info.id.length > 0) {
-        rememberId(state.assistantMessages, info.id, MAX_TRACKED_MESSAGES);
-      }
-      const out: OpenCodeClientEvent[] = [];
+      if (info === undefined) return [];
+      const id = typeof info.id === "string" ? info.id : undefined;
+      if (!id) return [];
+      const role = info.role;
 
-      // Usage rides the assistant message and is a SNAPSHOT: the MESSAGE's own
-      // running totals, restated. Emitted even mid-turn, where they are zeros
-      // — harmless, since a later restatement of the same message replaces
-      // them.
-      //
-      // #127: what is emitted is the TURN's snapshot, not the message's. One
-      // assistant message per agentic step means the attempt's REPLACE
-      // semantics would keep only the last step's counters and under-report a
-      // multi-step turn — in the direction that hides spend, which is the
-      // worst direction to be wrong in and the axis the #116 ledger is waiting
-      // on. Summing here rather than switching the attempt to `delta` mode is
-      // deliberate: the mode is fixed by the FIRST usage event and a later flip
-      // aborts the attempt, and a delta stream would have to reconstruct each
-      // message's increment from its own restatements anyway. Snapshot of a
-      // running sum keeps one mode for the whole attempt and stays correct
-      // under the duplicate completed message the probe records.
-      const tokens = asRecord(info.tokens);
-      const messageId = typeof info.id === "string" ? info.id : undefined;
-      if (messageId !== undefined) {
-        const inputTokens = asNumber(tokens?.input);
-        const outputTokens = asNumber(tokens?.output);
-        const costUsd = asNumber(info.cost);
-        if (
-          inputTokens !== undefined ||
-          outputTokens !== undefined ||
-          costUsd !== undefined
-        ) {
-          rememberUsage(state, messageId, {
-            ...(inputTokens !== undefined ? { inputTokens } : {}),
-            ...(outputTokens !== undefined ? { outputTokens } : {}),
-            ...(costUsd !== undefined ? { costUsd } : {}),
-          });
-          out.push({ kind: "usage", mode: "snapshot", ...turnUsage(state) });
+      if (role === "user") {
+        if (state.currentUserId === undefined) {
+          state.currentUserId = id;
         }
+        state.messageDetails.set(id, { id, role: "user", partIds: [] });
+        return [];
       }
 
-      // Recorded, never emitted. A completed STEP is not a completed TURN
-      // (#127); this is the content the boundary will quote when it arrives.
-      const proof = terminalProofFromAssistant(info);
+      if (role !== "assistant") return [];
+
+      rememberId(state.assistantMessages, id, MAX_TRACKED_MESSAGES);
+      const parentID =
+        typeof info.parentID === "string" ? info.parentID : undefined;
+      if (parentID) state.parentLinks.set(id, parentID);
+
+      const finish = typeof info.finish === "string" ? info.finish : undefined;
+      const isToolCalls = finish === "tool-calls" || finish === "tool_calls";
+      let msgDetail = state.messageDetails.get(id);
+      if (!msgDetail) {
+        msgDetail = {
+          id,
+          role: "assistant",
+          parentID,
+          time: asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined,
+          finish,
+          error: info.error,
+          hasToolCalls: isToolCalls,
+          partIds: [],
+        };
+        state.messageDetails.set(id, msgDetail);
+      } else {
+        msgDetail.parentID = parentID ?? msgDetail.parentID;
+        msgDetail.finish = finish ?? msgDetail.finish;
+        msgDetail.error = info.error ?? msgDetail.error;
+        msgDetail.time =
+          (asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined) ?? msgDetail.time;
+        if (isToolCalls) msgDetail.hasToolCalls = true;
+      }
+
+      const out: OpenCodeClientEvent[] = [];
+      out.push(...reconcileUnknownOwnerBuffer(id, state));
+
+      const tokens = asRecord(info.tokens);
+      const inputTokens = asNumber(tokens?.input);
+      const outputTokens = asNumber(tokens?.output);
+      const costUsd = asNumber(info.cost);
+      if (
+        inputTokens !== undefined ||
+        outputTokens !== undefined ||
+        costUsd !== undefined
+      ) {
+        rememberUsage(state, id, {
+          ...(inputTokens !== undefined ? { inputTokens } : {}),
+          ...(outputTokens !== undefined ? { outputTokens } : {}),
+          ...(costUsd !== undefined ? { costUsd } : {}),
+        });
+        out.push({ kind: "usage", mode: "snapshot", ...turnUsage(state) });
+      }
+
+      const proof = terminalProofFromAssistant(info, state);
       if (proof !== undefined) state.lastProof = proof;
       return out;
     }
 
-    // #127: THE turn boundary. `session.idle` fires exactly once for a whole
-    // agentic turn — measured on the live provider at three assistant messages
-    // to one idle — while `time.completed` fires once per STEP. Reading a step
-    // completion as the turn's terminal settled the attempt on step 1,
-    // harvested the model's plan narration as the answer and stopped a working
-    // model; that is every "hunter finished in 10-33s with one line" symptom.
-    //
-    // The §5.2/§3.2 objection to `session.idle` still stands and is respected:
-    // its whole payload is {sessionID}, so it supplies no proof and none is
-    // synthesised from it. It supplies only the BOUNDARY, and the proof quoted
-    // at that boundary is the provider's own completion record for the last
-    // step that finished. A turn that reached idle having completed nothing
-    // yields no terminal at all — the transport never issues its own proof,
-    // and the harness watchdog remains the backstop for a turn that can never
-    // produce one.
-    //
-    // Emitted from the mapper, not deferred to a quiet stream, so the terminal
-    // travels as an ordinary mapped event: streamEvents' drain-before-failure
-    // ordering is untouched and a buffered terminal still beats a failure. The
-    // recorded probe puts `session.idle` last (index 25, after both copies of
-    // the completed message at 21/22), so the last proof at the boundary is
-    // the turn's final one. If a build ever reordered them, the poll observer
-    // would quote the later message and §197 would raise a CONFLICT — loud,
-    // and exactly what that slot is for.
     case "session.idle": {
       if (state.boundaryReported) return [];
+      if (state.integrityFailure !== undefined) {
+        throw new Error(state.integrityFailure);
+      }
+      if (hasOutstandingTools(state)) return [];
+
       const proof = state.lastProof;
       if (proof === undefined) return [];
+      if (state.tombstones.has(proof.eventId)) {
+        state.integrityFailure = `[pr-hero] opencode client: terminal message was tombstoned: ${proof.eventId}`;
+        throw new Error(state.integrityFailure);
+      }
       state.boundaryReported = true;
-      return [{ kind: "terminal", proof }];
+
+      const out: OpenCodeClientEvent[] = [];
+      const msgDetail = state.messageDetails.get(proof.eventId);
+      if (msgDetail) {
+        for (const partId of msgDetail.partIds) {
+          if (state.tombstones.has(partId)) {
+            state.integrityFailure = `[pr-hero] opencode client: required part was tombstoned: ${partId}`;
+            throw new Error(state.integrityFailure);
+          }
+          const detail = state.partDetails.get(partId);
+          if (
+            detail &&
+            detail.type === "text" &&
+            !detail.synthetic &&
+            !detail.ignored
+          ) {
+            const snapshotText = detail.text ?? "";
+            if (snapshotText.length > 0) {
+              if (detail.emittedText.length === 0) {
+                detail.emittedText = snapshotText;
+                out.push({ kind: "delta", text: snapshotText });
+              } else if (snapshotText.startsWith(detail.emittedText)) {
+                const diff = snapshotText.slice(detail.emittedText.length);
+                if (diff.length > 0) {
+                  detail.emittedText = snapshotText;
+                  out.push({ kind: "delta", text: diff });
+                }
+              } else {
+                state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot observed for part ${partId}`;
+                throw new Error(state.integrityFailure);
+              }
+            }
+          }
+        }
+      }
+
+      out.push({ kind: "terminal", proof });
+      return out;
     }
 
-    // A busy session is the provider saying it is still working — exactly what
-    // §4.2's heartbeat is for. A `retry` status is NOT a heartbeat: it is
-    // backoff, and it reaches the policy through retryHintFromStatus.
     case "session.status": {
       const status = asRecord(p.status);
       return status?.type === "busy" ? [{ kind: "heartbeat" }] : [];
     }
 
-    // TRAP 3, corrected by #127. `session.idle` used to be dropped here on the
-    // grounds that its payload ({sessionID} — no id, no status, no timestamp)
-    // cannot supply a proof. That grounds is still true and still honoured:
-    // the `session.idle` arm above synthesises nothing and quotes the
-    // provider's own completion record. What was wrong was the conclusion —
-    // dropping the event entirely left `time.completed` as the only terminal
-    // signal, and that is a STEP boundary, not a turn boundary.
-    //
-    // The predicate this file used to export for the same job (`isSessionIdle`)
-    // is gone with it: it had no caller anywhere in src, and biome does not
-    // flag an unused EXPORT, so it was dead code hiding behind a keyword. The
-    // arm above is the caller it was waiting for.
     default:
       return [];
   }
@@ -1226,6 +1670,9 @@ export function createOpenCodeClient(
         while (state.queue.length > 0) {
           yield* mapOpenCodeEvents(state.queue.shift(), session.id, state.turn);
         }
+        if (state.turn.integrityFailure !== undefined) {
+          throw new Error(state.turn.integrityFailure);
+        }
         // Checked AFTER the drain and BEFORE `ended`: anything the provider
         // already said is delivered first — a terminal buffered before the
         // failure still wins its slot — and a failure is a louder end than an
@@ -1251,6 +1698,9 @@ export function createOpenCodeClient(
       // abort_unconfirmed.
       if (state === undefined) {
         return { kind: "pending" };
+      }
+      if (state.turn.integrityFailure !== undefined) {
+        return { kind: "failed", detail: state.turn.integrityFailure };
       }
 
       // #127: the BOUNDARY first, and from a different endpoint. This observer
@@ -1305,7 +1755,20 @@ export function createOpenCodeClient(
           // let the attempt run to its stall deadline on an API error the
           // provider already explained.
           const messages = unwrap(response, "session.messages");
-          const list = Array.isArray(messages) ? messages : [];
+          const list = Array.isArray(messages)
+            ? messages
+            : Array.isArray((messages as { data?: unknown })?.data)
+              ? (messages as { data: unknown[] }).data
+              : [];
+
+          reconcileMessages(list, state.turn);
+          if (state.turn.integrityFailure !== undefined) {
+            return { kind: "failed", detail: state.turn.integrityFailure };
+          }
+          if (hasOutstandingTools(state.turn)) {
+            return { kind: "pending" };
+          }
+
           // The turn has ended; the last completed assistant message supplies
           // the proof CONTENT — the same helper the stream uses, on purpose.
           // §197 wants two INDEPENDENT observers of ONE fact, not two facts
@@ -1316,8 +1779,8 @@ export function createOpenCodeClient(
           // attempt then falls to the harness watchdog, which is the correct
           // place for a turn that never produced a completion record.
           for (let i = list.length - 1; i >= 0; i -= 1) {
-            const info = (list[i] as { info?: unknown })?.info;
-            const proof = terminalProofFromAssistant(info);
+            const info = (list[i] as { info?: unknown })?.info ?? list[i];
+            const proof = terminalProofFromAssistant(info, state.turn);
             if (proof !== undefined) return { kind: "terminal", proof };
           }
         }
