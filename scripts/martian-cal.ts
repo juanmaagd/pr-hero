@@ -328,21 +328,41 @@ if (mode === "run") {
     if (await Bun.file(findingsPath).exists()) {
       try {
         const doc = (await Bun.file(findingsPath).json()) as FindingsDocument;
+        const pipelinePath = path.join(dir, "pipeline.json");
+        let pipelineData: { steps?: Array<{ status?: string }> } | undefined;
+        if (await Bun.file(pipelinePath).exists()) {
+          try {
+            pipelineData = (await Bun.file(pipelinePath).json()) as {
+              steps?: Array<{ status?: string }>;
+            };
+          } catch {}
+        }
+        const hasFailedStep = pipelineData?.steps?.some(
+          (s) => s.status === "failed" || s.status === "unsettled",
+        );
         const resume = evaluateResumeOutcome({
           hasFindingsDocument: true,
           runStatus: doc.run_status,
           sessionFailed: doc.sessionFailed,
           findings: doc.findings,
           protocolIntegrity:
-            doc.run_status === "complete" && !doc.sessionFailed
-              ? "verified"
-              : "unverified",
+            hasFailedStep === true
+              ? "unverified"
+              : doc.run_status === "complete" && !doc.sessionFailed
+                ? "verified"
+                : "unverified",
           terminalProof:
-            doc.run_status === "complete" && !doc.sessionFailed
-              ? { providerStatus: "completed" }
-              : null,
+            hasFailedStep === true
+              ? null
+              : doc.run_status === "complete" && !doc.sessionFailed
+                ? { providerStatus: "completed" }
+                : null,
           finishStatus:
-            doc.run_status === "complete" && !doc.sessionFailed ? "stop" : null,
+            hasFailedStep === true
+              ? "incomplete"
+              : doc.run_status === "complete" && !doc.sessionFailed
+                ? "stop"
+                : null,
         });
         if (resume === "complete" && doc.head_sha === row.headSha) {
           console.error(`\n=== ${label} — SKIPPED, already on disk at ${dir}`);

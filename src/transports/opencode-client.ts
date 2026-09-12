@@ -378,30 +378,36 @@ function rememberUsage(
     const costConflict =
       existing.costUsd !== undefined &&
       usage.costUsd !== undefined &&
-      existing.costUsd !== usage.costUsd;
+      usage.costUsd < existing.costUsd;
     const tokenConflict =
       (existing.inputTokens !== undefined &&
         usage.inputTokens !== undefined &&
-        existing.inputTokens !== usage.inputTokens) ||
+        usage.inputTokens < existing.inputTokens) ||
       (existing.outputTokens !== undefined &&
         usage.outputTokens !== undefined &&
-        existing.outputTokens !== usage.outputTokens);
+        usage.outputTokens < existing.outputTokens);
     if (costConflict || tokenConflict) {
       state.usageConflict = true;
       state.usageIncomplete = true;
-      state.usage.set(messageId, {
-        inputTokens: Math.max(
-          existing.inputTokens ?? 0,
-          usage.inputTokens ?? 0,
-        ),
-        outputTokens: Math.max(
-          existing.outputTokens ?? 0,
-          usage.outputTokens ?? 0,
-        ),
-        costUsd: Math.max(existing.costUsd ?? 0, usage.costUsd ?? 0),
-      });
-      return;
     }
+    const mergedInput =
+      existing.inputTokens !== undefined || usage.inputTokens !== undefined
+        ? Math.max(existing.inputTokens ?? 0, usage.inputTokens ?? 0)
+        : undefined;
+    const mergedOutput =
+      existing.outputTokens !== undefined || usage.outputTokens !== undefined
+        ? Math.max(existing.outputTokens ?? 0, usage.outputTokens ?? 0)
+        : undefined;
+    const mergedCost =
+      existing.costUsd !== undefined || usage.costUsd !== undefined
+        ? Math.max(existing.costUsd ?? 0, usage.costUsd ?? 0)
+        : undefined;
+    state.usage.set(messageId, {
+      ...(mergedInput !== undefined ? { inputTokens: mergedInput } : {}),
+      ...(mergedOutput !== undefined ? { outputTokens: mergedOutput } : {}),
+      ...(mergedCost !== undefined ? { costUsd: mergedCost } : {}),
+    });
+    return;
   }
   state.usage.set(messageId, usage);
   while (state.usage.size > MAX_TRACKED_MESSAGES) {

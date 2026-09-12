@@ -822,6 +822,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     let session: OpenCodeClientSession;
     let removeAbort: (() => void) | undefined;
     let setupTimer: ReturnType<typeof setTimeout> | undefined;
+    let createPromise: Promise<OpenCodeClientSession> | undefined;
     try {
       const abortPromise = new Promise<never>((_, reject) => {
         const onAbort = () => {
@@ -841,7 +842,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         }, 10_000);
       });
 
-      const createPromise = this.client.createSession({
+      createPromise = this.client.createSession({
         cwd: request.cwd,
         userPrompt: request.userPrompt,
         systemPromptPath: request.systemPromptPath,
@@ -857,6 +858,11 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         setupTimeoutPromise,
       ]);
     } catch (error) {
+      if (createPromise !== undefined) {
+        void createPromise
+          .then((s) => void this.client.abort(s))
+          .catch(() => {});
+      }
       if (
         context.signal.aborted ||
         (error instanceof DOMException && error.name === "AbortError")
@@ -1015,6 +1021,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
             if (event.text.length > 0) {
               advancedProgress = true;
             }
+          } else if (event.kind === "reasoning") {
+            advancedProgress = true;
+          } else if (event.kind === "diagnostic") {
+            advancedProgress = true;
           } else if (event.kind === "usage") {
             const totalTokens =
               (event.inputTokens ?? 0) + (event.outputTokens ?? 0);
