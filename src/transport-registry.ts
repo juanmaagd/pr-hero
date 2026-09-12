@@ -312,18 +312,15 @@ export class DefaultTransportRegistry implements TransportRegistry {
         }
       }
 
-      // Check bounded version admission policy (OA1b)
+      // Check bounded version admission policy (OA1b / U1-C1)
       if (
         merged.sdkVersion !== undefined ||
         merged.serverVersion !== undefined ||
         merged.openCodeServerVersion !== undefined
       ) {
         admitOpenCodeVersionPair({
-          sdkVersion: merged.sdkVersion ?? SUPPORTED_OPENCODE_SDK_VERSION,
-          serverVersion:
-            merged.serverVersion ??
-            merged.openCodeServerVersion ??
-            SUPPORTED_OPENCODE_SERVER_VERSION,
+          sdkVersion: merged.sdkVersion,
+          serverVersion: merged.serverVersion ?? merged.openCodeServerVersion,
         });
       }
 

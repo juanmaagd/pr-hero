@@ -94,7 +94,9 @@ export function terminalProofFromAssistant(
       // Completed tool-calls or unknown finish never establishes success
       if (message.finish !== "stop") return undefined;
       if (hasOutstandingTools(state)) return undefined;
-      if (!isMessageOwned(id, state)) return undefined;
+      if (state.currentUserId !== undefined && !isMessageOwned(id, state)) {
+        return undefined;
+      }
     }
   }
 
@@ -219,6 +221,8 @@ export interface OpenCodeTurnState {
   readonly usage: Map<string, StepUsage>;
   readonly evictedUsageIds: Set<string>;
   usageCapped: boolean;
+  usageConflict?: boolean;
+  usageIncomplete?: boolean;
   carriedUsage: StepUsage;
   lastProof?: ProviderTerminalProof;
   boundaryReported: boolean;
@@ -254,6 +258,8 @@ export function createTurnState(
     usage: new Map(),
     evictedUsageIds: new Set(),
     usageCapped: false,
+    usageConflict: false,
+    usageIncomplete: false,
     carriedUsage: {},
     boundaryReported: false,
   };
@@ -263,12 +269,9 @@ export function isMessageOwned(
   messageId: string,
   state: OpenCodeTurnState,
 ): boolean {
-  if (state.currentUserId === undefined) return true;
-  const parentId = state.parentLinks.get(messageId);
-  if (parentId === undefined) {
-    return true;
-  }
-  let current: string | undefined = messageId;
+  if (state.currentUserId === undefined) return false;
+  if (messageId === state.currentUserId) return true;
+  let current: string | undefined = state.parentLinks.get(messageId);
   const visited = new Set<string>();
   while (current !== undefined) {
     if (visited.has(current)) return false;
@@ -367,6 +370,43 @@ function rememberUsage(
 ): void {
   if (state.evictedUsageIds.has(messageId)) {
     state.usageCapped = true;
+    state.usageIncomplete = true;
+    return;
+  }
+  const existing = state.usage.get(messageId);
+  if (existing !== undefined) {
+    const costConflict =
+      existing.costUsd !== undefined &&
+      usage.costUsd !== undefined &&
+      usage.costUsd < existing.costUsd;
+    const tokenConflict =
+      (existing.inputTokens !== undefined &&
+        usage.inputTokens !== undefined &&
+        usage.inputTokens < existing.inputTokens) ||
+      (existing.outputTokens !== undefined &&
+        usage.outputTokens !== undefined &&
+        usage.outputTokens < existing.outputTokens);
+    if (costConflict || tokenConflict) {
+      state.usageConflict = true;
+      state.usageIncomplete = true;
+    }
+    const mergedInput =
+      existing.inputTokens !== undefined || usage.inputTokens !== undefined
+        ? Math.max(existing.inputTokens ?? 0, usage.inputTokens ?? 0)
+        : undefined;
+    const mergedOutput =
+      existing.outputTokens !== undefined || usage.outputTokens !== undefined
+        ? Math.max(existing.outputTokens ?? 0, usage.outputTokens ?? 0)
+        : undefined;
+    const mergedCost =
+      existing.costUsd !== undefined || usage.costUsd !== undefined
+        ? Math.max(existing.costUsd ?? 0, usage.costUsd ?? 0)
+        : undefined;
+    state.usage.set(messageId, {
+      ...(mergedInput !== undefined ? { inputTokens: mergedInput } : {}),
+      ...(mergedOutput !== undefined ? { outputTokens: mergedOutput } : {}),
+      ...(mergedCost !== undefined ? { costUsd: mergedCost } : {}),
+    });
     return;
   }
   state.usage.set(messageId, usage);
@@ -379,6 +419,7 @@ function rememberUsage(
       state.carriedUsage = addUsage(state.carriedUsage, evicted);
       rememberId(state.evictedUsageIds, oldest.value, MAX_TRACKED_MESSAGES);
       state.usageCapped = true;
+      state.usageIncomplete = true;
     }
   }
 }
@@ -600,8 +641,20 @@ export function reconcileMessages(
 ): {
   events: OpenCodeClientEvent[];
   terminalProof?: ProviderTerminalProof;
+  finalText?: string;
+  usage?: StepUsage;
+  usageIncomplete?: boolean;
   failure?: string;
 } {
+  if (
+    list.length > MAX_TRACKED_MESSAGES ||
+    state.messageDetails.size > MAX_TRACKED_MESSAGES
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: message cap exceeded (cap exhaustion)";
+    return { events: [], failure: state.integrityFailure };
+  }
+
   for (const item of list) {
     const itemRec = asRecord(item);
     const info = asRecord(itemRec?.info ?? item);
@@ -717,28 +770,77 @@ export function reconcileMessages(
     }
   }
 
+  if (state.partDetails.size > MAX_TRACKED_PARTS) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: part cap exceeded (cap exhaustion)";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  // Check missing usage across all completed assistant steps
+  for (const msg of state.messageDetails.values()) {
+    if (msg.role === "assistant" && msg.time?.completed !== undefined) {
+      const stepUsage = state.usage.get(msg.id);
+      if (
+        stepUsage === undefined ||
+        (stepUsage.costUsd === undefined &&
+          stepUsage.inputTokens === undefined &&
+          stepUsage.outputTokens === undefined)
+      ) {
+        state.usageIncomplete = true;
+      }
+    }
+  }
+
+  const candidateIds: string[] = [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const itemRec = asRecord(list[i]);
     const info = asRecord(itemRec?.info ?? list[i]);
-    if (info?.role !== "assistant") continue;
-    const id = typeof info.id === "string" ? info.id : undefined;
-    if (!id) continue;
+    if (info?.role === "assistant" && typeof info.id === "string") {
+      candidateIds.push(info.id);
+    }
+  }
+  if (candidateIds.length === 0) {
+    const allIds = Array.from(state.assistantMessages);
+    for (let i = allIds.length - 1; i >= 0; i -= 1) {
+      candidateIds.push(allIds[i]);
+    }
+  }
 
-    if (info.error !== undefined) {
-      const proof = terminalProofFromAssistant(info, state);
-      if (proof) return { events: [], terminalProof: proof };
+  for (const id of candidateIds) {
+    const msgDetail = state.messageDetails.get(id);
+    if (!msgDetail) continue;
+
+    if (msgDetail.error !== undefined) {
+      const proof = terminalProofFromAssistant(msgDetail, state);
+      if (proof) return { events: [], terminalProof: proof, finalText: "" };
     }
 
-    const evalRes = evaluateFinalAssistant(info, state);
+    const evalRes = evaluateFinalAssistant(msgDetail, state);
     if (!evalRes.valid) continue;
 
-    const proof = terminalProofFromAssistant(info, state);
+    const proof = terminalProofFromAssistant(msgDetail, state);
     if (proof === undefined) continue;
 
     const events: OpenCodeClientEvent[] = [];
-    const msgDetail = state.messageDetails.get(id);
-    if (msgDetail) {
-      for (const partId of msgDetail.partIds) {
+    let canonicalFinalText = "";
+    const orderedAssistantIds = Array.from(state.assistantMessages).filter(
+      (asstId) => {
+        const d = state.messageDetails.get(asstId);
+        return (
+          d &&
+          d.role === "assistant" &&
+          !d.hasToolCalls &&
+          (state.currentUserId === undefined || isMessageOwned(asstId, state))
+        );
+      },
+    );
+    if (!orderedAssistantIds.includes(id)) {
+      orderedAssistantIds.push(id);
+    }
+    for (const asstId of orderedAssistantIds) {
+      const d = state.messageDetails.get(asstId);
+      if (!d) continue;
+      for (const partId of d.partIds) {
         const detail = state.partDetails.get(partId);
         if (
           detail &&
@@ -746,29 +848,54 @@ export function reconcileMessages(
           !detail.synthetic &&
           !detail.ignored
         ) {
-          const snapshotText = detail.text ?? "";
-          const alreadyEmitted = detail.emittedText;
-          if (alreadyEmitted === snapshotText) {
-            continue;
-          }
-          if (alreadyEmitted.length === 0) {
-            detail.emittedText = snapshotText;
-            events.push({ kind: "delta", text: snapshotText });
-          } else if (snapshotText.startsWith(alreadyEmitted)) {
-            const suffix = snapshotText.slice(alreadyEmitted.length);
-            detail.emittedText = snapshotText;
-            events.push({ kind: "delta", text: suffix });
-          } else {
-            return {
-              events: [],
-              failure: `[pr-hero] opencode client: conflicting snapshot in readback for part ${partId}`,
-            };
-          }
+          canonicalFinalText += detail.text ?? detail.emittedText ?? "";
         }
       }
     }
 
-    return { events, terminalProof: proof };
+    for (const partId of msgDetail.partIds) {
+      const detail = state.partDetails.get(partId);
+      if (
+        detail &&
+        detail.type === "text" &&
+        !detail.synthetic &&
+        !detail.ignored
+      ) {
+        const snapshotText = detail.text ?? "";
+        const alreadyEmitted = detail.emittedText;
+        if (alreadyEmitted === snapshotText) {
+          continue;
+        }
+        if (alreadyEmitted.length === 0) {
+          detail.emittedText = snapshotText;
+          events.push({ kind: "delta", text: snapshotText });
+        } else if (snapshotText.startsWith(alreadyEmitted)) {
+          const suffix = snapshotText.slice(alreadyEmitted.length);
+          detail.emittedText = snapshotText;
+          events.push({ kind: "delta", text: suffix });
+        } else {
+          state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot in readback for part ${partId}`;
+          return {
+            events: [],
+            failure: state.integrityFailure,
+          };
+        }
+      }
+    }
+
+    const totalUsage = turnUsage(state);
+    const isIncomplete =
+      state.usageIncomplete === true ||
+      state.usageConflict === true ||
+      state.usageCapped === true;
+
+    return {
+      events,
+      terminalProof: proof,
+      finalText: canonicalFinalText,
+      usage: totalUsage,
+      usageIncomplete: isIncomplete,
+    };
   }
 
   return { events: [] };
@@ -1039,7 +1166,9 @@ export interface OpenCodeSdkPromptParameters {
 // signatures for a reason that has nothing to do with conformance.
 export interface OpenCodeSdkClientApi {
   readonly session: {
-    create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
+    create(
+      options?: unknown,
+    ): Promise<OpenCodeSdkResult<{ id: string; directory?: string }>>;
     prompt(
       parameters: OpenCodeSdkPromptParameters,
     ): Promise<OpenCodeSdkResult<unknown>>;
@@ -1475,17 +1604,29 @@ export function createOpenCodeClient(
         // re-derives this, so a provider that starts scoping it is a probe
         // failure rather than a silent PR-mode outage.
         assertMcpConnected(
-          unwrap(
-            await api.mcp.status({ query: { directory: input.cwd } }),
-            "mcp.status",
-          ),
+          unwrap(await api.mcp.status({ directory: input.cwd }), "mcp.status"),
           Object.keys(mcpConfig),
         );
 
         const created = await api.session.create({
+          directory: input.cwd,
           title: "pr-hero review step",
         });
-        sessionId = unwrap(created, "session.create").id;
+        const sessionRecord = unwrap(created, "session.create");
+        sessionId = sessionRecord.id;
+        if (
+          sessionRecord.directory !== undefined &&
+          sessionRecord.directory !== input.cwd
+        ) {
+          try {
+            await api.session.abort({ sessionID: sessionId });
+          } catch {
+            // Best effort abort on mismatch
+          }
+          throw new Error(
+            `opencode session created with mismatched directory: expected ${input.cwd}, got ${sessionRecord.directory}`,
+          );
+        }
 
         // Subscribed BEFORE the prompt, and the ordering is not stylistic.
         // event.subscribe() is live and unbuffered, so a subscription opened
@@ -1512,7 +1653,7 @@ export function createOpenCodeClient(
         let reported: readonly string[];
         try {
           reported = unwrap(
-            await api.tool.ids({ query: { directory: input.cwd } }),
+            await api.tool.ids({ directory: input.cwd }),
             "tool.ids",
           );
         } catch (error) {
@@ -1556,8 +1697,18 @@ export function createOpenCodeClient(
         // buys nothing — an SSE iterator nobody reads is not a recording, the
         // events simply have not been requested yet.
         void (async () => {
+          let queueBytes = 0;
           try {
             for await (const raw of subscription.stream) {
+              const rawSize = JSON.stringify(raw)?.length ?? 64;
+              queueBytes += rawSize;
+              if (queueBytes > 4 * 1024 * 1024) {
+                state.turn.integrityFailure =
+                  "[pr-hero] opencode client: raw subscription queue cap exceeded (cap exhaustion)";
+                state.wake?.();
+                state.wake = undefined;
+                break;
+              }
               state.queue.push(raw);
               state.wake?.();
               state.wake = undefined;
@@ -1623,7 +1774,13 @@ export function createOpenCodeClient(
               },
               enumerable: false,
             });
-            unwrap(await api.session.prompt(promptParams), "session.prompt");
+            const promptResult = unwrap(
+              await api.session.prompt(promptParams),
+              "session.prompt",
+            );
+            if (promptResult !== undefined) {
+              reconcileMessages([promptResult], state.turn);
+            }
           } catch (error) {
             state.failure = (error as Error).message;
             state.ended = true;
@@ -1793,27 +1950,31 @@ export function createOpenCodeClient(
               ? (messages as { data: unknown[] }).data
               : [];
 
-          reconcileMessages(list, state.turn);
-          if (state.turn.integrityFailure !== undefined) {
-            return { kind: "failed", detail: state.turn.integrityFailure };
+          const reconciled = reconcileMessages(list, state.turn);
+          if (
+            reconciled.failure !== undefined ||
+            state.turn.integrityFailure !== undefined
+          ) {
+            return {
+              kind: "failed",
+              detail:
+                reconciled.failure ??
+                state.turn.integrityFailure ??
+                "opencode client integrity failure",
+            };
           }
           if (hasOutstandingTools(state.turn)) {
             return { kind: "pending" };
           }
 
-          // The turn has ended; the last completed assistant message supplies
-          // the proof CONTENT — the same helper the stream uses, on purpose.
-          // §197 wants two INDEPENDENT observers of ONE fact, not two facts
-          // that happen to resemble each other: two copies of this derivation
-          // could drift and manufacture a conflict out of nothing.
-          //
-          // No completed message means no proof, and none is invented. The
-          // attempt then falls to the harness watchdog, which is the correct
-          // place for a turn that never produced a completion record.
-          for (let i = list.length - 1; i >= 0; i -= 1) {
-            const info = (list[i] as { info?: unknown })?.info ?? list[i];
-            const proof = terminalProofFromAssistant(info, state.turn);
-            if (proof !== undefined) return { kind: "terminal", proof };
+          if (reconciled.terminalProof !== undefined) {
+            return {
+              kind: "terminal",
+              proof: reconciled.terminalProof,
+              finalText: reconciled.finalText,
+              usage: reconciled.usage,
+              usageIncomplete: reconciled.usageIncomplete,
+            };
           }
         }
       }

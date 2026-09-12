@@ -94,19 +94,20 @@ export interface SessionWitness {
 
 const REDACTED = "[REDACTED]";
 const SENSITIVE_KEY_RE =
-  /^(?:authorization|api[_-]?key|x-api-key|token|password|secret)$/i;
+  /^(?:authorization|api[_-]?key|x-api-key|token|access_token|refresh_token|cookie|set-cookie|password|secret)$/i;
 
 function sanitizeString(text: string): string {
   return text
+    .replace(/(https?:\/\/)([^/@\s]+:[^/@\s]+@)/gi, `$1${REDACTED}@`)
     .replace(/Bearer\s+\S+/gi, REDACTED)
     .replace(/sk-[A-Za-z0-9_-]{8,}/g, REDACTED)
     .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, REDACTED)
     .replace(
-      /(?<=[?&](?:api[_-]?key|token|password|secret|key|auth)=)[^&\s"']+/gi,
+      /(?<=[?&](?:api[_-]?key|token|access_token|refresh_token|password|secret|key|auth)=)[^&\s"']+/gi,
       REDACTED,
     )
     .replace(
-      /(api[_-]?key|token|password|secret)["':=\s]+[^\s"',;}{]+/gi,
+      /(api[_-]?key|token|access_token|refresh_token|password|secret|cookie|set-cookie)["':=\s]+[^\s"',;}{]+/gi,
       (m) => {
         const sep = m.search(/["':=\s]+/);
         return sep < 0 ? REDACTED : `${m.slice(0, sep)}: "${REDACTED}"`;
@@ -171,7 +172,14 @@ export function classifyWitnessEvidence(
     return "inconclusive";
 
   const asst = witness.readback.messages.find((m) => m.role === "assistant");
-  if (!asst || asst.finishStatus === undefined || asst.finishStatus === null)
+  if (
+    !asst ||
+    asst.finishStatus === undefined ||
+    asst.finishStatus === null ||
+    asst.finishStatus !== "stop" ||
+    asst.parentId !== witness.identities?.userMessageId ||
+    asst.toolCalls?.some((t) => (t as { status?: string }).status === "running")
+  )
     return "inconclusive";
 
   const partsText = (asst.parts ?? [])
@@ -413,8 +421,16 @@ if (import.meta.main) {
           sentAt: started,
           receivedAt: Math.round(performance.now()),
         },
-        status: isOk ? 200 : 500,
-        error: isOk ? undefined : result.stderrTail.slice(-300),
+        status: isOk
+          ? 200
+          : result.stderrTail.includes("500")
+            ? 500
+            : undefined,
+        error: isOk
+          ? undefined
+          : result.stderrTail.includes("session.prompt failed")
+            ? result.stderrTail.slice(-300)
+            : undefined,
       },
       events: [
         {
@@ -451,9 +467,13 @@ if (import.meta.main) {
         ],
       },
       settlement: {
-        status: result.status,
-        readbackAttempts: 1,
-        arbiterTerminalReason: isOk ? "completed" : "failed",
+        status: outcome,
+        readbackAttempts: isOk ? 1 : 0,
+        arbiterTerminalReason: isOk
+          ? "completed"
+          : outcome === "timeout"
+            ? "timeout"
+            : "failed",
         abortRequested: false,
         abortAcknowledged: false,
         abortConfirmed: false,

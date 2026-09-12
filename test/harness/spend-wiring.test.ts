@@ -272,17 +272,13 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
     expect(ledger.settleCalls).toBe(2);
   });
 
-  // Martian `opencode` arm, 2026-09-10: a gateway 500 refused the prompt
-  // before any provider event. The transport reports that shape as
-  // complete-$0 usage with empty tokens (the model provably never started),
-  // and the metered-zero rule settles it — so the bucket never fences and
-  // the retry is admitted. Before the transport change this filed
-  // "unavailable", fenced the bucket, and the retry died at reserve time
-  // with no second transport call.
+  // Martian `opencode` arm: a rate-limit prompt refusal before any provider
+  // event provably never started ($0 complete usage), and the metered-zero
+  // rule settles it — so the bucket never fences and the retry is admitted.
   test("a refused-prompt $0 attempt settles and does not fence its retry", async () => {
     const dir = await tempDir();
     const REFUSAL =
-      'opencode session.prompt failed: {"name":"UnknownError","data":{"message":"Unexpected server error."}}';
+      "opencode session.prompt failed: 429 rate limit exceeded, prompt refused";
     let transportCalls = 0;
     const transport = new OpenCodeSdkTransport({
       client: {

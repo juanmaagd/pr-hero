@@ -105,7 +105,7 @@ opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}
 
 Quotes around the routing var are load-bearing (unset → empty string). Re-scaffold with `pr-hero setup --ci --force` if an old template lacks them.
 
-The Action installs OpenCode CLI **1.18.23** in its **own** step when `opencode-auth` is non-empty **or** routing contains `opencode`. Never `latest`. Claude-only (both OpenCode inputs empty / no `opencode` in routing) skips that install.
+The Action installs OpenCode CLI **1.18.30** in its **own** step when `opencode-auth` is non-empty **or** routing contains `opencode`. Never `latest`. Claude-only (both OpenCode inputs empty / no `opencode` in routing) skips that install.
 
 ## Fail-closed edges
 

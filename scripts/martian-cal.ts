@@ -26,6 +26,7 @@ import {
 } from "../src/martian-adapter";
 import { estimateCost } from "../src/report";
 import { DEFAULT_SIZE_GATE, evaluateSizeGateAggregate } from "../src/size-gate";
+import { evaluateResumeOutcome } from "./martian-judge";
 
 const LAB_AGENTS_DIR =
   "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
@@ -323,10 +324,52 @@ if (mode === "run") {
   for (const row of rows) {
     const dir = runDirFor(row.pr);
     const label = `cal ${row.pr}`;
-    if (await Bun.file(path.join(dir, "findings.json")).exists()) {
-      console.error(`\n=== ${label} — SKIPPED, already on disk at ${dir}`);
-      skipped++;
-      continue;
+    const findingsPath = path.join(dir, "findings.json");
+    if (await Bun.file(findingsPath).exists()) {
+      try {
+        const doc = (await Bun.file(findingsPath).json()) as FindingsDocument;
+        const pipelinePath = path.join(dir, "pipeline.json");
+        let pipelineData: { steps?: Array<{ status?: string }> } | undefined;
+        if (await Bun.file(pipelinePath).exists()) {
+          try {
+            pipelineData = (await Bun.file(pipelinePath).json()) as {
+              steps?: Array<{ status?: string }>;
+            };
+          } catch {}
+        }
+        const hasFailedStep = pipelineData?.steps?.some(
+          (s) => s.status === "failed" || s.status === "unsettled",
+        );
+        const resume = evaluateResumeOutcome({
+          hasFindingsDocument: true,
+          runStatus: doc.run_status,
+          sessionFailed: doc.sessionFailed,
+          findings: doc.findings,
+          protocolIntegrity:
+            hasFailedStep === true
+              ? "unverified"
+              : doc.run_status === "complete" && !doc.sessionFailed
+                ? "verified"
+                : "unverified",
+          terminalProof:
+            hasFailedStep === true
+              ? null
+              : doc.run_status === "complete" && !doc.sessionFailed
+                ? { providerStatus: "completed" }
+                : null,
+          finishStatus:
+            hasFailedStep === true
+              ? "incomplete"
+              : doc.run_status === "complete" && !doc.sessionFailed
+                ? "stop"
+                : null,
+        });
+        if (resume === "complete" && doc.head_sha === row.headSha) {
+          console.error(`\n=== ${label} — SKIPPED, already on disk at ${dir}`);
+          skipped++;
+          continue;
+        }
+      } catch {}
     }
     console.error(`\n=== ${label} -> ${dir}`);
     const code = await review(row, false);

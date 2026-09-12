@@ -207,9 +207,9 @@ The Action writes routing to `$HOME/.prhero/config.json` on the runner (person l
 `OPENCODE_AUTH_JSON` is written `0600` at the OpenCode auth path; brokers read that file. Invalid JSON
 fails the job loud.
 
-### Pin 1.18.23
+### Pin 1.18.30
 
-The Action installs OpenCode CLI **1.18.23** in its own step, only when `opencode-auth` is non-empty
+The Action installs OpenCode CLI **1.18.30** in its own step, only when `opencode-auth` is non-empty
 **or** `routing` contains `opencode`. It never uses `latest`. The install appends `$HOME/.opencode/bin`
 to `GITHUB_PATH` so a **later** step (Run pr-hero) sees the binary — the install step itself is not
 the review. Claude-only CI (no OpenCode secret, routing does not mention `opencode`) skips this

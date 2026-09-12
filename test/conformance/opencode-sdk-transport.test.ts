@@ -2518,18 +2518,23 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
       requestWire: {
         sanitizedPath:
-          "/session/sess-1/message?token=ghp_ABC12345678901234567890&apiKey=secret-key-1234",
+          "/session/sess-1/message?token=ghp_ABC12345678901234567890&apiKey=secret-key-1234&access_token=secret_access_token",
         sanitizedQuery: {
           key: "sk-openai-secret-token-abcdef123456",
           safe: "public-value",
+          access_token: "query_access_token",
+          cookie: "sid=secret_cookie_val",
         },
         sanitizedBody: {
           headers: {
             authorization: "Bearer my-secret-jwt-token-12345",
             "x-api-key": "secret-api-key-9999",
+            cookie: "session_id=super_secret_cookie",
           },
           password: "supersecretpassword",
           secret: "confidential",
+          endpoint: "https://admin:super_secret_pass@example.invalid/v1",
+          access_token: "body_access_token",
           userPrompt:
             "Please use token ghp_99999999999999999999 to authenticate with sk-key12345678",
         },
@@ -2550,6 +2555,12 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
     expect(serialized).not.toContain("confidential");
     expect(serialized).not.toContain("ghp_99999999999999999999");
     expect(serialized).not.toContain("sk-key12345678");
+    expect(serialized).not.toContain("super_secret_pass");
+    expect(serialized).not.toContain("secret_access_token");
+    expect(serialized).not.toContain("query_access_token");
+    expect(serialized).not.toContain("body_access_token");
+    expect(serialized).not.toContain("secret_cookie_val");
+    expect(serialized).not.toContain("super_secret_cookie");
 
     expect(sanitized.identities.credentialCategory).toBe("operator_oauth");
     expect(
@@ -2674,13 +2685,61 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(unfinishedWitness, "")).toBe("inconclusive");
+
+    const wrongOwnerWitness = makeBaseWitness({
+      identities: {
+        ...makeBaseWitness().identities,
+        userMessageId: "msg-user-correct",
+      },
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-wrong",
+            finishStatus: "stop",
+            parts: [{ id: "prt-1", type: "text", text: "text" }],
+          },
+        ],
+      },
+    });
+    expect(classifyWitnessEvidence(wrongOwnerWitness, "")).toBe("inconclusive");
+
+    const runningToolWitness = makeBaseWitness({
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-1",
+            finishStatus: "stop",
+            parts: [{ id: "prt-1", type: "text", text: "text" }],
+            toolCalls: [{ status: "running" }],
+          },
+        ],
+      },
+    });
+    expect(classifyWitnessEvidence(runningToolWitness, "")).toBe(
+      "inconclusive",
+    );
   });
 });
 
 describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, and complete-empty discrimination", () => {
   test("EQ1b: existing files with missing or incomplete witness/proof retain incomplete/inconclusive classification and do not falsely resume as success", () => {
+    // Bare terminal proof without findings document returns incomplete
+    const bareTerminal = evaluateResumeOutcome({
+      terminalProof: completedProof("evt-bare"),
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      finishStatus: "stop",
+    });
+    expect(bareTerminal).toBe("incomplete");
+
     // Missing terminal proof
     const missingProof = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: undefined,
@@ -2690,6 +2749,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Unverified protocol integrity
     const unverifiedIntegrity = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "unverified",
       terminalProof: completedProof("evt-1"),
@@ -2699,6 +2760,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Truncated / missing finish status
     const truncatedFinish = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-2"),
@@ -2709,6 +2772,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Unconfirmed cessation (abort requested without confirmation)
     const unconfirmedCessation = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-3"),
@@ -2720,6 +2785,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Partial run status on disk
     const partialRun = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "partial",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-4"),
@@ -2730,6 +2797,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Verified complete artifact DOES resume as complete
     const validComplete = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-5"),
