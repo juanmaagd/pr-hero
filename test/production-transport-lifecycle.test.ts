@@ -47,6 +47,8 @@ import type {
 } from "../src/transport-registry";
 import {
   DefaultTransportRegistry,
+  SUPPORTED_OPENCODE_SDK_VERSION,
+  SUPPORTED_OPENCODE_SERVER_VERSION,
   type TransportRegistry,
 } from "../src/transport-registry";
 import type { OpenCodeSdkLike } from "../src/transports/opencode-client";
@@ -669,6 +671,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
 
       const registry = new DefaultTransportRegistry({
         mode: "conformance",
+        sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
+        serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
         loadSdk,
         codegraphBinaryPath: "/opt/homebrew/bin/codegraph",
         launchServer: async (mcp?: unknown) => {
@@ -1446,6 +1450,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
 
       const registry = new DefaultTransportRegistry({
         mode: "conformance",
+        sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
+        serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
         evidence: new Map([["opencode", COMPLETE_EVIDENCE]]),
         binaryPath: opencodeFixture.canonicalPath,
         openCodeClient: mockClient,

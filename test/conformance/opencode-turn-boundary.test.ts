@@ -168,6 +168,7 @@ function stepCompleted(index: number): Record<string, unknown> {
   };
   return messageUpdated(STEPS[index] as string, "assistant", {
     finish: "stop",
+    parentID: USER_MESSAGE,
     time: { created: 1, completed: COMPLETED_AT + index },
     tokens: { input: tokens.input, output: tokens.output },
     cost: tokens.cost,
@@ -178,7 +179,7 @@ function stepEvents(index: number): Array<Record<string, unknown>> {
   const messageId = STEPS[index] as string;
   const partId = `prt_step_${index}`;
   return [
-    messageUpdated(messageId, "assistant"),
+    messageUpdated(messageId, "assistant", { parentID: USER_MESSAGE }),
     partUpdated(partId, messageId, "text", ""),
     partDelta(messageId, partId, STEP_TEXT[index] as string),
     partUpdated(partId, messageId, "text", STEP_TEXT[index] as string),

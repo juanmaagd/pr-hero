@@ -70,6 +70,8 @@ import {
   createDefaultTransportRegistry,
   type D1_11ReadinessEvidence,
   DefaultTransportRegistry,
+  SUPPORTED_OPENCODE_SDK_VERSION,
+  SUPPORTED_OPENCODE_SERVER_VERSION,
   type TransportFactoryOptions,
   type TransportRegistry,
 } from "./transport-registry";
@@ -459,6 +461,12 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       // the construction-time default rather than being shadowed by it. That
       // default survives as the fallback for callers holding no binding.
       credentialKind: this.credential.kind,
+      ...(this.route.backend === "opencode"
+        ? {
+            sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
+            serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
+          }
+        : {}),
     });
     const routeKey = this.key;
     this.leaseTracker.register(routeKey);
@@ -1056,10 +1064,14 @@ export async function prepareProductionAdmissionContext(input: {
     // #149: the SAME instance seeded into the binding authority above.
     credentialBroker: credentialBrokers.opencode,
     // #133: and the kind it was resolved FOR. The launcher pairs the two;
-    // sending the broker without its kind would leave the launcher defaulting
-    // to the OAuth kind over an api-token broker.
     credentialKind: openCodeCredential.kind,
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
+    ...(needsOpenCode
+      ? {
+          sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
+          serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
+        }
+      : {}),
   }) as DefaultTransportRegistry;
 
   return {
@@ -1698,5 +1710,12 @@ export function productionFallbackRegistry(options: {
     // OAuth kind — which would project the operator's OpenAI record under a
     // zai route. Wrong, not loud, and the worse of the two failure shapes.
     ...(credential === undefined ? {} : { credentialKind: kind }),
+    ...(options.plan?.steps.some((step) => step.route.backend === "opencode") ||
+    options.evidence?.has("opencode")
+      ? {
+          sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
+          serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
+        }
+      : {}),
   });
 }

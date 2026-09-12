@@ -400,7 +400,7 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
     // prompt runs in.
     expect(fake.toolIdsCalls()).toHaveLength(1);
     expect(fake.toolIdsCalls()[0]).toEqual({
-      query: { directory: "/tmp/work" },
+      directory: "/tmp/work",
     });
   });
 
@@ -1448,9 +1448,7 @@ describe("createOpenCodeClient MCP readback (#141)", () => {
 
     await client.createSession(MCP_INPUT);
 
-    expect(fake.mcpStatusCalls()).toEqual([
-      { query: { directory: "/tmp/work" } },
-    ]);
+    expect(fake.mcpStatusCalls()).toEqual([{ directory: "/tmp/work" }]);
   });
 
   // Measured (#141 fact 7): `--pure` suppresses neither config-delivered nor

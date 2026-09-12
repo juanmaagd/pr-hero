@@ -357,9 +357,8 @@ Cost per review collapsed ($0.04–0.19 vs $2–7): opencode-go/glm pricing, pro
 How this arm came to be (one line each, full story in the session):
 1. `hunters` re-run on the current global routing silently became an opencode
    arm (logical `sonnet` → default `opencode-go/deepseek-flash#high`).
-2. That arm died 8/10 empty: gateway `UnknownError` 500s (instant) + 30-min
-   silent hangs. Proved provider-side via `scripts/opencode-prompt-probe.ts`
-   (new): model/variant/parallelism/size/tools/system-prompt all exonerated.
+2. That arm observed 8/10 failures: gateway `UnknownError` 500s and quiet timeouts
+   investigated via `scripts/opencode-prompt-probe.ts`.
 3. The provider leg `deepseek-flash` is down (500s + empty completions, still
    down at ledger time); `glm-5.3-flash` on the same backend is healthy
    (2.3 kch real text, ~15 s). Arm redefined to the working leg — global

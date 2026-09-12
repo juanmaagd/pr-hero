@@ -126,6 +126,7 @@ function partDelta(partID: string, delta: string): Record<string, unknown> {
 // the turn's boundary — #127 — so every stream below ends with IDLE, the
 // event that actually says the turn is over.
 const COMPLETED = messageUpdated(ASSISTANT_MESSAGE, "assistant", {
+  parentID: USER_MESSAGE,
   finish: "stop",
   time: { created: 1, completed: 1_787_811_448_694 },
   tokens: { input: 24_012, output: 6 },
@@ -141,7 +142,7 @@ function reasoningThenAnswerStream(): Array<Record<string, unknown>> {
     messageUpdated(USER_MESSAGE, "user"),
     // TRAP 2's exhibit: the user's part carries the PROMPT text.
     partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
-    messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+    messageUpdated(ASSISTANT_MESSAGE, "assistant", { parentID: USER_MESSAGE }),
     partUpdated(REASONING_PART, ASSISTANT_MESSAGE, "reasoning", ""),
     partDelta(REASONING_PART, REASONING_A),
     partDelta(REASONING_PART, REASONING_B),
@@ -157,7 +158,7 @@ function reasoningOnlyStream(): Array<Record<string, unknown>> {
   return [
     messageUpdated(USER_MESSAGE, "user"),
     partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
-    messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+    messageUpdated(ASSISTANT_MESSAGE, "assistant", { parentID: USER_MESSAGE }),
     partUpdated(REASONING_PART, ASSISTANT_MESSAGE, "reasoning", ""),
     partDelta(REASONING_PART, REASONING_A),
     partDelta(REASONING_PART, REASONING_B),
@@ -261,7 +262,7 @@ function makeRequest(): TransportRequest {
 }
 
 async function flush(): Promise<void> {
-  for (let i = 0; i < 25; i += 1) await Promise.resolve();
+  for (let i = 0; i < 50; i += 1) await Promise.resolve();
 }
 
 async function runAttempt(events: Array<Record<string, unknown>>) {
