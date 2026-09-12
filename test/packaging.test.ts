@@ -475,7 +475,7 @@ describe("Packaging & distribution configuration", () => {
 
     // Threat matrix RED (7): pin is its own step so GITHUB_PATH applies to
     // later steps. Never `latest`. Install `if` may read inputs, not secrets.
-    test("OpenCode CLI install is not run-pr-hero, pins 1.18.23, and gates on inputs", () => {
+    test("OpenCode CLI install is not run-pr-hero, pins 1.18.30, and gates on inputs", () => {
       const action = parsedAction();
       const install = action.runs.steps.find((step) =>
         String(step.run ?? "").includes("opencode.ai/install"),
@@ -488,7 +488,7 @@ describe("Packaging & distribution configuration", () => {
       expect(install?.id).not.toBe("run-pr-hero");
       expect(String(install?.if)).toContain("inputs.");
       expect(String(install?.if)).not.toContain("secrets.");
-      expect(install?.run).toContain("--version 1.18.23");
+      expect(install?.run).toContain("--version 1.18.30");
       expect(install?.run).not.toContain("latest");
       expect(install?.run).toContain("GITHUB_PATH");
       const installAt = action.runs.steps.indexOf(install as never);

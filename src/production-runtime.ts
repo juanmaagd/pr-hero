@@ -463,6 +463,7 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       credentialKind: this.credential.kind,
       ...(this.route.backend === "opencode"
         ? {
+            openCodeBinaryPath: this.executable.absolutePath,
             sdkVersion: SUPPORTED_OPENCODE_SDK_VERSION,
             serverVersion: SUPPORTED_OPENCODE_SERVER_VERSION,
           }
@@ -1639,6 +1640,7 @@ export function productionFallbackRegistry(options: {
   readonly mode?: "production" | "conformance";
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly binaryPath?: string;
+  readonly openCodeBinaryPath?: string;
   readonly env?: Record<string, string>;
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
   // #133: optional because this function is also called with a bare
@@ -1688,6 +1690,7 @@ export function productionFallbackRegistry(options: {
     mode: options.mode,
     evidence: options.evidence,
     binaryPath: options.binaryPath,
+    openCodeBinaryPath: options.openCodeBinaryPath,
     env: options.env,
     // Forwarded only when the caller actually supplied one. Substituting a
     // fresh broker here would erase the difference between "no preference"

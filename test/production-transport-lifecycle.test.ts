@@ -508,6 +508,88 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       expect(lease2.transport).not.toBe(lease1.transport);
       expect(factoryCalls).toBe(2);
     });
+
+    test("binding.acquire forwards openCodeBinaryPath to registry.get for opencode bindings", async () => {
+      let capturedOptions: TransportFactoryOptions | undefined;
+
+      const registry: TransportRegistry = {
+        register() {},
+        has: () => true,
+        get(_backend, options?: TransportFactoryOptions) {
+          capturedOptions = options;
+          return {
+            backend: "opencode" as const,
+            capabilities: async () =>
+              createRecordingTransport([], "opencode").capabilities(),
+            execute: async () => ({
+              completion: "success" as const,
+              protocolIntegrity: "verified" as const,
+              finalText: "{}",
+              usage: {
+                wallMs: 1,
+                tokens: {},
+                completeness: "complete" as const,
+                billingMode: "subscription" as const,
+                costSource: "provider" as const,
+                cashCostUsd: 0,
+              },
+              stderrTail: "",
+            }),
+            classifyFailure: () => undefined,
+          } as ProviderTransport;
+        },
+        getCapabilityReport: async () =>
+          createRecordingTransport([], "opencode").capabilities(),
+        getAllCapabilityReports: async () => new Map(),
+      };
+
+      const step = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: openCodeRoutingConfig(),
+      });
+      const runtime = await createProductionRuntime({
+        workspaceRoot: tmpDir,
+        plan: createResolvedRoutePlan([step]),
+        binaryPath: claudeFixture.canonicalPath,
+        openCodeBinaryPath: opencodeFixture.canonicalPath,
+        executableAllowlists: mixedAllowlists(claudeFixture, opencodeFixture),
+        registry,
+        mode: "conformance",
+        evidence: new Map([["opencode", COMPLETE_EVIDENCE]]),
+        credentialBrokers: {
+          opencode: new OpenCodeAuthBroker({
+            readerFn: async () =>
+              JSON.stringify({
+                openai: { type: "oauth", access: "test", refresh: "test" },
+              }),
+          }),
+        },
+        authorityDeps: {
+          existsFn: (p) =>
+            p === claudeFixture.canonicalPath ||
+            p === opencodeFixture.canonicalPath ||
+            p.startsWith(tmpDir),
+          realpathFn: async (p) => p,
+        },
+      });
+
+      const binding = runtime.bindings.get(step.routeFingerprint);
+      expect(binding).toBeDefined();
+      if (binding === undefined) return;
+
+      const lease = await binding.acquire(ISOLATION_STUB, registry);
+      await lease.dispose();
+
+      expect(capturedOptions?.openCodeBinaryPath).toBe(
+        opencodeFixture.canonicalPath,
+      );
+      expect(capturedOptions?.sdkVersion).toBe(SUPPORTED_OPENCODE_SDK_VERSION);
+      expect(capturedOptions?.serverVersion).toBe(
+        SUPPORTED_OPENCODE_SERVER_VERSION,
+      );
+    });
   });
 
   describe("exact OpenCode provider/model/variant requests", () => {
