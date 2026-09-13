@@ -41,7 +41,7 @@ Do not load for musive H2H alone (`src/compare.ts`), M6 scout A/B on musive, or 
 
 1. Load `references/corpus.md` and `docs/benchmarks/martian-bench.md`. Name the baseline arm and whether this spend is new.
 2. Confirm authorised slice, one variable, cost band: `bun run scripts/martian-cal.ts plan`.
-3. `check` then `run`. Isolation is the engine’s. Resume skips dirs that already have `findings.json`.
+3. `check` then `run`. Isolation is the engine’s. Resume requires the frozen schedule/identity and attributable delivered-attempt proof; existing files alone never qualify. Preserve unqualified directories under `incomplete-attempts/`. Unknown spend remains unknown.
 4. Surface A: `bun run scripts/martian-judge.ts`. Label gateway + model. Sibling same `path:line` are not extra FPs.
 5. Surface B only if authorised. Always **say** whether it ran.
 6. Ledger in `docs/benchmarks/martian-bench.md`. Quote High+Critical recall; All F1 is secondary.

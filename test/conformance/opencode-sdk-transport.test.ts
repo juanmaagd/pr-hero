@@ -67,6 +67,7 @@ async function flush(): Promise<void> {
 }
 
 async function advance(clock: ManualClock, passes: number): Promise<void> {
+  await flush();
   for (let i = 0; i < passes; i += 1) {
     clock.fireAll();
     await flush();
@@ -157,11 +158,17 @@ function makeClient(options: {
       // No scripted stream: stay open forever, like a session mid-generation.
       await new Promise<never>(() => {});
     },
-    pollStatus: async () => {
+    pollStatus: async (_session, signal) => {
       const index = round;
       round += 1;
       if (options.hangRounds?.includes(index)) {
-        return new Promise<OpenCodePollResult>(() => {});
+        return new Promise<OpenCodePollResult>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("poll aborted")),
+            { once: true },
+          );
+        });
       }
       return options.polls?.[index] ?? ({ kind: "pending" } as const);
     },
@@ -1294,10 +1301,19 @@ function makeV2MockFetch() {
         ? (input as Request).method
         : "GET");
     if (parsedPath === "/session" && method.toUpperCase() === "POST") {
-      return new Response(JSON.stringify({ id: "ses-adapter-1" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+      const text = typeof init?.body === "string" ? init.body : "{}";
+      let dir = "/workspace/adapter-cwd";
+      try {
+        const body = JSON.parse(text);
+        if (body.directory) dir = body.directory;
+      } catch {}
+      return new Response(
+        JSON.stringify({ id: "ses-adapter-1", directory: dir }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
     if (urlStr.includes("/mcp") || urlStr.includes("/tool/ids")) {
       const data = urlStr.includes("/tool/ids") ? ["read", "bash"] : {};
@@ -1472,6 +1488,63 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
       ).toThrow(err as unknown as RegExp);
     }
   });
+
+  test("missing version pair is DENIED (not admitted) when registering opencode transport", async () => {
+    const { DefaultTransportRegistry, OpenCodeVersionAdmissionError } =
+      await import("../../src/transport-registry");
+    const registry = new DefaultTransportRegistry({
+      mode: "conformance",
+      sdkVersion: "" as never,
+      serverVersion: "" as never,
+    });
+    expect(() =>
+      registry.get("opencode", {
+        openCodeClient: {} as never,
+      }),
+    ).toThrow(OpenCodeVersionAdmissionError);
+
+    expect(() =>
+      registry.get("opencode", {
+        openCodeClient: {} as never,
+        sdkVersion: "1.18.25",
+        serverVersion: "" as never,
+      }),
+    ).toThrow(OpenCodeVersionAdmissionError);
+
+    expect(() =>
+      registry.get("opencode", {
+        openCodeClient: {} as never,
+        sdkVersion: "" as never,
+        serverVersion: "1.18.30",
+      }),
+    ).toThrow(OpenCodeVersionAdmissionError);
+  });
+
+  test("loadOpenCodeSdk rejects missing package metadata or unsupported SDK versions", async () => {
+    const { loadOpenCodeSdk, OpenCodeVersionAdmissionError } = await import(
+      "../../src/transport-registry"
+    );
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => ({ version: undefined }),
+      }),
+    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => {
+          throw new Error("package.json not found");
+        },
+      }),
+    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => ({ version: "1.18.26" }),
+      }),
+    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1516,7 +1589,14 @@ function makeControlledSdk(options: {
         }),
       },
       session: {
-        create: async () => ({ data: { id: sessionId } }),
+        create: async (opts?: unknown) => ({
+          data: {
+            id: sessionId,
+            directory:
+              (opts as { directory?: string } | undefined)?.directory ??
+              "/workspace",
+          },
+        }),
         prompt: async () => ({ data: promptRes }),
         messages: async () => ({ data: messages }),
         status: async () => ({ data: statuses }),
@@ -1575,6 +1655,7 @@ function makeControlledRig(
   const sink = new RecordingSink();
   const controller = new AbortController();
   const client = createOpenCodeClient({
+    createMessageId: () => "msg-user-1",
     loadSdk: async () => controlled.sdk,
     launchServer: async () => ({
       url: "http://127.0.0.1:4096",
@@ -1638,6 +1719,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
       id: "msg-asst-1",
       sessionID: SESS,
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-1",
       finish: "stop",
       time: { created: 1000, completed: 2000 },
@@ -1752,6 +1834,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
       id: "msg-asst-1",
       sessionID: SESS,
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-1",
       finish: "stop",
       time: { created: 1000, completed: 2000 },
@@ -1851,6 +1934,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
         info: {
           id: "msg-step-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "tool-calls",
@@ -1899,6 +1983,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
         info: {
           id: "msg-final",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-step-1",
           sessionID: SESS,
           finish: "stop",
@@ -1975,6 +2060,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
         info: {
           id: "msg-final",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2099,13 +2185,14 @@ describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
     const toolStepAssistant = {
       id: "msg-step-1",
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-1",
       sessionID: SESS,
       finish: "tool-calls",
       time: { created: 100, completed: 500 },
     };
 
-    controlled.setMessages([{ info: toolStepAssistant }]);
+    controlled.setMessages([{ info: toolStepAssistant, parts: [] }]);
     controlled.setStatus({ type: "idle" });
 
     controlled.emit({
@@ -2152,6 +2239,7 @@ describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
         info: {
           id: "msg-asst-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2217,6 +2305,7 @@ describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
     const unownedAssistant = {
       id: "msg-asst-unowned",
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-unrelated",
       sessionID: SESS,
       finish: "stop",
@@ -2275,6 +2364,7 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
         info: {
           id: "msg-asst-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2361,6 +2451,7 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
         info: {
           id: "msg-asst-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2446,7 +2537,7 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
   });
 });
 
-describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classification", () => {
+describe("Legacy U6 witnesses are unqualified without actual observations", () => {
   function makeBaseWitness(
     overrides: Partial<SessionWitness> = {},
   ): SessionWitness {
@@ -2591,7 +2682,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       witness,
       "",
     );
-    expect(classification).toBe("demonstrated_reconstruction_defect");
+    expect(classification).toBe("inconclusive");
   });
 
   test("persisted final empty: classifies as persisted_final_empty when server completes with empty assistant text", () => {
@@ -2611,7 +2702,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
     });
 
     const classification = classifyWitnessEvidence(witness, "");
-    expect(classification).toBe("persisted_final_empty");
+    expect(classification).toBe("inconclusive");
   });
 
   test("external rejection: classifies admission error, HTTP 4xx/5xx, or provider refusal as external_rejection", () => {
@@ -2625,9 +2716,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
         error: "Internal Server Error",
       },
     });
-    expect(classifyWitnessEvidence(httpErrorWitness, "")).toBe(
-      "external_rejection",
-    );
+    expect(classifyWitnessEvidence(httpErrorWitness, "")).toBe("inconclusive");
 
     const providerRefusalWitness = makeBaseWitness({
       settlement: {
@@ -2639,7 +2728,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(providerRefusalWitness, "")).toBe(
-      "external_rejection",
+      "inconclusive",
     );
 
     const admissionErrorWitness = makeBaseWitness({
@@ -2652,7 +2741,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(admissionErrorWitness, "")).toBe(
-      "external_rejection",
+      "inconclusive",
     );
   });
 
@@ -2928,5 +3017,186 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
     expect(completeWithFindings.isCompletedReview).toBe(true);
     expect(completeWithFindings.isCompleteEmpty).toBe(false);
     expect(completeWithFindings.isTransportBlank).toBe(false);
+  });
+});
+
+describe("OpenCode workspace and CWD lineage (U5-C1)", () => {
+  test("absent sessionRecord.directory on session.create is rejected", async () => {
+    const { createOpenCodeClient } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const client = createOpenCodeClient({
+      model: { providerID: "openai", modelID: "gpt-4o" },
+      launchServer: async () => ({
+        url: "http://127.0.0.1:4096",
+        pid: 12345,
+        close: async () => {},
+      }),
+      loadSdk: async () =>
+        ({
+          createOpencodeClient: () => ({
+            mcp: { status: async () => ({ data: {} }) },
+            session: {
+              create: async () => ({ data: { id: "ses-no-dir" } }),
+              abort: async () => ({ data: true }),
+            },
+            event: {
+              subscribe: async () => ({
+                [Symbol.asyncIterator]: async function* () {},
+              }),
+            },
+            tool: {
+              ids: async () => ({ data: ["read"] }),
+            },
+          }),
+        }) as never,
+      readSystemPrompt: async () => "PROMPT",
+    });
+
+    await expect(
+      client.createSession({
+        cwd: "/workspace/expected-dir",
+        systemPromptPath: "/tmp/sys.md",
+        tools: ["Read"],
+        userPrompt: "test",
+      }),
+    ).rejects.toThrow("mismatched directory");
+  });
+
+  test("mismatched sessionRecord.directory on session.create is rejected and aborts session", async () => {
+    const { createOpenCodeClient } = await import(
+      "../../src/transports/opencode-client"
+    );
+    let aborted = false;
+    const client = createOpenCodeClient({
+      model: { providerID: "openai", modelID: "gpt-4o" },
+      launchServer: async () => ({
+        url: "http://127.0.0.1:4096",
+        pid: 12345,
+        close: async () => {},
+      }),
+      loadSdk: async () =>
+        ({
+          createOpencodeClient: () => ({
+            mcp: { status: async () => ({ data: {} }) },
+            session: {
+              create: async () => ({
+                data: { id: "ses-diff-dir", directory: "/workspace/other-dir" },
+              }),
+              abort: async () => {
+                aborted = true;
+                return { data: true };
+              },
+            },
+          }),
+        }) as never,
+      readSystemPrompt: async () => "PROMPT",
+    });
+
+    await expect(
+      client.createSession({
+        cwd: "/workspace/expected-dir",
+        systemPromptPath: "/tmp/sys.md",
+        tools: ["Read"],
+        userPrompt: "test",
+      }),
+    ).rejects.toThrow(
+      /opencode session created with mismatched directory: expected \/workspace\/expected-dir, got \/workspace\/other-dir/,
+    );
+    expect(aborted).toBe(true);
+  });
+
+  test("mismatched message.path.cwd in mapOpenCodeEvents throws and sets integrity failure", async () => {
+    const { createTurnState, mapOpenCodeEvents } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const state = createTurnState(
+      "ses-1",
+      undefined,
+      "/workspace/expected-dir",
+    );
+    const event = {
+      type: "message.updated",
+      properties: {
+        sessionID: "ses-1",
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/rogue-dir" },
+        },
+      },
+    };
+
+    expect(() => mapOpenCodeEvents(event, "ses-1", state)).toThrow(
+      /message cwd mismatch/,
+    );
+    expect(state.integrityFailure).toContain("message cwd mismatch");
+  });
+
+  test("mismatched message.path.cwd in reconcileMessages sets integrity failure and rejects", async () => {
+    const { createTurnState, reconcileMessages } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const state = createTurnState(
+      "ses-1",
+      undefined,
+      "/workspace/expected-dir",
+    );
+    const messages = [
+      {
+        parts: [],
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/rogue-dir" },
+        },
+      },
+    ];
+
+    const result = reconcileMessages(messages, state);
+    expect(result.failure).toContain("message cwd mismatch");
+    expect(state.integrityFailure).toContain("message cwd mismatch");
+  });
+
+  test("matching message.path.cwd in mapOpenCodeEvents and reconcileMessages is accepted", async () => {
+    const { createTurnState, mapOpenCodeEvents, reconcileMessages } =
+      await import("../../src/transports/opencode-client");
+    const state = createTurnState(
+      "ses-1",
+      undefined,
+      "/workspace/expected-dir",
+    );
+    const event = {
+      type: "message.updated",
+      properties: {
+        sessionID: "ses-1",
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/expected-dir" },
+        },
+      },
+    };
+
+    expect(() => mapOpenCodeEvents(event, "ses-1", state)).not.toThrow();
+    expect(state.integrityFailure).toBeUndefined();
+
+    const messages = [
+      {
+        parts: [],
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/expected-dir" },
+        },
+      },
+    ];
+    const result = reconcileMessages(messages, state);
+    expect(result.failure).toBeUndefined();
+    expect(state.integrityFailure).toBeUndefined();
   });
 });

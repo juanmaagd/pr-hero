@@ -135,6 +135,17 @@ export function settlementReceiptPath(
   );
 }
 
+export function attemptEvidencePath(
+  outPath: string,
+  stepName: string,
+  attempt: number,
+): string {
+  return path.join(
+    path.dirname(outPath),
+    `evidence.${stepName}.attempt${attempt}.json`,
+  );
+}
+
 export const DEFAULT_STEP_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_STEP_MAX_ATTEMPTS = 2;
 

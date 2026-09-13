@@ -275,7 +275,7 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
   // Martian `opencode` arm: a rate-limit prompt refusal before any provider
   // event provably never started ($0 complete usage), and the metered-zero
   // rule settles it — so the bucket never fences and the retry is admitted.
-  test("a refused-prompt $0 attempt settles and does not fence its retry", async () => {
+  test("a dispatched refusal without billing proof remains unresolved and fences retry", async () => {
     const dir = await tempDir();
     const REFUSAL =
       "opencode session.prompt failed: 429 rate limit exceeded, prompt refused";
@@ -324,11 +324,11 @@ describe("PR5b — SpendLedger wiring (§9.1 five-step order)", () => {
 
     const result = await harness.run(step);
 
-    expect(result.status).toBe("ok");
-    expect(transportCalls).toBe(2);
-    expect(result.reservations?.length).toBe(2);
+    expect(result.status).toBe("failed");
+    expect(transportCalls).toBe(1);
+    expect(result.reservations?.length).toBe(1);
     for (const reservation of result.reservations ?? []) {
-      expect(reservation.state).toBe("settled");
+      expect(reservation.state).toBe("unresolved_remote");
     }
   });
 
@@ -1350,4 +1350,32 @@ describe("PR5b — BE2: Usage identity (cumulative/delta replay, missing/conflic
     // Retry could not run because bucket was fenced
     expect(transportCalls).toBe(1);
   });
+});
+
+test("attempt evidence preserves real proof and parsed empty findings for the driver", async () => {
+  const dir = await tempDir();
+  const step = await makeStep(dir);
+  const proof = {
+    eventId: "provider-terminal",
+    providerStatus: "completed",
+    providerObservedAt: "2026-09-13T00:00:00.000Z",
+  };
+  const transport: ProviderTransport = {
+    backend: "claude-code",
+    capabilities: async () => capabilities(),
+    classifyFailure: () => undefined,
+    execute: async () => ({ ...okOutcome(), terminalProof: proof }),
+  };
+  const result = await new StepExecutionHarness({
+    transport,
+    spawnFn: fakeSpawn,
+  }).run(step);
+  expect(result.status).toBe("ok");
+  const evidence = await Bun.file(
+    path.join(dir, `evidence.${step.name}.attempt1.json`),
+  ).json();
+  expect(evidence.outcome.terminalProof).toEqual(proof);
+  expect(evidence.delivered).toBe(true);
+  expect(evidence.outputSha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(evidence.identity.systemPromptSha256).toMatch(/^[a-f0-9]{64}$/);
 });

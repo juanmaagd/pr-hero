@@ -82,7 +82,19 @@ function messageUpdated(
     type: "message.updated",
     properties: {
       sessionID: SESSION_ID,
-      info: { id, role, sessionID: SESSION_ID, time: { created: 1 }, ...extra },
+      info: {
+        id,
+        role,
+        sessionID: SESSION_ID,
+        time: { created: 1 },
+        ...(role === "assistant"
+          ? {
+              path: { cwd: "/tmp/pr-hero-test", root: "/" },
+              parentID: USER_MESSAGE,
+            }
+          : {}),
+        ...extra,
+      },
     },
   };
 }
@@ -175,8 +187,13 @@ function fakeSdk(events: Array<Record<string, unknown>>): OpenCodeSdkLike {
       // connected" — which is a declaration too, not an absence of one.
       mcp: { status: async () => ({ data: {} }) },
       session: {
-        create: async () => ({ data: { id: SESSION_ID } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
+        create: async (opts) => ({
+          data: {
+            id: SESSION_ID,
+            directory: (opts as { directory: string }).directory,
+          },
+        }),
+        prompt: async () => ({ data: {} }),
         messages: async () => ({ data: [] }),
         // #127: the poll observer's turn boundary. An empty map is a session
         // that is not working — measured: opencode omits an idle session
@@ -223,6 +240,7 @@ function fakeSdk(events: Array<Record<string, unknown>>): OpenCodeSdkLike {
 
 function rigClient(events: Array<Record<string, unknown>>) {
   return createOpenCodeClient({
+    createMessageId: () => USER_MESSAGE,
     loadSdk: async () => fakeSdk(events),
     launchServer: async () => ({
       url: "http://127.0.0.1:1",

@@ -21,6 +21,10 @@ import {
 import { redactDiagnostic } from "./security/redact";
 import { ClaudeCodeCliTransport } from "./transports/claude-code-cli";
 import {
+  type OpenCodeObservedIdentity,
+  qualifyOpenCodeServer,
+} from "./transports/opencode-admission";
+import {
   assertOpenCodeSdk,
   createOpenCodeClient,
   type OpenCodeSdkLike,
@@ -42,24 +46,52 @@ import {
 // now validated instead of `as unknown as OpenCodeSdkLike`-cast. That cast was
 // the root cause of issue #121: it silenced the only compiler check that could
 // have noticed the local interface named a factory the SDK does not export.
-async function loadOpenCodeSdk(): Promise<OpenCodeSdkLike> {
+export async function loadOpenCodeSdk(options?: {
+  importPackage?: () => Promise<{ version?: string }>;
+  importSdk?: () => Promise<unknown>;
+}): Promise<OpenCodeSdkLike> {
   const dynamicImport = new Function("specifier", "return import(specifier)");
   let sdkPackage: { version?: string } | undefined;
   try {
-    sdkPackage = await dynamicImport("@opencode-ai/sdk/package.json");
+    sdkPackage = options?.importPackage
+      ? await options.importPackage()
+      : ((await dynamicImport("@opencode-ai/sdk/package.json")) as {
+          version?: string;
+        });
   } catch {
-    // If package metadata cannot be read directly, module export assertion guards
+    // If package metadata cannot be read directly, check below throws
   }
   const installedVersion = sdkPackage?.version;
   if (
-    installedVersion !== undefined &&
+    typeof installedVersion !== "string" ||
+    installedVersion.trim() === "" ||
     installedVersion !== SUPPORTED_OPENCODE_SDK_VERSION
   ) {
     throw new OpenCodeVersionAdmissionError(
       `Unsupported OpenCode SDK version "${installedVersion}". Expected exact version "${SUPPORTED_OPENCODE_SDK_VERSION}".`,
     );
   }
-  return assertOpenCodeSdk(await dynamicImport("@opencode-ai/sdk/v2"));
+  const sdkModule = options?.importSdk
+    ? await options.importSdk()
+    : await dynamicImport("@opencode-ai/sdk/v2");
+  return assertOpenCodeSdk(sdkModule);
+}
+
+export async function readInstalledOpenCodeSdkVersion(): Promise<
+  string | undefined
+> {
+  const dynamicImport = new Function("specifier", "return import(specifier)");
+  try {
+    const pkg = (await dynamicImport("@opencode-ai/sdk/package.json")) as {
+      version?: string;
+    };
+    if (typeof pkg?.version === "string" && pkg.version.trim() !== "") {
+      return pkg.version.trim();
+    }
+  } catch {
+    // SDK not installed or unreadable
+  }
+  return undefined;
 }
 
 export class RouteAdmissionError extends Error {}
@@ -226,6 +258,7 @@ export interface TransportFactoryOptions {
   readonly mode?: "production" | "conformance";
   readonly routeFingerprint?: string;
   readonly route?: ResolvedModelRoute;
+  readonly observedOpenCodeIdentity?: OpenCodeObservedIdentity;
   readonly sdkVersion?: string;
   readonly serverVersion?: string;
   readonly openCodeServerVersion?: string;
@@ -288,7 +321,7 @@ export class DefaultTransportRegistry implements TransportRegistry {
   }
 
   constructor(options: CreateTransportRegistryOptions = {}) {
-    this.defaultOptions = options;
+    this.defaultOptions = { ...options };
 
     // Register Claude CLI transport factory
     this.register("claude-code", (opts) => {
@@ -313,15 +346,28 @@ export class DefaultTransportRegistry implements TransportRegistry {
       }
 
       // Check bounded version admission policy (OA1b / U1-C1)
-      if (
-        merged.sdkVersion !== undefined ||
-        merged.serverVersion !== undefined ||
-        merged.openCodeServerVersion !== undefined
-      ) {
-        admitOpenCodeVersionPair({
+      const observed = merged.observedOpenCodeIdentity;
+      if (mode === "production" && observed === undefined) {
+        throw new OpenCodeVersionAdmissionError(
+          "Observed OpenCode identity is required in production",
+        );
+      }
+      admitOpenCodeVersionPair(
+        observed ?? {
           sdkVersion: merged.sdkVersion,
           serverVersion: merged.serverVersion ?? merged.openCodeServerVersion,
-        });
+        },
+      );
+      if (
+        observed !== undefined &&
+        ((merged.sdkVersion !== undefined &&
+          merged.sdkVersion !== observed.sdkVersion) ||
+          (merged.serverVersion !== undefined &&
+            merged.serverVersion !== observed.serverVersion))
+      ) {
+        throw new OpenCodeVersionAdmissionError(
+          "Declared OpenCode versions contradict observed identity",
+        );
       }
 
       // 2026-09-02: the billing mode stamped on every usage record this
@@ -390,6 +436,13 @@ export class DefaultTransportRegistry implements TransportRegistry {
       const codegraphBinaryPath =
         merged.codegraphBinaryPath ?? Bun.which("codegraph") ?? undefined;
       const client = createOpenCodeClient({
+        ...(observed ? { observedIdentity: observed } : {}),
+        ...(observed === undefined
+          ? {}
+          : {
+              qualifyServer: (url: string, signal?: AbortSignal) =>
+                qualifyOpenCodeServer(url, observed, signal),
+            }),
         model: route
           ? {
               providerID: route.provider,

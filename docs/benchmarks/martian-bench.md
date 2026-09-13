@@ -359,28 +359,24 @@ How this arm came to be (one line each, full story in the session):
    arm (logical `sonnet` → default `opencode-go/deepseek-flash#high`).
 2. That arm observed 8/10 failures: gateway `UnknownError` 500s and quiet timeouts
    investigated via `scripts/opencode-prompt-probe.ts`.
-3. The provider leg `deepseek-flash` is down (500s + empty completions, still
-   down at ledger time); `glm-5.3-flash` on the same backend is healthy
-   (2.3 kch real text, ~15 s). Arm redefined to the working leg — global
-   config untouched.
-4. Three transport hardenings landed (all offline-tested, suite 3417/3418
-   with 1 pre-existing fail, typecheck + biome clean):
-   Fix 1 — gateway-500 prompt refusal → `network_transient` (was terminal
-   `runtime_unavailable`), bounded retry; Fix 2 — provider-silence tripwire
-   (600 quiet poll rounds → `protocol_truncation`, caps hangs under the
-   30-min watchdog); Fix 3 — prompt-refused-before-start reports genuine
-   $0 (was "unavailable" → fenced the shared bucket, killing retries AND
-   siblings). Fix 1+3 verified live (transient retries admitted, settled
-   reservations); Fix 2 offline only (no hang recurred to prove it live).
+3. Historical attempts with `deepseek-flash` produced errors or empty results;
+   `glm-5.3-flash` produced text in some attempts. The old probe generated its
+   witness from the final result, so those records do **not** establish a
+   provider outage, model health, or the cause of missing text. Treat their
+   causal attribution as inconclusive, not as route qualification.
+4. Historical retry, round-count timeout, and zero-spend patches were later
+   audited. Missing observations do not prove non-execution or genuine zero
+   cost. The corrective phase replaces those assumptions with monotonic
+   bounds, incomplete accounting, and actual same-attempt observations.
 5. Engine for this arm: `24115ab` + uncommitted `src/transports/opencode-sdk.ts`
    (Fix 1–3), `test/conformance/opencode-sdk-transport.test.ts`,
    `test/harness/spend-wiring.test.ts`, `scripts/martian-cal.ts` (`--arm`,
    `--model`), `scripts/martian-judge.ts` (`--arm`, 0600 fix),
    `scripts/opencode-prompt-probe.ts` (new). Harness `--arm`/`--model` support
    is arm infrastructure, not a methodology variable.
-6. A same-night `opencode` (deepseek) arm attempt is NOT scored: provider down,
+6. A same-night `opencode` (deepseek) arm attempt is NOT scored: cause unproved,
    0/10 PRs with findings on the final try (`cal-*-opencode` dirs stand,
-   empty, as outage evidence). Only `hunters` and `opencode-glm` are scored.
+   empty, as incomplete attempt records). Only `hunters` and `opencode-glm` are scored.
 7. Regression gates: `bun run fixture-eval` pass (planted bug hit; runs
    `haiku`→glm-low route); refuter untouched so `refuter-probe` not re-run.
 
@@ -388,21 +384,47 @@ Surface B: **not run** (stored vendor reviews not bucketed for the ten).
 
 ## Benchmark qualification gates and metrics (Unit 7)
 
-Honest reporting requires separating qualification gates, run resumption, and completion denominators:
+Only **schema-valid, attributable completed attempts** qualify for resume and
+quality scoring. Historical files without real proof remain unqualified; they
+are not silently upgraded by the new loader.
 
-1. **Resumption gate (EQ1b):**
-   Existing directories or cached witness artifacts on disk must not falsely resume as completed reviews when outcomes or witnesses are incomplete. Specifically, unverified protocol integrity, missing terminal proofs, truncated turns (`finishStatus !== "stop"` or `truncated: true`), unconfirmed cessations (`abortRequested && !abortConfirmed`), or partial statuses (`run_status: "partial"`, `sessionFailed: true`) retain their `incomplete` or `inconclusive` classification and are barred from resuming as success.
+| Gate | Required evidence |
+|---|---|
+| Schedule | `schedule-<arm>.json` freezes selected PRs, head/base, replicate and output directory before execution. `--reps` creates separate attempt directories. Selection changes require a new arm. |
+| Identity | `run-identity.json` freezes engine commit and file digests, prompt/config content, effective routes and observed executable/SDK/server identity. Missing identity refuses qualified reuse. |
+| Completion | Findings schema validator, all required hunters and executed steps, actual delivered outcome, verified integrity, attributable terminal proof, matching request-plan/output/capture hashes. Mere file existence or a finish string is insufficient. |
+| Isolation | Artifact reads are bounded, confined to the run directory, and reject traversal, nonregular files and symlink escapes. |
+| Retry | A failed or mismatched previous directory is moved intact under `incomplete-attempts/`; it is never overwritten by the replacement attempt. |
 
-2. **Honest qualification denominators (EQ2a):**
-   Benchmark metrics separate completed runs from attempted runs:
-   - `completion_rate` and `coverage`: `completed / attempted`
-   - Wall-clock and spend metrics are computed honestly per completed review (`cost_per_complete = completed_spend / completed`, `wall_ms_per_complete = completed_wall_ms / completed`).
-   - Incomplete runs (e.g. provider outages, gateway 500 hangs, truncated sessions) are quarantined with their explicit failure reason and never folded into completed totals to distort unit costs or artificially deflate recall denominators.
+OpenCode capture records real SDK wire metadata/body, events, prompt result and
+same-session readback. Missing, capped or failed capture is inconclusive. A local
+abort acknowledgement does not prove provider cessation. Claude uses its own
+generic process-exit proof; OpenCode finish rules are not imposed on Claude.
+A schema-valid `findings: []` with attributable proof is a completed empty review,
+not transport failure. Neither zero findings nor successful delivery proves model
+quality.
 
-3. **MUSE complete-empty discrimination (EQ2b):**
-   A valid completed review that found 0 issues (such as Cal.com PR 22345, or zero-defect clean diffs under the MUSE test corpus) is distinct from an infrastructure drop or blank transport failure:
-   - **MUSE complete-empty:** Verified completion (`protocolIntegrity === "verified"`, valid terminal proof, `run_status === "complete"`), produces schema-valid `findings: []`, and is honestly included in the completed denominator with 0 TPs and 0 FPs.
-   - **Transport blank / drop:** Unverified finish, missing terminal proof, or empty stdout without a completed findings document. Classified as `transport_blank`, quarantined, and excluded from completed totals.
+### Denominators and unknown telemetry
+
+- **Completion rate:** completed / attempted. **Coverage:** completed / scheduled.
+  Missing scheduled attempts are reported explicitly, including zero output dirs.
+- **Cost per complete:** completed spend / completed reviews, only when every
+  completed attempt has exact known spend. Otherwise the metric is `null`/unknown.
+- **Wall time per complete:** completed wall time / completed reviews, subject to
+  the same knownness rule. Known subtotals and unknown sample counts are separate.
+- Failed attempts do not enter quality scores. Their reported spend remains in
+  partial/all-attempt accounting; unknown spend never becomes zero. Preserved
+  previous executions contribute spend and unknown counts, with a separate
+  `preserved_attempts` count; they do not inflate the frozen schedule denominator.
+- **H+C:** report High/Critical recall and TP/FN counts only. All-severity false
+  positives cannot support an H+C precision/F1 claim.
+- **Surface A:** offline judge output. **Surface B:** not run; no surfaced-success
+  claim is made.
+
+Tasks 8.1/8.2 remain a later, explicitly budgeted and ledgered phase: current
+OpenAI/DeepSeek/MUSE route qualification, serial/concurrent repetitions, then
+frozen paired benchmarks. These code corrections do not claim live qualification,
+provider health, guaranteed model quality, or approval for fifty-PR expansion.
 
 ## Sources
 

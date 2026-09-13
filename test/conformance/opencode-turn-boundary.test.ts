@@ -115,7 +115,19 @@ function messageUpdated(
     type: "message.updated",
     properties: {
       sessionID: SESSION_ID,
-      info: { id, role, sessionID: SESSION_ID, time: { created: 1 }, ...extra },
+      info: {
+        id,
+        role,
+        sessionID: SESSION_ID,
+        time: { created: 1 },
+        ...(role === "assistant"
+          ? {
+              path: { cwd: "/tmp/pr-hero-test", root: "/" },
+              parentID: USER_MESSAGE,
+            }
+          : {}),
+        ...extra,
+      },
     },
   };
 }
@@ -208,7 +220,18 @@ function messagesAfter(steps: number): unknown[] {
     { info: { id: USER_MESSAGE, role: "user", sessionID: SESSION_ID } },
   ];
   for (let i = 0; i < steps; i += 1) {
-    list.push({ info: props(stepCompleted(i)).info });
+    list.push({
+      info: props(stepCompleted(i)).info,
+      parts: [
+        {
+          id: `prt_step_${i}`,
+          messageID: STEPS[i],
+          sessionID: SESSION_ID,
+          type: "text",
+          text: STEP_TEXT[i],
+        },
+      ],
+    });
   }
   return list;
 }
@@ -250,7 +273,12 @@ function fakeSdk(): FakeSdk {
       mcp: { status: async () => ({ data: {} }) },
       tool: { ids: async () => ({ data: [...TOOL_IDS] }) },
       session: {
-        create: async () => ({ data: { id: SESSION_ID } }),
+        create: async (opts) => ({
+          data: {
+            id: SESSION_ID,
+            directory: (opts as { directory: string }).directory,
+          },
+        }),
         prompt: async () => ({ data: {} }),
         messages: async () => ({ data: messages }),
         status: async () => {
@@ -301,6 +329,7 @@ function fakeSdk(): FakeSdk {
 
 function rigClient(fake: FakeSdk) {
   return createOpenCodeClient({
+    createMessageId: () => USER_MESSAGE,
     loadSdk: async () => fake.sdk,
     launchServer: async () => ({
       url: "http://127.0.0.1:1",
@@ -609,7 +638,7 @@ describe("the poll observer reaches the same verdict independently", () => {
     const outcome = await attempt.outcome();
     if (outcome === undefined) throw new Error("the attempt never settled");
     expect(outcome.terminalProof?.eventId).toBe(STEPS[2]);
-    expect(outcome.finalText).toBe(STEP_TEXT.join(""));
+    expect(outcome.finalText).toBe(STEP_TEXT[2]);
     // It really did observe the session while it was working; the arming is a
     // measurement, not a relaxed gate.
     expect(fake.statusCalls()).toBeGreaterThan(0);
@@ -618,7 +647,11 @@ describe("the poll observer reaches the same verdict independently", () => {
 
 describe("the mapper separates the boundary from the proof", () => {
   test("a completed assistant message alone yields no terminal", () => {
-    const state = createTurnState();
+    const state = createTurnState(
+      SESSION_ID,
+      USER_MESSAGE,
+      "/tmp/pr-hero-test",
+    );
     const events = [
       ...stepEvents(0).map((event) =>
         mapOpenCodeEvents(event, SESSION_ID, state),
@@ -629,7 +662,11 @@ describe("the mapper separates the boundary from the proof", () => {
   });
 
   test("session.idle yields exactly one terminal, from the last completion", () => {
-    const state = createTurnState();
+    const state = createTurnState(
+      SESSION_ID,
+      USER_MESSAGE,
+      "/tmp/pr-hero-test",
+    );
     for (const event of turnSteps()) {
       mapOpenCodeEvents(event, SESSION_ID, state);
     }
@@ -651,7 +688,11 @@ describe("the mapper separates the boundary from the proof", () => {
   });
 
   test("an idle turn that completed nothing issues no proof at all", () => {
-    const state = createTurnState();
+    const state = createTurnState(
+      SESSION_ID,
+      USER_MESSAGE,
+      "/tmp/pr-hero-test",
+    );
     mapOpenCodeEvents(messageUpdated(USER_MESSAGE, "user"), SESSION_ID, state);
     mapOpenCodeEvents(
       messageUpdated(STEPS[0] as string, "assistant"),
@@ -666,7 +707,11 @@ describe("the mapper separates the boundary from the proof", () => {
   });
 
   test("session.idle for another session is ignored", () => {
-    const state = createTurnState();
+    const state = createTurnState(
+      SESSION_ID,
+      USER_MESSAGE,
+      "/tmp/pr-hero-test",
+    );
     for (const event of turnSteps()) {
       mapOpenCodeEvents(event, SESSION_ID, state);
     }
@@ -687,12 +732,12 @@ describe("the mapper separates the boundary from the proof", () => {
 // total, and the running figure could go DOWN at the instant of eviction —
 // under-reporting spend, which this transport calls the worst direction to be
 // wrong in. The cap is a MEMORY bound; it must never become an accounting one.
-describe("a turn longer than the usage cap still reports every step", () => {
+describe("bounded turns preserve usage and overflow fails closed", () => {
   // More steps than the cap, deliberately FRONT-LOADED: a first step far
   // larger than the ones after it is what makes eviction visible. With flat
   // per-step figures the truncated sum stays monotonic by accident and the
   // defect hides behind its own arithmetic.
-  const OVERFLOW_STEPS = 600;
+  const OVERFLOW_STEPS = 512;
   const FIRST_STEP_INPUT = 10_000;
   const LATER_STEP_INPUT = 1;
   const STEP_OUTPUT = 1;
@@ -710,12 +755,31 @@ describe("a turn longer than the usage cap still reports every step", () => {
     });
   }
 
+  test("a 513th identity fails without evicting the first step", () => {
+    const state = createTurnState(
+      SESSION_ID,
+      USER_MESSAGE,
+      "/tmp/pr-hero-test",
+    );
+    for (let i = 0; i < 512; i++)
+      mapOpenCodeEvents(overflowStep(i), SESSION_ID, state);
+    expect(() =>
+      mapOpenCodeEvents(overflowStep(512), SESSION_ID, state),
+    ).toThrow("message cap exceeded");
+    expect(state.usage.has("msg_overflow_0")).toBe(true);
+    expect(state.integrityFailure).toBeDefined();
+  });
+
   function runOverflowTurn(): Array<{
     inputTokens?: number;
     outputTokens?: number;
     costUsd?: number;
   }> {
-    const state = createTurnState();
+    const state = createTurnState(
+      SESSION_ID,
+      USER_MESSAGE,
+      "/tmp/pr-hero-test",
+    );
     const snapshots: Array<{
       inputTokens?: number;
       outputTokens?: number;
@@ -756,7 +820,7 @@ describe("a turn longer than the usage cap still reports every step", () => {
     expect(last.costUsd).toBeCloseTo(OVERFLOW_STEPS * STEP_COST, 10);
   });
 
-  test("the running total never decreases, not even at an eviction", () => {
+  test("the running total never decreases within the memory bound", () => {
     const snapshots = runOverflowTurn();
 
     let previousInput = 0;

@@ -46,6 +46,7 @@ import type {
   TransportFactoryOptions,
 } from "../src/transport-registry";
 import {
+  createDefaultTransportRegistry,
   DefaultTransportRegistry,
   SUPPORTED_OPENCODE_SDK_VERSION,
   SUPPORTED_OPENCODE_SERVER_VERSION,
@@ -96,9 +97,11 @@ async function writeClaudeFixture(
 
 async function writeOpenCodeFixture(
   dir: string,
+  version = "1.18.30",
 ): Promise<{ canonicalPath: string; sha256: string }> {
   const opencodePath = path.join(dir, "opencode");
-  const bytes = Buffer.concat([MACHO_PREFIX, Buffer.from("opencode")]);
+  const script = `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  echo "${version}"\n  exit 0\nfi\nexit 0\n`;
+  const bytes = Buffer.from(script);
   await writeFile(opencodePath, bytes);
   await chmod(opencodePath, 0o755);
   const canonicalPath = await realpath(opencodePath);
@@ -585,8 +588,10 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       expect(capturedOptions?.openCodeBinaryPath).toBe(
         opencodeFixture.canonicalPath,
       );
-      expect(capturedOptions?.sdkVersion).toBe(SUPPORTED_OPENCODE_SDK_VERSION);
-      expect(capturedOptions?.serverVersion).toBe(
+      expect(capturedOptions?.observedOpenCodeIdentity?.sdkVersion).toBe(
+        SUPPORTED_OPENCODE_SDK_VERSION,
+      );
+      expect(capturedOptions?.observedOpenCodeIdentity?.serverVersion).toBe(
         SUPPORTED_OPENCODE_SERVER_VERSION,
       );
     });
@@ -619,7 +624,14 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
           // "nothing connected".
           mcp: { status: async () => ({ data: {} }) },
           session: {
-            create: async () => ({ data: { id: "oc-sess-1" } }),
+            create: async (opts?: unknown) => ({
+              data: {
+                id: "oc-sess-1",
+                directory:
+                  (opts as { directory?: string } | undefined)?.directory ??
+                  tmpDir,
+              },
+            }),
             prompt: async (options: {
               model?: { providerID: string; modelID: string };
               body?: { model: { providerID: string; modelID: string } };
@@ -703,8 +715,21 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
             }),
           },
           session: {
-            create: async () => ({ data: { id: "oc-sess-141" } }),
-            prompt: async () => ({ data: {} }),
+            create: async (opts?: unknown) => ({
+              data: {
+                id: "oc-sess-141",
+                directory:
+                  (opts as { directory?: string } | undefined)?.directory ??
+                  tmpDir,
+              },
+            }),
+            prompt: async () => ({
+              data: {
+                id: "msg_user_0",
+                role: "user",
+                sessionID: "oc-sess-141",
+              },
+            }),
             messages: async () => ({ data: {} }),
             status: async () => ({ data: {} }),
             abort: async () => ({ data: {} }),
@@ -723,6 +748,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
                     info: {
                       role: "assistant",
                       id: "msg_1",
+                      parentID: "msg_user_0",
+                      sessionID,
                       time: { completed: 1_700_000_000_000 },
                       finish: "stop",
                     },
@@ -1107,6 +1134,50 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       expect(result.reservations ?? []).toHaveLength(0);
       expect(result.denialCode).toBe("executable_not_approved");
     });
+
+    test("declared constants cannot bypass unobserved versions: unversioned or unsupported binary denies binding acquisition", async () => {
+      const unsuppDir = await mkdtemp(path.join(tmpDir, "unsupp-opencode-"));
+      const unsupportedFixture = await writeOpenCodeFixture(
+        unsuppDir,
+        "1.18.99",
+      );
+      const step = resolveStepRoute({
+        stepKey: "refuter",
+        role: "refuter",
+        cliModel: "openai/gpt-4o",
+        routingConfig: openCodeRoutingConfig(),
+      });
+      const registry = createDefaultTransportRegistry({
+        mode: "conformance",
+        openCodeClient: {
+          createSession: async () => ({}) as never,
+        } as never,
+      });
+
+      await expect(
+        createProductionRuntime({
+          workspaceRoot: tmpDir,
+          plan: createResolvedRoutePlan([step]),
+          binaryPath: claudeFixture.canonicalPath,
+          openCodeBinaryPath: unsupportedFixture.canonicalPath,
+          executableAllowlists: mixedAllowlists(
+            claudeFixture,
+            unsupportedFixture,
+          ),
+          registry,
+          mode: "conformance",
+          evidence: new Map([["opencode", COMPLETE_EVIDENCE]]),
+          credentialBrokers: {
+            opencode: new OpenCodeAuthBroker({
+              readerFn: async () =>
+                JSON.stringify({
+                  openai: { type: "oauth", access: "test", refresh: "test" },
+                }),
+            }),
+          },
+        }),
+      ).rejects.toThrow(/Unsupported observed OpenCode pair/);
+    });
   });
 
   describe("binding drift and harness-owned opencode timeout", () => {
@@ -1395,7 +1466,9 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
           route: step.route,
         }),
       );
-      await sleep(10);
+      while (transportCalls === 0) {
+        await sleep(2);
+      }
       controller.abort();
       const resultA = await runPromise;
       expect(resultA.status).toBe("failed");

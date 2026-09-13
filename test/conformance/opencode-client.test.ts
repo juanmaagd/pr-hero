@@ -8,7 +8,11 @@ import type {
 } from "../../src/execution/contracts";
 import {
   createOpenCodeClient,
+  createTurnState,
+  isMessageOwned,
   type OpenCodeSdkLike,
+  reconcileMessages,
+  terminalProofFromAssistant,
 } from "../../src/transports/opencode-client";
 import {
   assertMcpConnected,
@@ -17,11 +21,19 @@ import {
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
-const ASSISTANT = JSON.parse(
-  readFileSync(path.join(FIXTURE_DIR, "assistant-message.json"), "utf-8"),
-) as Record<string, unknown>;
-
 const SESSION_ID = "ses_test";
+
+const ASSISTANT: Record<string, unknown> & {
+  id?: string;
+  path: { cwd: string; root: string };
+  sessionID: string;
+} = {
+  ...(JSON.parse(
+    readFileSync(path.join(FIXTURE_DIR, "assistant-message.json"), "utf-8"),
+  ) as Record<string, unknown>),
+  sessionID: SESSION_ID,
+  path: { cwd: "/tmp/work", root: "/" },
+};
 
 // The REAL tool surface, read live from `client.tool.ids()` against opencode
 // 1.18.23 while diagnosing issue #122. It is transcribed rather than derived:
@@ -119,17 +131,25 @@ function fakeSdk(
         },
       },
       session: {
-        create: async () => {
+        create: async (opts) => {
           createdAt = ++order;
           const id = options.sessionIds?.[creates] ?? SESSION_ID;
           creates += 1;
-          return { data: { id } };
+          return {
+            data: { id, directory: (opts as { directory: string }).directory },
+          };
         },
         prompt: async (opts) => {
           promptedAt = ++order;
           prompts.push(opts as Record<string, unknown>);
           if (options.promptHangs) await new Promise(() => {});
-          return { data: {} };
+          return {
+            data: {
+              id: "msg_041ddb5a0001orXfEB1f2tRCLO",
+              role: "user",
+              sessionID: options.sessionIds?.[0] ?? SESSION_ID,
+            },
+          };
         },
         messages: async () => ({ data: messages }),
         status: async () => ({ data: statuses }),
@@ -228,6 +248,7 @@ function rig(
   overrides: Partial<Parameters<typeof createOpenCodeClient>[0]> = {},
 ) {
   return createOpenCodeClient({
+    createMessageId: () => String(ASSISTANT.parentID),
     loadSdk: async () => fake.sdk,
     launchServer: async () => ({
       url: "http://127.0.0.1:1",
@@ -583,7 +604,14 @@ describe("createOpenCodeClient", () => {
       type: "message.updated",
       properties: {
         sessionID: SESSION_ID,
-        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        info: {
+          id: "msg_a",
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
       },
     });
     fake.emit({
@@ -593,6 +621,7 @@ describe("createOpenCodeClient", () => {
         part: {
           id: "prt_answer",
           messageID: "msg_a",
+          sessionID: SESSION_ID,
           type: "text",
           text: "",
         },
@@ -604,6 +633,7 @@ describe("createOpenCodeClient", () => {
       properties: {
         sessionID: SESSION_ID,
         partID: "prt_answer",
+        messageID: "msg_a",
         field: "text",
         delta: "early",
       },
@@ -656,12 +686,20 @@ describe("createOpenCodeClient", () => {
     const session = await client.createSession(INPUT);
 
     fake.setStatus({ type: "busy" });
-    fake.setMessages([{ info: { role: "user" }, parts: [] }]);
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+    ]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
 
     // A completed step, mid-turn. THE defect: this used to be a terminal.
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
@@ -694,7 +732,10 @@ describe("createOpenCodeClient", () => {
 
     fake.setStatus(undefined);
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
 
@@ -712,7 +753,10 @@ describe("createOpenCodeClient", () => {
 
     fake.setStatus({ type: "idle" });
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
 
@@ -740,6 +784,7 @@ describe("createOpenCodeClient", () => {
       properties: {
         sessionID: SESSION_ID,
         partID: "prt_answer",
+        messageID: "msg_a",
         field: "text",
         delta: text,
       },
@@ -752,7 +797,14 @@ describe("createOpenCodeClient", () => {
       type: "message.updated",
       properties: {
         sessionID: SESSION_ID,
-        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        info: {
+          id: "msg_a",
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
       },
     });
     fake.emit({
@@ -762,6 +814,7 @@ describe("createOpenCodeClient", () => {
         part: {
           id: "prt_answer",
           messageID: "msg_a",
+          sessionID: SESSION_ID,
           type: "text",
           text: "",
         },
@@ -964,7 +1017,7 @@ describe("createOpenCodeClient", () => {
             }
             // The sibling is parked exactly in the pre-states.set window.
             await secondCreateBlocked;
-            return { data: { id: SESSION_ID } };
+            return { data: { id: SESSION_ID, directory: INPUT.cwd } };
           },
         },
       }),
@@ -1498,5 +1551,193 @@ describe("createOpenCodeClient MCP readback (#141)", () => {
       /operator-thing/,
     );
     expect(fake.promptCalls()).toHaveLength(0);
+  });
+});
+
+describe("Work Unit 2: Client Reconciliation & Canonical Ownership (U2-C2, U2-C3, U2-C4)", () => {
+  describe("U2-C2: Canonical Message Ownership & Session Boundary", () => {
+    test("unowned assistant message is rejected even when currentUserId was absent", () => {
+      const state = createTurnState("ses_1", undefined, "/tmp/work");
+      const unownedMessage = {
+        ...ASSISTANT,
+        id: "msg_unowned_assistant",
+        sessionID: "ses_1",
+        parentID: "msg_unknown_user",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+      };
+
+      expect(isMessageOwned(unownedMessage.id, state)).toBe(false);
+
+      const proof = terminalProofFromAssistant(unownedMessage, state);
+      expect(proof).toBeUndefined();
+
+      const reconciled = reconcileMessages([unownedMessage], state);
+      expect(reconciled.terminalProof).toBeUndefined();
+    });
+
+    test("cross-session message is rejected by terminal proof and reconciliation", () => {
+      const state = createTurnState("ses_canonical", "msg_user_1", "/tmp/work");
+      state.parentLinks.set("msg_asst_1", "msg_user_1");
+      const crossSessionMessage = {
+        ...ASSISTANT,
+        id: "msg_asst_1",
+        sessionID: "ses_other_foreign",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+      };
+
+      const proof = terminalProofFromAssistant(crossSessionMessage, state);
+      expect(proof).toBeUndefined();
+
+      const reconciled = reconcileMessages([crossSessionMessage], state);
+      expect(reconciled.terminalProof).toBeUndefined();
+    });
+  });
+
+  describe("U2-C3: Canonical Readback Part Order & Terminal-Only Aggregation", () => {
+    test("readback parts replace stale delta order", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      state.messageDetails.set("msg_asst_1", {
+        id: "msg_asst_1",
+        role: "assistant",
+        parentID: "msg_user_1",
+        partIds: ["prt_stale_2", "prt_stale_1"],
+      });
+
+      const messageWithCanonicalParts = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [
+          {
+            id: "prt_stale_1",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "text",
+            text: "First part ",
+          },
+          {
+            id: "prt_stale_2",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "text",
+            text: "Second part",
+          },
+        ],
+      };
+
+      reconcileMessages([messageWithCanonicalParts], state);
+      const detail = state.messageDetails.get("msg_asst_1");
+      expect(detail?.partIds).toEqual(["prt_stale_1", "prt_stale_2"]);
+    });
+
+    test("canonicalFinalText aggregates only the terminal completed assistant message, excluding previous steps", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      const step1 = {
+        id: "msg_asst_step1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 150 },
+        parts: [
+          {
+            id: "prt_step1",
+            sessionID: "ses_1",
+            messageID: "msg_asst_step1",
+            type: "text",
+            text: "Previous step reasoning prose. ",
+          },
+        ],
+      };
+      const step2 = {
+        id: "msg_asst_step2",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 160, completed: 200 },
+        parts: [
+          {
+            id: "prt_step2",
+            sessionID: "ses_1",
+            messageID: "msg_asst_step2",
+            type: "text",
+            text: "Final answer only.",
+          },
+        ],
+      };
+
+      const reconciled = reconcileMessages([step1, step2], state);
+      expect(reconciled.finalText).toBe("Final answer only.");
+    });
+  });
+
+  describe("U2-C4: Explicit Bounds Across All Part Types & 4 MiB Readback Cap", () => {
+    test("exhausting part limits triggers integrity failure instead of silent eviction", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      for (let i = 0; i < 4096; i += 1) {
+        state.trackedPartOwners.set(`prt_prior_${i}`, "msg_asst_1");
+      }
+
+      const messageWithOverLimitPart = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [
+          {
+            id: "prt_excess",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "reasoning",
+            text: "excess reasoning",
+          },
+        ],
+      };
+
+      const reconciled = reconcileMessages([messageWithOverLimitPart], state);
+      expect(reconciled.failure).toBe(
+        "[pr-hero] opencode client: maximum tracked parts exceeded",
+      );
+      expect(state.integrityFailure).toBe(
+        "[pr-hero] opencode client: maximum tracked parts exceeded",
+      );
+      expect(state.trackedPartOwners.has("prt_prior_0")).toBe(true);
+    });
+
+    test("exceeding 4 MiB readback text cap triggers integrity failure", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      const largeText = "x".repeat(4 * 1024 * 1024 + 16);
+      const oversizedMessage = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [{ id: "prt_large", type: "text", text: largeText }],
+      };
+
+      const reconciled = reconcileMessages([oversizedMessage], state);
+      expect(reconciled.failure).toBe(
+        "[pr-hero] opencode client: total readback byte budget exceeded",
+      );
+      expect(state.integrityFailure).toBe(
+        "[pr-hero] opencode client: total readback byte budget exceeded",
+      );
+    });
   });
 });
