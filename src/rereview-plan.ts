@@ -19,6 +19,19 @@ export interface MarkerHead {
 export interface LastReviewedHead {
   L: string | null;
   source: LastHeadSource;
+  // Rereview-coverage fix: whether the run that posted L actually
+  // finished. Only ever false when `source === "summary_marker"` AND that
+  // marker carried the coverage=partial token — finding-marker recovery (no
+  // summary comment at all) and the absent case both mean "nothing to
+  // distrust", so they are always true regardless of `summaryComplete`.
+  //
+  // WHY this travels WITH L rather than L being nulled out on a partial
+  // marker: nulling L would make this function fall through to
+  // `latestMarkerHead(findingMarkers)` below — and a partial run's own
+  // inline finding markers carry the SAME head, so L would simply be
+  // resurrected there and the forced-full re-review this field exists to
+  // trigger would be a no-op.
+  lastComplete: boolean;
 }
 
 export interface DiscoveryPlan {
@@ -35,14 +48,22 @@ export interface DiscoveryPlan {
 
 export function resolveLastReviewedHead(input: {
   summaryHead: string | null;
+  // Ignored when summaryHead is null — required anyway so every call site
+  // must make an explicit choice rather than a silent default hiding the
+  // exact "leaves the fix a no-op" trap the WHY comment above names.
+  summaryComplete: boolean;
   findingMarkers: readonly MarkerHead[];
 }): LastReviewedHead {
   if (input.summaryHead !== null) {
-    return { L: input.summaryHead, source: "summary_marker" };
+    return {
+      L: input.summaryHead,
+      source: "summary_marker",
+      lastComplete: input.summaryComplete,
+    };
   }
   const latest = latestMarkerHead(input.findingMarkers);
-  if (latest === null) return { L: null, source: "absent" };
-  return { L: latest, source: "finding_markers" };
+  if (latest === null) return { L: null, source: "absent", lastComplete: true };
+  return { L: latest, source: "finding_markers", lastComplete: true };
 }
 
 export function decideRereviewCase(input: {
@@ -102,20 +123,41 @@ export function unreachableLastHeadMessage(sha: string): string {
   );
 }
 
+// The sibling notice for the OTHER way a re-review's L cannot be trusted
+// as-is: not force-pushed away (that is `unreachableLastHeadMessage`, case
+// E), but never actually finished (rereview-coverage fix). Same
+// "said once, in CI and out" rule, same emission site in cli.ts — right
+// where the L..H delta is about to be asked for.
+export function incompleteLastReviewMessage(sha: string): string {
+  return (
+    `The previous review of ${sha} did not complete (at least one agent ` +
+    "failed). This run reviews the full PR range and re-verifies every " +
+    "prior finding."
+  );
+}
+
 export function planDiscovery(input: {
   case: RereviewCase;
   full: boolean;
+  // Rereview-coverage fix: false forces the SAME full-discovery
+  // path `full: true` takes, PLUS verifyAll — because an incomplete prior
+  // run may be exactly the refuter failing, so prior findings cannot be
+  // trusted as merely "carried" the way a clean case B/C would carry them.
+  // This never rewrites `case` (R2-C5's rule: widening discovery never
+  // rewrites the case) — case stays whatever decideRereviewCase decided.
+  lastComplete: boolean;
 }): DiscoveryPlan {
-  const verifyAll = input.case === "D" || input.case === "E";
+  const caseVerifyAll = input.case === "D" || input.case === "E";
+  const forcedByIncompleteness = !input.lastComplete;
   const emptyDeltaIsError = input.case === "A";
-  if (input.full) {
+  if (input.full || forcedByIncompleteness) {
     return {
       case: input.case,
       discovery: "full",
       discoveryRestricted: false,
       skipDiscovery: false,
       emptyDeltaIsError,
-      verifyAll,
+      verifyAll: caseVerifyAll || forcedByIncompleteness,
     };
   }
   switch (input.case) {

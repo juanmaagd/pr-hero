@@ -102,6 +102,12 @@ export interface CiReviewAdmissionInput {
   authorityFailOpen?: boolean;
   // Explicit manual override (--force). When true, always return run.
   forceOverride?: boolean;
+  // Whether the run that posted summaryHead finished (its marker carried no
+  // coverage=partial token). Absent means complete, so every existing caller
+  // keeps today's verdicts. A partial review on the current head is a floor,
+  // not a verdict: it must not satisfy the same-head skip, or a CI re-run of
+  // that commit is skipped before the re-review can force full coverage.
+  summaryComplete?: boolean;
 }
 
 type CiReviewAdmissionTerminalFields = {
@@ -593,7 +599,15 @@ export function evaluateCiReviewAdmission(
   if (!input.markerSeen && input.summaryHead === null) {
     return { action: "run" };
   }
-  if (input.summaryHead !== null && input.summaryHead === input.currentHead) {
+  const partialSameHead =
+    input.summaryHead !== null &&
+    input.summaryHead === input.currentHead &&
+    input.summaryComplete === false;
+  if (
+    input.summaryHead !== null &&
+    input.summaryHead === input.currentHead &&
+    !partialSameHead
+  ) {
     const prior = priorForAdmissionInput(input);
     return {
       action: "skip",
@@ -624,6 +638,12 @@ export function evaluateCiReviewAdmission(
       reason: "once-per-pr",
       ...terminalFields(input, prior),
     };
+  }
+  // A partial review's own score is a floor, so the score and delta-risk
+  // gates below cannot justify skipping this head. The attempt cap and the
+  // explicit manual_only/once_per_pr policies above have already applied.
+  if (partialSameHead) {
+    return { action: "run" };
   }
   const prior = priorForAdmissionInput(input);
   if (prior.failOpen === true || input.authorityFailOpen === true) {

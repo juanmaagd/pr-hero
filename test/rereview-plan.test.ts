@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   decideLastHeadDelta,
   decideRereviewCase,
+  incompleteLastReviewMessage,
   planDiscovery,
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
@@ -17,27 +18,65 @@ describe("resolveLastReviewedHead — S-A", () => {
     expect(
       resolveLastReviewedHead({
         summaryHead: L,
+        summaryComplete: true,
         findingMarkers: [{ headSha: OTHER, createdAt: "2026-08-21T00:00:00Z" }],
       }),
-    ).toEqual({ L, source: "summary_marker" });
+    ).toEqual({ L, source: "summary_marker", lastComplete: true });
   });
 
   test("with the summary gone, L is the latest finding-marker created_at", () => {
     expect(
       resolveLastReviewedHead({
         summaryHead: null,
+        summaryComplete: true,
         findingMarkers: [
           { headSha: OTHER, createdAt: "2026-08-20T00:00:00Z" },
           { headSha: L, createdAt: "2026-08-21T00:00:00Z" },
         ],
       }),
-    ).toEqual({ L, source: "finding_markers" });
+    ).toEqual({ L, source: "finding_markers", lastComplete: true });
   });
 
   test("no summary and no markers is case-A absent, not a guessed head", () => {
     expect(
-      resolveLastReviewedHead({ summaryHead: null, findingMarkers: [] }),
-    ).toEqual({ L: null, source: "absent" });
+      resolveLastReviewedHead({
+        summaryHead: null,
+        summaryComplete: true,
+        findingMarkers: [],
+      }),
+    ).toEqual({ L: null, source: "absent", lastComplete: true });
+  });
+
+  // The rereview-coverage fix: completeness travels WITH L. A
+  // partial summary marker's L is NEVER nulled out — nulling it would make
+  // this function fall through to `latestMarkerHead(findingMarkers)`, and a
+  // partial run's own inline finding markers carry the SAME head, so L would
+  // just get resurrected there and the forced-full re-review would be a
+  // no-op. The pin below is exactly that trap: an incomplete summary marker
+  // AND a finding marker at the same head must still force `lastComplete`
+  // false, never quietly recover `true` through the fallback path.
+  test("an incomplete summary marker forces lastComplete false, even with a same-head finding marker", () => {
+    expect(
+      resolveLastReviewedHead({
+        summaryHead: L,
+        summaryComplete: false,
+        findingMarkers: [{ headSha: L, createdAt: "2026-08-21T00:00:00Z" }],
+      }),
+    ).toEqual({ L, source: "summary_marker", lastComplete: false });
+  });
+
+  // lastComplete is only ever consulted when the summary marker itself is
+  // the source of L — finding-marker recovery (no summary comment at all)
+  // and the absent case both mean "nothing to distrust", so they are always
+  // complete regardless of what summaryComplete says.
+  test("lastComplete is always true when L comes from finding markers or is absent, ignoring summaryComplete", () => {
+    expect(
+      resolveLastReviewedHead({
+        summaryHead: null,
+        summaryComplete: false,
+        findingMarkers: [{ headSha: L, createdAt: "2026-08-21T00:00:00Z" }],
+      }),
+    ).toEqual({ L, source: "finding_markers", lastComplete: true });
   });
 });
 
@@ -111,7 +150,7 @@ describe("decideRereviewCase", () => {
 
 describe("planDiscovery", () => {
   test("case A empty diff is still an error — first review", () => {
-    const plan = planDiscovery({ case: "A", full: false });
+    const plan = planDiscovery({ case: "A", full: false, lastComplete: true });
     expect(plan).toMatchObject({
       discovery: "full",
       emptyDeltaIsError: true,
@@ -121,19 +160,23 @@ describe("planDiscovery", () => {
   });
 
   test("S-empty — a re-review empty delta is not an error", () => {
-    expect(planDiscovery({ case: "B", full: false }).emptyDeltaIsError).toBe(
-      false,
-    );
-    expect(planDiscovery({ case: "C", full: false }).emptyDeltaIsError).toBe(
-      false,
-    );
-    expect(planDiscovery({ case: "C", full: false }).discovery).toBe(
-      "restricted",
-    );
+    expect(
+      planDiscovery({ case: "B", full: false, lastComplete: true })
+        .emptyDeltaIsError,
+    ).toBe(false);
+    expect(
+      planDiscovery({ case: "C", full: false, lastComplete: true })
+        .emptyDeltaIsError,
+    ).toBe(false);
+    expect(
+      planDiscovery({ case: "C", full: false, lastComplete: true }).discovery,
+    ).toBe("restricted");
   });
 
   test("case B without --full skips discovery", () => {
-    expect(planDiscovery({ case: "B", full: false })).toMatchObject({
+    expect(
+      planDiscovery({ case: "B", full: false, lastComplete: true }),
+    ).toMatchObject({
       discovery: "none",
       skipDiscovery: true,
       discoveryRestricted: true,
@@ -141,30 +184,87 @@ describe("planDiscovery", () => {
   });
 
   test("--full widens discovery and records the REAL case (R2-C5)", () => {
-    const b = planDiscovery({ case: "B", full: true });
+    const b = planDiscovery({ case: "B", full: true, lastComplete: true });
     expect(b.case).toBe("B");
     expect(b.discovery).toBe("full");
     expect(b.discoveryRestricted).toBe(false);
     expect(b.skipDiscovery).toBe(false);
     expect(b.verifyAll).toBe(false);
 
-    const c = planDiscovery({ case: "C", full: true });
+    const c = planDiscovery({ case: "C", full: true, lastComplete: true });
     expect(c.case).toBe("C");
     expect(c.discoveryRestricted).toBe(false);
     expect(c.verifyAll).toBe(false);
 
-    const d = planDiscovery({ case: "D", full: true });
+    const d = planDiscovery({ case: "D", full: true, lastComplete: true });
     expect(d.case).toBe("D");
     expect(d.verifyAll).toBe(true);
   });
 
   test("D and E verify-all on a full B..H range", () => {
-    expect(planDiscovery({ case: "D", full: false })).toMatchObject({
+    expect(
+      planDiscovery({ case: "D", full: false, lastComplete: true }),
+    ).toMatchObject({
       discovery: "full",
       verifyAll: true,
       emptyDeltaIsError: false,
     });
-    expect(planDiscovery({ case: "E", full: false }).verifyAll).toBe(true);
+    expect(
+      planDiscovery({ case: "E", full: false, lastComplete: true }).verifyAll,
+    ).toBe(true);
+  });
+
+  // The defect this whole fix closes (GitHub #42's re-review half): a PARTIAL
+  // run's marker used to read as complete, `decideRereviewCase` landed on B,
+  // and case B's `skipDiscovery: true` branch (line ~138) meant the missing
+  // hunters never ran again. `lastComplete: false` must take the SAME
+  // full-discovery path `--full` takes — never rewriting the case (that stays
+  // B/C/D/E per R2-C5), only widening what gets looked at — and additionally
+  // force `verifyAll`, because the prior refuter may be exactly what failed.
+  test("case B + lastComplete false forces full discovery, never the skipDiscovery branch", () => {
+    const plan = planDiscovery({ case: "B", full: false, lastComplete: false });
+    expect(plan).toMatchObject({
+      case: "B",
+      discovery: "full",
+      discoveryRestricted: false,
+      skipDiscovery: false,
+      verifyAll: true,
+    });
+  });
+
+  test("case C + lastComplete false forces full discovery and verifyAll", () => {
+    const plan = planDiscovery({ case: "C", full: false, lastComplete: false });
+    expect(plan).toMatchObject({
+      case: "C",
+      discovery: "full",
+      discoveryRestricted: false,
+      skipDiscovery: false,
+      verifyAll: true,
+    });
+  });
+
+  // emptyDeltaIsError stays a function of the CASE alone, never of
+  // completeness — a first review (A) is still the only case that errors on
+  // an empty diff, even in the degenerate combination the resolver never
+  // actually produces (case A always reports lastComplete: true).
+  test("emptyDeltaIsError is unaffected by lastComplete for every case", () => {
+    expect(
+      planDiscovery({ case: "A", full: false, lastComplete: false })
+        .emptyDeltaIsError,
+    ).toBe(true);
+    expect(
+      planDiscovery({ case: "B", full: false, lastComplete: false })
+        .emptyDeltaIsError,
+    ).toBe(false);
+  });
+});
+
+describe("incompleteLastReviewMessage", () => {
+  test("names the un-finished commit and the consequence", () => {
+    const message = incompleteLastReviewMessage(L);
+    expect(message).toContain(L);
+    expect(message).toContain("full");
+    expect(message).toContain("re-verifies");
   });
 });
 

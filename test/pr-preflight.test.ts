@@ -29,6 +29,7 @@ import {
   findMarkedCommentId,
   IN_FLIGHT_TTL_MS,
   isInFlightCommitStatus,
+  PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
   PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
   parseFindingMarker,
@@ -533,6 +534,30 @@ describe("prCommentMarker", () => {
     expect("<!-- pr-hero-report -->".startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(
       true,
     );
+  });
+
+  // Rereview-coverage fix (partial-review posting a marker that reads as
+  // complete, GitHub #42's re-review half): omitting `complete` — or passing
+  // it explicitly true — must stay BYTE-IDENTICAL to the pre-fix marker.
+  // Every already-posted comment, and every one-argument caller in this
+  // codebase, depends on that.
+  test("complete (default, and explicit true) is byte-identical to the old marker", () => {
+    expect(prCommentMarker(HEAD)).toBe(`<!-- pr-hero-report head=${HEAD} -->`);
+    expect(prCommentMarker(HEAD, true)).toBe(
+      `<!-- pr-hero-report head=${HEAD} -->`,
+    );
+  });
+
+  // A partial run's marker still starts with PR_COMMENT_MARKER_PREFIX (so
+  // findMarkedCommentId keeps finding/updating the SAME comment — no second
+  // summary), but carries the named coverage token so a reader can tell this
+  // run never finished.
+  test("incomplete carries the named coverage token and still matches the prefix", () => {
+    const marker = prCommentMarker(HEAD, false);
+    expect(marker).toBe(
+      `<!-- pr-hero-report head=${HEAD} ${PR_COMMENT_COVERAGE_PARTIAL_TOKEN} -->`,
+    );
+    expect(marker.startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(true);
   });
 });
 

@@ -46,23 +46,32 @@ describe("parseNameOnly", () => {
 describe("shouldAbortEmptyDiscovery — S-empty", () => {
   test("a first review with an empty diff still errors", () => {
     expect(
-      shouldAbortEmptyDiscovery(planDiscovery({ case: "A", full: false }), ""),
+      shouldAbortEmptyDiscovery(
+        planDiscovery({ case: "A", full: false, lastComplete: true }),
+        "",
+      ),
     ).toBe(true);
   });
 
   test("a re-review empty delta is not an error", () => {
     expect(
-      shouldAbortEmptyDiscovery(planDiscovery({ case: "C", full: false }), ""),
+      shouldAbortEmptyDiscovery(
+        planDiscovery({ case: "C", full: false, lastComplete: true }),
+        "",
+      ),
     ).toBe(false);
     expect(
-      shouldAbortEmptyDiscovery(planDiscovery({ case: "B", full: false }), ""),
+      shouldAbortEmptyDiscovery(
+        planDiscovery({ case: "B", full: false, lastComplete: true }),
+        "",
+      ),
     ).toBe(false);
   });
 
   test("a non-empty patch never aborts", () => {
     expect(
       shouldAbortEmptyDiscovery(
-        planDiscovery({ case: "A", full: false }),
+        planDiscovery({ case: "A", full: false, lastComplete: true }),
         "diff --git a/x b/x\n",
       ),
     ).toBe(false);
@@ -76,6 +85,7 @@ describe("prepareDiscovery", () => {
       H,
       full: false,
       summaryHead: null,
+      summaryComplete: true,
       findingMarkers: [],
       git: git(),
     });
@@ -92,13 +102,18 @@ describe("prepareDiscovery", () => {
       H,
       full: false,
       summaryHead: null,
+      summaryComplete: true,
       findingMarkers: [
         { headSha: MISSING, createdAt: "2026-08-20T00:00:00Z" },
         { headSha: L, createdAt: "2026-08-21T00:00:00Z" },
       ],
       git: git({ isAncestor: async () => true }),
     });
-    expect(prepared.last).toEqual({ L, source: "finding_markers" });
+    expect(prepared.last).toEqual({
+      L,
+      source: "finding_markers",
+      lastComplete: true,
+    });
     expect(prepared.case).toBe("C");
     expect(prepared.plan.emptyDeltaIsError).toBe(false);
   });
@@ -109,6 +124,7 @@ describe("prepareDiscovery", () => {
       H,
       full: false,
       summaryHead: L,
+      summaryComplete: true,
       findingMarkers: [],
       git: git({
         nameOnly: async (from) => (from === B ? ["src/a.ts"] : ["vendor/x"]),
@@ -129,6 +145,7 @@ describe("prepareDiscovery", () => {
       H,
       full: false,
       summaryHead: L,
+      summaryComplete: true,
       findingMarkers: [],
       git: git({
         nameOnly: async (from) =>
@@ -150,6 +167,7 @@ describe("prepareDiscovery", () => {
       H,
       full: true,
       summaryHead: L,
+      summaryComplete: true,
       findingMarkers: [],
       git: git({
         nameOnly: async () => {
@@ -171,6 +189,7 @@ describe("prepareDiscovery", () => {
       H: L,
       full: false,
       summaryHead: L,
+      summaryComplete: true,
       findingMarkers: [],
       git: git(),
     });
@@ -180,12 +199,41 @@ describe("prepareDiscovery", () => {
     expect(prepared.discoverySkippedEmptyDelta).toBe(true);
   });
 
+  // Rereview-coverage fix — the end-to-end reproduction of the reported
+  // defect (MusiveTech/musive PR 1823): a PARTIAL run's summary marker at
+  // L===H (case B) must NOT take the skipDiscovery branch. `discoveryFrom`
+  // === B (the unrestricted, full B..H range — `plan.discovery !== "restricted"`
+  // routes prepareDiscovery to the B..H branch, never the L..H one) and
+  // `discoverySkippedEmptyDelta` is false, which is exactly what makes
+  // cli.ts's `activeHunters` non-empty again.
+  test("a partial summary marker at L===H forces full discovery instead of skipping it", async () => {
+    const prepared = await prepareDiscovery({
+      B,
+      H: L,
+      full: false,
+      summaryHead: L,
+      summaryComplete: false,
+      findingMarkers: [],
+      git: git(),
+    });
+    expect(prepared.case).toBe("B");
+    expect(prepared.last.lastComplete).toBe(false);
+    expect(prepared.plan.skipDiscovery).toBe(false);
+    expect(prepared.plan.discovery).toBe("full");
+    expect(prepared.plan.verifyAll).toBe(true);
+    expect(prepared.discoveryPaths).toBeNull();
+    expect(prepared.discoveryFrom).toBe(B);
+    expect(prepared.discoverySkippedEmptyDelta).toBe(false);
+    expect(toRereviewProvenance(prepared)?.last_review_complete).toBe(false);
+  });
+
   test("D4 — L exists but is not an ancestor → full B..H, verify-all", async () => {
     const prepared = await prepareDiscovery({
       B,
       H,
       full: false,
       summaryHead: L,
+      summaryComplete: true,
       findingMarkers: [],
       git: git({ isAncestor: async () => false }),
     });
@@ -194,6 +242,7 @@ describe("prepareDiscovery", () => {
     expect(prepared.plan.verifyAll).toBe(true);
     expect(prepared.discoveryPaths).toBeNull();
     expect(toRereviewProvenance(prepared)?.case).toBe("D");
+    expect(toRereviewProvenance(prepared)?.last_review_complete).toBe(true);
   });
 
   // Coverage for the case the force-push fix depends on: D4 had a test, E did
@@ -205,6 +254,7 @@ describe("prepareDiscovery", () => {
       H,
       full: false,
       summaryHead: MISSING,
+      summaryComplete: true,
       findingMarkers: [],
       git: git({
         commitExists: async () => false,
@@ -234,6 +284,7 @@ describe("prepareDiscovery", () => {
       H,
       full: false,
       summaryHead: null,
+      summaryComplete: true,
       findingMarkers: [],
       git: git(),
     });
@@ -326,6 +377,53 @@ describe("buildPhaseBQueue", () => {
       summaryUpdatedAt: null,
     });
     expect(queued.map((e) => e.trigger)).toEqual(["verify_all"]);
+  });
+
+  // Rereview-coverage fix wiring gap:
+  // `planDiscovery`'s `verifyAll` field was computed but never READ by
+  // production code — `classifyPrior` only forced verify_all off `ctx.case
+  // === "D" || "E"`, and `decideRereviewCase` is unchanged by this fix (case
+  // stays B/C), so setting `plan.verifyAll: true` for a forced-full case B/C
+  // would otherwise be a no-op: the refuter-failed prior would never be
+  // re-verified, which is half the defect surviving the fix. `verifyAll`
+  // must now win regardless of case — mirroring exactly what D/E already do
+  // — and case B's empty L===H nameStatus (nothing "touched") proves it: with
+  // `verifyAll` unset the prior is merely `carried`.
+  test("verifyAll forces verify_all on case B even with an empty (L===H) nameStatus", () => {
+    const priors = [
+      {
+        id: "R001",
+        sev: "CRITICAL" as const,
+        tier: "blocking" as const,
+        channel: "inline" as const,
+        locs: ["src/a.ts:10"],
+        claim: "the prior refuter never confirmed this",
+        triage: null,
+        newThreadReply: false,
+      },
+    ];
+    const nameStatus = { files: [], deleted: [], renameMap: new Map() };
+
+    const forced = buildPhaseBQueue({
+      case: "B",
+      priors,
+      nameStatus,
+      summaryUpdatedAt: null,
+      verifyAll: true,
+    });
+    expect(forced.queued.map((e) => `${e.priorId}:${e.trigger}`)).toEqual([
+      "R001:verify_all",
+    ]);
+
+    const notForced = buildPhaseBQueue({
+      case: "B",
+      priors,
+      nameStatus,
+      summaryUpdatedAt: null,
+      verifyAll: false,
+    });
+    expect(notForced.queued).toEqual([]);
+    expect(notForced.settled[0]?.status).toBe("carried");
   });
 });
 
@@ -902,6 +1000,34 @@ describe("F007 — readRereviewProvenance", () => {
     expect(read.rereview.live).toEqual([liveRow]);
     expect(read.rereview.resolved_verified).toBe(0);
     expect(read.rereview.resolved_ids).toEqual([]);
+  });
+
+  // `last_review_complete` is OPTIONAL on read (rereview-coverage fix): an
+  // artifact written before this fix has no such field at all, and it must
+  // still parse — never `invalid` — defaulting to `true` (the pre-fix world
+  // had no notion of a forced-full re-review, so "complete" is the accurate
+  // back-compat reading, not a guess).
+  test("an old artifact with no last_review_complete field still parses, defaulting true", () => {
+    const read = readRereviewProvenance({ rereview: block() });
+    expect(read.kind).toBe("ok");
+    expect(read.kind === "ok" && read.rereview.last_review_complete).toBe(true);
+  });
+
+  test("last_review_complete: false survives the read verbatim", () => {
+    const read = readRereviewProvenance({
+      rereview: block({ last_review_complete: false }),
+    });
+    expect(read.kind === "ok" && read.rereview.last_review_complete).toBe(
+      false,
+    );
+  });
+
+  test("a non-boolean last_review_complete is invalid, naming the field", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({ last_review_complete: "no" }),
+      }),
+    ).toEqual({ kind: "invalid", problem: "rereview.last_review_complete" });
   });
 
   test("resolved_ids survives the read — collapse is decided from it", () => {
