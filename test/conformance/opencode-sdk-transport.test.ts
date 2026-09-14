@@ -1440,6 +1440,178 @@ describe("OpenCode SDK /v2 session wire conformance (OA1a)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Bun HTTP idle-timeout override on the blocking prompt POST
+// ---------------------------------------------------------------------------
+//
+// The recording fetch below is passed as the transport's OWN `options.fetch`
+// (not as a `cfg.fetch` override inside `loadSdk`, the pattern every other
+// test in this file uses). That distinction matters: `loadSdk`'s
+// `createOpencodeClient` here returns the REAL, unmodified
+// `sdkModule.createOpencodeClient(cfg)`, so `evidence.wrapFetch(...)` and the
+// inner `(options.fetch ?? globalThis.fetch)(request)` callback under test
+// actually run. A `loadSdk` that substitutes its own `fetch` into `cfg`
+// bypasses that inner callback entirely and would prove nothing about it.
+describe("OpenCode prompt POST Bun idle-timeout override", () => {
+  test("the blocking prompt POST disables Bun's idle timeout while every other request keeps the default call shape", async () => {
+    const { createOpenCodeClient } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const sdkModule = await import("@opencode-ai/sdk/v2");
+
+    const calls: Array<{
+      method: string;
+      pathname: string;
+      init: RequestInit | undefined;
+    }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      // The inner callback under test always hands this fetch a `Request`
+      // instance (the SDK builds one and calls `_fetch(request)` single-arg),
+      // so `input` is never a bare string/URL here.
+      const request =
+        input instanceof Request ? input : new Request(input, init);
+      const pathname = new URL(request.url).pathname;
+      calls.push({ method: request.method, pathname, init });
+      if (pathname === "/event") {
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"type":"server.connected","properties":{}}\n\n',
+                ),
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (pathname === "/session" && request.method === "POST") {
+        return new Response(
+          JSON.stringify({ id: "ses-idle-1", directory: "/workspace/idle" }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }
+      if (pathname === "/experimental/tool/ids") {
+        return new Response(JSON.stringify(["read"]), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      // /mcp status and the prompt POST both fall through to this shared
+      // empty-object reply; the prompt POST is distinguished below by path.
+      return new Response(JSON.stringify({}), {
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const client = createOpenCodeClient({
+      model: { providerID: "openai", modelID: "gpt-4o" },
+      loadSdk: async () => ({
+        createOpencodeClient: (config) =>
+          sdkModule.createOpencodeClient(config),
+      }),
+      fetch: fetchImpl,
+      readSystemPrompt: async () => "SYSTEM PROMPT",
+      launchServer: async () => ({
+        url: "http://127.0.0.1:4096",
+        pid: 1,
+        close: async () => {},
+      }),
+    });
+
+    await client.createSession({
+      cwd: "/workspace/idle",
+      systemPromptPath: "/tmp/sys.md",
+      tools: ["Read"],
+      userPrompt: "run review",
+    });
+
+    const findPromptCall = () =>
+      calls.find(
+        (call) =>
+          call.method === "POST" &&
+          call.pathname === "/session/ses-idle-1/message",
+      );
+    for (let i = 0; i < 50 && findPromptCall() === undefined; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const promptCall = findPromptCall();
+    expect(promptCall).toBeDefined();
+    // A: the blocking prompt POST must carry the Bun idle-timeout override.
+    expect(
+      (promptCall?.init as { timeout?: unknown } | undefined)?.timeout,
+    ).toBe(false);
+
+    // B: every OTHER recorded request keeps today's exact call shape — no
+    // second argument at all. Pinned to at least the two calls the parent
+    // named explicitly, so a future fixture change that stops driving either
+    // cannot silently turn this loop into a no-op over zero calls.
+    const otherCalls = calls.filter((call) => call !== promptCall);
+    expect(
+      otherCalls.some(
+        (call) => call.method === "GET" && call.pathname === "/event",
+      ),
+    ).toBe(true);
+    expect(
+      otherCalls.some(
+        (call) => call.method === "POST" && call.pathname === "/session",
+      ),
+    ).toBe(true);
+    for (const call of otherCalls) {
+      expect(call.init).toBeUndefined();
+    }
+  });
+});
+
+describe("isBlockingPromptRequest (pure predicate)", () => {
+  test.each([
+    [
+      "POST /session/ses_1/message matches the blocking prompt POST",
+      "POST",
+      "http://127.0.0.1:4096/session/ses_1/message",
+      true,
+    ],
+    [
+      "GET /session/ses_1/message is the poll readback, not the prompt POST",
+      "GET",
+      "http://127.0.0.1:4096/session/ses_1/message",
+      false,
+    ],
+    [
+      "POST /session/ses_1/message/msg_1 is the single-message endpoint (an extra path segment), not the prompt POST",
+      "POST",
+      "http://127.0.0.1:4096/session/ses_1/message/msg_1",
+      false,
+    ],
+    [
+      "POST /session/ses_1/prompt_async is the async variant, not this one",
+      "POST",
+      "http://127.0.0.1:4096/session/ses_1/prompt_async",
+      false,
+    ],
+    [
+      "POST /session is session.create, not the message endpoint",
+      "POST",
+      "http://127.0.0.1:4096/session",
+      false,
+    ],
+    [
+      "POST /session/ses_1/message?directory=/x still matches: only pathname is checked",
+      "POST",
+      "http://127.0.0.1:4096/session/ses_1/message?directory=/x",
+      true,
+    ],
+  ])("%s", async (_label, method, url, expected) => {
+    const { isBlockingPromptRequest } = await import(
+      "../../src/transports/opencode-client"
+    );
+    expect(isBlockingPromptRequest(new Request(url, { method }))).toBe(
+      expected,
+    );
+  });
+});
+
 describe("OpenCode bounded version admission policy (OA1b)", () => {
   test("admits exact SDK 1.18.25 and server 1.18.30 pair", async () => {
     const {
