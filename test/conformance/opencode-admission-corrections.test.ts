@@ -283,13 +283,15 @@ test.each(["valid", "wrong-version", "missing-doc", "wrong-cwd"])(
         ].includes(new URL(request.url).pathname),
       ))
         expect(new URL(request.url).searchParams.get("directory")).toBe("/tmp");
-      expect(
-        new URL(
-          requests.find(
-            (request) => new URL(request.url).pathname === "/session/status",
-          )?.url ?? "http://missing",
-        ).searchParams.has("directory"),
-      ).toBe(false);
+      // #223: GET /session/status is scoped by `directory` exactly like the
+      // requests above — it must carry the SAME one session.create used, or
+      // it watches an instance that has never heard of this session.
+      const statusRequests = requests.filter(
+        (request) => new URL(request.url).pathname === "/session/status",
+      );
+      expect(statusRequests.length).toBeGreaterThan(0);
+      for (const request of statusRequests)
+        expect(new URL(request.url).searchParams.get("directory")).toBe("/tmp");
     } finally {
       await client.close();
     }

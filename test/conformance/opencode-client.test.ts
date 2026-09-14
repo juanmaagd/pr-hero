@@ -75,6 +75,11 @@ interface FakeSdk {
   setStatus: (status: Record<string, unknown> | undefined) => void;
   setMcpStatus: (status: Record<string, unknown>) => void;
   mcpStatusCalls: () => Array<Record<string, unknown> | undefined>;
+  // #223: every call this session's OTHER observers make against
+  // `session.status` / `event.subscribe`, recorded verbatim so a test can
+  // assert they carry the same `directory` session.create registered.
+  statusCalls: () => Array<Record<string, unknown> | undefined>;
+  subscribeCalls: () => Array<Record<string, unknown> | undefined>;
 }
 
 function fakeSdk(
@@ -108,6 +113,14 @@ function fakeSdk(
   // and {} when nothing is connected.
   let mcpStatus: Record<string, unknown> = {};
   const mcpStatusCalls: Array<Record<string, unknown> | undefined> = [];
+  // #223: the real server scopes BOTH `GET /event` and `GET /session/status`
+  // by `directory` (measured against opencode 1.18.30). session.create is
+  // the one call that names the directory a session actually lives under;
+  // every other observer of that session has to name the SAME one or it is
+  // watching an instance that has never heard of it.
+  let createdDirectory: string | undefined;
+  const statusCalls: Array<Record<string, unknown> | undefined> = [];
+  const subscribeCalls: Array<Record<string, unknown> | undefined> = [];
   const queue: unknown[] = [];
   let notify: (() => void) | undefined;
   let ended = false;
@@ -135,6 +148,8 @@ function fakeSdk(
           createdAt = ++order;
           const id = options.sessionIds?.[creates] ?? SESSION_ID;
           creates += 1;
+          createdDirectory = (opts as { directory?: string } | undefined)
+            ?.directory;
           return {
             data: { id, directory: (opts as { directory: string }).directory },
           };
@@ -152,15 +167,35 @@ function fakeSdk(
           };
         },
         messages: async () => ({ data: messages }),
-        status: async () => ({ data: statuses }),
+        status: async (opts) => {
+          // Recorded verbatim, BEFORE the match decision — this is what the
+          // production call actually sent, not what the fake thinks of it.
+          statusCalls.push(opts as Record<string, unknown> | undefined);
+          const directory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          // #223: a directory that does not match the one session.create
+          // registered watches an instance that never heard of this
+          // session — measured (opencode 1.18.30) as `{}`, indistinguishable
+          // from "this session is idle".
+          if (directory !== createdDirectory) return { data: {} };
+          return { data: statuses };
+        },
         abort: async () => {
           aborts += 1;
           return { data: {} };
         },
       },
       event: {
-        subscribe: async () => {
+        subscribe: async (params) => {
           subscribedAt = ++order;
+          subscribeCalls.push(params as Record<string, unknown> | undefined);
+          const directory = (params as { directory?: string } | undefined)
+            ?.directory;
+          // #223: same scoping as session.status above. A mismatched
+          // directory still yields a live, endable stream — the real server
+          // keeps delivering server.connected/heartbeat on it — it just
+          // never carries THIS session's queued events.
+          const scoped = directory === createdDirectory;
           // One iterator object. Bun does not run an async-generator
           // `finally` on `return()` if `next()` never ran, so the close
           // signal is the `return` method itself — that is also what the
@@ -168,7 +203,9 @@ function fakeSdk(
           const inner = (async function* subscribeStream() {
             iterators += 1;
             for (;;) {
-              while (queue.length > 0) yield queue.shift();
+              if (scoped) {
+                while (queue.length > 0) yield queue.shift();
+              }
               if (ended) return;
               await new Promise<void>((r) => {
                 notify = r;
@@ -223,6 +260,8 @@ function fakeSdk(
       mcpStatus = status;
     },
     mcpStatusCalls: () => mcpStatusCalls,
+    statusCalls: () => statusCalls,
+    subscribeCalls: () => subscribeCalls,
   };
 }
 
@@ -328,6 +367,17 @@ describe("createOpenCodeClient", () => {
     expect(fake.subscribedAt()).toBeGreaterThan(0);
     expect(fake.promptedAt()).toBeGreaterThan(0);
     expect(fake.subscribedAt()).toBeLessThan(fake.promptedAt());
+  });
+
+  // #223: session.create now registers the session under the STEP's cwd
+  // (input.cwd), not the server's own — so a subscription that does not name
+  // the same directory watches an instance that has never heard of this
+  // session and only ever sees server.connected/heartbeat.
+  test("subscribes with the same directory session.create registered", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+    expect(fake.subscribeCalls()).toEqual([{ directory: INPUT.cwd }]);
   });
 
   // #128: the allow map is a snapshot of tool.ids(), and an id registered
@@ -671,6 +721,21 @@ describe("createOpenCodeClient", () => {
     expect(kinds).toContain("terminal");
   });
 
+  // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
+  // exactly like GET /event — it must query the SAME directory session.create
+  // registered (state.turn.expectedCwd, which IS input.cwd) or it watches an
+  // instance that has never heard of this session.
+  test("polls status with the same directory session.create registered", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+    fake.setStatus({ type: "busy" });
+
+    await client.pollStatus(session);
+
+    expect(fake.statusCalls()).toEqual([{ directory: INPUT.cwd }]);
+  });
+
   // #127. The poll observer used to scan session.messages() for the last
   // completed assistant message and call that the turn's terminal. At any poll
   // instant "last completed" is step 1 until step 2 exists, so it agreed with
@@ -719,12 +784,13 @@ describe("createOpenCodeClient", () => {
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
   });
 
-  // Absence is the boundary, but it is ALSO what a session this call cannot
-  // see looks like. Measured against opencode 1.18.23: a session created with
-  // no directory registers under the SERVER's cwd, and
-  // GET /session/status?directory=<step cwd> returns {} for it WHILE IT IS
-  // BUSY. An absence that has never been contradicted proves nothing, so it
-  // only counts once this observer has seen the provider name this session.
+  // Absence is the boundary, but it is ALSO what a wrong or missing
+  // `directory` scope looks like — #223 measured (opencode 1.18.30) that
+  // `GET /session/status` given a directory other than the one session.create
+  // registered returns {} for a session that is BUSY at that moment, the same
+  // shape as one that has finished. The response cannot tell the two apart,
+  // so an absence that has never been contradicted proves nothing; it only
+  // counts once this observer has seen the provider name this session.
   test("poll never reads an unseen session's absence as a finished turn", async () => {
     const fake = fakeSdk();
     const client = rig(fake);

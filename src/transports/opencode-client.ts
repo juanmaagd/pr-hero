@@ -1453,7 +1453,15 @@ export interface OpenCodeSdkClientApi {
     ): Promise<OpenCodeSdkResult<unknown>>;
   };
   readonly event: {
-    subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
+    // `parameters`, not `options`: the SDK's first argument is the parameters
+    // slot (`{directory?, workspace?}`); request options are its SECOND. The
+    // old name invited `subscribe({ signal })`, and the call site did exactly
+    // that — buildClientParams drops unknown keys, so the signal vanished and
+    // no directory was ever sent. Only the first argument is declared because
+    // it is the only one the call site passes.
+    subscribe(
+      parameters?: unknown,
+    ): Promise<{ stream: AsyncIterable<unknown> }>;
   };
   // `GET /experimental/tool/ids` — "List all tool IDs (including built-in and
   // dynamically registered)". REQUIRED, never optional: an optional member
@@ -1937,11 +1945,12 @@ export function createOpenCodeClient(
         //
         // The `directory` scope mirrors what the request asked for, and the
         // #127 analogue was checked rather than assumed. session.status
-        // reported {} for a BUSY session given a directory the server was not
-        // started in, so pollStatus below omits the parameter entirely — the
-        // obvious worry is that mcp.status scopes the same way and would then
-        // abort every PR-mode step, since the server inherits pr-hero's cwd
-        // and never the worktree.
+        // reported {} for a BUSY session given a directory other than the
+        // one its session was created under (#223) — so pollStatus below
+        // passes the SAME directory session.create used, never omits it —
+        // and the obvious worry was that mcp.status scopes the same way and
+        // would then abort every PR-mode step, since the server inherits
+        // pr-hero's cwd and never the worktree.
         //
         // It does not. MEASURED against a real PR worktree, with the server's
         // cwd deliberately elsewhere: `directory` set to the worktree, to the
@@ -1986,7 +1995,23 @@ export function createOpenCodeClient(
         // first deltas. The contract splits createSession and streamEvents
         // into separate calls, so unless the buffering happens here that
         // window cannot be closed at all.
-        subscription = await api.event.subscribe(requestOptions);
+        //
+        // #223: `directory` here MUST be the same one session.create used
+        // above (input.cwd) — GET /event is scoped by directory instance,
+        // exactly like GET /session/status (see pollStatus). Measured
+        // against opencode 1.18.30: a subscription opened under a different
+        // directory than the session's own sees only
+        // server.connected/heartbeat and never this session's events at all.
+        //
+        // `requestOptions` (`{signal}`) is deliberately NOT passed here. It
+        // used to be passed as the FIRST argument — the SDK's parameters
+        // slot, not its request-options slot — where buildClientParams drops
+        // unknown keys, so the SSE request has never carried an abort signal;
+        // stream close has always been owned by cleanup's `return()`. Moving
+        // it to the second argument would change live cancellation semantics
+        // (an AbortError inside the pump) that no fake here exercises, since
+        // the fakes ignore call options. That is a separate change.
+        subscription = await api.event.subscribe({ directory: input.cwd });
         evidence.record("subscription_ready", { sessionId });
         checkCancelled();
 
@@ -2289,15 +2314,28 @@ export function createOpenCodeClient(
       // permanently blind and §197 down to one observer again. The explicit
       // arm is still honoured for the build that does send it.
       //
-      // NO `directory` query, and that is measured too: the session is created
-      // without one, so it registers under the SERVER's cwd, while prompts
-      // carry the step's cwd. `GET /session/status?directory=<step cwd>`
-      // returned {} for a session that was BUSY at that moment. Passing the
-      // step cwd here would have made every busy session look absent — which
-      // is to say, look finished — and reopened #127 through its own fix.
+      // #223: `directory` IS required, and it must be the SAME one
+      // session.create used for this session — `state.turn.expectedCwd`,
+      // set from `input.cwd` by `createTurnState` (and the exact value
+      // `session.messages` below queries with too). Measured against
+      // opencode 1.18.30: `GET /session/status` is scoped by directory
+      // instance exactly like `GET /event` above, so omitting it — or
+      // naming a different one — watches an instance that has never heard
+      // of this session and reports it `{}` even while it is BUSY. That is
+      // indistinguishable from "finished" in the response shape, which is
+      // #127 reopened: a wrong scope silently discards the model's answer
+      // once the useful-progress deadline elapses, because this observer
+      // never sees anything to report.
+      //
+      // The still-true half of the old rationale survives below: absence is
+      // ambiguous on its own even with the RIGHT directory, because it is
+      // also what a session this call has simply never seen looks like.
       const statuses = asRecord(
         unwrap(
-          await state.api.session.status({}, { signal }),
+          await state.api.session.status(
+            { directory: state.turn.expectedCwd },
+            { signal },
+          ),
           "session.status",
         ),
       );

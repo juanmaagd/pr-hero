@@ -264,6 +264,11 @@ function fakeSdk(): FakeSdk {
   let statuses: Record<string, unknown> = {};
   let messages: unknown[] = [];
   let statusCalls = 0;
+  // #223: `GET /event` and `GET /session/status` are both scoped by
+  // `directory` instance (measured against opencode 1.18.30). session.create
+  // is what names the directory this session actually lives under; status
+  // and subscribe below only see it when they name the SAME one.
+  let createdDirectory: string | undefined;
 
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
@@ -273,34 +278,48 @@ function fakeSdk(): FakeSdk {
       mcp: { status: async () => ({ data: {} }) },
       tool: { ids: async () => ({ data: [...TOOL_IDS] }) },
       session: {
-        create: async (opts) => ({
-          data: {
-            id: SESSION_ID,
-            directory: (opts as { directory: string }).directory,
-          },
-        }),
+        create: async (opts) => {
+          createdDirectory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          return {
+            data: {
+              id: SESSION_ID,
+              directory: (opts as { directory: string }).directory,
+            },
+          };
+        },
         prompt: async () => ({ data: {} }),
         messages: async () => ({ data: messages }),
-        status: async () => {
+        status: async (opts) => {
           statusCalls += 1;
+          const directory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          if (directory !== createdDirectory) return { data: {} };
           return { data: statuses };
         },
         abort: async () => ({ data: {} }),
       },
       event: {
-        subscribe: async () => ({
-          stream: {
-            async *[Symbol.asyncIterator]() {
-              for (;;) {
-                while (queue.length > 0) yield queue.shift();
-                if (ended) return;
-                await new Promise<void>((resolve) => {
-                  notify = resolve;
-                });
-              }
+        subscribe: async (params) => {
+          const directory = (params as { directory?: string } | undefined)
+            ?.directory;
+          const scoped = directory === createdDirectory;
+          return {
+            stream: {
+              async *[Symbol.asyncIterator]() {
+                for (;;) {
+                  if (scoped) {
+                    while (queue.length > 0) yield queue.shift();
+                  }
+                  if (ended) return;
+                  await new Promise<void>((resolve) => {
+                    notify = resolve;
+                  });
+                }
+              },
             },
-          },
-        }),
+          };
+        },
       },
     }),
   };
@@ -548,11 +567,13 @@ describe("the poll observer reaches the same verdict independently", () => {
     expect(outcome.terminalProof?.eventId).toBe(STEPS[2]);
   });
 
-  // Absence is ambiguous on its own — it is also what a wrong directory scope
-  // looks like. Measured: a session created with no `directory` registers
-  // under the SERVER's cwd, and `GET /session/status?directory=<step cwd>`
-  // returns {} for it WHILE IT IS BUSY. So absence only means idle once this
-  // observer has proved it can see this session at all.
+  // Absence is ambiguous on its own — it is also what a wrong OR MISSING
+  // `directory` scope looks like. Measured (#223, opencode 1.18.30):
+  // `GET /session/status` given a directory other than the one session.create
+  // registered returns {} for a session that is BUSY at that moment, the same
+  // shape as a session that has finished. So absence only means idle once
+  // this observer has proved, through this same endpoint, that it can see
+  // this session at all.
   test("absence alone, never having seen the session, is not a boundary", async () => {
     const fake = fakeSdk();
     fake.setStatus(undefined);

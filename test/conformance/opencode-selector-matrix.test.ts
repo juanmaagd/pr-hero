@@ -300,6 +300,11 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
           "/session",
           "/experimental/tool/ids",
           "/session/ses_selector/message",
+          // #223: GET /session/status is scoped by `directory` exactly like
+          // the endpoints above — it must carry the SAME one session.create
+          // used, or it watches an instance that has never heard of this
+          // session.
+          "/session/status",
         ]) {
           const matching = requests.filter(
             (request) => new URL(request.url).pathname === p,
@@ -310,12 +315,6 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
               canonical,
             );
         }
-        for (const request of requests.filter(
-          (request) => new URL(request.url).pathname === "/session/status",
-        ))
-          expect(new URL(request.url).searchParams.has("directory")).toBe(
-            false,
-          );
         if (mode === "wrong-readback")
           expect(result.stderrTail).toContain("cwd mismatch");
         await client.close();
