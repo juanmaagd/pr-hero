@@ -2055,3 +2055,162 @@ describe("Prompt-result reconcile must not advance emission ahead of the stream 
     expect(state.partDetails.get("prt_dup_1")?.emittedText).toBe("hello ");
   });
 });
+
+// D-11: the poll observer's own readback (opencode-client.ts pollStatus,
+// `reconcileMessages(list, state.turn)`) reconciles with the DEFAULT `emit`
+// (true) — unlike the #223 prompt_result call site above, which was fixed to
+// `{ emit: false }` for exactly the same reason. The poll site discards
+// `reconciled.events` the same way the prompt_result call site used to
+// (opencode-sdk.ts's poll branch reads only `failure`/`terminalProof`/
+// `finalText`/`usage`/`usageIncomplete`), so the same hazard applies: if the
+// stream has already delivered a PREFIX of a text part when the poll's HTTP
+// readback observes the part's already-persisted FULL text, the poll's
+// reconcile advances `emittedText` to the full text for a consumer that was
+// only ever handed the prefix. The stream's own still-in-flight remaining
+// deltas for that part then find `emittedText` already past what was really
+// delivered: `handlePartDelta`'s dedup check (`emittedText.endsWith(delta)`)
+// does not recognise them as already-covered, so they are appended AGAIN as
+// duplicate delta events (corrupting delivery), and the part's own later
+// snapshot/session.idle boundary event finds `snapshotText` shorter than the
+// now-inflated `emittedText` and throws "conflicting snapshot observed" —
+// exactly the failure #223 fixed at the other call site, reopened at this one.
+//
+// These tests drive `reconcileMessages` (the exact call the poll site makes)
+// and `mapOpenCodeEvents` (the exact call the stream pump makes) directly, in
+// the ordering a live race would produce, so it is exact and never a timing
+// race.
+describe("Poll-readback reconcile must not advance emission ahead of the stream (D-11)", () => {
+  const SESS = "ses_pollrace";
+  const FULL_TEXT = "the answer is 42";
+  const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+
+  function completedAssistant(): Record<string, unknown> {
+    return {
+      id: "msg_asst_1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/work", root: "/" },
+      parentID: "msg_user_1",
+      finish: "stop",
+      time: { created: 100, completed: 200 },
+    };
+  }
+
+  function pollReadbackRecord(): Record<string, unknown> {
+    return {
+      info: completedAssistant(),
+      parts: [
+        {
+          id: "prt_ans_1",
+          messageID: "msg_asst_1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      ],
+    };
+  }
+
+  // Mechanism validation for the fix: the exact same race, but with the poll
+  // readback reconciled through `{ emit: false }` — what the fixed pollStatus
+  // call site will pass. `events` is still discarded by the caller (mirroring
+  // the real poll site, which never reads them), but `emittedText` must be
+  // left untouched so the stream's own remaining, perfectly ordinary delivery
+  // completes exactly once with no duplication and no thrown conflict.
+  test("fixed (emit:false) poll readback: the same race delivers the answer exactly once", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_ans_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: "",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    const firstDeltaEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_ans_1",
+          field: "text",
+          delta: DELTA_CHUNKS[0],
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(firstDeltaEvents).toEqual([
+      { kind: "delta", text: DELTA_CHUNKS[0] },
+    ]);
+
+    const reconciled = reconcileMessages([pollReadbackRecord()], state, {
+      emit: false,
+    });
+    expect(reconciled.terminalProof?.eventId).toBe("msg_asst_1");
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    // The fix: emittedText stays exactly what the stream actually delivered.
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(
+      DELTA_CHUNKS[0],
+    );
+
+    const collected: unknown[] = [];
+    for (const chunk of DELTA_CHUNKS.slice(1)) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_ans_1",
+              field: "text",
+              delta: chunk,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+    // The final restating snapshot must be recognised as already delivered —
+    // no throw, no further event.
+    const snapshotEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_ans_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: FULL_TEXT,
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(collected).toEqual(
+      DELTA_CHUNKS.slice(1).map((text) => ({ kind: "delta", text })),
+    );
+    expect(snapshotEvents).toEqual([]);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+});
