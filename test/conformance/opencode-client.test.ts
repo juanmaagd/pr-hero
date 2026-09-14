@@ -8,7 +8,12 @@ import type {
 } from "../../src/execution/contracts";
 import {
   createOpenCodeClient,
+  createTurnState,
+  isMessageOwned,
+  mapOpenCodeEvents,
   type OpenCodeSdkLike,
+  reconcileMessages,
+  terminalProofFromAssistant,
 } from "../../src/transports/opencode-client";
 import {
   assertMcpConnected,
@@ -17,11 +22,19 @@ import {
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
-const ASSISTANT = JSON.parse(
-  readFileSync(path.join(FIXTURE_DIR, "assistant-message.json"), "utf-8"),
-) as Record<string, unknown>;
-
 const SESSION_ID = "ses_test";
+
+const ASSISTANT: Record<string, unknown> & {
+  id?: string;
+  path: { cwd: string; root: string };
+  sessionID: string;
+} = {
+  ...(JSON.parse(
+    readFileSync(path.join(FIXTURE_DIR, "assistant-message.json"), "utf-8"),
+  ) as Record<string, unknown>),
+  sessionID: SESSION_ID,
+  path: { cwd: "/tmp/work", root: "/" },
+};
 
 // The REAL tool surface, read live from `client.tool.ids()` against opencode
 // 1.18.23 while diagnosing issue #122. It is transcribed rather than derived:
@@ -63,6 +76,11 @@ interface FakeSdk {
   setStatus: (status: Record<string, unknown> | undefined) => void;
   setMcpStatus: (status: Record<string, unknown>) => void;
   mcpStatusCalls: () => Array<Record<string, unknown> | undefined>;
+  // #223: every call this session's OTHER observers make against
+  // `session.status` / `event.subscribe`, recorded verbatim so a test can
+  // assert they carry the same `directory` session.create registered.
+  statusCalls: () => Array<Record<string, unknown> | undefined>;
+  subscribeCalls: () => Array<Record<string, unknown> | undefined>;
 }
 
 function fakeSdk(
@@ -96,6 +114,14 @@ function fakeSdk(
   // and {} when nothing is connected.
   let mcpStatus: Record<string, unknown> = {};
   const mcpStatusCalls: Array<Record<string, unknown> | undefined> = [];
+  // #223: the real server scopes BOTH `GET /event` and `GET /session/status`
+  // by `directory` (measured against opencode 1.18.30). session.create is
+  // the one call that names the directory a session actually lives under;
+  // every other observer of that session has to name the SAME one or it is
+  // watching an instance that has never heard of it.
+  let createdDirectory: string | undefined;
+  const statusCalls: Array<Record<string, unknown> | undefined> = [];
+  const subscribeCalls: Array<Record<string, unknown> | undefined> = [];
   const queue: unknown[] = [];
   let notify: (() => void) | undefined;
   let ended = false;
@@ -119,28 +145,58 @@ function fakeSdk(
         },
       },
       session: {
-        create: async () => {
+        create: async (opts) => {
           createdAt = ++order;
           const id = options.sessionIds?.[creates] ?? SESSION_ID;
           creates += 1;
-          return { data: { id } };
+          createdDirectory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          return {
+            data: { id, directory: (opts as { directory: string }).directory },
+          };
         },
         prompt: async (opts) => {
           promptedAt = ++order;
           prompts.push(opts as Record<string, unknown>);
           if (options.promptHangs) await new Promise(() => {});
-          return { data: {} };
+          return {
+            data: {
+              id: "msg_041ddb5a0001orXfEB1f2tRCLO",
+              role: "user",
+              sessionID: options.sessionIds?.[0] ?? SESSION_ID,
+            },
+          };
         },
         messages: async () => ({ data: messages }),
-        status: async () => ({ data: statuses }),
+        status: async (opts) => {
+          // Recorded verbatim, BEFORE the match decision — this is what the
+          // production call actually sent, not what the fake thinks of it.
+          statusCalls.push(opts as Record<string, unknown> | undefined);
+          const directory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          // #223: a directory that does not match the one session.create
+          // registered watches an instance that never heard of this
+          // session — measured (opencode 1.18.30) as `{}`, indistinguishable
+          // from "this session is idle".
+          if (directory !== createdDirectory) return { data: {} };
+          return { data: statuses };
+        },
         abort: async () => {
           aborts += 1;
           return { data: {} };
         },
       },
       event: {
-        subscribe: async () => {
+        subscribe: async (params) => {
           subscribedAt = ++order;
+          subscribeCalls.push(params as Record<string, unknown> | undefined);
+          const directory = (params as { directory?: string } | undefined)
+            ?.directory;
+          // #223: same scoping as session.status above. A mismatched
+          // directory still yields a live, endable stream — the real server
+          // keeps delivering server.connected/heartbeat on it — it just
+          // never carries THIS session's queued events.
+          const scoped = directory === createdDirectory;
           // One iterator object. Bun does not run an async-generator
           // `finally` on `return()` if `next()` never ran, so the close
           // signal is the `return` method itself — that is also what the
@@ -148,7 +204,9 @@ function fakeSdk(
           const inner = (async function* subscribeStream() {
             iterators += 1;
             for (;;) {
-              while (queue.length > 0) yield queue.shift();
+              if (scoped) {
+                while (queue.length > 0) yield queue.shift();
+              }
               if (ended) return;
               await new Promise<void>((r) => {
                 notify = r;
@@ -203,6 +261,8 @@ function fakeSdk(
       mcpStatus = status;
     },
     mcpStatusCalls: () => mcpStatusCalls,
+    statusCalls: () => statusCalls,
+    subscribeCalls: () => subscribeCalls,
   };
 }
 
@@ -228,6 +288,7 @@ function rig(
   overrides: Partial<Parameters<typeof createOpenCodeClient>[0]> = {},
 ) {
   return createOpenCodeClient({
+    createMessageId: () => String(ASSISTANT.parentID),
     loadSdk: async () => fake.sdk,
     launchServer: async () => ({
       url: "http://127.0.0.1:1",
@@ -307,6 +368,17 @@ describe("createOpenCodeClient", () => {
     expect(fake.subscribedAt()).toBeGreaterThan(0);
     expect(fake.promptedAt()).toBeGreaterThan(0);
     expect(fake.subscribedAt()).toBeLessThan(fake.promptedAt());
+  });
+
+  // #223: session.create now registers the session under the STEP's cwd
+  // (input.cwd), not the server's own — so a subscription that does not name
+  // the same directory watches an instance that has never heard of this
+  // session and only ever sees server.connected/heartbeat.
+  test("subscribes with the same directory session.create registered", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+    expect(fake.subscribeCalls()).toEqual([{ directory: INPUT.cwd }]);
   });
 
   // #128: the allow map is a snapshot of tool.ids(), and an id registered
@@ -400,7 +472,7 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
     // prompt runs in.
     expect(fake.toolIdsCalls()).toHaveLength(1);
     expect(fake.toolIdsCalls()[0]).toEqual({
-      query: { directory: "/tmp/work" },
+      directory: "/tmp/work",
     });
   });
 
@@ -583,7 +655,14 @@ describe("createOpenCodeClient", () => {
       type: "message.updated",
       properties: {
         sessionID: SESSION_ID,
-        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        info: {
+          id: "msg_a",
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
       },
     });
     fake.emit({
@@ -593,6 +672,7 @@ describe("createOpenCodeClient", () => {
         part: {
           id: "prt_answer",
           messageID: "msg_a",
+          sessionID: SESSION_ID,
           type: "text",
           text: "",
         },
@@ -604,6 +684,7 @@ describe("createOpenCodeClient", () => {
       properties: {
         sessionID: SESSION_ID,
         partID: "prt_answer",
+        messageID: "msg_a",
         field: "text",
         delta: "early",
       },
@@ -641,6 +722,21 @@ describe("createOpenCodeClient", () => {
     expect(kinds).toContain("terminal");
   });
 
+  // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
+  // exactly like GET /event — it must query the SAME directory session.create
+  // registered (state.turn.expectedCwd, which IS input.cwd) or it watches an
+  // instance that has never heard of this session.
+  test("polls status with the same directory session.create registered", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+    fake.setStatus({ type: "busy" });
+
+    await client.pollStatus(session);
+
+    expect(fake.statusCalls()).toEqual([{ directory: INPUT.cwd }]);
+  });
+
   // #127. The poll observer used to scan session.messages() for the last
   // completed assistant message and call that the turn's terminal. At any poll
   // instant "last completed" is step 1 until step 2 exists, so it agreed with
@@ -656,12 +752,20 @@ describe("createOpenCodeClient", () => {
     const session = await client.createSession(INPUT);
 
     fake.setStatus({ type: "busy" });
-    fake.setMessages([{ info: { role: "user" }, parts: [] }]);
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+    ]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
 
     // A completed step, mid-turn. THE defect: this used to be a terminal.
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
@@ -681,12 +785,13 @@ describe("createOpenCodeClient", () => {
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
   });
 
-  // Absence is the boundary, but it is ALSO what a session this call cannot
-  // see looks like. Measured against opencode 1.18.23: a session created with
-  // no directory registers under the SERVER's cwd, and
-  // GET /session/status?directory=<step cwd> returns {} for it WHILE IT IS
-  // BUSY. An absence that has never been contradicted proves nothing, so it
-  // only counts once this observer has seen the provider name this session.
+  // Absence is the boundary, but it is ALSO what a wrong or missing
+  // `directory` scope looks like — #223 measured (opencode 1.18.30) that
+  // `GET /session/status` given a directory other than the one session.create
+  // registered returns {} for a session that is BUSY at that moment, the same
+  // shape as one that has finished. The response cannot tell the two apart,
+  // so an absence that has never been contradicted proves nothing; it only
+  // counts once this observer has seen the provider name this session.
   test("poll never reads an unseen session's absence as a finished turn", async () => {
     const fake = fakeSdk();
     const client = rig(fake);
@@ -694,7 +799,10 @@ describe("createOpenCodeClient", () => {
 
     fake.setStatus(undefined);
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
 
@@ -712,7 +820,10 @@ describe("createOpenCodeClient", () => {
 
     fake.setStatus({ type: "idle" });
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
 
@@ -740,6 +851,7 @@ describe("createOpenCodeClient", () => {
       properties: {
         sessionID: SESSION_ID,
         partID: "prt_answer",
+        messageID: "msg_a",
         field: "text",
         delta: text,
       },
@@ -752,7 +864,14 @@ describe("createOpenCodeClient", () => {
       type: "message.updated",
       properties: {
         sessionID: SESSION_ID,
-        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        info: {
+          id: "msg_a",
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
       },
     });
     fake.emit({
@@ -762,6 +881,7 @@ describe("createOpenCodeClient", () => {
         part: {
           id: "prt_answer",
           messageID: "msg_a",
+          sessionID: SESSION_ID,
           type: "text",
           text: "",
         },
@@ -964,7 +1084,7 @@ describe("createOpenCodeClient", () => {
             }
             // The sibling is parked exactly in the pre-states.set window.
             await secondCreateBlocked;
-            return { data: { id: SESSION_ID } };
+            return { data: { id: SESSION_ID, directory: INPUT.cwd } };
           },
         },
       }),
@@ -1448,9 +1568,7 @@ describe("createOpenCodeClient MCP readback (#141)", () => {
 
     await client.createSession(MCP_INPUT);
 
-    expect(fake.mcpStatusCalls()).toEqual([
-      { query: { directory: "/tmp/work" } },
-    ]);
+    expect(fake.mcpStatusCalls()).toEqual([{ directory: "/tmp/work" }]);
   });
 
   // Measured (#141 fact 7): `--pure` suppresses neither config-delivered nor
@@ -1500,5 +1618,440 @@ describe("createOpenCodeClient MCP readback (#141)", () => {
       /operator-thing/,
     );
     expect(fake.promptCalls()).toHaveLength(0);
+  });
+});
+
+describe("Work Unit 2: Client Reconciliation & Canonical Ownership (U2-C2, U2-C3, U2-C4)", () => {
+  describe("U2-C2: Canonical Message Ownership & Session Boundary", () => {
+    test("unowned assistant message is rejected even when currentUserId was absent", () => {
+      const state = createTurnState("ses_1", undefined, "/tmp/work");
+      const unownedMessage = {
+        ...ASSISTANT,
+        id: "msg_unowned_assistant",
+        sessionID: "ses_1",
+        parentID: "msg_unknown_user",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+      };
+
+      expect(isMessageOwned(unownedMessage.id, state)).toBe(false);
+
+      const proof = terminalProofFromAssistant(unownedMessage, state);
+      expect(proof).toBeUndefined();
+
+      const reconciled = reconcileMessages([unownedMessage], state);
+      expect(reconciled.terminalProof).toBeUndefined();
+    });
+
+    test("cross-session message is rejected by terminal proof and reconciliation", () => {
+      const state = createTurnState("ses_canonical", "msg_user_1", "/tmp/work");
+      state.parentLinks.set("msg_asst_1", "msg_user_1");
+      const crossSessionMessage = {
+        ...ASSISTANT,
+        id: "msg_asst_1",
+        sessionID: "ses_other_foreign",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+      };
+
+      const proof = terminalProofFromAssistant(crossSessionMessage, state);
+      expect(proof).toBeUndefined();
+
+      const reconciled = reconcileMessages([crossSessionMessage], state);
+      expect(reconciled.terminalProof).toBeUndefined();
+    });
+  });
+
+  describe("U2-C3: Canonical Readback Part Order & Terminal-Only Aggregation", () => {
+    test("readback parts replace stale delta order", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      state.messageDetails.set("msg_asst_1", {
+        id: "msg_asst_1",
+        role: "assistant",
+        parentID: "msg_user_1",
+        partIds: ["prt_stale_2", "prt_stale_1"],
+      });
+
+      const messageWithCanonicalParts = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [
+          {
+            id: "prt_stale_1",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "text",
+            text: "First part ",
+          },
+          {
+            id: "prt_stale_2",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "text",
+            text: "Second part",
+          },
+        ],
+      };
+
+      reconcileMessages([messageWithCanonicalParts], state);
+      const detail = state.messageDetails.get("msg_asst_1");
+      expect(detail?.partIds).toEqual(["prt_stale_1", "prt_stale_2"]);
+    });
+
+    test("canonicalFinalText aggregates only the terminal completed assistant message, excluding previous steps", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      const step1 = {
+        id: "msg_asst_step1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 150 },
+        parts: [
+          {
+            id: "prt_step1",
+            sessionID: "ses_1",
+            messageID: "msg_asst_step1",
+            type: "text",
+            text: "Previous step reasoning prose. ",
+          },
+        ],
+      };
+      const step2 = {
+        id: "msg_asst_step2",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 160, completed: 200 },
+        parts: [
+          {
+            id: "prt_step2",
+            sessionID: "ses_1",
+            messageID: "msg_asst_step2",
+            type: "text",
+            text: "Final answer only.",
+          },
+        ],
+      };
+
+      const reconciled = reconcileMessages([step1, step2], state);
+      expect(reconciled.finalText).toBe("Final answer only.");
+    });
+  });
+
+  describe("U2-C4: Explicit Bounds Across All Part Types & 4 MiB Readback Cap", () => {
+    test("exhausting part limits triggers integrity failure instead of silent eviction", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      for (let i = 0; i < 4096; i += 1) {
+        state.trackedPartOwners.set(`prt_prior_${i}`, "msg_asst_1");
+      }
+
+      const messageWithOverLimitPart = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [
+          {
+            id: "prt_excess",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "reasoning",
+            text: "excess reasoning",
+          },
+        ],
+      };
+
+      const reconciled = reconcileMessages([messageWithOverLimitPart], state);
+      expect(reconciled.failure).toBe(
+        "[pr-hero] opencode client: maximum tracked parts exceeded",
+      );
+      expect(state.integrityFailure).toBe(
+        "[pr-hero] opencode client: maximum tracked parts exceeded",
+      );
+      expect(state.trackedPartOwners.has("prt_prior_0")).toBe(true);
+    });
+
+    test("exceeding 4 MiB readback text cap triggers integrity failure", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      const largeText = "x".repeat(4 * 1024 * 1024 + 16);
+      const oversizedMessage = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [{ id: "prt_large", type: "text", text: largeText }],
+      };
+
+      const reconciled = reconcileMessages([oversizedMessage], state);
+      expect(reconciled.failure).toBe(
+        "[pr-hero] opencode client: total readback byte budget exceeded",
+      );
+      expect(state.integrityFailure).toBe(
+        "[pr-hero] opencode client: total readback byte budget exceeded",
+      );
+    });
+  });
+});
+
+// #223: session.prompt() resolves with the finished message and reconciles it
+// purely to ingest identity/usage/error state — the event stream is the only
+// delivery channel, so that reconcile must never advance `emittedText` (the
+// "already delivered to the consumer" bookkeeping `handlePartDelta` and
+// `handlePartUpdated` both trust). These tests drive `reconcileMessages` and
+// `mapOpenCodeEvents` directly, in hand-picked order, so the ordering between
+// a prompt-result reconcile and the part's own stream lifecycle is exact and
+// never a timing race.
+describe("Prompt-result reconcile must not advance emission ahead of the stream (#223)", () => {
+  const SESS = "ses_promptrace";
+  const FULL_TEXT = "the answer is 42";
+  const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+
+  function completedAssistant(): Record<string, unknown> {
+    return {
+      id: "msg_asst_1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/work", root: "/" },
+      parentID: "msg_user_1",
+      finish: "stop",
+      time: { created: 100, completed: 200 },
+    };
+  }
+
+  function promptResultRecord(): Record<string, unknown> {
+    return {
+      info: completedAssistant(),
+      parts: [
+        {
+          id: "prt_ans_1",
+          messageID: "msg_asst_1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      ],
+    };
+  }
+
+  test("emit:false ingests identity, usage and the text snapshot without advancing emittedText", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    const reconciled = reconcileMessages([promptResultRecord()], state, {
+      emit: false,
+    });
+
+    // Ingestion still happened: ownership, the terminal proof and the
+    // computed finalText are all present.
+    expect(reconciled.terminalProof?.eventId).toBe("msg_asst_1");
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    expect(state.messageDetails.get("msg_asst_1")?.finish).toBe("stop");
+    // But the bookkeeping a later stream event checks against was left
+    // untouched — no delta was ever handed to a consumer.
+    expect(state.partDetails.get("prt_ans_1")?.text).toBe(FULL_TEXT);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+    expect(reconciled.events).toEqual([]);
+  });
+
+  test("fixed (emit:false) call site: the same replayed lifecycle delivers the answer exactly once", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    reconcileMessages([promptResultRecord()], state, { emit: false });
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+
+    const collected: unknown[] = [];
+    collected.push(
+      ...mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_ans_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "text",
+              text: "",
+            },
+          },
+        },
+        SESS,
+        state,
+      ),
+    );
+    for (const chunk of DELTA_CHUNKS) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_ans_1",
+              field: "text",
+              delta: chunk,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+    // No throw: the final snapshot exactly matches what the deltas already
+    // built up, so it is recognized as already-delivered and produces no
+    // further event.
+    collected.push(
+      ...mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_ans_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "text",
+              text: FULL_TEXT,
+            },
+          },
+        },
+        SESS,
+        state,
+      ),
+    );
+
+    expect(collected).toEqual(
+      DELTA_CHUNKS.map((text) => ({ kind: "delta", text })),
+    );
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+  });
+
+  // Regression (a): the normal ordering, where the part's deltas and its
+  // final snapshot have ALREADY arrived and been fully emitted over the
+  // stream by the time the prompt-result reconcile runs. It must be a no-op
+  // regardless of `emit`, because `alreadyEmitted === snapshotText` short-
+  // circuits before either branch that could advance or duplicate anything.
+  test("regression (a): a late prompt-result reconcile after the stream already delivered the text is a no-op", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    // currentUserId/expectedCwd only matter for ownership on the assistant
+    // message itself, which the prompt-result reconcile below establishes;
+    // seed the part as already fully streamed BEFORE that happens.
+    state.parts.set("prt_ans_1", "answer");
+    state.partDetails.set("prt_ans_1", {
+      id: "prt_ans_1",
+      messageId: "msg_asst_1",
+      type: "text",
+      text: FULL_TEXT,
+      emittedText: FULL_TEXT,
+    });
+
+    const reconciled = reconcileMessages([promptResultRecord()], state, {
+      emit: false,
+    });
+
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+
+  // Regression (b): prompt_result carries the finished answer but the stream
+  // never replays the text part at all (dropped, or the turn ends before it
+  // does). The answer must still be delivered once, through the session.idle
+  // boundary reading `detail.text` against an `emittedText` the ingest-only
+  // reconcile correctly left empty.
+  test("regression (b): prompt-result with no stream text events at all is delivered once at the session.idle boundary", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    reconcileMessages([promptResultRecord()], state, { emit: false });
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+
+    // The assistant's own message.updated is what establishes state.lastProof
+    // — the session.idle boundary has nothing to report without it.
+    const updatedEvents = mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: { sessionID: SESS, info: completedAssistant() },
+      },
+      SESS,
+      state,
+    );
+    expect(updatedEvents).toEqual([]);
+
+    const idleEvents = mapOpenCodeEvents(
+      { type: "session.idle", properties: { sessionID: SESS } },
+      SESS,
+      state,
+    );
+
+    expect(idleEvents).toEqual([
+      { kind: "delta", text: FULL_TEXT },
+      {
+        kind: "terminal",
+        proof: {
+          eventId: "msg_asst_1",
+          providerStatus: "completed",
+          providerObservedAt: new Date(200).toISOString(),
+        },
+      },
+    ]);
+  });
+
+  // Regression (c): the existing duplicate-delta contract this fix must not
+  // weaken — a delta that exactly repeats the tail already emitted is
+  // dropped, never appended twice. Exercised here through the same
+  // `mapOpenCodeEvents` surface the two tests above use.
+  test("regression (c): a duplicate delta that repeats the already-emitted tail is still deduplicated", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_dup_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const first = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_dup_1",
+          field: "text",
+          delta: "hello ",
+        },
+      },
+      SESS,
+      state,
+    );
+    const duplicate = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_dup_1",
+          field: "text",
+          delta: "hello ",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(first).toEqual([{ kind: "delta", text: "hello " }]);
+    expect(duplicate).toEqual([]);
+    expect(state.partDetails.get("prt_dup_1")?.emittedText).toBe("hello ");
   });
 });

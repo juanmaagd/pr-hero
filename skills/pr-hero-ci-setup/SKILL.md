@@ -38,7 +38,7 @@ Load when the user asks to:
 | openai API key in CI | **Refuse.** openai → ChatGPT OAuth mapping; `type:"api"` is refused. Use a non-openai API token (tested: deepseek). |
 | Hunters OpenCode / refuter Claude | DATA cannot. Routing is `sonnet`/`haiku`, not role. Default hunters+refuter = `sonnet`. |
 | Mixed OpenCode providers in one run | Out of scope (#195). One OpenCode provider per run. Mixed `claude-code` + one OpenCode provider is legal. |
-| OpenCode CLI pin | Action installs **1.18.23** iff `opencode-auth != ''` OR routing contains `opencode`. Never `latest`. |
+| OpenCode CLI pin | Action installs **1.18.30** iff `opencode-auth != ''` OR routing contains `opencode`. Never `latest`. |
 | Fork PRs | Skip unchanged. Credentials union is Anthropic **or** Claude OAuth **or** `OPENCODE_AUTH_JSON`. Review `if` never reads `secrets`. |
 | Spend gates | Defaults: `budget-usd: 10.00` on metered routes (Anthropic key **or** OpenCode auth file), `max-changed-lines: 1000`, `max-changed-files: 50`. Claude-only OAuth stays unlimited-subscription unless OpenCode auth is also present. |
 | Existing workflow | `setup --ci` skips; ask before `--force` |

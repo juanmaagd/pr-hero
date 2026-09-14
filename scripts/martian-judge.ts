@@ -1,3 +1,5 @@
+import { loadBenchmarkSchedule, loadQualifiedReview } from "./martian-evidence";
+
 // Martian's offline LLM judge, same prompt and TP/FP/FN arithmetic as
 // withmartian/code-review-benchmark `step3_judge_comments.py`.
 //
@@ -12,9 +14,11 @@
 // mechanical analogue of their step 2.5, labelled as such.
 
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import type { Finding, FindingsDocument } from "../src/findings";
+import { readEvidenceFile } from "../src/execution/attempt-evidence";
+import type { Finding } from "../src/findings";
 import { lookupGolden, type MartianGoldenPr } from "../src/martian-adapter";
 import { resolveRunnerAuthority } from "../src/runner-authority";
 import { ClaudeCodeRunner } from "../src/step-runner";
@@ -22,10 +26,15 @@ import { ClaudeCodeRunner } from "../src/step-runner";
 export type ResumeClassification = "complete" | "incomplete" | "inconclusive";
 
 export interface ArtifactResumeCandidate {
+  hasFindingsDocument?: boolean;
   runStatus?: "complete" | "partial";
   sessionFailed?: boolean;
   protocolIntegrity?: "verified" | "unverified" | "malformed";
-  terminalProof?: { providerStatus?: string } | null;
+  terminalProof?: {
+    providerStatus?: string;
+    eventId?: string;
+    providerObservedAt?: string;
+  } | null;
   abortRequested?: boolean;
   abortConfirmed?: boolean;
   finishStatus?: string | null;
@@ -36,19 +45,28 @@ export interface ArtifactResumeCandidate {
 export function evaluateResumeOutcome(
   artifact: ArtifactResumeCandidate,
 ): ResumeClassification {
+  if (artifact.hasFindingsDocument !== true) {
+    return "incomplete";
+  }
+  if (!Array.isArray(artifact.findings)) {
+    return "incomplete";
+  }
   if (artifact.runStatus === "partial" || artifact.sessionFailed === true) {
     return "incomplete";
   }
-  if (
-    artifact.protocolIntegrity !== undefined &&
-    artifact.protocolIntegrity !== "verified"
-  ) {
+  if (artifact.protocolIntegrity !== "verified") {
     return "incomplete";
   }
   if (artifact.terminalProof === undefined || artifact.terminalProof === null) {
     return "incomplete";
   }
-  if (artifact.terminalProof.providerStatus !== "completed") {
+  if (
+    artifact.terminalProof.providerStatus !== "completed" ||
+    !artifact.terminalProof.eventId ||
+    !Number.isFinite(
+      Date.parse(artifact.terminalProof.providerObservedAt ?? ""),
+    )
+  ) {
     return "incomplete";
   }
   if (artifact.truncated === true) {
@@ -65,28 +83,36 @@ export function evaluateResumeOutcome(
 
 export interface BenchmarkRunRecord {
   pr: number;
-  status: "complete" | "partial";
-  wallMs: number;
-  costUsd: number;
+  status: "complete" | "partial" | "missing";
+  wallMs?: number;
+  costUsd?: number;
+  knownCostUsd?: number;
   tp?: number;
   fp?: number;
   fn?: number;
   findings?: unknown[];
   quarantineReason?: string;
+  preserved?: boolean;
 }
 
 export interface QualifiedBenchmarkMetrics {
   attempted: number;
+  scheduled: number;
+  preservedAttempts: number;
+  missing: number;
+  unknownCostCount: number;
+  unknownWallCount: number;
+  knownSpendUsd: number;
   completed: number;
   partial: number;
   completionRate: number;
   coverage: number;
-  completedSpendUsd: number;
-  partialSpendUsd: number;
-  totalSpendUsd: number;
-  costPerComplete: number;
-  completedWallMs: number;
-  wallMsPerComplete: number;
+  completedSpendUsd: number | null;
+  partialSpendUsd: number | null;
+  totalSpendUsd: number | null;
+  costPerComplete: number | null;
+  completedWallMs: number | null;
+  wallMsPerComplete: number | null;
   quality: {
     tp: number;
     fp: number;
@@ -100,26 +126,54 @@ export interface QualifiedBenchmarkMetrics {
 
 export function computeQualifiedBenchmarkMetrics(
   runs: BenchmarkRunRecord[],
+  scheduledAttempts?: number,
 ): QualifiedBenchmarkMetrics {
-  const attempted = runs.length;
+  const scheduled = scheduledAttempts ?? runs.length;
+  const actualRuns = runs.filter((r) => r.status !== "missing");
+  const attempted = actualRuns.filter((r) => !r.preserved).length;
+  const preservedAttempts = actualRuns.filter((r) => r.preserved).length;
+  const missing = Math.max(0, scheduled - attempted);
+  const known = (n: unknown): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n >= 0;
+  const unknownCostCount = actualRuns.filter((r) => !known(r.costUsd)).length;
+  const unknownWallCount = actualRuns.filter((r) => !known(r.wallMs)).length;
+  const knownSpendUsd = actualRuns.reduce(
+    (sum, r) =>
+      sum +
+      (known(r.costUsd)
+        ? r.costUsd
+        : known(r.knownCostUsd)
+          ? r.knownCostUsd
+          : 0),
+    0,
+  );
   const completedRuns = runs.filter((r) => r.status === "complete");
   const partialRuns = runs.filter((r) => r.status === "partial");
 
   const completed = completedRuns.length;
-  const partial = partialRuns.length;
+  const partial = partialRuns.filter((r) => !r.preserved).length;
   const completionRate = attempted > 0 ? completed / attempted : 0;
-  const coverage = completionRate;
+  const coverage = scheduled > 0 ? completed / scheduled : 0;
 
-  const completedSpendUsd = completedRuns.reduce(
-    (sum, r) => sum + r.costUsd,
-    0,
-  );
-  const partialSpendUsd = partialRuns.reduce((sum, r) => sum + r.costUsd, 0);
-  const totalSpendUsd = completedSpendUsd + partialSpendUsd;
-  const costPerComplete = completed > 0 ? completedSpendUsd / completed : 0;
-
-  const completedWallMs = completedRuns.reduce((sum, r) => sum + r.wallMs, 0);
-  const wallMsPerComplete = completed > 0 ? completedWallMs / completed : 0;
+  const sumKnown = (
+    items: BenchmarkRunRecord[],
+    field: "costUsd" | "wallMs",
+  ): number | null =>
+    items.some((r) => !known(r[field]))
+      ? null
+      : items.reduce((sum, r) => sum + (r[field] as number), 0);
+  const completedSpendUsd = sumKnown(completedRuns, "costUsd");
+  const partialSpendUsd = sumKnown(partialRuns, "costUsd");
+  const totalSpendUsd = unknownCostCount > 0 ? null : knownSpendUsd;
+  const costPerComplete =
+    completed > 0 && completedSpendUsd !== null
+      ? completedSpendUsd / completed
+      : null;
+  const completedWallMs = sumKnown(completedRuns, "wallMs");
+  const wallMsPerComplete =
+    completed > 0 && completedWallMs !== null
+      ? completedWallMs / completed
+      : null;
 
   const tp = completedRuns.reduce((sum, r) => sum + (r.tp ?? 0), 0);
   const fp = completedRuns.reduce((sum, r) => sum + (r.fp ?? 0), 0);
@@ -139,6 +193,12 @@ export function computeQualifiedBenchmarkMetrics(
 
   return {
     attempted,
+    scheduled,
+    preservedAttempts,
+    missing,
+    unknownCostCount,
+    unknownWallCount,
+    knownSpendUsd,
     completed,
     partial,
     completionRate,
@@ -172,7 +232,11 @@ export interface ReviewCompletionInput {
   runStatus?: "complete" | "partial";
   sessionFailed?: boolean;
   protocolIntegrity?: "verified" | "unverified" | "malformed";
-  terminalProof?: { providerStatus?: string } | null;
+  terminalProof?: {
+    providerStatus?: string;
+    eventId?: string;
+    providerObservedAt?: string;
+  } | null;
   finishStatus?: string | null;
   findings?: unknown[];
   stdout?: string;
@@ -187,8 +251,10 @@ export function discriminateReviewCompletion(input: ReviewCompletionInput): {
 } {
   const isVerifiedFinish =
     input.protocolIntegrity === "verified" &&
-    (input.terminalProof?.providerStatus === "completed" ||
-      input.finishStatus === "stop");
+    input.terminalProof?.providerStatus === "completed" &&
+    typeof input.terminalProof.eventId === "string" &&
+    input.terminalProof.eventId.length > 0 &&
+    Number.isFinite(Date.parse(input.terminalProof.providerObservedAt ?? ""));
 
   const isCompleteStatus =
     input.hasFindingsDocument &&
@@ -197,7 +263,15 @@ export function discriminateReviewCompletion(input: ReviewCompletionInput): {
     isVerifiedFinish;
 
   if (isCompleteStatus) {
-    if (Array.isArray(input.findings) && input.findings.length === 0) {
+    if (!Array.isArray(input.findings)) {
+      return {
+        classification: "partial_failure",
+        isCompletedReview: false,
+        isCompleteEmpty: false,
+        isTransportBlank: false,
+      };
+    }
+    if (input.findings.length === 0) {
       return {
         classification: "complete_empty",
         isCompletedReview: true,
@@ -388,63 +462,52 @@ if (import.meta.main) {
   }
   const goldens = (await Bun.file(GOLDENS_PATH).json()) as MartianGoldenPr[];
 
-  const dirs: string[] = [];
-  for await (const entry of new Bun.Glob(`cal-*-${arm}`).scan({
-    cwd: runsRoot,
-    onlyFiles: false,
-  })) {
-    dirs.push(entry.replace(/\/$/, ""));
-  }
-  dirs.sort();
-  if (dirs.length === 0) fail(`no cal-*-${arm} runs in ${runsRoot}`);
+  const schedule = await loadBenchmarkSchedule(runsRoot, arm).catch((error) =>
+    fail(`frozen schedule required: ${error.message}`),
+  );
+  const dirs = schedule.attempts.map((a) => a.directory);
 
   const evals: PrEval[] = [];
   const runRecords: BenchmarkRunRecord[] = [];
   let judgeCost = 0;
 
   for (const dir of dirs) {
-    const match = new RegExp(`^cal-(\\d+)-${arm}$`).exec(dir);
-    if (match === null) continue;
-    const pr = Number(match[1]);
-    const findingsPath = path.join(runsRoot, dir, "findings.json");
-    if (!(await Bun.file(findingsPath).exists())) {
-      console.error(`skip ${dir}: no findings.json`);
+    const scheduled = schedule.attempts.find((a) => a.directory === dir);
+    if (!scheduled) continue;
+    const pr = scheduled.pr;
+    // A failed execution may write pipeline.json but never findings.json.
+    const attemptRoot = path.join(runsRoot, dir);
+    const produced = await readdir(attemptRoot).catch(() => [] as string[]);
+    if (produced.length === 0) {
       runRecords.push({
         pr,
-        status: "partial",
-        wallMs: 0,
-        costUsd: 0,
-        quarantineReason: "missing_findings_json",
+        status: "missing",
+        quarantineReason: "missing_attempt_artifacts",
       });
       continue;
     }
-    const doc = (await Bun.file(findingsPath).json()) as FindingsDocument;
+    const qualified = await loadQualifiedReview(
+      path.join(runsRoot, dir),
+      scheduled.identity,
+    );
+    if (!qualified.qualified || !qualified.doc || !scheduled.identity) {
+      console.error(
+        `quarantine ${dir}: ${qualified.reason ?? "missing frozen identity"}`,
+      );
+      runRecords.push({
+        pr,
+        status: "partial",
+        costUsd: qualified.costUsd,
+        knownCostUsd: qualified.knownCostUsd,
+        wallMs: qualified.wallMs,
+        quarantineReason: qualified.reason ?? "missing frozen identity",
+      });
+      continue;
+    }
+    const doc = qualified.doc;
     const golden = lookupGolden(goldens, pr);
-    const findings = (doc.findings ?? []) as Finding[];
+    const findings = doc.findings;
     const candidates = findings.map((f) => f.claim);
-
-    const completion = discriminateReviewCompletion({
-      hasFindingsDocument: true,
-      runStatus: doc.run_status,
-      sessionFailed: doc.sessionFailed,
-      protocolIntegrity: "verified",
-      terminalProof: { providerStatus: "completed" },
-      finishStatus: "stop",
-      findings,
-    });
-
-    if (!completion.isCompletedReview) {
-      console.error(`quarantine ${dir}: runStatus is ${doc.run_status}`);
-      runRecords.push({
-        pr,
-        status: "partial",
-        wallMs: doc.telemetry?.wall_ms ?? 0,
-        costUsd: doc.telemetry?.cost_usd_est ?? 0,
-        quarantineReason: `run_status_${doc.run_status}`,
-      });
-      continue;
-    }
-
     console.error(
       `\n=== judge PR ${pr}  ${candidates.length} candidates × ${golden.comments.length} goldens`,
     );
@@ -470,8 +533,9 @@ if (import.meta.main) {
       runRecords.push({
         pr,
         status: "complete",
-        wallMs: doc.telemetry?.wall_ms ?? 0,
-        costUsd: doc.telemetry?.cost_usd_est ?? 0,
+        wallMs: qualified.wallMs,
+        costUsd: qualified.costUsd,
+        knownCostUsd: qualified.knownCostUsd,
         tp: 0,
         fp: 0,
         fn: golden.comments.length,
@@ -587,8 +651,9 @@ if (import.meta.main) {
     runRecords.push({
       pr,
       status: "complete",
-      wallMs: doc.telemetry?.wall_ms ?? 0,
-      costUsd: doc.telemetry?.cost_usd_est ?? 0,
+      wallMs: qualified.wallMs,
+      costUsd: qualified.costUsd,
+      knownCostUsd: qualified.knownCostUsd,
       tp,
       fp,
       fn,
@@ -605,7 +670,78 @@ if (import.meta.main) {
     );
   }
 
-  const metrics = computeQualifiedBenchmarkMetrics(runRecords);
+  // Retained attempts remain spend evidence, never extra scheduled completions.
+  const archived = await readdir(path.join(runsRoot, "incomplete-attempts"), {
+    withFileTypes: true,
+  }).catch(() => []);
+  for (const entry of archived) {
+    if (!entry.isDirectory()) continue;
+    const scheduled = schedule.attempts.find((a) =>
+      entry.name.startsWith(`${a.directory}-`),
+    );
+    if (!scheduled) continue;
+    const relative = path.join("incomplete-attempts", entry.name);
+    let costUsd: number | undefined;
+    let knownCostUsd: number | undefined;
+    try {
+      const identity = (
+        await readEvidenceFile(
+          runsRoot,
+          path.join(relative, "run-identity.json"),
+        )
+      ).value as { pr?: number; headSha?: string; baseSha?: string };
+      if (
+        identity.pr !== scheduled.pr ||
+        identity.headSha !== scheduled.headSha ||
+        identity.baseSha !== scheduled.baseSha
+      )
+        continue;
+      const pipeline = (
+        await readEvidenceFile(runsRoot, path.join(relative, "pipeline.json"))
+      ).value as { usage_v2?: { cashCostUsd?: number; completeness?: string } };
+      const usage = pipeline.usage_v2;
+      if (
+        typeof usage?.cashCostUsd === "number" &&
+        Number.isFinite(usage.cashCostUsd) &&
+        usage.cashCostUsd >= 0
+      ) {
+        knownCostUsd = usage.cashCostUsd;
+        if (usage.completeness === "complete") costUsd = knownCostUsd;
+      }
+    } catch {
+      /* Unreadable retained evidence is unknown, not zero. */
+    }
+    runRecords.push({
+      pr: scheduled.pr,
+      status: "partial",
+      preserved: true,
+      costUsd,
+      knownCostUsd,
+      quarantineReason: "preserved_previous_attempt",
+    });
+  }
+
+  const scheduledAttempts = schedule.attempts.length;
+  const metrics = computeQualifiedBenchmarkMetrics(
+    runRecords,
+    scheduledAttempts,
+  );
+
+  const tpHC = evals.reduce(
+    (sum, e) =>
+      sum +
+      e.true_positives.filter((tp) => /^(?:high|critical)$/i.test(tp.severity))
+        .length,
+    0,
+  );
+  const fnHC = evals.reduce(
+    (sum, e) =>
+      sum +
+      e.false_negatives.filter((fn) => /^(?:high|critical)$/i.test(fn.severity))
+        .length,
+    0,
+  );
+  const recallHC = tpHC + fnHC > 0 ? tpHC / (tpHC + fnHC) : 0;
 
   const outPath = path.join(
     runsRoot,
@@ -629,7 +765,22 @@ if (import.meta.main) {
           precision: metrics.quality.precision,
           recall: metrics.quality.recall,
           f1: metrics.quality.f1,
+          high_critical: {
+            tp: tpHC,
+            fn: fnHC,
+            recall: recallHC,
+          },
           judge_cost_usd: judgeCost,
+          scheduled: metrics.scheduled,
+          preserved_attempts: metrics.preservedAttempts,
+          missing: metrics.missing,
+          unknown_cost_count: metrics.unknownCostCount,
+          unknown_wall_count: metrics.unknownWallCount,
+          known_spend_usd: metrics.knownSpendUsd,
+          surfaces: {
+            surface_a: "offline judge",
+            surface_b: "not run; no surfaced-success claim",
+          },
           attempted: metrics.attempted,
           completed: metrics.completed,
           partial: metrics.partial,
@@ -655,9 +806,15 @@ if (import.meta.main) {
   );
   console.log(`prs: ${evals.length}  judge cost: $${judgeCost.toFixed(2)}`);
   console.log(
-    `completed: ${metrics.completed}/${metrics.attempted} (${(metrics.completionRate * 100).toFixed(1)}%)  cost/complete: $${metrics.costPerComplete.toFixed(2)}`,
+    `completed: ${metrics.completed}/${metrics.attempted} (${(metrics.completionRate * 100).toFixed(1)}%)  cost/complete: $${metrics.costPerComplete === null ? "unknown" : metrics.costPerComplete.toFixed(2)}`,
+  );
+  console.log(
+    `High+Critical (H+C): recall ${(recallHC * 100).toFixed(1)}% (${tpHC}/${tpHC + fnHC})`,
   );
   console.log("");
+  console.log(
+    `scheduled: ${metrics.scheduled}; missing: ${metrics.missing}; unknown cost: ${metrics.unknownCostCount}; known spend subtotal: $${metrics.knownSpendUsd.toFixed(2)}; Surface B: not run`,
+  );
   console.log("pr     P      R      F1     tp fp fn");
   console.log("-----  -----  -----  -----  -- -- --");
   for (const e of evals) {

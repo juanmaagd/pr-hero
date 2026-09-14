@@ -1,3 +1,14 @@
+import {
+  evidenceSha256,
+  readEvidenceFile,
+} from "../src/execution/attempt-evidence";
+import type { DiagnosticEvidence } from "../src/execution/contracts";
+import { redactEvidence } from "../src/security/evidence-redaction";
+import { attemptEvidencePath } from "../src/step-runner";
+import {
+  classifyObservationEvidence,
+  redactEvidenceText,
+} from "../src/transports/opencode-evidence";
 // LIVE probe & #5982 same-session witness protocol:
 // Diagnoses Martian arm failures across model/variant matrices with short watchdogs
 // and attributable delivery evidence (EQ1a). Distinguishes proved text loss,
@@ -85,6 +96,7 @@ export interface SessionWitnessSettlement {
 }
 
 export interface SessionWitness {
+  capture?: DiagnosticEvidence;
   identities: SessionWitnessIdentities;
   requestWire: SessionWitnessRequestWire;
   events: SessionWitnessEventObservation[];
@@ -92,99 +104,19 @@ export interface SessionWitness {
   settlement: SessionWitnessSettlement;
 }
 
-const REDACTED = "[REDACTED]";
-const SENSITIVE_KEY_RE =
-  /^(?:authorization|api[_-]?key|x-api-key|token|password|secret)$/i;
-
-function sanitizeString(text: string): string {
-  return text
-    .replace(/Bearer\s+\S+/gi, REDACTED)
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, REDACTED)
-    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, REDACTED)
-    .replace(
-      /(?<=[?&](?:api[_-]?key|token|password|secret|key|auth)=)[^&\s"']+/gi,
-      REDACTED,
-    )
-    .replace(
-      /(api[_-]?key|token|password|secret)["':=\s]+[^\s"',;}{]+/gi,
-      (m) => {
-        const sep = m.search(/["':=\s]+/);
-        return sep < 0 ? REDACTED : `${m.slice(0, sep)}: "${REDACTED}"`;
-      },
-    );
-}
-
-export function sanitizeWitness<T>(input: T): T {
-  if (input === null || input === undefined) return input;
-  if (typeof input === "string") return sanitizeString(input) as unknown as T;
-  if (Array.isArray(input)) {
-    return input.map((item) => sanitizeWitness(item)) as unknown as T;
+export function sanitizeWitness<T>(value: T): T {
+  try {
+    return redactEvidence(value) as T;
+  } catch {
+    return { captureStatus: "unavailable" } as T;
   }
-  if (typeof input === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-      result[k] =
-        k !== "credentialCategory" && SENSITIVE_KEY_RE.test(k)
-          ? REDACTED
-          : sanitizeWitness(v);
-    }
-    return result as unknown as T;
-  }
-  return input;
 }
 
 export function classifyWitnessEvidence(
   witness: SessionWitness,
   reconstructedLocalText: string,
 ): WitnessClassification {
-  const wireStatus = witness.requestWire?.status;
-  if (wireStatus !== undefined && wireStatus >= 400)
-    return "external_rejection";
-  if (witness.requestWire?.error && witness.requestWire.error.trim().length > 0)
-    return "external_rejection";
-
-  const terminalReason =
-    witness.settlement?.arbiterTerminalReason?.toLowerCase() ?? "";
-  if (
-    terminalReason.includes("refused") ||
-    terminalReason.includes("rejection") ||
-    terminalReason.includes("admission") ||
-    terminalReason.includes("external_error") ||
-    terminalReason.includes("provider_error")
-  )
-    return "external_rejection";
-
-  const st = witness.settlement?.status?.toLowerCase() ?? "";
-  if (
-    st === "admission-error" ||
-    st === "external_rejection" ||
-    st === "instant-error"
-  )
-    return "external_rejection";
-
-  if (
-    !witness.readback ||
-    !Array.isArray(witness.readback.messages) ||
-    witness.readback.messages.length === 0 ||
-    witness.settlement?.readbackAttempts === 0
-  )
-    return "inconclusive";
-
-  const asst = witness.readback.messages.find((m) => m.role === "assistant");
-  if (!asst || asst.finishStatus === undefined || asst.finishStatus === null)
-    return "inconclusive";
-
-  const partsText = (asst.parts ?? [])
-    .filter((p) => p.type === "text" && typeof p.text === "string")
-    .map((p) => p.text)
-    .join("");
-  const serverText = (asst.finalText ?? partsText).trim();
-  const localText = (reconstructedLocalText ?? "").trim();
-
-  if (serverText.length > 0 && localText.length === 0)
-    return "demonstrated_reconstruction_defect";
-  if (serverText.length === 0) return "persisted_final_empty";
-  return "inconclusive";
+  return classifyObservationEvidence(witness.capture, reconstructedLocalText);
 }
 
 interface ArmDef {
@@ -381,89 +313,55 @@ if (import.meta.main) {
 
     const ms = Math.round(performance.now() - started);
     const outcome = classify(result.status, result.stderrTail);
-    const isOk = result.status === "ok";
-    const witness: SessionWitness = sanitizeWitness({
-      identities: {
-        runId: `probe-${arm.id}-r${rep}${leg === undefined ? "" : `-l${leg}`}`,
-        attemptId: `att-${result.attempts}`,
-        sessionId: `sess-${arm.id}-r${rep}`,
-        userMessageId: `msg-user-${rep}`,
-        gitCommitSha: process.env.GIT_COMMIT_SHA ?? "dev-workspace",
-        sdkVersion: "1.18.25",
-        serverVersion: "1.18.30",
-        route: {
-          provider: shared.route.provider,
-          modelSnapshot: shared.route.modelSnapshot,
-          ...(shared.route.modelVariant !== undefined
-            ? { modelVariant: shared.route.modelVariant }
-            : {}),
-        },
-        cwd: stepCwd ?? workspaceRoot,
-        credentialCategory: "operator_configured",
-        sanitizedEndpoint: "http://127.0.0.1:ephemeral/v1",
-      },
-      requestWire: {
-        sanitizedPath: "/session/message",
-        sanitizedQuery: {},
-        sanitizedBody: {
-          model: shared.route.modelSnapshot,
-          promptChars: userPrompt.length,
-        },
-        timestamps: {
-          sentAt: started,
-          receivedAt: Math.round(performance.now()),
-        },
-        status: isOk ? 200 : 500,
-        error: isOk ? undefined : result.stderrTail.slice(-300),
-      },
-      events: [
-        {
-          timestamp: started + 5,
-          seq: 1,
-          eventType: "session.started",
-        },
-        ...(result.resultText.length > 0
-          ? [
-              {
-                timestamp: started + 10,
-                seq: 2,
-                eventType: "message.part.updated",
-                partId: "prt-1",
-                textDelta: result.resultText,
-              },
-            ]
-          : []),
-      ],
-      readback: {
-        directory: stepCwd ?? workspaceRoot,
-        messages: [
-          {
-            id: `msg-asst-${result.attempts}`,
-            role: "assistant",
-            parentId: `msg-user-${rep}`,
-            finishStatus: isOk ? "stop" : undefined,
-            parts:
-              result.resultText.length > 0
-                ? [{ id: "prt-1", type: "text", text: result.resultText }]
-                : [],
-            finalText: result.resultText,
-          },
-        ],
-      },
-      settlement: {
-        status: result.status,
-        readbackAttempts: 1,
-        arbiterTerminalReason: isOk ? "completed" : "failed",
-        abortRequested: false,
-        abortAcknowledged: false,
-        abortConfirmed: false,
-        usageCompleteness: result.usage ? "complete" : "incomplete",
-      },
-    });
-    const classification = classifyWitnessEvidence(witness, result.resultText);
+    let capture: DiagnosticEvidence | undefined;
+    let evidence: unknown;
+    try {
+      const file = attemptEvidencePath(
+        path.join(dir, "out.json"),
+        result.name,
+        result.attempts,
+      );
+      const loaded = await readEvidenceFile(dir, path.relative(dir, file));
+      evidence = loaded.value;
+      const ref = (
+        evidence as {
+          capture?: {
+            relativePath: string;
+            schema: string;
+            sha256: string;
+            status: DiagnosticEvidence["status"];
+          };
+        }
+      ).capture;
+      if (ref) {
+        const artifact = await readEvidenceFile(dir, ref.relativePath);
+        if (evidenceSha256(artifact.bytes) === ref.sha256)
+          capture = {
+            schema: ref.schema,
+            status: ref.status,
+            redactedJson: JSON.stringify(artifact.value),
+          };
+      }
+    } catch {
+      /* Missing observation is unavailable, never a synthetic witness. */
+    }
+    const classification = classifyObservationEvidence(
+      capture,
+      result.resultText,
+    );
     writeFileSync(
       path.join(dir, "witness.json"),
-      `${JSON.stringify(witness, null, 2)}\n`,
+      `${JSON.stringify(
+        sanitizeWitness({
+          schemaVersion: 1,
+          evidence: evidence ?? null,
+          capture: capture ? JSON.parse(capture.redactedJson) : null,
+          captureStatus: capture?.status ?? "unavailable",
+          classification,
+        }),
+        null,
+        2,
+      )}\n`,
     );
 
     results.push({
@@ -475,7 +373,7 @@ if (import.meta.main) {
       ms,
       attempts: result.attempts,
       cost_usd_est: result.usage.cost_usd_est,
-      stderrTail: result.stderrTail.slice(-300),
+      stderrTail: redactEvidenceText(result.stderrTail).slice(-300),
     });
 
     console.error(
@@ -495,13 +393,15 @@ if (import.meta.main) {
         arm: arm.id,
         rep: 1,
         outcome: "admission-error",
-        classification: "external_rejection",
+        classification: "inconclusive",
         ms: Math.round(performance.now() - started),
         attempts: 0,
         cost_usd_est: 0,
-        stderrTail: made.error.slice(-300),
+        stderrTail: redactEvidenceText(made.error).slice(-300),
       });
-      console.error(`  [${arm.id}] admission-error: ${made.error}`);
+      console.error(
+        `  [${arm.id}] admission-error: ${redactEvidenceText(made.error)}`,
+      );
       continue;
     }
     try {

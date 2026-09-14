@@ -136,7 +136,14 @@ export interface ObservedModel {
   readonly canonicalModel?: string;
 }
 
+export interface DiagnosticEvidence {
+  readonly schema: string;
+  readonly status: "complete" | "incomplete" | "unavailable";
+  readonly redactedJson: string;
+}
+
 export interface TransportOutcome {
+  readonly diagnosticEvidence?: DiagnosticEvidence;
   readonly completion: "success" | "failed" | "cancelled";
   readonly protocolIntegrity:
     | "verified"

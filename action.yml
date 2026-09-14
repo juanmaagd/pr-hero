@@ -111,14 +111,14 @@ runs:
         OPENCODE_AUTH_INPUT: ${{ inputs.opencode-auth }}
       run: bun "${{ github.action_path }}/src/ci-setup.ts"
 
-    # Pin 1.18.23 as its own step so GITHUB_PATH updates later steps only
+    # Pin 1.18.30 as its own step so GITHUB_PATH updates later steps only
     # (install ≠ Run pr-hero). Never unpinned. Digest verify of the official
     # installer is named, not built.
     - name: Install OpenCode CLI
       if: ${{ inputs.opencode-auth != '' || contains(inputs.routing, 'opencode') }}
       shell: bash
       run: |
-        curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.23
+        curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.30
         echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
     - name: Run pr-hero

@@ -16,6 +16,7 @@ import type {
   CredentialProjection,
 } from "../security/credential-broker";
 import { CredentialProjectionError } from "../security/credential-broker";
+import { redactEvidenceText } from "../security/evidence-redaction";
 import { redactDiagnostic } from "../security/redact";
 import { WorkspaceReadBroker } from "../security/workspace-read-broker";
 import {
@@ -34,6 +35,10 @@ import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
 import type { AttemptAdmissionGate, AttemptLease } from "./admission";
 import { writeJsonAtomically } from "./atomic-write";
+import {
+  freezeAttemptEvidenceIdentity,
+  persistAttemptEvidence,
+} from "./attempt-evidence";
 import {
   BucketBreakerTrippedError,
   ConcurrencyAdmissionAbortedError,
@@ -106,6 +111,7 @@ async function projectCredentialWithBudget(
     outcome = "pending";
     return projection;
   });
+  guarded.catch(() => {});
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
@@ -388,13 +394,13 @@ async function writeAttemptLog(
       ...(cause !== undefined ? [`cause: ${cause}`] : []),
       "--- stderr tail (4096) ---",
       // §6.3: redaction before persistence — nothing unredacted hits disk.
-      redactDiagnostic(outcome.stderrTail),
+      redactEvidenceText(redactDiagnostic(outcome.stderrTail)),
       // #126: the transport's own tallies, on their own line-item section so
       // triage still reads them while no classifier can. The section is always
       // written, empty included, so the log format stays fixed rather than
       // varying with what a given attempt happened to observe.
       "--- transport diagnostics ---",
-      redactDiagnostic(outcome.diagnosticsTail ?? ""),
+      redactEvidenceText(redactDiagnostic(outcome.diagnosticsTail ?? "")),
       // #175 half 2: the models the PROVIDER says it ran, which is the only
       // trustworthy answer to "what did this attempt actually use" — the
       // route's own `modelSnapshot` records what we ASKED for. Always
@@ -410,7 +416,7 @@ async function writeAttemptLog(
         ),
       ),
       "--- result tail (8192) ---",
-      redactDiagnostic(outcome.finalText.slice(-8192)),
+      redactEvidenceText(redactDiagnostic(outcome.finalText.slice(-8192))),
       "",
     ].join("\n"),
   );
@@ -1941,6 +1947,7 @@ export class StepExecutionHarness implements StepRunner {
       harnessWatchdogMs,
     } = args;
 
+    const frozenIdentity = await freezeAttemptEvidenceIdentity(request, step);
     const execution = await this.executeSession({
       step,
       request,
@@ -2000,6 +2007,24 @@ export class StepExecutionHarness implements StepRunner {
         }
       },
     });
+
+    let evidenceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        persistAttemptEvidence(step, request, {
+          ...execution,
+          frozenIdentity,
+        }).catch(() => {}),
+        new Promise<void>((resolve) => {
+          evidenceTimer = setTimeout(
+            resolve,
+            Math.min(100, Math.max(1, step.timeoutMs)),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(evidenceTimer);
+    }
 
     // D1-08 PR5a (§9.2 "Circuit Breaker Fences An Unconfirmed-Abort
     // Bucket"): an SDK abort the harness could not confirm remotely stopped

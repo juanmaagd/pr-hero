@@ -67,6 +67,7 @@ async function flush(): Promise<void> {
 }
 
 async function advance(clock: ManualClock, passes: number): Promise<void> {
+  await flush();
   for (let i = 0; i < passes; i += 1) {
     clock.fireAll();
     await flush();
@@ -157,11 +158,17 @@ function makeClient(options: {
       // No scripted stream: stay open forever, like a session mid-generation.
       await new Promise<never>(() => {});
     },
-    pollStatus: async () => {
+    pollStatus: async (_session, signal) => {
       const index = round;
       round += 1;
       if (options.hangRounds?.includes(index)) {
-        return new Promise<OpenCodePollResult>(() => {});
+        return new Promise<OpenCodePollResult>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("poll aborted")),
+            { once: true },
+          );
+        });
       }
       return options.polls?.[index] ?? ({ kind: "pending" } as const);
     },
@@ -1294,10 +1301,19 @@ function makeV2MockFetch() {
         ? (input as Request).method
         : "GET");
     if (parsedPath === "/session" && method.toUpperCase() === "POST") {
-      return new Response(JSON.stringify({ id: "ses-adapter-1" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+      const text = typeof init?.body === "string" ? init.body : "{}";
+      let dir = "/workspace/adapter-cwd";
+      try {
+        const body = JSON.parse(text);
+        if (body.directory) dir = body.directory;
+      } catch {}
+      return new Response(
+        JSON.stringify({ id: "ses-adapter-1", directory: dir }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
     if (urlStr.includes("/mcp") || urlStr.includes("/tool/ids")) {
       const data = urlStr.includes("/tool/ids") ? ["read", "bash"] : {};
@@ -1472,6 +1488,63 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
       ).toThrow(err as unknown as RegExp);
     }
   });
+
+  test("missing version pair is DENIED (not admitted) when registering opencode transport", async () => {
+    const { DefaultTransportRegistry, OpenCodeVersionAdmissionError } =
+      await import("../../src/transport-registry");
+    const registry = new DefaultTransportRegistry({
+      mode: "conformance",
+      sdkVersion: "" as never,
+      serverVersion: "" as never,
+    });
+    expect(() =>
+      registry.get("opencode", {
+        openCodeClient: {} as never,
+      }),
+    ).toThrow(OpenCodeVersionAdmissionError);
+
+    expect(() =>
+      registry.get("opencode", {
+        openCodeClient: {} as never,
+        sdkVersion: "1.18.25",
+        serverVersion: "" as never,
+      }),
+    ).toThrow(OpenCodeVersionAdmissionError);
+
+    expect(() =>
+      registry.get("opencode", {
+        openCodeClient: {} as never,
+        sdkVersion: "" as never,
+        serverVersion: "1.18.30",
+      }),
+    ).toThrow(OpenCodeVersionAdmissionError);
+  });
+
+  test("loadOpenCodeSdk rejects missing package metadata or unsupported SDK versions", async () => {
+    const { loadOpenCodeSdk, OpenCodeVersionAdmissionError } = await import(
+      "../../src/transport-registry"
+    );
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => ({ version: undefined }),
+      }),
+    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => {
+          throw new Error("package.json not found");
+        },
+      }),
+    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => ({ version: "1.18.26" }),
+      }),
+    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1516,7 +1589,14 @@ function makeControlledSdk(options: {
         }),
       },
       session: {
-        create: async () => ({ data: { id: sessionId } }),
+        create: async (opts?: unknown) => ({
+          data: {
+            id: sessionId,
+            directory:
+              (opts as { directory?: string } | undefined)?.directory ??
+              "/workspace",
+          },
+        }),
         prompt: async () => ({ data: promptRes }),
         messages: async () => ({ data: messages }),
         status: async () => ({ data: statuses }),
@@ -1575,6 +1655,7 @@ function makeControlledRig(
   const sink = new RecordingSink();
   const controller = new AbortController();
   const client = createOpenCodeClient({
+    createMessageId: () => "msg-user-1",
     loadSdk: async () => controlled.sdk,
     launchServer: async () => ({
       url: "http://127.0.0.1:4096",
@@ -1638,6 +1719,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
       id: "msg-asst-1",
       sessionID: SESS,
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-1",
       finish: "stop",
       time: { created: 1000, completed: 2000 },
@@ -1752,6 +1834,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
       id: "msg-asst-1",
       sessionID: SESS,
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-1",
       finish: "stop",
       time: { created: 1000, completed: 2000 },
@@ -1851,6 +1934,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
         info: {
           id: "msg-step-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "tool-calls",
@@ -1899,6 +1983,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
         info: {
           id: "msg-final",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-step-1",
           sessionID: SESS,
           finish: "stop",
@@ -1975,6 +2060,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
         info: {
           id: "msg-final",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2043,6 +2129,145 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
   });
 });
 
+// #223: session.prompt() is a BLOCKING call that resolves with the finished
+// message (see the "FIRED, never awaited" comment on the client), so its
+// result always carries the completed assistant info AND that step's final
+// text part. Its RESULT is reconciled purely to ingest identity/usage/error
+// state — the transport never treats it as the delivery channel, because the
+// event stream is the one place a consumer-visible delta is supposed to come
+// from. Two of twelve live opencode 1.18.30 attempts observed that HTTP
+// result land BEFORE the stream had replayed the SAME text part's own
+// announce -> delta x4 -> snapshot lifecycle, and a discard-only reconcile
+// that still advanced its internal "already delivered" bookkeeping made the
+// later, perfectly ordinary snapshot look like a conflicting one.
+describe("OpenCode prompt-result races ahead of the part's own stream lifecycle (#223)", () => {
+  const SESS = "ses-promptrace";
+
+  test("a full-text prompt_result followed by the part's announce/delta/snapshot lifecycle still delivers the answer exactly once", async () => {
+    const FULL_TEXT = "the answer is 42";
+    const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+    expect(DELTA_CHUNKS.join("")).toBe(FULL_TEXT);
+
+    const completedAssistant = {
+      id: "msg-asst-1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
+      parentID: "msg-user-1",
+      finish: "stop",
+      time: { created: 1000, completed: 2000 },
+      tokens: { input: 10, output: 5 },
+      cost: 0,
+    };
+
+    // session.prompt() resolves with the full completed message AND its
+    // final text part already attached, exactly like the live server.
+    const controlled = makeControlledSdk({
+      sessionId: SESS,
+      promptResponse: {
+        info: completedAssistant,
+        parts: [
+          {
+            id: "prt-ans-1",
+            messageID: "msg-asst-1",
+            sessionID: SESS,
+            type: "text",
+            text: FULL_TEXT,
+          },
+        ],
+      },
+    });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    // Lets the fired-not-awaited session.prompt() call resolve, and its
+    // discard-only reconcile run, BEFORE any stream event for this part
+    // exists — reproducing "prompt_result arrives before the whole stream
+    // lifecycle" from the live evidence.
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    // The SAME part's own lifecycle, replayed over the stream afterward:
+    // announced empty, rebuilt through deltas, then restated as a snapshot.
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+
+    for (const chunk of DELTA_CHUNKS) {
+      controlled.emit({
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg-asst-1",
+          partID: "prt-ans-1",
+          field: "text",
+          delta: chunk,
+        },
+      });
+    }
+
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.finalText).toBe(FULL_TEXT);
+
+    // The consumer-visible deltas must concatenate to the answer exactly
+    // once — no loss from the discard, no duplication from a ghost-advanced
+    // "already emitted" bookkeeping.
+    const deltaText = rig.sink.events
+      .filter((event) => event.type === "delta")
+      .map((event) => (event as { text: string }).text)
+      .join("");
+    expect(deltaText).toBe(FULL_TEXT);
+  });
+});
+
 describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
   const SESS = "ses-oa2b";
 
@@ -2099,13 +2324,14 @@ describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
     const toolStepAssistant = {
       id: "msg-step-1",
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-1",
       sessionID: SESS,
       finish: "tool-calls",
       time: { created: 100, completed: 500 },
     };
 
-    controlled.setMessages([{ info: toolStepAssistant }]);
+    controlled.setMessages([{ info: toolStepAssistant, parts: [] }]);
     controlled.setStatus({ type: "idle" });
 
     controlled.emit({
@@ -2152,6 +2378,7 @@ describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
         info: {
           id: "msg-asst-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2217,6 +2444,7 @@ describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
     const unownedAssistant = {
       id: "msg-asst-unowned",
       role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
       parentID: "msg-user-unrelated",
       sessionID: SESS,
       finish: "stop",
@@ -2275,6 +2503,7 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
         info: {
           id: "msg-asst-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2361,6 +2590,7 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
         info: {
           id: "msg-asst-1",
           role: "assistant",
+          path: { cwd: "/tmp/pr-hero-test", root: "/" },
           parentID: "msg-user-1",
           sessionID: SESS,
           finish: "stop",
@@ -2446,7 +2676,7 @@ describe("OpenCode reconciliation fail-closed integrity", () => {
   });
 });
 
-describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classification", () => {
+describe("Legacy U6 witnesses are unqualified without actual observations", () => {
   function makeBaseWitness(
     overrides: Partial<SessionWitness> = {},
   ): SessionWitness {
@@ -2518,18 +2748,23 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
       requestWire: {
         sanitizedPath:
-          "/session/sess-1/message?token=ghp_ABC12345678901234567890&apiKey=secret-key-1234",
+          "/session/sess-1/message?token=ghp_ABC12345678901234567890&apiKey=secret-key-1234&access_token=secret_access_token",
         sanitizedQuery: {
           key: "sk-openai-secret-token-abcdef123456",
           safe: "public-value",
+          access_token: "query_access_token",
+          cookie: "sid=secret_cookie_val",
         },
         sanitizedBody: {
           headers: {
             authorization: "Bearer my-secret-jwt-token-12345",
             "x-api-key": "secret-api-key-9999",
+            cookie: "session_id=super_secret_cookie",
           },
           password: "supersecretpassword",
           secret: "confidential",
+          endpoint: "https://admin:super_secret_pass@example.invalid/v1",
+          access_token: "body_access_token",
           userPrompt:
             "Please use token ghp_99999999999999999999 to authenticate with sk-key12345678",
         },
@@ -2550,6 +2785,12 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
     expect(serialized).not.toContain("confidential");
     expect(serialized).not.toContain("ghp_99999999999999999999");
     expect(serialized).not.toContain("sk-key12345678");
+    expect(serialized).not.toContain("super_secret_pass");
+    expect(serialized).not.toContain("secret_access_token");
+    expect(serialized).not.toContain("query_access_token");
+    expect(serialized).not.toContain("body_access_token");
+    expect(serialized).not.toContain("secret_cookie_val");
+    expect(serialized).not.toContain("super_secret_cookie");
 
     expect(sanitized.identities.credentialCategory).toBe("operator_oauth");
     expect(
@@ -2580,7 +2821,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       witness,
       "",
     );
-    expect(classification).toBe("demonstrated_reconstruction_defect");
+    expect(classification).toBe("inconclusive");
   });
 
   test("persisted final empty: classifies as persisted_final_empty when server completes with empty assistant text", () => {
@@ -2600,7 +2841,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
     });
 
     const classification = classifyWitnessEvidence(witness, "");
-    expect(classification).toBe("persisted_final_empty");
+    expect(classification).toBe("inconclusive");
   });
 
   test("external rejection: classifies admission error, HTTP 4xx/5xx, or provider refusal as external_rejection", () => {
@@ -2614,9 +2855,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
         error: "Internal Server Error",
       },
     });
-    expect(classifyWitnessEvidence(httpErrorWitness, "")).toBe(
-      "external_rejection",
-    );
+    expect(classifyWitnessEvidence(httpErrorWitness, "")).toBe("inconclusive");
 
     const providerRefusalWitness = makeBaseWitness({
       settlement: {
@@ -2628,7 +2867,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(providerRefusalWitness, "")).toBe(
-      "external_rejection",
+      "inconclusive",
     );
 
     const admissionErrorWitness = makeBaseWitness({
@@ -2641,7 +2880,7 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(admissionErrorWitness, "")).toBe(
-      "external_rejection",
+      "inconclusive",
     );
   });
 
@@ -2674,13 +2913,61 @@ describe("Task 6.1 RED U6 EQ1a: same-session witness provenance and classificati
       },
     });
     expect(classifyWitnessEvidence(unfinishedWitness, "")).toBe("inconclusive");
+
+    const wrongOwnerWitness = makeBaseWitness({
+      identities: {
+        ...makeBaseWitness().identities,
+        userMessageId: "msg-user-correct",
+      },
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-wrong",
+            finishStatus: "stop",
+            parts: [{ id: "prt-1", type: "text", text: "text" }],
+          },
+        ],
+      },
+    });
+    expect(classifyWitnessEvidence(wrongOwnerWitness, "")).toBe("inconclusive");
+
+    const runningToolWitness = makeBaseWitness({
+      readback: {
+        messages: [
+          {
+            id: "msg-asst-1",
+            role: "assistant",
+            parentId: "msg-user-1",
+            finishStatus: "stop",
+            parts: [{ id: "prt-1", type: "text", text: "text" }],
+            toolCalls: [{ status: "running" }],
+          },
+        ],
+      },
+    });
+    expect(classifyWitnessEvidence(runningToolWitness, "")).toBe(
+      "inconclusive",
+    );
   });
 });
 
 describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, and complete-empty discrimination", () => {
   test("EQ1b: existing files with missing or incomplete witness/proof retain incomplete/inconclusive classification and do not falsely resume as success", () => {
+    // Bare terminal proof without findings document returns incomplete
+    const bareTerminal = evaluateResumeOutcome({
+      terminalProof: completedProof("evt-bare"),
+      runStatus: "complete",
+      protocolIntegrity: "verified",
+      finishStatus: "stop",
+    });
+    expect(bareTerminal).toBe("incomplete");
+
     // Missing terminal proof
     const missingProof = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: undefined,
@@ -2690,6 +2977,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Unverified protocol integrity
     const unverifiedIntegrity = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "unverified",
       terminalProof: completedProof("evt-1"),
@@ -2699,6 +2988,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Truncated / missing finish status
     const truncatedFinish = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-2"),
@@ -2709,6 +3000,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Unconfirmed cessation (abort requested without confirmation)
     const unconfirmedCessation = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-3"),
@@ -2720,6 +3013,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Partial run status on disk
     const partialRun = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "partial",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-4"),
@@ -2730,6 +3025,8 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
 
     // Verified complete artifact DOES resume as complete
     const validComplete = evaluateResumeOutcome({
+      hasFindingsDocument: true,
+      findings: [],
       runStatus: "complete",
       protocolIntegrity: "verified",
       terminalProof: completedProof("evt-5"),
@@ -2859,5 +3156,186 @@ describe("Task 7.1 RED U7 EQ1b/EQ2a/b: outcome resume, qualification metrics, an
     expect(completeWithFindings.isCompletedReview).toBe(true);
     expect(completeWithFindings.isCompleteEmpty).toBe(false);
     expect(completeWithFindings.isTransportBlank).toBe(false);
+  });
+});
+
+describe("OpenCode workspace and CWD lineage (U5-C1)", () => {
+  test("absent sessionRecord.directory on session.create is rejected", async () => {
+    const { createOpenCodeClient } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const client = createOpenCodeClient({
+      model: { providerID: "openai", modelID: "gpt-4o" },
+      launchServer: async () => ({
+        url: "http://127.0.0.1:4096",
+        pid: 12345,
+        close: async () => {},
+      }),
+      loadSdk: async () =>
+        ({
+          createOpencodeClient: () => ({
+            mcp: { status: async () => ({ data: {} }) },
+            session: {
+              create: async () => ({ data: { id: "ses-no-dir" } }),
+              abort: async () => ({ data: true }),
+            },
+            event: {
+              subscribe: async () => ({
+                [Symbol.asyncIterator]: async function* () {},
+              }),
+            },
+            tool: {
+              ids: async () => ({ data: ["read"] }),
+            },
+          }),
+        }) as never,
+      readSystemPrompt: async () => "PROMPT",
+    });
+
+    await expect(
+      client.createSession({
+        cwd: "/workspace/expected-dir",
+        systemPromptPath: "/tmp/sys.md",
+        tools: ["Read"],
+        userPrompt: "test",
+      }),
+    ).rejects.toThrow("mismatched directory");
+  });
+
+  test("mismatched sessionRecord.directory on session.create is rejected and aborts session", async () => {
+    const { createOpenCodeClient } = await import(
+      "../../src/transports/opencode-client"
+    );
+    let aborted = false;
+    const client = createOpenCodeClient({
+      model: { providerID: "openai", modelID: "gpt-4o" },
+      launchServer: async () => ({
+        url: "http://127.0.0.1:4096",
+        pid: 12345,
+        close: async () => {},
+      }),
+      loadSdk: async () =>
+        ({
+          createOpencodeClient: () => ({
+            mcp: { status: async () => ({ data: {} }) },
+            session: {
+              create: async () => ({
+                data: { id: "ses-diff-dir", directory: "/workspace/other-dir" },
+              }),
+              abort: async () => {
+                aborted = true;
+                return { data: true };
+              },
+            },
+          }),
+        }) as never,
+      readSystemPrompt: async () => "PROMPT",
+    });
+
+    await expect(
+      client.createSession({
+        cwd: "/workspace/expected-dir",
+        systemPromptPath: "/tmp/sys.md",
+        tools: ["Read"],
+        userPrompt: "test",
+      }),
+    ).rejects.toThrow(
+      /opencode session created with mismatched directory: expected \/workspace\/expected-dir, got \/workspace\/other-dir/,
+    );
+    expect(aborted).toBe(true);
+  });
+
+  test("mismatched message.path.cwd in mapOpenCodeEvents throws and sets integrity failure", async () => {
+    const { createTurnState, mapOpenCodeEvents } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const state = createTurnState(
+      "ses-1",
+      undefined,
+      "/workspace/expected-dir",
+    );
+    const event = {
+      type: "message.updated",
+      properties: {
+        sessionID: "ses-1",
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/rogue-dir" },
+        },
+      },
+    };
+
+    expect(() => mapOpenCodeEvents(event, "ses-1", state)).toThrow(
+      /message cwd mismatch/,
+    );
+    expect(state.integrityFailure).toContain("message cwd mismatch");
+  });
+
+  test("mismatched message.path.cwd in reconcileMessages sets integrity failure and rejects", async () => {
+    const { createTurnState, reconcileMessages } = await import(
+      "../../src/transports/opencode-client"
+    );
+    const state = createTurnState(
+      "ses-1",
+      undefined,
+      "/workspace/expected-dir",
+    );
+    const messages = [
+      {
+        parts: [],
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/rogue-dir" },
+        },
+      },
+    ];
+
+    const result = reconcileMessages(messages, state);
+    expect(result.failure).toContain("message cwd mismatch");
+    expect(state.integrityFailure).toContain("message cwd mismatch");
+  });
+
+  test("matching message.path.cwd in mapOpenCodeEvents and reconcileMessages is accepted", async () => {
+    const { createTurnState, mapOpenCodeEvents, reconcileMessages } =
+      await import("../../src/transports/opencode-client");
+    const state = createTurnState(
+      "ses-1",
+      undefined,
+      "/workspace/expected-dir",
+    );
+    const event = {
+      type: "message.updated",
+      properties: {
+        sessionID: "ses-1",
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/expected-dir" },
+        },
+      },
+    };
+
+    expect(() => mapOpenCodeEvents(event, "ses-1", state)).not.toThrow();
+    expect(state.integrityFailure).toBeUndefined();
+
+    const messages = [
+      {
+        parts: [],
+        info: {
+          id: "msg-1",
+          sessionID: "ses-1",
+          role: "assistant",
+          path: { cwd: "/workspace/expected-dir" },
+        },
+      },
+    ];
+    const result = reconcileMessages(messages, state);
+    expect(result.failure).toBeUndefined();
+    expect(state.integrityFailure).toBeUndefined();
   });
 });

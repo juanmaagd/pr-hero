@@ -34,7 +34,7 @@ const SESSION_ID = (
 // would drop every delta, which is exactly why the parameter is required
 // rather than optional.
 function mapAll(sessionId = SESSION_ID): OpenCodeClientEvent[] {
-  const index = createTurnState();
+  const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
   return PROBE_EVENTS.flatMap((raw) =>
     mapOpenCodeEvents(raw, sessionId, index),
   );
@@ -43,7 +43,11 @@ function mapAll(sessionId = SESSION_ID): OpenCodeClientEvent[] {
 // For the single-event assertions: an event mapped in isolation gets an index
 // that has seen nothing else.
 function mapOne(raw: unknown, sessionId = SESSION_ID): OpenCodeClientEvent[] {
-  return mapOpenCodeEvents(raw, sessionId, createTurnState());
+  return mapOpenCodeEvents(
+    raw,
+    sessionId,
+    createTurnState(SESSION_ID, String(ASSISTANT.parentID)),
+  );
 }
 
 describe("mapOpenCodeEvent against the recorded stream", () => {
@@ -74,7 +78,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
   // door the fix had to open. Registration is gated on the part's owning
   // message having been announced as the ASSISTANT's.
   test("the recorded user part is never a channel a delta can fill", () => {
-    const index = createTurnState();
+    const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
     for (const raw of PROBE_EVENTS) mapOpenCodeEvents(raw, SESSION_ID, index);
 
     const userPart = PROBE_EVENTS.find(
@@ -108,68 +112,57 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     ).toEqual([]);
   });
 
-  // The correlation index is keyed by provider-generated ids on a
-  // subscription that outlives any one turn, so it needs a ceiling. Eviction
-  // is oldest-first: parts are announced and streamed in order, so the oldest
-  // entry is the one no delta can still name.
-  test("the part index is bounded, and evicts the oldest first", () => {
-    const index = createTurnState();
+  test("part overflow fails closed without evicting prior identity", () => {
+    const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
     mapOpenCodeEvents(
       {
         type: "message.updated",
         properties: {
           sessionID: SESSION_ID,
-          info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+          info: { ...ASSISTANT, id: "msg_a", sessionID: SESSION_ID },
         },
       },
       SESSION_ID,
       index,
     );
-    for (let i = 0; i < 5000; i += 1) {
-      mapOpenCodeEvents(
-        {
-          type: "message.part.updated",
-          properties: {
-            sessionID: SESSION_ID,
-            part: {
-              id: `prt_${i}`,
-              messageID: "msg_a",
-              type: "text",
-              text: "",
-            },
-            time: 1,
-          },
+    const part = (i: number) => ({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: `prt_${i}`,
+          sessionID: SESSION_ID,
+          messageID: "msg_a",
+          type: "text",
+          text: "",
         },
-        SESSION_ID,
-        index,
-      );
-    }
-    expect(index.parts.size).toBeLessThanOrEqual(4096);
-    expect(index.parts.has("prt_0")).toBe(false);
-    expect(index.parts.has("prt_4999")).toBe(true);
+      },
+    });
+    for (let i = 0; i < 4096; i++)
+      mapOpenCodeEvents(part(i), SESSION_ID, index);
+    expect(() => mapOpenCodeEvents(part(4096), SESSION_ID, index)).toThrow(
+      "maximum tracked parts",
+    );
+    expect(index.parts.has("prt_0")).toBe(true);
+    expect(index.parts.has("prt_4096")).toBe(false);
   });
 
-  // The twin bound, and a SECOND eviction implementation — the assistant-message
-  // set is what gates part registration, so an unbounded one would grow for as
-  // long as the subscription lives just as surely as the part map would.
-  test("the assistant-message set is bounded too", () => {
-    const index = createTurnState();
-    for (let i = 0; i < 700; i += 1) {
-      mapOpenCodeEvents(
-        {
-          type: "message.updated",
-          properties: {
-            sessionID: SESSION_ID,
-            info: { id: `msg_${i}`, role: "assistant", time: { created: 1 } },
-          },
-        },
-        SESSION_ID,
-        index,
-      );
-    }
-    expect(index.assistantMessages.size).toBeLessThanOrEqual(512);
-    expect(index.assistantMessages.has("msg_0")).toBe(false);
-    expect(index.assistantMessages.has("msg_699")).toBe(true);
+  test("message overflow fails closed without evicting prior identity", () => {
+    const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
+    const message = (i: number) => ({
+      type: "message.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        info: { ...ASSISTANT, id: `msg_${i}`, sessionID: SESSION_ID },
+      },
+    });
+    for (let i = 0; i < 512; i++)
+      mapOpenCodeEvents(message(i), SESSION_ID, index);
+    expect(() => mapOpenCodeEvents(message(512), SESSION_ID, index)).toThrow(
+      "message cap exceeded",
+    );
+    expect(index.assistantMessages.has("msg_0")).toBe(true);
+    expect(index.assistantMessages.has("msg_512")).toBe(false);
   });
 
   test("events for another session are dropped, noise and all", () => {

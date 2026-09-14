@@ -44,11 +44,13 @@ import {
   openCodeLaunchServerFor,
 } from "../src/transport-registry";
 
-const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
-
-async function writeOpenCodeFixture(dir: string) {
+async function writeOpenCodeFixture(
+  dir: string,
+  version = "1.18.30",
+): Promise<{ canonicalPath: string; sha256: string }> {
   const p = path.join(dir, "opencode");
-  const bytes = Buffer.concat([MACHO_PREFIX, Buffer.from("opencode")]);
+  const script = `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  echo "${version}"\n  exit 0\nfi\nexit 0\n`;
+  const bytes = Buffer.from(script);
   await writeFile(p, bytes);
   await chmod(p, 0o755);
   const canonicalPath = await realpath(p);
@@ -538,6 +540,8 @@ describe("#182 wiring: bindings, server, gates", () => {
     };
     const registry = createDefaultTransportRegistry({
       mode: "conformance",
+      sdkVersion: "1.18.25",
+      serverVersion: "1.18.30",
       openCodeClient: fakeClient as never,
       credentialKind: "provider_free",
     });

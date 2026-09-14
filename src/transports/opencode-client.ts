@@ -1,3 +1,4 @@
+import { OpenCodeEvidenceCollector } from "./opencode-evidence";
 // D1-06: the mapping between what @opencode-ai/sdk actually emits and the
 // narrow `OpenCodeClientLike` contract the transport was built against.
 //
@@ -14,6 +15,8 @@
 // defeat both the credential projection (§6.1) and the verified-binary rule
 // (§13).
 
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ProviderTerminalProof } from "../execution/contracts";
 import {
   ALL_MCP_TOOL_IDS,
@@ -89,12 +92,22 @@ export function terminalProofFromAssistant(
   if (completed === undefined) return undefined;
 
   if (state !== undefined) {
+    if (
+      state.sessionId !== undefined &&
+      message.sessionID !== undefined &&
+      message.sessionID !== state.sessionId
+    ) {
+      return undefined;
+    }
     if (state.tombstones.has(id)) return undefined;
+    if (!isMessageOwned(id, state)) return undefined;
     if (message.error === undefined) {
       // Completed tool-calls or unknown finish never establishes success
       if (message.finish !== "stop") return undefined;
       if (hasOutstandingTools(state)) return undefined;
-      if (!isMessageOwned(id, state)) return undefined;
+      if (!isMessageOwned(id, state)) {
+        return undefined;
+      }
     }
   }
 
@@ -187,6 +200,7 @@ export interface TrackedPartDetail {
 export interface TrackedMessageDetail {
   readonly id: string;
   readonly role: "user" | "assistant" | string;
+  sessionID?: string;
   parentID?: string;
   time?: { created?: number; completed?: number };
   finish?: string;
@@ -205,6 +219,7 @@ export interface UnknownOwnerObservation {
 export interface OpenCodeTurnState {
   readonly sessionId?: string;
   currentUserId?: string;
+  expectedCwd?: string;
   readonly assistantMessages: Set<string>;
   readonly parts: Map<string, "answer" | "reasoning">;
   readonly partDetails: Map<string, TrackedPartDetail>;
@@ -217,8 +232,13 @@ export interface OpenCodeTurnState {
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   readonly usage: Map<string, StepUsage>;
+  readonly completedUsage: Set<string>;
+  readonly payloadBytes: Map<string, number>;
+  readonly trackedPartOwners: Map<string, string>;
   readonly evictedUsageIds: Set<string>;
   usageCapped: boolean;
+  usageConflict?: boolean;
+  usageIncomplete?: boolean;
   carriedUsage: StepUsage;
   lastProof?: ProviderTerminalProof;
   boundaryReported: boolean;
@@ -235,14 +255,17 @@ const MAX_TRACKED_PARTS = 4096;
 const MAX_TRACKED_MESSAGES = 512;
 const MAX_UNKNOWN_OWNER_BUFFER = 256;
 const MAX_TOMBSTONES = 1024;
+const MAX_READBACK_BYTES = 4 * 1024 * 1024;
 
 export function createTurnState(
   sessionId?: string,
   currentUserId?: string,
+  expectedCwd?: string,
 ): OpenCodeTurnState {
   return {
     sessionId,
     currentUserId,
+    expectedCwd,
     assistantMessages: new Set(),
     parts: new Map(),
     partDetails: new Map(),
@@ -252,23 +275,119 @@ export function createTurnState(
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     usage: new Map(),
+    completedUsage: new Set(),
+    payloadBytes: new Map(),
+    trackedPartOwners: new Map(),
     evictedUsageIds: new Set(),
     usageCapped: false,
+    usageConflict: false,
+    usageIncomplete: false,
     carriedUsage: {},
     boundaryReported: false,
   };
+}
+
+function failIntegrity(state: OpenCodeTurnState, detail: string): never {
+  state.integrityFailure = `[pr-hero] opencode client: ${detail}`;
+  throw new Error(state.integrityFailure);
+}
+
+function canonicalDirectory(path: string): string {
+  // Canonicalize existing symlinks, while keeping pure fixtures and a removed
+  // checkout deterministic. Neither spelling can authorize another directory.
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function trackPayload(
+  state: OpenCodeTurnState,
+  key: string,
+  value: unknown,
+): void {
+  const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  let total = bytes;
+  for (const [id, size] of state.payloadBytes) if (id !== key) total += size;
+  if (total > MAX_READBACK_BYTES)
+    failIntegrity(state, "observation byte budget exceeded");
+  state.payloadBytes.set(key, bytes);
+}
+
+function trackPart(
+  state: OpenCodeTurnState,
+  part: Record<string, unknown>,
+  messageId: string,
+): void {
+  const id = part.id;
+  if (
+    typeof id !== "string" ||
+    part.messageID !== messageId ||
+    (state.sessionId !== undefined && part.sessionID !== state.sessionId)
+  ) {
+    failIntegrity(state, "part ownership mismatch or missing identity");
+  }
+  if (state.tombstones.has(id))
+    failIntegrity(state, "required part reappeared after removal");
+  const owner = state.trackedPartOwners.get(id);
+  if (owner !== undefined && owner !== messageId)
+    failIntegrity(state, "part identity changed ownership");
+  if (
+    owner === undefined &&
+    state.trackedPartOwners.size >= MAX_TRACKED_PARTS
+  ) {
+    failIntegrity(state, "maximum tracked parts exceeded");
+  }
+  trackPayload(state, `part:${id}`, part);
+  state.trackedPartOwners.set(id, messageId);
+}
+
+function trackMessage(
+  state: OpenCodeTurnState,
+  info: Record<string, unknown>,
+): void {
+  const id = info.id;
+  if (
+    typeof id !== "string" ||
+    (state.sessionId !== undefined && info.sessionID !== state.sessionId)
+  ) {
+    failIntegrity(state, "message ownership mismatch or missing identity");
+  }
+  const previous = state.messageDetails.get(id);
+  if (
+    previous !== undefined &&
+    (previous.role !== info.role ||
+      (previous.parentID !== undefined && previous.parentID !== info.parentID))
+  ) {
+    failIntegrity(state, "message identity changed role or parent");
+  }
+  if (
+    !state.payloadBytes.has(`message:${id}`) &&
+    [...state.payloadBytes.keys()].filter((key) => key.startsWith("message:"))
+      .length >= MAX_TRACKED_MESSAGES
+  ) {
+    failIntegrity(state, "message cap exceeded (cap exhaustion)");
+  }
+  const path = asRecord(info.path);
+  if (
+    info.role === "assistant" &&
+    state.expectedCwd !== undefined &&
+    (typeof path?.cwd !== "string" ||
+      canonicalDirectory(path.cwd) !== canonicalDirectory(state.expectedCwd))
+  ) {
+    failIntegrity(state, "message cwd mismatch or unavailable");
+  }
+  trackPayload(state, `message:${id}`, info);
 }
 
 export function isMessageOwned(
   messageId: string,
   state: OpenCodeTurnState,
 ): boolean {
-  if (state.currentUserId === undefined) return true;
-  const parentId = state.parentLinks.get(messageId);
-  if (parentId === undefined) {
-    return true;
-  }
-  let current: string | undefined = messageId;
+  if (state.currentUserId === undefined) return false;
+  if (messageId === state.currentUserId) return true;
+  let current: string | undefined = state.parentLinks.get(messageId);
   const visited = new Set<string>();
   while (current !== undefined) {
     if (visited.has(current)) return false;
@@ -299,6 +418,14 @@ function evaluateFinalAssistant(
   const id = typeof message.id === "string" ? message.id : undefined;
   if (!id) return { valid: false, reason: "missing id" };
 
+  if (
+    state.sessionId !== undefined &&
+    message.sessionID !== undefined &&
+    message.sessionID !== state.sessionId
+  ) {
+    return { valid: false, reason: "cross-session message mismatch" };
+  }
+
   if (state.tombstones.has(id)) {
     return { valid: false, reason: "message tombstoned" };
   }
@@ -323,10 +450,8 @@ function evaluateFinalAssistant(
     return { valid: false, reason: "outstanding tools in progress" };
   }
 
-  if (state.currentUserId !== undefined) {
-    if (!isMessageOwned(id, state)) {
-      return { valid: false, reason: "missing or invalid ownership" };
-    }
+  if (!isMessageOwned(id, state)) {
+    return { valid: false, reason: "missing or invalid ownership" };
   }
 
   return { valid: true };
@@ -364,9 +489,52 @@ function rememberUsage(
   state: OpenCodeTurnState,
   messageId: string,
   usage: StepUsage,
+  completed = false,
 ): void {
   if (state.evictedUsageIds.has(messageId)) {
     state.usageCapped = true;
+    state.usageIncomplete = true;
+    return;
+  }
+  const existing = state.usage.get(messageId);
+  const wasCompleted = state.completedUsage.has(messageId);
+  if (completed) state.completedUsage.add(messageId);
+  if (existing !== undefined) {
+    const costConflict =
+      existing.costUsd !== undefined &&
+      usage.costUsd !== undefined &&
+      (usage.costUsd < existing.costUsd ||
+        (wasCompleted && usage.costUsd !== existing.costUsd));
+    const tokenConflict =
+      (existing.inputTokens !== undefined &&
+        usage.inputTokens !== undefined &&
+        (usage.inputTokens < existing.inputTokens ||
+          (wasCompleted && usage.inputTokens !== existing.inputTokens))) ||
+      (existing.outputTokens !== undefined &&
+        usage.outputTokens !== undefined &&
+        (usage.outputTokens < existing.outputTokens ||
+          (wasCompleted && usage.outputTokens !== existing.outputTokens)));
+    if (costConflict || tokenConflict) {
+      state.usageConflict = true;
+      state.usageIncomplete = true;
+    }
+    const mergedInput =
+      existing.inputTokens !== undefined || usage.inputTokens !== undefined
+        ? Math.max(existing.inputTokens ?? 0, usage.inputTokens ?? 0)
+        : undefined;
+    const mergedOutput =
+      existing.outputTokens !== undefined || usage.outputTokens !== undefined
+        ? Math.max(existing.outputTokens ?? 0, usage.outputTokens ?? 0)
+        : undefined;
+    const mergedCost =
+      existing.costUsd !== undefined || usage.costUsd !== undefined
+        ? Math.max(existing.costUsd ?? 0, usage.costUsd ?? 0)
+        : undefined;
+    state.usage.set(messageId, {
+      ...(mergedInput !== undefined ? { inputTokens: mergedInput } : {}),
+      ...(mergedOutput !== undefined ? { outputTokens: mergedOutput } : {}),
+      ...(mergedCost !== undefined ? { costUsd: mergedCost } : {}),
+    });
     return;
   }
   state.usage.set(messageId, usage);
@@ -379,6 +547,7 @@ function rememberUsage(
       state.carriedUsage = addUsage(state.carriedUsage, evicted);
       rememberId(state.evictedUsageIds, oldest.value, MAX_TRACKED_MESSAGES);
       state.usageCapped = true;
+      state.usageIncomplete = true;
     }
   }
 }
@@ -408,6 +577,7 @@ function handlePartUpdated(
   const messageId =
     typeof part.messageID === "string" ? part.messageID : undefined;
   if (!partId || !messageId) return [];
+  trackPart(state, part, messageId);
 
   if (state.tombstones.has(partId) || state.tombstones.has(messageId)) {
     return [];
@@ -432,6 +602,7 @@ function handlePartUpdated(
     return [];
   }
 
+  if (!isMessageOwned(messageId, state)) return [];
   const msgDetail = state.messageDetails.get(messageId);
   if (msgDetail && !msgDetail.partIds.includes(partId)) {
     msgDetail.partIds.push(partId);
@@ -448,6 +619,11 @@ function handlePartUpdated(
       | undefined;
     const callId = typeof part.callID === "string" ? part.callID : partId;
     if (status) {
+      if (
+        !state.toolStates.has(callId) &&
+        state.toolStates.size >= MAX_TRACKED_PARTS
+      )
+        failIntegrity(state, "tool identity cap exceeded");
       state.toolStates.set(callId, status);
     }
     if (msgDetail) msgDetail.hasToolCalls = true;
@@ -455,8 +631,25 @@ function handlePartUpdated(
   }
 
   if (partType === "reasoning") {
+    if (!isMessageOwned(messageId, state)) return [];
+    const previous = state.partDetails.get(partId)?.text ?? "";
+    const text = typeof part.text === "string" ? part.text : "";
     remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
-    return [];
+    state.partDetails.set(partId, {
+      id: partId,
+      messageId,
+      type: "reasoning",
+      text: text.startsWith(previous) ? text : previous,
+      emittedText: "",
+    });
+    // Only an owned cumulative snapshot proving advancement is useful.
+    // Bare delta markers have no replay identity and cannot extend the deadline.
+    return [
+      {
+        kind: "reasoning",
+        progress: text.length > previous.length && text.startsWith(previous),
+      },
+    ];
   }
 
   if (msgDetail?.role === "user" || !state.assistantMessages.has(messageId)) {
@@ -521,6 +714,9 @@ function handlePartDelta(
   const partId = p.partID;
   if (typeof partId !== "string") return [];
   const messageId = typeof p.messageID === "string" ? p.messageID : undefined;
+  if (messageId === undefined)
+    failIntegrity(state, "delta missing message identity");
+  trackPart(state, { ...p, id: partId }, messageId);
 
   if (
     state.tombstones.has(partId) ||
@@ -531,9 +727,11 @@ function handlePartDelta(
 
   const kind = state.parts.get(partId);
   if (kind === "reasoning") {
+    if (!messageId || !isMessageOwned(messageId, state)) return [];
     return [{ kind: "reasoning" }];
   }
   if (kind === "answer") {
+    if (!isMessageOwned(messageId, state)) return [];
     let detail = state.partDetails.get(partId);
     if (!detail) {
       detail = {
@@ -547,6 +745,14 @@ function handlePartDelta(
     if (detail.emittedText.endsWith(delta)) {
       return [];
     }
+    if (
+      Buffer.byteLength(delta, "utf8") > 64 * 1024 ||
+      Buffer.byteLength(detail.emittedText + delta, "utf8") > 1024 * 1024
+    )
+      failIntegrity(state, "delta or answer byte limit exceeded");
+    trackPayload(state, `retained:${partId}`, {
+      text: detail.emittedText + delta,
+    });
     detail.emittedText += delta;
     return [{ kind: "delta", text: delta }];
   }
@@ -597,11 +803,71 @@ function reconcileUnknownOwnerBuffer(
 export function reconcileMessages(
   list: unknown[],
   state: OpenCodeTurnState,
+  // #223: `emit` gates ONLY the per-part "already delivered" bookkeeping
+  // below (the loop that pushes `delta` events and advances
+  // `detail.emittedText`). Every other effect of a call — trackMessage/
+  // trackPart identity checks, usage, errors, `detail.text` snapshot storage
+  // — always runs, because a caller that discards the returned `events` still
+  // needs those ingested. Defaults to true so every existing caller (the poll
+  // readback at pollStatus, and every direct test) keeps today's behaviour.
+  options?: { readonly emit?: boolean },
 ): {
   events: OpenCodeClientEvent[];
   terminalProof?: ProviderTerminalProof;
+  finalText?: string;
+  usage?: StepUsage;
+  usageIncomplete?: boolean;
   failure?: string;
 } {
+  const emit = options?.emit ?? true;
+  if (
+    list.length > MAX_TRACKED_MESSAGES ||
+    state.messageDetails.size > MAX_TRACKED_MESSAGES
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: message cap exceeded (cap exhaustion)";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  if (
+    state.parts.size > MAX_TRACKED_PARTS ||
+    state.partDetails.size > MAX_TRACKED_PARTS
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: maximum tracked parts exceeded";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  try {
+    if (Buffer.byteLength(JSON.stringify(list), "utf8") > MAX_READBACK_BYTES) {
+      failIntegrity(state, "total readback byte budget exceeded");
+    }
+    const seenMessages = new Set<string>();
+    const seenParts = new Set<string>();
+    for (const item of list) {
+      const rec = asRecord(item);
+      const info = asRecord(rec?.info ?? item);
+      if (!info) failIntegrity(state, "invalid readback message");
+      trackMessage(state, info);
+      if (seenMessages.has(String(info.id)))
+        failIntegrity(state, "duplicate message in readback");
+      seenMessages.add(String(info.id));
+      if (info.role === "assistant" && !Array.isArray(rec?.parts)) {
+        failIntegrity(state, "unknown readback parts coverage");
+      }
+      for (const value of Array.isArray(rec?.parts) ? rec.parts : []) {
+        const part = asRecord(value);
+        if (!part) failIntegrity(state, "invalid readback part");
+        trackPart(state, part, String(info.id));
+        if (seenParts.has(String(part.id)))
+          failIntegrity(state, "duplicate part in readback");
+        seenParts.add(String(part.id));
+      }
+    }
+  } catch {
+    return { events: [], failure: state.integrityFailure };
+  }
+
   for (const item of list) {
     const itemRec = asRecord(item);
     const info = asRecord(itemRec?.info ?? item);
@@ -611,9 +877,6 @@ export function reconcileMessages(
     if (!id) continue;
 
     if (role === "user") {
-      if (state.currentUserId === undefined) {
-        state.currentUserId = id;
-      }
       if (!state.messageDetails.has(id)) {
         state.messageDetails.set(id, { id, role: "user", partIds: [] });
       }
@@ -625,11 +888,18 @@ export function reconcileMessages(
 
       const finish = typeof info.finish === "string" ? info.finish : undefined;
       const isToolCalls = finish === "tool-calls" || finish === "tool_calls";
+      const sessionID =
+        typeof info.sessionID === "string"
+          ? info.sessionID
+          : typeof itemRec?.sessionID === "string"
+            ? (itemRec.sessionID as string)
+            : undefined;
       let msgDetail = state.messageDetails.get(id);
       if (!msgDetail) {
         msgDetail = {
           id,
           role: "assistant",
+          sessionID,
           parentID,
           time: asRecord(info.time) as
             | { created?: number; completed?: number }
@@ -641,6 +911,7 @@ export function reconcileMessages(
         };
         state.messageDetails.set(id, msgDetail);
       } else {
+        msgDetail.sessionID = sessionID ?? msgDetail.sessionID;
         msgDetail.parentID = parentID ?? msgDetail.parentID;
         msgDetail.finish = finish ?? msgDetail.finish;
         msgDetail.error = info.error ?? msgDetail.error;
@@ -651,6 +922,7 @@ export function reconcileMessages(
         if (isToolCalls) msgDetail.hasToolCalls = true;
       }
 
+      if (!isMessageOwned(id, state)) continue;
       const tokens = asRecord(info.tokens);
       const inputTokens = asNumber(tokens?.input);
       const outputTokens = asNumber(tokens?.output);
@@ -660,11 +932,16 @@ export function reconcileMessages(
         outputTokens !== undefined ||
         costUsd !== undefined
       ) {
-        rememberUsage(state, id, {
-          ...(inputTokens !== undefined ? { inputTokens } : {}),
-          ...(outputTokens !== undefined ? { outputTokens } : {}),
-          ...(costUsd !== undefined ? { costUsd } : {}),
-        });
+        rememberUsage(
+          state,
+          id,
+          {
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            ...(costUsd !== undefined ? { costUsd } : {}),
+          },
+          asNumber(asRecord(info.time)?.completed) !== undefined,
+        );
       }
 
       const parts = Array.isArray(itemRec?.parts)
@@ -672,12 +949,13 @@ export function reconcileMessages(
         : Array.isArray(info.content)
           ? (info.content as unknown[])
           : [];
+      const readbackPartIds: string[] = [];
       for (const p of parts) {
         const part = asRecord(p);
         if (!part) continue;
         const partId = typeof part.id === "string" ? part.id : undefined;
         if (!partId) continue;
-        if (!msgDetail.partIds.includes(partId)) msgDetail.partIds.push(partId);
+        if (!readbackPartIds.includes(partId)) readbackPartIds.push(partId);
 
         const partType = part.type;
         if (partType === "tool") {
@@ -689,17 +967,45 @@ export function reconcileMessages(
             | "error"
             | undefined;
           const callId = typeof part.callID === "string" ? part.callID : partId;
-          if (status) state.toolStates.set(callId, status);
+          if (status) {
+            if (
+              !state.toolStates.has(callId) &&
+              state.toolStates.size >= MAX_TRACKED_PARTS
+            )
+              failIntegrity(state, "tool identity cap exceeded");
+            state.toolStates.set(callId, status);
+          }
           msgDetail.hasToolCalls = true;
         } else if (partType === "reasoning") {
-          remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+          if (
+            !state.parts.has(partId) &&
+            state.parts.size >= MAX_TRACKED_PARTS
+          ) {
+            state.integrityFailure =
+              "[pr-hero] opencode client: maximum tracked parts exceeded";
+            return { events: [], failure: state.integrityFailure };
+          }
+          state.parts.set(partId, "reasoning");
         } else if (partType === "text") {
           const isSynthetic = part.synthetic === true;
           const isIgnored = part.ignored === true;
           if (!isSynthetic && !isIgnored && !msgDetail.hasToolCalls) {
-            remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
+            if (
+              !state.parts.has(partId) &&
+              state.parts.size >= MAX_TRACKED_PARTS
+            ) {
+              state.integrityFailure =
+                "[pr-hero] opencode client: maximum tracked parts exceeded";
+              return { events: [], failure: state.integrityFailure };
+            }
+            state.parts.set(partId, "answer");
             let detail = state.partDetails.get(partId);
             if (!detail) {
+              if (state.partDetails.size >= MAX_TRACKED_PARTS) {
+                state.integrityFailure =
+                  "[pr-hero] opencode client: maximum tracked parts exceeded";
+                return { events: [], failure: state.integrityFailure };
+              }
               detail = {
                 id: partId,
                 messageId: id,
@@ -714,65 +1020,137 @@ export function reconcileMessages(
           }
         }
       }
+      if (Array.isArray(itemRec?.parts) || Array.isArray(info.content)) {
+        msgDetail.partIds = readbackPartIds;
+      }
     }
   }
 
+  if (
+    state.parts.size > MAX_TRACKED_PARTS ||
+    state.partDetails.size > MAX_TRACKED_PARTS
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: maximum tracked parts exceeded";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  // Check missing usage across all completed assistant steps
+  for (const msg of state.messageDetails.values()) {
+    if (msg.role === "assistant" && isMessageOwned(msg.id, state)) {
+      const stepUsage = state.usage.get(msg.id);
+      if (
+        msg.time?.completed === undefined ||
+        stepUsage === undefined ||
+        stepUsage.costUsd === undefined ||
+        stepUsage.inputTokens === undefined ||
+        stepUsage.outputTokens === undefined
+      ) {
+        state.usageIncomplete = true;
+      }
+    }
+  }
+
+  const candidateIds: string[] = [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const itemRec = asRecord(list[i]);
     const info = asRecord(itemRec?.info ?? list[i]);
-    if (info?.role !== "assistant") continue;
-    const id = typeof info.id === "string" ? info.id : undefined;
-    if (!id) continue;
+    if (info?.role === "assistant" && typeof info.id === "string") {
+      candidateIds.push(info.id);
+    }
+  }
+  if (candidateIds.length === 0) {
+    const allIds = Array.from(state.assistantMessages);
+    for (let i = allIds.length - 1; i >= 0; i -= 1) {
+      candidateIds.push(allIds[i]);
+    }
+  }
 
-    if (info.error !== undefined) {
-      const proof = terminalProofFromAssistant(info, state);
-      if (proof) return { events: [], terminalProof: proof };
+  for (const id of candidateIds) {
+    const msgDetail = state.messageDetails.get(id);
+    if (!msgDetail) continue;
+
+    if (msgDetail.error !== undefined) {
+      const proof = terminalProofFromAssistant(msgDetail, state);
+      if (proof) return { events: [], terminalProof: proof, finalText: "" };
     }
 
-    const evalRes = evaluateFinalAssistant(info, state);
+    const evalRes = evaluateFinalAssistant(msgDetail, state);
     if (!evalRes.valid) continue;
 
-    const proof = terminalProofFromAssistant(info, state);
+    const proof = terminalProofFromAssistant(msgDetail, state);
     if (proof === undefined) continue;
 
     const events: OpenCodeClientEvent[] = [];
-    const msgDetail = state.messageDetails.get(id);
-    if (msgDetail) {
-      for (const partId of msgDetail.partIds) {
-        const detail = state.partDetails.get(partId);
-        if (
-          detail &&
-          detail.type === "text" &&
-          !detail.synthetic &&
-          !detail.ignored
-        ) {
-          const snapshotText = detail.text ?? "";
-          const alreadyEmitted = detail.emittedText;
-          if (alreadyEmitted === snapshotText) {
-            continue;
-          }
-          if (alreadyEmitted.length === 0) {
-            detail.emittedText = snapshotText;
-            events.push({ kind: "delta", text: snapshotText });
-          } else if (snapshotText.startsWith(alreadyEmitted)) {
-            const suffix = snapshotText.slice(alreadyEmitted.length);
-            detail.emittedText = snapshotText;
-            events.push({ kind: "delta", text: suffix });
-          } else {
-            return {
-              events: [],
-              failure: `[pr-hero] opencode client: conflicting snapshot in readback for part ${partId}`,
-            };
-          }
+    let canonicalFinalText = "";
+    for (const partId of msgDetail.partIds) {
+      const detail = state.partDetails.get(partId);
+      if (
+        detail &&
+        detail.type === "text" &&
+        !detail.synthetic &&
+        !detail.ignored
+      ) {
+        canonicalFinalText += detail.text ?? detail.emittedText ?? "";
+      }
+    }
+
+    // #223: this is the ONLY place in this function that advances
+    // `detail.emittedText` or produces a `delta` event, so it is exactly what
+    // `emit: false` must skip. Skipping it here rather than filtering the
+    // caller's returned `events` afterward keeps the invariant literal:
+    // `emittedText` cannot advance except in the same branch that hands a
+    // delta to the consumer, so a discard-only caller can never leave the
+    // "already delivered" bookkeeping ahead of what was actually delivered.
+    for (const partId of emit ? msgDetail.partIds : []) {
+      const detail = state.partDetails.get(partId);
+      if (
+        detail &&
+        detail.type === "text" &&
+        !detail.synthetic &&
+        !detail.ignored
+      ) {
+        const snapshotText = detail.text ?? "";
+        const alreadyEmitted = detail.emittedText;
+        if (alreadyEmitted === snapshotText) {
+          continue;
+        }
+        if (alreadyEmitted.length === 0) {
+          detail.emittedText = snapshotText;
+          events.push({ kind: "delta", text: snapshotText });
+        } else if (snapshotText.startsWith(alreadyEmitted)) {
+          const suffix = snapshotText.slice(alreadyEmitted.length);
+          detail.emittedText = snapshotText;
+          events.push({ kind: "delta", text: suffix });
+        } else {
+          state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot in readback for part ${partId}`;
+          return {
+            events: [],
+            failure: state.integrityFailure,
+          };
         }
       }
     }
 
-    return { events, terminalProof: proof };
+    const totalUsage = turnUsage(state);
+    const isIncomplete =
+      state.usageIncomplete === true ||
+      state.usageConflict === true ||
+      state.usageCapped === true;
+
+    return {
+      events,
+      terminalProof: proof,
+      finalText: canonicalFinalText,
+      usage: totalUsage,
+      usageIncomplete: isIncomplete,
+    };
   }
 
   return { events: [] };
 }
+
+export const reconcilePartsAndDelivery = reconcileMessages;
 
 export function mapOpenCodeEvents(
   raw: unknown,
@@ -794,6 +1172,11 @@ export function mapOpenCodeEvents(
     case "message.removed": {
       const messageId = p.messageID;
       if (typeof messageId === "string") {
+        if (
+          !state.tombstones.has(messageId) &&
+          state.tombstones.size >= MAX_TOMBSTONES
+        )
+          failIntegrity(state, "tombstone cap exceeded");
         rememberId(state.tombstones, messageId, MAX_TOMBSTONES);
         if (
           messageId === state.currentUserId ||
@@ -809,6 +1192,11 @@ export function mapOpenCodeEvents(
     case "message.part.removed": {
       const partId = p.partID;
       if (typeof partId === "string") {
+        if (
+          !state.tombstones.has(partId) &&
+          state.tombstones.size >= MAX_TOMBSTONES
+        )
+          failIntegrity(state, "tombstone cap exceeded");
         rememberId(state.tombstones, partId, MAX_TOMBSTONES);
         const detail = state.partDetails.get(partId);
         if (
@@ -837,12 +1225,11 @@ export function mapOpenCodeEvents(
       if (info === undefined) return [];
       const id = typeof info.id === "string" ? info.id : undefined;
       if (!id) return [];
+      trackMessage(state, info);
+
       const role = info.role;
 
       if (role === "user") {
-        if (state.currentUserId === undefined) {
-          state.currentUserId = id;
-        }
         state.messageDetails.set(id, { id, role: "user", partIds: [] });
         return [];
       }
@@ -856,11 +1243,18 @@ export function mapOpenCodeEvents(
 
       const finish = typeof info.finish === "string" ? info.finish : undefined;
       const isToolCalls = finish === "tool-calls" || finish === "tool_calls";
+      const sessionID =
+        typeof info.sessionID === "string"
+          ? info.sessionID
+          : typeof p.sessionID === "string"
+            ? (p.sessionID as string)
+            : undefined;
       let msgDetail = state.messageDetails.get(id);
       if (!msgDetail) {
         msgDetail = {
           id,
           role: "assistant",
+          sessionID,
           parentID,
           time: asRecord(info.time) as
             | { created?: number; completed?: number }
@@ -872,6 +1266,7 @@ export function mapOpenCodeEvents(
         };
         state.messageDetails.set(id, msgDetail);
       } else {
+        msgDetail.sessionID = sessionID ?? msgDetail.sessionID;
         msgDetail.parentID = parentID ?? msgDetail.parentID;
         msgDetail.finish = finish ?? msgDetail.finish;
         msgDetail.error = info.error ?? msgDetail.error;
@@ -882,6 +1277,7 @@ export function mapOpenCodeEvents(
         if (isToolCalls) msgDetail.hasToolCalls = true;
       }
 
+      if (!isMessageOwned(id, state)) return [];
       const out: OpenCodeClientEvent[] = [];
       out.push(...reconcileUnknownOwnerBuffer(id, state));
 
@@ -894,16 +1290,23 @@ export function mapOpenCodeEvents(
         outputTokens !== undefined ||
         costUsd !== undefined
       ) {
-        rememberUsage(state, id, {
-          ...(inputTokens !== undefined ? { inputTokens } : {}),
-          ...(outputTokens !== undefined ? { outputTokens } : {}),
-          ...(costUsd !== undefined ? { costUsd } : {}),
-        });
+        rememberUsage(
+          state,
+          id,
+          {
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            ...(costUsd !== undefined ? { costUsd } : {}),
+          },
+          asNumber(asRecord(info.time)?.completed) !== undefined,
+        );
         out.push({
           kind: "usage",
           id,
           mode: "snapshot",
-          ...(state.usageCapped ? { incomplete: true } : {}),
+          ...(state.usageCapped || state.usageConflict || state.usageIncomplete
+            ? { incomplete: true }
+            : {}),
           ...turnUsage(state),
         });
       }
@@ -1039,21 +1442,42 @@ export interface OpenCodeSdkPromptParameters {
 // signatures for a reason that has nothing to do with conformance.
 export interface OpenCodeSdkClientApi {
   readonly session: {
-    create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
+    create(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<{ id: string; directory?: string }>>;
     prompt(
       parameters: OpenCodeSdkPromptParameters,
+      request?: { signal?: AbortSignal },
     ): Promise<OpenCodeSdkResult<unknown>>;
-    messages(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    messages(
+      options: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
     // `GET /session/status` — the POLL observer's turn boundary (#127), and a
     // different endpoint from session.messages(), which is the point: §197
     // wants two INDEPENDENT observers, not two pipes onto one fact. REQUIRED,
     // never optional, for the same reason `tool.ids` is: an optional member
     // lets a fake skip the surface silently, which is the shape of issue #121.
-    status(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
-    abort(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    status(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
+    abort(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
   };
   readonly event: {
-    subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
+    // `parameters`, not `options`: the SDK's first argument is the parameters
+    // slot (`{directory?, workspace?}`); request options are its SECOND. The
+    // old name invited `subscribe({ signal })`, and the call site did exactly
+    // that — buildClientParams drops unknown keys, so the signal vanished and
+    // no directory was ever sent. Only the first argument is declared because
+    // it is the only one the call site passes.
+    subscribe(
+      parameters?: unknown,
+    ): Promise<{ stream: AsyncIterable<unknown> }>;
   };
   // `GET /experimental/tool/ids` — "List all tool IDs (including built-in and
   // dynamically registered)". REQUIRED, never optional: an optional member
@@ -1061,7 +1485,10 @@ export interface OpenCodeSdkClientApi {
   // The endpoint is experimental-prefixed, so pinning it here (and in the
   // surface conformance test) is what keeps a rename from going unnoticed.
   readonly tool: {
-    ids(options?: unknown): Promise<OpenCodeSdkResult<readonly string[]>>;
+    ids(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<readonly string[]>>;
   };
   // `GET /mcp` — the §E readback's endpoint, and the only place a connected
   // MCP server is visible at all: it contributes nothing to `tool.ids` or
@@ -1070,7 +1497,10 @@ export interface OpenCodeSdkClientApi {
   // surface silently, which is the shape of issue #121, and a skipped readback
   // is an unverified tool channel rather than a missing convenience.
   readonly mcp: {
-    status(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    status(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
   };
 }
 
@@ -1142,6 +1572,19 @@ function describeSdkError(error: unknown): string {
 
 export interface CreateOpenCodeClientOptions {
   readonly loadSdk: () => Promise<OpenCodeSdkLike>;
+  /** Injected only for deterministic protocol fixtures; production IDs match ^msg. */
+  readonly createMessageId?: () => string;
+  readonly observedIdentity?: {
+    sdkVersion: string;
+    serverVersion: string;
+    executableSha256: string;
+  };
+  readonly fetch?: typeof fetch;
+  /** Production factory requires actual serving identity and pinned /doc proof. */
+  readonly qualifyServer?: (
+    url: string,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
   // #141: the run's MCP registry travels INTO the launch. OpenCode reads it
   // from the environment at startup, so a server already running cannot be
   // given one without leaving a window between "server up" and "MCP
@@ -1266,6 +1709,7 @@ function resolveToolMap(
 }
 
 interface SessionState {
+  evidence: OpenCodeEvidenceCollector;
   readonly api: OpenCodeSdkClientApi;
   // ONE consumer of the subscription, ever. The pump owns the iterator and
   // hands events over through this queue; streamEvents never touches the
@@ -1276,6 +1720,7 @@ interface SessionState {
   // (F002/F003 on PR #84) — in a repo that had already written the hazard
   // down, in opencode-sdk.ts, and walked into it anyway.
   readonly queue: unknown[];
+  queueBytes: number;
   // #124: partID → part kind, correlated from `message.part.updated`. #127
   // added the turn's proof and usage accumulators alongside them. Lives on the
   // session because that is the scope both are valid in, and because they must
@@ -1342,6 +1787,7 @@ export function createOpenCodeClient(
   options: CreateOpenCodeClientOptions,
 ): OpenCodeClientLike & { close(): Promise<void> } {
   const states = new Map<string, SessionState>();
+  const captures = new Map<string, OpenCodeEvidenceCollector>();
   const denyFloor = options.denyFloor ?? DEFAULT_DENY_FLOOR;
   // ONE server for the whole client, launched lazily. A server per SESSION
   // left a spawned process behind for every attempt, released only by a
@@ -1388,12 +1834,54 @@ export function createOpenCodeClient(
   }
 
   return {
+    takeEvidence(sessionId, attempt) {
+      const key = `${sessionId}:${attempt}`;
+      const collector = captures.get(key);
+      captures.delete(key);
+      return collector?.snapshot();
+    },
     async createSession(
       input: OpenCodeCreateSessionInput,
     ): Promise<OpenCodeClientSession> {
+      const evidence = new OpenCodeEvidenceCollector(
+        input.correlation ?? { sessionId: "unavailable", attempt: 0 },
+      );
+      if (input.correlation)
+        captures.set(
+          `${input.correlation.sessionId}:${input.correlation.attempt}`,
+          evidence,
+        );
+      evidence.record("runtime_identity", options.observedIdentity ?? null);
+      const checkCancelled = () => input.signal?.throwIfAborted();
+      checkCancelled();
+      const requestOptions = { signal: input.signal };
+      let cleanupDeadline: number | undefined;
+      const cleanup = async (
+        work: (signal: AbortSignal) => Promise<unknown>,
+      ) => {
+        const controller = new AbortController();
+        cleanupDeadline ??= performance.now() + 1_000;
+        const remaining = Math.max(0, cleanupDeadline - performance.now());
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            work(controller.signal),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(() => {
+                controller.abort();
+                resolve();
+              }, remaining);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          controller.abort();
+        }
+      };
       let sdk: OpenCodeSdkLike;
       try {
         sdk = await options.loadSdk();
+        checkCancelled();
       } catch (error) {
         throw new Error(
           "the opencode backend needs @opencode-ai/sdk, which is an optional " +
@@ -1416,6 +1904,7 @@ export function createOpenCodeClient(
       // must cost nothing to unwind — and because §D needs the config in hand
       // at launch, not after it.
       const mcpConfig = await resolveMcpConfig(options, input);
+      checkCancelled();
       const mcpFingerprint = JSON.stringify(mcpConfig);
 
       if (serverPromise === undefined) {
@@ -1440,12 +1929,24 @@ export function createOpenCodeClient(
         );
       }
       const handle = server ?? (await serverPromise);
-      const api = sdk.createOpencodeClient({ baseUrl: handle.url });
+      checkCancelled();
+      const api = sdk.createOpencodeClient({
+        baseUrl: handle.url,
+        fetch: evidence.wrapFetch((request) =>
+          (options.fetch ?? globalThis.fetch)(request),
+        ),
+      });
 
       let sessionId: string | undefined;
       let subscription: { stream: AsyncIterable<unknown> } | undefined;
       establishing += 1;
       try {
+        const qualification = await options.qualifyServer?.(
+          handle.url,
+          input.signal,
+        );
+        evidence.record("server_qualification", qualification ?? null);
+        checkCancelled();
         // §E, and FIRST: the OpenCode analogue of claude-code's
         // `--strict-mcp-config`, except claude-code DECLARES its isolation
         // with a flag and this reads the connected set back from the provider.
@@ -1460,11 +1961,12 @@ export function createOpenCodeClient(
         //
         // The `directory` scope mirrors what the request asked for, and the
         // #127 analogue was checked rather than assumed. session.status
-        // reported {} for a BUSY session given a directory the server was not
-        // started in, so pollStatus below omits the parameter entirely — the
-        // obvious worry is that mcp.status scopes the same way and would then
-        // abort every PR-mode step, since the server inherits pr-hero's cwd
-        // and never the worktree.
+        // reported {} for a BUSY session given a directory other than the
+        // one its session was created under (#223) — so pollStatus below
+        // passes the SAME directory session.create used, never omits it —
+        // and the obvious worry was that mcp.status scopes the same way and
+        // would then abort every PR-mode step, since the server inherits
+        // pr-hero's cwd and never the worktree.
         //
         // It does not. MEASURED against a real PR worktree, with the server's
         // cwd deliberately elsewhere: `directory` set to the worktree, to the
@@ -1476,16 +1978,32 @@ export function createOpenCodeClient(
         // failure rather than a silent PR-mode outage.
         assertMcpConnected(
           unwrap(
-            await api.mcp.status({ query: { directory: input.cwd } }),
+            await api.mcp.status({ directory: input.cwd }, requestOptions),
             "mcp.status",
           ),
           Object.keys(mcpConfig),
         );
 
-        const created = await api.session.create({
-          title: "pr-hero review step",
-        });
-        sessionId = unwrap(created, "session.create").id;
+        checkCancelled();
+        const created = await api.session.create(
+          {
+            directory: input.cwd,
+            title: "pr-hero review step",
+          },
+          requestOptions,
+        );
+        const sessionRecord = unwrap(created, "session.create");
+        sessionId = sessionRecord.id;
+        checkCancelled();
+        if (
+          typeof sessionRecord.directory !== "string" ||
+          canonicalDirectory(sessionRecord.directory) !==
+            canonicalDirectory(input.cwd)
+        ) {
+          throw new Error(
+            `opencode session created with mismatched directory: expected ${input.cwd}, got ${sessionRecord.directory}`,
+          );
+        }
 
         // Subscribed BEFORE the prompt, and the ordering is not stylistic.
         // event.subscribe() is live and unbuffered, so a subscription opened
@@ -1493,7 +2011,25 @@ export function createOpenCodeClient(
         // first deltas. The contract splits createSession and streamEvents
         // into separate calls, so unless the buffering happens here that
         // window cannot be closed at all.
-        subscription = await api.event.subscribe();
+        //
+        // #223: `directory` here MUST be the same one session.create used
+        // above (input.cwd) — GET /event is scoped by directory instance,
+        // exactly like GET /session/status (see pollStatus). Measured
+        // against opencode 1.18.30: a subscription opened under a different
+        // directory than the session's own sees only
+        // server.connected/heartbeat and never this session's events at all.
+        //
+        // `requestOptions` (`{signal}`) is deliberately NOT passed here. It
+        // used to be passed as the FIRST argument — the SDK's parameters
+        // slot, not its request-options slot — where buildClientParams drops
+        // unknown keys, so the SSE request has never carried an abort signal;
+        // stream close has always been owned by cleanup's `return()`. Moving
+        // it to the second argument would change live cancellation semantics
+        // (an AbortError inside the pump) that no fake here exercises, since
+        // the fakes ignore call options. That is a separate change.
+        subscription = await api.event.subscribe({ directory: input.cwd });
+        evidence.record("subscription_ready", { sessionId });
+        checkCancelled();
 
         // #128: enumerate AFTER create+subscribe, immediately before the
         // prompt. The map is a snapshot of tool.ids(); an id registered in
@@ -1512,7 +2048,7 @@ export function createOpenCodeClient(
         let reported: readonly string[];
         try {
           reported = unwrap(
-            await api.tool.ids({ query: { directory: input.cwd } }),
+            await api.tool.ids({ directory: input.cwd }, requestOptions),
             "tool.ids",
           );
         } catch (error) {
@@ -1543,10 +2079,22 @@ export function createOpenCodeClient(
           mcpToolIdsFor(mcpConfig),
         );
 
+        const userMessageId =
+          options.createMessageId?.() ??
+          `msg_${Date.now().toString(16)}${crypto.randomUUID().replaceAll("-", "")}`;
+        if (!/^msg/.test(userMessageId))
+          throw new Error("invalid OpenCode submitted message identity");
+        evidence.record("session_identity", {
+          sessionId,
+          userMessageId,
+          cwd: input.cwd,
+        });
         const state: SessionState = {
+          evidence,
           api,
           queue: [],
-          turn: createTurnState(),
+          queueBytes: 0,
+          turn: createTurnState(sessionId, userMessageId, input.cwd),
           observedActive: false,
           ended: false,
         };
@@ -1558,6 +2106,16 @@ export function createOpenCodeClient(
         void (async () => {
           try {
             for await (const raw of subscription.stream) {
+              evidence.record("event", raw);
+              const rawSize = Buffer.byteLength(JSON.stringify(raw), "utf8");
+              state.queueBytes += rawSize;
+              if (state.queueBytes > 4 * 1024 * 1024) {
+                state.turn.integrityFailure =
+                  "[pr-hero] opencode client: raw subscription queue cap exceeded (cap exhaustion)";
+                state.wake?.();
+                state.wake = undefined;
+                break;
+              }
               state.queue.push(raw);
               state.wake?.();
               state.wake = undefined;
@@ -1604,6 +2162,7 @@ export function createOpenCodeClient(
             const variant = options.variant ?? options.model.variant;
             const promptParams: OpenCodeSdkPromptParameters = {
               sessionID: sessionId,
+              messageID: userMessageId,
               directory: input.cwd,
               model: {
                 providerID: options.model.providerID,
@@ -1623,7 +2182,25 @@ export function createOpenCodeClient(
               },
               enumerable: false,
             });
-            unwrap(await api.session.prompt(promptParams), "session.prompt");
+            checkCancelled();
+            const promptResult = unwrap(
+              await api.session.prompt(promptParams, requestOptions),
+              "session.prompt",
+            );
+            evidence.record("prompt_result", promptResult);
+            if (asRecord(asRecord(promptResult)?.info) !== undefined) {
+              // #223: this reconcile is INGEST ONLY — its `events` are
+              // discarded because the event stream, never this blocking HTTP
+              // response, is the delivery channel (see the "FIRED, never
+              // awaited" comment above). `emit: false` keeps that discard
+              // honest: two of twelve live opencode 1.18.30 attempts had this
+              // call race ahead of the SAME text part's own announce -> delta
+              // -> snapshot lifecycle on the stream, and letting it advance
+              // `emittedText` here — for text nobody was actually handed —
+              // made the stream's own, perfectly ordinary snapshot look like
+              // a conflicting one and threw away a correct answer.
+              reconcileMessages([promptResult], state.turn, { emit: false });
+            }
           } catch (error) {
             state.failure = (error as Error).message;
             state.ended = true;
@@ -1646,7 +2223,7 @@ export function createOpenCodeClient(
         // against the shared server for as long as a sibling keeps it alive.
         if (subscription !== undefined) {
           const iterator = subscription.stream[Symbol.asyncIterator]();
-          await iterator.return?.();
+          await cleanup(async () => iterator.return?.());
         }
         // Unwind whatever this call managed to create. Without this the
         // caller gets an exception and no id, so nothing can be released by
@@ -1669,9 +2246,11 @@ export function createOpenCodeClient(
           // caused the unwind is the one the caller must still see — masking
           // it with a teardown detail would trade a diagnosis for a symptom.
           try {
-            unwrap(
-              await api.session.abort({ sessionID: sessionId }),
-              "session.abort",
+            await cleanup(async (signal) =>
+              unwrap(
+                await api.session.abort({ sessionID: sessionId }, { signal }),
+                "session.abort",
+              ),
             );
           } catch (abortError) {
             const detail = (abortError as Error).message;
@@ -1700,7 +2279,12 @@ export function createOpenCodeClient(
       // through the same door — so there is no handoff to race.
       for (;;) {
         while (state.queue.length > 0) {
-          yield* mapOpenCodeEvents(state.queue.shift(), session.id, state.turn);
+          const raw = state.queue.shift();
+          state.queueBytes = Math.max(
+            0,
+            state.queueBytes - Buffer.byteLength(JSON.stringify(raw), "utf8"),
+          );
+          yield* mapOpenCodeEvents(raw, session.id, state.turn);
         }
         if (state.turn.integrityFailure !== undefined) {
           throw new Error(state.turn.integrityFailure);
@@ -1719,6 +2303,7 @@ export function createOpenCodeClient(
 
     async pollStatus(
       session: OpenCodeClientSession,
+      signal?: AbortSignal,
     ): Promise<OpenCodePollResult> {
       const state = states.get(session.id);
       // #131: abort() owns the Map release. Absence must not throw (a throw
@@ -1755,15 +2340,33 @@ export function createOpenCodeClient(
       // permanently blind and §197 down to one observer again. The explicit
       // arm is still honoured for the build that does send it.
       //
-      // NO `directory` query, and that is measured too: the session is created
-      // without one, so it registers under the SERVER's cwd, while prompts
-      // carry the step's cwd. `GET /session/status?directory=<step cwd>`
-      // returned {} for a session that was BUSY at that moment. Passing the
-      // step cwd here would have made every busy session look absent — which
-      // is to say, look finished — and reopened #127 through its own fix.
+      // #223: `directory` IS required, and it must be the SAME one
+      // session.create used for this session — `state.turn.expectedCwd`,
+      // set from `input.cwd` by `createTurnState` (and the exact value
+      // `session.messages` below queries with too). Measured against
+      // opencode 1.18.30: `GET /session/status` is scoped by directory
+      // instance exactly like `GET /event` above, so omitting it — or
+      // naming a different one — watches an instance that has never heard
+      // of this session and reports it `{}` even while it is BUSY. That is
+      // indistinguishable from "finished" in the response shape, which is
+      // #127 reopened: a wrong scope silently discards the model's answer
+      // once the useful-progress deadline elapses, because this observer
+      // never sees anything to report.
+      //
+      // The still-true half of the old rationale survives below: absence is
+      // ambiguous on its own even with the RIGHT directory, because it is
+      // also what a session this call has simply never seen looks like.
       const statuses = asRecord(
-        unwrap(await state.api.session.status({}), "session.status"),
+        unwrap(
+          await state.api.session.status(
+            { directory: state.turn.expectedCwd },
+            { signal },
+          ),
+          "session.status",
+        ),
       );
+      signal?.throwIfAborted();
+      state.evidence.record("status", { sessionId: session.id, statuses });
       const statusType = asRecord(statuses?.[session.id])?.type;
       // Both are the provider still working. `retry` especially: a session in
       // backoff is neither done nor idle, and it will produce more steps — its
@@ -1778,42 +2381,62 @@ export function createOpenCodeClient(
         // endpoint. An explicit idle names it, so it arms and settles at once.
         if (statusType === "idle") state.observedActive = true;
         if (state.observedActive) {
-          const response = await state.api.session.messages({
-            sessionID: session.id,
-          });
+          signal?.throwIfAborted();
+          const response = await state.api.session.messages(
+            {
+              sessionID: session.id,
+              directory: state.turn.expectedCwd,
+            },
+            { signal },
+          );
+          signal?.throwIfAborted();
           // Throws on the error arm rather than reporting "pending": the
           // caller treats a poll that throws as a FAILED OBSERVATION and
           // counts it (opencode-sdk.ts:707), whereas a silent "pending" would
           // let the attempt run to its stall deadline on an API error the
           // provider already explained.
           const messages = unwrap(response, "session.messages");
-          const list = Array.isArray(messages)
-            ? messages
-            : Array.isArray((messages as { data?: unknown })?.data)
-              ? (messages as { data: unknown[] }).data
-              : [];
-
-          reconcileMessages(list, state.turn);
-          if (state.turn.integrityFailure !== undefined) {
+          state.evidence.record("readback", {
+            sessionId: session.id,
+            cwd: state.turn.expectedCwd,
+            coverage: Array.isArray(messages) ? "complete" : "unknown",
+            messages,
+          });
+          // The qualified ordinary endpoint returns the complete array when
+          // no limit is supplied. An object/cursor is unknown coverage, not []
+          // and never an excuse to reuse a prior terminal snapshot.
+          if (!Array.isArray(messages)) {
+            state.turn.integrityFailure =
+              "[pr-hero] opencode client: unknown message readback coverage";
             return { kind: "failed", detail: state.turn.integrityFailure };
+          }
+          const list = messages;
+
+          const reconciled = reconcileMessages(list, state.turn);
+          if (
+            reconciled.failure !== undefined ||
+            state.turn.integrityFailure !== undefined
+          ) {
+            return {
+              kind: "failed",
+              detail:
+                reconciled.failure ??
+                state.turn.integrityFailure ??
+                "opencode client integrity failure",
+            };
           }
           if (hasOutstandingTools(state.turn)) {
             return { kind: "pending" };
           }
 
-          // The turn has ended; the last completed assistant message supplies
-          // the proof CONTENT — the same helper the stream uses, on purpose.
-          // §197 wants two INDEPENDENT observers of ONE fact, not two facts
-          // that happen to resemble each other: two copies of this derivation
-          // could drift and manufacture a conflict out of nothing.
-          //
-          // No completed message means no proof, and none is invented. The
-          // attempt then falls to the harness watchdog, which is the correct
-          // place for a turn that never produced a completion record.
-          for (let i = list.length - 1; i >= 0; i -= 1) {
-            const info = (list[i] as { info?: unknown })?.info ?? list[i];
-            const proof = terminalProofFromAssistant(info, state.turn);
-            if (proof !== undefined) return { kind: "terminal", proof };
+          if (reconciled.terminalProof !== undefined) {
+            return {
+              kind: "terminal",
+              proof: reconciled.terminalProof,
+              finalText: reconciled.finalText,
+              usage: reconciled.usage,
+              usageIncomplete: reconciled.usageIncomplete,
+            };
           }
         }
       }
@@ -1847,10 +2470,12 @@ export function createOpenCodeClient(
       // (opencode-sdk.ts's callAbortOnce) catches and stamps a note into
       // stderrTail, which keeps abort best-effort — observed, never fatal to
       // the teardown it runs inside.
+      state.evidence.record("abort_requested", { sessionId: session.id });
       unwrap(
         await state.api.session.abort({ sessionID: session.id }),
         "session.abort",
       );
+      state.evidence.record("abort_acknowledged", { sessionId: session.id });
       // #131: abort is the attempt's teardown, so it owns the Map release.
       // streamEvents already holds this object by reference, so in-flight
       // readers survive the delete; later pollStatus/abort see the gap.
