@@ -291,6 +291,7 @@ import {
   collapseTargets,
   decideLastHeadDelta,
   enrichPriorsFromThreads,
+  incompleteLastReviewMessage,
   parseNameOnly,
   parseNameStatus,
   prepareDiscovery,
@@ -405,6 +406,7 @@ import { watchCommand } from "./watch";
 import {
   markerCommentSeen,
   parseMarkerHead,
+  parsePrCommentMarker,
   parsePrFiles,
 } from "./watch-preflight";
 import { isMachineOnboarded, runWizard } from "./wizard";
@@ -2410,17 +2412,26 @@ async function reviewPr(
       fetchPrReviewComments(operatorRoot, prNumber),
     ]);
     const existingSummaryId = findMarkedCommentId(issueComments);
-    const summaryHead =
+    // parsePrCommentMarker, not parseMarkerHead: this is the ONE call site
+    // that decides whether the L this run is about to trust actually
+    // finished (rereview-coverage fix). A missing or unparseable
+    // marker means "nothing to distrust" — summaryComplete defaults true and
+    // is then ignored anyway, since resolveLastReviewedHead only consults it
+    // when summaryHead itself is non-null.
+    const summaryMarker =
       existingSummaryId === null
         ? null
-        : parseMarkerHead(
+        : parsePrCommentMarker(
             issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
           );
+    const summaryHead = summaryMarker?.head ?? null;
+    const summaryComplete = summaryMarker?.complete ?? true;
     const prepared = await prepareDiscovery({
       B: diffFromSha,
       H: headSha,
       full: options.full,
       summaryHead,
+      summaryComplete,
       findingMarkers: postedFindings.map((p) => ({
         headSha: p.marker.headSha,
         createdAt: p.created_at ?? "",
@@ -2503,6 +2514,15 @@ async function reviewPr(
       if (lastHeadDelta.kind === "unreachable") {
         const degraded = unreachableLastHeadMessage(lastHeadDelta.sha);
         log(isCi ? formatWorkflowCommand("notice", degraded) : degraded);
+      } else if (lastHeadDelta.kind === "diff" && !prepared.last.lastComplete) {
+        // The incomplete-review notice, same mechanism and "said once, in CI and out"
+        // rule as the unreachable one above — case E's unreachable message
+        // already explains "full review, re-verify everything" for that
+        // case, so this covers exactly the cases the unreachable branch
+        // does not: a forced-full B/C re-review because the LAST review
+        // (not this one) never finished.
+        const incomplete = incompleteLastReviewMessage(lastHeadDelta.from);
+        log(isCi ? formatWorkflowCommand("notice", incomplete) : incomplete);
       }
       const nameStatus = parseNameStatus(
         lastHeadDelta.kind === "diff"
@@ -2536,6 +2556,14 @@ async function reviewPr(
         priors,
         nameStatus,
         summaryUpdatedAt,
+        // Rereview-coverage wiring fix: `plan.
+        // verifyAll` was computed but never read anywhere in production —
+        // classifyPrior only ever forced verify_all off `case === "D" ||
+        // "E"`, and decideRereviewCase stays UNCHANGED by this fix (the
+        // case stays B/C, only discovery widens, per R2-C5). Without this,
+        // `verifyAll: true` on a forced-full case B/C would be a silent
+        // no-op and the refuter-failed prior would never be re-verified.
+        verifyAll: prepared.plan.verifyAll,
       });
       verifyQueue = classified.queued;
       overlapCandidates = classified.overlapCandidates;

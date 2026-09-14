@@ -299,8 +299,26 @@ export function decideWorktree(input: {
 // a foreign lookalike marker such as `<!-- pr-hero-reporter -->` does not.
 export const PR_COMMENT_MARKER_PREFIX = "<!-- pr-hero-report ";
 
-export function prCommentMarker(headSha: string): string {
-  return `<!-- pr-hero-report head=${headSha} -->`;
+// Rereview-coverage fix (GitHub #42's re-review half, MusiveTech/musive
+// #1823): a PARTIAL run (some hunters or the refuter failed, but not all —
+// `sessionFailed` false) used to post the exact same marker a COMPLETE run
+// posts. The next `pr-hero review --pr N` on the same head then trusted
+// L===H and skipped discovery entirely, so the missing hunters never ran
+// and the failed refuter never re-verified anything — silently, forever,
+// until a genuinely new push arrived. This token is the fix's whole wire
+// contract: named once, spelled once, consulted by exact match only (see
+// parsePrCommentMarker in watch-preflight.ts).
+export const PR_COMMENT_COVERAGE_PARTIAL_TOKEN = "coverage=partial";
+
+// `complete` defaults to `true` so every pre-existing one-argument call —
+// every already-posted comment, every test in this codebase — stays
+// BYTE-IDENTICAL to the marker this function emitted before this fix. Only
+// `renderPrComment` (report.ts), which actually knows `doc.run_status`,
+// passes `false`.
+export function prCommentMarker(headSha: string, complete = true): string {
+  return complete
+    ? `<!-- pr-hero-report head=${headSha} -->`
+    : `<!-- pr-hero-report head=${headSha} ${PR_COMMENT_COVERAGE_PARTIAL_TOKEN} -->`;
 }
 
 // Finds the comment a --post run should update. A comment matches only when

@@ -613,7 +613,16 @@ export function renderPrComment(
   // watcher that the new head was reviewed — the same silent lie the pin and
   // the notice below exist to kill, just relocated into the machine-readable
   // half of the comment.
-  const out: string[] = [prCommentMarker(doc.head_sha)];
+  // Rereview-coverage fix: a PARTIAL run's marker carries the
+  // coverage=partial token so the NEXT `pr-hero review --pr N` can tell (via
+  // parsePrCommentMarker) that this run never finished and must not trust
+  // L===H the way a clean case B/C would. A COMPLETE run's marker stays
+  // byte-identical to before — the self-healing property: a forced-full
+  // re-run that is ITSELF partial writes coverage=partial again, so coverage
+  // stays forced until a run actually completes.
+  const out: string[] = [
+    prCommentMarker(doc.head_sha, doc.run_status !== "partial"),
+  ];
   out.push("## pr-hero review");
   out.push("");
   // GitHub #39, and it goes FIRST — above the #42 incompleteness notice and

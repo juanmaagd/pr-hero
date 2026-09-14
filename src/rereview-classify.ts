@@ -67,6 +67,19 @@ export interface PhaseBContext {
   renameMap: ReadonlyMap<string, string>;
   touched: (identity: FindingIdentity) => boolean;
   summaryUpdatedAt: string | null;
+  // Rereview-coverage fix wiring gap:
+  // `DiscoveryPlan.verifyAll` (rereview-plan.ts) was
+  // computed for every case but never READ by any production code — this
+  // function forced verify_all purely off `case === "D" || "E"`, and
+  // buildPhaseBQueue (rereview-prepare.ts) passed it only `case`, never the
+  // plan. That made `planDiscovery`'s `verifyAll: true` for a forced-full
+  // case B/C (an incomplete prior run) a silent no-op: the refuter-failed
+  // prior would stay merely `carried` (case B's empty L===H nameStatus never
+  // touches anything) or `queued: touched` at best (case C) — never
+  // `verify_all`. This field closes that gap: `true` forces verify_all
+  // exactly like case D/E do, for ANY case, so a forced-full re-review
+  // actually re-verifies every prior instead of trusting them unexamined.
+  verifyAll?: boolean;
 }
 
 export interface PhaseBResult {
@@ -107,7 +120,7 @@ export function classifyPrior(
     return { id: prior.id, status: "re-tiered", locs, renamed };
   }
 
-  if (ctx.case === "D" || ctx.case === "E") {
+  if (ctx.case === "D" || ctx.case === "E" || ctx.verifyAll === true) {
     return {
       id: prior.id,
       status: "queued",
