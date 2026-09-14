@@ -2055,8 +2055,10 @@ async function reviewPr(
       existingSummaryId === null
         ? null
         : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? null);
-    const summaryHead =
-      summaryBody === null ? null : parseMarkerHead(summaryBody);
+    const summaryMarker =
+      summaryBody === null ? null : parsePrCommentMarker(summaryBody);
+    const summaryHead = summaryMarker?.head ?? null;
+    const summaryComplete = summaryMarker?.complete ?? true;
     const state = summaryBody === null ? null : parseStateBlock(summaryBody);
     const parsedAdmission =
       summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
@@ -2125,6 +2127,7 @@ async function reviewPr(
     const admissionVerdict = evaluateCiReviewAdmission({
       currentHead: target.headSha,
       summaryHead,
+      summaryComplete,
       markerSeen,
       reviewCount,
       state,

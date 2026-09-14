@@ -578,9 +578,11 @@ export function parsePrCommentMarker(
 // for both wire forms, and this function does not distinguish them. There is
 // deliberately NO automatic relaunch loop for a PR whose review keeps timing
 // out: the watcher's one-review-per-PR eligibility stays exactly as it was.
-// Recovery is an explicit `pr-hero review --pr N` (which DOES force a full
-// re-review via `lastComplete`, see rereview-plan.ts) or a new push — never
-// the watcher noticing coverage=partial and retrying on its own.
+// Recovery is an explicit `pr-hero review --pr N`, a CI re-run of the same
+// commit (CI admission does not treat a partial same-head review as done,
+// see evaluateCiReviewAdmission), or a new push; each forces a full
+// re-review via `lastComplete` (rereview-plan.ts). Never the watcher noticing
+// coverage=partial and retrying on its own.
 export function markerDeclaredHeads(comments: { body: string }[]): string[] {
   const heads: string[] = [];
   for (const comment of comments) {

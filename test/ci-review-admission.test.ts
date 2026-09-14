@@ -384,6 +384,90 @@ describe("evaluateCiReviewAdmission", () => {
     }
   });
 
+  // A partial prior review on this head is a floor, not a verdict: "same
+  // head" cannot skip it, and neither can its own below-threshold score.
+  // The attempt cap and the explicit manual_only/once_per_pr policies still
+  // apply, so a head whose agents keep timing out cannot loop unbounded.
+  test("same head whose last review was partial runs instead of skipping", () => {
+    const admission = parseCiAdmissionBlock(
+      admissionBody({ blocking: 0, advisory: 0 }),
+    );
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_A,
+        summaryHead: HEAD_A,
+        summaryComplete: false,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission,
+        postedFindings: null,
+        policy: policy({ mode: "thresholded" }),
+      }),
+    );
+    expect(verdict).toEqual({ action: "run" });
+  });
+
+  test("same head whose last review was partial still respects the attempt cap", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_A,
+        summaryHead: HEAD_A,
+        summaryComplete: false,
+        markerSeen: true,
+        reviewCount: DEFAULT_CI_MAX_ATTEMPTS,
+        state: null,
+        admission: null,
+        postedFindings: null,
+        policy: DEFAULT_POLICY,
+      }),
+    );
+    expect(verdict.action).toBe("manual-required");
+    if (verdict.action === "manual-required") {
+      expect(verdict.reason).toBe("max-attempts-exhausted");
+    }
+  });
+
+  test("same head whose last review was partial still respects once_per_pr", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_A,
+        summaryHead: HEAD_A,
+        summaryComplete: false,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: null,
+        postedFindings: null,
+        policy: policy({ mode: "once_per_pr" }),
+      }),
+    );
+    expect(verdict.action).toBe("skip");
+    if (verdict.action === "skip") {
+      expect(verdict.reason).toBe("once-per-pr");
+    }
+  });
+
+  test("same head with an explicitly complete last review still skips", () => {
+    const verdict = evaluateCiReviewAdmission(
+      admissionInput({
+        currentHead: HEAD_A,
+        summaryHead: HEAD_A,
+        summaryComplete: true,
+        markerSeen: true,
+        reviewCount: 1,
+        state: null,
+        admission: null,
+        postedFindings: null,
+        policy: DEFAULT_POLICY,
+      }),
+    );
+    expect(verdict.action).toBe("skip");
+    if (verdict.action === "skip") {
+      expect(verdict.reason).toBe("same-head");
+    }
+  });
+
   test("2 advisory-tier findings on prior review skips re-review", () => {
     const admission = parseCiAdmissionBlock(
       admissionBody({ blocking: 0, advisory: 2 }),

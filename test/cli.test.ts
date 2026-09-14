@@ -608,6 +608,18 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
     ).text();
     expect(source).toContain("verifyAll: prepared.plan.verifyAll,");
   });
+
+  test("CI admission is handed the summary marker's completeness", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain(
+      "summaryBody === null ? null : parsePrCommentMarker(summaryBody);",
+    );
+    expect(source).toContain(
+      "summaryHead,\n      summaryComplete,\n      markerSeen,",
+    );
+  });
 });
 
 // Same precedent as the gotchas-gate scan above: `review()` and `reviewPr()`
