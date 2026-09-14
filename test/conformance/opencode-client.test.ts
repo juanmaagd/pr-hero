@@ -10,6 +10,7 @@ import {
   createOpenCodeClient,
   createTurnState,
   isMessageOwned,
+  mapOpenCodeEvents,
   type OpenCodeSdkLike,
   reconcileMessages,
   terminalProofFromAssistant,
@@ -1805,5 +1806,252 @@ describe("Work Unit 2: Client Reconciliation & Canonical Ownership (U2-C2, U2-C3
         "[pr-hero] opencode client: total readback byte budget exceeded",
       );
     });
+  });
+});
+
+// #223: session.prompt() resolves with the finished message and reconciles it
+// purely to ingest identity/usage/error state — the event stream is the only
+// delivery channel, so that reconcile must never advance `emittedText` (the
+// "already delivered to the consumer" bookkeeping `handlePartDelta` and
+// `handlePartUpdated` both trust). These tests drive `reconcileMessages` and
+// `mapOpenCodeEvents` directly, in hand-picked order, so the ordering between
+// a prompt-result reconcile and the part's own stream lifecycle is exact and
+// never a timing race.
+describe("Prompt-result reconcile must not advance emission ahead of the stream (#223)", () => {
+  const SESS = "ses_promptrace";
+  const FULL_TEXT = "the answer is 42";
+  const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+
+  function completedAssistant(): Record<string, unknown> {
+    return {
+      id: "msg_asst_1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/work", root: "/" },
+      parentID: "msg_user_1",
+      finish: "stop",
+      time: { created: 100, completed: 200 },
+    };
+  }
+
+  function promptResultRecord(): Record<string, unknown> {
+    return {
+      info: completedAssistant(),
+      parts: [
+        {
+          id: "prt_ans_1",
+          messageID: "msg_asst_1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      ],
+    };
+  }
+
+  test("emit:false ingests identity, usage and the text snapshot without advancing emittedText", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    const reconciled = reconcileMessages([promptResultRecord()], state, {
+      emit: false,
+    });
+
+    // Ingestion still happened: ownership, the terminal proof and the
+    // computed finalText are all present.
+    expect(reconciled.terminalProof?.eventId).toBe("msg_asst_1");
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    expect(state.messageDetails.get("msg_asst_1")?.finish).toBe("stop");
+    // But the bookkeeping a later stream event checks against was left
+    // untouched — no delta was ever handed to a consumer.
+    expect(state.partDetails.get("prt_ans_1")?.text).toBe(FULL_TEXT);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+    expect(reconciled.events).toEqual([]);
+  });
+
+  test("fixed (emit:false) call site: the same replayed lifecycle delivers the answer exactly once", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    reconcileMessages([promptResultRecord()], state, { emit: false });
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+
+    const collected: unknown[] = [];
+    collected.push(
+      ...mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_ans_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "text",
+              text: "",
+            },
+          },
+        },
+        SESS,
+        state,
+      ),
+    );
+    for (const chunk of DELTA_CHUNKS) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_ans_1",
+              field: "text",
+              delta: chunk,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+    // No throw: the final snapshot exactly matches what the deltas already
+    // built up, so it is recognized as already-delivered and produces no
+    // further event.
+    collected.push(
+      ...mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_ans_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "text",
+              text: FULL_TEXT,
+            },
+          },
+        },
+        SESS,
+        state,
+      ),
+    );
+
+    expect(collected).toEqual(
+      DELTA_CHUNKS.map((text) => ({ kind: "delta", text })),
+    );
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+  });
+
+  // Regression (a): the normal ordering, where the part's deltas and its
+  // final snapshot have ALREADY arrived and been fully emitted over the
+  // stream by the time the prompt-result reconcile runs. It must be a no-op
+  // regardless of `emit`, because `alreadyEmitted === snapshotText` short-
+  // circuits before either branch that could advance or duplicate anything.
+  test("regression (a): a late prompt-result reconcile after the stream already delivered the text is a no-op", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    // currentUserId/expectedCwd only matter for ownership on the assistant
+    // message itself, which the prompt-result reconcile below establishes;
+    // seed the part as already fully streamed BEFORE that happens.
+    state.parts.set("prt_ans_1", "answer");
+    state.partDetails.set("prt_ans_1", {
+      id: "prt_ans_1",
+      messageId: "msg_asst_1",
+      type: "text",
+      text: FULL_TEXT,
+      emittedText: FULL_TEXT,
+    });
+
+    const reconciled = reconcileMessages([promptResultRecord()], state, {
+      emit: false,
+    });
+
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+
+  // Regression (b): prompt_result carries the finished answer but the stream
+  // never replays the text part at all (dropped, or the turn ends before it
+  // does). The answer must still be delivered once, through the session.idle
+  // boundary reading `detail.text` against an `emittedText` the ingest-only
+  // reconcile correctly left empty.
+  test("regression (b): prompt-result with no stream text events at all is delivered once at the session.idle boundary", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    reconcileMessages([promptResultRecord()], state, { emit: false });
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+
+    // The assistant's own message.updated is what establishes state.lastProof
+    // — the session.idle boundary has nothing to report without it.
+    const updatedEvents = mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: { sessionID: SESS, info: completedAssistant() },
+      },
+      SESS,
+      state,
+    );
+    expect(updatedEvents).toEqual([]);
+
+    const idleEvents = mapOpenCodeEvents(
+      { type: "session.idle", properties: { sessionID: SESS } },
+      SESS,
+      state,
+    );
+
+    expect(idleEvents).toEqual([
+      { kind: "delta", text: FULL_TEXT },
+      {
+        kind: "terminal",
+        proof: {
+          eventId: "msg_asst_1",
+          providerStatus: "completed",
+          providerObservedAt: new Date(200).toISOString(),
+        },
+      },
+    ]);
+  });
+
+  // Regression (c): the existing duplicate-delta contract this fix must not
+  // weaken — a delta that exactly repeats the tail already emitted is
+  // dropped, never appended twice. Exercised here through the same
+  // `mapOpenCodeEvents` surface the two tests above use.
+  test("regression (c): a duplicate delta that repeats the already-emitted tail is still deduplicated", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_dup_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const first = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_dup_1",
+          field: "text",
+          delta: "hello ",
+        },
+      },
+      SESS,
+      state,
+    );
+    const duplicate = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_dup_1",
+          field: "text",
+          delta: "hello ",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(first).toEqual([{ kind: "delta", text: "hello " }]);
+    expect(duplicate).toEqual([]);
+    expect(state.partDetails.get("prt_dup_1")?.emittedText).toBe("hello ");
   });
 });

@@ -2129,6 +2129,145 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
   });
 });
 
+// #223: session.prompt() is a BLOCKING call that resolves with the finished
+// message (see the "FIRED, never awaited" comment on the client), so its
+// result always carries the completed assistant info AND that step's final
+// text part. Its RESULT is reconciled purely to ingest identity/usage/error
+// state — the transport never treats it as the delivery channel, because the
+// event stream is the one place a consumer-visible delta is supposed to come
+// from. Two of twelve live opencode 1.18.30 attempts observed that HTTP
+// result land BEFORE the stream had replayed the SAME text part's own
+// announce -> delta x4 -> snapshot lifecycle, and a discard-only reconcile
+// that still advanced its internal "already delivered" bookkeeping made the
+// later, perfectly ordinary snapshot look like a conflicting one.
+describe("OpenCode prompt-result races ahead of the part's own stream lifecycle (#223)", () => {
+  const SESS = "ses-promptrace";
+
+  test("a full-text prompt_result followed by the part's announce/delta/snapshot lifecycle still delivers the answer exactly once", async () => {
+    const FULL_TEXT = "the answer is 42";
+    const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+    expect(DELTA_CHUNKS.join("")).toBe(FULL_TEXT);
+
+    const completedAssistant = {
+      id: "msg-asst-1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
+      parentID: "msg-user-1",
+      finish: "stop",
+      time: { created: 1000, completed: 2000 },
+      tokens: { input: 10, output: 5 },
+      cost: 0,
+    };
+
+    // session.prompt() resolves with the full completed message AND its
+    // final text part already attached, exactly like the live server.
+    const controlled = makeControlledSdk({
+      sessionId: SESS,
+      promptResponse: {
+        info: completedAssistant,
+        parts: [
+          {
+            id: "prt-ans-1",
+            messageID: "msg-asst-1",
+            sessionID: SESS,
+            type: "text",
+            text: FULL_TEXT,
+          },
+        ],
+      },
+    });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    // Lets the fired-not-awaited session.prompt() call resolve, and its
+    // discard-only reconcile run, BEFORE any stream event for this part
+    // exists — reproducing "prompt_result arrives before the whole stream
+    // lifecycle" from the live evidence.
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    // The SAME part's own lifecycle, replayed over the stream afterward:
+    // announced empty, rebuilt through deltas, then restated as a snapshot.
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+
+    for (const chunk of DELTA_CHUNKS) {
+      controlled.emit({
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg-asst-1",
+          partID: "prt-ans-1",
+          field: "text",
+          delta: chunk,
+        },
+      });
+    }
+
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.finalText).toBe(FULL_TEXT);
+
+    // The consumer-visible deltas must concatenate to the answer exactly
+    // once — no loss from the discard, no duplication from a ghost-advanced
+    // "already emitted" bookkeeping.
+    const deltaText = rig.sink.events
+      .filter((event) => event.type === "delta")
+      .map((event) => (event as { text: string }).text)
+      .join("");
+    expect(deltaText).toBe(FULL_TEXT);
+  });
+});
+
 describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
   const SESS = "ses-oa2b";
 

@@ -803,6 +803,14 @@ function reconcileUnknownOwnerBuffer(
 export function reconcileMessages(
   list: unknown[],
   state: OpenCodeTurnState,
+  // #223: `emit` gates ONLY the per-part "already delivered" bookkeeping
+  // below (the loop that pushes `delta` events and advances
+  // `detail.emittedText`). Every other effect of a call — trackMessage/
+  // trackPart identity checks, usage, errors, `detail.text` snapshot storage
+  // — always runs, because a caller that discards the returned `events` still
+  // needs those ingested. Defaults to true so every existing caller (the poll
+  // readback at pollStatus, and every direct test) keeps today's behaviour.
+  options?: { readonly emit?: boolean },
 ): {
   events: OpenCodeClientEvent[];
   terminalProof?: ProviderTerminalProof;
@@ -811,6 +819,7 @@ export function reconcileMessages(
   usageIncomplete?: boolean;
   failure?: string;
 } {
+  const emit = options?.emit ?? true;
   if (
     list.length > MAX_TRACKED_MESSAGES ||
     state.messageDetails.size > MAX_TRACKED_MESSAGES
@@ -1086,7 +1095,14 @@ export function reconcileMessages(
       }
     }
 
-    for (const partId of msgDetail.partIds) {
+    // #223: this is the ONLY place in this function that advances
+    // `detail.emittedText` or produces a `delta` event, so it is exactly what
+    // `emit: false` must skip. Skipping it here rather than filtering the
+    // caller's returned `events` afterward keeps the invariant literal:
+    // `emittedText` cannot advance except in the same branch that hands a
+    // delta to the consumer, so a discard-only caller can never leave the
+    // "already delivered" bookkeeping ahead of what was actually delivered.
+    for (const partId of emit ? msgDetail.partIds : []) {
       const detail = state.partDetails.get(partId);
       if (
         detail &&
@@ -2173,7 +2189,17 @@ export function createOpenCodeClient(
             );
             evidence.record("prompt_result", promptResult);
             if (asRecord(asRecord(promptResult)?.info) !== undefined) {
-              reconcileMessages([promptResult], state.turn);
+              // #223: this reconcile is INGEST ONLY — its `events` are
+              // discarded because the event stream, never this blocking HTTP
+              // response, is the delivery channel (see the "FIRED, never
+              // awaited" comment above). `emit: false` keeps that discard
+              // honest: two of twelve live opencode 1.18.30 attempts had this
+              // call race ahead of the SAME text part's own announce -> delta
+              // -> snapshot lifecycle on the stream, and letting it advance
+              // `emittedText` here — for text nobody was actually handed —
+              // made the stream's own, perfectly ordinary snapshot look like
+              // a conflicting one and threw away a correct answer.
+              reconcileMessages([promptResult], state.turn, { emit: false });
             }
           } catch (error) {
             state.failure = (error as Error).message;
