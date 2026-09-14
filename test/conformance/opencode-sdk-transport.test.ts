@@ -1980,6 +1980,7 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
 
     // Delivers delta "hello "
     controlled.emit({
+      id: "evt-hello-1",
       type: "message.part.delta",
       properties: {
         sessionID: SESS,
@@ -1990,8 +1991,12 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
       },
     });
 
-    // Duplicate delta delivery of "hello "
+    // Duplicate delivery of the SAME event id: this is the real
+    // duplicate-delta contract (an SSE `Last-Event-ID` reconnect redelivering
+    // the same event), unlike two independent deltas that merely happen to
+    // carry the same text — those are both applied (see D-13 below).
     controlled.emit({
+      id: "evt-hello-1",
       type: "message.part.delta",
       properties: {
         sessionID: SESS,
@@ -2064,6 +2069,146 @@ describe("OpenCode canonical final snapshots & missing observations (OA2a)", () 
 
     expect(outcome.completion).toBe("success");
     expect(outcome.finalText).toBe("hello ");
+  });
+
+  // D-13: distinct event ids for repeated-token deltas ("b" twice, building
+  // "abbc") must all be applied — the old text-suffix dedup would have
+  // silently dropped the second "b". Re-emitting the LAST delta's exact
+  // event id afterward proves `controlled.emit`'s top-level `id` reaches
+  // `mapOpenCodeEvents` untouched: only an id that actually arrives at the
+  // dedup check could suppress that redelivery.
+  test("D-13: repeated-token deltas with distinct ids are all applied and a redelivered id is dropped", async () => {
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+
+    const chunks: Array<{ id: string; delta: string }> = [
+      { id: "evt-a", delta: "a" },
+      { id: "evt-b1", delta: "b" },
+      { id: "evt-b2", delta: "b" },
+      { id: "evt-c", delta: "c" },
+    ];
+    // Each real delta is a sequential await inside the transport's
+    // stream-watcher loop (one `pushGuarded` per delta); flushing between
+    // emissions lets each one settle for real before the manual clock's
+    // `fireAll()` runs, so a still-in-flight push is never mistaken for one
+    // that missed its stall deadline.
+    for (const { id, delta } of chunks) {
+      controlled.emit({
+        id,
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg-asst-1",
+          partID: "prt-ans-1",
+          field: "text",
+          delta,
+        },
+      });
+      await flush();
+    }
+
+    // Redelivery of the LAST chunk's exact event id — must be dropped, not
+    // appended again.
+    controlled.emit({
+      id: "evt-c",
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg-asst-1",
+        partID: "prt-ans-1",
+        field: "text",
+        delta: "c",
+      },
+    });
+    await flush();
+
+    const completedAssistant = {
+      id: "msg-asst-1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
+      parentID: "msg-user-1",
+      finish: "stop",
+      time: { created: 1000, completed: 2000 },
+      tokens: { input: 10, output: 5 },
+      cost: 0,
+    };
+
+    controlled.setMessages([
+      {
+        info: completedAssistant,
+        parts: [
+          {
+            id: "prt-ans-1",
+            messageID: "msg-asst-1",
+            sessionID: SESS,
+            type: "text",
+            text: "abbc",
+          },
+        ],
+      },
+    ]);
+
+    // Snapshot event restating "abbc" — must not throw "conflicting
+    // snapshot observed".
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "abbc",
+        },
+      },
+    });
+
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.finalText).toBe("abbc");
   });
 
   test("user prompt text, reasoning, and intermediate tool-step text are excluded from final answer", async () => {

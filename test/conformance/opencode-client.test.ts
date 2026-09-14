@@ -2011,11 +2011,12 @@ describe("Prompt-result reconcile must not advance emission ahead of the stream 
     ]);
   });
 
-  // Regression (c): the existing duplicate-delta contract this fix must not
-  // weaken — a delta that exactly repeats the tail already emitted is
-  // dropped, never appended twice. Exercised here through the same
-  // `mapOpenCodeEvents` surface the two tests above use.
-  test("regression (c): a duplicate delta that repeats the already-emitted tail is still deduplicated", () => {
+  // Regression (c): the real duplicate-delta contract this fix preserves —
+  // the SAME event id redelivered (e.g. after an SSE `Last-Event-ID`
+  // reconnect) is still deduplicated, never appended twice. Identity here is
+  // the event id, not the delta's text: see the "dedupe by event id"
+  // describe block below for why a text-suffix check was wrong.
+  test("regression (c): a duplicate delta with the same event id is still deduplicated", () => {
     const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
     state.parts.set("prt_dup_1", "answer");
     state.assistantMessages.add("msg_asst_1");
@@ -2023,6 +2024,7 @@ describe("Prompt-result reconcile must not advance emission ahead of the stream 
 
     const first = mapOpenCodeEvents(
       {
+        id: "evt_dup_1",
         type: "message.part.delta",
         properties: {
           sessionID: SESS,
@@ -2037,6 +2039,7 @@ describe("Prompt-result reconcile must not advance emission ahead of the stream 
     );
     const duplicate = mapOpenCodeEvents(
       {
+        id: "evt_dup_1",
         type: "message.part.delta",
         properties: {
           sessionID: SESS,
@@ -2053,6 +2056,250 @@ describe("Prompt-result reconcile must not advance emission ahead of the stream 
     expect(first).toEqual([{ kind: "delta", text: "hello " }]);
     expect(duplicate).toEqual([]);
     expect(state.partDetails.get("prt_dup_1")?.emittedText).toBe("hello ");
+  });
+});
+
+// D-13: `handlePartDelta`'s old dedup check compared the delta's TEXT
+// against the tail already emitted (`emittedText.endsWith(delta)`), which
+// silently ate any legitimately repeated token — not just an exact provider
+// redelivery. Identity for a redelivered event is the event's own `id`
+// (OpenCode's SSE client reconnects with `Last-Event-ID` and can redeliver
+// the same event verbatim — see serverSentEvents.gen.js), never its text.
+describe("dedupe by event id, not text-suffix (D-13)", () => {
+  const SESS = "ses_delta_id_dedupe";
+
+  test("a. repeated tokens: every delta with a distinct id is emitted and the final snapshot matches", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_repeat_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const deltas = [
+      { id: "evt_1", delta: "a" },
+      { id: "evt_2", delta: "b" },
+      { id: "evt_3", delta: "b" },
+      { id: "evt_4", delta: "c" },
+    ];
+    const collected: unknown[] = [];
+    for (const { id, delta } of deltas) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            id,
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_repeat_1",
+              field: "text",
+              delta,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+
+    expect(collected).toEqual([
+      { kind: "delta", text: "a" },
+      { kind: "delta", text: "b" },
+      { kind: "delta", text: "b" },
+      { kind: "delta", text: "c" },
+    ]);
+    expect(state.partDetails.get("prt_repeat_1")?.emittedText).toBe("abbc");
+
+    // The later snapshot restating the true text must not throw a
+    // "conflicting snapshot observed" error.
+    const snapshotEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_repeat_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: "abbc",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(snapshotEvents).toEqual([]);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+
+  test("b. repeated JSON closer: a legitimately repeated '}' delta is applied, not dropped, with no snapshot", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_json_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const deltas = [
+      { id: "evt_j1", delta: '{"a":{"b":1' },
+      { id: "evt_j2", delta: "}" },
+      { id: "evt_j3", delta: "}" },
+    ];
+    for (const { id, delta } of deltas) {
+      mapOpenCodeEvents(
+        {
+          id,
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESS,
+            messageID: "msg_asst_1",
+            partID: "prt_json_1",
+            field: "text",
+            delta,
+          },
+        },
+        SESS,
+        state,
+      );
+    }
+
+    expect(state.partDetails.get("prt_json_1")?.emittedText).toBe(
+      '{"a":{"b":1}}',
+    );
+  });
+
+  test("c. same-id replay: the second delivery of the same event id is dropped and text is not doubled", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_same_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const event = {
+      id: "evt_same_1",
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg_asst_1",
+        partID: "prt_same_1",
+        field: "text",
+        delta: "b",
+      },
+    };
+
+    const first = mapOpenCodeEvents(event, SESS, state);
+    const second = mapOpenCodeEvents(event, SESS, state);
+
+    expect(first).toEqual([{ kind: "delta", text: "b" }]);
+    expect(second).toEqual([]);
+    expect(state.partDetails.get("prt_same_1")?.emittedText).toBe("b");
+  });
+
+  test("d. id-less deltas have no identity to compare, so two identical ones are both applied", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_noid_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const event = {
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg_asst_1",
+        partID: "prt_noid_1",
+        field: "text",
+        delta: "b",
+      },
+    };
+
+    const first = mapOpenCodeEvents(event, SESS, state);
+    const second = mapOpenCodeEvents(event, SESS, state);
+
+    expect(first).toEqual([{ kind: "delta", text: "b" }]);
+    expect(second).toEqual([{ kind: "delta", text: "b" }]);
+    expect(state.partDetails.get("prt_noid_1")?.emittedText).toBe("bb");
+  });
+
+  test("e. buffered unknown-owner delta reconciles exactly once, then drops the same id again", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    // Part announced with an empty snapshot before ownership is known —
+    // buffered as type "part.updated".
+    const announceEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_buf_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: "",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(announceEvents).toEqual([]);
+
+    // Delta arrives before ownership is known too — buffered as
+    // "part.delta", carrying its event id along.
+    const deltaBeforeOwnership = mapOpenCodeEvents(
+      {
+        id: "evt_buf_1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_buf_1",
+          field: "text",
+          delta: "hello",
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(deltaBeforeOwnership).toEqual([]);
+
+    // Ownership established: the buffer reconciles both observations.
+    const reconciledEvents = mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESS,
+          info: {
+            id: "msg_asst_1",
+            role: "assistant",
+            sessionID: SESS,
+            path: { cwd: "/tmp/work", root: "/" },
+            parentID: "msg_user_1",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(reconciledEvents).toEqual([{ kind: "delta", text: "hello" }]);
+    expect(state.partDetails.get("prt_buf_1")?.emittedText).toBe("hello");
+
+    // The same event id arriving again after reconciliation is now a
+    // genuine replay (ownership is known) and must be dropped.
+    const replay = mapOpenCodeEvents(
+      {
+        id: "evt_buf_1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_buf_1",
+          field: "text",
+          delta: "hello",
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(replay).toEqual([]);
+    expect(state.partDetails.get("prt_buf_1")?.emittedText).toBe("hello");
   });
 });
 

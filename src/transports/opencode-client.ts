@@ -39,6 +39,7 @@ import type { OpenCodeServerHandle } from "./opencode-server";
 // will never call. The adapter slice declares the SDK an OPTIONAL peer and
 // reaches it through a dynamic import.
 interface RawEvent {
+  readonly id?: unknown;
   readonly type?: unknown;
   readonly properties?: unknown;
 }
@@ -214,6 +215,11 @@ export interface UnknownOwnerObservation {
   readonly partId: string;
   readonly messageId?: string;
   readonly raw: Record<string, unknown>;
+  // Set only for a buffered "part.delta": the provider event id, threaded
+  // through so replay (reconcileUnknownOwnerBuffer) can dedupe by identity
+  // the same way a live delta does. "part.updated" snapshots are cumulative
+  // and self-idempotent, so they carry no id.
+  readonly eventId?: string;
 }
 
 export interface OpenCodeTurnState {
@@ -231,6 +237,9 @@ export interface OpenCodeTurnState {
   >;
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
+  // Provider event ids for text deltas actually applied to `emittedText`
+  // (never ids merely seen while buffered — see `handlePartDelta`).
+  readonly deltaEventIds: Set<string>;
   readonly usage: Map<string, StepUsage>;
   readonly completedUsage: Set<string>;
   readonly payloadBytes: Map<string, number>;
@@ -256,6 +265,9 @@ const MAX_TRACKED_MESSAGES = 512;
 const MAX_UNKNOWN_OWNER_BUFFER = 256;
 const MAX_TOMBSTONES = 1024;
 const MAX_READBACK_BYTES = 4 * 1024 * 1024;
+// Same order of magnitude as MAX_TRACKED_PARTS: sized to cover an SSE
+// reconnect's Last-Event-ID replay window for one turn's answer deltas.
+const MAX_TRACKED_DELTA_EVENTS = 4096;
 
 export function createTurnState(
   sessionId?: string,
@@ -274,6 +286,7 @@ export function createTurnState(
     toolStates: new Map(),
     tombstones: new Set(),
     unknownOwnerBuffer: [],
+    deltaEventIds: new Set(),
     usage: new Map(),
     completedUsage: new Set(),
     payloadBytes: new Map(),
@@ -707,6 +720,7 @@ function handlePartUpdated(
 function handlePartDelta(
   p: Record<string, unknown>,
   state: OpenCodeTurnState,
+  eventId?: string,
 ): OpenCodeClientEvent[] {
   if (p.field !== "text") return [];
   const delta = p.delta;
@@ -727,11 +741,31 @@ function handlePartDelta(
 
   const kind = state.parts.get(partId);
   if (kind === "reasoning") {
+    // No id dedup needed here: unlike the answer branch below, this emits a
+    // bare progress marker and never accumulates `delta` into any tracked
+    // text. A redelivered reasoning delta produces one extra marker, not a
+    // corrupted `emittedText` or a "conflicting snapshot" throw, so there is
+    // nothing for an id check to protect.
     if (!messageId || !isMessageOwned(messageId, state)) return [];
     return [{ kind: "reasoning" }];
   }
   if (kind === "answer") {
     if (!isMessageOwned(messageId, state)) return [];
+    // Identity for dedup is the provider event id, not the delta's text.
+    // The SDK's SSE client reconnects with `Last-Event-ID`
+    // (serverSentEvents.gen.js) and can redeliver the same event verbatim,
+    // but text is the wrong signal to detect that with: a prior version of
+    // this check dropped any delta that merely repeated the tail already
+    // emitted, which also matches a legitimately repeated token (e.g. "b"
+    // after "b" in "a","b","b","c", or a second "}" closing nested JSON).
+    // That either corrupted the delivered text (when no snapshot ever
+    // arrived to reveal the gap) or threw "conflicting snapshot observed"
+    // once one did. An event with no id — or a non-string one — carries no
+    // identity to compare, so it is always treated as novel rather than
+    // assumed a duplicate.
+    if (eventId !== undefined && state.deltaEventIds.has(eventId)) {
+      return [];
+    }
     let detail = state.partDetails.get(partId);
     if (!detail) {
       detail = {
@@ -742,9 +776,6 @@ function handlePartDelta(
       };
       state.partDetails.set(partId, detail);
     }
-    if (detail.emittedText.endsWith(delta)) {
-      return [];
-    }
     if (
       Buffer.byteLength(delta, "utf8") > 64 * 1024 ||
       Buffer.byteLength(detail.emittedText + delta, "utf8") > 1024 * 1024
@@ -754,6 +785,12 @@ function handlePartDelta(
       text: detail.emittedText + delta,
     });
     detail.emittedText += delta;
+    // Recorded only now that the delta is actually applied — never when
+    // first buffered for an unknown owner — so a buffered delta that later
+    // reconciles is not mistaken for its own duplicate.
+    if (eventId !== undefined) {
+      rememberId(state.deltaEventIds, eventId, MAX_TRACKED_DELTA_EVENTS);
+    }
     return [{ kind: "delta", text: delta }];
   }
 
@@ -772,6 +809,7 @@ function handlePartDelta(
       partId,
       messageId,
       raw: p,
+      eventId,
     });
   }
 
@@ -789,7 +827,7 @@ function reconcileUnknownOwnerBuffer(
       if (obs.type === "part.updated") {
         events.push(...handlePartUpdated(obs.raw, state));
       } else if (obs.type === "part.delta") {
-        events.push(...handlePartDelta(obs.raw, state));
+        events.push(...handlePartDelta(obs.raw, state, obs.eventId));
       }
     } else {
       remaining.push(obs);
@@ -1213,7 +1251,9 @@ export function mapOpenCodeEvents(
     }
 
     case "message.part.delta": {
-      return handlePartDelta(p, state);
+      const rawId = (raw as RawEvent)?.id;
+      const eventId = typeof rawId === "string" ? rawId : undefined;
+      return handlePartDelta(p, state, eventId);
     }
 
     case "message.part.updated": {
