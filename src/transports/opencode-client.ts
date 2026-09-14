@@ -1783,6 +1783,34 @@ async function resolveMcpConfig(
   });
 }
 
+// bun-types 1.3.14 does not declare Bun's `timeout` fetch option on
+// RequestInit (or on BunFetchRequestInit, which only extends it) even though
+// Bun's runtime honours it — see the WHY comment at the call site below for
+// what this buys. A narrow local type spells the one field needed instead of
+// widening RequestInit itself.
+type FetchInitWithIdleTimeoutDisabled = RequestInit & {
+  readonly timeout: false;
+};
+
+// Distinguishes the ONE request this client fires that legitimately blocks
+// past Bun's default HTTP idle timeout: POST /session/{sessionID}/message
+// (session.prompt) only returns response headers once the whole model turn
+// finishes. Anchored so it never matches:
+//   - GET  /session/{sessionID}/message         (session.messages: the poll
+//     readback, answers immediately, must keep the default timeout)
+//   - GET/DELETE /session/{sessionID}/message/{id}  (getMessage/deleteMessage
+//     — the single-message endpoint; the SDK never POSTs here, but the extra
+//     path segment must be rejected regardless of method)
+//   - POST /session/{sessionID}/prompt_async
+//   - POST /session                             (session.create)
+// A query string (e.g. `?directory=...`, which every one of these calls
+// carries) never defeats the match: only pathname is checked.
+export function isBlockingPromptRequest(request: Request): boolean {
+  if (request.method !== "POST") return false;
+  const { pathname } = new URL(request.url);
+  return /^\/session\/[^/]+\/message$/.test(pathname);
+}
+
 export function createOpenCodeClient(
   options: CreateOpenCodeClientOptions,
 ): OpenCodeClientLike & { close(): Promise<void> } {
@@ -1932,9 +1960,37 @@ export function createOpenCodeClient(
       checkCancelled();
       const api = sdk.createOpencodeClient({
         baseUrl: handle.url,
-        fetch: evidence.wrapFetch((request) =>
-          (options.fetch ?? globalThis.fetch)(request),
-        ),
+        fetch: evidence.wrapFetch((request) => {
+          const fetchImpl = options.fetch ?? globalThis.fetch;
+          // Bun's fetch has a default 300s HTTP idle timeout
+          // (BUN_CONFIG_HTTP_IDLE_TIMEOUT) that is armed while waiting for
+          // response headers and is NOT re-armed by "the request is still
+          // legitimately in flight" — only by socket activity. The blocking
+          // prompt POST's headers only arrive once the whole model turn
+          // completes (measured: real turns exceed 300s), and a REJECTION
+          // here — a bare TimeoutError included — ends the entire turn: the
+          // catch a short way below sets `state.failure` and `state.ended`,
+          // even though the event stream (the actual delivery channel, see
+          // the "FIRED, never awaited" comment on the call site) may still be
+          // progressing normally. Live evidence: two hunters on a real PR
+          // died at ~300s this way.
+          //
+          // The override is scoped to exactly that one request via
+          // isBlockingPromptRequest — every other call in this file (session
+          // create, /event's SSE subscription, mcp.status, tool.ids,
+          // /session/status, abort, message readback) returns promptly and
+          // keeps today's exact single-argument call shape unchanged.
+          //
+          // Cancellation is unaffected: the Request built by the SDK still
+          // carries `requestOptions.signal` regardless of this second
+          // argument, so an abort during a `timeout: false` call still
+          // rejects the way it always has.
+          if (isBlockingPromptRequest(request)) {
+            const init: FetchInitWithIdleTimeoutDisabled = { timeout: false };
+            return fetchImpl(request, init);
+          }
+          return fetchImpl(request);
+        }),
       });
 
       let sessionId: string | undefined;
