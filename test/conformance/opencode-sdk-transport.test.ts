@@ -2440,6 +2440,200 @@ describe("OpenCode prompt-result races ahead of the part's own stream lifecycle 
   });
 });
 
+// D-11: the poll observer's own readback (opencode-client.ts pollStatus,
+// `reconcileMessages(list, state.turn)`, GET /session/messages) reconciles
+// with the DEFAULT `emit` (true) — the poll site discards `reconciled.events`
+// exactly the way the #223 prompt_result call site above used to, reading
+// only `failure`/`terminalProof`/`finalText`/`usage`/`usageIncomplete`. Same
+// discard, same hazard: `state.turn` is the SAME shared turn state the stream
+// mutates through `mapOpenCodeEvents` (opencode-client.ts SessionState.turn),
+// so when the poll's HTTP readback observes a text part's FULL persisted text
+// while the stream has only delivered a PREFIX of it, the poll's discard-only
+// reconcile still advances `emittedText` to the full text — for a consumer
+// that was only ever handed the prefix. The stream's own still-in-flight
+// remaining deltas for that part then find `emittedText` already past what
+// was really delivered, and the part's own restating snapshot (every real
+// fixture sends one before the turn ends) finds `snapshotText` shorter than
+// the now-advanced `emittedText` and throws "conflicting snapshot observed" —
+// which `runStream`'s catch turns into `settle({ kind: "stream_error" })`,
+// flipping a run that actually finished cleanly into `completion: "failed"`.
+//
+// This is the real end-to-end wiring: the real `createOpenCodeClient` and the
+// real `OpenCodeSdkTransport`, so it is what actually discriminates whether
+// the poll call site itself carries `{ emit: false }` — unlike the client
+// tests in opencode-client.test.ts, which drive `reconcileMessages` directly
+// and would look the same regardless of what the poll call site passes.
+describe("OpenCode poll readback races ahead of a partially-streamed part (D-11)", () => {
+  const SESS = "ses-pollrace";
+
+  test("a poll readback that observes the full text before the stream finishes delivering it must not corrupt the outcome", async () => {
+    const FULL_TEXT = "the answer is 42";
+    const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+    expect(DELTA_CHUNKS.join("")).toBe(FULL_TEXT);
+
+    const inProgressAssistant = {
+      id: "msg-asst-1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/pr-hero-test", root: "/" },
+      parentID: "msg-user-1",
+      time: { created: 1000 },
+    };
+    const completedAssistant = {
+      ...inProgressAssistant,
+      finish: "stop",
+      time: { created: 1000, completed: 2000 },
+      tokens: { input: 10, output: 5 },
+      cost: 0,
+    };
+
+    const controlled = makeControlledSdk({ sessionId: SESS });
+    const rig = makeControlledRig(controlled, SESS);
+
+    const pending = rig.transport.execute(makeRequest({ sessionId: SESS }), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+
+    controlled.emit({
+      type: "message.updated",
+      properties: {
+        sessionID: SESS,
+        info: { id: "msg-user-1", role: "user", sessionID: SESS },
+      },
+    });
+    // Registers ownership (assistantMessages/parentLinks) for the still
+    // in-progress step, exactly as the real stream would before the model
+    // has finished responding — required before `handlePartUpdated`/
+    // `handlePartDelta` will act on this message's parts immediately instead
+    // of buffering them in `unknownOwnerBuffer` until a later owning event.
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: inProgressAssistant },
+    });
+
+    // The part's own lifecycle begins on the stream: announced empty, then
+    // its FIRST chunk only — caught mid-flight, exactly the ordinary
+    // announce -> delta lifecycle partway through.
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: "",
+        },
+      },
+    });
+    controlled.emit({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg-asst-1",
+        partID: "prt-ans-1",
+        field: "text",
+        delta: DELTA_CHUNKS[0],
+      },
+    });
+    await flush();
+    expect(
+      rig.sink.events
+        .filter((event) => event.type === "delta")
+        .map((event) => (event as { text: string }).text)
+        .join(""),
+    ).toBe(DELTA_CHUNKS[0]);
+
+    // The poll observer now races ahead: the session is first reported busy
+    // (arming the poll's own boundary detection), then its readback shows
+    // the message already fully persisted with its COMPLETE text — before
+    // the stream has delivered the rest of it.
+    controlled.setStatus({ type: "busy" });
+    await advance(rig.clock, 1);
+
+    controlled.setMessages([
+      {
+        info: completedAssistant,
+        parts: [
+          {
+            id: "prt-ans-1",
+            messageID: "msg-asst-1",
+            sessionID: SESS,
+            type: "text",
+            text: FULL_TEXT,
+          },
+        ],
+      },
+    ]);
+    controlled.setStatus(undefined);
+    await advance(rig.clock, 1);
+
+    // The stream's own remaining deltas — already in flight when the poll
+    // won the race — arrive now, followed by the part's own restating
+    // snapshot, exactly like the #223 test above and every real fixture.
+    for (const chunk of DELTA_CHUNKS.slice(1)) {
+      controlled.emit({
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg-asst-1",
+          partID: "prt-ans-1",
+          field: "text",
+          delta: chunk,
+        },
+      });
+    }
+    controlled.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESS,
+        part: {
+          id: "prt-ans-1",
+          messageID: "msg-asst-1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      },
+    });
+    controlled.emit({
+      type: "message.updated",
+      properties: { sessionID: SESS, info: completedAssistant },
+    });
+    controlled.emit({
+      type: "session.idle",
+      properties: { sessionID: SESS },
+    });
+
+    await advance(rig.clock, 8);
+    const outcome = await pending;
+
+    // DISCRIMINATING: on the unfixed poll call site this settles
+    // `stream_error`/`failed` (protocolIntegrity `unverified`, terminalProof
+    // dropped) even though the turn actually finished and the answer was
+    // fully known — the poll's own valid terminal proof and finalText are
+    // real, but the stream's own ordinary remaining lifecycle looks like a
+    // conflict and throws. Once the poll site stops advancing `emittedText`
+    // for text it never handed to a consumer, the same race settles clean.
+    expect(outcome.completion).toBe("success");
+    expect(outcome.protocolIntegrity).toBe("verified");
+    expect(outcome.finalText).toBe(FULL_TEXT);
+    expect(outcome.terminalProof?.eventId).toBe("msg-asst-1");
+
+    // The consumer-visible deltas must concatenate to the answer exactly
+    // once — no loss, and no duplication from a poll-advanced "already
+    // emitted" bookkeeping the stream never actually delivered.
+    const deltaText = rig.sink.events
+      .filter((event) => event.type === "delta")
+      .map((event) => (event as { text: string }).text)
+      .join("");
+    expect(deltaText).toBe(FULL_TEXT);
+  });
+});
+
 describe("OpenCode false completion & ownership reconciliation (OA2b)", () => {
   const SESS = "ses-oa2b";
 

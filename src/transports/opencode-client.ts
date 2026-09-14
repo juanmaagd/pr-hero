@@ -2468,7 +2468,28 @@ export function createOpenCodeClient(
           }
           const list = messages;
 
-          const reconciled = reconcileMessages(list, state.turn);
+          // #223 follow-up: this reconcile is INGEST ONLY, exactly like the
+          // prompt_result call site above — its `events` are discarded below
+          // (only `failure`/`terminalProof`/`finalText`/`usage`/
+          // `usageIncomplete` are read), because the event stream, never this
+          // polled HTTP readback, is the delivery channel. `emit: false`
+          // keeps that discard honest: without it, a poll that races ahead of
+          // the stream — observing a text part's FULL persisted snapshot
+          // while the stream has only delivered a PREFIX of it — still
+          // advanced `emittedText` to the full text here, for a consumer
+          // that was never handed the rest. The stream's own still-in-flight
+          // remaining deltas then found `emittedText` already past what was
+          // really delivered, and its own later restating snapshot (every
+          // real fixture sends one before the turn ends) found a
+          // `snapshotText` shorter than the now-advanced `emittedText` and
+          // threw "conflicting snapshot observed" — turning a turn that
+          // actually finished cleanly into a `stream_error`/`failed` outcome.
+          // `finalText` is unaffected either way: `canonicalFinalText`
+          // (opencode-client.ts reconcileMessages) is computed from
+          // `detail.text`, not `detail.emittedText`, before this gate runs.
+          const reconciled = reconcileMessages(list, state.turn, {
+            emit: false,
+          });
           if (
             reconciled.failure !== undefined ||
             state.turn.integrityFailure !== undefined
