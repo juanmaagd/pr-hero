@@ -2315,7 +2315,8 @@ describe("dedupe by event id, not text-suffix (D-13)", () => {
 // reconcile advances `emittedText` to the full text for a consumer that was
 // only ever handed the prefix. The stream's own still-in-flight remaining
 // deltas for that part then find `emittedText` already past what was really
-// delivered: `handlePartDelta`'s dedup check (`emittedText.endsWith(delta)`)
+// delivered: `handlePartDelta`'s then text-suffix dedup check
+// (`emittedText.endsWith(delta)`, since replaced by event-id dedupe — D-13)
 // does not recognise them as already-covered, so they are appended AGAIN as
 // duplicate delta events (corrupting delivery), and the part's own later
 // snapshot/session.idle boundary event finds `snapshotText` shorter than the
