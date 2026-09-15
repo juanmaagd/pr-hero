@@ -104,6 +104,39 @@ async function setup(
   };
   return { harness, step, dir, binary, mcp };
 }
+// PR #228 CI failure follow-up: `persistAttemptEvidence` races against a
+// timer of at most `min(100, step.timeoutMs)` ms inside the harness
+// (src/execution/harness.ts) — `StepExecutionHarness.run()` can return
+// before the evidence file is ever written. A plain `readFile` right after
+// `x.harness.run(x.step)` only passed locally because redacting a few
+// thousand records happened to finish inside that window; on a slower CI
+// runner (or under concurrent load) it does not, and every test in this
+// file that reads the evidence JSON this way is exposed to the same race,
+// not just the ones with the largest fixtures. Polling instead of a fixed
+// sleep means a fast write is observed immediately and a slow one still
+// succeeds, bounded by a real timeout with a clear failure message instead
+// of an opaque ENOENT. NOT a fix for the race itself — the harness still
+// races the timer exactly as before; this only makes the TEST observe the
+// eventual, correct result instead of an arbitrary snapshot mid-write.
+async function waitForEvidence(step: StepSpec, attempt = 1, timeoutMs = 10000) {
+  const file = attemptEvidencePath(step.outPath, step.name, attempt);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let text: string;
+    try {
+      text = await readFile(file, "utf8");
+    } catch {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `evidence file never appeared within ${timeoutMs}ms: ${file}`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      continue;
+    }
+    return JSON.parse(text);
+  }
+}
 test("actual harness artifact redacts synthetic Cookie and URL credentials", async () => {
   const x = await setup();
   const result = await x.harness.run(x.step);
@@ -121,9 +154,7 @@ test("actual harness artifact redacts synthetic Cookie and URL credentials", asy
   expect(log).not.toContain("SYNTHETIC_COOKIE");
   expect(log).not.toContain("SYNTHETIC_CSRF");
   expect(log).not.toContain("SYNTHETIC_PASSWORD");
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   expect(e.delivered).toBe(true);
   expect(e.outcome.terminalProof.eventId).toBe("actual-fixture-exit");
 });
@@ -134,9 +165,7 @@ test("actual harness proof preserves frozen inputs when execution mutates files"
     await writeFile(r.mcpConfigPath, '{"mcpServers":{"new":{}}}');
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log(
     "POSTEXEC_IDENTITY",
     e.identity.executableSha256 === evidenceSha256("AFTER-EXECUTION"),
@@ -225,9 +254,7 @@ test("persistAttemptEvidence writes the OpenCode capture once overhead accountin
   const diagnosticEvidence = collector.snapshot();
   const x = await setup(undefined, { diagnosticEvidence });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log("CAPTURE_PERSISTED", e.capture, "DROPPED", e.captureDropped);
   expect(e.capture).toBeDefined();
   expect(e.captureDropped).toBeUndefined();
@@ -264,9 +291,7 @@ test("persistAttemptEvidence persists a realistic multi-thousand-record capture 
   const diagnosticEvidence = collector.snapshot();
   const x = await setup(undefined, { diagnosticEvidence });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   const captureFile = e.capture
     ? path.join(x.dir, e.capture.relativePath)
     : undefined;
@@ -340,9 +365,7 @@ test("persistAttemptEvidence redacts a secret-looking value inside a record's da
     },
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log(
     "SECRET_AT_SCALE_CAPTURE",
     "capture",
@@ -367,9 +390,7 @@ test("persistAttemptEvidence drops a well-schemed but non-wrapper capture with a
     },
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log("NON_WRAPPER_DROPPED", e.captureDropped, "capture", e.capture);
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
@@ -394,9 +415,7 @@ test("persistAttemptEvidence records captureDropped with a reason and size when 
     },
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log(
     "OVERSIZED_CAPTURE_DROPPED",
     e.captureDropped,
@@ -435,7 +454,6 @@ test("a capture whose compact JSON is just under the persist cap survives persis
   }
   const diagnosticEvidence = collector.snapshot();
   const sourceBytes = Buffer.byteLength(diagnosticEvidence.redactedJson);
-  console.log("F003_SOURCE_COMPACT_BYTES", sourceBytes);
   // The collector's own invariant (#228 F001) already guarantees this; it
   // is the near-cap starting point this fix must survive, not what is
   // under test here.
@@ -443,15 +461,11 @@ test("a capture whose compact JSON is just under the persist cap survives persis
 
   const x = await setup(undefined, { diagnosticEvidence });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
-  console.log("F003_CAPTURE", e.capture, "DROPPED", e.captureDropped);
+  const e = await waitForEvidence(x.step);
   expect(e.captureDropped).toBeUndefined();
   expect(e.capture).toBeDefined();
   const captureFile = path.join(x.dir, e.capture.relativePath);
   const persisted = await readFile(captureFile);
-  console.log("F003_PERSISTED_BYTES", persisted.length);
   expect(persisted.length).toBeLessThanOrEqual(4 * 1024 * 1024);
   expect(evidenceSha256(persisted)).toBe(e.capture.sha256);
 
@@ -491,7 +505,6 @@ test("a capture whose redacted output grows past the cap is dropped with no dang
     records,
   });
   const originalBytes = Buffer.byteLength(redactedJson);
-  console.log("F003_ORIGINAL_BYTES", originalBytes, "CAP", 4 * 1024 * 1024);
   // Passes the existing PRE-redaction gate — this is not the #001-era bug.
   expect(originalBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
 
@@ -503,15 +516,7 @@ test("a capture whose redacted output grows past the cap is dropped with no dang
     },
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
-  console.log(
-    "F003_REDACTED_GROWTH_DROPPED",
-    e.captureDropped,
-    "capture",
-    e.capture,
-  );
+  const e = await waitForEvidence(x.step);
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
   expect(e.captureDropped.reason).toBe("capture exceeds the 4 MiB persist cap");
@@ -541,9 +546,7 @@ test("persistAttemptEvidence records captureDropped with a reason when a capture
     },
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log("BAD_SCHEMA_DROPPED", e.captureDropped, "capture", e.capture);
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
@@ -559,9 +562,7 @@ test("persistAttemptEvidence records captureDropped with a reason when a capture
     },
   });
   await x.harness.run(x.step);
-  const e = JSON.parse(
-    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
-  );
+  const e = await waitForEvidence(x.step);
   console.log(
     "MALFORMED_CAPTURE_DROPPED",
     e.captureDropped,
