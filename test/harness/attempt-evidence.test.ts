@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { evidenceSha256 } from "../../src/execution/attempt-evidence";
+import {
+  evidenceSha256,
+  readEvidenceFile,
+} from "../../src/execution/attempt-evidence";
 import type {
   ProviderTransport,
   TransportOutcome,
@@ -405,6 +408,124 @@ test("persistAttemptEvidence records captureDropped with a reason and size when 
   expect(typeof e.captureDropped.reason).toBe("string");
   expect(e.captureDropped.reason.length).toBeGreaterThan(0);
   expect(e.captureDropped.bytes).toBe(Buffer.byteLength(redactedJson));
+});
+// PR #228 review, F003 (WARNING): `persistAttemptEvidence` checked
+// `capture.redactedJson` (COMPACT JSON) against the 4 MiB persist cap, but
+// `writeJsonAtomically` then pretty-printed the redacted `safe` object
+// unconditionally — `JSON.stringify(value, null, 2)`'s per-level indentation
+// and newlines inflate a multi-thousand-record array well past what was
+// checked. A live capture was observed persisted at 4.9 MB, and
+// `readEvidenceFile` (used by scripts/martian-evidence.ts) enforces a
+// SEPARATE 5 MiB read bound, so a capture that just barely passed the 4 MiB
+// check could still land past that too. 15000 records of a realistic
+// message.part.delta shape, sized so the collector's OWN byte cap (its F001
+// invariant) leaves the compact snapshot just 288 bytes under 4 MiB, is
+// deterministic and reproduces the real gap: pretty-printing this exact
+// snapshot lands at ~4.96 MB, comfortably past both bounds.
+test("a capture whose compact JSON is just under the persist cap survives persistence and stays readable by readEvidenceFile (F003)", async () => {
+  const collector = new OpenCodeEvidenceCollector({
+    sessionId: "s",
+    attempt: 1,
+  });
+  for (let i = 0; i < 15000; i++) {
+    collector.record("event", {
+      type: "message.part.delta",
+      properties: { delta: "x".repeat(380) },
+    });
+  }
+  const diagnosticEvidence = collector.snapshot();
+  const sourceBytes = Buffer.byteLength(diagnosticEvidence.redactedJson);
+  console.log("F003_SOURCE_COMPACT_BYTES", sourceBytes);
+  // The collector's own invariant (#228 F001) already guarantees this; it
+  // is the near-cap starting point this fix must survive, not what is
+  // under test here.
+  expect(sourceBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+
+  const x = await setup(undefined, { diagnosticEvidence });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log("F003_CAPTURE", e.capture, "DROPPED", e.captureDropped);
+  expect(e.captureDropped).toBeUndefined();
+  expect(e.capture).toBeDefined();
+  const captureFile = path.join(x.dir, e.capture.relativePath);
+  const persisted = await readFile(captureFile);
+  console.log("F003_PERSISTED_BYTES", persisted.length);
+  expect(persisted.length).toBeLessThanOrEqual(4 * 1024 * 1024);
+  expect(evidenceSha256(persisted)).toBe(e.capture.sha256);
+
+  // readEvidenceFile's SEPARATE 5 MiB read bound must not reject this file.
+  const read = await readEvidenceFile(x.dir, e.capture.relativePath);
+  expect((read.value as { records: unknown[] }).records.length).toBeGreaterThan(
+    0,
+  );
+});
+// The other half of the same gap: redaction itself can GROW a record (a
+// short secret-looking value like `password: "x"` becomes the fixed
+// `"[REDACTED]"` marker, longer than what it replaced), so checking only
+// the PRE-redaction size is not enough either. 40936 records of
+// `password: "x"` are sized so the ORIGINAL compact JSON sits 53 bytes
+// under the 4 MiB cap (passing the old, still-present pre-redaction gate)
+// while the REDACTED compact JSON lands at ~4.56 MB — comfortably over.
+test("a capture whose redacted output grows past the cap is dropped with no dangling capture reference (F003)", async () => {
+  const RECORD_COUNT = 40936;
+  const records: Array<{
+    seq: number;
+    observedMs: number;
+    kind: string;
+    data: unknown;
+  }> = [];
+  for (let i = 0; i < RECORD_COUNT; i++) {
+    records.push({
+      seq: i + 1,
+      observedMs: i,
+      kind: "event",
+      data: { note: "filler-record-payload", password: "x" },
+    });
+  }
+  const redactedJson = JSON.stringify({
+    schemaVersion: 1,
+    sessionId: "s",
+    attempt: 1,
+    records,
+  });
+  const originalBytes = Buffer.byteLength(redactedJson);
+  console.log("F003_ORIGINAL_BYTES", originalBytes, "CAP", 4 * 1024 * 1024);
+  // Passes the existing PRE-redaction gate — this is not the #001-era bug.
+  expect(originalBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+
+  const x = await setup(undefined, {
+    diagnosticEvidence: {
+      schema: "pr-hero.opencode-observations.v1",
+      status: "complete",
+      redactedJson,
+    },
+  });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log(
+    "F003_REDACTED_GROWTH_DROPPED",
+    e.captureDropped,
+    "capture",
+    e.capture,
+  );
+  expect(e.capture).toBeUndefined();
+  expect(e.captureDropped).toBeDefined();
+  expect(e.captureDropped.reason).toBe("capture exceeds the 4 MiB persist cap");
+  expect(e.captureDropped.bytes).toBeGreaterThan(4 * 1024 * 1024);
+
+  // No dangling capture file left behind for a capture never referenced.
+  const captureFile = attemptEvidencePath(x.step.outPath, "hunter", 1).replace(
+    /\.json$/,
+    ".capture.json",
+  );
+  const exists = await readFile(captureFile)
+    .then(() => true)
+    .catch(() => false);
+  expect(exists).toBe(false);
 });
 test("persistAttemptEvidence records captureDropped with a reason when a capture schema is not recognized", async () => {
   const x = await setup(undefined, {

@@ -217,16 +217,37 @@ export async function persistAttemptEvidence(
               data: redactEvidence(r.data),
             })),
           };
-          const captureFile = file.replace(/\.json$/, ".capture.json");
-          await mkdir(path.dirname(file), { recursive: true });
-          await writeJsonAtomically(captureFile, safe);
-          const bytes = await readFile(captureFile);
-          evidence.capture = {
-            schema: capture.schema,
-            status: capture.status,
-            sha256: evidenceSha256(bytes),
-            relativePath: path.basename(captureFile),
-          };
+          // PR #228 review, F003: `writeJsonAtomically` used to
+          // pretty-print unconditionally, so a capture whose ORIGINAL
+          // (compact) `redactedJson` sat just under the 4 MiB check above
+          // could still land ~20-30% larger on disk once indentation and
+          // newlines were added — close enough to `readEvidenceFile`'s
+          // separate 5 MiB read bound (attempt-evidence.ts) that a live
+          // capture was observed persisted at 4.9 MB. Serialized here
+          // once, compact, and checked as THIS exact string — not the
+          // pre-redaction estimate above, since redaction can itself grow
+          // or shrink a record's size — so the file is never written
+          // unless the exact bytes about to hit disk already fit, and the
+          // persisted size always equals the checked size.
+          const compactRedacted = JSON.stringify(safe);
+          const redactedBytes = Buffer.byteLength(compactRedacted);
+          if (redactedBytes > 4 * 1024 * 1024) {
+            evidence.captureDropped = {
+              reason: "capture exceeds the 4 MiB persist cap",
+              bytes: redactedBytes,
+            };
+          } else {
+            const captureFile = file.replace(/\.json$/, ".capture.json");
+            await mkdir(path.dirname(file), { recursive: true });
+            await writeJsonAtomically(captureFile, safe, { compact: true });
+            const bytes = await readFile(captureFile);
+            evidence.capture = {
+              schema: capture.schema,
+              status: capture.status,
+              sha256: evidenceSha256(bytes),
+              relativePath: path.basename(captureFile),
+            };
+          }
         } catch (error) {
           // Qualification requires an actual usable capture, but a capture
           // that WAS produced and then lost to a redaction or write failure
