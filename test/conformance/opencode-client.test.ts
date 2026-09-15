@@ -1285,6 +1285,93 @@ describe("createOpenCodeClient", () => {
     expect(result.completedToolCallIds).toEqual(["call_read_1"]);
   });
 
+  // pr-hero review F001 (round 2, opencode-client.ts:809): end-to-end through
+  // the REAL client and the REAL transport (not a mocked `OpenCodeClientLike`
+  // — the defect lives entirely inside `handlePartUpdated`, which a mocked
+  // transport-level test bypasses). Before the fix, the stream emitted ZERO
+  // `{kind:"tool"}` events for an error->completed callID, so this attempt's
+  // `outcome.toolInvocations` silently stayed 0 despite a real completion the
+  // stream itself watched happen.
+  test("a stream call observed error then completed still tallies once at the transport level (F001 round 2)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const transport = new OpenCodeSdkTransport({ client });
+    const sink: AsyncEventSink = {
+      push: async (_event: ProviderEvent) => "accepted" as const,
+      close: async () => {},
+    };
+    const request: TransportRequest = {
+      sessionId: "oc-sess-f001-round2",
+      attempt: 1,
+      route: {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt",
+        modelSnapshot: "gpt-test-snapshot",
+      },
+      executionModel: "gpt-test-snapshot",
+      systemPromptPath: "/tmp/system.md",
+      systemPromptSha256: "deadbeef",
+      userPrompt: "review this",
+      cwd: "/tmp/work",
+      tools: INPUT.tools,
+      isolation: {
+        credentialProjectionId: "proj-1",
+        env: {},
+        syntheticHome: "/tmp/home",
+        syntheticConfigHome: "/tmp/config",
+        syntheticTmp: "/tmp/tmp",
+        verifiedBinaryPath: "/usr/bin/true",
+      },
+    };
+
+    const pending = transport.execute(request, {
+      signal: new AbortController().signal,
+      events: sink,
+    });
+
+    // #124: createSession()/streamEvents() run inside execute() — early
+    // events survive the gap by buffering (see the "buffered events survive"
+    // test above), so emitting right away is safe.
+    fake.emit(messageEvent());
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_tool_err_ok",
+          messageID: ASSISTANT.id,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID: "call_err_then_ok",
+          tool: "read",
+          state: { status: "error" },
+        },
+      },
+    });
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_tool_err_ok",
+          messageID: ASSISTANT.id,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID: "call_err_then_ok",
+          tool: "read",
+          state: { status: "completed" },
+        },
+      },
+    });
+    fake.emit({ type: "session.idle", properties: { sessionID: SESSION_ID } });
+    fake.endStream();
+
+    const outcome = await pending;
+    expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(1);
+  });
+
   // Absence is the boundary, but it is ALSO what a wrong or missing
   // `directory` scope looks like — #223 measured (opencode 1.18.30) that
   // `GET /session/status` given a directory other than the one session.create
@@ -3282,6 +3369,50 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     expect(toolStatus("error")).toEqual([]);
   });
 
+  // pr-hero review F001 (round 2, opencode-client.ts:809): the reverse order
+  // of the test above. "error" then "completed" share TOOL_STATUS_RANK, so
+  // the "completed" observation is NOT a forward transition and must not
+  // stamp a SECOND "activity" — but it IS the first time this callID is
+  // observed "completed", so the tool tally must still fire, keyed by set
+  // membership rather than by rank.
+  test("error -> completed emits the tool event but not a second activity (set membership, not rank)", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_error_then_ok",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_error_then_ok",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // error is the FIRST observation for this callID: rank -1 -> 2 IS a
+    // forward transition, so it earns its own "activity" credit.
+    expect(toolStatus("error")).toEqual([{ kind: "activity" }]);
+    // completed shares error's rank, so no second "activity" — but the tool
+    // tally is decoupled from rank and fires on its own first sighting.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "tool", tool: "unknown", callId: "call_error_then_ok" },
+    ]);
+    expect(state.completedToolCallIds.has("call_error_then_ok")).toBe(true);
+    // A further restatement of "completed" is neither a transition nor a
+    // novel set member — nothing fires.
+    expect(toolStatus("completed")).toEqual([]);
+  });
+
   // #228's review: `reconcileMessages` (the ~250ms poll readback, `emit:
   // false`) ALSO writes `state.toolStates.set(callId, status)`
   // unconditionally, and three concurrent hunters sharing one server can
@@ -3343,14 +3474,16 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // "completed" in toolStates.
     expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
     expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
-    // #214: for the same reason — the count is read off `toolActivityRank`,
-    // never `toolStates` — the stream's own arrival at "completed" still
-    // stamps a look even though the poll raced ahead and marked it complete
-    // in `toolStates` already.
-    expect(toolStatus("completed")).toEqual([
-      { kind: "activity" },
-      { kind: "tool", tool: "unknown", callId: "call_poll_race" },
-    ]);
+    // #214: "activity" is read off `toolActivityRank`, never `toolStates` —
+    // the stream's own arrival at "completed" still stamps a look even
+    // though the poll raced ahead and marked it complete in `toolStates`
+    // already. The TALLY is different (pr-hero review F001 round 2): it is
+    // keyed by membership in `completedToolCallIds`, which the poll's own
+    // observation above already claimed for this exact callID — so the
+    // stream's later "completed" earns its activity credit but does not
+    // ALSO re-emit `{kind:"tool"}` for an identity the shared set already
+    // has. One canonical count, from whichever observer got there first.
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
     // Same identity, seen by both observers — the set stays a union of one,
     // not two (F002's "same call counts once" at the client layer).
     expect(state.completedToolCallIds.size).toBe(1);

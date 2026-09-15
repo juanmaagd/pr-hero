@@ -461,6 +461,24 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
     ]);
   });
 
+  // pr-hero review F001 (round 2, opencode-client.ts:809): "error" and
+  // "completed" share TOOL_STATUS_RANK (both terminal, neither outranks the
+  // other), so an error->completed transition for the same callID left
+  // `transitioned` false and the completed-tally block — nested inside
+  // `if (transitioned)` — never ran at all. The call was never added to
+  // `completedToolCallIds` and no `{kind:"tool"}` event fired, contradicting
+  // the set's own contract ("every callID EVER observed completed") whenever
+  // the poll does not independently catch the same call.
+  test("error then completed for the same callID still counts as one look", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "error"), state),
+    ).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
   test("step-start and step-finish are not tool invocations", () => {
     const state = announceAssistant();
     for (const type of ["step-start", "step-finish"]) {

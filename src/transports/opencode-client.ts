@@ -791,24 +791,31 @@ function handlePartUpdated(
       // "completed" before the stream ever delivers that same tool's
       // "pending"/"running"; reading `toolStates` here would let the poll's
       // race silently swallow the stream's own real "completed" transition
-      // and undercount a hunter that plainly looked. `transitioned` already
-      // means "a genuinely NOVEL forward step the stream itself watched
-      // happen" — restating "completed" or moving through "error" (same rank
-      // as "completed", see TOOL_STATUS_RANK) leaves it false, so this stays
-      // a look counted once per callID for free. "error" is excluded on
+      // and undercount a hunter that plainly looked. "error" is excluded on
       // purpose: it produced no findable signal to reason from, and no test
       // has asked for an errored call to count as "looked".
-      if (status === "completed") {
-        const tool =
-          typeof part.tool === "string" && part.tool.length > 0
-            ? part.tool
-            : "unknown";
-        // pr-hero review F001: recorded in the monotonic set REGARDLESS of
-        // whether a later observation ever reports something else for this
-        // callID — see the field's own WHY comment on `OpenCodeTurnState`.
-        state.completedToolCallIds.add(callId);
-        events.push({ kind: "tool", tool, callId });
-      }
+    }
+    // pr-hero review F001 (round 2): the completion TALLY is keyed by SET
+    // MEMBERSHIP, never by `transitioned`/rank — deliberately a SEPARATE gate
+    // from "activity" above. "error" and "completed" share TOOL_STATUS_RANK
+    // (both terminal, neither outranks the other), so an error->completed
+    // transition for the same callID leaves `transitioned` false; nesting
+    // this tally inside `if (transitioned)` (the pre-fix shape) meant that
+    // sequence was NEVER added to `completedToolCallIds` and never emitted
+    // its `{kind:"tool"}` event at all — contradicting the set's own
+    // contract ("every callID EVER observed completed") and silently
+    // undercounting whenever the poll did not independently catch the same
+    // call. Checking set membership instead of rank still counts each
+    // callID exactly once: a REPEAT "completed" for an id already present is
+    // a no-op, and the ownership guard above already confines this to the
+    // turn's own tool calls.
+    if (status === "completed" && !state.completedToolCallIds.has(callId)) {
+      const tool =
+        typeof part.tool === "string" && part.tool.length > 0
+          ? part.tool
+          : "unknown";
+      state.completedToolCallIds.add(callId);
+      events.push({ kind: "tool", tool, callId });
     }
     return events;
   }
