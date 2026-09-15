@@ -306,6 +306,24 @@ export interface OpenCodeTurnState {
   // here only once it is already present in `toolStates`, which enforces
   // MAX_TRACKED_PARTS before either write.
   readonly completedToolCallIds: Set<string>;
+  // pr-hero review F001 (round 3): STREAM-OWNED — written and read ONLY by
+  // `handlePartUpdated`, to decide whether THIS observer has already emitted
+  // its own `{kind:"tool"}` for a callID. Deliberately a SEPARATE set from
+  // `completedToolCallIds` above, which `reconcileMessages` (prompt_result's
+  // own readback at session-create, and every poll round, winning or not)
+  // also writes unconditionally. Gating the stream's emission on the SHARED
+  // set (the round-2 shape) let a non-stream reconcile that observed
+  // "completed" for a callID BEFORE the stream's own SSE event for that
+  // exact completion arrive suppress the stream's emission entirely — and
+  // when the STREAM, not the poll, goes on to win the turn's terminal (no
+  // poll terminal ever reports that callID), the transport's union receives
+  // it from NEITHER channel and undercounts a hunter that plainly looked.
+  // Emission dedupe must be decided from what THIS observer has already
+  // emitted, never from what some other observer already recorded. Bounded
+  // by construction like `completedToolCallIds` (no separate cap, no
+  // eviction): every id here is added only after `toolStates`'s own
+  // MAX_TRACKED_PARTS check above already passed for that identity.
+  readonly streamCompletedToolCallIds: Set<string>;
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   // Provider event ids for text deltas actually applied to `emittedText`
@@ -397,6 +415,7 @@ export function createTurnState(
     toolStates: new Map(),
     toolActivityRank: new Map(),
     completedToolCallIds: new Set(),
+    streamCompletedToolCallIds: new Set(),
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     deltaEventIds: new Set(),
@@ -805,17 +824,31 @@ function handlePartUpdated(
     // its `{kind:"tool"}` event at all — contradicting the set's own
     // contract ("every callID EVER observed completed") and silently
     // undercounting whenever the poll did not independently catch the same
-    // call. Checking set membership instead of rank still counts each
-    // callID exactly once: a REPEAT "completed" for an id already present is
-    // a no-op, and the ownership guard above already confines this to the
-    // turn's own tool calls.
-    if (status === "completed" && !state.completedToolCallIds.has(callId)) {
-      const tool =
-        typeof part.tool === "string" && part.tool.length > 0
-          ? part.tool
-          : "unknown";
+    // call.
+    if (status === "completed") {
+      // Always recorded in the SHARED set, unconditionally — this is what
+      // `pollStatus` reports if the POLL ends up winning the turn's terminal
+      // instead of the stream, and it must reflect every completion
+      // regardless of which observer saw it first.
       state.completedToolCallIds.add(callId);
-      events.push({ kind: "tool", tool, callId });
+      // pr-hero review F001 (round 3): emission is deduped against the
+      // STREAM-OWNED set, never the shared one above — see that field's own
+      // WHY comment on `OpenCodeTurnState`. Deduping against the shared set
+      // let a non-stream reconcile that saw this exact callID complete FIRST
+      // (prompt_result's own readback, a non-winning poll round) suppress
+      // the stream's own emission, silently losing the count whenever the
+      // stream — not the poll — went on to win the terminal. A REPEAT
+      // "completed" this observer has already emitted for is still a
+      // no-op, and the ownership guard above already confines this to the
+      // turn's own tool calls.
+      if (!state.streamCompletedToolCallIds.has(callId)) {
+        const tool =
+          typeof part.tool === "string" && part.tool.length > 0
+            ? part.tool
+            : "unknown";
+        state.streamCompletedToolCallIds.add(callId);
+        events.push({ kind: "tool", tool, callId });
+      }
     }
     return events;
   }

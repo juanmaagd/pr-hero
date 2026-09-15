@@ -19,6 +19,7 @@ import {
   assertMcpConnected,
   translateMcpConfig,
 } from "../../src/transports/opencode-mcp";
+import type { OpenCodeClientEvent } from "../../src/transports/opencode-sdk";
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
@@ -1370,6 +1371,95 @@ describe("createOpenCodeClient", () => {
     const outcome = await pending;
     expect(outcome.completion).toBe("success");
     expect(outcome.toolInvocations).toBe(1);
+  });
+
+  // pr-hero review F001 (round 3, opencode-client.ts:812 as b7b45c1 left it):
+  // the D-9/D-11 race, live. A non-stream observer (here, a POLL round that
+  // reconciles the readback but is not itself the turn's final message — the
+  // same reconcile a prompt_result readback also runs) sees callID A
+  // "completed" BEFORE the stream's own SSE event for that exact completion
+  // ever arrives. Round 2 deduped the stream's `{kind:"tool"}` emission
+  // against the SHARED `completedToolCallIds` set that reconcile had already
+  // written — so the stream's own emission was suppressed. When the STREAM,
+  // not the poll, goes on to win the turn's terminal (no poll TERMINAL ever
+  // reports this callID), the transport's union never learns of it from any
+  // channel, and `toolInvocations` comes out 0 for a hunt that plainly
+  // looked. Driven at the client's own session/pollStatus/streamEvents
+  // surface (not through `OpenCodeSdkTransport`) so the ONLY poll
+  // observation is the one this test drives by hand — a transport-owned
+  // background poll loop sharing the same session would race unpredictably
+  // against it and make the exact sequence being tested nondeterministic.
+  test("a non-winning poll reconcile does not suppress the stream's own tally when the stream wins the terminal (F001 round 3)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    // Arm `observedActive` (a "busy" status is required before pollStatus
+    // will ever read back messages at all).
+    fake.setStatus({ type: "busy" });
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    // A readback of a STILL-IN-PROGRESS turn (no `time.completed`, so it can
+    // never itself be the winning terminal) that already shows call_race
+    // completed — the non-winning reconcile this test is about.
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+      {
+        info: {
+          id: ASSISTANT.id,
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
+        parts: [
+          {
+            id: "prt_tool_race",
+            sessionID: SESSION_ID,
+            messageID: ASSISTANT.id,
+            type: "tool",
+            callID: "call_race",
+            tool: "read",
+            state: { status: "completed" },
+          },
+        ],
+      },
+    ]);
+    fake.setStatus(undefined);
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    // NOW the stream independently delivers its own SSE events for the SAME
+    // callID and wins the terminal — no poll terminal ever reports it.
+    fake.emit(messageEvent());
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_tool_race",
+          messageID: ASSISTANT.id,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID: "call_race",
+          tool: "read",
+          state: { status: "completed" },
+        },
+      },
+    });
+    fake.emit({ type: "session.idle", properties: { sessionID: SESSION_ID } });
+    fake.endStream();
+
+    const toolEvents: OpenCodeClientEvent[] = [];
+    for await (const event of client.streamEvents(session)) {
+      if (event.kind === "tool") toolEvents.push(event);
+    }
+    expect(toolEvents).toEqual([
+      { kind: "tool", tool: "read", callId: "call_race" },
+    ]);
   });
 
   // Absence is the boundary, but it is ALSO what a wrong or missing
@@ -3477,15 +3567,25 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // #214: "activity" is read off `toolActivityRank`, never `toolStates` —
     // the stream's own arrival at "completed" still stamps a look even
     // though the poll raced ahead and marked it complete in `toolStates`
-    // already. The TALLY is different (pr-hero review F001 round 2): it is
-    // keyed by membership in `completedToolCallIds`, which the poll's own
-    // observation above already claimed for this exact callID — so the
-    // stream's later "completed" earns its activity credit but does not
-    // ALSO re-emit `{kind:"tool"}` for an identity the shared set already
-    // has. One canonical count, from whichever observer got there first.
-    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
-    // Same identity, seen by both observers — the set stays a union of one,
-    // not two (F002's "same call counts once" at the client layer).
+    // already. The TALLY (pr-hero review F001 round 3) is the SAME story,
+    // for the SAME reason: it is deduped against `streamCompletedToolCallIds`
+    // — STREAM-OWNED, never the shared `completedToolCallIds` the poll
+    // reconcile above already wrote. If this emission were deduped against
+    // the shared set instead (round 2's shape), the poll's earlier
+    // observation would suppress the stream's own `{kind:"tool"}` here —
+    // and if the STREAM, not the poll, goes on to win the turn's terminal,
+    // the transport's union would never learn of this callID from ANY
+    // channel. So the stream still emits its own "tool" event even though
+    // the shared set already has this callID.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown", callId: "call_poll_race" },
+    ]);
+    // The SHARED set still stays a union of one, not two: the poll's own
+    // earlier write and the stream's later one are the same identity
+    // (F002's "same call counts once" at the client layer) — this is a
+    // reporting fact for `pollStatus`, independent of the stream's own
+    // emission dedupe above.
     expect(state.completedToolCallIds.size).toBe(1);
   });
 });
