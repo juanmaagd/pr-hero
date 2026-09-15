@@ -168,7 +168,16 @@ describe("launchOpenCodeServer", () => {
     });
     fake.emit(LISTENING);
     const server = await pending;
-    expect(fake.env()).toEqual(projected);
+    // #157: OPENCODE_CONFIG_CONTENT is now delivered unconditionally (the
+    // permission-deny config below), so "exactly the projected environment"
+    // means the projection plus that one documented addition — never a merge
+    // of process.env, which is what this test actually guards.
+    expect(fake.env()).toEqual({
+      ...projected,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { external_directory: "deny" },
+      }),
+    });
     fake.finish(0);
     await server.close();
   });
@@ -198,7 +207,14 @@ describe("launchOpenCodeServer", () => {
     const server = await pending;
 
     const env = fake.env();
-    expect(env?.OPENCODE_CONFIG_CONTENT).toBe(JSON.stringify({ mcp }));
+    // #157: permission-deny now rides alongside mcp in the same delivered
+    // config.
+    expect(env?.OPENCODE_CONFIG_CONTENT).toBe(
+      JSON.stringify({
+        mcp,
+        permission: { external_directory: "deny" },
+      }),
+    );
     // The projection is still passed through in full; the config is the ONE
     // documented addition, never a merge of process.env.
     expect(env?.HOME).toBe("/tmp/projection");
@@ -213,8 +229,11 @@ describe("launchOpenCodeServer", () => {
   // Parity with claude-code on a repo with no codegraph index: pr-hero writes
   // {"mcpServers":{}} and the hunters run on read/grep/glob. An empty `mcp`
   // object delivered as config would be a claim about the child's tool
-  // channels that pr-hero is not making.
-  test("delivers no config at all when there is no MCP to deliver", async () => {
+  // channels that pr-hero is not making — so `mcp` itself is still omitted
+  // here. #157: the permission-deny config is NOT gated on `mcp` the same
+  // way, since it is a threat-model floor rather than a claim about tool
+  // channels, so it still ships even with nothing to say about MCP.
+  test("delivers only the permission-deny config when there is no MCP to deliver", async () => {
     const fake = fakeServer();
     const pending = launchOpenCodeServer({
       verifiedBinaryPath: BIN,
@@ -225,7 +244,38 @@ describe("launchOpenCodeServer", () => {
     });
     fake.emit(LISTENING);
     const server = await pending;
-    expect(fake.env()).toEqual({ HOME: "/tmp/projection" });
+    expect(fake.env()).toEqual({
+      HOME: "/tmp/projection",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { external_directory: "deny" },
+      }),
+    });
+    fake.finish(0);
+    await server.close();
+  });
+
+  // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+  // reviewed worktree tripped `permission.asked` for `external_directory`
+  // twice in one run (resilience at 168.9s, reliability at 374.0s), and since
+  // pr-hero never answered OpenCode's permission prompt the tool call sat
+  // blocked until the silence tripwire killed the attempt 150s later at $0.
+  // Failing closed AT THE SOURCE means the provider itself refuses the
+  // read/write instead of asking and waiting forever — this tightens the §13
+  // isolation threat model (CLAUDE.md rule 4), it does not loosen it.
+  test("denies external_directory access in the delivered config, with or without an MCP registry", async () => {
+    const fake = fakeServer();
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: { HOME: "/tmp/projection" },
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+    const config = JSON.parse(fake.env()?.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      permission?: { external_directory?: string };
+    };
+    expect(config.permission?.external_directory).toBe("deny");
     fake.finish(0);
     await server.close();
   });
@@ -426,10 +476,15 @@ describe("projected server launch (#149)", () => {
     fake.emit(LISTENING);
     await pending;
 
+    // #157: permission-deny is delivered unconditionally now, alongside the
+    // allowlist-plus-projection env this test otherwise guards.
     expect(fake.env()).toEqual({
       PATH: "/usr/bin",
       LANG: "en_US.UTF-8",
       ...PROJECTION_ENV,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { external_directory: "deny" },
+      }),
     });
   });
 

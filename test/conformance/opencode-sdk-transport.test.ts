@@ -1832,6 +1832,7 @@ function makeControlledSdk(options: {
   const sdk: import("../../src/transports/opencode-client").OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: { status: async () => ({ data: {} }) },
+      permission: { reply: async () => ({ data: true }) },
       tool: {
         ids: async () => ({
           data: options.toolIds ?? ["read", "grep", "glob"],

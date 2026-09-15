@@ -342,6 +342,27 @@ export function formatProviderLimitDetail(
   return `${MARKER_PROVIDER_LIMIT} (${reason}): ${message}`;
 }
 
+// #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+// reviewed worktree tripped `permission.asked` for `external_directory`
+// twice in one run, and pr-hero never answered OpenCode's permission prompt
+// — the tool call sat blocked until the silence tripwire killed the attempt
+// 150s later at $0. opencode-client.ts rejects any own-session permission
+// prompt as defense in depth beside the server-side `deny` config
+// (opencode-server.ts); THIS marker fires only when that reject itself could
+// not be delivered — the one case the config cannot cover, since it needs a
+// working SDK call to answer the prompt at all. No retry can fix a control
+// that failed to execute, so this is terminal, not `protocol_truncation`.
+const MARKER_PERMISSION_REJECT_FAILED =
+  "[pr-hero] opencode sdk: failed to reject an OpenCode permission request";
+
+export function formatPermissionRejectFailureDetail(
+  permission: string,
+  patterns: readonly string[],
+  errorMessage: string,
+): string {
+  return `${MARKER_PERMISSION_REJECT_FAILED} (${permission} ${JSON.stringify(patterns)}): ${errorMessage}`;
+}
+
 type SettleReason =
   // #132: `drained` records whether the stream had gone QUIET when the
   // post-win window closed. False means the drain budget ran out with content
@@ -1834,6 +1855,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // right, since a fresh attempt cannot outrun quota that is already spent.
     if (witness.includes(MARKER_PROVIDER_LIMIT)) {
       return "quota_exhausted";
+    }
+    // #157: same ordering rule as the marker above — checked before any
+    // generic provider-text pattern so the underlying reply-failure message
+    // (network error, 4xx body, whatever the SDK call actually failed with)
+    // cannot steer this into rate_limit/network_transient/auth_invalid
+    // instead of the fact that pr-hero's own permission control failed to
+    // run.
+    if (witness.includes(MARKER_PERMISSION_REJECT_FAILED)) {
+      return "runtime_unavailable";
     }
     if (
       witness.includes(MARKER_CONFLICT) ||

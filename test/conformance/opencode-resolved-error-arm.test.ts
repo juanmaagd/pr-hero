@@ -102,6 +102,7 @@ function fakeSdk(
       // These rigs declare no registry, so the verified answer is "nothing
       // connected" — which is a declaration too, not an absence of one.
       mcp: { status: async () => ({ data: {} }) },
+      permission: { reply: async () => ({ data: true }) },
       session: {
         create: async (opts) => ({
           data: {

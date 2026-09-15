@@ -98,6 +98,9 @@ function setup(
         return { data: {} };
       },
     },
+    permission: {
+      reply: async () => ({ data: true }),
+    },
     tool: {
       ids: async (_p, r) => {
         signals.tools = r?.signal;

@@ -32,7 +32,10 @@ import type {
   OpenCodeCreateSessionInput,
   OpenCodePollResult,
 } from "./opencode-sdk";
-import { formatProviderLimitDetail } from "./opencode-sdk";
+import {
+  formatPermissionRejectFailureDetail,
+  formatProviderLimitDetail,
+} from "./opencode-sdk";
 import type { OpenCodeServerHandle } from "./opencode-server";
 
 // Structural, not imported from the SDK: pr-hero ships with ZERO runtime
@@ -1684,6 +1687,27 @@ export interface OpenCodeSdkClientApi {
       request?: { signal?: AbortSignal },
     ): Promise<OpenCodeSdkResult<unknown>>;
   };
+  // `POST /permission/{requestID}/reply` — the ONLY way to unblock a pending
+  // OpenCode permission prompt (#157: `permission.asked` for
+  // `external_directory` blocked a tool call for the whole usefulProgressMs
+  // budget, since pr-hero has no UI to answer one and the server-side `deny`
+  // config cannot cover every future permission kind). REQUIRED, never
+  // optional, for the same reason as tool.ids/mcp.status above: an optional
+  // member lets a fake skip the surface silently, which is the shape of
+  // issue #121, and a skipped reply here is a hung tool call with no
+  // evidence anything was ever attempted.
+  readonly permission: {
+    reply(
+      parameters: {
+        requestID: string;
+        directory?: string;
+        workspace?: string;
+        reply?: "once" | "always" | "reject";
+        message?: string;
+      },
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
+  };
 }
 
 export interface OpenCodeSdkLike {
@@ -2354,6 +2378,73 @@ export function createOpenCodeClient(
               const rawSessionId = eventSessionId(raw);
               if (rawSessionId === undefined || rawSessionId === sessionId) {
                 evidence.record("event", raw);
+              }
+              // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path
+              // OUTSIDE the reviewed worktree tripped `permission.asked`,
+              // and pr-hero never answered it — the tool call sat blocked
+              // until the silence tripwire killed the attempt 150s later at
+              // $0. The server-side `deny` config (opencode-server.ts) is
+              // the primary control; this is defense in depth for whatever
+              // it does not cover — ANY permission, not only
+              // `external_directory`, since pr-hero has no UI to answer a
+              // prompt and must never leave one pending. Own session only:
+              // `rawSessionId` is the SAME id `eventSessionId` already
+              // computed above.
+              if (
+                rawSessionId === sessionId &&
+                (raw as RawEvent)?.type === "permission.asked"
+              ) {
+                const properties = props(raw);
+                const requestID = properties?.id;
+                const permissionName =
+                  typeof properties?.permission === "string"
+                    ? properties.permission
+                    : "unknown";
+                const patterns = Array.isArray(properties?.patterns)
+                  ? (properties.patterns as unknown[]).filter(
+                      (p): p is string => typeof p === "string",
+                    )
+                  : [];
+                if (typeof requestID === "string") {
+                  void (async () => {
+                    try {
+                      unwrap(
+                        await api.permission.reply(
+                          {
+                            requestID,
+                            directory: input.cwd,
+                            reply: "reject",
+                          },
+                          requestOptions,
+                        ),
+                        "permission.reply",
+                      );
+                      // Visible in the attempt's evidence capture even
+                      // though nothing settles on the success path — this is
+                      // the only record that pr-hero ever saw, and answered,
+                      // this prompt.
+                      evidence.record("permission_rejected", {
+                        requestID,
+                        permission: permissionName,
+                        patterns,
+                      });
+                    } catch (error) {
+                      // The one case the server-side config cannot cover:
+                      // the reject control itself did not run. Settled
+                      // promptly rather than left to the silence tripwire —
+                      // see the second door below, exactly like the prompt
+                      // failure above.
+                      state.failure = formatPermissionRejectFailureDetail(
+                        permissionName,
+                        patterns,
+                        (error as Error).message,
+                      );
+                      state.ended = true;
+                      state.wake?.();
+                      state.wake = undefined;
+                    }
+                  })();
+                }
               }
               const rawSize = Buffer.byteLength(JSON.stringify(raw), "utf8");
               state.queueBytes += rawSize;

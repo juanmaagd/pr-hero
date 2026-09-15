@@ -623,6 +623,7 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
           // request declares no mcp registry, so the verified answer is
           // "nothing connected".
           mcp: { status: async () => ({ data: {} }) },
+          permission: { reply: async () => ({ data: true }) },
           session: {
             create: async (opts?: unknown) => ({
               data: {
@@ -714,6 +715,7 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
               data: { codegraph: { status: "connected" } },
             }),
           },
+          permission: { reply: async () => ({ data: true }) },
           session: {
             create: async (opts?: unknown) => ({
               data: {

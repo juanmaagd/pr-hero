@@ -81,6 +81,9 @@ interface FakeSdk {
   // assert they carry the same `directory` session.create registered.
   statusCalls: () => Array<Record<string, unknown> | undefined>;
   subscribeCalls: () => Array<Record<string, unknown> | undefined>;
+  // #157: every call to `permission.reply`, verbatim, so a test can assert
+  // the exact ids pr-hero sent — and how many times it sent them.
+  replyCalls: () => Array<Record<string, unknown>>;
 }
 
 function fakeSdk(
@@ -89,6 +92,11 @@ function fakeSdk(
     // `undefined` means "the live surface". An Error rejects the call; an
     // array (including an empty one) resolves with exactly those ids.
     toolIds?: readonly string[] | Error;
+    // #157: `undefined` means every `permission.reply` call succeeds
+    // (`{data: true}`, the real 200 shape). A string simulates the SDK's own
+    // `ThrowOnError = false` convention — an API-level refusal RESOLVES with
+    // `{data: undefined, error}`, never a rejected promise.
+    permissionReplyError?: string;
     // Distinct ids per createSession, in call order. Default is SESSION_ID
     // for every create, which is what the single-session tests pin.
     sessionIds?: readonly string[];
@@ -128,12 +136,22 @@ function fakeSdk(
 
   let iterators = 0;
   let streamReturns = 0;
+  const replyCalls: Array<Record<string, unknown>> = [];
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: {
         status: async (opts) => {
           mcpStatusCalls.push(opts as Record<string, unknown> | undefined);
           return { data: mcpStatus };
+        },
+      },
+      permission: {
+        reply: async (opts) => {
+          replyCalls.push(opts as Record<string, unknown>);
+          if (options.permissionReplyError !== undefined) {
+            return { error: options.permissionReplyError };
+          }
+          return { data: true };
         },
       },
       tool: {
@@ -241,6 +259,7 @@ function fakeSdk(
     toolIdsAt: () => toolIdsAt,
     promptedAt: () => promptedAt,
     toolIdsCalls: () => toolIdsCalls,
+    replyCalls: () => replyCalls,
     emit: (event) => {
       queue.push(event);
       notify?.();
@@ -778,6 +797,113 @@ describe("createOpenCodeClient", () => {
       "own.info",
       "sessionless",
     ]);
+  });
+
+  // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+  // reviewed worktree tripped `permission.asked` for `external_directory`
+  // twice in one run, and pr-hero never answers OpenCode's permission
+  // prompt — the tool call sat blocked until the silence tripwire killed the
+  // attempt 150s later at $0. The server-side deny config
+  // (opencode-server.ts) is the primary control; this is defense in depth
+  // for whatever it does not cover, so it rejects ANY permission, not only
+  // `external_directory`.
+  test("an own-session permission.asked immediately rejects the request, exactly once", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_01ABC",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/Users/juanma/.prhero/repos/.../mobile/*"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    // Drain so the pump has certainly run to completion.
+    for await (const _event of client.streamEvents(session)) {
+      // no-op: only the reply side effect is under test here
+    }
+
+    expect(fake.replyCalls()).toEqual([
+      { requestID: "per_01ABC", directory: INPUT.cwd, reply: "reject" },
+    ]);
+  });
+
+  test("a permission.asked for another session triggers no reply", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_other",
+        sessionID: "ses_other",
+        permission: "external_directory",
+        patterns: ["/anywhere"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // no-op
+    }
+
+    expect(fake.replyCalls()).toEqual([]);
+  });
+
+  test("a failing reject reply settles the attempt failed with the witness, well before usefulProgressMs, not protocol_truncation", async () => {
+    const fake = fakeSdk({ permissionReplyError: "permission service down" });
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_fails",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Races against a real, bounded timeout rather than draining forever:
+    // against UNMODIFIED code nothing ever settles `streamEvents`, and a
+    // plain `for await` would hang the whole file, not just this test.
+    const iterator = client.streamEvents(session)[Symbol.asyncIterator]();
+    let thrown: Error | undefined;
+    try {
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("test timeout: stream never settled")),
+              200,
+            );
+          }),
+        ]);
+        if (step.done) break;
+      }
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      fake.endStream();
+      await iterator.return?.();
+    }
+
+    expect(thrown?.message).toContain("permission service down");
   });
 
   // #223: pollStatus's boundary is GET /session/status, scoped by `directory`

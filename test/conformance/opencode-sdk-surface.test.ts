@@ -178,4 +178,25 @@ describe("the installed @opencode-ai/sdk/v2", () => {
     expect(typeof client.session?.status).toBe("function");
     expect(client.session?.status).not.toBe(client.session?.messages);
   });
+
+  // #157's half of the drift-kill. `POST /permission/{requestID}/reply` is
+  // the ONLY way pr-hero can unblock a pending OpenCode permission prompt
+  // (measured live, pr-157-8df2fca3-6: `permission.asked` for
+  // `external_directory` blocked a tool call for the whole
+  // usefulProgressMs budget). Losing this method would take the client's
+  // reject-on-ask defense in depth with it and leave every future
+  // permission kind the server-side config does not cover to hang again.
+  test("really exposes permission.reply(), the only way to unblock a pending prompt", async () => {
+    const module = (await import("@opencode-ai/sdk/v2")) as unknown as {
+      createOpencodeClient: (config: { baseUrl: string }) => {
+        permission?: { reply?: unknown };
+      };
+    };
+
+    const client = module.createOpencodeClient({
+      baseUrl: "http://127.0.0.1:1",
+    });
+
+    expect(typeof client.permission?.reply).toBe("function");
+  });
 });
