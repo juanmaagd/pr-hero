@@ -79,6 +79,7 @@ async function run(
       createOpencodeClient: () => ({
         tool: { ids: async () => ({ data: ["read"] }) },
         mcp: { status: async () => ({ data: {} }) },
+        permission: { reply: async () => ({ data: true }) },
         session: {
           create: async () => ({ data: { id: sid, directory: cwd } }),
           prompt: async () =>

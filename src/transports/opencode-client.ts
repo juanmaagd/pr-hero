@@ -32,6 +32,10 @@ import type {
   OpenCodeCreateSessionInput,
   OpenCodePollResult,
 } from "./opencode-sdk";
+import {
+  formatPermissionRejectFailureDetail,
+  formatProviderLimitDetail,
+} from "./opencode-sdk";
 import type { OpenCodeServerHandle } from "./opencode-server";
 
 // Structural, not imported from the SDK: pr-hero ships with ZERO runtime
@@ -55,6 +59,25 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+// #228: the raw provider event carries its session id in one of three
+// places depending on its shape — a plain event's own `properties.sessionID`,
+// a `message.part.*` event's `properties.part.sessionID`, or a
+// `message.updated`-shaped event's `properties.info.sessionID`. Returns
+// `undefined` when none of the three is present, which the caller treats as
+// "cannot be attributed to any session" and therefore not filterable.
+function eventSessionId(raw: unknown): string | undefined {
+  const p = props(raw);
+  if (p === undefined) return undefined;
+  if (typeof p.sessionID === "string") return p.sessionID;
+  const part = asRecord(p.part);
+  if (part !== undefined && typeof part.sessionID === "string")
+    return part.sessionID;
+  const info = asRecord(p.info);
+  if (info !== undefined && typeof info.sessionID === "string")
+    return info.sessionID;
+  return undefined;
 }
 
 function asNumber(value: unknown): number | undefined {
@@ -166,6 +189,34 @@ export function retryHintFromStatus(
   return delta > 0 ? delta : undefined;
 }
 
+// #157: SessionStatus's `retry` arm can also carry an `action` naming an
+// account/usage limit rather than an ordinary transient backoff. Only
+// "account_rate_limit" has ever been observed (pr-157-8df2fca3-4, all three
+// hunter captures, 3487 occurrences each) — this set is deliberately literal
+// rather than "any retry", so an unrecognised future reason keeps today's
+// alive-and-retrying behavior instead of guessing at a fact the provider
+// never actually stated. `message` is read from the top-level retry status,
+// not `action.message` — measured identical on the real capture, and the
+// top-level field is what retryHintFromStatus above already reads its
+// sibling `next` from.
+const ACCOUNT_LIMIT_REASONS: ReadonlySet<string> = new Set([
+  "account_rate_limit",
+]);
+
+export function providerLimitFromStatus(
+  status: unknown,
+): { reason: string; message: string } | undefined {
+  const record = asRecord(status);
+  if (record?.type !== "retry") return undefined;
+  const action = asRecord(record.action);
+  const reason = action?.reason;
+  if (typeof reason !== "string" || !ACCOUNT_LIMIT_REASONS.has(reason)) {
+    return undefined;
+  }
+  const message = typeof record.message === "string" ? record.message : "";
+  return { reason, message };
+}
+
 // TRAP 4 (issue #124): `message.part.delta` carries NO part type. Its whole
 // payload is {sessionID, messageID, partID, field, delta}, so the only way to
 // know what a delta belongs to is to correlate its `partID` against the part
@@ -235,11 +286,27 @@ export interface OpenCodeTurnState {
     string,
     "pending" | "running" | "completed" | "error"
   >;
+  // Owned ONLY by the stream path (`handlePartUpdated`). `reconcileMessages`
+  // (the poll readback) writes `toolStates` unconditionally and can observe
+  // a LATER status before the stream delivers that tool's own earlier ones
+  // — crediting activity off `toolStates` would let a poll-advanced rank
+  // suppress every real transition the stream later reports. See the WHY
+  // comment at its use site in `handlePartUpdated`.
+  readonly toolActivityRank: Map<string, number>;
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   // Provider event ids for text deltas actually applied to `emittedText`
   // (never ids merely seen while buffered — see `handlePartDelta`).
   readonly deltaEventIds: Set<string>;
+  // Sibling to `deltaEventIds` above, kept separate rather than shared: that
+  // set's own comment fixes its meaning as "applied to emittedText", which a
+  // reasoning delta never is (see `handlePartDelta`'s reasoning branch). A
+  // provider event id is unique across the whole stream regardless of part
+  // kind, so there is no collision risk in sharing it — this is a semantics
+  // choice, not a safety one. Records every NOVEL reasoning-delta id seen,
+  // so a replayed id (an SSE Last-Event-ID reconnect) is recognized and does
+  // not earn useful-progress credit twice.
+  readonly reasoningDeltaEventIds: Set<string>;
   readonly usage: Map<string, StepUsage>;
   readonly completedUsage: Set<string>;
   readonly payloadBytes: Map<string, number>;
@@ -268,6 +335,37 @@ const MAX_READBACK_BYTES = 4 * 1024 * 1024;
 // Same order of magnitude as MAX_TRACKED_PARTS: sized to cover an SSE
 // reconnect's Last-Event-ID replay window for one turn's answer deltas.
 const MAX_TRACKED_DELTA_EVENTS = 4096;
+// Own cap, same rationale as MAX_TRACKED_DELTA_EVENTS, for reasoningDeltaEventIds.
+const MAX_TRACKED_REASONING_DELTA_EVENTS = 4096;
+// PR #228 review, F002: same redelivery hazard as MAX_TRACKED_DELTA_EVENTS
+// (an SSE Last-Event-ID reconnect can replay an event this session already
+// saw), applied to `permission.asked` requestIDs — see SessionState's
+// `respondedPermissions`. Permission prompts are far rarer than deltas
+// within one attempt, so a smaller cap than MAX_TRACKED_DELTA_EVENTS is
+// still generous; sized to MAX_TRACKED_MESSAGES for the same "one order of
+// magnitude above anything a real attempt produces" reasoning. Unlike every
+// OTHER bounded set here, reaching this cap does NOT evict the oldest id via
+// `rememberId` — round 2 of the same review: an evicted requestID is
+// indistinguishable from an unseen one, so its later redelivery would slip
+// past the dedupe guard and fire a second reply. The attempt fails closed
+// instead once this many distinct prompts have been answered in one turn.
+const MAX_TRACKED_PERMISSION_REQUESTS = MAX_TRACKED_MESSAGES;
+// An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
+// newer one already landed (e.g. "running" replayed after "completed" was
+// already observed) — `previousStatus !== status` alone would credit that
+// replay as a transition, since it genuinely differs from what is stored.
+// Rank makes only FORWARD movement count: `completed` and `error` share a
+// rank because both are terminal outcomes and neither outranks the other, so
+// one following the other (in either direction) is not progress either.
+const TOOL_STATUS_RANK: Record<
+  "pending" | "running" | "completed" | "error",
+  number
+> = {
+  pending: 0,
+  running: 1,
+  completed: 2,
+  error: 2,
+};
 
 export function createTurnState(
   sessionId?: string,
@@ -284,9 +382,11 @@ export function createTurnState(
     messageDetails: new Map(),
     parentLinks: new Map(),
     toolStates: new Map(),
+    toolActivityRank: new Map(),
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     deltaEventIds: new Set(),
+    reasoningDeltaEventIds: new Set(),
     usage: new Map(),
     completedUsage: new Set(),
     payloadBytes: new Map(),
@@ -631,16 +731,42 @@ function handlePartUpdated(
       | "error"
       | undefined;
     const callId = typeof part.callID === "string" ? part.callID : partId;
+    let transitioned = false;
     if (status) {
       if (
         !state.toolStates.has(callId) &&
         state.toolStates.size >= MAX_TRACKED_PARTS
       )
         failIntegrity(state, "tool identity cap exceeded");
+      // `state.toolStates` still stores the raw reported status regardless
+      // of rank — other logic (e.g. `hasOutstandingTools`) reads it and
+      // must keep seeing the provider's literal last-known status, not a
+      // rank-filtered one. Only whether `activity` is EMITTED changes below.
       state.toolStates.set(callId, status);
+      // #228's review: credit is computed against `toolActivityRank`, a map
+      // owned ONLY by this stream path — NEVER against `toolStates`, which
+      // `reconcileMessages` (the poll readback) also writes unconditionally.
+      // Three concurrent hunters sharing one server can have a poll round
+      // observe a tool's "completed" before the stream ever delivers that
+      // same tool's "pending"/"running". Comparing against `toolStates`
+      // would then compare the stream's real "pending" against the rank the
+      // POLL already advanced to "completed", crediting nothing for work
+      // the stream is only now reporting.
+      const previousRank = state.toolActivityRank.get(callId) ?? -1;
+      const newRank = TOOL_STATUS_RANK[status];
+      transitioned = newRank > previousRank;
+      if (transitioned)
+        remember(state.toolActivityRank, callId, newRank, MAX_TRACKED_PARTS);
     }
     if (msgDetail) msgDetail.hasToolCalls = true;
-    return [];
+    // Ownership was already established above (the `isMessageOwned` check
+    // before this switch), so a NOVEL status transition here is real
+    // provider work — the tool actually moved pending -> running ->
+    // completed/error. Re-observing the SAME status (a re-delivered or
+    // redundant update) is not new work and earns nothing. Before this, tool
+    // execution time counted as silence: this branch emitted no client
+    // event at all, transition or not.
+    return transitioned ? [{ kind: "activity" }] : [];
   }
 
   if (partType === "reasoning") {
@@ -655,8 +781,12 @@ function handlePartUpdated(
       text: text.startsWith(previous) ? text : previous,
       emittedText: "",
     });
-    // Only an owned cumulative snapshot proving advancement is useful.
-    // Bare delta markers have no replay identity and cannot extend the deadline.
+    // An owned cumulative snapshot proving advancement is useful, and so —
+    // see `handlePartDelta`'s reasoning branch below — is a DELTA carrying a
+    // provider event id not seen before: PR #227 threaded that id through,
+    // which is exactly the replay identity this comment used to say a bare
+    // delta marker lacked. An id-less delta still has none and stays a bare
+    // marker there.
     return [
       {
         kind: "reasoning",
@@ -741,12 +871,25 @@ function handlePartDelta(
 
   const kind = state.parts.get(partId);
   if (kind === "reasoning") {
-    // No id dedup needed here: unlike the answer branch below, this emits a
-    // bare progress marker and never accumulates `delta` into any tracked
-    // text. A redelivered reasoning delta produces one extra marker, not a
-    // corrupted `emittedText` or a "conflicting snapshot" throw, so there is
-    // nothing for an id check to protect.
     if (!messageId || !isMessageOwned(messageId, state)) return [];
+    // #227 threaded the provider event id through this handler (the
+    // `eventId` parameter), which is exactly the replay identity f842a8b
+    // said a bare reasoning delta marker lacked ("bare delta markers have no
+    // replay identity and cannot extend the deadline" — the old comment
+    // here, and still true for an id-less delta). A delta whose id has not
+    // been seen before is real, novel work the model did; the SAME id
+    // redelivered (an SSE Last-Event-ID reconnect) is not. Unlike the answer
+    // branch below, nothing is accumulated into any tracked text either way
+    // — a redelivered id just falls back to the bare marker, never a
+    // corrupted `emittedText` or a "conflicting snapshot" throw.
+    if (eventId !== undefined && !state.reasoningDeltaEventIds.has(eventId)) {
+      rememberId(
+        state.reasoningDeltaEventIds,
+        eventId,
+        MAX_TRACKED_REASONING_DELTA_EVENTS,
+      );
+      return [{ kind: "reasoning", progress: true }];
+    }
     return [{ kind: "reasoning" }];
   }
   if (kind === "answer") {
@@ -1412,6 +1555,21 @@ export function mapOpenCodeEvents(
 
     case "session.status": {
       const status = asRecord(p.status);
+      // #157: checked BEFORE the busy/heartbeat arm below — a retry status
+      // naming an account/usage limit is not "still working", it is a fact
+      // that ends the attempt. Reached only for THIS session: the shared
+      // `p.sessionID !== sessionId` guard above already returned [] for
+      // every other one.
+      const limit = providerLimitFromStatus(status);
+      if (limit !== undefined) {
+        return [
+          {
+            kind: "provider_limit",
+            reason: limit.reason,
+            message: limit.message,
+          },
+        ];
+      }
       return status?.type === "busy" ? [{ kind: "heartbeat" }] : [];
     }
 
@@ -1539,6 +1697,27 @@ export interface OpenCodeSdkClientApi {
   readonly mcp: {
     status(
       options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
+  };
+  // `POST /permission/{requestID}/reply` — the ONLY way to unblock a pending
+  // OpenCode permission prompt (#157: `permission.asked` for
+  // `external_directory` blocked a tool call for the whole usefulProgressMs
+  // budget, since pr-hero has no UI to answer one and the server-side `deny`
+  // config cannot cover every future permission kind). REQUIRED, never
+  // optional, for the same reason as tool.ids/mcp.status above: an optional
+  // member lets a fake skip the surface silently, which is the shape of
+  // issue #121, and a skipped reply here is a hung tool call with no
+  // evidence anything was ever attempted.
+  readonly permission: {
+    reply(
+      parameters: {
+        requestID: string;
+        directory?: string;
+        workspace?: string;
+        reply?: "once" | "always" | "reject";
+        message?: string;
+      },
       request?: { signal?: AbortSignal },
     ): Promise<OpenCodeSdkResult<unknown>>;
   };
@@ -1790,6 +1969,14 @@ interface SessionState {
   // only door left. §197 asks for two independent observers of one fact; one
   // observer plus a blind spot is not that.
   failure?: string;
+  // PR #228 review, F002: `permission.asked` requestIDs already replied to
+  // or currently in flight. An SSE Last-Event-ID reconnect can redeliver an
+  // event this session already saw (the same hazard #227 dedupes for stream
+  // deltas via OpenCodeTurnState.deltaEventIds) — a replayed permission.asked
+  // must not send a second reply for a request the server already closed.
+  // Added to BEFORE the reply is awaited, not after it resolves, so a
+  // duplicate arriving while the first reply is still in flight also skips.
+  readonly respondedPermissions: Set<string>;
 }
 
 // #141. Returns an EMPTY registry for a request that names none, which is the
@@ -2193,6 +2380,7 @@ export function createOpenCodeClient(
           turn: createTurnState(sessionId, userMessageId, input.cwd),
           observedActive: false,
           ended: false,
+          respondedPermissions: new Set(),
         };
         states.set(sessionId, state);
 
@@ -2202,7 +2390,123 @@ export function createOpenCodeClient(
         void (async () => {
           try {
             for await (const raw of subscription.stream) {
-              evidence.record("event", raw);
+              // #228: this is ONE directory-scoped stream shared by every
+              // concurrent hunter's session on the same server. Recording
+              // every event unfiltered meant roughly 55% of a real
+              // multi-hunter capture was OTHER sessions' events, filling the
+              // record/byte cap long before this session's own silence
+              // window was covered. An event with no attributable session id
+              // is still recorded — there is nothing to filter it against.
+              const rawSessionId = eventSessionId(raw);
+              if (rawSessionId === undefined || rawSessionId === sessionId) {
+                evidence.record("event", raw);
+              }
+              // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path
+              // OUTSIDE the reviewed worktree tripped `permission.asked`,
+              // and pr-hero never answered it — the tool call sat blocked
+              // until the silence tripwire killed the attempt 150s later at
+              // $0. The server-side `deny` config (opencode-server.ts) is
+              // the primary control; this is defense in depth for whatever
+              // it does not cover — ANY permission, not only
+              // `external_directory`, since pr-hero has no UI to answer a
+              // prompt and must never leave one pending. Own session only:
+              // `rawSessionId` is the SAME id `eventSessionId` already
+              // computed above.
+              if (
+                rawSessionId === sessionId &&
+                (raw as RawEvent)?.type === "permission.asked"
+              ) {
+                const properties = props(raw);
+                const requestID = properties?.id;
+                const permissionName =
+                  typeof properties?.permission === "string"
+                    ? properties.permission
+                    : "unknown";
+                const patterns = Array.isArray(properties?.patterns)
+                  ? (properties.patterns as unknown[]).filter(
+                      (p): p is string => typeof p === "string",
+                    )
+                  : [];
+                if (
+                  typeof requestID === "string" &&
+                  !state.respondedPermissions.has(requestID)
+                ) {
+                  // PR #228 review (round 2), F002: `rememberId` (used for
+                  // every OTHER bounded id set in this file) evicts the
+                  // OLDEST entry once full — fine for high-volume, low-
+                  // stakes dedup like stream deltas, but wrong here: an
+                  // evicted requestID is indistinguishable from one this
+                  // session never saw, so ITS later SSE redelivery would
+                  // pass the `!has(requestID)` guard above and fire a
+                  // SECOND `permission.reply` for a request the server
+                  // already closed — exactly the failure this set exists to
+                  // prevent. A failed second reply already fails the
+                  // attempt below, so evicting just makes that failure
+                  // depend on redelivery timing this session cannot
+                  // control. 512 distinct permission prompts inside one
+                  // step is already anomalous — `external_directory` is
+                  // denied at the server config (opencode-server.ts) — so
+                  // failing closed here, the same way `failIntegrity` fails
+                  // closed on other exhausted identity caps (e.g. "tool
+                  // identity cap exceeded"), is strictly safer than ever
+                  // forgetting a requestID this session has committed to
+                  // answering.
+                  if (
+                    state.respondedPermissions.size >=
+                    MAX_TRACKED_PERMISSION_REQUESTS
+                  ) {
+                    state.turn.integrityFailure =
+                      "[pr-hero] opencode client: permission request cap exceeded (512)";
+                    state.wake?.();
+                    state.wake = undefined;
+                    break;
+                  }
+                  // PR #228 review, F002: added BEFORE the reply is even
+                  // sent, not after it resolves — an SSE Last-Event-ID
+                  // reconnect can redeliver this same event, and a duplicate
+                  // arriving while this reply is still in flight must also
+                  // see it here rather than racing the await below.
+                  state.respondedPermissions.add(requestID);
+                  void (async () => {
+                    try {
+                      unwrap(
+                        await api.permission.reply(
+                          {
+                            requestID,
+                            directory: input.cwd,
+                            reply: "reject",
+                          },
+                          requestOptions,
+                        ),
+                        "permission.reply",
+                      );
+                      // Visible in the attempt's evidence capture even
+                      // though nothing settles on the success path — this is
+                      // the only record that pr-hero ever saw, and answered,
+                      // this prompt.
+                      evidence.record("permission_rejected", {
+                        requestID,
+                        permission: permissionName,
+                        patterns,
+                      });
+                    } catch (error) {
+                      // The one case the server-side config cannot cover:
+                      // the reject control itself did not run. Settled
+                      // promptly rather than left to the silence tripwire —
+                      // see the second door below, exactly like the prompt
+                      // failure above.
+                      state.failure = formatPermissionRejectFailureDetail(
+                        permissionName,
+                        patterns,
+                        (error as Error).message,
+                      );
+                      state.ended = true;
+                      state.wake?.();
+                      state.wake = undefined;
+                    }
+                  })();
+                }
+              }
               const rawSize = Buffer.byteLength(JSON.stringify(raw), "utf8");
               state.queueBytes += rawSize;
               if (state.queueBytes > 4 * 1024 * 1024) {
@@ -2463,7 +2767,20 @@ export function createOpenCodeClient(
       );
       signal?.throwIfAborted();
       state.evidence.record("status", { sessionId: session.id, statuses });
-      const statusType = asRecord(statuses?.[session.id])?.type;
+      const statusRecord = asRecord(statuses?.[session.id]);
+      // #157: checked BEFORE "retry means still working" below, and it is
+      // its own second observer of the same fact the stream carries when it
+      // is still alive to carry it — see mapOpenCodeEvents's "session.status"
+      // case. `statuses?.[session.id]` is already scoped to THIS session, so
+      // no separate session-match check is needed here.
+      const limit = providerLimitFromStatus(statusRecord);
+      if (limit !== undefined) {
+        return {
+          kind: "failed",
+          detail: formatProviderLimitDetail(limit.reason, limit.message),
+        };
+      }
+      const statusType = statusRecord?.type;
       // Both are the provider still working. `retry` especially: a session in
       // backoff is neither done nor idle, and it will produce more steps — its
       // `next` timestamp is what retryHintFromStatus reads for the policy.

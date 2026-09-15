@@ -81,6 +81,14 @@ interface FakeSdk {
   // assert they carry the same `directory` session.create registered.
   statusCalls: () => Array<Record<string, unknown> | undefined>;
   subscribeCalls: () => Array<Record<string, unknown> | undefined>;
+  // #157: every call to `permission.reply`, verbatim, so a test can assert
+  // the exact ids pr-hero sent — and how many times it sent them.
+  replyCalls: () => Array<Record<string, unknown>>;
+  // F002: releases every `permission.reply` call parked on
+  // `permissionReplyHangs`, so a test can assert what happens to a
+  // DUPLICATE delivered while the first reply is still genuinely in
+  // flight, rather than a race that depends on microtask ordering.
+  releasePendingReplies: () => void;
 }
 
 function fakeSdk(
@@ -89,6 +97,17 @@ function fakeSdk(
     // `undefined` means "the live surface". An Error rejects the call; an
     // array (including an empty one) resolves with exactly those ids.
     toolIds?: readonly string[] | Error;
+    // #157: `undefined` means every `permission.reply` call succeeds
+    // (`{data: true}`, the real 200 shape). A string simulates the SDK's own
+    // `ThrowOnError = false` convention — an API-level refusal RESOLVES with
+    // `{data: undefined, error}`, never a rejected promise.
+    permissionReplyError?: string;
+    // F002: when true, every `permission.reply` call parks on an internal
+    // gate until the test calls `releasePendingReplies()` — the only way to
+    // deterministically hold a reply "in flight" for a concurrent-duplicate
+    // test, rather than depending on how many microtask hops a fast-resolving
+    // fake happens to take.
+    permissionReplyHangs?: boolean;
     // Distinct ids per createSession, in call order. Default is SESSION_ID
     // for every create, which is what the single-session tests pin.
     sessionIds?: readonly string[];
@@ -128,12 +147,29 @@ function fakeSdk(
 
   let iterators = 0;
   let streamReturns = 0;
+  const replyCalls: Array<Record<string, unknown>> = [];
+  let releasePendingReplies: (() => void) | undefined;
+  const pendingRepliesGate = options.permissionReplyHangs
+    ? new Promise<void>((resolve) => {
+        releasePendingReplies = resolve;
+      })
+    : undefined;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: {
         status: async (opts) => {
           mcpStatusCalls.push(opts as Record<string, unknown> | undefined);
           return { data: mcpStatus };
+        },
+      },
+      permission: {
+        reply: async (opts) => {
+          replyCalls.push(opts as Record<string, unknown>);
+          if (pendingRepliesGate) await pendingRepliesGate;
+          if (options.permissionReplyError !== undefined) {
+            return { error: options.permissionReplyError };
+          }
+          return { data: true };
         },
       },
       tool: {
@@ -241,6 +277,8 @@ function fakeSdk(
     toolIdsAt: () => toolIdsAt,
     promptedAt: () => promptedAt,
     toolIdsCalls: () => toolIdsCalls,
+    replyCalls: () => replyCalls,
+    releasePendingReplies: () => releasePendingReplies?.(),
     emit: (event) => {
       queue.push(event);
       notify?.();
@@ -722,6 +760,398 @@ describe("createOpenCodeClient", () => {
     expect(kinds).toContain("terminal");
   });
 
+  // #228: the subscription loop reads ONE directory-scoped stream shared by
+  // every concurrent hunter's session on the same server, and used to
+  // `evidence.record("event", raw)` every event it saw — roughly 55% of a
+  // real capture's records turned out to be OTHER sessions' events, which
+  // filled the record/byte cap long before this session's own silence
+  // window. The provider's session id can live in `properties.sessionID`,
+  // `properties.part.sessionID`, or `properties.info.sessionID`; an event
+  // carrying none of those (no session id anywhere) is still recorded, since
+  // there is nothing to filter it against.
+  test("records only this session's own events plus session-less ones, never another session's", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession({
+      ...INPUT,
+      correlation: { sessionId: "h", attempt: 1 },
+    });
+
+    fake.emit({ type: "own.top", properties: { sessionID: SESSION_ID } });
+    fake.emit({ type: "foreign.top", properties: { sessionID: "ses_other" } });
+    fake.emit({
+      type: "own.part",
+      properties: { part: { sessionID: SESSION_ID } },
+    });
+    fake.emit({
+      type: "foreign.part",
+      properties: { part: { sessionID: "ses_other" } },
+    });
+    fake.emit({
+      type: "own.info",
+      properties: { info: { sessionID: SESSION_ID } },
+    });
+    fake.emit({
+      type: "foreign.info",
+      properties: { info: { sessionID: "ses_other" } },
+    });
+    fake.emit({ type: "sessionless", properties: { foo: "bar" } });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+
+    const capture = client.takeEvidence?.("h", 1);
+    expect(capture).toBeDefined();
+    const parsed = JSON.parse(
+      (capture as { redactedJson: string }).redactedJson,
+    );
+    const recordedTypes = (
+      parsed.records as Array<{ kind: string; data: { type?: string } }>
+    )
+      .filter((r) => r.kind === "event")
+      .map((r) => r.data.type);
+
+    expect(recordedTypes).toEqual([
+      "own.top",
+      "own.part",
+      "own.info",
+      "sessionless",
+    ]);
+  });
+
+  // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+  // reviewed worktree tripped `permission.asked` for `external_directory`
+  // twice in one run, and pr-hero never answers OpenCode's permission
+  // prompt — the tool call sat blocked until the silence tripwire killed the
+  // attempt 150s later at $0. The server-side deny config
+  // (opencode-server.ts) is the primary control; this is defense in depth
+  // for whatever it does not cover, so it rejects ANY permission, not only
+  // `external_directory`.
+  test("an own-session permission.asked immediately rejects the request, exactly once", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_01ABC",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/Users/juanma/.prhero/repos/.../mobile/*"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    // Drain so the pump has certainly run to completion.
+    for await (const _event of client.streamEvents(session)) {
+      // no-op: only the reply side effect is under test here
+    }
+
+    expect(fake.replyCalls()).toEqual([
+      { requestID: "per_01ABC", directory: INPUT.cwd, reply: "reject" },
+    ]);
+  });
+
+  test("a permission.asked for another session triggers no reply", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_other",
+        sessionID: "ses_other",
+        permission: "external_directory",
+        patterns: ["/anywhere"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // no-op
+    }
+
+    expect(fake.replyCalls()).toEqual([]);
+  });
+
+  test("a failing reject reply settles the attempt failed with the witness, well before usefulProgressMs, not protocol_truncation", async () => {
+    const fake = fakeSdk({ permissionReplyError: "permission service down" });
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_fails",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Races against a real, bounded timeout rather than draining forever:
+    // against UNMODIFIED code nothing ever settles `streamEvents`, and a
+    // plain `for await` would hang the whole file, not just this test.
+    const iterator = client.streamEvents(session)[Symbol.asyncIterator]();
+    let thrown: Error | undefined;
+    try {
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("test timeout: stream never settled")),
+              200,
+            );
+          }),
+        ]);
+        if (step.done) break;
+      }
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      fake.endStream();
+      await iterator.return?.();
+    }
+
+    expect(thrown?.message).toContain("permission service down");
+    // Ties this failure to the marker classifyFailure keys on
+    // (opencode-sdk.ts's formatPermissionRejectFailureDetail) rather than a
+    // coincidental substring match.
+    expect(thrown?.message).toContain(
+      "failed to reject an OpenCode permission request",
+    );
+  });
+
+  // PR #228 review, F002 (CRITICAL, corroborated): the SSE client can
+  // redeliver events after a Last-Event-ID reconnect — the same redelivery
+  // hazard #227 dedupes for stream deltas. A replayed `permission.asked`
+  // used to send a SECOND reply for a request the server already closed; if
+  // that second reply failed, the catch settled a successfully-denied
+  // prompt as a terminal `runtime_unavailable`.
+  test("a redelivered permission.asked replies only once and does not fail the attempt (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_dup",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    };
+    fake.emit(event);
+    fake.emit(event); // SSE redelivery of the SAME requestID
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+
+    let thrown: Error | undefined;
+    try {
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(fake.replyCalls()).toHaveLength(1);
+    expect(thrown).toBeUndefined();
+  });
+
+  // The specific race the fix must close: the requestID has to be recorded
+  // BEFORE the reply is awaited, not after it resolves — otherwise a
+  // duplicate arriving while the first reply is genuinely still in flight
+  // races the write instead of losing to it deterministically.
+  test("a duplicate delivered while the first reply is still pending triggers no second reply (F002)", async () => {
+    const fake = fakeSdk({ permissionReplyHangs: true });
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_pending",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    };
+    fake.emit(event);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fake.replyCalls()).toHaveLength(1);
+
+    // The duplicate arrives while the first reply is still parked on the
+    // gate — genuinely in flight, not merely fast.
+    fake.emit(event);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fake.replyCalls()).toHaveLength(1);
+
+    fake.releasePendingReplies();
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // drain
+    }
+  });
+
+  test("permission.asked for two different requestIDs replies to both (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_a",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/a"],
+        metadata: {},
+        always: [],
+      },
+    });
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_b",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/b"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // drain
+    }
+
+    expect(fake.replyCalls().map((c) => c.requestID)).toEqual([
+      "per_a",
+      "per_b",
+    ]);
+  });
+
+  function askEvent(id: string) {
+    return {
+      type: "permission.asked",
+      properties: {
+        id,
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: [],
+        metadata: {},
+        always: [],
+      },
+    };
+  }
+
+  // PR #228 review (round 2), F002 (CRITICAL, corroborated): the bounded
+  // `respondedPermissions` set used to be maintained with `rememberId`,
+  // which evicts the OLDEST requestID once the cap is full — the same
+  // pattern every other bounded id set in this file uses. But an evicted
+  // requestID is indistinguishable from one this session never saw, so a
+  // later SSE redelivery of THAT evicted id would pass the dedupe guard and
+  // fire a second `permission.reply` for a request the server already
+  // closed. 512 distinct prompts inside one step is already anomalous, so
+  // the fix fails the attempt closed instead of ever forgetting an id.
+  test("the permission request cap is exceeded, fails the attempt closed instead of forgetting old requestIDs (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const CAP = 512;
+    for (let i = 0; i < CAP; i++) fake.emit(askEvent(`per_${i}`));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.replyCalls()).toHaveLength(CAP);
+
+    // One more DISTINCT requestID, past the cap.
+    fake.emit(askEvent("per_overflow"));
+    await new Promise((r) => setTimeout(r, 20));
+    fake.endStream();
+
+    // Races against a real, bounded timeout rather than draining forever —
+    // same pattern as "a failing reject reply settles..." above.
+    const iterator = client.streamEvents(session)[Symbol.asyncIterator]();
+    let thrown: Error | undefined;
+    try {
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("test timeout: stream never settled")),
+              200,
+            );
+          }),
+        ]);
+        if (step.done) break;
+      }
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      await iterator.return?.();
+    }
+
+    expect(thrown?.message).toContain("permission request cap exceeded (512)");
+    // No reply ever went out for the id that pushed past the cap.
+    expect(fake.replyCalls()).toHaveLength(CAP);
+    expect(fake.replyCalls().some((c) => c.requestID === "per_overflow")).toBe(
+      false,
+    );
+  });
+
+  // Regression/sanity companion to the cap test above: a set holding many
+  // (but not cap-exceeding) ids must not spontaneously start misbehaving —
+  // the first id ever added is still exactly as protected as it was when
+  // the set was empty. Because it deliberately stays under the cap, this
+  // test does NOT by itself catch a `rememberId`-eviction regression (with
+  // this few ids, `rememberId`'s own eviction never triggers either) — the
+  // cap test above is the one that does.
+  test("a redelivery of the first requestID after the set holds many ids still sends no second reply (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const MANY = 300;
+    for (let i = 0; i < MANY; i++) fake.emit(askEvent(`many_${i}`));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.replyCalls()).toHaveLength(MANY);
+
+    // Redeliver the very FIRST requestID ever seen.
+    fake.emit(askEvent("many_0"));
+    await new Promise((r) => setTimeout(r, 20));
+    fake.endStream();
+
+    let thrown: Error | undefined;
+    try {
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(fake.replyCalls()).toHaveLength(MANY);
+    expect(thrown).toBeUndefined();
+  });
+
   // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
   // exactly like GET /event — it must query the SAME directory session.create
   // registered (state.turn.expectedCwd, which IS input.cwd) or it watches an
@@ -828,6 +1258,64 @@ describe("createOpenCodeClient", () => {
     ]);
 
     expect((await client.pollStatus(session)).kind).toBe("terminal");
+  });
+
+  // #157: pr-157-8df2fca3-4's complete capture — `GET /session/status`
+  // reported this exact retry/account_rate_limit status for the whole
+  // attempt, and the old code only ever read `type: "retry"` as "the provider
+  // is still working" (line ~2578's `observedActive = true`), so the poll
+  // kept the attempt alive for the full usefulProgressMs budget over a quota
+  // that was never coming back. `account_rate_limit` is the only
+  // `action.reason` observed across all three hunter captures of that run.
+  const LIMIT_MESSAGE =
+    "5 hour usage limit reached. It will reset in 22 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01M17B67W4Q9BE4T0910EQ0NRY/go";
+
+  test("a poll-observed account usage limit fails fast with the provider's message (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({
+      type: "retry",
+      attempt: 1,
+      message: LIMIT_MESSAGE,
+      action: {
+        reason: "account_rate_limit",
+        provider: "opencode-go",
+        title: "Go limit reached",
+      },
+    });
+
+    const result = await client.pollStatus(session);
+    expect(result.kind).toBe("failed");
+    if (result.kind !== "failed") throw new Error("unreachable");
+    expect(result.detail).toContain(LIMIT_MESSAGE);
+    expect(result.detail).toContain("account_rate_limit");
+  });
+
+  test("a poll-observed retry with no action reason keeps polling, not failed (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({ type: "retry", attempt: 2, message: "429", next: 1 });
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+  });
+
+  test("a poll-observed retry with an unrecognised action reason keeps polling (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({
+      type: "retry",
+      attempt: 1,
+      message: "provider is retrying",
+      action: { reason: "some_future_reason", provider: "opencode-go" },
+    });
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
   });
 
   // pr-hero F002/F003 on this PR, both BLOCKER, and both right — they are the
@@ -2460,5 +2948,306 @@ describe("Poll-readback reconcile must not advance emission ahead of the stream 
     expect(snapshotEvents).toEqual([]);
     expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
     expect(state.integrityFailure).toBeUndefined();
+  });
+});
+
+// #227 threaded the provider event id through `handlePartDelta`, giving
+// reasoning deltas replay identity they lacked when f842a8b restricted useful
+// progress to owned cumulative SNAPSHOTS only ("bare delta markers have no
+// replay identity and cannot extend the deadline"). A delta carrying a NOVEL
+// id is no longer a bare marker — replaying the SAME id (an SSE
+// Last-Event-ID reconnect) is still not new work, and an id-less delta still
+// has no identity to prove novelty with, so both keep emitting the old bare
+// marker. Tool execution time counted as silence for a separate reason: this
+// same file's `handlePartUpdated` tool branch emitted NOTHING at all for a
+// tool part update, novel status transition or not. Both gaps fed the false
+// "quiet-round budget" tripwire on reasoning-heavy or tool-heavy turns a real
+// GLM/OpenAI stream produces.
+describe("useful-progress credit for novel reasoning deltas and tool transitions", () => {
+  const SESS = "ses_progress_credit";
+
+  function ownReasoningPart(state: ReturnType<typeof createTurnState>) {
+    state.parts.set("prt_r1", "reasoning");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+  }
+
+  test("a reasoning delta with a novel provider event id counts as progress", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+
+    const events = mapOpenCodeEvents(
+      {
+        id: "evt_reasoning_novel",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_r1",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([{ kind: "reasoning", progress: true }]);
+  });
+
+  test("the same reasoning delta id replayed does not count twice", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+    const send = () =>
+      mapOpenCodeEvents(
+        {
+          id: "evt_reasoning_replay",
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESS,
+            messageID: "msg_asst_1",
+            partID: "prt_r1",
+            field: "text",
+            delta: "thinking about it",
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(send()).toEqual([{ kind: "reasoning", progress: true }]);
+    expect(send()).toEqual([{ kind: "reasoning" }]);
+  });
+
+  test("an id-less reasoning delta never counts as progress", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+
+    const events = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_r1",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([{ kind: "reasoning" }]);
+  });
+
+  test("a reasoning delta for an unowned message emits nothing, novel id or not", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_r_foreign", "reasoning");
+    state.assistantMessages.add("msg_foreign");
+    state.parentLinks.set("msg_foreign", "someone_elses_prompt");
+
+    const events = mapOpenCodeEvents(
+      {
+        id: "evt_reasoning_foreign",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_foreign",
+          partID: "prt_r_foreign",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  test("an owned tool part's novel status transition emits activity once; the same status again emits nothing", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_1",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("pending")).toEqual([]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([]);
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+  });
+
+  // An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
+  // newer one already landed (e.g. "running" replayed after "completed" was
+  // already observed). `previousStatus !== status` credits that as a
+  // transition — it IS a change from what was last stored, but it is not
+  // FORWARD progress, so it must not earn `activity`. Rank: pending=0,
+  // running=1, completed=2, error=2 (a terminal either way, so neither
+  // outranks the other) — only a strictly increasing rank counts, and a
+  // first observation always counts (previous rank is -1).
+  test("a replayed older tool status after a newer one already landed emits nothing", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_replay",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_replay",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([]);
+  });
+
+  test("pending -> running -> completed emits exactly 3 activities", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_forward",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_forward",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+  });
+
+  test("completed -> error emits nothing: both are terminal, equal rank", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_terminal",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_terminal",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("error")).toEqual([]);
+  });
+
+  // #228's review: `reconcileMessages` (the ~250ms poll readback, `emit:
+  // false`) ALSO writes `state.toolStates.set(callId, status)`
+  // unconditionally, and three concurrent hunters sharing one server can
+  // have a poll round observe a tool's "completed" status before the stream
+  // ever delivers that same tool's "pending"/"running". If activity credit
+  // were computed against `toolStates`, the stream's later real transitions
+  // would compare against the rank the POLL already advanced to
+  // "completed" and never earn credit.
+  test("tool activity credit is computed independently of the poll reconcile's toolStates writes", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    const pollReadbackObservesCompletedFirst = {
+      id: "msg_asst_1",
+      role: "assistant",
+      path: { cwd: "/tmp/work" },
+      sessionID: SESS,
+      parentID: "msg_user_1",
+      parts: [
+        {
+          id: "prt_tool_poll_race",
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          type: "tool",
+          callID: "call_poll_race",
+          state: { status: "completed" },
+        },
+      ],
+    };
+    reconcileMessages([pollReadbackObservesCompletedFirst], state, {
+      emit: false,
+    });
+    // toolStates is exactly as unconditional as before this commit.
+    expect(state.toolStates.get("call_poll_race")).toBe("completed");
+
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_poll_race",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_poll_race",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // The stream's OWN pending -> running -> completed still earns credit
+    // for every forward step, unaffected by the poll having already stored
+    // "completed" in toolStates.
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
   });
 });

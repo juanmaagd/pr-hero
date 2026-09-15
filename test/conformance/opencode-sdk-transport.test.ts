@@ -28,7 +28,10 @@ import type {
   OpenCodePollResult,
   OpenCodeTransportClock,
 } from "../../src/transports/opencode-sdk";
-import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
+import {
+  formatPermissionRejectFailureDetail,
+  OpenCodeSdkTransport,
+} from "../../src/transports/opencode-sdk";
 
 // §13 line 740: SDK conformance must distinguish a confirmed abort from
 // unknown_may_continue without claiming remote cost ended, and §13 line 746
@@ -872,6 +875,119 @@ describe("OpenCodeSdkTransport failure surface", () => {
         stderrTail: "something entirely opaque happened",
       }),
     ).toBeUndefined();
+  });
+});
+
+// #157: pr-157-8df2fca3-4's complete capture — OpenCode named this exact
+// account limit ~3.8s into the attempt, retried internally, and delivered no
+// reasoning/text/usage for the rest of it. The old code read `session.status`
+// retry only for its `next` backoff hint and mapped it to nothing else, so
+// the attempt sat quiet for the whole usefulProgressMs budget before the
+// silence tripwire settled it $0/transient at 150s — the user saw "silence",
+// never the account limit the provider had already named.
+describe("OpenCodeSdkTransport provider account/usage limit (#157)", () => {
+  const LIMIT_MESSAGE =
+    "5 hour usage limit reached. It will reset in 22 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01M17B67W4Q9BE4T0910EQ0NRY/go";
+
+  test("a stream-observed account limit fails fast, well before usefulProgressMs", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_limit",
+          reason: "account_rate_limit",
+          message: LIMIT_MESSAGE,
+        },
+      ]),
+    });
+    // Real production budget from the run this pins; never advanced below —
+    // the whole point is that settlement does not wait on it at all.
+    const rig = makeRig({
+      client: handle.client,
+      transport: { usefulProgressMs: 150_000 },
+    });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.stderrTail).toContain(
+      "provider usage limit reached (account_rate_limit)",
+    );
+    expect(outcome.stderrTail).toContain(LIMIT_MESSAGE);
+    // The workspace URL is not a secret and must survive whatever redaction
+    // this witness line goes through downstream.
+    expect(outcome.stderrTail).toContain("https://opencode.ai/workspace/");
+    expect(rig.transport.classifyFailure(outcome)).toBe("quota_exhausted");
+    expect(rig.transport.classifyFailure(outcome)).not.toBe(
+      "protocol_truncation",
+    );
+    // The provider is told to stop its own internal retry loop — the same
+    // best-effort abort every other stream_error/session_failed reason gets.
+    expect(handle.abortCount()).toBe(1);
+  });
+
+  test("a poll-observed account limit (via a failed poll result) classifies the same", async () => {
+    const handle = makeClient({
+      polls: [
+        {
+          kind: "failed",
+          detail: `[pr-hero] opencode sdk: provider usage limit reached (account_rate_limit): ${LIMIT_MESSAGE}`,
+        },
+      ],
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { usefulProgressMs: 150_000 },
+    });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.stderrTail).toContain(LIMIT_MESSAGE);
+    expect(rig.transport.classifyFailure(outcome)).toBe("quota_exhausted");
+    expect(handle.abortCount()).toBe(1);
+  });
+});
+
+// #157: opencode-client.ts settles a failed permission-reject the same way
+// as a failed session poll — a `{kind:"failed"}` OpenCodePollResult, so this
+// pins the classification the client-level tests in opencode-client.test.ts
+// cannot reach (they only observe `state.failure`'s message, never what
+// classifyFailure does with it).
+describe("OpenCodeSdkTransport permission-reject failure classification (#157)", () => {
+  test("a failed permission reject classifies runtime_unavailable, never protocol_truncation", async () => {
+    const detail = formatPermissionRejectFailureDetail(
+      "external_directory",
+      ["/blocked"],
+      "permission service down",
+    );
+    const handle = makeClient({
+      polls: [{ kind: "failed", detail }],
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { usefulProgressMs: 150_000 },
+    });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.stderrTail).toContain("permission service down");
+    expect(rig.transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+    expect(rig.transport.classifyFailure(outcome)).not.toBe(
+      "protocol_truncation",
+    );
+    expect(handle.abortCount()).toBe(1);
   });
 });
 
@@ -1755,6 +1871,7 @@ function makeControlledSdk(options: {
   const sdk: import("../../src/transports/opencode-client").OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: { status: async () => ({ data: {} }) },
+      permission: { reply: async () => ({ data: true }) },
       tool: {
         ids: async () => ({
           data: options.toolIds ?? ["read", "grep", "glob"],

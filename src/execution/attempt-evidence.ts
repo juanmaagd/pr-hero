@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import { redactEvidence } from "../security/evidence-redaction";
+import {
+  redactEvidence,
+  redactEvidenceText,
+} from "../security/evidence-redaction";
 import { attemptEvidencePath, type StepSpec } from "../step-runner";
 import { writeJsonAtomically } from "./atomic-write";
 import type { TransportOutcome, TransportRequest } from "./contracts";
@@ -38,6 +41,81 @@ export interface ExecutionAttemptEvidence {
     status: "complete" | "incomplete" | "unavailable";
     sha256: string;
     relativePath: string;
+  };
+  // A capture the transport actually produced but that this function could
+  // not persist (too large, an unrecognized schema, or a parse/write
+  // failure) is a diagnostic loss worth recording — silently proceeding
+  // without either `capture` or this field left every one of a real
+  // production run's failed steps with NO way to tell whether a capture was
+  // ever taken. Set only when `outcome.diagnosticEvidence` was present and
+  // `capture` above was not populated for it.
+  captureDropped?: { reason: string; bytes?: number };
+}
+interface ParsedCaptureRecord {
+  seq: number;
+  observedMs: number;
+  kind: string;
+  data: unknown;
+}
+interface ParsedCaptureWrapper {
+  schemaVersion: number;
+  sessionId: string;
+  attempt: number;
+  records: ParsedCaptureRecord[];
+}
+/**
+ * Parses and structurally validates a capture's `redactedJson` as the
+ * `{schemaVersion, sessionId, attempt, records: [{seq, observedMs, kind,
+ * data}]}` wrapper `OpenCodeEvidenceCollector.snapshot()` produces. Returns
+ * `undefined` on a JSON parse failure OR any shape mismatch — both mean the
+ * same thing to the caller: this is not a capture whose records can be
+ * redacted one at a time, so it must not fall back to redacting whatever
+ * WAS parsed as one undifferentiated blob.
+ */
+function parseCaptureWrapper(
+  redactedJson: string,
+): ParsedCaptureWrapper | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(redactedJson);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return undefined;
+  const v = value as Record<string, unknown>;
+  if (
+    typeof v.schemaVersion !== "number" ||
+    typeof v.sessionId !== "string" ||
+    typeof v.attempt !== "number" ||
+    !Number.isInteger(v.attempt) ||
+    !Array.isArray(v.records)
+  )
+    return undefined;
+  const records: ParsedCaptureRecord[] = [];
+  for (const item of v.records) {
+    if (typeof item !== "object" || item === null || Array.isArray(item))
+      return undefined;
+    const r = item as Record<string, unknown>;
+    if (
+      typeof r.seq !== "number" ||
+      typeof r.observedMs !== "number" ||
+      typeof r.kind !== "string" ||
+      !("data" in r)
+    )
+      return undefined;
+    records.push({
+      seq: r.seq,
+      observedMs: r.observedMs,
+      kind: r.kind,
+      data: r.data,
+    });
+  }
+  return {
+    schemaVersion: v.schemaVersion,
+    sessionId: v.sessionId,
+    attempt: v.attempt,
+    records,
   };
 }
 /** Diagnostic control-plane persistence. Failure never changes execution/billing. */
@@ -91,25 +169,99 @@ export async function persistAttemptEvidence(
     evidence.outputPath = path.basename(step.outPath);
   }
   const capture = outcome?.diagnosticEvidence;
-  if (
-    capture &&
-    Buffer.byteLength(capture.redactedJson) <= 4 * 1024 * 1024 &&
-    /^pr-hero\.[a-z0-9.-]+$/.test(capture.schema)
-  ) {
-    try {
-      const safe = redactEvidence(JSON.parse(capture.redactedJson));
-      const captureFile = file.replace(/\.json$/, ".capture.json");
-      await mkdir(path.dirname(file), { recursive: true });
-      await writeJsonAtomically(captureFile, safe);
-      const bytes = await readFile(captureFile);
-      evidence.capture = {
-        schema: capture.schema,
-        status: capture.status,
-        sha256: evidenceSha256(bytes),
-        relativePath: path.basename(captureFile),
+  if (capture) {
+    const captureBytes = Buffer.byteLength(capture.redactedJson);
+    if (captureBytes > 4 * 1024 * 1024) {
+      evidence.captureDropped = {
+        reason: "capture exceeds the 4 MiB persist cap",
+        bytes: captureBytes,
       };
-    } catch {
-      /* Qualification requires an actual usable capture. */
+    } else if (!/^pr-hero\.[a-z0-9.-]+$/.test(capture.schema)) {
+      evidence.captureDropped = {
+        reason: `capture schema "${capture.schema}" is not recognized`,
+        bytes: captureBytes,
+      };
+    } else {
+      // WHY per-record, not whole-blob: `redactEvidence()` bounds its
+      // traversal to one shared 20000-node / depth-12 budget
+      // (src/security/evidence-redaction.ts:35-38). Redacting the entire
+      // parsed capture in ONE call spends that whole budget across every
+      // record combined, and a real multi-minute hunter stream's capture
+      // has thousands of them — the budget blew every time, throwing
+      // "capture shape limit" for every real production capture, not just
+      // pathological ones. `OpenCodeEvidenceCollector.record()` already
+      // redacts each record's `data` individually at record time, each
+      // call getting its OWN fresh budget; redacting per record here again,
+      // instead of once for the whole blob, keeps exactly that same
+      // per-record bound rather than a shared one a few thousand records
+      // exhausts together. Raising the shared budget instead would weaken
+      // it for every OTHER caller of `redactEvidence`, so that decision is
+      // left to a human call — this function works within the existing
+      // bound rather than asking for a wider one.
+      const wrapper = parseCaptureWrapper(capture.redactedJson);
+      if (!wrapper) {
+        evidence.captureDropped = {
+          reason: "capture wrapper shape is not recognized",
+          bytes: captureBytes,
+        };
+      } else {
+        try {
+          const safe = {
+            schemaVersion: wrapper.schemaVersion,
+            sessionId: wrapper.sessionId,
+            attempt: wrapper.attempt,
+            records: wrapper.records.map((r) => ({
+              seq: r.seq,
+              observedMs: r.observedMs,
+              kind: redactEvidenceText(r.kind),
+              data: redactEvidence(r.data),
+            })),
+          };
+          // PR #228 review, F003: `writeJsonAtomically` used to
+          // pretty-print unconditionally, so a capture whose ORIGINAL
+          // (compact) `redactedJson` sat just under the 4 MiB check above
+          // could still land ~20-30% larger on disk once indentation and
+          // newlines were added — close enough to `readEvidenceFile`'s
+          // separate 5 MiB read bound (attempt-evidence.ts) that a live
+          // capture was observed persisted at 4.9 MB. Serialized here
+          // once, compact, and checked as THIS exact string — not the
+          // pre-redaction estimate above, since redaction can itself grow
+          // or shrink a record's size — so the file is never written
+          // unless the exact bytes about to hit disk already fit, and the
+          // persisted size always equals the checked size.
+          const compactRedacted = JSON.stringify(safe);
+          const redactedBytes = Buffer.byteLength(compactRedacted);
+          if (redactedBytes > 4 * 1024 * 1024) {
+            evidence.captureDropped = {
+              reason: "capture exceeds the 4 MiB persist cap",
+              bytes: redactedBytes,
+            };
+          } else {
+            const captureFile = file.replace(/\.json$/, ".capture.json");
+            await mkdir(path.dirname(file), { recursive: true });
+            await writeJsonAtomically(captureFile, safe, { compact: true });
+            const bytes = await readFile(captureFile);
+            evidence.capture = {
+              schema: capture.schema,
+              status: capture.status,
+              sha256: evidenceSha256(bytes),
+              relativePath: path.basename(captureFile),
+            };
+          }
+        } catch (error) {
+          // Qualification requires an actual usable capture, but a capture
+          // that WAS produced and then lost to a redaction or write failure
+          // is still a diagnostic loss worth recording, never a silent
+          // no-op.
+          evidence.captureDropped = {
+            reason:
+              error instanceof Error
+                ? `capture persist failed: ${error.message}`
+                : "capture persist failed",
+            bytes: captureBytes,
+          };
+        }
+      }
     }
   }
   await mkdir(path.dirname(file), { recursive: true });

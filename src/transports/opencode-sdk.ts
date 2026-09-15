@@ -138,6 +138,26 @@ export type OpenCodeClientEvent =
   // all the transport needs to tell a turn that reasoned and never answered
   // apart from one that produced nothing at all.
   | { readonly kind: "reasoning"; readonly progress?: boolean }
+  // A tool part's status actually CHANGED (a novel pending/running/
+  // completed/error transition the client observed at most once — see
+  // opencode-client.ts's `handlePartUpdated`). Deliberately carries no
+  // payload, same reasoning as the bare "reasoning" marker above: the tool's
+  // input/output is not the answer and must not spend any content budget.
+  // Distinct from "reasoning" on purpose — the SDK uses reasoning events for
+  // its own "reasoning parts were received and discarded" diagnostics, and
+  // conflating tool execution into that would corrupt them.
+  | { readonly kind: "activity" }
+  // #157: our own session's status named an account/usage limit (a `retry`
+  // status whose `action.reason` is one opencode-client.ts's
+  // providerLimitFromStatus recognises). Carries the provider's reason and
+  // message VERBATIM — nothing is summarized or reworded — because the
+  // classification witness has to be the provider's own fact, not this
+  // transport's paraphrase of it.
+  | {
+      readonly kind: "provider_limit";
+      readonly reason: string;
+      readonly message: string;
+    }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
@@ -295,6 +315,53 @@ const MARKER_REASONING_ONLY =
 // Deliberately digit-free per #126 (shares the witness with provider text).
 const MARKER_SILENCE =
   "[pr-hero] opencode sdk: the provider stream delivered no content event for the whole quiet-round budget; the answer is incomplete";
+// #157: pr-157-8df2fca3-4's complete capture — OpenCode reported an
+// account_rate_limit retry status (`5 hour usage limit reached...`) for our
+// own session ~3.8s into the attempt, kept retrying internally, and never
+// delivered another reasoning/text/usage event. The attempt sat quiet for
+// the whole usefulProgressMs budget before the silence tripwire settled it
+// $0/transient — the user saw "silence", never the account limit the
+// provider had already named. A spent quota cannot be outrun by a fresh
+// attempt, unlike silence or a transient stall, so this is fail-fast.
+//
+// Digit-free per #126 (the marker shares its witness with the provider's own
+// text, appended verbatim by formatProviderLimitDetail below): a prefix that
+// read like a rate limit or a socket error would let classifyFailure's
+// generic patterns decide the cause instead of this fact.
+const MARKER_PROVIDER_LIMIT =
+  "[pr-hero] opencode sdk: provider usage limit reached";
+
+// Shared by both observers of this fact — opencode-client.ts's stream
+// mapping (a `provider_limit` OpenCodeClientEvent) and its status poll (a
+// `{kind:"failed"}` OpenCodePollResult) — so the exact classification witness
+// is defined once rather than duplicated as a literal in two files.
+export function formatProviderLimitDetail(
+  reason: string,
+  message: string,
+): string {
+  return `${MARKER_PROVIDER_LIMIT} (${reason}): ${message}`;
+}
+
+// #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+// reviewed worktree tripped `permission.asked` for `external_directory`
+// twice in one run, and pr-hero never answered OpenCode's permission prompt
+// — the tool call sat blocked until the silence tripwire killed the attempt
+// 150s later at $0. opencode-client.ts rejects any own-session permission
+// prompt as defense in depth beside the server-side `deny` config
+// (opencode-server.ts); THIS marker fires only when that reject itself could
+// not be delivered — the one case the config cannot cover, since it needs a
+// working SDK call to answer the prompt at all. No retry can fix a control
+// that failed to execute, so this is terminal, not `protocol_truncation`.
+const MARKER_PERMISSION_REJECT_FAILED =
+  "[pr-hero] opencode sdk: failed to reject an OpenCode permission request";
+
+export function formatPermissionRejectFailureDetail(
+  permission: string,
+  patterns: readonly string[],
+  errorMessage: string,
+): string {
+  return `${MARKER_PERMISSION_REJECT_FAILED} (${permission} ${JSON.stringify(patterns)}): ${errorMessage}`;
+}
 
 type SettleReason =
   // #132: `drained` records whether the stream had gone QUIET when the
@@ -1035,6 +1102,8 @@ export class OpenCodeSdkTransport implements ProviderTransport {
             }
           } else if (event.kind === "reasoning" && event.progress === true) {
             advancedProgress = true;
+          } else if (event.kind === "activity") {
+            advancedProgress = true;
           } else if (event.kind === "usage") {
             const totalTokens =
               (event.inputTokens ?? 0) + (event.outputTokens ?? 0);
@@ -1180,6 +1249,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               sawReasoning = true;
               break;
             }
+            case "activity": {
+              // Same shape as "reasoning" above: nothing to forward, nothing
+              // to bound. The useful-progress credit was already taken above,
+              // before this switch — there is nothing left to do here.
+              break;
+            }
             case "heartbeat": {
               const pushed = await pushGuarded({
                 ...base(),
@@ -1200,6 +1275,20 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               onProviderTerminalCandidate(event.proof, "stream");
               if (settled) return;
               break;
+            }
+            case "provider_limit": {
+              // #157: fail fast — no fresh attempt can outrun a spent quota,
+              // unlike an ordinary stall or silence. Reuses `stream_error`
+              // rather than a new SettleReason: the abort-trigger set and the
+              // completion/protocolIntegrity mapping already give this exact
+              // shape (failed, unverified, best-effort abort), and the
+              // classification-critical text just needs to survive inside
+              // `detail` for classifyFailure's substring match below.
+              settle({
+                kind: "stream_error",
+                detail: formatProviderLimitDetail(event.reason, event.message),
+              });
+              return;
             }
           }
           if (settled) return;
@@ -1755,6 +1844,26 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     const witness = outcome.stderrTail;
     if (witness.includes(MARKER_ABORT_UNCONFIRMED)) {
       return "remote_abort_unconfirmed";
+    }
+    // #157: FIRST among the provider-text patterns, deliberately. The
+    // provider's own message is appended verbatim after this marker (see
+    // formatProviderLimitDetail), and a message that happens to say "rate
+    // limit" or "quota exceeded" must not let the generic patterns below
+    // decide the cause instead of the fact pr-hero actually observed.
+    // `quota_exhausted` is the one §7 cause whose retry disposition is
+    // already terminal (decideRetryDisposition's default arm) — exactly
+    // right, since a fresh attempt cannot outrun quota that is already spent.
+    if (witness.includes(MARKER_PROVIDER_LIMIT)) {
+      return "quota_exhausted";
+    }
+    // #157: same ordering rule as the marker above — checked before any
+    // generic provider-text pattern so the underlying reply-failure message
+    // (network error, 4xx body, whatever the SDK call actually failed with)
+    // cannot steer this into rate_limit/network_transient/auth_invalid
+    // instead of the fact that pr-hero's own permission control failed to
+    // run.
+    if (witness.includes(MARKER_PERMISSION_REJECT_FAILED)) {
+      return "runtime_unavailable";
     }
     if (
       witness.includes(MARKER_CONFLICT) ||

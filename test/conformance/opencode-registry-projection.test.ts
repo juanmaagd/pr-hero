@@ -95,7 +95,15 @@ describe("the registry's default opencode launcher (#149)", () => {
     await launch();
 
     expect(broker.calls()).toBe(1);
-    expect(spawn.env()).toEqual({ PATH: "/usr/bin", ...PROJECTION_ENV });
+    // #157: permission-deny now ships unconditionally alongside the
+    // projected/allowlisted env this test otherwise guards.
+    expect(spawn.env()).toEqual({
+      PATH: "/usr/bin",
+      ...PROJECTION_ENV,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { external_directory: "deny" },
+      }),
+    });
   });
 
   test("it forwards the run's MCP registry to the spawn", async () => {

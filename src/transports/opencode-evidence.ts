@@ -8,40 +8,216 @@ export {
 } from "../security/evidence-redaction";
 
 const MAX_BYTES = 4 * 1024 * 1024;
+const MAX_RECORDS = 10000;
+// #228: a real production capture hit the 10,000-record cap at ~57.7s into a
+// 242-286s attempt — the silence window that needed diagnosing happened
+// AFTER the cap was already exhausted, so stopping at the cap threw away
+// exactly the part that mattered. The first HEAD_MAX_RECORDS/HEAD_MAX_BYTES
+// (whichever comes first) are kept PERMANENTLY — this is where
+// session-identity and the prompt's http_request/response/request_body
+// naturally land, since they happen at the very start of a turn. Everything
+// after that is a rolling TAIL of the most recent records, which is where a
+// terminal readback naturally lands, since it happens at the very end.
+const HEAD_MAX_RECORDS = 1000;
+const HEAD_MAX_BYTES = 1 * 1024 * 1024;
+// PR #228 review, F001: `fits()` used to reserve marker room only once
+// `elidedCount > 0` — i.e. only AFTER something had already been elided.
+// But the oversized-record pre-check and the head-admission check run the
+// identical formula for the same record at the same instant while
+// `elidedCount === 0`, so the record that fails one identically fails the
+// other and is always skipped before it can land in an empty tail. That
+// means the FIRST-EVER skip's marker is born the instant a head+tail
+// combination was already accepted WITHOUT it ever being budgeted for —
+// and head is permanent, so nothing can shrink to make room afterward.
+// Reserving this worst-case serialized marker size unconditionally, from
+// the very first record on, keeps every accepted state already compatible
+// with a marker that has not been created yet, so `snapshot()` can never
+// exceed `maxBytes` regardless of when or how many times elision starts.
+// Worst case: `observedMs` is the longest a JSON number round-trips to
+// (the most negative representable double), and `records`/`bytes` are
+// each bounded by `Number.MAX_SAFE_INTEGER` — no real capture count or
+// byte tally can ever legally exceed that.
+const MARKER_RESERVE_BYTES = Buffer.byteLength(
+  JSON.stringify({
+    seq: 0,
+    observedMs: -1.7976931348623157e308,
+    kind: "elided",
+    data: { records: Number.MAX_SAFE_INTEGER, bytes: Number.MAX_SAFE_INTEGER },
+  }),
+);
 export interface OpenCodeObservation {
   seq: number;
   observedMs: number;
   kind: string;
   data: unknown;
 }
+interface TailEntry {
+  readonly record: OpenCodeObservation;
+  readonly size: number;
+}
 export class OpenCodeEvidenceCollector {
-  private records: OpenCodeObservation[] = [];
-  private bytes = 0;
+  private head: OpenCodeObservation[] = [];
+  private headBytes = 0;
+  private headClosed = false;
+  private tail: TailEntry[] = [];
+  private tailBytes = 0;
+  private elidedCount = 0;
+  private elidedBytes = 0;
+  // Fixed the FIRST time anything is ever elided, and reused for every
+  // subsequent marker-size estimate AND the final emitted marker — so the
+  // marker's own serialized size, once it exists, never drifts between the
+  // budget decisions made while collecting and what `snapshot()` actually
+  // writes. Growth in `elidedCount`/`elidedBytes` (their digit width) is the
+  // only thing allowed to change the marker's size across those checks.
+  private elidedObservedMs?: number;
+  private nextSeq = 1;
   private incomplete = false;
   private pending = 0;
   private frozen?: DiagnosticEvidence;
+  private wrapperBytesCache?: number;
   constructor(
     private correlation: { sessionId: string; attempt: number },
     private maxBytes = MAX_BYTES,
   ) {}
+  // `snapshot()` serializes `{"schemaVersion":1,...correlation,"records":[...]}`
+  // — every record beyond the first costs one extra byte for its join comma,
+  // and the object wrapper itself (schemaVersion/correlation/brackets) costs a
+  // fixed amount too. `record()` used to reserve a flat 256-byte slack for
+  // both, which a few thousand records blow through on commas alone (each is
+  // 1 byte, but there is one per record past the first) — the final
+  // `redactedJson` could then land past `maxBytes` even though every
+  // individual record fit under it. Computed once here (the wrapper shape
+  // never changes after construction) so `record()` can budget the exact
+  // overhead instead of guessing at it.
+  private wrapperBytes(): number {
+    if (this.wrapperBytesCache === undefined)
+      this.wrapperBytesCache = Buffer.byteLength(
+        JSON.stringify({
+          schemaVersion: 1,
+          ...this.correlation,
+          records: [],
+        }),
+      );
+    return this.wrapperBytesCache;
+  }
+  private markerRecord(): OpenCodeObservation {
+    return {
+      seq: 0, // never collides with a real record's seq, which starts at 1
+      observedMs: this.elidedObservedMs ?? 0,
+      kind: "elided",
+      data: { records: this.elidedCount, bytes: this.elidedBytes },
+    };
+  }
+  // Exact accounting for the FINAL emitted sequence (head, then the marker
+  // if anything was ever elided, then tail) given candidate head/tail
+  // sizes — the same join-comma/wrapper formula `record()`'s overhead fix
+  // established, extended to a marker that may or may not exist yet.
+  private fits(
+    headCount: number,
+    headBytes: number,
+    tailCount: number,
+    tailBytes: number,
+  ): boolean {
+    // Always reserve one record slot and MARKER_RESERVE_BYTES for a marker
+    // that may not exist yet (see MARKER_RESERVE_BYTES above) — never
+    // conditioned on `this.elidedCount > 0`, since that is exactly the
+    // instant this check cannot yet know whether the marker is about to be
+    // born. The real marker, once it exists, is always <=
+    // MARKER_RESERVE_BYTES, so this is a safe over-reservation, not a
+    // separate re-check.
+    const totalCount = headCount + 1 + tailCount;
+    if (totalCount > MAX_RECORDS) return false;
+    const totalBytes =
+      this.wrapperBytes() +
+      headBytes +
+      MARKER_RESERVE_BYTES +
+      tailBytes +
+      Math.max(0, totalCount - 1);
+    return totalBytes <= this.maxBytes;
+  }
   record(kind: string, data: unknown): void {
-    if (this.frozen || this.incomplete) return;
+    if (this.frozen) return;
     try {
       const safe = redactEvidence(data);
-      const record = {
-        seq: this.records.length + 1,
+      const rec: OpenCodeObservation = {
+        seq: this.nextSeq,
         observedMs: performance.now(),
         kind,
         data: safe,
       };
-      const size = Buffer.byteLength(JSON.stringify(record));
-      if (
-        this.records.length >= 10000 ||
-        this.bytes + size > this.maxBytes - 256
-      )
-        throw new Error("capture limit");
-      this.records.push(record);
-      this.bytes += size;
+      const size = Buffer.byteLength(JSON.stringify(rec));
+
+      if (!this.headClosed) {
+        const withinHeadBudget =
+          this.head.length + 1 <= HEAD_MAX_RECORDS &&
+          this.headBytes + size <= HEAD_MAX_BYTES;
+        if (
+          withinHeadBudget &&
+          this.fits(this.head.length + 1, this.headBytes + size, 0, 0)
+        ) {
+          this.head.push(rec);
+          this.headBytes += size;
+          this.nextSeq++;
+          return;
+        }
+        this.headClosed = true;
+      }
+
+      // A record too large to fit even an EMPTY tail must be skipped BEFORE
+      // touching the existing tail at all. The old code found this out only
+      // by draining every real tail record first (the loop below) and then
+      // throwing "capture limit" once there was nothing left to evict — and
+      // since that throw landed in the catch below, which used to also set
+      // the early-return gate above, ONE oversized record (a multi-MB
+      // response_body at the end of an attempt is the realistic case) both
+      // erased every tail record that survived up to that point AND
+      // silenced every record for the rest of the attempt. Checked here so
+      // the existing tail is never touched for a record that could never
+      // have fit it regardless of what got evicted.
+      if (!this.fits(this.head.length, this.headBytes, 1, size)) {
+        if (this.elidedCount === 0) this.elidedObservedMs = performance.now();
+        this.elidedCount += 1;
+        this.elidedBytes += size;
+        this.incomplete = true;
+        this.nextSeq++;
+        return;
+      }
+
+      // Tail phase: append `rec`, evicting the oldest tail entries first if
+      // needed to stay within both the record cap and `maxBytes` — the
+      // moment the FIRST eviction happens, a marker starts existing, and
+      // every fit check from then on (including this same loop's later
+      // iterations) accounts for it.
+      let candidateTailBytes = this.tailBytes + size;
+      let candidateTailCount = this.tail.length + 1;
+      for (;;) {
+        if (
+          this.fits(
+            this.head.length,
+            this.headBytes,
+            candidateTailCount,
+            candidateTailBytes,
+          )
+        ) {
+          this.tail.push({ record: rec, size });
+          this.tailBytes = candidateTailBytes;
+          this.nextSeq++;
+          return;
+        }
+        const oldest = this.tail.shift();
+        // Unreachable given the pre-check above already proved the record
+        // fits an EMPTY tail: this loop can only run out of entries to evict
+        // before `fits()` turns true if that proof was wrong. Kept as a
+        // fail-safe — the catch below still marks `incomplete` rather than
+        // recording a wrong result, and no longer disables future recording.
+        if (oldest === undefined) throw new Error("capture limit");
+        this.tailBytes -= oldest.size;
+        if (this.elidedCount === 0) this.elidedObservedMs = performance.now();
+        this.elidedCount += 1;
+        this.elidedBytes += oldest.size;
+        candidateTailBytes = this.tailBytes + size;
+        candidateTailCount = this.tail.length + 1;
+      }
     } catch {
       this.incomplete = true;
     }
@@ -133,16 +309,23 @@ export class OpenCodeEvidenceCollector {
     }) as typeof fetch;
   }
   snapshot(): DiagnosticEvidence {
-    if (!this.frozen)
+    if (!this.frozen) {
+      const records: OpenCodeObservation[] = [...this.head];
+      if (this.elidedCount > 0) records.push(this.markerRecord());
+      for (const entry of this.tail) records.push(entry.record);
       this.frozen = {
         schema: "pr-hero.opencode-observations.v1",
-        status: this.incomplete || this.pending > 0 ? "incomplete" : "complete",
+        status:
+          this.incomplete || this.pending > 0 || this.elidedCount > 0
+            ? "incomplete"
+            : "complete",
         redactedJson: JSON.stringify({
           schemaVersion: 1,
           ...this.correlation,
-          records: this.records,
+          records,
         }),
       };
+    }
     return this.frozen;
   }
 }
