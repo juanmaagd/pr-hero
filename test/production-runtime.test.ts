@@ -83,9 +83,11 @@ async function writeClaudeFixture(
 
 async function writeOpenCodeFixture(
   dir: string,
+  version = "1.18.30",
 ): Promise<{ canonicalPath: string; sha256: string }> {
   const opencodePath = path.join(dir, "opencode");
-  const bytes = Buffer.concat([MACHO_PREFIX, Buffer.from("opencode")]);
+  const script = `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  echo "${version}"\n  exit 0\nfi\nexit 0\n`;
+  const bytes = Buffer.from(script);
   await writeFile(opencodePath, bytes);
   await chmod(opencodePath, 0o755);
   const canonicalPath = await realpath(opencodePath);
@@ -126,6 +128,26 @@ function createMockTransport(
 ): ProviderTransport {
   return {
     backend,
+    admissionIdentity:
+      backend === "claude-code"
+        ? { executable: "claude", provider: "anthropic" }
+        : { executable: "opencode", provider: "opencode" },
+    cancellationSemantics:
+      backend === "claude-code" ? "process-exit" : "provider-proof",
+    defaultRoute:
+      backend === "claude-code"
+        ? {
+            backend: "claude-code",
+            provider: "anthropic",
+            modelFamily: "claude",
+            modelSnapshot: "sonnet",
+          }
+        : {
+            backend: "opencode",
+            provider: "opencode",
+            modelFamily: "opencode",
+            modelSnapshot: "gpt-4o",
+          },
     capabilities: async (): Promise<ProviderCapabilityReport> => ({
       backend,
       status: "ready",

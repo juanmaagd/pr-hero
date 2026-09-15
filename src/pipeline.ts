@@ -119,6 +119,7 @@ import {
   validateReviewSpec,
 } from "./spec";
 import {
+  attemptEvidencePath,
   attemptLogPath,
   DEFAULT_STEP_MAX_ATTEMPTS,
   DEFAULT_STEP_TIMEOUT_MS,
@@ -782,6 +783,7 @@ interface StepMeta {
   // can name a file a lost lease prevented. Naming where it should be still
   // beats the previous answer, which was silence.
   attemptLogPath?: string;
+  attemptEvidencePath?: string;
   settlementReceiptPath?: string;
   // D1-08 PR2 (§8): the step's normalized usage, attached by recordSettlement
   // — the single existing usage join site (D1-10c's own comment: a second
@@ -2765,6 +2767,10 @@ function recordSettlement(
   // were ever written. Pointing at `attempt0.json` would be the same lie the
   // harness's own cancellation message was fixed for.
   if (result.attempts < 1) return;
+  meta.attemptEvidencePath = path.relative(
+    runDir,
+    attemptEvidencePath(meta.outPath, meta.name, result.attempts),
+  );
   meta.attemptLogPath = path.relative(
     runDir,
     attemptLogPath(meta.outPath, meta.name, result.attempts),

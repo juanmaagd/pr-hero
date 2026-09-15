@@ -82,7 +82,19 @@ function messageUpdated(
     type: "message.updated",
     properties: {
       sessionID: SESSION_ID,
-      info: { id, role, sessionID: SESSION_ID, time: { created: 1 }, ...extra },
+      info: {
+        id,
+        role,
+        sessionID: SESSION_ID,
+        time: { created: 1 },
+        ...(role === "assistant"
+          ? {
+              path: { cwd: "/tmp/pr-hero-test", root: "/" },
+              parentID: USER_MESSAGE,
+            }
+          : {}),
+        ...extra,
+      },
     },
   };
 }
@@ -126,6 +138,7 @@ function partDelta(partID: string, delta: string): Record<string, unknown> {
 // the turn's boundary — #127 — so every stream below ends with IDLE, the
 // event that actually says the turn is over.
 const COMPLETED = messageUpdated(ASSISTANT_MESSAGE, "assistant", {
+  parentID: USER_MESSAGE,
   finish: "stop",
   time: { created: 1, completed: 1_787_811_448_694 },
   tokens: { input: 24_012, output: 6 },
@@ -141,7 +154,7 @@ function reasoningThenAnswerStream(): Array<Record<string, unknown>> {
     messageUpdated(USER_MESSAGE, "user"),
     // TRAP 2's exhibit: the user's part carries the PROMPT text.
     partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
-    messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+    messageUpdated(ASSISTANT_MESSAGE, "assistant", { parentID: USER_MESSAGE }),
     partUpdated(REASONING_PART, ASSISTANT_MESSAGE, "reasoning", ""),
     partDelta(REASONING_PART, REASONING_A),
     partDelta(REASONING_PART, REASONING_B),
@@ -157,7 +170,7 @@ function reasoningOnlyStream(): Array<Record<string, unknown>> {
   return [
     messageUpdated(USER_MESSAGE, "user"),
     partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
-    messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+    messageUpdated(ASSISTANT_MESSAGE, "assistant", { parentID: USER_MESSAGE }),
     partUpdated(REASONING_PART, ASSISTANT_MESSAGE, "reasoning", ""),
     partDelta(REASONING_PART, REASONING_A),
     partDelta(REASONING_PART, REASONING_B),
@@ -173,9 +186,15 @@ function fakeSdk(events: Array<Record<string, unknown>>): OpenCodeSdkLike {
       // These rigs declare no registry, so the verified answer is "nothing
       // connected" — which is a declaration too, not an absence of one.
       mcp: { status: async () => ({ data: {} }) },
+      permission: { reply: async () => ({ data: true }) },
       session: {
-        create: async () => ({ data: { id: SESSION_ID } }),
-        prompt: async () => ({ data: { info: {}, parts: [] } }),
+        create: async (opts) => ({
+          data: {
+            id: SESSION_ID,
+            directory: (opts as { directory: string }).directory,
+          },
+        }),
+        prompt: async () => ({ data: {} }),
         messages: async () => ({ data: [] }),
         // #127: the poll observer's turn boundary. An empty map is a session
         // that is not working — measured: opencode omits an idle session
@@ -222,6 +241,7 @@ function fakeSdk(events: Array<Record<string, unknown>>): OpenCodeSdkLike {
 
 function rigClient(events: Array<Record<string, unknown>>) {
   return createOpenCodeClient({
+    createMessageId: () => USER_MESSAGE,
     loadSdk: async () => fakeSdk(events),
     launchServer: async () => ({
       url: "http://127.0.0.1:1",
@@ -261,7 +281,7 @@ function makeRequest(): TransportRequest {
 }
 
 async function flush(): Promise<void> {
-  for (let i = 0; i < 25; i += 1) await Promise.resolve();
+  for (let i = 0; i < 50; i += 1) await Promise.resolve();
 }
 
 async function runAttempt(events: Array<Record<string, unknown>>) {
@@ -287,7 +307,16 @@ async function runAttempt(events: Array<Record<string, unknown>>) {
   // post-win observation window that settles a provider terminal is one of
   // them. Nothing here sleeps a real one (PR #118: host-dependent waits are
   // how this suite flaked before).
+  //
+  // #214: TWO flushes before each fire, not one. A fixture whose stream
+  // yields more than one client event per raw SSE event (#214's "tool" event
+  // rides the same raw update as #228's "activity") needs one more
+  // microtask hop per extra event to fully drain a still-in-flight
+  // `pushGuarded` race before `clock.fireAll()` runs — one flush left that
+  // push's own stall timer as the only pending callback, which `fireAll`
+  // then "won" on `clock.fireAll`'s behalf instead of the real push.
   for (let round = 0; round < 50 && !done; round += 1) {
+    await flush();
     await flush();
     clock.fireAll();
   }
@@ -394,6 +423,46 @@ describe("tool-call parts survive the SSE path (#214)", () => {
   const TOOL_PART = "prt_tool_read";
   const DUMP =
     'Building the value ledger to check the tab geometry for contradictions.{"findings":[]}';
+  // #228's ownership/step model: a real OpenCode turn puts a completed tool
+  // part on its OWN step message (`finish: "tool-calls"`), never on the same
+  // message as the final answer — see opencode-client.ts's
+  // `isIntermediateToolStep` and the transport conformance test "user prompt
+  // text, reasoning, and intermediate tool-step text are excluded from final
+  // answer". A single-message fixture (tool part + answer on one id) used to
+  // work before that guard existed; now the answer text on a `hasToolCalls`
+  // message is dropped as narration, so these fixtures use a second,
+  // parented message for the real answer, matching that shape.
+  const ASSISTANT_FINAL_MESSAGE = "msg_assistant_final";
+
+  function partDeltaFor(
+    messageId: string,
+    partID: string,
+    delta: string,
+  ): Record<string, unknown> {
+    return {
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESSION_ID,
+        messageID: messageId,
+        partID,
+        field: "text",
+        delta,
+      },
+    };
+  }
+
+  function completedFor(
+    messageId: string,
+    parentId: string,
+  ): Record<string, unknown> {
+    return messageUpdated(messageId, "assistant", {
+      parentID: parentId,
+      finish: "stop",
+      time: { created: 1, completed: 1_787_811_448_694 },
+      tokens: { input: 24_012, output: 6 },
+      cost: 0.01,
+    });
+  }
 
   test("a one-step prose dump with no tool parts stamps 0", async () => {
     const events: Array<Record<string, unknown>> = [
@@ -420,7 +489,11 @@ describe("tool-call parts survive the SSE path (#214)", () => {
     const events: Array<Record<string, unknown>> = [
       messageUpdated(USER_MESSAGE, "user"),
       partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
-      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      // Step 1: the intermediate tool-calling step.
+      messageUpdated(ASSISTANT_MESSAGE, "assistant", {
+        finish: "tool-calls",
+        time: { created: 1, completed: 2 },
+      }),
       {
         type: "message.part.updated",
         properties: {
@@ -436,10 +509,14 @@ describe("tool-call parts survive the SSE path (#214)", () => {
           },
         },
       },
-      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
-      partDelta(ANSWER_PART, ANSWER),
-      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ANSWER),
-      COMPLETED,
+      // Step 2: the final step, parented to step 1, carrying the real answer.
+      messageUpdated(ASSISTANT_FINAL_MESSAGE, "assistant", {
+        parentID: ASSISTANT_MESSAGE,
+      }),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", ""),
+      partDeltaFor(ASSISTANT_FINAL_MESSAGE, ANSWER_PART, ANSWER),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", ANSWER),
+      completedFor(ASSISTANT_FINAL_MESSAGE, ASSISTANT_MESSAGE),
       IDLE,
     ];
     const { outcome } = await runAttempt(events);
@@ -453,11 +530,22 @@ describe("tool-call parts survive the SSE path (#214)", () => {
     expect(outcome.diagnosticsTail).toContain("(read)");
   });
 
-  test("a pending Read announcement then a dump stamps 0 — announcing is not looking", async () => {
+  // #228's `hasOutstandingTools` refuses to finalize a turn while a tool is
+  // still "pending"/"running" — a genuinely-stuck pending announcement (the
+  // shape this test used to script) can no longer reach a terminal at all,
+  // so it stopped exercising "announcing is not looking" and started
+  // exercising the harness watchdog instead. "error" is the other terminal
+  // status #214 excludes from the count (see the WHY comment on the "tool"
+  // branch in opencode-client.ts's `handlePartUpdated`), and it lets the turn
+  // actually finish, so it is what this fixture now scripts.
+  test("an errored Read call then empty findings stamps 0 — an error is not a look", async () => {
     const events: Array<Record<string, unknown>> = [
       messageUpdated(USER_MESSAGE, "user"),
       partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
-      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant", {
+        finish: "tool-calls",
+        time: { created: 1, completed: 2 },
+      }),
       {
         type: "message.part.updated",
         properties: {
@@ -469,14 +557,17 @@ describe("tool-call parts survive the SSE path (#214)", () => {
             type: "tool",
             callID: "call_read_1",
             tool: "read",
-            state: { status: "pending" },
+            state: { status: "error" },
           },
         },
       },
-      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
-      partDelta(ANSWER_PART, DUMP),
-      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", DUMP),
-      COMPLETED,
+      messageUpdated(ASSISTANT_FINAL_MESSAGE, "assistant", {
+        parentID: ASSISTANT_MESSAGE,
+      }),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", ""),
+      partDeltaFor(ASSISTANT_FINAL_MESSAGE, ANSWER_PART, DUMP),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", DUMP),
+      completedFor(ASSISTANT_FINAL_MESSAGE, ASSISTANT_MESSAGE),
       IDLE,
     ];
     const { outcome } = await runAttempt(events);

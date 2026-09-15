@@ -7,6 +7,7 @@ import type {
   ProviderCapabilityReport,
   ProviderTerminalProof,
   ProviderTransport,
+  ResolvedModelRoute,
   TransportFailureCause,
   TransportOutcome,
   TransportRequest,
@@ -427,6 +428,17 @@ async function boundedText(
 
 export class ClaudeCodeCliTransport implements ProviderTransport {
   readonly backend = "claude-code";
+  readonly admissionIdentity = {
+    executable: "claude",
+    provider: "anthropic",
+  } as const;
+  readonly cancellationSemantics = "process-exit" as const;
+  readonly defaultRoute: ResolvedModelRoute = {
+    backend: "claude-code",
+    provider: "anthropic",
+    modelFamily: "claude",
+    modelSnapshot: "sonnet",
+  };
   get billingMode(): NormalizedUsage["billingMode"] {
     return claudeCliCostBasis(process.env).billingMode;
   }

@@ -22,6 +22,7 @@ import {
   type DiscoveryPlan,
   decideLastHeadDelta,
   decideRereviewCase,
+  incompleteLastReviewMessage,
   type LastHeadSource,
   type LastReviewedHead,
   type MarkerHead,
@@ -38,7 +39,11 @@ import { parseTriageMarker } from "./triage";
 // imports rereview-plan.ts directly; these two travel with `prepareDiscovery`'s
 // output, so they ride the same facade. The return type stays unexported here
 // — cli.ts infers it, and nothing names it across this boundary.
-export { decideLastHeadDelta, unreachableLastHeadMessage };
+export {
+  decideLastHeadDelta,
+  incompleteLastReviewMessage,
+  unreachableLastHeadMessage,
+};
 
 export interface RereviewGit {
   commitExists(sha: string): Promise<boolean>;
@@ -62,6 +67,15 @@ export interface RereviewProvenance {
   case: RereviewCase;
   last_reviewed_head: string | null;
   last_head_source: LastHeadSource;
+  // Rereview-coverage fix: WHY discovery was forced full without
+  // `--full` on the artifact record — "case B, discovery full, no --full"
+  // is otherwise unexplained. Mirrors `LastReviewedHead.lastComplete`
+  // verbatim. Optional on the TYPE (not just the parser) because it is
+  // genuinely absent from every pipeline.json written before this fix —
+  // `toRereviewProvenance` always sets a concrete boolean; a reader that
+  // wants the definite value defaults it `?? true`, same as
+  // `readRereviewProvenance` does below.
+  last_review_complete?: boolean;
   discovery_range: string;
   discovery_restricted: boolean;
   discovery_skipped_empty_delta: boolean;
@@ -112,11 +126,17 @@ export async function prepareDiscovery(input: {
   H: string;
   full: boolean;
   summaryHead: string | null;
+  // Ignored when summaryHead is null. Required so the ONE production caller
+  // (cli.ts) must explicitly compute it from the posted marker — see
+  // resolveLastReviewedHead's WHY for the "leaves the fix a no-op" trap a
+  // silent default would hide.
+  summaryComplete: boolean;
   findingMarkers: readonly MarkerHead[];
   git: RereviewGit;
 }): Promise<PreparedDiscovery> {
   const last = resolveLastReviewedHead({
     summaryHead: input.summaryHead,
+    summaryComplete: input.summaryComplete,
     findingMarkers: input.findingMarkers,
   });
   let objectExists: boolean | null = null;
@@ -133,7 +153,11 @@ export async function prepareDiscovery(input: {
     objectExists,
     isAncestor,
   });
-  const plan = planDiscovery({ case: rereviewCase, full: input.full });
+  const plan = planDiscovery({
+    case: rereviewCase,
+    full: input.full,
+    lastComplete: last.lastComplete,
+  });
 
   if (plan.skipDiscovery) {
     const from = last.L ?? input.B;
@@ -188,6 +212,7 @@ export function toRereviewProvenance(
     case: prepared.case,
     last_reviewed_head: prepared.last.L,
     last_head_source: prepared.last.source,
+    last_review_complete: prepared.last.lastComplete,
     discovery_range: `${prepared.discoveryFrom}..${prepared.discoveryTo}`,
     discovery_restricted: prepared.plan.discoveryRestricted,
     discovery_skipped_empty_delta: prepared.discoverySkippedEmptyDelta,
@@ -255,6 +280,17 @@ export function readRereviewProvenance(
     source !== "absent"
   ) {
     return problem("last_head_source");
+  }
+  // Optional (rereview-coverage fix): an artifact written before this fix
+  // has no such field at all, and it must still parse — never invalid,
+  // defaulting to `true` on read (see the assignment below). The pre-fix
+  // world had no notion of a forced-full re-review, so "complete" is the
+  // accurate back-compat reading, not a guess.
+  if (
+    raw.last_review_complete !== undefined &&
+    typeof raw.last_review_complete !== "boolean"
+  ) {
+    return problem("last_review_complete");
   }
   if (typeof raw.discovery_range !== "string") {
     return problem("discovery_range");
@@ -341,6 +377,10 @@ export function readRereviewProvenance(
       case: rereviewCase,
       last_reviewed_head: lastHead,
       last_head_source: source,
+      last_review_complete:
+        typeof raw.last_review_complete === "boolean"
+          ? raw.last_review_complete
+          : true,
       discovery_range: raw.discovery_range,
       discovery_restricted: raw.discovery_restricted,
       discovery_skipped_empty_delta: raw.discovery_skipped_empty_delta,
@@ -452,6 +492,12 @@ export function buildPhaseBQueue(input: {
   priors: readonly PriorRecord[];
   nameStatus: NameStatus;
   summaryUpdatedAt: string | null;
+  // Rereview-coverage fix wiring gap: threads `DiscoveryPlan.verifyAll`
+  // (rereview-plan.ts) into classifyPrior's ctx — see PhaseBContext's WHY
+  // in rereview-classify.ts. Optional/defaulted false so every pre-existing
+  // call site (case D/E already force verify_all off `case` alone) keeps
+  // its exact behavior untouched.
+  verifyAll?: boolean;
 }): {
   queued: VerifyQueueEntry[];
   overlapCandidates: VerifyQueueEntry[];
@@ -465,6 +511,7 @@ export function buildPhaseBQueue(input: {
     touched: (identity: FindingIdentity) =>
       [...identity.keys()].some((path) => deltaFiles.has(path)),
     summaryUpdatedAt: input.summaryUpdatedAt,
+    verifyAll: input.verifyAll ?? false,
   };
   const queued: VerifyQueueEntry[] = [];
   const overlapCandidates: VerifyQueueEntry[] = [];

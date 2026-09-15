@@ -310,6 +310,122 @@ bun run scripts/martian-cal.ts plan|check|run|score   # default = 3-PR pilot; --
 bun run scripts/martian-judge.ts                      # Surface A on existing runs
 ```
 
+## Cal.com 10 arm `opencode-glm` (2026-09-11, Surface A)
+
+Second methodology arm. One variable vs `hunters`: the model route —
+`opus` logical → `opencode-go/glm-5.3-flash#high [configured, opencode]` for
+all 5 steps (`--model opus`; frontmatter `sonnet` overridden by CLI
+precedence), same prompt set `slice3b-lifecycle-v6-clean`
+(`sha256: 5ac28df9`), scout off, summarizer off, parity never fires. Local
+`--two-dot`, never `--pr`. Runs: `~/Desktop/martian-cal/runs/cal-*-opencode-glm`.
+Judge artifact: `~/Desktop/martian-cal/runs/martian-judge-opencode-glm.json`.
+
+**Judge (Surface A):** Martian `JUDGE_PROMPT`, Claude Code CLI, `sonnet`,
+`tools: []` — same judge shape as the baseline (gateway + model labelled, not
+Martian's Opus 4.5 rows). Sibling `path:line` not extra FPs. Unreplicated.
+Cal.com only. **Do not quote as the 50-PR offline board.**
+
+Reviews **$0.84** (~2.5 h serial). Judge **$0.00** (subscription). **Total $0.84.**
+
+| | P | R | F1 | tp | fp | fn | gold |
+|---|---|---|---|---|---|---|---|
+| **All** (what the script scored) | 0.47 | 0.51 | 0.49 | 21 | 24 | 20 | 41 |
+| **High+Critical recall (headline)** | — | **0.68** | — | 13 | — | 6 | 19 |
+| Strict recall, gold-side only (`bug/security/concurrency/data/api`) | — | 0.60 | — | 21 | — | 14 | 35 |
+
+Delta vs `hunters` (tp/fp/fn): All P 0.44→0.47, R 0.41→0.51, F1 0.43→0.49;
+Strict recall 17/35→21/35; **High+Critical recall 13/19 identical with
+different composition.**
+
+| PR | Findings | tp/fp/fn (`hunters`) | vs goldens (judge) |
+|---|---|---|---|
+| 14943 | 4 | 1/3/1 (1/0/1) | Same High/bug hit (unscoped `deleteMany`), +3 FP |
+| 8330 | 6 | 2/4/0 (0/1/2) | **Best delta: both Medium/bug goldens HIT** (dayjs `===`, slot arithmetic) — the baseline's zero cell |
+| 8087 | 4 | 1/0/1 (1/1/1) | Same Critical/concurrency `forEach` hit, FP 0 (was 1) |
+| 10600 | 4 | 2/2/3 (1/4/4) | Kept High/concurrency TOCTOU, +Medium/bug, fewer FP |
+| 10967 | 13 | 5/5/1 (3/5/3) | +2 TP (extra High/bug ×2); miss Low/api contract stands |
+| 22345 | 1 | 0/1/2 (0/0/2) | Still ~empty (Insights/`Prisma.sql` outside hunter profile), +1 FP |
+| 7232 | 11 | 2/4/1 (2/1/1) | Same Medium/concurrency + High/data hits, +3 FP |
+| 11059 | 6 | 5/0/4 (6/3/3) | −1 TP (miss Salesforce-adjacent High), **zero FP** (was 3) |
+| 14740 | 2 | 1/1/5 (2/5/4) | **Regression cell:** missed High/security blacklist bypass (baseline hit) and still misses Critical `&&` vs `\|\|`; sparse (2 findings) |
+| 22532 | 8 | 2/4/2 (1/2/3) | Medium/bug + High/api hits (pair confidences not audited; baseline's TP was a flagged-weak 0.65) |
+
+Profile: small-local-logic goldens (8330) now hit — the baseline's counterexamples
+are shrinking. 14740 is the new counterexample (sparse + missed security High).
+Cost per review collapsed ($0.04–0.19 vs $2–7): opencode-go/glm pricing, provider-reported.
+
+How this arm came to be (one line each, full story in the session):
+1. `hunters` re-run on the current global routing silently became an opencode
+   arm (logical `sonnet` → default `opencode-go/deepseek-flash#high`).
+2. That arm observed 8/10 failures: gateway `UnknownError` 500s and quiet timeouts
+   investigated via `scripts/opencode-prompt-probe.ts`.
+3. Historical attempts with `deepseek-flash` produced errors or empty results;
+   `glm-5.3-flash` produced text in some attempts. The old probe generated its
+   witness from the final result, so those records do **not** establish a
+   provider outage, model health, or the cause of missing text. Treat their
+   causal attribution as inconclusive, not as route qualification.
+4. Historical retry, round-count timeout, and zero-spend patches were later
+   audited. Missing observations do not prove non-execution or genuine zero
+   cost. The corrective phase replaces those assumptions with monotonic
+   bounds, incomplete accounting, and actual same-attempt observations.
+5. Engine for this arm: `24115ab` + uncommitted `src/transports/opencode-sdk.ts`
+   (Fix 1–3), `test/conformance/opencode-sdk-transport.test.ts`,
+   `test/harness/spend-wiring.test.ts`, `scripts/martian-cal.ts` (`--arm`,
+   `--model`), `scripts/martian-judge.ts` (`--arm`, 0600 fix),
+   `scripts/opencode-prompt-probe.ts` (new). Harness `--arm`/`--model` support
+   is arm infrastructure, not a methodology variable.
+6. A same-night `opencode` (deepseek) arm attempt is NOT scored: cause unproved,
+   0/10 PRs with findings on the final try (`cal-*-opencode` dirs stand,
+   empty, as incomplete attempt records). Only `hunters` and `opencode-glm` are scored.
+7. Regression gates: `bun run fixture-eval` pass (planted bug hit; runs
+   `haiku`→glm-low route); refuter untouched so `refuter-probe` not re-run.
+
+Surface B: **not run** (stored vendor reviews not bucketed for the ten).
+
+## Benchmark qualification gates and metrics (Unit 7)
+
+Only **schema-valid, attributable completed attempts** qualify for resume and
+quality scoring. Historical files without real proof remain unqualified; they
+are not silently upgraded by the new loader.
+
+| Gate | Required evidence |
+|---|---|
+| Schedule | `schedule-<arm>.json` freezes selected PRs, head/base, replicate and output directory before execution. `--reps` creates separate attempt directories. Selection changes require a new arm. |
+| Identity | `run-identity.json` freezes engine commit and file digests, prompt/config content, effective routes and observed executable/SDK/server identity. Missing identity refuses qualified reuse. |
+| Completion | Findings schema validator, all required hunters and executed steps, actual delivered outcome, verified integrity, attributable terminal proof, matching request-plan/output/capture hashes. Mere file existence or a finish string is insufficient. |
+| Isolation | Artifact reads are bounded, confined to the run directory, and reject traversal, nonregular files and symlink escapes. |
+| Retry | A failed or mismatched previous directory is moved intact under `incomplete-attempts/`; it is never overwritten by the replacement attempt. |
+
+OpenCode capture records real SDK wire metadata/body, events, prompt result and
+same-session readback. Missing, capped or failed capture is inconclusive. A local
+abort acknowledgement does not prove provider cessation. Claude uses its own
+generic process-exit proof; OpenCode finish rules are not imposed on Claude.
+A schema-valid `findings: []` with attributable proof is a completed empty review,
+not transport failure. Neither zero findings nor successful delivery proves model
+quality.
+
+### Denominators and unknown telemetry
+
+- **Completion rate:** completed / attempted. **Coverage:** completed / scheduled.
+  Missing scheduled attempts are reported explicitly, including zero output dirs.
+- **Cost per complete:** completed spend / completed reviews, only when every
+  completed attempt has exact known spend. Otherwise the metric is `null`/unknown.
+- **Wall time per complete:** completed wall time / completed reviews, subject to
+  the same knownness rule. Known subtotals and unknown sample counts are separate.
+- Failed attempts do not enter quality scores. Their reported spend remains in
+  partial/all-attempt accounting; unknown spend never becomes zero. Preserved
+  previous executions contribute spend and unknown counts, with a separate
+  `preserved_attempts` count; they do not inflate the frozen schedule denominator.
+- **H+C:** report High/Critical recall and TP/FN counts only. All-severity false
+  positives cannot support an H+C precision/F1 claim.
+- **Surface A:** offline judge output. **Surface B:** not run; no surfaced-success
+  claim is made.
+
+Tasks 8.1/8.2 remain a later, explicitly budgeted and ledgered phase: current
+OpenAI/DeepSeek/MUSE route qualification, serial/concurrent repetitions, then
+frozen paired benchmarks. These code corrections do not claim live qualification,
+provider health, guaranteed model quality, or approval for fifty-PR expansion.
+
 ## Sources
 
 - https://codereview.withmartian.com/
@@ -318,3 +434,4 @@ bun run scripts/martian-judge.ts                      # Surface A on existing ru
 - https://github.com/withmartian/code-review-benchmark/blob/main/methodology/full.md
 - https://huggingface.co/datasets/code-review-bench/code-review-bench
 - Internal: `ROADMAP.md` (THE PIVOT, C10, D3), `docs/review-strategies.md`, `docs/doordash-dashbench-trust.md`, `src/compare.ts`
+

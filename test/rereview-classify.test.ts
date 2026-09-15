@@ -28,6 +28,7 @@ function ctx(overrides: Partial<PhaseBContext> = {}): PhaseBContext {
     renameMap: new Map(),
     touched: () => false,
     summaryUpdatedAt: "2026-08-20T12:00:00Z",
+    verifyAll: false,
     ...overrides,
   };
 }
@@ -252,6 +253,55 @@ describe("case D/E — verify-all after triage settles", () => {
     const result = classifyPrior(
       prior(),
       ctx({ case: "E", deletedFiles: new Set(["src/app.ts"]) }),
+    );
+    expect(result.status).toBe("verified-gone");
+  });
+});
+
+// Rereview-coverage fix wiring gap: `ctx.verifyAll` must force verify_all
+// exactly like case D/E do, for ANY case — this is how a forced-full
+// re-review (case stays B or C; only discovery widens, per R2-C5) actually
+// re-verifies every prior instead of leaving `plan.verifyAll` a documented
+// but unread flag. Deterministic triage settlements (deleted files,
+// dismissed/deferred/misclassified) still short-circuit BEFORE verifyAll is
+// even consulted — a human's own triage call outranks the machine's
+// "the last run might have missed this" signal.
+describe("verifyAll (rereview-coverage fix) — forces verify_all outside D/E", () => {
+  test("case B with verifyAll queues verify_all even though case B alone would not", () => {
+    const result = classifyPrior(prior(), ctx({ case: "B", verifyAll: true }));
+    expect(result).toMatchObject({ status: "queued", trigger: "verify_all" });
+  });
+
+  test("case C with verifyAll queues verify_all even on an untouched file", () => {
+    const result = classifyPrior(
+      prior(),
+      ctx({ case: "C", verifyAll: true, touched: () => false }),
+    );
+    expect(result).toMatchObject({ status: "queued", trigger: "verify_all" });
+  });
+
+  test("verifyAll does not override a deterministic triage settlement", () => {
+    const result = classifyPrior(
+      prior({
+        triage: {
+          tag: "dismissed",
+          verdict: "upheld",
+          createdAt: "2026-08-21T00:00:00Z",
+        },
+      }),
+      ctx({ case: "B", verifyAll: true }),
+    );
+    expect(result.status).toBe("suppressed");
+  });
+
+  test("verifyAll does not override verified-gone", () => {
+    const result = classifyPrior(
+      prior(),
+      ctx({
+        case: "C",
+        verifyAll: true,
+        deletedFiles: new Set(["src/app.ts"]),
+      }),
     );
     expect(result.status).toBe("verified-gone");
   });

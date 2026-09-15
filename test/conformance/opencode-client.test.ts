@@ -8,7 +8,12 @@ import type {
 } from "../../src/execution/contracts";
 import {
   createOpenCodeClient,
+  createTurnState,
+  isMessageOwned,
+  mapOpenCodeEvents,
   type OpenCodeSdkLike,
+  reconcileMessages,
+  terminalProofFromAssistant,
 } from "../../src/transports/opencode-client";
 import {
   assertMcpConnected,
@@ -17,11 +22,19 @@ import {
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
-const ASSISTANT = JSON.parse(
-  readFileSync(path.join(FIXTURE_DIR, "assistant-message.json"), "utf-8"),
-) as Record<string, unknown>;
-
 const SESSION_ID = "ses_test";
+
+const ASSISTANT: Record<string, unknown> & {
+  id?: string;
+  path: { cwd: string; root: string };
+  sessionID: string;
+} = {
+  ...(JSON.parse(
+    readFileSync(path.join(FIXTURE_DIR, "assistant-message.json"), "utf-8"),
+  ) as Record<string, unknown>),
+  sessionID: SESSION_ID,
+  path: { cwd: "/tmp/work", root: "/" },
+};
 
 // The REAL tool surface, read live from `client.tool.ids()` against opencode
 // 1.18.23 while diagnosing issue #122. It is transcribed rather than derived:
@@ -63,6 +76,19 @@ interface FakeSdk {
   setStatus: (status: Record<string, unknown> | undefined) => void;
   setMcpStatus: (status: Record<string, unknown>) => void;
   mcpStatusCalls: () => Array<Record<string, unknown> | undefined>;
+  // #223: every call this session's OTHER observers make against
+  // `session.status` / `event.subscribe`, recorded verbatim so a test can
+  // assert they carry the same `directory` session.create registered.
+  statusCalls: () => Array<Record<string, unknown> | undefined>;
+  subscribeCalls: () => Array<Record<string, unknown> | undefined>;
+  // #157: every call to `permission.reply`, verbatim, so a test can assert
+  // the exact ids pr-hero sent — and how many times it sent them.
+  replyCalls: () => Array<Record<string, unknown>>;
+  // F002: releases every `permission.reply` call parked on
+  // `permissionReplyHangs`, so a test can assert what happens to a
+  // DUPLICATE delivered while the first reply is still genuinely in
+  // flight, rather than a race that depends on microtask ordering.
+  releasePendingReplies: () => void;
 }
 
 function fakeSdk(
@@ -71,6 +97,17 @@ function fakeSdk(
     // `undefined` means "the live surface". An Error rejects the call; an
     // array (including an empty one) resolves with exactly those ids.
     toolIds?: readonly string[] | Error;
+    // #157: `undefined` means every `permission.reply` call succeeds
+    // (`{data: true}`, the real 200 shape). A string simulates the SDK's own
+    // `ThrowOnError = false` convention — an API-level refusal RESOLVES with
+    // `{data: undefined, error}`, never a rejected promise.
+    permissionReplyError?: string;
+    // F002: when true, every `permission.reply` call parks on an internal
+    // gate until the test calls `releasePendingReplies()` — the only way to
+    // deterministically hold a reply "in flight" for a concurrent-duplicate
+    // test, rather than depending on how many microtask hops a fast-resolving
+    // fake happens to take.
+    permissionReplyHangs?: boolean;
     // Distinct ids per createSession, in call order. Default is SESSION_ID
     // for every create, which is what the single-session tests pin.
     sessionIds?: readonly string[];
@@ -96,18 +133,43 @@ function fakeSdk(
   // and {} when nothing is connected.
   let mcpStatus: Record<string, unknown> = {};
   const mcpStatusCalls: Array<Record<string, unknown> | undefined> = [];
+  // #223: the real server scopes BOTH `GET /event` and `GET /session/status`
+  // by `directory` (measured against opencode 1.18.30). session.create is
+  // the one call that names the directory a session actually lives under;
+  // every other observer of that session has to name the SAME one or it is
+  // watching an instance that has never heard of it.
+  let createdDirectory: string | undefined;
+  const statusCalls: Array<Record<string, unknown> | undefined> = [];
+  const subscribeCalls: Array<Record<string, unknown> | undefined> = [];
   const queue: unknown[] = [];
   let notify: (() => void) | undefined;
   let ended = false;
 
   let iterators = 0;
   let streamReturns = 0;
+  const replyCalls: Array<Record<string, unknown>> = [];
+  let releasePendingReplies: (() => void) | undefined;
+  const pendingRepliesGate = options.permissionReplyHangs
+    ? new Promise<void>((resolve) => {
+        releasePendingReplies = resolve;
+      })
+    : undefined;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: {
         status: async (opts) => {
           mcpStatusCalls.push(opts as Record<string, unknown> | undefined);
           return { data: mcpStatus };
+        },
+      },
+      permission: {
+        reply: async (opts) => {
+          replyCalls.push(opts as Record<string, unknown>);
+          if (pendingRepliesGate) await pendingRepliesGate;
+          if (options.permissionReplyError !== undefined) {
+            return { error: options.permissionReplyError };
+          }
+          return { data: true };
         },
       },
       tool: {
@@ -119,28 +181,58 @@ function fakeSdk(
         },
       },
       session: {
-        create: async () => {
+        create: async (opts) => {
           createdAt = ++order;
           const id = options.sessionIds?.[creates] ?? SESSION_ID;
           creates += 1;
-          return { data: { id } };
+          createdDirectory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          return {
+            data: { id, directory: (opts as { directory: string }).directory },
+          };
         },
         prompt: async (opts) => {
           promptedAt = ++order;
           prompts.push(opts as Record<string, unknown>);
           if (options.promptHangs) await new Promise(() => {});
-          return { data: {} };
+          return {
+            data: {
+              id: "msg_041ddb5a0001orXfEB1f2tRCLO",
+              role: "user",
+              sessionID: options.sessionIds?.[0] ?? SESSION_ID,
+            },
+          };
         },
         messages: async () => ({ data: messages }),
-        status: async () => ({ data: statuses }),
+        status: async (opts) => {
+          // Recorded verbatim, BEFORE the match decision — this is what the
+          // production call actually sent, not what the fake thinks of it.
+          statusCalls.push(opts as Record<string, unknown> | undefined);
+          const directory = (opts as { directory?: string } | undefined)
+            ?.directory;
+          // #223: a directory that does not match the one session.create
+          // registered watches an instance that never heard of this
+          // session — measured (opencode 1.18.30) as `{}`, indistinguishable
+          // from "this session is idle".
+          if (directory !== createdDirectory) return { data: {} };
+          return { data: statuses };
+        },
         abort: async () => {
           aborts += 1;
           return { data: {} };
         },
       },
       event: {
-        subscribe: async () => {
+        subscribe: async (params) => {
           subscribedAt = ++order;
+          subscribeCalls.push(params as Record<string, unknown> | undefined);
+          const directory = (params as { directory?: string } | undefined)
+            ?.directory;
+          // #223: same scoping as session.status above. A mismatched
+          // directory still yields a live, endable stream — the real server
+          // keeps delivering server.connected/heartbeat on it — it just
+          // never carries THIS session's queued events.
+          const scoped = directory === createdDirectory;
           // One iterator object. Bun does not run an async-generator
           // `finally` on `return()` if `next()` never ran, so the close
           // signal is the `return` method itself — that is also what the
@@ -148,7 +240,9 @@ function fakeSdk(
           const inner = (async function* subscribeStream() {
             iterators += 1;
             for (;;) {
-              while (queue.length > 0) yield queue.shift();
+              if (scoped) {
+                while (queue.length > 0) yield queue.shift();
+              }
               if (ended) return;
               await new Promise<void>((r) => {
                 notify = r;
@@ -183,6 +277,8 @@ function fakeSdk(
     toolIdsAt: () => toolIdsAt,
     promptedAt: () => promptedAt,
     toolIdsCalls: () => toolIdsCalls,
+    replyCalls: () => replyCalls,
+    releasePendingReplies: () => releasePendingReplies?.(),
     emit: (event) => {
       queue.push(event);
       notify?.();
@@ -203,6 +299,8 @@ function fakeSdk(
       mcpStatus = status;
     },
     mcpStatusCalls: () => mcpStatusCalls,
+    statusCalls: () => statusCalls,
+    subscribeCalls: () => subscribeCalls,
   };
 }
 
@@ -228,6 +326,7 @@ function rig(
   overrides: Partial<Parameters<typeof createOpenCodeClient>[0]> = {},
 ) {
   return createOpenCodeClient({
+    createMessageId: () => String(ASSISTANT.parentID),
     loadSdk: async () => fake.sdk,
     launchServer: async () => ({
       url: "http://127.0.0.1:1",
@@ -307,6 +406,17 @@ describe("createOpenCodeClient", () => {
     expect(fake.subscribedAt()).toBeGreaterThan(0);
     expect(fake.promptedAt()).toBeGreaterThan(0);
     expect(fake.subscribedAt()).toBeLessThan(fake.promptedAt());
+  });
+
+  // #223: session.create now registers the session under the STEP's cwd
+  // (input.cwd), not the server's own — so a subscription that does not name
+  // the same directory watches an instance that has never heard of this
+  // session and only ever sees server.connected/heartbeat.
+  test("subscribes with the same directory session.create registered", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession(INPUT);
+    expect(fake.subscribeCalls()).toEqual([{ directory: INPUT.cwd }]);
   });
 
   // #128: the allow map is a snapshot of tool.ids(), and an id registered
@@ -400,7 +510,7 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
     // prompt runs in.
     expect(fake.toolIdsCalls()).toHaveLength(1);
     expect(fake.toolIdsCalls()[0]).toEqual({
-      query: { directory: "/tmp/work" },
+      directory: "/tmp/work",
     });
   });
 
@@ -583,7 +693,14 @@ describe("createOpenCodeClient", () => {
       type: "message.updated",
       properties: {
         sessionID: SESSION_ID,
-        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        info: {
+          id: "msg_a",
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
       },
     });
     fake.emit({
@@ -593,6 +710,7 @@ describe("createOpenCodeClient", () => {
         part: {
           id: "prt_answer",
           messageID: "msg_a",
+          sessionID: SESSION_ID,
           type: "text",
           text: "",
         },
@@ -604,6 +722,7 @@ describe("createOpenCodeClient", () => {
       properties: {
         sessionID: SESSION_ID,
         partID: "prt_answer",
+        messageID: "msg_a",
         field: "text",
         delta: "early",
       },
@@ -641,6 +760,413 @@ describe("createOpenCodeClient", () => {
     expect(kinds).toContain("terminal");
   });
 
+  // #228: the subscription loop reads ONE directory-scoped stream shared by
+  // every concurrent hunter's session on the same server, and used to
+  // `evidence.record("event", raw)` every event it saw — roughly 55% of a
+  // real capture's records turned out to be OTHER sessions' events, which
+  // filled the record/byte cap long before this session's own silence
+  // window. The provider's session id can live in `properties.sessionID`,
+  // `properties.part.sessionID`, or `properties.info.sessionID`; an event
+  // carrying none of those (no session id anywhere) is still recorded, since
+  // there is nothing to filter it against.
+  test("records only this session's own events plus session-less ones, never another session's", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession({
+      ...INPUT,
+      correlation: { sessionId: "h", attempt: 1 },
+    });
+
+    fake.emit({ type: "own.top", properties: { sessionID: SESSION_ID } });
+    fake.emit({ type: "foreign.top", properties: { sessionID: "ses_other" } });
+    fake.emit({
+      type: "own.part",
+      properties: { part: { sessionID: SESSION_ID } },
+    });
+    fake.emit({
+      type: "foreign.part",
+      properties: { part: { sessionID: "ses_other" } },
+    });
+    fake.emit({
+      type: "own.info",
+      properties: { info: { sessionID: SESSION_ID } },
+    });
+    fake.emit({
+      type: "foreign.info",
+      properties: { info: { sessionID: "ses_other" } },
+    });
+    fake.emit({ type: "sessionless", properties: { foo: "bar" } });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+
+    const capture = client.takeEvidence?.("h", 1);
+    expect(capture).toBeDefined();
+    const parsed = JSON.parse(
+      (capture as { redactedJson: string }).redactedJson,
+    );
+    const recordedTypes = (
+      parsed.records as Array<{ kind: string; data: { type?: string } }>
+    )
+      .filter((r) => r.kind === "event")
+      .map((r) => r.data.type);
+
+    expect(recordedTypes).toEqual([
+      "own.top",
+      "own.part",
+      "own.info",
+      "sessionless",
+    ]);
+  });
+
+  // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+  // reviewed worktree tripped `permission.asked` for `external_directory`
+  // twice in one run, and pr-hero never answers OpenCode's permission
+  // prompt — the tool call sat blocked until the silence tripwire killed the
+  // attempt 150s later at $0. The server-side deny config
+  // (opencode-server.ts) is the primary control; this is defense in depth
+  // for whatever it does not cover, so it rejects ANY permission, not only
+  // `external_directory`.
+  test("an own-session permission.asked immediately rejects the request, exactly once", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_01ABC",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/Users/juanma/.prhero/repos/.../mobile/*"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    // Drain so the pump has certainly run to completion.
+    for await (const _event of client.streamEvents(session)) {
+      // no-op: only the reply side effect is under test here
+    }
+
+    expect(fake.replyCalls()).toEqual([
+      { requestID: "per_01ABC", directory: INPUT.cwd, reply: "reject" },
+    ]);
+  });
+
+  test("a permission.asked for another session triggers no reply", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_other",
+        sessionID: "ses_other",
+        permission: "external_directory",
+        patterns: ["/anywhere"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // no-op
+    }
+
+    expect(fake.replyCalls()).toEqual([]);
+  });
+
+  test("a failing reject reply settles the attempt failed with the witness, well before usefulProgressMs, not protocol_truncation", async () => {
+    const fake = fakeSdk({ permissionReplyError: "permission service down" });
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_fails",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Races against a real, bounded timeout rather than draining forever:
+    // against UNMODIFIED code nothing ever settles `streamEvents`, and a
+    // plain `for await` would hang the whole file, not just this test.
+    const iterator = client.streamEvents(session)[Symbol.asyncIterator]();
+    let thrown: Error | undefined;
+    try {
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("test timeout: stream never settled")),
+              200,
+            );
+          }),
+        ]);
+        if (step.done) break;
+      }
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      fake.endStream();
+      await iterator.return?.();
+    }
+
+    expect(thrown?.message).toContain("permission service down");
+    // Ties this failure to the marker classifyFailure keys on
+    // (opencode-sdk.ts's formatPermissionRejectFailureDetail) rather than a
+    // coincidental substring match.
+    expect(thrown?.message).toContain(
+      "failed to reject an OpenCode permission request",
+    );
+  });
+
+  // PR #228 review, F002 (CRITICAL, corroborated): the SSE client can
+  // redeliver events after a Last-Event-ID reconnect — the same redelivery
+  // hazard #227 dedupes for stream deltas. A replayed `permission.asked`
+  // used to send a SECOND reply for a request the server already closed; if
+  // that second reply failed, the catch settled a successfully-denied
+  // prompt as a terminal `runtime_unavailable`.
+  test("a redelivered permission.asked replies only once and does not fail the attempt (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_dup",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    };
+    fake.emit(event);
+    fake.emit(event); // SSE redelivery of the SAME requestID
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+
+    let thrown: Error | undefined;
+    try {
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(fake.replyCalls()).toHaveLength(1);
+    expect(thrown).toBeUndefined();
+  });
+
+  // The specific race the fix must close: the requestID has to be recorded
+  // BEFORE the reply is awaited, not after it resolves — otherwise a
+  // duplicate arriving while the first reply is genuinely still in flight
+  // races the write instead of losing to it deterministically.
+  test("a duplicate delivered while the first reply is still pending triggers no second reply (F002)", async () => {
+    const fake = fakeSdk({ permissionReplyHangs: true });
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_pending",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    };
+    fake.emit(event);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fake.replyCalls()).toHaveLength(1);
+
+    // The duplicate arrives while the first reply is still parked on the
+    // gate — genuinely in flight, not merely fast.
+    fake.emit(event);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fake.replyCalls()).toHaveLength(1);
+
+    fake.releasePendingReplies();
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // drain
+    }
+  });
+
+  test("permission.asked for two different requestIDs replies to both (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_a",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/a"],
+        metadata: {},
+        always: [],
+      },
+    });
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_b",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/b"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // drain
+    }
+
+    expect(fake.replyCalls().map((c) => c.requestID)).toEqual([
+      "per_a",
+      "per_b",
+    ]);
+  });
+
+  function askEvent(id: string) {
+    return {
+      type: "permission.asked",
+      properties: {
+        id,
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: [],
+        metadata: {},
+        always: [],
+      },
+    };
+  }
+
+  // PR #228 review (round 2), F002 (CRITICAL, corroborated): the bounded
+  // `respondedPermissions` set used to be maintained with `rememberId`,
+  // which evicts the OLDEST requestID once the cap is full — the same
+  // pattern every other bounded id set in this file uses. But an evicted
+  // requestID is indistinguishable from one this session never saw, so a
+  // later SSE redelivery of THAT evicted id would pass the dedupe guard and
+  // fire a second `permission.reply` for a request the server already
+  // closed. 512 distinct prompts inside one step is already anomalous, so
+  // the fix fails the attempt closed instead of ever forgetting an id.
+  test("the permission request cap is exceeded, fails the attempt closed instead of forgetting old requestIDs (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const CAP = 512;
+    for (let i = 0; i < CAP; i++) fake.emit(askEvent(`per_${i}`));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.replyCalls()).toHaveLength(CAP);
+
+    // One more DISTINCT requestID, past the cap.
+    fake.emit(askEvent("per_overflow"));
+    await new Promise((r) => setTimeout(r, 20));
+    fake.endStream();
+
+    // Races against a real, bounded timeout rather than draining forever —
+    // same pattern as "a failing reject reply settles..." above.
+    const iterator = client.streamEvents(session)[Symbol.asyncIterator]();
+    let thrown: Error | undefined;
+    try {
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("test timeout: stream never settled")),
+              200,
+            );
+          }),
+        ]);
+        if (step.done) break;
+      }
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      await iterator.return?.();
+    }
+
+    expect(thrown?.message).toContain("permission request cap exceeded (512)");
+    // No reply ever went out for the id that pushed past the cap.
+    expect(fake.replyCalls()).toHaveLength(CAP);
+    expect(fake.replyCalls().some((c) => c.requestID === "per_overflow")).toBe(
+      false,
+    );
+  });
+
+  // Regression/sanity companion to the cap test above: a set holding many
+  // (but not cap-exceeding) ids must not spontaneously start misbehaving —
+  // the first id ever added is still exactly as protected as it was when
+  // the set was empty. Because it deliberately stays under the cap, this
+  // test does NOT by itself catch a `rememberId`-eviction regression (with
+  // this few ids, `rememberId`'s own eviction never triggers either) — the
+  // cap test above is the one that does.
+  test("a redelivery of the first requestID after the set holds many ids still sends no second reply (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const MANY = 300;
+    for (let i = 0; i < MANY; i++) fake.emit(askEvent(`many_${i}`));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.replyCalls()).toHaveLength(MANY);
+
+    // Redeliver the very FIRST requestID ever seen.
+    fake.emit(askEvent("many_0"));
+    await new Promise((r) => setTimeout(r, 20));
+    fake.endStream();
+
+    let thrown: Error | undefined;
+    try {
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(fake.replyCalls()).toHaveLength(MANY);
+    expect(thrown).toBeUndefined();
+  });
+
+  // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
+  // exactly like GET /event — it must query the SAME directory session.create
+  // registered (state.turn.expectedCwd, which IS input.cwd) or it watches an
+  // instance that has never heard of this session.
+  test("polls status with the same directory session.create registered", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+    fake.setStatus({ type: "busy" });
+
+    await client.pollStatus(session);
+
+    expect(fake.statusCalls()).toEqual([{ directory: INPUT.cwd }]);
+  });
+
   // #127. The poll observer used to scan session.messages() for the last
   // completed assistant message and call that the turn's terminal. At any poll
   // instant "last completed" is step 1 until step 2 exists, so it agreed with
@@ -656,12 +1182,20 @@ describe("createOpenCodeClient", () => {
     const session = await client.createSession(INPUT);
 
     fake.setStatus({ type: "busy" });
-    fake.setMessages([{ info: { role: "user" }, parts: [] }]);
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+    ]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
 
     // A completed step, mid-turn. THE defect: this used to be a terminal.
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
     expect((await client.pollStatus(session)).kind).toBe("pending");
@@ -681,12 +1215,13 @@ describe("createOpenCodeClient", () => {
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
   });
 
-  // Absence is the boundary, but it is ALSO what a session this call cannot
-  // see looks like. Measured against opencode 1.18.23: a session created with
-  // no directory registers under the SERVER's cwd, and
-  // GET /session/status?directory=<step cwd> returns {} for it WHILE IT IS
-  // BUSY. An absence that has never been contradicted proves nothing, so it
-  // only counts once this observer has seen the provider name this session.
+  // Absence is the boundary, but it is ALSO what a wrong or missing
+  // `directory` scope looks like — #223 measured (opencode 1.18.30) that
+  // `GET /session/status` given a directory other than the one session.create
+  // registered returns {} for a session that is BUSY at that moment, the same
+  // shape as one that has finished. The response cannot tell the two apart,
+  // so an absence that has never been contradicted proves nothing; it only
+  // counts once this observer has seen the provider name this session.
   test("poll never reads an unseen session's absence as a finished turn", async () => {
     const fake = fakeSdk();
     const client = rig(fake);
@@ -694,7 +1229,10 @@ describe("createOpenCodeClient", () => {
 
     fake.setStatus(undefined);
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
 
@@ -712,11 +1250,72 @@ describe("createOpenCodeClient", () => {
 
     fake.setStatus({ type: "idle" });
     fake.setMessages([
-      { info: { role: "user" }, parts: [] },
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
       { info: ASSISTANT, parts: [] },
     ]);
 
     expect((await client.pollStatus(session)).kind).toBe("terminal");
+  });
+
+  // #157: pr-157-8df2fca3-4's complete capture — `GET /session/status`
+  // reported this exact retry/account_rate_limit status for the whole
+  // attempt, and the old code only ever read `type: "retry"` as "the provider
+  // is still working" (line ~2578's `observedActive = true`), so the poll
+  // kept the attempt alive for the full usefulProgressMs budget over a quota
+  // that was never coming back. `account_rate_limit` is the only
+  // `action.reason` observed across all three hunter captures of that run.
+  const LIMIT_MESSAGE =
+    "5 hour usage limit reached. It will reset in 22 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01M17B67W4Q9BE4T0910EQ0NRY/go";
+
+  test("a poll-observed account usage limit fails fast with the provider's message (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({
+      type: "retry",
+      attempt: 1,
+      message: LIMIT_MESSAGE,
+      action: {
+        reason: "account_rate_limit",
+        provider: "opencode-go",
+        title: "Go limit reached",
+      },
+    });
+
+    const result = await client.pollStatus(session);
+    expect(result.kind).toBe("failed");
+    if (result.kind !== "failed") throw new Error("unreachable");
+    expect(result.detail).toContain(LIMIT_MESSAGE);
+    expect(result.detail).toContain("account_rate_limit");
+  });
+
+  test("a poll-observed retry with no action reason keeps polling, not failed (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({ type: "retry", attempt: 2, message: "429", next: 1 });
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+  });
+
+  test("a poll-observed retry with an unrecognised action reason keeps polling (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({
+      type: "retry",
+      attempt: 1,
+      message: "provider is retrying",
+      action: { reason: "some_future_reason", provider: "opencode-go" },
+    });
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
   });
 
   // pr-hero F002/F003 on this PR, both BLOCKER, and both right — they are the
@@ -740,6 +1339,7 @@ describe("createOpenCodeClient", () => {
       properties: {
         sessionID: SESSION_ID,
         partID: "prt_answer",
+        messageID: "msg_a",
         field: "text",
         delta: text,
       },
@@ -752,7 +1352,14 @@ describe("createOpenCodeClient", () => {
       type: "message.updated",
       properties: {
         sessionID: SESSION_ID,
-        info: { id: "msg_a", role: "assistant", time: { created: 1 } },
+        info: {
+          id: "msg_a",
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
       },
     });
     fake.emit({
@@ -762,6 +1369,7 @@ describe("createOpenCodeClient", () => {
         part: {
           id: "prt_answer",
           messageID: "msg_a",
+          sessionID: SESSION_ID,
           type: "text",
           text: "",
         },
@@ -964,7 +1572,7 @@ describe("createOpenCodeClient", () => {
             }
             // The sibling is parked exactly in the pre-states.set window.
             await secondCreateBlocked;
-            return { data: { id: SESSION_ID } };
+            return { data: { id: SESSION_ID, directory: INPUT.cwd } };
           },
         },
       }),
@@ -1448,9 +2056,7 @@ describe("createOpenCodeClient MCP readback (#141)", () => {
 
     await client.createSession(MCP_INPUT);
 
-    expect(fake.mcpStatusCalls()).toEqual([
-      { query: { directory: "/tmp/work" } },
-    ]);
+    expect(fake.mcpStatusCalls()).toEqual([{ directory: "/tmp/work" }]);
   });
 
   // Measured (#141 fact 7): `--pure` suppresses neither config-delivered nor
@@ -1500,5 +2106,1177 @@ describe("createOpenCodeClient MCP readback (#141)", () => {
       /operator-thing/,
     );
     expect(fake.promptCalls()).toHaveLength(0);
+  });
+});
+
+describe("Work Unit 2: Client Reconciliation & Canonical Ownership (U2-C2, U2-C3, U2-C4)", () => {
+  describe("U2-C2: Canonical Message Ownership & Session Boundary", () => {
+    test("unowned assistant message is rejected even when currentUserId was absent", () => {
+      const state = createTurnState("ses_1", undefined, "/tmp/work");
+      const unownedMessage = {
+        ...ASSISTANT,
+        id: "msg_unowned_assistant",
+        sessionID: "ses_1",
+        parentID: "msg_unknown_user",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+      };
+
+      expect(isMessageOwned(unownedMessage.id, state)).toBe(false);
+
+      const proof = terminalProofFromAssistant(unownedMessage, state);
+      expect(proof).toBeUndefined();
+
+      const reconciled = reconcileMessages([unownedMessage], state);
+      expect(reconciled.terminalProof).toBeUndefined();
+    });
+
+    test("cross-session message is rejected by terminal proof and reconciliation", () => {
+      const state = createTurnState("ses_canonical", "msg_user_1", "/tmp/work");
+      state.parentLinks.set("msg_asst_1", "msg_user_1");
+      const crossSessionMessage = {
+        ...ASSISTANT,
+        id: "msg_asst_1",
+        sessionID: "ses_other_foreign",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+      };
+
+      const proof = terminalProofFromAssistant(crossSessionMessage, state);
+      expect(proof).toBeUndefined();
+
+      const reconciled = reconcileMessages([crossSessionMessage], state);
+      expect(reconciled.terminalProof).toBeUndefined();
+    });
+  });
+
+  describe("U2-C3: Canonical Readback Part Order & Terminal-Only Aggregation", () => {
+    test("readback parts replace stale delta order", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      state.messageDetails.set("msg_asst_1", {
+        id: "msg_asst_1",
+        role: "assistant",
+        parentID: "msg_user_1",
+        partIds: ["prt_stale_2", "prt_stale_1"],
+      });
+
+      const messageWithCanonicalParts = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [
+          {
+            id: "prt_stale_1",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "text",
+            text: "First part ",
+          },
+          {
+            id: "prt_stale_2",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "text",
+            text: "Second part",
+          },
+        ],
+      };
+
+      reconcileMessages([messageWithCanonicalParts], state);
+      const detail = state.messageDetails.get("msg_asst_1");
+      expect(detail?.partIds).toEqual(["prt_stale_1", "prt_stale_2"]);
+    });
+
+    test("canonicalFinalText aggregates only the terminal completed assistant message, excluding previous steps", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      const step1 = {
+        id: "msg_asst_step1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 150 },
+        parts: [
+          {
+            id: "prt_step1",
+            sessionID: "ses_1",
+            messageID: "msg_asst_step1",
+            type: "text",
+            text: "Previous step reasoning prose. ",
+          },
+        ],
+      };
+      const step2 = {
+        id: "msg_asst_step2",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 160, completed: 200 },
+        parts: [
+          {
+            id: "prt_step2",
+            sessionID: "ses_1",
+            messageID: "msg_asst_step2",
+            type: "text",
+            text: "Final answer only.",
+          },
+        ],
+      };
+
+      const reconciled = reconcileMessages([step1, step2], state);
+      expect(reconciled.finalText).toBe("Final answer only.");
+    });
+  });
+
+  describe("U2-C4: Explicit Bounds Across All Part Types & 4 MiB Readback Cap", () => {
+    test("exhausting part limits triggers integrity failure instead of silent eviction", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      for (let i = 0; i < 4096; i += 1) {
+        state.trackedPartOwners.set(`prt_prior_${i}`, "msg_asst_1");
+      }
+
+      const messageWithOverLimitPart = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [
+          {
+            id: "prt_excess",
+            sessionID: "ses_1",
+            messageID: "msg_asst_1",
+            type: "reasoning",
+            text: "excess reasoning",
+          },
+        ],
+      };
+
+      const reconciled = reconcileMessages([messageWithOverLimitPart], state);
+      expect(reconciled.failure).toBe(
+        "[pr-hero] opencode client: maximum tracked parts exceeded",
+      );
+      expect(state.integrityFailure).toBe(
+        "[pr-hero] opencode client: maximum tracked parts exceeded",
+      );
+      expect(state.trackedPartOwners.has("prt_prior_0")).toBe(true);
+    });
+
+    test("exceeding 4 MiB readback text cap triggers integrity failure", () => {
+      const state = createTurnState("ses_1", "msg_user_1", "/tmp/work");
+      const largeText = "x".repeat(4 * 1024 * 1024 + 16);
+      const oversizedMessage = {
+        id: "msg_asst_1",
+        role: "assistant",
+        path: { cwd: "/tmp/work" },
+        sessionID: "ses_1",
+        parentID: "msg_user_1",
+        finish: "stop",
+        time: { created: 100, completed: 200 },
+        parts: [{ id: "prt_large", type: "text", text: largeText }],
+      };
+
+      const reconciled = reconcileMessages([oversizedMessage], state);
+      expect(reconciled.failure).toBe(
+        "[pr-hero] opencode client: total readback byte budget exceeded",
+      );
+      expect(state.integrityFailure).toBe(
+        "[pr-hero] opencode client: total readback byte budget exceeded",
+      );
+    });
+  });
+});
+
+// #223: session.prompt() resolves with the finished message and reconciles it
+// purely to ingest identity/usage/error state — the event stream is the only
+// delivery channel, so that reconcile must never advance `emittedText` (the
+// "already delivered to the consumer" bookkeeping `handlePartDelta` and
+// `handlePartUpdated` both trust). These tests drive `reconcileMessages` and
+// `mapOpenCodeEvents` directly, in hand-picked order, so the ordering between
+// a prompt-result reconcile and the part's own stream lifecycle is exact and
+// never a timing race.
+describe("Prompt-result reconcile must not advance emission ahead of the stream (#223)", () => {
+  const SESS = "ses_promptrace";
+  const FULL_TEXT = "the answer is 42";
+  const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+
+  function completedAssistant(): Record<string, unknown> {
+    return {
+      id: "msg_asst_1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/work", root: "/" },
+      parentID: "msg_user_1",
+      finish: "stop",
+      time: { created: 100, completed: 200 },
+    };
+  }
+
+  function promptResultRecord(): Record<string, unknown> {
+    return {
+      info: completedAssistant(),
+      parts: [
+        {
+          id: "prt_ans_1",
+          messageID: "msg_asst_1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      ],
+    };
+  }
+
+  test("emit:false ingests identity, usage and the text snapshot without advancing emittedText", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    const reconciled = reconcileMessages([promptResultRecord()], state, {
+      emit: false,
+    });
+
+    // Ingestion still happened: ownership, the terminal proof and the
+    // computed finalText are all present.
+    expect(reconciled.terminalProof?.eventId).toBe("msg_asst_1");
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    expect(state.messageDetails.get("msg_asst_1")?.finish).toBe("stop");
+    // But the bookkeeping a later stream event checks against was left
+    // untouched — no delta was ever handed to a consumer.
+    expect(state.partDetails.get("prt_ans_1")?.text).toBe(FULL_TEXT);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+    expect(reconciled.events).toEqual([]);
+  });
+
+  test("fixed (emit:false) call site: the same replayed lifecycle delivers the answer exactly once", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    reconcileMessages([promptResultRecord()], state, { emit: false });
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+
+    const collected: unknown[] = [];
+    collected.push(
+      ...mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_ans_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "text",
+              text: "",
+            },
+          },
+        },
+        SESS,
+        state,
+      ),
+    );
+    for (const chunk of DELTA_CHUNKS) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_ans_1",
+              field: "text",
+              delta: chunk,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+    // No throw: the final snapshot exactly matches what the deltas already
+    // built up, so it is recognized as already-delivered and produces no
+    // further event.
+    collected.push(
+      ...mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_ans_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "text",
+              text: FULL_TEXT,
+            },
+          },
+        },
+        SESS,
+        state,
+      ),
+    );
+
+    expect(collected).toEqual(
+      DELTA_CHUNKS.map((text) => ({ kind: "delta", text })),
+    );
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+  });
+
+  // Regression (a): the normal ordering, where the part's deltas and its
+  // final snapshot have ALREADY arrived and been fully emitted over the
+  // stream by the time the prompt-result reconcile runs. It must be a no-op
+  // regardless of `emit`, because `alreadyEmitted === snapshotText` short-
+  // circuits before either branch that could advance or duplicate anything.
+  test("regression (a): a late prompt-result reconcile after the stream already delivered the text is a no-op", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    // currentUserId/expectedCwd only matter for ownership on the assistant
+    // message itself, which the prompt-result reconcile below establishes;
+    // seed the part as already fully streamed BEFORE that happens.
+    state.parts.set("prt_ans_1", "answer");
+    state.partDetails.set("prt_ans_1", {
+      id: "prt_ans_1",
+      messageId: "msg_asst_1",
+      type: "text",
+      text: FULL_TEXT,
+      emittedText: FULL_TEXT,
+    });
+
+    const reconciled = reconcileMessages([promptResultRecord()], state, {
+      emit: false,
+    });
+
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+
+  // Regression (b): prompt_result carries the finished answer but the stream
+  // never replays the text part at all (dropped, or the turn ends before it
+  // does). The answer must still be delivered once, through the session.idle
+  // boundary reading `detail.text` against an `emittedText` the ingest-only
+  // reconcile correctly left empty.
+  test("regression (b): prompt-result with no stream text events at all is delivered once at the session.idle boundary", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    reconcileMessages([promptResultRecord()], state, { emit: false });
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe("");
+
+    // The assistant's own message.updated is what establishes state.lastProof
+    // — the session.idle boundary has nothing to report without it.
+    const updatedEvents = mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: { sessionID: SESS, info: completedAssistant() },
+      },
+      SESS,
+      state,
+    );
+    expect(updatedEvents).toEqual([]);
+
+    const idleEvents = mapOpenCodeEvents(
+      { type: "session.idle", properties: { sessionID: SESS } },
+      SESS,
+      state,
+    );
+
+    expect(idleEvents).toEqual([
+      { kind: "delta", text: FULL_TEXT },
+      {
+        kind: "terminal",
+        proof: {
+          eventId: "msg_asst_1",
+          providerStatus: "completed",
+          providerObservedAt: new Date(200).toISOString(),
+        },
+      },
+    ]);
+  });
+
+  // Regression (c): the real duplicate-delta contract this fix preserves —
+  // the SAME event id redelivered (e.g. after an SSE `Last-Event-ID`
+  // reconnect) is still deduplicated, never appended twice. Identity here is
+  // the event id, not the delta's text: see the "dedupe by event id"
+  // describe block below for why a text-suffix check was wrong.
+  test("regression (c): a duplicate delta with the same event id is still deduplicated", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_dup_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const first = mapOpenCodeEvents(
+      {
+        id: "evt_dup_1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_dup_1",
+          field: "text",
+          delta: "hello ",
+        },
+      },
+      SESS,
+      state,
+    );
+    const duplicate = mapOpenCodeEvents(
+      {
+        id: "evt_dup_1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_dup_1",
+          field: "text",
+          delta: "hello ",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(first).toEqual([{ kind: "delta", text: "hello " }]);
+    expect(duplicate).toEqual([]);
+    expect(state.partDetails.get("prt_dup_1")?.emittedText).toBe("hello ");
+  });
+});
+
+// D-13: `handlePartDelta`'s old dedup check compared the delta's TEXT
+// against the tail already emitted (`emittedText.endsWith(delta)`), which
+// silently ate any legitimately repeated token — not just an exact provider
+// redelivery. Identity for a redelivered event is the event's own `id`
+// (OpenCode's SSE client reconnects with `Last-Event-ID` and can redeliver
+// the same event verbatim — see serverSentEvents.gen.js), never its text.
+describe("dedupe by event id, not text-suffix (D-13)", () => {
+  const SESS = "ses_delta_id_dedupe";
+
+  test("a. repeated tokens: every delta with a distinct id is emitted and the final snapshot matches", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_repeat_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const deltas = [
+      { id: "evt_1", delta: "a" },
+      { id: "evt_2", delta: "b" },
+      { id: "evt_3", delta: "b" },
+      { id: "evt_4", delta: "c" },
+    ];
+    const collected: unknown[] = [];
+    for (const { id, delta } of deltas) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            id,
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_repeat_1",
+              field: "text",
+              delta,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+
+    expect(collected).toEqual([
+      { kind: "delta", text: "a" },
+      { kind: "delta", text: "b" },
+      { kind: "delta", text: "b" },
+      { kind: "delta", text: "c" },
+    ]);
+    expect(state.partDetails.get("prt_repeat_1")?.emittedText).toBe("abbc");
+
+    // The later snapshot restating the true text must not throw a
+    // "conflicting snapshot observed" error.
+    const snapshotEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_repeat_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: "abbc",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(snapshotEvents).toEqual([]);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+
+  test("b. repeated JSON closer: a legitimately repeated '}' delta is applied, not dropped, with no snapshot", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_json_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const deltas = [
+      { id: "evt_j1", delta: '{"a":{"b":1' },
+      { id: "evt_j2", delta: "}" },
+      { id: "evt_j3", delta: "}" },
+    ];
+    for (const { id, delta } of deltas) {
+      mapOpenCodeEvents(
+        {
+          id,
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESS,
+            messageID: "msg_asst_1",
+            partID: "prt_json_1",
+            field: "text",
+            delta,
+          },
+        },
+        SESS,
+        state,
+      );
+    }
+
+    expect(state.partDetails.get("prt_json_1")?.emittedText).toBe(
+      '{"a":{"b":1}}',
+    );
+  });
+
+  test("c. same-id replay: the second delivery of the same event id is dropped and text is not doubled", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_same_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const event = {
+      id: "evt_same_1",
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg_asst_1",
+        partID: "prt_same_1",
+        field: "text",
+        delta: "b",
+      },
+    };
+
+    const first = mapOpenCodeEvents(event, SESS, state);
+    const second = mapOpenCodeEvents(event, SESS, state);
+
+    expect(first).toEqual([{ kind: "delta", text: "b" }]);
+    expect(second).toEqual([]);
+    expect(state.partDetails.get("prt_same_1")?.emittedText).toBe("b");
+  });
+
+  test("d. id-less deltas have no identity to compare, so two identical ones are both applied", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_noid_1", "answer");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    const event = {
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESS,
+        messageID: "msg_asst_1",
+        partID: "prt_noid_1",
+        field: "text",
+        delta: "b",
+      },
+    };
+
+    const first = mapOpenCodeEvents(event, SESS, state);
+    const second = mapOpenCodeEvents(event, SESS, state);
+
+    expect(first).toEqual([{ kind: "delta", text: "b" }]);
+    expect(second).toEqual([{ kind: "delta", text: "b" }]);
+    expect(state.partDetails.get("prt_noid_1")?.emittedText).toBe("bb");
+  });
+
+  test("e. buffered unknown-owner delta reconciles exactly once, then drops the same id again", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+
+    // Part announced with an empty snapshot before ownership is known —
+    // buffered as type "part.updated".
+    const announceEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_buf_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: "",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(announceEvents).toEqual([]);
+
+    // Delta arrives before ownership is known too — buffered as
+    // "part.delta", carrying its event id along.
+    const deltaBeforeOwnership = mapOpenCodeEvents(
+      {
+        id: "evt_buf_1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_buf_1",
+          field: "text",
+          delta: "hello",
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(deltaBeforeOwnership).toEqual([]);
+
+    // Ownership established: the buffer reconciles both observations.
+    const reconciledEvents = mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESS,
+          info: {
+            id: "msg_asst_1",
+            role: "assistant",
+            sessionID: SESS,
+            path: { cwd: "/tmp/work", root: "/" },
+            parentID: "msg_user_1",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(reconciledEvents).toEqual([{ kind: "delta", text: "hello" }]);
+    expect(state.partDetails.get("prt_buf_1")?.emittedText).toBe("hello");
+
+    // The same event id arriving again after reconciliation is now a
+    // genuine replay (ownership is known) and must be dropped.
+    const replay = mapOpenCodeEvents(
+      {
+        id: "evt_buf_1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_buf_1",
+          field: "text",
+          delta: "hello",
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(replay).toEqual([]);
+    expect(state.partDetails.get("prt_buf_1")?.emittedText).toBe("hello");
+  });
+});
+
+// D-11: the poll observer's own readback (opencode-client.ts pollStatus,
+// `reconcileMessages(list, state.turn)`) reconciles with the DEFAULT `emit`
+// (true) — unlike the #223 prompt_result call site above, which was fixed to
+// `{ emit: false }` for exactly the same reason. The poll site discards
+// `reconciled.events` the same way the prompt_result call site used to
+// (opencode-sdk.ts's poll branch reads only `failure`/`terminalProof`/
+// `finalText`/`usage`/`usageIncomplete`), so the same hazard applies: if the
+// stream has already delivered a PREFIX of a text part when the poll's HTTP
+// readback observes the part's already-persisted FULL text, the poll's
+// reconcile advances `emittedText` to the full text for a consumer that was
+// only ever handed the prefix. The stream's own still-in-flight remaining
+// deltas for that part then find `emittedText` already past what was really
+// delivered: `handlePartDelta`'s then text-suffix dedup check
+// (`emittedText.endsWith(delta)`, since replaced by event-id dedupe — D-13)
+// does not recognise them as already-covered, so they are appended AGAIN as
+// duplicate delta events (corrupting delivery), and the part's own later
+// snapshot/session.idle boundary event finds `snapshotText` shorter than the
+// now-inflated `emittedText` and throws "conflicting snapshot observed" —
+// exactly the failure #223 fixed at the other call site, reopened at this one.
+//
+// These tests drive `reconcileMessages` (the exact call the poll site makes)
+// and `mapOpenCodeEvents` (the exact call the stream pump makes) directly, in
+// the ordering a live race would produce, so it is exact and never a timing
+// race.
+describe("Poll-readback reconcile must not advance emission ahead of the stream (D-11)", () => {
+  const SESS = "ses_pollrace";
+  const FULL_TEXT = "the answer is 42";
+  const DELTA_CHUNKS = ["the ", "answer ", "is ", "42"];
+
+  function completedAssistant(): Record<string, unknown> {
+    return {
+      id: "msg_asst_1",
+      sessionID: SESS,
+      role: "assistant",
+      path: { cwd: "/tmp/work", root: "/" },
+      parentID: "msg_user_1",
+      finish: "stop",
+      time: { created: 100, completed: 200 },
+    };
+  }
+
+  function pollReadbackRecord(): Record<string, unknown> {
+    return {
+      info: completedAssistant(),
+      parts: [
+        {
+          id: "prt_ans_1",
+          messageID: "msg_asst_1",
+          sessionID: SESS,
+          type: "text",
+          text: FULL_TEXT,
+        },
+      ],
+    };
+  }
+
+  // Mechanism validation for the fix: the exact same race, but with the poll
+  // readback reconciled through `{ emit: false }` — what the fixed pollStatus
+  // call site will pass. `events` is still discarded by the caller (mirroring
+  // the real poll site, which never reads them), but `emittedText` must be
+  // left untouched so the stream's own remaining, perfectly ordinary delivery
+  // completes exactly once with no duplication and no thrown conflict.
+  test("fixed (emit:false) poll readback: the same race delivers the answer exactly once", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+
+    mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_ans_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: "",
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+    const firstDeltaEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_ans_1",
+          field: "text",
+          delta: DELTA_CHUNKS[0],
+        },
+      },
+      SESS,
+      state,
+    );
+    expect(firstDeltaEvents).toEqual([
+      { kind: "delta", text: DELTA_CHUNKS[0] },
+    ]);
+
+    const reconciled = reconcileMessages([pollReadbackRecord()], state, {
+      emit: false,
+    });
+    expect(reconciled.terminalProof?.eventId).toBe("msg_asst_1");
+    expect(reconciled.finalText).toBe(FULL_TEXT);
+    // The fix: emittedText stays exactly what the stream actually delivered.
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(
+      DELTA_CHUNKS[0],
+    );
+
+    const collected: unknown[] = [];
+    for (const chunk of DELTA_CHUNKS.slice(1)) {
+      collected.push(
+        ...mapOpenCodeEvents(
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID: SESS,
+              messageID: "msg_asst_1",
+              partID: "prt_ans_1",
+              field: "text",
+              delta: chunk,
+            },
+          },
+          SESS,
+          state,
+        ),
+      );
+    }
+    // The final restating snapshot must be recognised as already delivered —
+    // no throw, no further event.
+    const snapshotEvents = mapOpenCodeEvents(
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESS,
+          part: {
+            id: "prt_ans_1",
+            messageID: "msg_asst_1",
+            sessionID: SESS,
+            type: "text",
+            text: FULL_TEXT,
+          },
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(collected).toEqual(
+      DELTA_CHUNKS.slice(1).map((text) => ({ kind: "delta", text })),
+    );
+    expect(snapshotEvents).toEqual([]);
+    expect(state.partDetails.get("prt_ans_1")?.emittedText).toBe(FULL_TEXT);
+    expect(state.integrityFailure).toBeUndefined();
+  });
+});
+
+// #227 threaded the provider event id through `handlePartDelta`, giving
+// reasoning deltas replay identity they lacked when f842a8b restricted useful
+// progress to owned cumulative SNAPSHOTS only ("bare delta markers have no
+// replay identity and cannot extend the deadline"). A delta carrying a NOVEL
+// id is no longer a bare marker — replaying the SAME id (an SSE
+// Last-Event-ID reconnect) is still not new work, and an id-less delta still
+// has no identity to prove novelty with, so both keep emitting the old bare
+// marker. Tool execution time counted as silence for a separate reason: this
+// same file's `handlePartUpdated` tool branch emitted NOTHING at all for a
+// tool part update, novel status transition or not. Both gaps fed the false
+// "quiet-round budget" tripwire on reasoning-heavy or tool-heavy turns a real
+// GLM/OpenAI stream produces.
+describe("useful-progress credit for novel reasoning deltas and tool transitions", () => {
+  const SESS = "ses_progress_credit";
+
+  function ownReasoningPart(state: ReturnType<typeof createTurnState>) {
+    state.parts.set("prt_r1", "reasoning");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+  }
+
+  test("a reasoning delta with a novel provider event id counts as progress", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+
+    const events = mapOpenCodeEvents(
+      {
+        id: "evt_reasoning_novel",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_r1",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([{ kind: "reasoning", progress: true }]);
+  });
+
+  test("the same reasoning delta id replayed does not count twice", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+    const send = () =>
+      mapOpenCodeEvents(
+        {
+          id: "evt_reasoning_replay",
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESS,
+            messageID: "msg_asst_1",
+            partID: "prt_r1",
+            field: "text",
+            delta: "thinking about it",
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(send()).toEqual([{ kind: "reasoning", progress: true }]);
+    expect(send()).toEqual([{ kind: "reasoning" }]);
+  });
+
+  test("an id-less reasoning delta never counts as progress", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+
+    const events = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_r1",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([{ kind: "reasoning" }]);
+  });
+
+  test("a reasoning delta for an unowned message emits nothing, novel id or not", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_r_foreign", "reasoning");
+    state.assistantMessages.add("msg_foreign");
+    state.parentLinks.set("msg_foreign", "someone_elses_prompt");
+
+    const events = mapOpenCodeEvents(
+      {
+        id: "evt_reasoning_foreign",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_foreign",
+          partID: "prt_r_foreign",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  test("an owned tool part's novel status transition emits activity once; the same status again emits nothing", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_1",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("pending")).toEqual([]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([]);
+    // #214: a novel transition INTO "completed" also stamps a look, off the
+    // same `transitioned` gate as "activity" — see the WHY comment at the
+    // "tool" branch in `handlePartUpdated`. `tool` reads "unknown" because
+    // this fixture's part carries no `tool` field.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown" },
+    ]);
+  });
+
+  // An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
+  // newer one already landed (e.g. "running" replayed after "completed" was
+  // already observed). `previousStatus !== status` credits that as a
+  // transition — it IS a change from what was last stored, but it is not
+  // FORWARD progress, so it must not earn `activity`. Rank: pending=0,
+  // running=1, completed=2, error=2 (a terminal either way, so neither
+  // outranks the other) — only a strictly increasing rank counts, and a
+  // first observation always counts (previous rank is -1).
+  test("a replayed older tool status after a newer one already landed emits nothing", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_replay",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_replay",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // #214: see the WHY comment above — a novel transition into "completed"
+    // also stamps a look.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown" },
+    ]);
+    expect(toolStatus("running")).toEqual([]);
+  });
+
+  test("pending -> running -> completed emits exactly 3 activities", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_forward",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_forward",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    // #214: see the WHY comment above — a novel transition into "completed"
+    // also stamps a look.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown" },
+    ]);
+  });
+
+  test("completed -> error emits nothing: both are terminal, equal rank", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_terminal",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_terminal",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // #214: see the WHY comment above — a novel transition into "completed"
+    // also stamps a look.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown" },
+    ]);
+    expect(toolStatus("error")).toEqual([]);
+  });
+
+  // #228's review: `reconcileMessages` (the ~250ms poll readback, `emit:
+  // false`) ALSO writes `state.toolStates.set(callId, status)`
+  // unconditionally, and three concurrent hunters sharing one server can
+  // have a poll round observe a tool's "completed" status before the stream
+  // ever delivers that same tool's "pending"/"running". If activity credit
+  // were computed against `toolStates`, the stream's later real transitions
+  // would compare against the rank the POLL already advanced to
+  // "completed" and never earn credit.
+  test("tool activity credit is computed independently of the poll reconcile's toolStates writes", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    const pollReadbackObservesCompletedFirst = {
+      id: "msg_asst_1",
+      role: "assistant",
+      path: { cwd: "/tmp/work" },
+      sessionID: SESS,
+      parentID: "msg_user_1",
+      parts: [
+        {
+          id: "prt_tool_poll_race",
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          type: "tool",
+          callID: "call_poll_race",
+          state: { status: "completed" },
+        },
+      ],
+    };
+    reconcileMessages([pollReadbackObservesCompletedFirst], state, {
+      emit: false,
+    });
+    // toolStates is exactly as unconditional as before this commit.
+    expect(state.toolStates.get("call_poll_race")).toBe("completed");
+
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_poll_race",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_poll_race",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // The stream's OWN pending -> running -> completed still earns credit
+    // for every forward step, unaffected by the poll having already stored
+    // "completed" in toolStates.
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    // #214: for the same reason — the count is read off `toolActivityRank`,
+    // never `toolStates` — the stream's own arrival at "completed" still
+    // stamps a look even though the poll raced ahead and marked it complete
+    // in `toolStates` already.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown" },
+    ]);
   });
 });

@@ -102,13 +102,19 @@ function fakeSdk(
       // These rigs declare no registry, so the verified answer is "nothing
       // connected" — which is a declaration too, not an absence of one.
       mcp: { status: async () => ({ data: {} }) },
+      permission: { reply: async () => ({ data: true }) },
       session: {
-        create: async () => ({ data: { id: SESSION_ID } }),
+        create: async (opts) => ({
+          data: {
+            id: SESSION_ID,
+            directory: (opts as { directory: string }).directory,
+          },
+        }),
         prompt: async () => {
           if (options.promptGate !== undefined) await options.promptGate;
           return options.promptError !== undefined
             ? { data: undefined, error: options.promptError }
-            : { data: { info: {}, parts: [] } };
+            : { data: {} };
         },
         messages: async () => ({ data: [] }),
         // #127: a refused prompt never makes the session work, so it is never

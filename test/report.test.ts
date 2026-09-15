@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import {
   findingMarker,
+  PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
   PR_COMMENT_MARKER_PREFIX,
   prCommentMarker,
 } from "../src/pr-preflight";
@@ -482,6 +483,40 @@ describe("renderPrComment", () => {
         undefined,
       ).split("\n")[0],
     ).toBe(prCommentMarker(HEAD));
+  });
+
+  // Rereview-coverage fix (self-healing): a COMPLETE run's marker
+  // stays byte-identical to today — this is the wire-format promise the
+  // watcher's cross-machine guard, the CI admission block, and every
+  // already-posted comment depend on.
+  test("a complete run's marker is byte-identical to the pre-fix plain form", () => {
+    const body = renderPrComment(
+      doc({ run_status: "complete" }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
+    expect(body.split("\n")[0]).toBe(`<!-- pr-hero-report head=${HEAD} -->`);
+  });
+
+  // A PARTIAL run's marker carries the named coverage token so the NEXT
+  // `pr-hero review --pr N` can tell (via parsePrCommentMarker) that this
+  // run never finished, and must not trust L===H as "nothing changed since
+  // a clean review" (GitHub #42's re-review half — MusiveTech/musive #1823).
+  test("a partial run's marker carries the coverage=partial token, still under the same prefix", () => {
+    const body = renderPrComment(
+      doc({ run_status: "partial", telemetry: PARTIAL_TELEMETRY }),
+      undefined,
+      undefined,
+      [],
+      undefined,
+    );
+    const firstLine = body.split("\n")[0] ?? "";
+    expect(firstLine).toBe(
+      `<!-- pr-hero-report head=${HEAD} ${PR_COMMENT_COVERAGE_PARTIAL_TOKEN} -->`,
+    );
+    expect(firstLine.startsWith(PR_COMMENT_MARKER_PREFIX)).toBe(true);
   });
 
   // findMarkedCommentId matches on the prefix; a rendered comment that

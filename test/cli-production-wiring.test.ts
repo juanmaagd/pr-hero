@@ -28,15 +28,19 @@ const mockLoadSdk = async () =>
     }),
   }) as unknown as import("../src/transports/opencode-client").OpenCodeSdkLike;
 
-const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
-
 async function writeExecutable(
   dir: string,
   name: string,
   body: string,
 ): Promise<{ canonicalPath: string; sha256: string }> {
   const filePath = path.join(dir, name);
-  const bytes = Buffer.concat([MACHO_PREFIX, Buffer.from(body)]);
+  const script =
+    name === "opencode" && body === "opencode"
+      ? `#!/bin/sh\nif [ "$1" = "--version" ]; then\n  echo "1.18.30"\n  exit 0\nfi\nexit 0\n`
+      : body.startsWith("#!")
+        ? body
+        : `#!/bin/sh\n${body}\n`;
+  const bytes = Buffer.from(script);
   await writeFile(filePath, bytes);
   await chmod(filePath, 0o755);
   const canonicalPath = await realpath(filePath);

@@ -146,11 +146,19 @@ function makeClient(options: {
       }
       await new Promise<never>(() => {});
     },
-    pollStatus: async () => {
+    pollStatus: async (_session, signal) => {
       const index = round;
       round += 1;
       if (options.hangRounds?.includes(index)) {
-        return new Promise<OpenCodePollResult>(() => {});
+        // A timed-out cooperative request releases its slot on abort. A
+        // permanently uncooperative request must NOT admit another poll (U3).
+        return new Promise<OpenCodePollResult>((_, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new Error("poll aborted")),
+            { once: true },
+          );
+        });
       }
       return options.polls?.[index] ?? ({ kind: "pending" } as const);
     },

@@ -129,10 +129,29 @@ export async function launchOpenCodeServer(
   // measured to work under `--pure` (#141 fact 1). Written here rather than by
   // the caller so the "exactly the projected environment" rule keeps a single
   // enforcement point.
-  const childEnv: Record<string, string> =
+  //
+  // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+  // reviewed worktree tripped OpenCode's `permission.asked` for
+  // `external_directory` twice in one run, and pr-hero never answers that
+  // prompt — the tool call sat blocked until the silence tripwire killed the
+  // attempt 150s later at $0. `permission.external_directory: "deny"` is
+  // delivered UNCONDITIONALLY (not gated on `mcp`, unlike the block below) so
+  // the provider refuses the read/write itself instead of asking and waiting
+  // forever. This tightens the §13 isolation threat model (CLAUDE.md rule
+  // 4); the client's own reject-on-ask handling (opencode-client.ts's
+  // "permission.asked" case) is defense in depth for whatever this config
+  // does not cover, never the primary control.
+  const config: {
+    mcp?: OpenCodeMcpConfig;
+    permission: { external_directory: "deny" };
+  } =
     mcp === undefined || mcpConfigIsEmpty(mcp)
-      ? { ...env }
-      : { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp }) };
+      ? { permission: { external_directory: "deny" } }
+      : { mcp, permission: { external_directory: "deny" } };
+  const childEnv: Record<string, string> = {
+    ...env,
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+  };
 
   const proc = spawnFn(openCodeServerArgv(verifiedBinaryPath, hostname), {
     // EXACTLY the projected environment. Never `...process.env`.

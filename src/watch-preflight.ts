@@ -511,22 +511,78 @@ export function parsePrFiles(raw: string): NumstatFile[] {
 // back out is how one machine's watcher learns another machine already paid
 // for this head.
 
+// The exact-token contract (rereview-coverage fix): a marker's
+// first line is either the plain complete form, or the plain form plus the
+// space-separated `coverage=partial` token — and NOTHING else. An
+// abbreviated or garbage trailing token (`coverage=partiallyDone`,
+// `coverage=PARTIAL`, a stray space) fails the WHOLE match rather than being
+// coerced into either bucket, mirroring how a malformed sha already failed
+// the whole marker before this fix (never a partial match). This single
+// regex backs both readers below so their heads can never drift apart.
+//
+// WHY this is also the correct behavior for an OLDER pr-hero deployed
+// elsewhere, unaware of the coverage token: its own copy of this regex has
+// no optional group, so it fails to match a partial marker's first line
+// entirely and reads it as the legacy headless marker — no head declared,
+// covers none, PR stays eligible. That is the fail-safe direction (more
+// review, never a truncated one), and it is what motivates fail-closed
+// (not fail-complete) as THIS reader's answer for a garbage token too.
+const MARKER_HEAD_RE =
+  /^<!-- pr-hero-report head=([0-9a-f]{40})( coverage=partial)? -->/;
+
 // NEVER throws: comment bodies are foreign text (bots, humans, pasted
 // reports), and a guard that crashes on someone else's comment takes the
 // whole watcher down with it. An old-format marker (`<!-- pr-hero-report -->`,
 // no head=) returns null — it declares NO head, so it covers none and the
 // PR stays eligible; a malformed or abbreviated head reads the same way.
+//
+// Every existing consumer (markerDeclaredHeads below; cli.ts's CI-admission
+// authority check and its previousHeadSha reconcile read) needs the head
+// unchanged regardless of whether the run that posted it completed — none of
+// them care about completeness, only identity — so this stays a thin
+// projection of parsePrCommentMarker rather than a second regex to keep in
+// sync.
 export function parseMarkerHead(body: string): string | null {
+  return parsePrCommentMarker(body)?.head ?? null;
+}
+
+export interface PrCommentMarkerFields {
+  head: string;
+  complete: boolean;
+}
+
+// The coverage-aware reader (rereview-coverage fix): cli.ts's
+// re-review discovery seam needs to know not just WHICH head a posted
+// summary comment covers, but whether that run actually finished — a
+// PARTIAL run's own L must never be trusted the same way a COMPLETE run's
+// is (see resolveLastReviewedHead's `lastComplete` in rereview-plan.ts).
+export function parsePrCommentMarker(
+  body: string,
+): PrCommentMarkerFields | null {
   if (typeof body !== "string") return null;
   if (!body.startsWith(PR_COMMENT_MARKER_PREFIX)) return null;
   const newlineAt = body.indexOf("\n");
   const firstLine = newlineAt === -1 ? body : body.slice(0, newlineAt);
-  const match = /^<!-- pr-hero-report head=([0-9a-f]{40}) -->/.exec(firstLine);
-  return match === null ? null : (match[1] ?? null);
+  const match = MARKER_HEAD_RE.exec(firstLine);
+  if (match === null) return null;
+  const head = match[1];
+  if (head === undefined) return null;
+  return { head, complete: match[2] === undefined };
 }
 
 // Every head any pr-hero-marked comment on the PR declares. Duplicates are
 // harmless (the guard only asks "is this head among them").
+//
+// Rereview-coverage fix (explicitly unchanged): a PARTIAL marker's
+// head still counts as "declared" here — parseMarkerHead returns the head
+// for both wire forms, and this function does not distinguish them. There is
+// deliberately NO automatic relaunch loop for a PR whose review keeps timing
+// out: the watcher's one-review-per-PR eligibility stays exactly as it was.
+// Recovery is an explicit `pr-hero review --pr N`, a CI re-run of the same
+// commit (CI admission does not treat a partial same-head review as done,
+// see evaluateCiReviewAdmission), or a new push; each forces a full
+// re-review via `lastComplete` (rereview-plan.ts). Never the watcher noticing
+// coverage=partial and retrying on its own.
 export function markerDeclaredHeads(comments: { body: string }[]): string[] {
   const heads: string[] = [];
   for (const comment of comments) {

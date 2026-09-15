@@ -567,6 +567,61 @@ describe("every gotchas gate asks the shared predicate", () => {
   });
 });
 
+// Rereview-coverage fix (GitHub #42's re-review half, MusiveTech/musive
+// #1823): reviewPr() is the SAME unexported I/O shell as the gotchas gate
+// above, so "hunters are non-empty for a forced-full case B re-review" can't
+// be proven end-to-end offline either. What CAN be pinned, same precedent —
+// source-shape, not execution — is the wiring the fix depends on: that
+// `activeHunters` still derives from `skipDiscovery` alone (never a
+// case === "B" special-case that would defeat the fix), and that both
+// `prepareDiscovery` and `buildPhaseBQueue` are actually handed the values
+// this fix computes rather than a hardcoded default. The pure half of this
+// —`skipDiscovery: false` / `verifyAll: true` for a forced-full case B — is
+// exhaustively covered in test/rereview-prepare.test.ts and
+// test/rereview-plan.test.ts; this only guards that cli.ts still WIRES those
+// results through.
+describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () => {
+  test("activeHunters is still gated on skipDiscovery alone, not a hardcoded case check", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain(
+      "const activeHunters = skipDiscovery\n      ? []\n      : spec.agents.filter(",
+    );
+    // The one thing that must NEVER reappear: a discovery gate that special-
+    // cases case B directly would silently reintroduce the exact defect this
+    // fix closes, bypassing `plan.skipDiscovery`/`lastComplete` entirely.
+    expect(source).not.toContain('prepared.case === "B"');
+  });
+
+  test("prepareDiscovery is handed a computed summaryComplete, not a bare literal", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain("const summaryComplete = summaryMarker?.complete");
+    expect(source).toContain("summaryComplete,\n      findingMarkers:");
+  });
+
+  test("buildPhaseBQueue receives plan.verifyAll — the wiring gap this fix closes", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain("verifyAll: prepared.plan.verifyAll,");
+  });
+
+  test("CI admission is handed the summary marker's completeness", async () => {
+    const source = await Bun.file(
+      path.resolve(import.meta.dir, "../src/cli.ts"),
+    ).text();
+    expect(source).toContain(
+      "summaryBody === null ? null : parsePrCommentMarker(summaryBody);",
+    );
+    expect(source).toContain(
+      "summaryHead,\n      summaryComplete,\n      markerSeen,",
+    );
+  });
+});
+
 // Same precedent as the gotchas-gate scan above: `review()` and `reviewPr()`
 // are unexported I/O shells, so nothing offline reaches them directly. What
 // has to be pinned here is that BOTH shells actually thread the rules a

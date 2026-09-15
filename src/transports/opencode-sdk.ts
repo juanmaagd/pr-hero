@@ -7,6 +7,7 @@ import type {
   ProviderEventBase,
   ProviderTerminalProof,
   ProviderTransport,
+  ResolvedModelRoute,
   TransportFailureCause,
   TransportOutcome,
   TransportRequest,
@@ -85,6 +86,11 @@ const DEFAULT_POLL_ROUND_MS = 2000;
 // louder and more actionable end than a watchdog timeout over a won terminal.
 const DEFAULT_MAX_DRAIN_CYCLES = 4;
 
+// Useful progress is a monotonic deadline, independent of poll latency. The
+// optional round cap remains a deterministic test/backward-compatibility seam;
+// production does not use rounds as a substitute for elapsed time.
+const DEFAULT_USEFUL_PROGRESS_MS = 150_000;
+
 export interface OpenCodeClientSession {
   readonly id: string;
   // The tool allow map the client actually sent, resolved against the
@@ -96,6 +102,8 @@ export interface OpenCodeClientSession {
 }
 
 export interface OpenCodeCreateSessionInput {
+  readonly correlation?: { sessionId: string; attempt: number };
+  readonly signal?: AbortSignal;
   readonly cwd: string;
   readonly userPrompt: string;
   readonly systemPromptPath: string;
@@ -107,11 +115,13 @@ export type OpenCodeClientEvent =
   | { readonly kind: "delta"; readonly text: string }
   | {
       readonly kind: "usage";
+      readonly id?: string;
       readonly mode: "snapshot" | "delta";
       readonly final?: boolean;
       readonly inputTokens?: number;
       readonly outputTokens?: number;
       readonly costUsd?: number;
+      readonly incomplete?: boolean;
     }
   | {
       readonly kind: "diagnostic";
@@ -127,17 +137,53 @@ export type OpenCodeClientEvent =
   // survives the boundary is the bare fact that the model thought, which is
   // all the transport needs to tell a turn that reasoned and never answered
   // apart from one that produced nothing at all.
-  | { readonly kind: "reasoning" }
-  // #214: a COMPLETED tool-call part. Pending/running/error restatements are
-  // dropped at the mapper — announcing Read is not looking. `tool` is the
-  // provider id (`read`, `grep`, …), never arguments or output: those are
-  // model-adjacent and must not reach `notes`.
+  | { readonly kind: "reasoning"; readonly progress?: boolean }
+  // A tool part's status actually CHANGED (a novel pending/running/
+  // completed/error transition the client observed at most once — see
+  // opencode-client.ts's `handlePartUpdated`). Deliberately carries no
+  // payload, same reasoning as the bare "reasoning" marker above: the tool's
+  // input/output is not the answer and must not spend any content budget.
+  // Distinct from "reasoning" on purpose — the SDK uses reasoning events for
+  // its own "reasoning parts were received and discarded" diagnostics, and
+  // conflating tool execution into that would corrupt them.
+  | { readonly kind: "activity" }
+  // #214 (merged with #228's toolActivityRank): a COMPLETED tool-call part,
+  // emitted alongside "activity" at most once per callID — see
+  // opencode-client.ts's `handlePartUpdated`, which gates this on the SAME
+  // stream-owned `toolActivityRank` forward-rank check "activity" uses, never
+  // on `toolStates` (which the poll readback also writes and can race ahead
+  // of the stream). Pending/running/error restatements are dropped —
+  // announcing Read is not looking, and an errored call is excluded on
+  // purpose: it produced no signal to reason from, and no test has asked for
+  // it to count. `tool` is the provider id (`read`, `grep`, …), never
+  // arguments or output: those are model-adjacent and must not reach `notes`.
   | { readonly kind: "tool"; readonly tool?: string }
+  // #157: our own session's status named an account/usage limit (a `retry`
+  // status whose `action.reason` is one opencode-client.ts's
+  // providerLimitFromStatus recognises). Carries the provider's reason and
+  // message VERBATIM — nothing is summarized or reworded — because the
+  // classification witness has to be the provider's own fact, not this
+  // transport's paraphrase of it.
+  | {
+      readonly kind: "provider_limit";
+      readonly reason: string;
+      readonly message: string;
+    }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
   | { readonly kind: "pending" }
-  | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof }
+  | {
+      readonly kind: "terminal";
+      readonly proof: ProviderTerminalProof;
+      readonly finalText?: string;
+      readonly usage?: {
+        readonly inputTokens?: number;
+        readonly outputTokens?: number;
+        readonly costUsd?: number;
+      };
+      readonly usageIncomplete?: boolean;
+    }
   // The session itself failed, so no turn will ever produce a terminal. It is
   // NOT a terminal — the transport issues no proof of its own — and it is not
   // a failed observation either: it is a successful observation of a fact that
@@ -150,13 +196,20 @@ export type OpenCodePollResult =
 // arbitration) and §290 (abort without provider confirmation) require. No
 // assumption about the real SDK's API is encoded here.
 export interface OpenCodeClientLike {
+  takeEvidence?(
+    sessionId: string,
+    attempt: number,
+  ): import("../execution/contracts").DiagnosticEvidence | undefined;
   createSession(
     input: OpenCodeCreateSessionInput,
   ): Promise<OpenCodeClientSession>;
   streamEvents(
     session: OpenCodeClientSession,
   ): AsyncIterable<OpenCodeClientEvent>;
-  pollStatus(session: OpenCodeClientSession): Promise<OpenCodePollResult>;
+  pollStatus(
+    session: OpenCodeClientSession,
+    signal?: AbortSignal,
+  ): Promise<OpenCodePollResult>;
   abort(session: OpenCodeClientSession): Promise<void>;
   close?(): Promise<void>;
 }
@@ -164,10 +217,12 @@ export interface OpenCodeClientLike {
 // Injectable clock so conformance tests fire every deadline by hand and never
 // sleep a real one (§13 line 746).
 export interface OpenCodeTransportClock {
+  nowMs?(): number;
   schedule(ms: number, fn: () => void): () => void;
 }
 
 const systemClock: OpenCodeTransportClock = {
+  nowMs: () => performance.now(),
   schedule(ms, fn) {
     const timer = setTimeout(fn, ms);
     return () => clearTimeout(timer);
@@ -184,6 +239,10 @@ export interface OpenCodeSdkTransportOptions {
   readonly pollIntervalMs?: number;
   readonly pollRoundMs?: number;
   readonly maxDrainCycles?: number;
+  // Optional legacy test tripwire; production uses usefulProgressMs.
+  readonly maxQuietRounds?: number;
+  readonly usefulProgressMs?: number;
+  readonly setupDeadlineMs?: number;
   readonly clock?: OpenCodeTransportClock;
   readonly nowIso?: () => string;
   // 2026-09-02: how the ROUTE this transport serves bills, stamped onto every
@@ -209,6 +268,11 @@ export interface OpenCodeSdkTransportOptions {
   // registry branch still passes a route without a kind, but no composition in
   // src/ reaches it: both harness constructions supply an explicit transport.
   readonly billingMode?: UsageBillingMode;
+  readonly admissionIdentity?: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly defaultRoute?: ResolvedModelRoute;
 }
 
 const MARKER_ABORT_UNCONFIRMED =
@@ -254,6 +318,61 @@ const MARKER_UNDELIVERED_CONTENT =
 // channel delivered no content. See classifyFailure.
 const MARKER_REASONING_ONLY =
   "[pr-hero] opencode sdk: the turn completed with reasoning parts only and no answer text part";
+// Martian `opencode` arm, 2026-09-10: the provider-silence tripwire below.
+// Maps to `protocol_truncation` beside the undelivered-content marker: the
+// channel went quiet mid-delivery (or before any delivery), and a FRESH
+// attempt on the transient budget is the only remedy that can work.
+//
+// Deliberately digit-free per #126 (shares the witness with provider text).
+const MARKER_SILENCE =
+  "[pr-hero] opencode sdk: the provider stream delivered no content event for the whole quiet-round budget; the answer is incomplete";
+// #157: pr-157-8df2fca3-4's complete capture — OpenCode reported an
+// account_rate_limit retry status (`5 hour usage limit reached...`) for our
+// own session ~3.8s into the attempt, kept retrying internally, and never
+// delivered another reasoning/text/usage event. The attempt sat quiet for
+// the whole usefulProgressMs budget before the silence tripwire settled it
+// $0/transient — the user saw "silence", never the account limit the
+// provider had already named. A spent quota cannot be outrun by a fresh
+// attempt, unlike silence or a transient stall, so this is fail-fast.
+//
+// Digit-free per #126 (the marker shares its witness with the provider's own
+// text, appended verbatim by formatProviderLimitDetail below): a prefix that
+// read like a rate limit or a socket error would let classifyFailure's
+// generic patterns decide the cause instead of this fact.
+const MARKER_PROVIDER_LIMIT =
+  "[pr-hero] opencode sdk: provider usage limit reached";
+
+// Shared by both observers of this fact — opencode-client.ts's stream
+// mapping (a `provider_limit` OpenCodeClientEvent) and its status poll (a
+// `{kind:"failed"}` OpenCodePollResult) — so the exact classification witness
+// is defined once rather than duplicated as a literal in two files.
+export function formatProviderLimitDetail(
+  reason: string,
+  message: string,
+): string {
+  return `${MARKER_PROVIDER_LIMIT} (${reason}): ${message}`;
+}
+
+// #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+// reviewed worktree tripped `permission.asked` for `external_directory`
+// twice in one run, and pr-hero never answered OpenCode's permission prompt
+// — the tool call sat blocked until the silence tripwire killed the attempt
+// 150s later at $0. opencode-client.ts rejects any own-session permission
+// prompt as defense in depth beside the server-side `deny` config
+// (opencode-server.ts); THIS marker fires only when that reject itself could
+// not be delivered — the one case the config cannot cover, since it needs a
+// working SDK call to answer the prompt at all. No retry can fix a control
+// that failed to execute, so this is terminal, not `protocol_truncation`.
+const MARKER_PERMISSION_REJECT_FAILED =
+  "[pr-hero] opencode sdk: failed to reject an OpenCode permission request";
+
+export function formatPermissionRejectFailureDetail(
+  permission: string,
+  patterns: readonly string[],
+  errorMessage: string,
+): string {
+  return `${MARKER_PERMISSION_REJECT_FAILED} (${permission} ${JSON.stringify(patterns)}): ${errorMessage}`;
+}
 
 type SettleReason =
   // #132: `drained` records whether the stream had gone QUIET when the
@@ -265,6 +384,7 @@ type SettleReason =
   | { readonly kind: "usage_flip"; readonly detail: string }
   | { readonly kind: "bound"; readonly target: "delta" | "aggregate" }
   | { readonly kind: "stall" }
+  | { readonly kind: "silence" }
   | { readonly kind: "stream_error"; readonly detail: string }
   | { readonly kind: "session_failed"; readonly detail: string }
   | { readonly kind: "abort_confirmed" }
@@ -326,6 +446,35 @@ function noSessionUsage(
   };
 }
 
+// A prompt refusal that arrived before any provider event: the failure
+// detail IS the refusal (session.prompt rejected at call time —
+// opencode-client.ts: a refused prompt creates no message and therefore no
+// events), and not a single delta, reasoning part, tool invocation, or usage
+// event was ever observed. The model provably never started, so the
+// noSessionUsage assertion holds exactly as it does for session-creation
+// failure. Anything else — a refusal after partial delivery, a non-refusal
+// stream death, a poll-observed failure with no refusal text — keeps the
+// fail-closed "unavailable".
+function promptRefusedBeforeStart(
+  reason: SettleReason,
+  finalPartsLength: number,
+  sawReasoning: boolean,
+  sawContentEvent: boolean,
+): boolean {
+  if (reason.kind !== "stream_error" && reason.kind !== "session_failed") {
+    return false;
+  }
+  if (!reason.detail.includes(MARKER_PROMPT_REFUSED)) {
+    return false;
+  }
+  if (finalPartsLength !== 0 || sawReasoning || sawContentEvent) {
+    return false;
+  }
+  // A dispatched request may fail after provider work began. Text (including
+  // incidental HTTP-looking numbers) is not authoritative nonexecution proof.
+  return false;
+}
+
 // Matching means the poll observes the SAME terminal identity the slot already
 // holds: identical eventId AND providerStatus. Anything else is a conflicting
 // terminal, which §197 says makes the outcome malformed rather than being
@@ -348,6 +497,12 @@ function isValidProof(proof: ProviderTerminalProof): boolean {
 
 export class OpenCodeSdkTransport implements ProviderTransport {
   readonly backend = "opencode" as const;
+  readonly admissionIdentity: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly cancellationSemantics = "provider-proof" as const;
+  readonly defaultRoute?: ResolvedModelRoute;
   private readonly client: OpenCodeClientLike;
   private readonly stallDeadlineMs: number;
   private readonly abortConfirmMs: number;
@@ -357,6 +512,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   private readonly pollIntervalMs: number;
   private readonly pollRoundMs: number;
   private readonly maxDrainCycles: number;
+  private readonly maxQuietRounds: number;
+  private readonly usefulProgressMs: number;
+  private readonly setupDeadlineMs: number;
   private readonly clock: OpenCodeTransportClock;
   private readonly nowIso: () => string;
   // Public and readonly on purpose. #149's forwarding "guarantee" shipped
@@ -370,6 +528,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
   }
 
   constructor(options: OpenCodeSdkTransportOptions) {
+    this.admissionIdentity = options.admissionIdentity ?? {
+      executable: "opencode",
+      provider: "opencode",
+    };
+    this.cancellationSemantics = "provider-proof";
+    this.defaultRoute = options.defaultRoute;
     this.client = options.client;
     this.stallDeadlineMs = options.stallDeadlineMs ?? DEFAULT_STALL_DEADLINE_MS;
     this.abortConfirmMs = options.abortConfirmMs ?? SDK_ABORT_CONFIRM_MS;
@@ -379,7 +543,11 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
     this.pollRoundMs = options.pollRoundMs ?? DEFAULT_POLL_ROUND_MS;
     this.maxDrainCycles = options.maxDrainCycles ?? DEFAULT_MAX_DRAIN_CYCLES;
+    this.maxQuietRounds = options.maxQuietRounds ?? Number.POSITIVE_INFINITY;
     this.clock = options.clock ?? systemClock;
+    this.usefulProgressMs =
+      options.usefulProgressMs ?? DEFAULT_USEFUL_PROGRESS_MS;
+    this.setupDeadlineMs = options.setupDeadlineMs ?? 10_000;
     this.nowIso = options.nowIso ?? (() => new Date().toISOString());
     this.usageBillingMode = options.billingMode ?? "subscription";
   }
@@ -505,6 +673,22 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     request: TransportRequest,
     context: { readonly signal: AbortSignal; readonly events: AsyncEventSink },
   ): Promise<TransportOutcome> {
+    const outcome = await this.executeAttempt(request, context);
+    try {
+      const diagnosticEvidence = this.client.takeEvidence?.(
+        request.sessionId,
+        request.attempt,
+      );
+      return diagnosticEvidence ? { ...outcome, diagnosticEvidence } : outcome;
+    } catch {
+      return outcome;
+    }
+  }
+
+  private async executeAttempt(
+    request: TransportRequest,
+    context: { readonly signal: AbortSignal; readonly events: AsyncEventSink },
+  ): Promise<TransportOutcome> {
     // `notes` becomes stderrTail, which is the classification WITNESS: the
     // markers this transport stamps, plus the provider's own words verbatim.
     // Nothing else belongs in it.
@@ -599,13 +783,46 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       });
     };
 
+    // ---- provider-silence tripwire (Martian `opencode` arm, 2026-09-10) ----
+    // Counts consecutive poll rounds with no content event; heartbeats do not
+    // reset — a keepalive-only session is the hung shape. Tripping settles
+    // `silence` (fresh transient attempt), capping a hung provider well under
+    // the 30-min harness watchdog. A timed-out round counts: an unobservable
+    // server beside a silent stream is the same hung shape, and the remedy
+    // (bounded retry) is the same.
+    let quietRounds = 0;
+    let contentSinceRound = false;
+    const nowMs = () => this.clock.nowMs?.() ?? performance.now();
+    let lastUsefulProgressWall = nowMs();
+    const noteContentEvent = (): void => {
+      contentSinceRound = true;
+      lastUsefulProgressWall = nowMs();
+    };
+
     // ---- §197 terminal compare-and-set slot -------------------------------
     let slotProof: ProviderTerminalProof | undefined;
     let pollConfirmations = 0;
     let invalidProofs = 0;
+    let terminalFinalText: string | undefined;
+    let terminalUsage:
+      | {
+          inputTokens?: number;
+          outputTokens?: number;
+          costUsd?: number;
+        }
+      | undefined;
+    let terminalUsageIncomplete = false;
+
     const onProviderTerminalCandidate = (
       proof: ProviderTerminalProof,
       source: "stream" | "poll",
+      finalText?: string,
+      usage?: {
+        inputTokens?: number;
+        outputTokens?: number;
+        costUsd?: number;
+      },
+      incompleteUsage?: boolean,
     ): void => {
       if (settled) return;
       if (!isValidProof(proof)) {
@@ -614,6 +831,15 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           `[pr-hero] opencode sdk: ignored invalid ${source} terminal proof (missing identity fields); it could not win the slot`,
         );
         return;
+      }
+      if (finalText !== undefined) {
+        terminalFinalText = finalText;
+      }
+      if (usage !== undefined) {
+        terminalUsage = usage;
+      }
+      if (incompleteUsage === true) {
+        terminalUsageIncomplete = true;
       }
       if (slotProof === undefined) {
         slotProof = proof;
@@ -660,9 +886,46 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     };
 
     // ---- session -----------------------------------------------------------
+    if (context.signal.aborted) {
+      return {
+        completion: "cancelled",
+        protocolIntegrity: "unverified",
+        finalText: "",
+        usage: noSessionUsage(Date.now() - startedWall, this.usageBillingMode),
+        stderrTail: "[pr-hero] opencode sdk: cancelled before session creation",
+      };
+    }
+
     let session: OpenCodeClientSession;
+    let removeAbort: (() => void) | undefined;
+    let cancelSetup: (() => void) | undefined;
+    let setupTimedOut = false;
+    const operation = new AbortController();
+    const cancelOperation = () => operation.abort();
+    context.signal.addEventListener("abort", cancelOperation, { once: true });
+    let createPromise: Promise<OpenCodeClientSession> | undefined;
     try {
-      session = await this.client.createSession({
+      const abortPromise = new Promise<never>((_, reject) => {
+        const onAbort = () => {
+          reject(new DOMException("The operation was aborted", "AbortError"));
+        };
+        context.signal.addEventListener("abort", onAbort, { once: true });
+        removeAbort = () => {
+          context.signal.removeEventListener("abort", onAbort);
+        };
+      });
+
+      const setupTimeoutPromise = new Promise<never>((_, reject) => {
+        cancelSetup = this.clock.schedule(this.setupDeadlineMs, () => {
+          setupTimedOut = true;
+          operation.abort();
+          reject(new Error("opencode sdk: session creation deadline exceeded"));
+        });
+      });
+
+      createPromise = this.client.createSession({
+        correlation: { sessionId: request.sessionId, attempt: request.attempt },
+        signal: operation.signal,
         cwd: request.cwd,
         userPrompt: request.userPrompt,
         systemPromptPath: request.systemPromptPath,
@@ -671,16 +934,53 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           ? { mcpConfigPath: request.mcpConfigPath }
           : {}),
       });
+
+      session = await Promise.race([
+        createPromise,
+        abortPromise,
+        setupTimeoutPromise,
+      ]);
     } catch (error) {
+      operation.abort();
+      context.signal.removeEventListener("abort", cancelOperation);
+      if (createPromise !== undefined) {
+        void createPromise
+          .then((s) => void this.client.abort(s))
+          .catch(() => {});
+      }
+      if (
+        context.signal.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        return {
+          completion: "cancelled",
+          protocolIntegrity: "unverified",
+          finalText: "",
+          usage: normalizeUnavailableUsage({
+            wallMs: Date.now() - startedWall,
+            billingMode: this.usageBillingMode,
+          }),
+          stderrTail:
+            "[pr-hero] opencode sdk: cancelled during session creation",
+        };
+      }
       // Redaction of any provider text happens harness-side before persistence;
       // here the message is only classification witness (§6.3).
       return {
         completion: "failed",
         protocolIntegrity: "unverified",
         finalText: "",
-        usage: noSessionUsage(Date.now() - startedWall, this.usageBillingMode),
+        usage: setupTimedOut
+          ? normalizeUnavailableUsage({
+              wallMs: Date.now() - startedWall,
+              billingMode: this.usageBillingMode,
+            })
+          : noSessionUsage(Date.now() - startedWall, this.usageBillingMode),
         stderrTail: `[pr-hero] opencode sdk: session creation failed: ${errorMessage(error)}`,
       };
+    } finally {
+      removeAbort?.();
+      cancelSetup?.();
     }
 
     // ONE line per attempt (#122), so the tools/MCP axis is provable by
@@ -713,8 +1013,13 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // `aggregateBytes` either — reasoning is not the answer, so it must not
     // consume the answer's §4.2 content budget.
     let sawReasoning = false;
+    // #214: always stamped, including 0 — see the "tool" case below and the
+    // outcome construction further down.
     let toolInvocations = 0;
     const completedToolIds: string[] = [];
+    let sawContentEvent = false;
+    const seenUsageIds = new Set<string>();
+    let usageIncomplete = false;
     // §4.1/§8: the first usage event fixes the attempt's aggregation mode;
     // `applyUsageUpdate` is the pure snapshot-replaces/delta-accumulates state
     // machine, shared with every other transport that folds a usage stream.
@@ -728,12 +1033,18 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // Single-delivery guarantee for abort(): gated by abortSequenceStarted,
     // which both the signal path and the local-termination path consult.
     const callAbortOnce = async (): Promise<void> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        await this.client.abort(session);
+        const timeoutPromise = new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, this.cleanupMs);
+        });
+        await Promise.race([this.client.abort(session), timeoutPromise]);
       } catch (error) {
         notes.push(
           `[pr-hero] opencode sdk: abort call failed: ${errorMessage(error)}`,
         );
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
       }
     };
 
@@ -745,6 +1056,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       abortSequenceStarted = true;
       notes.push("[pr-hero] opencode sdk: abort requested");
       void callAbortOnce();
+      if (slotProof !== undefined) {
+        settle({ kind: "abort_confirmed" });
+        return;
+      }
       scheduleTracked(this.abortConfirmMs, () =>
         settle({ kind: "abort_unconfirmed" }),
       );
@@ -783,6 +1098,8 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       // Attached ONCE: a per-iteration `done.then(...)` would pile a handler
       // onto `done` for every event a long stream delivers.
       const settledSignal = done.then(() => STREAM_SETTLED);
+      let lastKnownTokens = 0;
+      let lastKnownCost = 0;
       try {
         for (;;) {
           const step = await Promise.race([iterator.next(), settledSignal]);
@@ -790,6 +1107,32 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           if (step.done === true) break;
           const event = step.value;
           if (settled) return;
+          // Provider-silence tripwire accounting: advance progress only on novel
+          // delta text or strictly advanced usage tokens/cost. Heartbeats and
+          // duplicate identical usage are keepalives, not signs of real delivery.
+          let advancedProgress = false;
+          if (event.kind === "delta") {
+            if (event.text.length > 0) {
+              advancedProgress = true;
+            }
+          } else if (event.kind === "reasoning" && event.progress === true) {
+            advancedProgress = true;
+          } else if (event.kind === "activity") {
+            advancedProgress = true;
+          } else if (event.kind === "usage") {
+            const totalTokens =
+              (event.inputTokens ?? 0) + (event.outputTokens ?? 0);
+            const cost = event.costUsd ?? 0;
+            if (totalTokens > lastKnownTokens || cost > lastKnownCost) {
+              advancedProgress = true;
+              if (totalTokens > lastKnownTokens) lastKnownTokens = totalTokens;
+              if (cost > lastKnownCost) lastKnownCost = cost;
+            }
+          }
+          if (advancedProgress) {
+            noteContentEvent();
+            sawContentEvent = true;
+          }
           switch (event.kind) {
             case "delta": {
               // #132: set BEFORE the push, not after it. The window must count
@@ -822,11 +1165,23 @@ export class OpenCodeSdkTransport implements ProviderTransport {
                 sinkClosed = true;
                 closedDataPlaneEvents += 1;
               }
+              if (settled) return;
               finalParts.push(event.text);
               aggregateBytes += bytes;
               break;
             }
             case "usage": {
+              if (event.incomplete) {
+                usageIncomplete = true;
+              }
+              if (event.id !== undefined) {
+                if (seenUsageIds.has(event.id)) {
+                  if (event.mode === "delta") {
+                    break;
+                  }
+                }
+                seenUsageIds.add(event.id);
+              }
               // §4.2 line 195: the first usage event fixes the attempt's
               // aggregation mode; a later flip throws rather than silently
               // mixing snapshot and delta semantics.
@@ -880,6 +1235,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
                 sinkClosed = true;
                 closedDataPlaneEvents += 1;
               }
+              if (settled) return;
               break;
             }
             case "diagnostic": {
@@ -897,6 +1253,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
                 sinkClosed = true;
                 closedDataPlaneEvents += 1;
               }
+              if (settled) return;
               break;
             }
             case "reasoning": {
@@ -908,12 +1265,19 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               break;
             }
             case "tool": {
-              // Completed invocations only — the mapper dropped pending/error.
-              // Never a witness: tool ids ride diagnosticsTail with the count.
+              // Completed invocations only — the mapper dropped pending/error
+              // and already dedupes by callID. Never a witness: tool ids ride
+              // diagnosticsTail with the count, never `notes`.
               toolInvocations += 1;
               if (event.tool !== undefined && event.tool.length > 0) {
                 completedToolIds.push(event.tool);
               }
+              break;
+            }
+            case "activity": {
+              // Same shape as "reasoning" above: nothing to forward, nothing
+              // to bound. The useful-progress credit was already taken above,
+              // before this switch — there is nothing left to do here.
               break;
             }
             case "heartbeat": {
@@ -929,12 +1293,27 @@ export class OpenCodeSdkTransport implements ProviderTransport {
                 sinkClosed = true;
                 closedDataPlaneEvents += 1;
               }
+              if (settled) return;
               break;
             }
             case "terminal": {
               onProviderTerminalCandidate(event.proof, "stream");
               if (settled) return;
               break;
+            }
+            case "provider_limit": {
+              // #157: fail fast — no fresh attempt can outrun a spent quota,
+              // unlike an ordinary stall or silence. Reuses `stream_error`
+              // rather than a new SettleReason: the abort-trigger set and the
+              // completion/protocolIntegrity mapping already give this exact
+              // shape (failed, unverified, best-effort abort), and the
+              // classification-critical text just needs to survive inside
+              // `detail` for classifyFailure's substring match below.
+              settle({
+                kind: "stream_error",
+                detail: formatProviderLimitDetail(event.reason, event.message),
+              });
+              return;
             }
           }
           if (settled) return;
@@ -951,10 +1330,16 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     };
 
     // ---- poll watcher ------------------------------------------------------
+    let inFlightPoll: Promise<OpenCodePollResult | "round_timeout"> | undefined;
     const pollScriptRound = async (): Promise<
       OpenCodePollResult | "round_timeout"
     > => {
       let cancelRound: (() => void) | undefined;
+      const roundController = new AbortController();
+      const abortRound = () => roundController.abort();
+      context.signal.addEventListener("abort", abortRound, { once: true });
+      // After cancellation, fresh bounded polls may still confirm cessation.
+      // Only the request in flight when cancellation arrives is interrupted.
       try {
         const timedOut = new Promise<"round_timeout">((resolve) => {
           cancelRound = this.clock.schedule(this.pollRoundMs, () =>
@@ -962,12 +1347,25 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           );
         });
         // A poll that throws is a failed observation, not a terminal.
-        const round = this.client
-          .pollStatus(session)
-          .catch(() => "round_timeout" as const);
-        return await Promise.race([round, timedOut]);
+        // A client ignoring AbortSignal must not accumulate requests. Keep its
+        // promise occupying the slot until it actually settles.
+        if (inFlightPoll === undefined) {
+          inFlightPoll = this.client
+            .pollStatus(session, roundController.signal)
+            .catch(() => "round_timeout" as const)
+            .finally(() => {
+              inFlightPoll = undefined;
+            });
+        }
+        return await Promise.race([
+          inFlightPoll,
+          timedOut,
+          done.then(() => "round_timeout" as const),
+        ]);
       } finally {
         cancelRound?.();
+        roundController.abort();
+        context.signal.removeEventListener("abort", abortRound);
       }
     };
     // Observe FIRST, delay BETWEEN rounds — never before the first one. The
@@ -1008,20 +1406,61 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           settle({ kind: "session_failed", detail: result.detail });
           return;
         } else if (result.kind === "terminal") {
-          onProviderTerminalCandidate(result.proof, "poll");
+          onProviderTerminalCandidate(
+            result.proof,
+            "poll",
+            result.finalText,
+            result.usage,
+            result.usageIncomplete,
+          );
           if (settled) return;
+        }
+        if (settled) return;
+        // Provider-silence tripwire accounting, closed here: one completed
+        // round with no content event since the last one. A timed-out round
+        // counts — §197 already says it proves nothing either way, and beside
+        // a silent stream it is the same hung shape.
+        if (contentSinceRound) {
+          quietRounds = 0;
+          contentSinceRound = false;
+        } else {
+          quietRounds += 1;
+          const elapsedQuietMs = nowMs() - lastUsefulProgressWall;
+          if (
+            quietRounds >= this.maxQuietRounds ||
+            elapsedQuietMs >= this.usefulProgressMs
+          ) {
+            settle({ kind: "silence" });
+            return;
+          }
         }
         if (settled) return;
         await delay(this.pollIntervalMs);
       }
     };
 
+    // Re-arm against an absolute monotonic deadline, not a count of polls.
+    const checkUsefulDeadline = (): void => {
+      if (settled || slotProof !== undefined || abortSequenceStarted) return;
+      const remaining =
+        this.usefulProgressMs - (nowMs() - lastUsefulProgressWall);
+      if (remaining <= 0) settle({ kind: "silence" });
+      else scheduleTracked(remaining, checkUsefulDeadline);
+    };
+    lastUsefulProgressWall = nowMs();
+    // Legacy timeless conformance clocks cannot drive elapsed-time alarms;
+    // production and advancing-clock tests always supply monotonic nowMs.
+    if (this.clock.nowMs !== undefined) {
+      scheduleTracked(this.usefulProgressMs, checkUsefulDeadline);
+    }
     const streamWatcher = runStream();
     const pollWatcher = runPoll();
 
     let outcome: TransportOutcome;
     try {
       const reason = await done;
+      operation.abort();
+      context.signal.removeEventListener("abort", cancelOperation);
       for (const cancel of [...cancellers]) cancel();
       cancellers.clear();
       context.signal.removeEventListener("abort", onAbortSignal);
@@ -1032,6 +1471,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       if (
         (reason.kind === "bound" ||
           reason.kind === "stall" ||
+          reason.kind === "silence" ||
           reason.kind === "stream_error" ||
           reason.kind === "session_failed" ||
           reason.kind === "usage_flip") &&
@@ -1065,9 +1505,17 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           `[pr-hero] opencode sdk: poll observed a session failure: ${reason.detail}`,
         );
       }
+      if (reason.kind === "silence") notes.push(MARKER_SILENCE);
       if (reason.kind === "abort_unconfirmed")
         notes.push(MARKER_ABORT_UNCONFIRMED);
-      if (reason.kind === "abort_confirmed") {
+      if (
+        reason.kind === "abort_confirmed" ||
+        (abortSequenceStarted &&
+          slotProof !== undefined &&
+          !notes.includes(
+            "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
+          ))
+      ) {
         notes.push(
           "[pr-hero] opencode sdk: provider terminal proof confirmed the abort inside the confirmation window",
         );
@@ -1172,7 +1620,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           }
           protocolIntegrity = "verified";
           const status = (slotProof?.providerStatus ?? "").toLowerCase();
-          if (status === "completed") {
+          if (abortSequenceStarted || context.signal.aborted) {
+            // BE1a: Cancellation/deadline admitted before settlement fences
+            // success deterministically. The verified terminal proof stays
+            // attached as evidence of remote completion.
+            completion = status === "failed" ? "failed" : "cancelled";
+          } else if (status === "completed") {
             // §3.2 requires a VERIFIED proof and a BOUNDED finalText for
             // success — bounded, not non-empty: whether empty text is usable
             // output is the harness's format decision (§7), never ours.
@@ -1184,6 +1637,13 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           }
           break;
         }
+        case "silence":
+          // The answer channel went quiet with the delivery unfinished (or
+          // never started) — failed/truncated, never success. The marker
+          // above carries the cause to `protocol_truncation`.
+          completion = "failed";
+          protocolIntegrity = "truncated";
+          break;
         case "conflict":
         case "usage_flip":
           // §197 / §4.2 line 195: a contradiction makes the outcome malformed;
@@ -1213,6 +1673,25 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           break;
       }
 
+      const effectiveFinalText =
+        terminalFinalText !== undefined
+          ? terminalFinalText
+          : finalParts.join("");
+
+      const effectiveIncomplete = usageIncomplete || terminalUsageIncomplete;
+
+      const effectiveCostUsd =
+        terminalUsage?.costUsd !== undefined
+          ? Math.max(cashCostUsd ?? 0, terminalUsage.costUsd)
+          : cashCostUsd;
+
+      const hasObservedUsage =
+        usageState !== undefined ||
+        (terminalUsage !== undefined &&
+          (terminalUsage.costUsd !== undefined ||
+            terminalUsage.inputTokens !== undefined ||
+            terminalUsage.outputTokens !== undefined));
+
       outcome = {
         completion,
         protocolIntegrity,
@@ -1224,7 +1703,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           reason.kind === "usage_flip")
           ? { terminalProof: slotProof }
           : {}),
-        finalText: finalParts.join(""),
+        finalText: effectiveFinalText,
         // §8: no usage event ever arriving is not a proven zero —
         // "unavailable" says honestly that the cost is unknown rather than
         // fabricating a $0 for a session that DID run. `usageState` defined
@@ -1242,39 +1721,69 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // old wording as "usage does not arrive yet" is what made
         // `pricingReady: false` look consistent with a client that has been
         // reading the provider's cost off every assistant message.
-        usage:
-          usageState === undefined
-            ? normalizeUnavailableUsage({
+        usage: !hasObservedUsage
+          ? promptRefusedBeforeStart(
+              reason,
+              finalParts.length,
+              sawReasoning,
+              sawContentEvent,
+            )
+            ? noSessionUsage(Date.now() - startedWall, this.usageBillingMode)
+            : normalizeUnavailableUsage({
                 wallMs: Date.now() - startedWall,
                 billingMode: this.usageBillingMode,
               })
-            : {
-                wallMs: Date.now() - startedWall,
-                tokens: {
-                  ...usageState.tokens,
-                  inputKnown: usageState.tokens.inputUncached,
-                  outputKnown: usageState.tokens.outputVisible,
-                  totalKnown:
-                    usageState.tokens.inputUncached !== undefined ||
-                    usageState.tokens.outputVisible !== undefined
-                      ? (usageState.tokens.inputUncached ?? 0) +
-                        (usageState.tokens.outputVisible ?? 0)
-                      : undefined,
-                },
-                completeness: "complete",
-                // 2026-09-02: the ROUTE's mode, not a hardcoded
-                // "subscription". #133 established that an OpenCode route on
-                // any provider but `openai` runs on a `provider_api_token`
-                // and therefore bills METERED, and the exact-binding
-                // capability report has said so since. This record used to
-                // contradict it — and the contradiction is exploitable, not
-                // cosmetic: `settlementFromUsage`'s metered-zero rule reads
-                // THIS field, so a metered attempt wearing a subscription
-                // badge settles a provider-reported $0 as truthful.
-                billingMode: this.usageBillingMode,
-                costSource: cashCostUsd !== undefined ? "provider" : "unknown",
-                ...(cashCostUsd !== undefined ? { cashCostUsd } : {}),
+          : {
+              wallMs: Date.now() - startedWall,
+              tokens: {
+                ...(usageState?.tokens ?? {}),
+                inputKnown:
+                  usageState?.tokens.inputUncached ??
+                  terminalUsage?.inputTokens,
+                outputKnown:
+                  usageState?.tokens.outputVisible ??
+                  terminalUsage?.outputTokens,
+                totalKnown:
+                  (usageState?.tokens.inputUncached ??
+                    terminalUsage?.inputTokens) !== undefined ||
+                  (usageState?.tokens.outputVisible ??
+                    terminalUsage?.outputTokens) !== undefined
+                    ? (usageState?.tokens.inputUncached ??
+                        terminalUsage?.inputTokens ??
+                        0) +
+                      (usageState?.tokens.outputVisible ??
+                        terminalUsage?.outputTokens ??
+                        0)
+                    : undefined,
               },
+              completeness:
+                effectiveIncomplete ||
+                reason.kind === "abort_unconfirmed" ||
+                reason.kind === "usage_flip" ||
+                reason.kind === "conflict" ||
+                reason.kind === "silence" ||
+                reason.kind === "stream_error" ||
+                reason.kind === "session_failed" ||
+                reason.kind === "stall" ||
+                reason.kind === "bound"
+                  ? "partial"
+                  : "complete",
+              // 2026-09-02: the ROUTE's mode, not a hardcoded
+              // "subscription". #133 established that an OpenCode route on
+              // any provider but `openai` runs on a `provider_api_token`
+              // and therefore bills METERED, and the exact-binding
+              // capability report has said so since. This record used to
+              // contradict it — and the contradiction is exploitable, not
+              // cosmetic: `settlementFromUsage`'s metered-zero rule reads
+              // THIS field, so a metered attempt wearing a subscription
+              // badge settles a provider-reported $0 as truthful.
+              billingMode: this.usageBillingMode,
+              costSource:
+                effectiveCostUsd !== undefined ? "provider" : "unknown",
+              ...(effectiveCostUsd !== undefined
+                ? { cashCostUsd: effectiveCostUsd }
+                : {}),
+            },
         // D1-07 bridge recovers watchdog_timeout from harness-set timedOut on
         // the outcome, not from transport notes.
         stderrTail: boundTailBytes(notes.join("\n"), MAX_STDERR_TAIL_BYTES),
@@ -1334,13 +1843,19 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       return outcome;
     } finally {
       if (streamIterator !== undefined) {
-        await Promise.race([
-          streamIterator.return?.() ??
-            Promise.resolve({ done: true as const, value: undefined }),
-          new Promise<void>((resolve) => {
-            setTimeout(resolve, this.cleanupMs);
-          }),
-        ]).catch(() => {});
+        let returnTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const returnTimeout = new Promise<void>((resolve) => {
+            returnTimer = setTimeout(resolve, this.cleanupMs);
+          });
+          await Promise.race([
+            streamIterator.return?.() ??
+              Promise.resolve({ done: true as const, value: undefined }),
+            returnTimeout,
+          ]).catch(() => {});
+        } finally {
+          if (returnTimer !== undefined) clearTimeout(returnTimer);
+        }
       }
     }
   }
@@ -1369,6 +1884,26 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     const witness = outcome.stderrTail;
     if (witness.includes(MARKER_ABORT_UNCONFIRMED)) {
       return "remote_abort_unconfirmed";
+    }
+    // #157: FIRST among the provider-text patterns, deliberately. The
+    // provider's own message is appended verbatim after this marker (see
+    // formatProviderLimitDetail), and a message that happens to say "rate
+    // limit" or "quota exceeded" must not let the generic patterns below
+    // decide the cause instead of the fact pr-hero actually observed.
+    // `quota_exhausted` is the one §7 cause whose retry disposition is
+    // already terminal (decideRetryDisposition's default arm) — exactly
+    // right, since a fresh attempt cannot outrun quota that is already spent.
+    if (witness.includes(MARKER_PROVIDER_LIMIT)) {
+      return "quota_exhausted";
+    }
+    // #157: same ordering rule as the marker above — checked before any
+    // generic provider-text pattern so the underlying reply-failure message
+    // (network error, 4xx body, whatever the SDK call actually failed with)
+    // cannot steer this into rate_limit/network_transient/auth_invalid
+    // instead of the fact that pr-hero's own permission control failed to
+    // run.
+    if (witness.includes(MARKER_PERMISSION_REJECT_FAILED)) {
+      return "runtime_unavailable";
     }
     if (
       witness.includes(MARKER_CONFLICT) ||
@@ -1399,6 +1934,21 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|fetch failed|network (error|failure)|\b(?:502|503|504)\b|overloaded/i.test(
         witness,
       )
+    ) {
+      return "network_transient";
+    }
+    // The gateway's 500 surfacing as a refused prompt (Martian `opencode`
+    // arm, 2026-09-10: `opencode session.prompt failed:
+    // {"name":"UnknownError","data":{"message":"Unexpected server error…"}}`
+    // killed 7/10 PRs with no retry, while the same route self-healed within
+    // seconds hours later). A refused prompt whose text IS the provider's own
+    // 500 is a transient gateway failure, not the runtime being unavailable —
+    // the terminal marker below must not swallow it. Placed beside the
+    // network patterns under the same ordering rule: auth/rate-limit above
+    // still win, and a local TypeError with no provider-500 text still falls
+    // through to the terminal marker.
+    if (
+      /unexpected server error|internal server error|\b500\b/i.test(witness)
     ) {
       return "network_transient";
     }
@@ -1448,6 +1998,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     if (witness.includes(MARKER_UNDELIVERED_CONTENT)) {
       return "protocol_truncation";
     }
+    if (witness.includes(MARKER_SILENCE)) return "protocol_truncation";
     if (witness.includes(MARKER_REASONING_ONLY)) return "protocol_truncation";
     return undefined;
   }

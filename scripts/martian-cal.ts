@@ -15,9 +15,11 @@
 // One pipeline: hunters, scout off, summarizer off, parity never fires.
 
 import { existsSync } from "node:fs";
+import { mkdir, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import type { Finding, FindingsDocument } from "../src/findings";
+import { writeJsonAtomically } from "../src/execution/atomic-write";
+import type { FindingsDocument } from "../src/findings";
 import {
   findingsToMartianReview,
   lookupGolden,
@@ -26,14 +28,35 @@ import {
 } from "../src/martian-adapter";
 import { estimateCost } from "../src/report";
 import { DEFAULT_SIZE_GATE, evaluateSizeGateAggregate } from "../src/size-gate";
+import {
+  type BenchmarkSchedule,
+  freezeBenchmarkIdentity,
+  loadBenchmarkSchedule,
+  loadQualifiedReview,
+} from "./martian-evidence";
 
 const LAB_AGENTS_DIR =
   "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
 
 const ROOT = path.join(import.meta.dir, "..");
-const CASES_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-cases.json");
-const GOLDENS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-goldens.json");
-const GOTCHAS_PATH = path.join(ROOT, "docs", "benchmarks", "martian-cal-gotchas.md");
+const CASES_PATH = path.join(
+  ROOT,
+  "docs",
+  "benchmarks",
+  "martian-cal-cases.json",
+);
+const GOLDENS_PATH = path.join(
+  ROOT,
+  "docs",
+  "benchmarks",
+  "martian-cal-goldens.json",
+);
+const GOTCHAS_PATH = path.join(
+  ROOT,
+  "docs",
+  "benchmarks",
+  "martian-cal-gotchas.md",
+);
 const DEFAULT_REPO = path.join(homedir(), "Desktop", "martian-cal", "cal.com");
 const DEFAULT_RUNS = path.join(homedir(), "Desktop", "martian-cal", "runs");
 const HUNTERS = 3;
@@ -72,7 +95,7 @@ function argValue(flag: string): string | undefined {
 const mode = Bun.argv[2];
 if (mode !== "plan" && mode !== "check" && mode !== "run" && mode !== "score") {
   fail(
-    "usage: bun run scripts/martian-cal.ts plan|check|run|score [--all] [--only 14943,8330] [--repo …] [--runs …]",
+    "usage: bun run scripts/martian-cal.ts plan|check|run|score [--all] [--only 14943,8330] [--arm <id>] [--model <logical>] [--hunter-model <l>] [--refuter-model <l>] [--repo …] [--runs …]",
   );
 }
 
@@ -82,6 +105,25 @@ const repo = argValue("--repo") ?? DEFAULT_REPO;
 const runsRoot = argValue("--runs") ?? DEFAULT_RUNS;
 const onlyRaw = argValue("--only");
 const all = Bun.argv.includes("--all");
+// New methodology arm (one variable vs the `hunters` baseline): the arm id is
+// the run-dir suffix (`cal-<pr>-<arm>`). Default keeps the frozen baseline
+// dirs byte-for-byte addressable. `run` skips dirs that already hold
+// findings.json, so a new arm never overwrites the baseline.
+const arm = argValue("--arm") ?? "hunters";
+if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(arm)) {
+  fail(`--arm must match [a-zA-Z0-9_-]+, got: ${arm}`);
+}
+// Logical-model override for the arm (CLI --model precedence: flag > spec >
+// frontmatter). Lets an arm name a working route without touching the
+// operator's global routing config — e.g. --model opus resolves through the
+// global opus mapping (opencode/glm-5.3-flash#high) while frontmatter says
+// sonnet. Empty = frontmatter (the `hunters` baseline shape).
+const model = argValue("--model");
+// Per-role models (--hunter-model / --refuter-model set AgentSpec.model per
+// role). Lets one arm split hunters and refuter across two routes with the
+// prompt set byte-identical.
+const hunterModel = argValue("--hunter-model");
+const refuterModel = argValue("--refuter-model");
 
 function parseOnly(raw: string): number[] {
   return raw.split(",").map((s) => {
@@ -105,7 +147,7 @@ const rows: CaseRow[] = selected.map((pr) => {
 });
 
 function runDirFor(pr: number): string {
-  return path.join(runsRoot, `cal-${pr}-hunters`);
+  return path.join(runsRoot, `cal-${pr}-${arm}`);
 }
 
 function git(args: string[]): { ok: boolean; stdout: string; stderr: string } {
@@ -151,7 +193,11 @@ async function checkoutHead(row: CaseRow): Promise<void> {
   }
 }
 
-async function review(row: CaseRow, dryRun: boolean): Promise<number> {
+async function review(
+  row: CaseRow,
+  dryRun: boolean,
+  outputDir = runDirFor(row.pr),
+): Promise<number> {
   await checkoutHead(row);
   const argv = [
     process.execPath,
@@ -168,10 +214,13 @@ async function review(row: CaseRow, dryRun: boolean): Promise<number> {
     "--no-summary",
     "--agents",
     LAB_AGENTS_DIR,
+    ...(model === undefined ? [] : ["--model", model]),
+    ...(hunterModel === undefined ? [] : ["--hunter-model", hunterModel]),
+    ...(refuterModel === undefined ? [] : ["--refuter-model", refuterModel]),
     "--gotchas",
     GOTCHAS_PATH,
     "--out",
-    runDirFor(row.pr),
+    outputDir,
     ...(dryRun ? ["--dry-run"] : []),
   ];
   const proc = Bun.spawn(argv, {
@@ -230,6 +279,13 @@ if (mode === "plan") {
   console.log(
     `${rows.length} PR(s). Estimated ${HUNTERS} hunters + refuter, summarizer off, scout off, parity never fires.`,
   );
+  console.log(`arm: ${arm}  (run dirs: cal-<pr>-${arm})`);
+  console.log(
+    `model: ${model ?? "(frontmatter)"}  (CLI --model precedence over frontmatter)`,
+  );
+  console.log(
+    `role models: hunters ${hunterModel ?? "(frontmatter)"} / refuter ${refuterModel ?? "(frontmatter)"}`,
+  );
   console.log(`band sum: $${low.toFixed(2)}–$${high.toFixed(2)}`);
   console.log(
     "Gate column is GitHub aggregate counters (no exclusions, no whitespace). Conservative.",
@@ -272,48 +328,118 @@ if (mode === "check") {
 
 if (mode === "run") {
   console.error(
-    `martian-cal run: ${rows.length} PR(s), pipeline hunters, into ${runsRoot}`,
+    `martian-cal run: ${rows.length} PR(s), pipeline hunters, arm ${arm}, model ${model ?? "(frontmatter)"}, hunters ${hunterModel ?? "(frontmatter)"}, refuter ${refuterModel ?? "(frontmatter)"}, into ${runsRoot}`,
   );
+  const reps = Number(argValue("--reps") ?? "1");
+  if (!Number.isInteger(reps) || reps < 1 || reps > 100)
+    fail("--reps must be 1..100");
+  await mkdir(runsRoot, { recursive: true });
+  const expectedAttempts = rows.flatMap((row) =>
+    Array.from({ length: reps }, (_, i) => ({
+      id: `${arm}:${row.pr}:${i + 1}`,
+      pr: row.pr,
+      replicate: i + 1,
+      directory: `cal-${row.pr}-${arm}${reps === 1 ? "" : `-r${i + 1}`}`,
+      headSha: row.headSha,
+      baseSha: row.baseSha,
+    })),
+  );
+  let schedule: BenchmarkSchedule = {
+    schemaVersion: 1,
+    arm,
+    attempts: expectedAttempts,
+  };
+  if (existsSync(path.join(runsRoot, `schedule-${arm}.json`))) {
+    schedule = await loadBenchmarkSchedule(runsRoot, arm);
+    if (
+      JSON.stringify(
+        schedule.attempts.map(({ identity: _, ...attempt }) => attempt),
+      ) !== JSON.stringify(expectedAttempts)
+    )
+      fail("selected attempts differ from frozen schedule; use a new arm");
+  } else
+    await writeJsonAtomically(
+      path.join(runsRoot, `schedule-${arm}.json`),
+      schedule,
+    );
   const failures: string[] = [];
   let skipped = 0;
-  for (const row of rows) {
-    const dir = runDirFor(row.pr);
-    const label = `cal ${row.pr}`;
-    if (await Bun.file(path.join(dir, "findings.json")).exists()) {
-      console.error(`\n=== ${label} — SKIPPED, already on disk at ${dir}`);
+  for (const attempt of schedule.attempts) {
+    const row = rows.find((r) => r.pr === attempt.pr);
+    if (!row) continue;
+    const dir = path.join(runsRoot, attempt.directory);
+    const label = `cal ${row.pr} replicate ${attempt.replicate}`;
+    await checkoutHead(row);
+    const identity = await freezeBenchmarkIdentity({
+      engineRoot: ROOT,
+      repo,
+      agentsDir: LAB_AGENTS_DIR,
+      gotchasPath: GOTCHAS_PATH,
+      pr: row.pr,
+      headSha: row.headSha,
+      baseSha: row.baseSha,
+      model,
+      hunterModel,
+      refuterModel,
+    });
+    const previous = await loadQualifiedReview(dir, identity);
+    if (previous.qualified) {
+      attempt.identity = identity;
+      await writeJsonAtomically(
+        path.join(runsRoot, `schedule-${arm}.json`),
+        schedule,
+      );
+      console.error(
+        `\n=== ${label} — SKIPPED, verified matching attempt at ${dir}`,
+      );
       skipped++;
       continue;
     }
+    if (existsSync(dir)) {
+      const quarantine = path.join(runsRoot, "incomplete-attempts");
+      await mkdir(quarantine, { recursive: true });
+      await rename(
+        dir,
+        path.join(
+          quarantine,
+          `${attempt.directory}-${Date.now()}-${crypto.randomUUID()}`,
+        ),
+      );
+    }
+    attempt.identity = identity;
+    await writeJsonAtomically(
+      path.join(runsRoot, `schedule-${arm}.json`),
+      schedule,
+    );
+    await mkdir(dir, { recursive: true });
+    await writeJsonAtomically(path.join(dir, "run-identity.json"), identity);
     console.error(`\n=== ${label} -> ${dir}`);
-    const code = await review(row, false);
+    const code = await review(row, false, dir);
     if (code !== 0) {
       failures.push(`${label}: exit ${code}`);
       continue;
     }
-    if (!(await Bun.file(path.join(dir, "findings.json")).exists())) {
+    const qualified = await loadQualifiedReview(dir, identity);
+    if (!qualified.qualified || !qualified.doc) {
       failures.push(
-        `${label}: exited 0 but wrote no findings.json — skipped (empty diff or size gate)`,
+        `${label}: exited 0 but is unqualified: ${qualified.reason}`,
       );
       continue;
     }
-    const doc = (await Bun.file(
-      path.join(dir, "findings.json"),
-    ).json()) as FindingsDocument;
     const golden = lookupGolden(goldens, row.pr);
     const overlay = findingsToMartianReview({
       prUrl: golden.url,
-      findings: doc.findings as Finding[],
+      findings: qualified.doc.findings,
     });
-    await Bun.write(
-      path.join(dir, "martian-review.json"),
-      `${JSON.stringify(overlay, null, 2)}\n`,
-    );
+    await writeJsonAtomically(path.join(dir, "martian-review.json"), overlay);
   }
   if (skipped > 0) {
     console.error(`martian-cal run: ${skipped} skipped — already on disk`);
   }
   if (failures.length === 0) {
-    console.error("martian-cal run: every review exited 0");
+    console.error(
+      "martian-cal run: every scheduled review has verified matching completion",
+    );
   } else {
     console.error(`martian-cal run: ${failures.length} failure(s):`);
     for (const f of failures) console.error(`  ${f}`);

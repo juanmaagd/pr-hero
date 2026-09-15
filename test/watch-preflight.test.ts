@@ -32,6 +32,7 @@ import {
   parseMarkerHead,
   parsePipelineMeta,
   parsePlistInterval,
+  parsePrCommentMarker,
   parsePrFiles,
   parsePrList,
   parseWatchConfig,
@@ -476,6 +477,34 @@ describe("parseMarkerHead", () => {
     ).toEqual([HEAD_A, HEAD_B]);
   });
 
+  // Rereview-coverage fix (explicitly unchanged): a PARTIAL
+  // marker's head is still "declared" for the watcher's one-review-per-PR
+  // eligibility check. There is no automatic relaunch loop for a chronically
+  // timing-out PR — recovery is an explicit `pr-hero review --pr N` (or a new
+  // push), never the watcher noticing coverage=partial and retrying on its
+  // own.
+  test("a partial marker's head is still declared (no automatic relaunch)", () => {
+    expect(
+      markerDeclaredHeads([
+        {
+          body: `<!-- pr-hero-report head=${HEAD_A} coverage=partial -->\nbody`,
+        },
+      ]),
+    ).toEqual([HEAD_A]);
+  });
+
+  // parseMarkerHead must return the head for BOTH wire forms — every
+  // existing consumer (markerDeclaredHeads above, plus cli.ts's CI-admission
+  // and previousHeadSha reads) needs the head unchanged regardless of
+  // whether the run that posted it completed.
+  test("the head parses the same whether the marker is complete or partial", () => {
+    expect(
+      parseMarkerHead(
+        `<!-- pr-hero-report head=${HEAD_A} coverage=partial -->`,
+      ),
+    ).toBe(HEAD_A);
+  });
+
   // The two marker facts differ exactly on the legacy headless marker: it
   // declares no head (heads stay empty) yet proves a review happened
   // (markerSeen true) — the fact the one-review-per-PR default consumes.
@@ -497,6 +526,52 @@ describe("parseMarkerHead", () => {
       ]),
     ).toBe(false);
     expect(markerCommentSeen([])).toBe(false);
+  });
+});
+
+// Rereview-coverage fix: the coverage-aware reader. parseMarkerHead
+// (above) stays the head-only projection every existing consumer keeps
+// using unchanged; this is the new `{ head, complete }` reader that
+// resolveLastReviewedHead's caller (cli.ts) needs to know WHETHER the last
+// review it is about to trust actually finished.
+describe("parsePrCommentMarker", () => {
+  test("the plain (complete) marker parses to complete: true", () => {
+    expect(
+      parsePrCommentMarker(`<!-- pr-hero-report head=${HEAD_A} -->`),
+    ).toEqual({ head: HEAD_A, complete: true });
+  });
+
+  test("the coverage=partial marker parses to complete: false, same head", () => {
+    expect(
+      parsePrCommentMarker(
+        `<!-- pr-hero-report head=${HEAD_A} coverage=partial -->\n\n## review`,
+      ),
+    ).toEqual({ head: HEAD_A, complete: false });
+  });
+
+  // The exact-token contract: an abbreviated or garbage trailing token must
+  // NOT read as partial (nor silently as complete) — it fails the whole
+  // match, same fail-safe direction as a malformed sha already took before
+  // this fix. This is also exactly what an OLDER pr-hero deployment (still
+  // running the strict pre-fix regex) does when it meets one of OUR partial
+  // markers: it does not recognize the trailing token either, so the whole
+  // marker fails to match and reads as the legacy headless marker (no head
+  // declared) rather than mis-reading it as complete.
+  test("a garbage or abbreviated coverage token never parses, in either reader", () => {
+    const garbage = `<!-- pr-hero-report head=${HEAD_A} coverage=partiallyDone -->`;
+    expect(parsePrCommentMarker(garbage)).toBeNull();
+    expect(parseMarkerHead(garbage)).toBeNull();
+  });
+
+  test("the legacy headless marker parses to null, same as parseMarkerHead", () => {
+    expect(
+      parsePrCommentMarker("<!-- pr-hero-report -->\nold format"),
+    ).toBeNull();
+  });
+
+  test("foreign bodies never throw", () => {
+    expect(parsePrCommentMarker("LGTM")).toBeNull();
+    expect(parsePrCommentMarker("")).toBeNull();
   });
 });
 

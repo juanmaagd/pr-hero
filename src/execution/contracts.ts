@@ -136,7 +136,14 @@ export interface ObservedModel {
   readonly canonicalModel?: string;
 }
 
+export interface DiagnosticEvidence {
+  readonly schema: string;
+  readonly status: "complete" | "incomplete" | "unavailable";
+  readonly redactedJson: string;
+}
+
 export interface TransportOutcome {
+  readonly diagnosticEvidence?: DiagnosticEvidence;
   readonly completion: "success" | "failed" | "cancelled";
   readonly protocolIntegrity:
     | "verified"
@@ -211,6 +218,12 @@ export type TransportFailureCause =
 export interface ProviderTransport {
   readonly backend: RunnerBackend;
   readonly billingMode?: UsageBillingMode;
+  readonly admissionIdentity?: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly cancellationSemantics?: "process-exit" | "provider-proof";
+  readonly defaultRoute?: ResolvedModelRoute;
   capabilities(): Promise<ProviderCapabilityReport>;
   execute(
     request: TransportRequest,
@@ -321,6 +334,12 @@ export interface RuntimeBinding {
   readonly environment: EnvironmentPolicy;
   readonly tools: ToolPolicy;
   readonly mcp: McpPolicy;
+  readonly admissionIdentity?: {
+    readonly executable: string;
+    readonly provider: string;
+  };
+  readonly cancellationSemantics?: "process-exit" | "provider-proof";
+  readonly defaultRoute?: ResolvedModelRoute;
   capabilities(): Promise<ExactBindingCapabilityReport>;
   acquire(
     isolation: IsolationProjection,

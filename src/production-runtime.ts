@@ -70,9 +70,15 @@ import {
   createDefaultTransportRegistry,
   type D1_11ReadinessEvidence,
   DefaultTransportRegistry,
+  readInstalledOpenCodeSdkVersion,
   type TransportFactoryOptions,
   type TransportRegistry,
 } from "./transport-registry";
+import {
+  type OpenCodeIdentityObserver,
+  type OpenCodeObservedIdentity,
+  observeOpenCodeExecutable,
+} from "./transports/opencode-admission";
 import { zeroUsage } from "./usage";
 
 export class ProductionRuntimeError extends Error {
@@ -89,6 +95,7 @@ export interface ProductionRuntimeOptions extends RunnerAuthorityOptions {
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly authorityDeps?: ResolveRunnerAuthorityDeps;
   readonly spawnFn?: typeof Bun.spawn;
+  readonly observeOpenCodeIdentity?: OpenCodeIdentityObserver;
   readonly signal?: AbortSignal;
   readonly attemptAdmissionGate?: AttemptAdmissionGate;
   readonly graceMarginMs?: number;
@@ -214,6 +221,7 @@ class DefaultActiveTransportLeaseTracker
 }
 
 interface FrozenRuntimeBindingOptions {
+  readonly observedOpenCodeIdentity?: OpenCodeObservedIdentity;
   readonly key: string;
   readonly route: ResolvedModelRoute;
   readonly authority: ResolvedBindingAuthority;
@@ -239,6 +247,7 @@ function minimalIsolationFromExecutable(
 }
 
 class FrozenRuntimeBinding implements RuntimeBinding {
+  readonly observedOpenCodeIdentity?: OpenCodeObservedIdentity;
   readonly key: string;
   readonly route: ResolvedModelRoute;
   readonly executable: VerifiedExecutable;
@@ -261,6 +270,10 @@ class FrozenRuntimeBinding implements RuntimeBinding {
 
   constructor(options: FrozenRuntimeBindingOptions) {
     this.key = options.key;
+    this.observedOpenCodeIdentity =
+      options.observedOpenCodeIdentity === undefined
+        ? undefined
+        : Object.freeze({ ...options.observedOpenCodeIdentity });
     this.route = Object.freeze({ ...options.route });
     this.executable = Object.freeze({ ...options.executable });
     this.credential = Object.freeze({ ...options.credential });
@@ -459,6 +472,12 @@ class FrozenRuntimeBinding implements RuntimeBinding {
       // the construction-time default rather than being shadowed by it. That
       // default survives as the fallback for callers holding no binding.
       credentialKind: this.credential.kind,
+      ...(this.route.backend === "opencode"
+        ? {
+            openCodeBinaryPath: this.executable.absolutePath,
+            observedOpenCodeIdentity: this.observedOpenCodeIdentity,
+          }
+        : {}),
     });
     const routeKey = this.key;
     this.leaseTracker.register(routeKey);
@@ -519,6 +538,7 @@ async function resolveFrozenBindings(
   // #182: one verdict per (provider, model), shared across every binding in
   // this resolution — the same cache the admission passes down, so the server
   // credential and the bindings cannot disagree across two spawns.
+  const observations = new Map<string, Promise<OpenCodeObservedIdentity>>();
   const freeVerdicts = new Map<string, Promise<boolean>>();
   const probeFree = async (
     provider: string,
@@ -590,7 +610,30 @@ async function resolveFrozenBindings(
       }
     }
     const executable = toVerifiedExecutable(authority);
+    let observedOpenCodeIdentity: OpenCodeObservedIdentity | undefined;
+    if (step.route.backend === "opencode") {
+      const key = JSON.stringify([executable.absolutePath, executable.sha256]);
+      let observation = observations.get(key);
+      if (observation === undefined) {
+        observation = options.observeOpenCodeIdentity
+          ? options.observeOpenCodeIdentity(executable, options.signal)
+          : observeOpenCodeExecutable(executable, options.signal, {
+              sdkVersion: readInstalledOpenCodeSdkVersion,
+            });
+        observations.set(key, observation);
+      }
+      observedOpenCodeIdentity = await observation;
+      if (
+        observedOpenCodeIdentity.executablePath !== executable.absolutePath ||
+        observedOpenCodeIdentity.executableSha256 !== executable.sha256
+      ) {
+        throw new ProductionRuntimeError(
+          "Observed OpenCode executable identity differs from frozen binding",
+        );
+      }
+    }
     const binding = new FrozenRuntimeBinding({
+      observedOpenCodeIdentity,
       key: step.routeFingerprint,
       route: step.route,
       authority,
@@ -608,6 +651,7 @@ async function resolveFrozenBindings(
           mode: options.mode,
           evidence: options.evidence,
           binaryPath: authority.binaryPath,
+          observedOpenCodeIdentity,
         }),
       leaseTracker,
     });
@@ -705,6 +749,7 @@ export async function collectDoctorExactBindingReports(input: {
   readonly routingConfig?: RoutingConfig;
   readonly authorityDeps?: ResolveRunnerAuthorityDeps;
   readonly env?: RunnerAuthorityOptions["env"];
+  readonly observeOpenCodeIdentity?: OpenCodeIdentityObserver;
   readonly loadSdk?: () => Promise<
     import("./transports/opencode-client").OpenCodeSdkLike
   >;
@@ -734,6 +779,7 @@ export async function collectDoctorExactBindingReports(input: {
   const probe = await probeBindingsReadiness({
     ...authority,
     plan,
+    observeOpenCodeIdentity: input.observeOpenCodeIdentity,
     workspaceRoot: input.workspaceRoot,
     authorityDeps: input.authorityDeps,
     mode: "conformance",
@@ -826,6 +872,7 @@ export async function prepareProductionAdmissionContext(input: {
   readonly workspaceRoot: string;
   readonly plan: ResolvedRoutePlan;
   readonly authorityDeps?: ResolveRunnerAuthorityDeps;
+  readonly observeOpenCodeIdentity?: OpenCodeIdentityObserver;
   readonly loadSdk?: () => Promise<
     import("./transports/opencode-client").OpenCodeSdkLike
   >;
@@ -1010,6 +1057,7 @@ export async function prepareProductionAdmissionContext(input: {
     plan: input.plan,
     workspaceRoot: input.workspaceRoot,
     registry: probeRegistry,
+    observeOpenCodeIdentity: input.observeOpenCodeIdentity,
     mode: "conformance",
     authorityDeps: input.authorityDeps,
     // #182: the SAME memoised instance the server credential above was
@@ -1047,8 +1095,14 @@ export async function prepareProductionAdmissionContext(input: {
   }
   await probe.dispose();
 
+  const observedBinding = [...probe.bindings.values()].find(
+    (binding): binding is FrozenRuntimeBinding =>
+      binding instanceof FrozenRuntimeBinding &&
+      binding.route.backend === "opencode",
+  );
   const registry = createDefaultTransportRegistry({
     mode: "production",
+    observedOpenCodeIdentity: observedBinding?.observedOpenCodeIdentity,
     evidence,
     binaryPath: authorityOptions.binaryPath,
     openCodeBinaryPath: authorityOptions.openCodeBinaryPath,
@@ -1056,8 +1110,6 @@ export async function prepareProductionAdmissionContext(input: {
     // #149: the SAME instance seeded into the binding authority above.
     credentialBroker: credentialBrokers.opencode,
     // #133: and the kind it was resolved FOR. The launcher pairs the two;
-    // sending the broker without its kind would leave the launcher defaulting
-    // to the OAuth kind over an api-token broker.
     credentialKind: openCodeCredential.kind,
     ...(input.loadSdk !== undefined ? { loadSdk: input.loadSdk } : {}),
   }) as DefaultTransportRegistry;
@@ -1548,7 +1600,28 @@ export async function createProductionRuntime(
       }
     }
   }
+  // Backend-wide compatibility admission must consume the same observations
+  // as exact bindings, not reconstruct an unobserved factory beside them.
+  const compatibilityReports = new Map<
+    RunnerBackend,
+    ProviderCapabilityReport
+  >();
+  for (const binding of bindings.values()) {
+    if (compatibilityReports.has(binding.route.backend)) continue;
+    compatibilityReports.set(
+      binding.route.backend,
+      await registry.getCapabilityReport(binding.route.backend, {
+        mode: options.mode,
+        evidence: options.evidence,
+        observedOpenCodeIdentity:
+          binding instanceof FrozenRuntimeBinding
+            ? binding.observedOpenCodeIdentity
+            : undefined,
+      }),
+    );
+  }
   const admitted = await admitRoutePlan(plan, registry, {
+    capabilities: compatibilityReports,
     mode: options.mode,
     evidence: options.evidence,
   });
@@ -1627,6 +1700,7 @@ export function productionFallbackRegistry(options: {
   readonly mode?: "production" | "conformance";
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly binaryPath?: string;
+  readonly openCodeBinaryPath?: string;
   readonly env?: Record<string, string>;
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
   // #133: optional because this function is also called with a bare
@@ -1676,6 +1750,7 @@ export function productionFallbackRegistry(options: {
     mode: options.mode,
     evidence: options.evidence,
     binaryPath: options.binaryPath,
+    openCodeBinaryPath: options.openCodeBinaryPath,
     env: options.env,
     // Forwarded only when the caller actually supplied one. Substituting a
     // fresh broker here would erase the difference between "no preference"

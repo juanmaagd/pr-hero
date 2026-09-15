@@ -330,6 +330,14 @@ describe("Task 2.1 RED: Route Admission & Transport Registry", () => {
 
       const registry = createDefaultTransportRegistry({
         mode: "conformance",
+        observedOpenCodeIdentity: {
+          sdkVersion: "1.18.25",
+          serverVersion: "1.18.30",
+          executablePath: "/fixture",
+          executableSha256: "fixture",
+        },
+        sdkVersion: "1.18.25",
+        serverVersion: "1.18.30",
         evidence: new Map([["opencode", completeEvidence]]),
         openCodeClient: {
           createSession: async () => ({ id: "sess-1" }),
@@ -741,6 +749,8 @@ describe("OpenCode transport factory derives usage billing mode from the credent
   function openCodeTransportFor(credentialKind?: CredentialKind) {
     const registry = createDefaultTransportRegistry({
       mode: "conformance",
+      sdkVersion: "1.18.25",
+      serverVersion: "1.18.30",
       openCodeClient: idleClient,
       ...(credentialKind === undefined ? {} : { credentialKind }),
     });

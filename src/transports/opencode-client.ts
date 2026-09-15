@@ -1,3 +1,4 @@
+import { OpenCodeEvidenceCollector } from "./opencode-evidence";
 // D1-06: the mapping between what @opencode-ai/sdk actually emits and the
 // narrow `OpenCodeClientLike` contract the transport was built against.
 //
@@ -14,6 +15,8 @@
 // defeat both the credential projection (§6.1) and the verified-binary rule
 // (§13).
 
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ProviderTerminalProof } from "../execution/contracts";
 import {
   ALL_MCP_TOOL_IDS,
@@ -29,6 +32,10 @@ import type {
   OpenCodeCreateSessionInput,
   OpenCodePollResult,
 } from "./opencode-sdk";
+import {
+  formatPermissionRejectFailureDetail,
+  formatProviderLimitDetail,
+} from "./opencode-sdk";
 import type { OpenCodeServerHandle } from "./opencode-server";
 
 // Structural, not imported from the SDK: pr-hero ships with ZERO runtime
@@ -36,6 +43,7 @@ import type { OpenCodeServerHandle } from "./opencode-server";
 // will never call. The adapter slice declares the SDK an OPTIONAL peer and
 // reaches it through a dynamic import.
 interface RawEvent {
+  readonly id?: unknown;
   readonly type?: unknown;
   readonly properties?: unknown;
 }
@@ -51,6 +59,25 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+// #228: the raw provider event carries its session id in one of three
+// places depending on its shape — a plain event's own `properties.sessionID`,
+// a `message.part.*` event's `properties.part.sessionID`, or a
+// `message.updated`-shaped event's `properties.info.sessionID`. Returns
+// `undefined` when none of the three is present, which the caller treats as
+// "cannot be attributed to any session" and therefore not filterable.
+function eventSessionId(raw: unknown): string | undefined {
+  const p = props(raw);
+  if (p === undefined) return undefined;
+  if (typeof p.sessionID === "string") return p.sessionID;
+  const part = asRecord(p.part);
+  if (part !== undefined && typeof part.sessionID === "string")
+    return part.sessionID;
+  const info = asRecord(p.info);
+  if (info !== undefined && typeof info.sessionID === "string")
+    return info.sessionID;
+  return undefined;
 }
 
 function asNumber(value: unknown): number | undefined {
@@ -73,6 +100,7 @@ function asNumber(value: unknown): number | undefined {
 // and pollStatus below.
 export function terminalProofFromAssistant(
   info: unknown,
+  state?: OpenCodeTurnState,
 ): ProviderTerminalProof | undefined {
   const message = asRecord(info);
   if (message === undefined) return undefined;
@@ -86,6 +114,26 @@ export function terminalProofFromAssistant(
   // the moment its step starts; only `time.completed` says the step ended and
   // therefore that there is anything here to quote as proof.
   if (completed === undefined) return undefined;
+
+  if (state !== undefined) {
+    if (
+      state.sessionId !== undefined &&
+      message.sessionID !== undefined &&
+      message.sessionID !== state.sessionId
+    ) {
+      return undefined;
+    }
+    if (state.tombstones.has(id)) return undefined;
+    if (!isMessageOwned(id, state)) return undefined;
+    if (message.error === undefined) {
+      // Completed tool-calls or unknown finish never establishes success
+      if (message.finish !== "stop") return undefined;
+      if (hasOutstandingTools(state)) return undefined;
+      if (!isMessageOwned(id, state)) {
+        return undefined;
+      }
+    }
+  }
 
   // providerStatus is a NORMALISED field, not a passthrough. The transport
   // maps "completed" to success, "cancelled" to cancelled and EVERYTHING ELSE
@@ -141,6 +189,34 @@ export function retryHintFromStatus(
   return delta > 0 ? delta : undefined;
 }
 
+// #157: SessionStatus's `retry` arm can also carry an `action` naming an
+// account/usage limit rather than an ordinary transient backoff. Only
+// "account_rate_limit" has ever been observed (pr-157-8df2fca3-4, all three
+// hunter captures, 3487 occurrences each) — this set is deliberately literal
+// rather than "any retry", so an unrecognised future reason keeps today's
+// alive-and-retrying behavior instead of guessing at a fact the provider
+// never actually stated. `message` is read from the top-level retry status,
+// not `action.message` — measured identical on the real capture, and the
+// top-level field is what retryHintFromStatus above already reads its
+// sibling `next` from.
+const ACCOUNT_LIMIT_REASONS: ReadonlySet<string> = new Set([
+  "account_rate_limit",
+]);
+
+export function providerLimitFromStatus(
+  status: unknown,
+): { reason: string; message: string } | undefined {
+  const record = asRecord(status);
+  if (record?.type !== "retry") return undefined;
+  const action = asRecord(record.action);
+  const reason = action?.reason;
+  if (typeof reason !== "string" || !ACCOUNT_LIMIT_REASONS.has(reason)) {
+    return undefined;
+  }
+  const message = typeof record.message === "string" ? record.message : "";
+  return { reason, message };
+}
+
 // TRAP 4 (issue #124): `message.part.delta` carries NO part type. Its whole
 // payload is {sessionID, messageID, partID, field, delta}, so the only way to
 // know what a delta belongs to is to correlate its `partID` against the part
@@ -161,42 +237,88 @@ export function retryHintFromStatus(
 // Eviction is oldest-first (a Map iterates in insertion order), which is the
 // safe direction — parts are announced and streamed in order, so the oldest
 // entry is the one no delta can still name.
+export interface TrackedPartDetail {
+  readonly id: string;
+  messageId?: string;
+  type: string;
+  text?: string;
+  synthetic?: boolean;
+  ignored?: boolean;
+  emittedText: string;
+  toolStatus?: "pending" | "running" | "completed" | "error";
+  toolCallId?: string;
+}
+
+export interface TrackedMessageDetail {
+  readonly id: string;
+  readonly role: "user" | "assistant" | string;
+  sessionID?: string;
+  parentID?: string;
+  time?: { created?: number; completed?: number };
+  finish?: string;
+  error?: unknown;
+  hasToolCalls?: boolean;
+  partIds: string[];
+}
+
+export interface UnknownOwnerObservation {
+  readonly type: "part.updated" | "part.delta";
+  readonly partId: string;
+  readonly messageId?: string;
+  readonly raw: Record<string, unknown>;
+  // Set only for a buffered "part.delta": the provider event id, threaded
+  // through so replay (reconcileUnknownOwnerBuffer) can dedupe by identity
+  // the same way a live delta does. "part.updated" snapshots are cumulative
+  // and self-idempotent, so they carry no id.
+  readonly eventId?: string;
+}
+
 export interface OpenCodeTurnState {
-  // Assistant-owned message ids. TRAP 2 lives here now: `message.part.updated`
-  // fires for the USER message too, and the recorded one carried the prompt
-  // text itself, so registering every text part would make a delta naming the
-  // user's part echo the prompt into finalText — the exact defect TRAP 2 was
-  // written to prevent, re-entering through the door the fix had to open.
+  readonly sessionId?: string;
+  currentUserId?: string;
+  expectedCwd?: string;
   readonly assistantMessages: Set<string>;
   readonly parts: Map<string, "answer" | "reasoning">;
-  // #214: unique provider call ids for `type: "tool"` parts. A tool part is
-  // restated pending → running → completed; counting each restatement would
-  // make "looked" a function of how chatty the provider is about one Read.
-  readonly toolCalls: Set<string>;
-  // #127: the turn's usage, kept per MESSAGE ID rather than as one running
-  // figure. Each step message restates its OWN totals, so within a message the
-  // newest value replaces the older one — and the recorded probe
-  // (test/fixtures/opencode/probe-events.json, indices 21 and 22) emits the
-  // completed message twice, byte for byte, which a per-event sum would
-  // double-count. Across messages the values are added, because each step is a
-  // separately billed provider call.
+  readonly partDetails: Map<string, TrackedPartDetail>;
+  readonly messageDetails: Map<string, TrackedMessageDetail>;
+  readonly parentLinks: Map<string, string>;
+  readonly toolStates: Map<
+    string,
+    "pending" | "running" | "completed" | "error"
+  >;
+  // Owned ONLY by the stream path (`handlePartUpdated`). `reconcileMessages`
+  // (the poll readback) writes `toolStates` unconditionally and can observe
+  // a LATER status before the stream delivers that tool's own earlier ones
+  // — crediting activity off `toolStates` would let a poll-advanced rank
+  // suppress every real transition the stream later reports. See the WHY
+  // comment at its use site in `handlePartUpdated`.
+  readonly toolActivityRank: Map<string, number>;
+  readonly tombstones: Set<string>;
+  readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
+  // Provider event ids for text deltas actually applied to `emittedText`
+  // (never ids merely seen while buffered — see `handlePartDelta`).
+  readonly deltaEventIds: Set<string>;
+  // Sibling to `deltaEventIds` above, kept separate rather than shared: that
+  // set's own comment fixes its meaning as "applied to emittedText", which a
+  // reasoning delta never is (see `handlePartDelta`'s reasoning branch). A
+  // provider event id is unique across the whole stream regardless of part
+  // kind, so there is no collision risk in sharing it — this is a semantics
+  // choice, not a safety one. Records every NOVEL reasoning-delta id seen,
+  // so a replayed id (an SSE Last-Event-ID reconnect) is recognized and does
+  // not earn useful-progress credit twice.
+  readonly reasoningDeltaEventIds: Set<string>;
   readonly usage: Map<string, StepUsage>;
-  // What the bounded map above has already forgotten. The cap is a MEMORY
-  // bound and must never become an accounting one: summing only the entries
-  // still present made an evicted step's tokens vanish from every later total
-  // — and the running figure could go DOWN at the instant of eviction, which
-  // is the under-reporting direction this file calls the worst one to be wrong
-  // in. Folding the evicted value in here keeps the figure whole while the map
-  // stays bounded.
+  readonly completedUsage: Set<string>;
+  readonly payloadBytes: Map<string, number>;
+  readonly trackedPartOwners: Map<string, string>;
+  readonly evictedUsageIds: Set<string>;
+  usageCapped: boolean;
+  usageConflict?: boolean;
+  usageIncomplete?: boolean;
   carriedUsage: StepUsage;
-  // The most recent completion record observed for this turn. This is the
-  // proof CONTENT the boundary quotes; it is never itself a boundary.
   lastProof?: ProviderTerminalProof;
-  // One terminal per turn. `session.idle` should fire once, but a second one
-  // must not be able to manufacture a second proof — §197's slot reads a
-  // repeat as a confirmation and a DIFFERENT proof as a conflict, so the
-  // cheapest place to guarantee "once" is here, at the source.
   boundaryReported: boolean;
+  integrityFailure?: string;
 }
 
 interface StepUsage {
@@ -205,22 +327,247 @@ interface StepUsage {
   readonly costUsd?: number;
 }
 
-// Generous on purpose: a long hunter turn announces a part per tool call, per
-// step boundary and per text block, and evicting a part that is still being
-// streamed would DROP answer text. The bound exists to make growth impossible,
-// not to be reached.
 const MAX_TRACKED_PARTS = 4096;
 const MAX_TRACKED_MESSAGES = 512;
+const MAX_UNKNOWN_OWNER_BUFFER = 256;
+const MAX_TOMBSTONES = 1024;
+const MAX_READBACK_BYTES = 4 * 1024 * 1024;
+// Same order of magnitude as MAX_TRACKED_PARTS: sized to cover an SSE
+// reconnect's Last-Event-ID replay window for one turn's answer deltas.
+const MAX_TRACKED_DELTA_EVENTS = 4096;
+// Own cap, same rationale as MAX_TRACKED_DELTA_EVENTS, for reasoningDeltaEventIds.
+const MAX_TRACKED_REASONING_DELTA_EVENTS = 4096;
+// PR #228 review, F002: same redelivery hazard as MAX_TRACKED_DELTA_EVENTS
+// (an SSE Last-Event-ID reconnect can replay an event this session already
+// saw), applied to `permission.asked` requestIDs — see SessionState's
+// `respondedPermissions`. Permission prompts are far rarer than deltas
+// within one attempt, so a smaller cap than MAX_TRACKED_DELTA_EVENTS is
+// still generous; sized to MAX_TRACKED_MESSAGES for the same "one order of
+// magnitude above anything a real attempt produces" reasoning. Unlike every
+// OTHER bounded set here, reaching this cap does NOT evict the oldest id via
+// `rememberId` — round 2 of the same review: an evicted requestID is
+// indistinguishable from an unseen one, so its later redelivery would slip
+// past the dedupe guard and fire a second reply. The attempt fails closed
+// instead once this many distinct prompts have been answered in one turn.
+const MAX_TRACKED_PERMISSION_REQUESTS = MAX_TRACKED_MESSAGES;
+// An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
+// newer one already landed (e.g. "running" replayed after "completed" was
+// already observed) — `previousStatus !== status` alone would credit that
+// replay as a transition, since it genuinely differs from what is stored.
+// Rank makes only FORWARD movement count: `completed` and `error` share a
+// rank because both are terminal outcomes and neither outranks the other, so
+// one following the other (in either direction) is not progress either.
+const TOOL_STATUS_RANK: Record<
+  "pending" | "running" | "completed" | "error",
+  number
+> = {
+  pending: 0,
+  running: 1,
+  completed: 2,
+  error: 2,
+};
 
-export function createTurnState(): OpenCodeTurnState {
+export function createTurnState(
+  sessionId?: string,
+  currentUserId?: string,
+  expectedCwd?: string,
+): OpenCodeTurnState {
   return {
+    sessionId,
+    currentUserId,
+    expectedCwd,
     assistantMessages: new Set(),
     parts: new Map(),
-    toolCalls: new Set(),
+    partDetails: new Map(),
+    messageDetails: new Map(),
+    parentLinks: new Map(),
+    toolStates: new Map(),
+    toolActivityRank: new Map(),
+    tombstones: new Set(),
+    unknownOwnerBuffer: [],
+    deltaEventIds: new Set(),
+    reasoningDeltaEventIds: new Set(),
     usage: new Map(),
+    completedUsage: new Set(),
+    payloadBytes: new Map(),
+    trackedPartOwners: new Map(),
+    evictedUsageIds: new Set(),
+    usageCapped: false,
+    usageConflict: false,
+    usageIncomplete: false,
     carriedUsage: {},
     boundaryReported: false,
   };
+}
+
+function failIntegrity(state: OpenCodeTurnState, detail: string): never {
+  state.integrityFailure = `[pr-hero] opencode client: ${detail}`;
+  throw new Error(state.integrityFailure);
+}
+
+function canonicalDirectory(path: string): string {
+  // Canonicalize existing symlinks, while keeping pure fixtures and a removed
+  // checkout deterministic. Neither spelling can authorize another directory.
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function trackPayload(
+  state: OpenCodeTurnState,
+  key: string,
+  value: unknown,
+): void {
+  const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  let total = bytes;
+  for (const [id, size] of state.payloadBytes) if (id !== key) total += size;
+  if (total > MAX_READBACK_BYTES)
+    failIntegrity(state, "observation byte budget exceeded");
+  state.payloadBytes.set(key, bytes);
+}
+
+function trackPart(
+  state: OpenCodeTurnState,
+  part: Record<string, unknown>,
+  messageId: string,
+): void {
+  const id = part.id;
+  if (
+    typeof id !== "string" ||
+    part.messageID !== messageId ||
+    (state.sessionId !== undefined && part.sessionID !== state.sessionId)
+  ) {
+    failIntegrity(state, "part ownership mismatch or missing identity");
+  }
+  if (state.tombstones.has(id))
+    failIntegrity(state, "required part reappeared after removal");
+  const owner = state.trackedPartOwners.get(id);
+  if (owner !== undefined && owner !== messageId)
+    failIntegrity(state, "part identity changed ownership");
+  if (
+    owner === undefined &&
+    state.trackedPartOwners.size >= MAX_TRACKED_PARTS
+  ) {
+    failIntegrity(state, "maximum tracked parts exceeded");
+  }
+  trackPayload(state, `part:${id}`, part);
+  state.trackedPartOwners.set(id, messageId);
+}
+
+function trackMessage(
+  state: OpenCodeTurnState,
+  info: Record<string, unknown>,
+): void {
+  const id = info.id;
+  if (
+    typeof id !== "string" ||
+    (state.sessionId !== undefined && info.sessionID !== state.sessionId)
+  ) {
+    failIntegrity(state, "message ownership mismatch or missing identity");
+  }
+  const previous = state.messageDetails.get(id);
+  if (
+    previous !== undefined &&
+    (previous.role !== info.role ||
+      (previous.parentID !== undefined && previous.parentID !== info.parentID))
+  ) {
+    failIntegrity(state, "message identity changed role or parent");
+  }
+  if (
+    !state.payloadBytes.has(`message:${id}`) &&
+    [...state.payloadBytes.keys()].filter((key) => key.startsWith("message:"))
+      .length >= MAX_TRACKED_MESSAGES
+  ) {
+    failIntegrity(state, "message cap exceeded (cap exhaustion)");
+  }
+  const path = asRecord(info.path);
+  if (
+    info.role === "assistant" &&
+    state.expectedCwd !== undefined &&
+    (typeof path?.cwd !== "string" ||
+      canonicalDirectory(path.cwd) !== canonicalDirectory(state.expectedCwd))
+  ) {
+    failIntegrity(state, "message cwd mismatch or unavailable");
+  }
+  trackPayload(state, `message:${id}`, info);
+}
+
+export function isMessageOwned(
+  messageId: string,
+  state: OpenCodeTurnState,
+): boolean {
+  if (state.currentUserId === undefined) return false;
+  if (messageId === state.currentUserId) return true;
+  let current: string | undefined = state.parentLinks.get(messageId);
+  const visited = new Set<string>();
+  while (current !== undefined) {
+    if (visited.has(current)) return false;
+    visited.add(current);
+    if (current === state.currentUserId) return true;
+    current = state.parentLinks.get(current);
+  }
+  return false;
+}
+
+export function hasOutstandingTools(state: OpenCodeTurnState): boolean {
+  for (const status of state.toolStates.values()) {
+    if (status === "pending" || status === "running") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function evaluateFinalAssistant(
+  info: unknown,
+  state: OpenCodeTurnState,
+): { valid: boolean; reason?: string } {
+  const message = asRecord(info);
+  if (message?.role !== "assistant") {
+    return { valid: false, reason: "not an assistant message" };
+  }
+  const id = typeof message.id === "string" ? message.id : undefined;
+  if (!id) return { valid: false, reason: "missing id" };
+
+  if (
+    state.sessionId !== undefined &&
+    message.sessionID !== undefined &&
+    message.sessionID !== state.sessionId
+  ) {
+    return { valid: false, reason: "cross-session message mismatch" };
+  }
+
+  if (state.tombstones.has(id)) {
+    return { valid: false, reason: "message tombstoned" };
+  }
+
+  const completed = asNumber(asRecord(message.time)?.completed);
+  if (completed === undefined) {
+    return { valid: false, reason: "not completed" };
+  }
+
+  if (message.error !== undefined) {
+    return { valid: true };
+  }
+
+  if (message.finish !== "stop") {
+    return {
+      valid: false,
+      reason: `unsupported finish: ${String(message.finish)}`,
+    };
+  }
+
+  if (hasOutstandingTools(state)) {
+    return { valid: false, reason: "outstanding tools in progress" };
+  }
+
+  if (!isMessageOwned(id, state)) {
+    return { valid: false, reason: "missing or invalid ownership" };
+  }
+
+  return { valid: true };
 }
 
 function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
@@ -232,10 +579,6 @@ function remember<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
   }
 }
 
-// Field-wise addition, and every field is INDEPENDENT: a field stays absent
-// unless at least one step reported it. The mapper has never invented a zero,
-// and a fabricated 0 would be indistinguishable from a real one to §8's
-// "unavailable vs proven zero" distinction downstream.
 function addField(
   base: number | undefined,
   step: number | undefined,
@@ -255,41 +598,73 @@ function addUsage(base: StepUsage, step: StepUsage): StepUsage {
   };
 }
 
-// The usage map's OWN eviction path, deliberately not the generic `remember`.
-// A generic helper shared with `state.parts` would have to grow an eviction
-// callback that exactly one of its two callers passes, and an optional hook
-// that silently changes what a caller keeps is the same hazard as an absent
-// tool key in resolveToolMap: the question gets made moot instead of answered.
-// Parts want the evicted entry GONE — an id no delta can still name — while
-// usage wants its value kept and its key forgotten. Those are different needs
-// and they get different code.
-//
-// A message evicted and then restated is counted twice, and that is the
-// accepted residual: bounded memory over an unbounded id space cannot dedupe
-// perfectly, and the leftover error is an OVER-count — spend made visible,
-// never hidden, which is the direction this transport chooses everywhere else.
 function rememberUsage(
   state: OpenCodeTurnState,
   messageId: string,
   usage: StepUsage,
+  completed = false,
 ): void {
+  if (state.evictedUsageIds.has(messageId)) {
+    state.usageCapped = true;
+    state.usageIncomplete = true;
+    return;
+  }
+  const existing = state.usage.get(messageId);
+  const wasCompleted = state.completedUsage.has(messageId);
+  if (completed) state.completedUsage.add(messageId);
+  if (existing !== undefined) {
+    const costConflict =
+      existing.costUsd !== undefined &&
+      usage.costUsd !== undefined &&
+      (usage.costUsd < existing.costUsd ||
+        (wasCompleted && usage.costUsd !== existing.costUsd));
+    const tokenConflict =
+      (existing.inputTokens !== undefined &&
+        usage.inputTokens !== undefined &&
+        (usage.inputTokens < existing.inputTokens ||
+          (wasCompleted && usage.inputTokens !== existing.inputTokens))) ||
+      (existing.outputTokens !== undefined &&
+        usage.outputTokens !== undefined &&
+        (usage.outputTokens < existing.outputTokens ||
+          (wasCompleted && usage.outputTokens !== existing.outputTokens)));
+    if (costConflict || tokenConflict) {
+      state.usageConflict = true;
+      state.usageIncomplete = true;
+    }
+    const mergedInput =
+      existing.inputTokens !== undefined || usage.inputTokens !== undefined
+        ? Math.max(existing.inputTokens ?? 0, usage.inputTokens ?? 0)
+        : undefined;
+    const mergedOutput =
+      existing.outputTokens !== undefined || usage.outputTokens !== undefined
+        ? Math.max(existing.outputTokens ?? 0, usage.outputTokens ?? 0)
+        : undefined;
+    const mergedCost =
+      existing.costUsd !== undefined || usage.costUsd !== undefined
+        ? Math.max(existing.costUsd ?? 0, usage.costUsd ?? 0)
+        : undefined;
+    state.usage.set(messageId, {
+      ...(mergedInput !== undefined ? { inputTokens: mergedInput } : {}),
+      ...(mergedOutput !== undefined ? { outputTokens: mergedOutput } : {}),
+      ...(mergedCost !== undefined ? { costUsd: mergedCost } : {}),
+    });
+    return;
+  }
   state.usage.set(messageId, usage);
   while (state.usage.size > MAX_TRACKED_MESSAGES) {
     const oldest = state.usage.keys().next();
     if (oldest.done === true) return;
     const evicted = state.usage.get(oldest.value);
     state.usage.delete(oldest.value);
-    // Folded BEFORE the entry is unreachable, so no path deletes a value the
-    // carried total has not already absorbed.
     if (evicted !== undefined) {
       state.carriedUsage = addUsage(state.carriedUsage, evicted);
+      rememberId(state.evictedUsageIds, oldest.value, MAX_TRACKED_MESSAGES);
+      state.usageCapped = true;
+      state.usageIncomplete = true;
     }
   }
 }
 
-// The turn's figure: everything the map has forgotten, plus every step
-// message's LATEST snapshot still in it. Starting from the carried total is
-// what makes the cap a memory bound rather than an accounting one.
 function turnUsage(state: OpenCodeTurnState): StepUsage {
   let total = state.carriedUsage;
   for (const step of state.usage.values()) total = addUsage(total, step);
@@ -305,221 +680,936 @@ function rememberId(set: Set<string>, id: string, cap: number): void {
   }
 }
 
-// Returns a LIST because one raw event can carry two facts: the assistant's
-// completed `message.updated` is both the attempt's real usage figure and its
-// terminal proof. Usage is emitted FIRST so the transport has banked it before
-// the terminal can settle the attempt out from under it.
-//
-// STATEFUL since #124, and the index is a REQUIRED parameter rather than an
-// optional one. An optional index would need a default for "no index", and
-// both available defaults are wrong: accepting every delta is the defect, and
-// dropping every delta is an empty answer. An absent argument that silently
-// changes what the mapper harvests is the same hazard as the absent tool key
-// in resolveToolMap — the question is made moot instead of answered.
+function handlePartUpdated(
+  p: Record<string, unknown>,
+  state: OpenCodeTurnState,
+): OpenCodeClientEvent[] {
+  const part = asRecord(p.part);
+  if (!part) return [];
+  const partId = typeof part.id === "string" ? part.id : undefined;
+  const messageId =
+    typeof part.messageID === "string" ? part.messageID : undefined;
+  if (!partId || !messageId) return [];
+  trackPart(state, part, messageId);
+
+  if (state.tombstones.has(partId) || state.tombstones.has(messageId)) {
+    return [];
+  }
+
+  // If message owner is unknown, buffer observation
+  if (
+    !state.messageDetails.has(messageId) &&
+    !state.assistantMessages.has(messageId)
+  ) {
+    if (state.unknownOwnerBuffer.length >= MAX_UNKNOWN_OWNER_BUFFER) {
+      state.integrityFailure =
+        "[pr-hero] opencode client: unknown-owner buffer cap exceeded (cap exhaustion)";
+      throw new Error(state.integrityFailure);
+    }
+    state.unknownOwnerBuffer.push({
+      type: "part.updated",
+      partId,
+      messageId,
+      raw: p,
+    });
+    return [];
+  }
+
+  if (!isMessageOwned(messageId, state)) return [];
+  const msgDetail = state.messageDetails.get(messageId);
+  if (msgDetail && !msgDetail.partIds.includes(partId)) {
+    msgDetail.partIds.push(partId);
+  }
+
+  const partType = part.type;
+  if (partType === "tool") {
+    const toolState = asRecord(part.state);
+    const status = toolState?.status as
+      | "pending"
+      | "running"
+      | "completed"
+      | "error"
+      | undefined;
+    const callId = typeof part.callID === "string" ? part.callID : partId;
+    let transitioned = false;
+    if (status) {
+      if (
+        !state.toolStates.has(callId) &&
+        state.toolStates.size >= MAX_TRACKED_PARTS
+      )
+        failIntegrity(state, "tool identity cap exceeded");
+      // `state.toolStates` still stores the raw reported status regardless
+      // of rank — other logic (e.g. `hasOutstandingTools`) reads it and
+      // must keep seeing the provider's literal last-known status, not a
+      // rank-filtered one. Only whether `activity` is EMITTED changes below.
+      state.toolStates.set(callId, status);
+      // #228's review: credit is computed against `toolActivityRank`, a map
+      // owned ONLY by this stream path — NEVER against `toolStates`, which
+      // `reconcileMessages` (the poll readback) also writes unconditionally.
+      // Three concurrent hunters sharing one server can have a poll round
+      // observe a tool's "completed" before the stream ever delivers that
+      // same tool's "pending"/"running". Comparing against `toolStates`
+      // would then compare the stream's real "pending" against the rank the
+      // POLL already advanced to "completed", crediting nothing for work
+      // the stream is only now reporting.
+      const previousRank = state.toolActivityRank.get(callId) ?? -1;
+      const newRank = TOOL_STATUS_RANK[status];
+      transitioned = newRank > previousRank;
+      if (transitioned)
+        remember(state.toolActivityRank, callId, newRank, MAX_TRACKED_PARTS);
+    }
+    if (msgDetail) msgDetail.hasToolCalls = true;
+    // Ownership was already established above (the `isMessageOwned` check
+    // before this switch), so a NOVEL status transition here is real
+    // provider work — the tool actually moved pending -> running ->
+    // completed/error. Re-observing the SAME status (a re-delivered or
+    // redundant update) is not new work and earns nothing. Before this, tool
+    // execution time counted as silence: this branch emitted no client
+    // event at all, transition or not.
+    const events: OpenCodeClientEvent[] = [];
+    if (transitioned) {
+      events.push({ kind: "activity" });
+      // #214: count a LOOK, not an announcement. Gated on `transitioned` —
+      // computed above off `toolActivityRank`, the STREAM-owned forward rank
+      // — and deliberately NOT off `toolStates` (which `reconcileMessages`,
+      // the poll readback, also writes unconditionally). Three concurrent
+      // hunters sharing one server can have a poll round observe a tool's
+      // "completed" before the stream ever delivers that same tool's
+      // "pending"/"running"; reading `toolStates` here would let the poll's
+      // race silently swallow the stream's own real "completed" transition
+      // and undercount a hunter that plainly looked. `transitioned` already
+      // means "a genuinely NOVEL forward step the stream itself watched
+      // happen" — restating "completed" or moving through "error" (same rank
+      // as "completed", see TOOL_STATUS_RANK) leaves it false, so this stays
+      // a look counted once per callID for free. "error" is excluded on
+      // purpose: it produced no findable signal to reason from, and no test
+      // has asked for an errored call to count as "looked".
+      if (status === "completed") {
+        const tool =
+          typeof part.tool === "string" && part.tool.length > 0
+            ? part.tool
+            : "unknown";
+        events.push({ kind: "tool", tool });
+      }
+    }
+    return events;
+  }
+
+  if (partType === "reasoning") {
+    if (!isMessageOwned(messageId, state)) return [];
+    const previous = state.partDetails.get(partId)?.text ?? "";
+    const text = typeof part.text === "string" ? part.text : "";
+    remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
+    state.partDetails.set(partId, {
+      id: partId,
+      messageId,
+      type: "reasoning",
+      text: text.startsWith(previous) ? text : previous,
+      emittedText: "",
+    });
+    // An owned cumulative snapshot proving advancement is useful, and so —
+    // see `handlePartDelta`'s reasoning branch below — is a DELTA carrying a
+    // provider event id not seen before: PR #227 threaded that id through,
+    // which is exactly the replay identity this comment used to say a bare
+    // delta marker lacked. An id-less delta still has none and stays a bare
+    // marker there.
+    return [
+      {
+        kind: "reasoning",
+        progress: text.length > previous.length && text.startsWith(previous),
+      },
+    ];
+  }
+
+  if (msgDetail?.role === "user" || !state.assistantMessages.has(messageId)) {
+    return [];
+  }
+
+  if (partType === "text") {
+    const isSynthetic = part.synthetic === true;
+    const isIgnored = part.ignored === true;
+    const isIntermediateToolStep = msgDetail?.hasToolCalls === true;
+
+    if (isSynthetic || isIgnored || isIntermediateToolStep) {
+      return [];
+    }
+
+    remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
+
+    let detail = state.partDetails.get(partId);
+    if (!detail) {
+      detail = {
+        id: partId,
+        messageId,
+        type: "text",
+        synthetic: isSynthetic,
+        ignored: isIgnored,
+        emittedText: "",
+      };
+      state.partDetails.set(partId, detail);
+    }
+
+    const snapshotText = typeof part.text === "string" ? part.text : undefined;
+    if (snapshotText !== undefined && snapshotText.length > 0) {
+      detail.text = snapshotText;
+      const alreadyEmitted = detail.emittedText;
+      if (alreadyEmitted === snapshotText) {
+        return [];
+      }
+      if (alreadyEmitted.length === 0) {
+        detail.emittedText = snapshotText;
+        return [{ kind: "delta", text: snapshotText }];
+      }
+      if (snapshotText.startsWith(alreadyEmitted)) {
+        const suffix = snapshotText.slice(alreadyEmitted.length);
+        detail.emittedText = snapshotText;
+        return [{ kind: "delta", text: suffix }];
+      }
+      state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot observed for part ${partId}`;
+      throw new Error(state.integrityFailure);
+    }
+  }
+
+  return [];
+}
+
+function handlePartDelta(
+  p: Record<string, unknown>,
+  state: OpenCodeTurnState,
+  eventId?: string,
+): OpenCodeClientEvent[] {
+  if (p.field !== "text") return [];
+  const delta = p.delta;
+  if (typeof delta !== "string" || delta.length === 0) return [];
+  const partId = p.partID;
+  if (typeof partId !== "string") return [];
+  const messageId = typeof p.messageID === "string" ? p.messageID : undefined;
+  if (messageId === undefined)
+    failIntegrity(state, "delta missing message identity");
+  trackPart(state, { ...p, id: partId }, messageId);
+
+  if (
+    state.tombstones.has(partId) ||
+    (messageId && state.tombstones.has(messageId))
+  ) {
+    return [];
+  }
+
+  const kind = state.parts.get(partId);
+  if (kind === "reasoning") {
+    if (!messageId || !isMessageOwned(messageId, state)) return [];
+    // #227 threaded the provider event id through this handler (the
+    // `eventId` parameter), which is exactly the replay identity f842a8b
+    // said a bare reasoning delta marker lacked ("bare delta markers have no
+    // replay identity and cannot extend the deadline" — the old comment
+    // here, and still true for an id-less delta). A delta whose id has not
+    // been seen before is real, novel work the model did; the SAME id
+    // redelivered (an SSE Last-Event-ID reconnect) is not. Unlike the answer
+    // branch below, nothing is accumulated into any tracked text either way
+    // — a redelivered id just falls back to the bare marker, never a
+    // corrupted `emittedText` or a "conflicting snapshot" throw.
+    if (eventId !== undefined && !state.reasoningDeltaEventIds.has(eventId)) {
+      rememberId(
+        state.reasoningDeltaEventIds,
+        eventId,
+        MAX_TRACKED_REASONING_DELTA_EVENTS,
+      );
+      return [{ kind: "reasoning", progress: true }];
+    }
+    return [{ kind: "reasoning" }];
+  }
+  if (kind === "answer") {
+    if (!isMessageOwned(messageId, state)) return [];
+    // Identity for dedup is the provider event id, not the delta's text.
+    // The SDK's SSE client reconnects with `Last-Event-ID`
+    // (serverSentEvents.gen.js) and can redeliver the same event verbatim,
+    // but text is the wrong signal to detect that with: a prior version of
+    // this check dropped any delta that merely repeated the tail already
+    // emitted, which also matches a legitimately repeated token (e.g. "b"
+    // after "b" in "a","b","b","c", or a second "}" closing nested JSON).
+    // That either corrupted the delivered text (when no snapshot ever
+    // arrived to reveal the gap) or threw "conflicting snapshot observed"
+    // once one did. An event with no id — or a non-string one — carries no
+    // identity to compare, so it is always treated as novel rather than
+    // assumed a duplicate.
+    if (eventId !== undefined && state.deltaEventIds.has(eventId)) {
+      return [];
+    }
+    let detail = state.partDetails.get(partId);
+    if (!detail) {
+      detail = {
+        id: partId,
+        messageId,
+        type: "text",
+        emittedText: "",
+      };
+      state.partDetails.set(partId, detail);
+    }
+    if (
+      Buffer.byteLength(delta, "utf8") > 64 * 1024 ||
+      Buffer.byteLength(detail.emittedText + delta, "utf8") > 1024 * 1024
+    )
+      failIntegrity(state, "delta or answer byte limit exceeded");
+    trackPayload(state, `retained:${partId}`, {
+      text: detail.emittedText + delta,
+    });
+    detail.emittedText += delta;
+    // Recorded only now that the delta is actually applied — never when
+    // first buffered for an unknown owner — so a buffered delta that later
+    // reconciles is not mistaken for its own duplicate.
+    if (eventId !== undefined) {
+      rememberId(state.deltaEventIds, eventId, MAX_TRACKED_DELTA_EVENTS);
+    }
+    return [{ kind: "delta", text: delta }];
+  }
+
+  if (
+    messageId &&
+    !state.messageDetails.has(messageId) &&
+    !state.assistantMessages.has(messageId)
+  ) {
+    if (state.unknownOwnerBuffer.length >= MAX_UNKNOWN_OWNER_BUFFER) {
+      state.integrityFailure =
+        "[pr-hero] opencode client: unknown-owner buffer cap exceeded (cap exhaustion)";
+      throw new Error(state.integrityFailure);
+    }
+    state.unknownOwnerBuffer.push({
+      type: "part.delta",
+      partId,
+      messageId,
+      raw: p,
+      eventId,
+    });
+  }
+
+  return [];
+}
+
+function reconcileUnknownOwnerBuffer(
+  messageId: string,
+  state: OpenCodeTurnState,
+): OpenCodeClientEvent[] {
+  const events: OpenCodeClientEvent[] = [];
+  const remaining: UnknownOwnerObservation[] = [];
+  for (const obs of state.unknownOwnerBuffer) {
+    if (obs.messageId === messageId) {
+      if (obs.type === "part.updated") {
+        events.push(...handlePartUpdated(obs.raw, state));
+      } else if (obs.type === "part.delta") {
+        events.push(...handlePartDelta(obs.raw, state, obs.eventId));
+      }
+    } else {
+      remaining.push(obs);
+    }
+  }
+  state.unknownOwnerBuffer.length = 0;
+  state.unknownOwnerBuffer.push(...remaining);
+  return events;
+}
+
+export function reconcileMessages(
+  list: unknown[],
+  state: OpenCodeTurnState,
+  // #223: `emit` gates ONLY the per-part "already delivered" bookkeeping
+  // below (the loop that pushes `delta` events and advances
+  // `detail.emittedText`). Every other effect of a call — trackMessage/
+  // trackPart identity checks, usage, errors, `detail.text` snapshot storage
+  // — always runs, because a caller that discards the returned `events` still
+  // needs those ingested. Defaults to true so every existing caller (the poll
+  // readback at pollStatus, and every direct test) keeps today's behaviour.
+  options?: { readonly emit?: boolean },
+): {
+  events: OpenCodeClientEvent[];
+  terminalProof?: ProviderTerminalProof;
+  finalText?: string;
+  usage?: StepUsage;
+  usageIncomplete?: boolean;
+  failure?: string;
+} {
+  const emit = options?.emit ?? true;
+  if (
+    list.length > MAX_TRACKED_MESSAGES ||
+    state.messageDetails.size > MAX_TRACKED_MESSAGES
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: message cap exceeded (cap exhaustion)";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  if (
+    state.parts.size > MAX_TRACKED_PARTS ||
+    state.partDetails.size > MAX_TRACKED_PARTS
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: maximum tracked parts exceeded";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  try {
+    if (Buffer.byteLength(JSON.stringify(list), "utf8") > MAX_READBACK_BYTES) {
+      failIntegrity(state, "total readback byte budget exceeded");
+    }
+    const seenMessages = new Set<string>();
+    const seenParts = new Set<string>();
+    for (const item of list) {
+      const rec = asRecord(item);
+      const info = asRecord(rec?.info ?? item);
+      if (!info) failIntegrity(state, "invalid readback message");
+      trackMessage(state, info);
+      if (seenMessages.has(String(info.id)))
+        failIntegrity(state, "duplicate message in readback");
+      seenMessages.add(String(info.id));
+      if (info.role === "assistant" && !Array.isArray(rec?.parts)) {
+        failIntegrity(state, "unknown readback parts coverage");
+      }
+      for (const value of Array.isArray(rec?.parts) ? rec.parts : []) {
+        const part = asRecord(value);
+        if (!part) failIntegrity(state, "invalid readback part");
+        trackPart(state, part, String(info.id));
+        if (seenParts.has(String(part.id)))
+          failIntegrity(state, "duplicate part in readback");
+        seenParts.add(String(part.id));
+      }
+    }
+  } catch {
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  for (const item of list) {
+    const itemRec = asRecord(item);
+    const info = asRecord(itemRec?.info ?? item);
+    if (!info) continue;
+    const id = typeof info.id === "string" ? info.id : undefined;
+    const role = info.role;
+    if (!id) continue;
+
+    if (role === "user") {
+      if (!state.messageDetails.has(id)) {
+        state.messageDetails.set(id, { id, role: "user", partIds: [] });
+      }
+    } else if (role === "assistant") {
+      rememberId(state.assistantMessages, id, MAX_TRACKED_MESSAGES);
+      const parentID =
+        typeof info.parentID === "string" ? info.parentID : undefined;
+      if (parentID) state.parentLinks.set(id, parentID);
+
+      const finish = typeof info.finish === "string" ? info.finish : undefined;
+      const isToolCalls = finish === "tool-calls" || finish === "tool_calls";
+      const sessionID =
+        typeof info.sessionID === "string"
+          ? info.sessionID
+          : typeof itemRec?.sessionID === "string"
+            ? (itemRec.sessionID as string)
+            : undefined;
+      let msgDetail = state.messageDetails.get(id);
+      if (!msgDetail) {
+        msgDetail = {
+          id,
+          role: "assistant",
+          sessionID,
+          parentID,
+          time: asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined,
+          finish,
+          error: info.error,
+          hasToolCalls: isToolCalls,
+          partIds: [],
+        };
+        state.messageDetails.set(id, msgDetail);
+      } else {
+        msgDetail.sessionID = sessionID ?? msgDetail.sessionID;
+        msgDetail.parentID = parentID ?? msgDetail.parentID;
+        msgDetail.finish = finish ?? msgDetail.finish;
+        msgDetail.error = info.error ?? msgDetail.error;
+        msgDetail.time =
+          (asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined) ?? msgDetail.time;
+        if (isToolCalls) msgDetail.hasToolCalls = true;
+      }
+
+      if (!isMessageOwned(id, state)) continue;
+      const tokens = asRecord(info.tokens);
+      const inputTokens = asNumber(tokens?.input);
+      const outputTokens = asNumber(tokens?.output);
+      const costUsd = asNumber(info.cost);
+      if (
+        inputTokens !== undefined ||
+        outputTokens !== undefined ||
+        costUsd !== undefined
+      ) {
+        rememberUsage(
+          state,
+          id,
+          {
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+            ...(costUsd !== undefined ? { costUsd } : {}),
+          },
+          asNumber(asRecord(info.time)?.completed) !== undefined,
+        );
+      }
+
+      const parts = Array.isArray(itemRec?.parts)
+        ? (itemRec?.parts as unknown[])
+        : Array.isArray(info.content)
+          ? (info.content as unknown[])
+          : [];
+      const readbackPartIds: string[] = [];
+      for (const p of parts) {
+        const part = asRecord(p);
+        if (!part) continue;
+        const partId = typeof part.id === "string" ? part.id : undefined;
+        if (!partId) continue;
+        if (!readbackPartIds.includes(partId)) readbackPartIds.push(partId);
+
+        const partType = part.type;
+        if (partType === "tool") {
+          const toolState = asRecord(part.state);
+          const status = toolState?.status as
+            | "pending"
+            | "running"
+            | "completed"
+            | "error"
+            | undefined;
+          const callId = typeof part.callID === "string" ? part.callID : partId;
+          if (status) {
+            if (
+              !state.toolStates.has(callId) &&
+              state.toolStates.size >= MAX_TRACKED_PARTS
+            )
+              failIntegrity(state, "tool identity cap exceeded");
+            state.toolStates.set(callId, status);
+          }
+          msgDetail.hasToolCalls = true;
+          // #214, known gap: this write feeds `hasOutstandingTools` (so a
+          // message the poll alone has seen is not declared final while a
+          // tool is still pending/running) but this call site is always
+          // `emit: false` — see the WHY comment at both its call sites — so a
+          // completion this observer is the FIRST to see never produces a
+          // `{kind:"tool"}` count event the way the stream path does. #214's
+          // original design had no poll observer at all, so this is not a
+          // regression; it stays a narrow gap (only reachable if the stream
+          // never once delivers a tool part the poll independently completes)
+          // rather than a second counting path to keep in sync with the
+          // stream's.
+        } else if (partType === "reasoning") {
+          if (
+            !state.parts.has(partId) &&
+            state.parts.size >= MAX_TRACKED_PARTS
+          ) {
+            state.integrityFailure =
+              "[pr-hero] opencode client: maximum tracked parts exceeded";
+            return { events: [], failure: state.integrityFailure };
+          }
+          state.parts.set(partId, "reasoning");
+        } else if (partType === "text") {
+          const isSynthetic = part.synthetic === true;
+          const isIgnored = part.ignored === true;
+          if (!isSynthetic && !isIgnored && !msgDetail.hasToolCalls) {
+            if (
+              !state.parts.has(partId) &&
+              state.parts.size >= MAX_TRACKED_PARTS
+            ) {
+              state.integrityFailure =
+                "[pr-hero] opencode client: maximum tracked parts exceeded";
+              return { events: [], failure: state.integrityFailure };
+            }
+            state.parts.set(partId, "answer");
+            let detail = state.partDetails.get(partId);
+            if (!detail) {
+              if (state.partDetails.size >= MAX_TRACKED_PARTS) {
+                state.integrityFailure =
+                  "[pr-hero] opencode client: maximum tracked parts exceeded";
+                return { events: [], failure: state.integrityFailure };
+              }
+              detail = {
+                id: partId,
+                messageId: id,
+                type: "text",
+                emittedText: "",
+              };
+              state.partDetails.set(partId, detail);
+            }
+            if (typeof part.text === "string") {
+              detail.text = part.text;
+            }
+          }
+        }
+      }
+      if (Array.isArray(itemRec?.parts) || Array.isArray(info.content)) {
+        msgDetail.partIds = readbackPartIds;
+      }
+    }
+  }
+
+  if (
+    state.parts.size > MAX_TRACKED_PARTS ||
+    state.partDetails.size > MAX_TRACKED_PARTS
+  ) {
+    state.integrityFailure =
+      "[pr-hero] opencode client: maximum tracked parts exceeded";
+    return { events: [], failure: state.integrityFailure };
+  }
+
+  // Check missing usage across all completed assistant steps
+  for (const msg of state.messageDetails.values()) {
+    if (msg.role === "assistant" && isMessageOwned(msg.id, state)) {
+      const stepUsage = state.usage.get(msg.id);
+      if (
+        msg.time?.completed === undefined ||
+        stepUsage === undefined ||
+        stepUsage.costUsd === undefined ||
+        stepUsage.inputTokens === undefined ||
+        stepUsage.outputTokens === undefined
+      ) {
+        state.usageIncomplete = true;
+      }
+    }
+  }
+
+  const candidateIds: string[] = [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const itemRec = asRecord(list[i]);
+    const info = asRecord(itemRec?.info ?? list[i]);
+    if (info?.role === "assistant" && typeof info.id === "string") {
+      candidateIds.push(info.id);
+    }
+  }
+  if (candidateIds.length === 0) {
+    const allIds = Array.from(state.assistantMessages);
+    for (let i = allIds.length - 1; i >= 0; i -= 1) {
+      candidateIds.push(allIds[i]);
+    }
+  }
+
+  for (const id of candidateIds) {
+    const msgDetail = state.messageDetails.get(id);
+    if (!msgDetail) continue;
+
+    if (msgDetail.error !== undefined) {
+      const proof = terminalProofFromAssistant(msgDetail, state);
+      if (proof) return { events: [], terminalProof: proof, finalText: "" };
+    }
+
+    const evalRes = evaluateFinalAssistant(msgDetail, state);
+    if (!evalRes.valid) continue;
+
+    const proof = terminalProofFromAssistant(msgDetail, state);
+    if (proof === undefined) continue;
+
+    const events: OpenCodeClientEvent[] = [];
+    let canonicalFinalText = "";
+    for (const partId of msgDetail.partIds) {
+      const detail = state.partDetails.get(partId);
+      if (
+        detail &&
+        detail.type === "text" &&
+        !detail.synthetic &&
+        !detail.ignored
+      ) {
+        canonicalFinalText += detail.text ?? detail.emittedText ?? "";
+      }
+    }
+
+    // #223: this is the ONLY place in this function that advances
+    // `detail.emittedText` or produces a `delta` event, so it is exactly what
+    // `emit: false` must skip. Skipping it here rather than filtering the
+    // caller's returned `events` afterward keeps the invariant literal:
+    // `emittedText` cannot advance except in the same branch that hands a
+    // delta to the consumer, so a discard-only caller can never leave the
+    // "already delivered" bookkeeping ahead of what was actually delivered.
+    for (const partId of emit ? msgDetail.partIds : []) {
+      const detail = state.partDetails.get(partId);
+      if (
+        detail &&
+        detail.type === "text" &&
+        !detail.synthetic &&
+        !detail.ignored
+      ) {
+        const snapshotText = detail.text ?? "";
+        const alreadyEmitted = detail.emittedText;
+        if (alreadyEmitted === snapshotText) {
+          continue;
+        }
+        if (alreadyEmitted.length === 0) {
+          detail.emittedText = snapshotText;
+          events.push({ kind: "delta", text: snapshotText });
+        } else if (snapshotText.startsWith(alreadyEmitted)) {
+          const suffix = snapshotText.slice(alreadyEmitted.length);
+          detail.emittedText = snapshotText;
+          events.push({ kind: "delta", text: suffix });
+        } else {
+          state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot in readback for part ${partId}`;
+          return {
+            events: [],
+            failure: state.integrityFailure,
+          };
+        }
+      }
+    }
+
+    const totalUsage = turnUsage(state);
+    const isIncomplete =
+      state.usageIncomplete === true ||
+      state.usageConflict === true ||
+      state.usageCapped === true;
+
+    return {
+      events,
+      terminalProof: proof,
+      finalText: canonicalFinalText,
+      usage: totalUsage,
+      usageIncomplete: isIncomplete,
+    };
+  }
+
+  return { events: [] };
+}
+
+export const reconcilePartsAndDelivery = reconcileMessages;
+
 export function mapOpenCodeEvents(
   raw: unknown,
   sessionId: string,
   state: OpenCodeTurnState,
 ): OpenCodeClientEvent[] {
+  if (state.integrityFailure !== undefined) {
+    throw new Error(state.integrityFailure);
+  }
+
   const type = (raw as RawEvent)?.type;
   if (typeof type !== "string") return [];
   const p = props(raw);
   if (p === undefined) return [];
 
-  // TRAP 1: event.subscribe() is GLOBAL, not scoped to a session. One trivial
-  // prompt produced 71 events, 45 of them `plugin.added`. Every event that
-  // matters carries properties.sessionID and none of the noise does, so this
-  // one check is both the session filter and the noise filter.
   if (p.sessionID !== sessionId) return [];
 
   switch (type) {
-    // TRAP 2: text deltas come from `message.part.delta` ONLY.
-    // `message.part.updated` also fires for the USER message — the recorded
-    // one carried the prompt text itself — so an adapter that treated every
-    // text part as a delta would echo the prompt into finalText and hand it
-    // to StepSpec.parse as though the model had written it.
-    case "message.part.delta": {
-      if (p.field !== "text") return [];
-      const delta = p.delta;
-      if (typeof delta !== "string" || delta.length === 0) return [];
+    case "message.removed": {
+      const messageId = p.messageID;
+      if (typeof messageId === "string") {
+        if (
+          !state.tombstones.has(messageId) &&
+          state.tombstones.size >= MAX_TOMBSTONES
+        )
+          failIntegrity(state, "tombstone cap exceeded");
+        rememberId(state.tombstones, messageId, MAX_TOMBSTONES);
+        if (
+          messageId === state.currentUserId ||
+          (state.lastProof && state.lastProof.eventId === messageId)
+        ) {
+          state.integrityFailure = `[pr-hero] opencode client: required message removed: ${messageId}`;
+          throw new Error(state.integrityFailure);
+        }
+      }
+      return [];
+    }
+
+    case "message.part.removed": {
       const partId = p.partID;
-      if (typeof partId !== "string") return [];
-      // TRAP 4: the part's KIND decides, never the field name.
-      //
-      // An UNANNOUNCED part id is dropped, and that choice is deliberate. The
-      // recorded probe settles the ordering question it turns on: the part is
-      // announced by `message.part.updated` (type "text", text "") and only
-      // then delta'd, and its owning `message.updated` precedes that — so a
-      // delta whose part was never announced is not a race the provider is
-      // known to run. Both directions can be wrong, and they are not equally
-      // wrong: accepting an unannounced delta re-opens THIS bug for every part
-      // type the provider adds next, silently, while dropping one costs at
-      // worst an answer that arrives short — which fails the harness's parse
-      // loudly and buys a fresh attempt on the transient budget.
-      const kind = state.parts.get(partId);
-      if (kind === "answer") return [{ kind: "delta", text: delta }];
-      // Discarded HERE, at the boundary: the text does not travel, only the
-      // fact that it existed. Dropping it downstream instead would spend the
-      // answer's §4.2 content budget on text that is not the answer.
-      if (kind === "reasoning") return [{ kind: "reasoning" }];
+      if (typeof partId === "string") {
+        if (
+          !state.tombstones.has(partId) &&
+          state.tombstones.size >= MAX_TOMBSTONES
+        )
+          failIntegrity(state, "tombstone cap exceeded");
+        rememberId(state.tombstones, partId, MAX_TOMBSTONES);
+        const detail = state.partDetails.get(partId);
+        if (
+          detail &&
+          detail.type === "text" &&
+          (detail.emittedText.length > 0 ||
+            (detail.text && detail.text.length > 0))
+        ) {
+          state.integrityFailure = `[pr-hero] opencode client: required part removed: ${partId}`;
+          throw new Error(state.integrityFailure);
+        }
+      }
       return [];
     }
 
-    // Consumed for the part's TYPE, never for its content — the TRAP 2
-    // reasoning above is unchanged and this arm still maps to nothing. What it
-    // does is register what the following deltas are allowed to become.
+    case "message.part.delta": {
+      const rawId = (raw as RawEvent)?.id;
+      const eventId = typeof rawId === "string" ? rawId : undefined;
+      return handlePartDelta(p, state, eventId);
+    }
+
     case "message.part.updated": {
-      const part = asRecord(p.part);
-      const partId = part?.id;
-      const messageId = part?.messageID;
-      if (typeof partId !== "string" || typeof messageId !== "string") {
-        return [];
-      }
-      // Assistant-owned parts only. The user's message has a text part too,
-      // carrying the prompt itself, and it must never become a channel the
-      // answer can be assembled from.
-      if (!state.assistantMessages.has(messageId)) return [];
-      if (part?.type === "text") {
-        remember(state.parts, partId, "answer", MAX_TRACKED_PARTS);
-      } else if (part?.type === "reasoning") {
-        remember(state.parts, partId, "reasoning", MAX_TRACKED_PARTS);
-      } else if (part?.type === "tool") {
-        // Count a LOOK, not an announcement. `message.part.updated` restates
-        // pending → running → completed (or error) for the same callID; the
-        // live spark hunt on musive #1817 stamped tool_invocations: 2 off the
-        // first pending update, dumped `{"findings":[]}`, and posted a clean
-        // bill. Only `completed` is the instance fact "the tool ran".
-        const toolState = asRecord(part.state);
-        if (toolState?.status !== "completed") return [];
-        const callId =
-          typeof part.callID === "string" && part.callID.length > 0
-            ? part.callID
-            : partId;
-        if (state.toolCalls.has(callId)) return [];
-        rememberId(state.toolCalls, callId, MAX_TRACKED_PARTS);
-        const tool =
-          typeof part.tool === "string" && part.tool.length > 0
-            ? part.tool
-            : "unknown";
-        return [{ kind: "tool", tool }];
-      }
-      return [];
+      return handlePartUpdated(p, state);
     }
-
-    // `session.updated` is deliberately NOT a usage source. Its info.tokens
-    // stayed {input:0, output:0, ...} for the ENTIRE recorded run while the
-    // real figures (24012 in / 6 out) only ever appeared on the assistant
-    // message. Since §4.2 snapshot mode REPLACES the counters, a zero
-    // snapshot arriving after a real one would wipe the attempt's usage —
-    // silently, and in the direction that under-reports spend.
 
     case "message.updated": {
       const info = asRecord(p.info);
-      if (info === undefined || info.role !== "assistant") return [];
-      // Registered before the early returns below: this event is the ONLY
-      // place the provider says which message is the assistant's, and the
-      // part index needs that fact even on the mid-turn restatements that
-      // carry neither usage nor a proof.
-      if (typeof info.id === "string" && info.id.length > 0) {
-        rememberId(state.assistantMessages, info.id, MAX_TRACKED_MESSAGES);
-      }
-      const out: OpenCodeClientEvent[] = [];
+      if (info === undefined) return [];
+      const id = typeof info.id === "string" ? info.id : undefined;
+      if (!id) return [];
+      trackMessage(state, info);
 
-      // Usage rides the assistant message and is a SNAPSHOT: the MESSAGE's own
-      // running totals, restated. Emitted even mid-turn, where they are zeros
-      // — harmless, since a later restatement of the same message replaces
-      // them.
-      //
-      // #127: what is emitted is the TURN's snapshot, not the message's. One
-      // assistant message per agentic step means the attempt's REPLACE
-      // semantics would keep only the last step's counters and under-report a
-      // multi-step turn — in the direction that hides spend, which is the
-      // worst direction to be wrong in and the axis the #116 ledger is waiting
-      // on. Summing here rather than switching the attempt to `delta` mode is
-      // deliberate: the mode is fixed by the FIRST usage event and a later flip
-      // aborts the attempt, and a delta stream would have to reconstruct each
-      // message's increment from its own restatements anyway. Snapshot of a
-      // running sum keeps one mode for the whole attempt and stays correct
-      // under the duplicate completed message the probe records.
+      const role = info.role;
+
+      if (role === "user") {
+        state.messageDetails.set(id, { id, role: "user", partIds: [] });
+        return [];
+      }
+
+      if (role !== "assistant") return [];
+
+      rememberId(state.assistantMessages, id, MAX_TRACKED_MESSAGES);
+      const parentID =
+        typeof info.parentID === "string" ? info.parentID : undefined;
+      if (parentID) state.parentLinks.set(id, parentID);
+
+      const finish = typeof info.finish === "string" ? info.finish : undefined;
+      const isToolCalls = finish === "tool-calls" || finish === "tool_calls";
+      const sessionID =
+        typeof info.sessionID === "string"
+          ? info.sessionID
+          : typeof p.sessionID === "string"
+            ? (p.sessionID as string)
+            : undefined;
+      let msgDetail = state.messageDetails.get(id);
+      if (!msgDetail) {
+        msgDetail = {
+          id,
+          role: "assistant",
+          sessionID,
+          parentID,
+          time: asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined,
+          finish,
+          error: info.error,
+          hasToolCalls: isToolCalls,
+          partIds: [],
+        };
+        state.messageDetails.set(id, msgDetail);
+      } else {
+        msgDetail.sessionID = sessionID ?? msgDetail.sessionID;
+        msgDetail.parentID = parentID ?? msgDetail.parentID;
+        msgDetail.finish = finish ?? msgDetail.finish;
+        msgDetail.error = info.error ?? msgDetail.error;
+        msgDetail.time =
+          (asRecord(info.time) as
+            | { created?: number; completed?: number }
+            | undefined) ?? msgDetail.time;
+        if (isToolCalls) msgDetail.hasToolCalls = true;
+      }
+
+      if (!isMessageOwned(id, state)) return [];
+      const out: OpenCodeClientEvent[] = [];
+      out.push(...reconcileUnknownOwnerBuffer(id, state));
+
       const tokens = asRecord(info.tokens);
-      const messageId = typeof info.id === "string" ? info.id : undefined;
-      if (messageId !== undefined) {
-        const inputTokens = asNumber(tokens?.input);
-        const outputTokens = asNumber(tokens?.output);
-        const costUsd = asNumber(info.cost);
-        if (
-          inputTokens !== undefined ||
-          outputTokens !== undefined ||
-          costUsd !== undefined
-        ) {
-          rememberUsage(state, messageId, {
+      const inputTokens = asNumber(tokens?.input);
+      const outputTokens = asNumber(tokens?.output);
+      const costUsd = asNumber(info.cost);
+      if (
+        inputTokens !== undefined ||
+        outputTokens !== undefined ||
+        costUsd !== undefined
+      ) {
+        rememberUsage(
+          state,
+          id,
+          {
             ...(inputTokens !== undefined ? { inputTokens } : {}),
             ...(outputTokens !== undefined ? { outputTokens } : {}),
             ...(costUsd !== undefined ? { costUsd } : {}),
-          });
-          out.push({ kind: "usage", mode: "snapshot", ...turnUsage(state) });
-        }
+          },
+          asNumber(asRecord(info.time)?.completed) !== undefined,
+        );
+        out.push({
+          kind: "usage",
+          id,
+          mode: "snapshot",
+          ...(state.usageCapped || state.usageConflict || state.usageIncomplete
+            ? { incomplete: true }
+            : {}),
+          ...turnUsage(state),
+        });
       }
 
-      // Recorded, never emitted. A completed STEP is not a completed TURN
-      // (#127); this is the content the boundary will quote when it arrives.
-      const proof = terminalProofFromAssistant(info);
+      const proof = terminalProofFromAssistant(info, state);
       if (proof !== undefined) state.lastProof = proof;
       return out;
     }
 
-    // #127: THE turn boundary. `session.idle` fires exactly once for a whole
-    // agentic turn — measured on the live provider at three assistant messages
-    // to one idle — while `time.completed` fires once per STEP. Reading a step
-    // completion as the turn's terminal settled the attempt on step 1,
-    // harvested the model's plan narration as the answer and stopped a working
-    // model; that is every "hunter finished in 10-33s with one line" symptom.
-    //
-    // The §5.2/§3.2 objection to `session.idle` still stands and is respected:
-    // its whole payload is {sessionID}, so it supplies no proof and none is
-    // synthesised from it. It supplies only the BOUNDARY, and the proof quoted
-    // at that boundary is the provider's own completion record for the last
-    // step that finished. A turn that reached idle having completed nothing
-    // yields no terminal at all — the transport never issues its own proof,
-    // and the harness watchdog remains the backstop for a turn that can never
-    // produce one.
-    //
-    // Emitted from the mapper, not deferred to a quiet stream, so the terminal
-    // travels as an ordinary mapped event: streamEvents' drain-before-failure
-    // ordering is untouched and a buffered terminal still beats a failure. The
-    // recorded probe puts `session.idle` last (index 25, after both copies of
-    // the completed message at 21/22), so the last proof at the boundary is
-    // the turn's final one. If a build ever reordered them, the poll observer
-    // would quote the later message and §197 would raise a CONFLICT — loud,
-    // and exactly what that slot is for.
     case "session.idle": {
       if (state.boundaryReported) return [];
+      if (state.integrityFailure !== undefined) {
+        throw new Error(state.integrityFailure);
+      }
+      if (hasOutstandingTools(state)) return [];
+
       const proof = state.lastProof;
       if (proof === undefined) return [];
+      if (state.tombstones.has(proof.eventId)) {
+        state.integrityFailure = `[pr-hero] opencode client: terminal message was tombstoned: ${proof.eventId}`;
+        throw new Error(state.integrityFailure);
+      }
       state.boundaryReported = true;
-      return [{ kind: "terminal", proof }];
+
+      const out: OpenCodeClientEvent[] = [];
+      const msgDetail = state.messageDetails.get(proof.eventId);
+      if (msgDetail) {
+        for (const partId of msgDetail.partIds) {
+          if (state.tombstones.has(partId)) {
+            state.integrityFailure = `[pr-hero] opencode client: required part was tombstoned: ${partId}`;
+            throw new Error(state.integrityFailure);
+          }
+          const detail = state.partDetails.get(partId);
+          if (
+            detail &&
+            detail.type === "text" &&
+            !detail.synthetic &&
+            !detail.ignored
+          ) {
+            const snapshotText = detail.text ?? "";
+            if (snapshotText.length > 0) {
+              if (detail.emittedText.length === 0) {
+                detail.emittedText = snapshotText;
+                out.push({ kind: "delta", text: snapshotText });
+              } else if (snapshotText.startsWith(detail.emittedText)) {
+                const diff = snapshotText.slice(detail.emittedText.length);
+                if (diff.length > 0) {
+                  detail.emittedText = snapshotText;
+                  out.push({ kind: "delta", text: diff });
+                }
+              } else {
+                state.integrityFailure = `[pr-hero] opencode client: conflicting snapshot observed for part ${partId}`;
+                throw new Error(state.integrityFailure);
+              }
+            }
+          }
+        }
+      }
+
+      out.push({ kind: "terminal", proof });
+      return out;
     }
 
-    // A busy session is the provider saying it is still working — exactly what
-    // §4.2's heartbeat is for. A `retry` status is NOT a heartbeat: it is
-    // backoff, and it reaches the policy through retryHintFromStatus.
     case "session.status": {
       const status = asRecord(p.status);
+      // #157: checked BEFORE the busy/heartbeat arm below — a retry status
+      // naming an account/usage limit is not "still working", it is a fact
+      // that ends the attempt. Reached only for THIS session: the shared
+      // `p.sessionID !== sessionId` guard above already returned [] for
+      // every other one.
+      const limit = providerLimitFromStatus(status);
+      if (limit !== undefined) {
+        return [
+          {
+            kind: "provider_limit",
+            reason: limit.reason,
+            message: limit.message,
+          },
+        ];
+      }
       return status?.type === "busy" ? [{ kind: "heartbeat" }] : [];
     }
 
-    // TRAP 3, corrected by #127. `session.idle` used to be dropped here on the
-    // grounds that its payload ({sessionID} — no id, no status, no timestamp)
-    // cannot supply a proof. That grounds is still true and still honoured:
-    // the `session.idle` arm above synthesises nothing and quotes the
-    // provider's own completion record. What was wrong was the conclusion —
-    // dropping the event entirely left `time.completed` as the only terminal
-    // signal, and that is a STEP boundary, not a turn boundary.
-    //
-    // The predicate this file used to export for the same job (`isSessionIdle`)
-    // is gone with it: it had no caller anywhere in src, and biome does not
-    // flag an unused EXPORT, so it was dead code hiding behind a keyword. The
-    // arm above is the caller it was waiting for.
     default:
       return [];
   }
@@ -559,21 +1649,70 @@ export type OpenCodeSdkResult<T> =
 // not properties, on purpose — property-style function types are checked
 // contravariantly under `strict` and would reject the real client's generic
 // signatures for a reason that has nothing to do with conformance.
+export interface OpenCodeSdkPromptParameters {
+  readonly sessionID: string;
+  readonly directory?: string;
+  readonly workspace?: string;
+  readonly messageID?: string;
+  readonly model?: {
+    readonly providerID: string;
+    readonly modelID: string;
+  };
+  readonly agent?: string;
+  readonly noReply?: boolean;
+  readonly tools?: Readonly<Record<string, boolean>>;
+  readonly format?: unknown;
+  readonly system?: string;
+  readonly variant?: string;
+  readonly parts?: readonly unknown[];
+  readonly [key: string]: unknown;
+}
+
+// Deliberately narrow: the transport needs five methods, not the SDK's
+// twenty namespaces. test/conformance/opencode-sdk-surface.test.ts asserts at
+// COMPILE TIME that the real `OpencodeClient` from /v2 is assignable to this,
+// so the narrowing can never drift back into a guess. Members are method shorthand,
+// not properties, on purpose — property-style function types are checked
+// contravariantly under `strict` and would reject the real client's generic
+// signatures for a reason that has nothing to do with conformance.
 export interface OpenCodeSdkClientApi {
   readonly session: {
-    create(options?: unknown): Promise<OpenCodeSdkResult<{ id: string }>>;
-    prompt(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
-    messages(options: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    create(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<{ id: string; directory?: string }>>;
+    prompt(
+      parameters: OpenCodeSdkPromptParameters,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
+    messages(
+      options: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
     // `GET /session/status` — the POLL observer's turn boundary (#127), and a
     // different endpoint from session.messages(), which is the point: §197
     // wants two INDEPENDENT observers, not two pipes onto one fact. REQUIRED,
     // never optional, for the same reason `tool.ids` is: an optional member
     // lets a fake skip the surface silently, which is the shape of issue #121.
-    status(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
-    abort(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    status(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
+    abort(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
   };
   readonly event: {
-    subscribe(options?: unknown): Promise<{ stream: AsyncIterable<unknown> }>;
+    // `parameters`, not `options`: the SDK's first argument is the parameters
+    // slot (`{directory?, workspace?}`); request options are its SECOND. The
+    // old name invited `subscribe({ signal })`, and the call site did exactly
+    // that — buildClientParams drops unknown keys, so the signal vanished and
+    // no directory was ever sent. Only the first argument is declared because
+    // it is the only one the call site passes.
+    subscribe(
+      parameters?: unknown,
+    ): Promise<{ stream: AsyncIterable<unknown> }>;
   };
   // `GET /experimental/tool/ids` — "List all tool IDs (including built-in and
   // dynamically registered)". REQUIRED, never optional: an optional member
@@ -581,7 +1720,10 @@ export interface OpenCodeSdkClientApi {
   // The endpoint is experimental-prefixed, so pinning it here (and in the
   // surface conformance test) is what keeps a rename from going unnoticed.
   readonly tool: {
-    ids(options?: unknown): Promise<OpenCodeSdkResult<readonly string[]>>;
+    ids(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<readonly string[]>>;
   };
   // `GET /mcp` — the §E readback's endpoint, and the only place a connected
   // MCP server is visible at all: it contributes nothing to `tool.ids` or
@@ -590,7 +1732,31 @@ export interface OpenCodeSdkClientApi {
   // surface silently, which is the shape of issue #121, and a skipped readback
   // is an unverified tool channel rather than a missing convenience.
   readonly mcp: {
-    status(options?: unknown): Promise<OpenCodeSdkResult<unknown>>;
+    status(
+      options?: unknown,
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
+  };
+  // `POST /permission/{requestID}/reply` — the ONLY way to unblock a pending
+  // OpenCode permission prompt (#157: `permission.asked` for
+  // `external_directory` blocked a tool call for the whole usefulProgressMs
+  // budget, since pr-hero has no UI to answer one and the server-side `deny`
+  // config cannot cover every future permission kind). REQUIRED, never
+  // optional, for the same reason as tool.ids/mcp.status above: an optional
+  // member lets a fake skip the surface silently, which is the shape of
+  // issue #121, and a skipped reply here is a hung tool call with no
+  // evidence anything was ever attempted.
+  readonly permission: {
+    reply(
+      parameters: {
+        requestID: string;
+        directory?: string;
+        workspace?: string;
+        reply?: "once" | "always" | "reject";
+        message?: string;
+      },
+      request?: { signal?: AbortSignal },
+    ): Promise<OpenCodeSdkResult<unknown>>;
   };
 }
 
@@ -600,7 +1766,12 @@ export interface OpenCodeSdkLike {
   // exported. Nothing compared the two, so every live OpenCode step died on
   // `sdk.createClient is not a function` while the offline suite stayed green
   // — every mock was shaped to the same guess.
-  createOpencodeClient(config: { baseUrl: string }): OpenCodeSdkClientApi;
+  createOpencodeClient(config: {
+    baseUrl: string;
+    directory?: string;
+    experimental_workspaceID?: string;
+    [key: string]: unknown;
+  }): OpenCodeSdkClientApi;
 }
 
 // The runtime half of the conformance check. `import type` is erased, so it
@@ -617,7 +1788,7 @@ export function assertOpenCodeSdk(module: unknown): OpenCodeSdkLike {
     typeof candidate.createOpencodeClient !== "function"
   ) {
     throw new Error(
-      "@opencode-ai/sdk resolved but does not export createOpencodeClient(), " +
+      "@opencode-ai/sdk/v2 resolved but does not export createOpencodeClient(), " +
         "which pr-hero needs to open a session. The installed package is not " +
         `the SDK this transport was built against (got ${describeModule(module)}).`,
     );
@@ -657,6 +1828,19 @@ function describeSdkError(error: unknown): string {
 
 export interface CreateOpenCodeClientOptions {
   readonly loadSdk: () => Promise<OpenCodeSdkLike>;
+  /** Injected only for deterministic protocol fixtures; production IDs match ^msg. */
+  readonly createMessageId?: () => string;
+  readonly observedIdentity?: {
+    sdkVersion: string;
+    serverVersion: string;
+    executableSha256: string;
+  };
+  readonly fetch?: typeof fetch;
+  /** Production factory requires actual serving identity and pinned /doc proof. */
+  readonly qualifyServer?: (
+    url: string,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
   // #141: the run's MCP registry travels INTO the launch. OpenCode reads it
   // from the environment at startup, so a server already running cannot be
   // given one without leaving a window between "server up" and "MCP
@@ -664,7 +1848,12 @@ export interface CreateOpenCodeClientOptions {
   readonly launchServer: (
     mcp?: OpenCodeMcpConfig,
   ) => Promise<OpenCodeServerHandle>;
-  readonly model: { readonly providerID: string; readonly modelID: string };
+  readonly model: {
+    readonly providerID: string;
+    readonly modelID: string;
+    readonly variant?: string;
+  };
+  readonly variant?: string;
   readonly readSystemPrompt: (promptPath: string) => Promise<string>;
   // #141: reads the Claude-shaped mcp.json named by the request. Optional only
   // because a request may carry no registry at all; a request that DOES carry
@@ -776,6 +1965,7 @@ function resolveToolMap(
 }
 
 interface SessionState {
+  evidence: OpenCodeEvidenceCollector;
   readonly api: OpenCodeSdkClientApi;
   // ONE consumer of the subscription, ever. The pump owns the iterator and
   // hands events over through this queue; streamEvents never touches the
@@ -786,6 +1976,7 @@ interface SessionState {
   // (F002/F003 on PR #84) — in a repo that had already written the hazard
   // down, in opencode-sdk.ts, and walked into it anyway.
   readonly queue: unknown[];
+  queueBytes: number;
   // #124: partID → part kind, correlated from `message.part.updated`. #127
   // added the turn's proof and usage accumulators alongside them. Lives on the
   // session because that is the scope both are valid in, and because they must
@@ -815,6 +2006,14 @@ interface SessionState {
   // only door left. §197 asks for two independent observers of one fact; one
   // observer plus a blind spot is not that.
   failure?: string;
+  // PR #228 review, F002: `permission.asked` requestIDs already replied to
+  // or currently in flight. An SSE Last-Event-ID reconnect can redeliver an
+  // event this session already saw (the same hazard #227 dedupes for stream
+  // deltas via OpenCodeTurnState.deltaEventIds) — a replayed permission.asked
+  // must not send a second reply for a request the server already closed.
+  // Added to BEFORE the reply is awaited, not after it resolves, so a
+  // duplicate arriving while the first reply is still in flight also skips.
+  readonly respondedPermissions: Set<string>;
 }
 
 // #141. Returns an EMPTY registry for a request that names none, which is the
@@ -848,10 +2047,39 @@ async function resolveMcpConfig(
   });
 }
 
+// bun-types 1.3.14 does not declare Bun's `timeout` fetch option on
+// RequestInit (or on BunFetchRequestInit, which only extends it) even though
+// Bun's runtime honours it — see the WHY comment at the call site below for
+// what this buys. A narrow local type spells the one field needed instead of
+// widening RequestInit itself.
+type FetchInitWithIdleTimeoutDisabled = RequestInit & {
+  readonly timeout: false;
+};
+
+// Distinguishes the ONE request this client fires that legitimately blocks
+// past Bun's default HTTP idle timeout: POST /session/{sessionID}/message
+// (session.prompt) only returns response headers once the whole model turn
+// finishes. Anchored so it never matches:
+//   - GET  /session/{sessionID}/message         (session.messages: the poll
+//     readback, answers immediately, must keep the default timeout)
+//   - GET/DELETE /session/{sessionID}/message/{id}  (getMessage/deleteMessage
+//     — the single-message endpoint; the SDK never POSTs here, but the extra
+//     path segment must be rejected regardless of method)
+//   - POST /session/{sessionID}/prompt_async
+//   - POST /session                             (session.create)
+// A query string (e.g. `?directory=...`, which every one of these calls
+// carries) never defeats the match: only pathname is checked.
+export function isBlockingPromptRequest(request: Request): boolean {
+  if (request.method !== "POST") return false;
+  const { pathname } = new URL(request.url);
+  return /^\/session\/[^/]+\/message$/.test(pathname);
+}
+
 export function createOpenCodeClient(
   options: CreateOpenCodeClientOptions,
 ): OpenCodeClientLike & { close(): Promise<void> } {
   const states = new Map<string, SessionState>();
+  const captures = new Map<string, OpenCodeEvidenceCollector>();
   const denyFloor = options.denyFloor ?? DEFAULT_DENY_FLOOR;
   // ONE server for the whole client, launched lazily. A server per SESSION
   // left a spawned process behind for every attempt, released only by a
@@ -898,12 +2126,54 @@ export function createOpenCodeClient(
   }
 
   return {
+    takeEvidence(sessionId, attempt) {
+      const key = `${sessionId}:${attempt}`;
+      const collector = captures.get(key);
+      captures.delete(key);
+      return collector?.snapshot();
+    },
     async createSession(
       input: OpenCodeCreateSessionInput,
     ): Promise<OpenCodeClientSession> {
+      const evidence = new OpenCodeEvidenceCollector(
+        input.correlation ?? { sessionId: "unavailable", attempt: 0 },
+      );
+      if (input.correlation)
+        captures.set(
+          `${input.correlation.sessionId}:${input.correlation.attempt}`,
+          evidence,
+        );
+      evidence.record("runtime_identity", options.observedIdentity ?? null);
+      const checkCancelled = () => input.signal?.throwIfAborted();
+      checkCancelled();
+      const requestOptions = { signal: input.signal };
+      let cleanupDeadline: number | undefined;
+      const cleanup = async (
+        work: (signal: AbortSignal) => Promise<unknown>,
+      ) => {
+        const controller = new AbortController();
+        cleanupDeadline ??= performance.now() + 1_000;
+        const remaining = Math.max(0, cleanupDeadline - performance.now());
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            work(controller.signal),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(() => {
+                controller.abort();
+                resolve();
+              }, remaining);
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+          controller.abort();
+        }
+      };
       let sdk: OpenCodeSdkLike;
       try {
         sdk = await options.loadSdk();
+        checkCancelled();
       } catch (error) {
         throw new Error(
           "the opencode backend needs @opencode-ai/sdk, which is an optional " +
@@ -926,6 +2196,7 @@ export function createOpenCodeClient(
       // must cost nothing to unwind — and because §D needs the config in hand
       // at launch, not after it.
       const mcpConfig = await resolveMcpConfig(options, input);
+      checkCancelled();
       const mcpFingerprint = JSON.stringify(mcpConfig);
 
       if (serverPromise === undefined) {
@@ -950,12 +2221,52 @@ export function createOpenCodeClient(
         );
       }
       const handle = server ?? (await serverPromise);
-      const api = sdk.createOpencodeClient({ baseUrl: handle.url });
+      checkCancelled();
+      const api = sdk.createOpencodeClient({
+        baseUrl: handle.url,
+        fetch: evidence.wrapFetch((request) => {
+          const fetchImpl = options.fetch ?? globalThis.fetch;
+          // Bun's fetch has a default 300s HTTP idle timeout
+          // (BUN_CONFIG_HTTP_IDLE_TIMEOUT) that is armed while waiting for
+          // response headers and is NOT re-armed by "the request is still
+          // legitimately in flight" — only by socket activity. The blocking
+          // prompt POST's headers only arrive once the whole model turn
+          // completes (measured: real turns exceed 300s), and a REJECTION
+          // here — a bare TimeoutError included — ends the entire turn: the
+          // catch a short way below sets `state.failure` and `state.ended`,
+          // even though the event stream (the actual delivery channel, see
+          // the "FIRED, never awaited" comment on the call site) may still be
+          // progressing normally. Live evidence: two hunters on a real PR
+          // died at ~300s this way.
+          //
+          // The override is scoped to exactly that one request via
+          // isBlockingPromptRequest — every other call in this file (session
+          // create, /event's SSE subscription, mcp.status, tool.ids,
+          // /session/status, abort, message readback) returns promptly and
+          // keeps today's exact single-argument call shape unchanged.
+          //
+          // Cancellation is unaffected: the Request built by the SDK still
+          // carries `requestOptions.signal` regardless of this second
+          // argument, so an abort during a `timeout: false` call still
+          // rejects the way it always has.
+          if (isBlockingPromptRequest(request)) {
+            const init: FetchInitWithIdleTimeoutDisabled = { timeout: false };
+            return fetchImpl(request, init);
+          }
+          return fetchImpl(request);
+        }),
+      });
 
       let sessionId: string | undefined;
       let subscription: { stream: AsyncIterable<unknown> } | undefined;
       establishing += 1;
       try {
+        const qualification = await options.qualifyServer?.(
+          handle.url,
+          input.signal,
+        );
+        evidence.record("server_qualification", qualification ?? null);
+        checkCancelled();
         // §E, and FIRST: the OpenCode analogue of claude-code's
         // `--strict-mcp-config`, except claude-code DECLARES its isolation
         // with a flag and this reads the connected set back from the provider.
@@ -970,11 +2281,12 @@ export function createOpenCodeClient(
         //
         // The `directory` scope mirrors what the request asked for, and the
         // #127 analogue was checked rather than assumed. session.status
-        // reported {} for a BUSY session given a directory the server was not
-        // started in, so pollStatus below omits the parameter entirely — the
-        // obvious worry is that mcp.status scopes the same way and would then
-        // abort every PR-mode step, since the server inherits pr-hero's cwd
-        // and never the worktree.
+        // reported {} for a BUSY session given a directory other than the
+        // one its session was created under (#223) — so pollStatus below
+        // passes the SAME directory session.create used, never omits it —
+        // and the obvious worry was that mcp.status scopes the same way and
+        // would then abort every PR-mode step, since the server inherits
+        // pr-hero's cwd and never the worktree.
         //
         // It does not. MEASURED against a real PR worktree, with the server's
         // cwd deliberately elsewhere: `directory` set to the worktree, to the
@@ -986,16 +2298,32 @@ export function createOpenCodeClient(
         // failure rather than a silent PR-mode outage.
         assertMcpConnected(
           unwrap(
-            await api.mcp.status({ query: { directory: input.cwd } }),
+            await api.mcp.status({ directory: input.cwd }, requestOptions),
             "mcp.status",
           ),
           Object.keys(mcpConfig),
         );
 
-        const created = await api.session.create({
-          body: { title: "pr-hero review step" },
-        });
-        sessionId = unwrap(created, "session.create").id;
+        checkCancelled();
+        const created = await api.session.create(
+          {
+            directory: input.cwd,
+            title: "pr-hero review step",
+          },
+          requestOptions,
+        );
+        const sessionRecord = unwrap(created, "session.create");
+        sessionId = sessionRecord.id;
+        checkCancelled();
+        if (
+          typeof sessionRecord.directory !== "string" ||
+          canonicalDirectory(sessionRecord.directory) !==
+            canonicalDirectory(input.cwd)
+        ) {
+          throw new Error(
+            `opencode session created with mismatched directory: expected ${input.cwd}, got ${sessionRecord.directory}`,
+          );
+        }
 
         // Subscribed BEFORE the prompt, and the ordering is not stylistic.
         // event.subscribe() is live and unbuffered, so a subscription opened
@@ -1003,7 +2331,25 @@ export function createOpenCodeClient(
         // first deltas. The contract splits createSession and streamEvents
         // into separate calls, so unless the buffering happens here that
         // window cannot be closed at all.
-        subscription = await api.event.subscribe();
+        //
+        // #223: `directory` here MUST be the same one session.create used
+        // above (input.cwd) — GET /event is scoped by directory instance,
+        // exactly like GET /session/status (see pollStatus). Measured
+        // against opencode 1.18.30: a subscription opened under a different
+        // directory than the session's own sees only
+        // server.connected/heartbeat and never this session's events at all.
+        //
+        // `requestOptions` (`{signal}`) is deliberately NOT passed here. It
+        // used to be passed as the FIRST argument — the SDK's parameters
+        // slot, not its request-options slot — where buildClientParams drops
+        // unknown keys, so the SSE request has never carried an abort signal;
+        // stream close has always been owned by cleanup's `return()`. Moving
+        // it to the second argument would change live cancellation semantics
+        // (an AbortError inside the pump) that no fake here exercises, since
+        // the fakes ignore call options. That is a separate change.
+        subscription = await api.event.subscribe({ directory: input.cwd });
+        evidence.record("subscription_ready", { sessionId });
+        checkCancelled();
 
         // #128: enumerate AFTER create+subscribe, immediately before the
         // prompt. The map is a snapshot of tool.ids(); an id registered in
@@ -1022,7 +2368,7 @@ export function createOpenCodeClient(
         let reported: readonly string[];
         try {
           reported = unwrap(
-            await api.tool.ids({ query: { directory: input.cwd } }),
+            await api.tool.ids({ directory: input.cwd }, requestOptions),
             "tool.ids",
           );
         } catch (error) {
@@ -1053,12 +2399,25 @@ export function createOpenCodeClient(
           mcpToolIdsFor(mcpConfig),
         );
 
+        const userMessageId =
+          options.createMessageId?.() ??
+          `msg_${Date.now().toString(16)}${crypto.randomUUID().replaceAll("-", "")}`;
+        if (!/^msg/.test(userMessageId))
+          throw new Error("invalid OpenCode submitted message identity");
+        evidence.record("session_identity", {
+          sessionId,
+          userMessageId,
+          cwd: input.cwd,
+        });
         const state: SessionState = {
+          evidence,
           api,
           queue: [],
-          turn: createTurnState(),
+          queueBytes: 0,
+          turn: createTurnState(sessionId, userMessageId, input.cwd),
           observedActive: false,
           ended: false,
+          respondedPermissions: new Set(),
         };
         states.set(sessionId, state);
 
@@ -1068,6 +2427,132 @@ export function createOpenCodeClient(
         void (async () => {
           try {
             for await (const raw of subscription.stream) {
+              // #228: this is ONE directory-scoped stream shared by every
+              // concurrent hunter's session on the same server. Recording
+              // every event unfiltered meant roughly 55% of a real
+              // multi-hunter capture was OTHER sessions' events, filling the
+              // record/byte cap long before this session's own silence
+              // window was covered. An event with no attributable session id
+              // is still recorded — there is nothing to filter it against.
+              const rawSessionId = eventSessionId(raw);
+              if (rawSessionId === undefined || rawSessionId === sessionId) {
+                evidence.record("event", raw);
+              }
+              // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path
+              // OUTSIDE the reviewed worktree tripped `permission.asked`,
+              // and pr-hero never answered it — the tool call sat blocked
+              // until the silence tripwire killed the attempt 150s later at
+              // $0. The server-side `deny` config (opencode-server.ts) is
+              // the primary control; this is defense in depth for whatever
+              // it does not cover — ANY permission, not only
+              // `external_directory`, since pr-hero has no UI to answer a
+              // prompt and must never leave one pending. Own session only:
+              // `rawSessionId` is the SAME id `eventSessionId` already
+              // computed above.
+              if (
+                rawSessionId === sessionId &&
+                (raw as RawEvent)?.type === "permission.asked"
+              ) {
+                const properties = props(raw);
+                const requestID = properties?.id;
+                const permissionName =
+                  typeof properties?.permission === "string"
+                    ? properties.permission
+                    : "unknown";
+                const patterns = Array.isArray(properties?.patterns)
+                  ? (properties.patterns as unknown[]).filter(
+                      (p): p is string => typeof p === "string",
+                    )
+                  : [];
+                if (
+                  typeof requestID === "string" &&
+                  !state.respondedPermissions.has(requestID)
+                ) {
+                  // PR #228 review (round 2), F002: `rememberId` (used for
+                  // every OTHER bounded id set in this file) evicts the
+                  // OLDEST entry once full — fine for high-volume, low-
+                  // stakes dedup like stream deltas, but wrong here: an
+                  // evicted requestID is indistinguishable from one this
+                  // session never saw, so ITS later SSE redelivery would
+                  // pass the `!has(requestID)` guard above and fire a
+                  // SECOND `permission.reply` for a request the server
+                  // already closed — exactly the failure this set exists to
+                  // prevent. A failed second reply already fails the
+                  // attempt below, so evicting just makes that failure
+                  // depend on redelivery timing this session cannot
+                  // control. 512 distinct permission prompts inside one
+                  // step is already anomalous — `external_directory` is
+                  // denied at the server config (opencode-server.ts) — so
+                  // failing closed here, the same way `failIntegrity` fails
+                  // closed on other exhausted identity caps (e.g. "tool
+                  // identity cap exceeded"), is strictly safer than ever
+                  // forgetting a requestID this session has committed to
+                  // answering.
+                  if (
+                    state.respondedPermissions.size >=
+                    MAX_TRACKED_PERMISSION_REQUESTS
+                  ) {
+                    state.turn.integrityFailure =
+                      "[pr-hero] opencode client: permission request cap exceeded (512)";
+                    state.wake?.();
+                    state.wake = undefined;
+                    break;
+                  }
+                  // PR #228 review, F002: added BEFORE the reply is even
+                  // sent, not after it resolves — an SSE Last-Event-ID
+                  // reconnect can redeliver this same event, and a duplicate
+                  // arriving while this reply is still in flight must also
+                  // see it here rather than racing the await below.
+                  state.respondedPermissions.add(requestID);
+                  void (async () => {
+                    try {
+                      unwrap(
+                        await api.permission.reply(
+                          {
+                            requestID,
+                            directory: input.cwd,
+                            reply: "reject",
+                          },
+                          requestOptions,
+                        ),
+                        "permission.reply",
+                      );
+                      // Visible in the attempt's evidence capture even
+                      // though nothing settles on the success path — this is
+                      // the only record that pr-hero ever saw, and answered,
+                      // this prompt.
+                      evidence.record("permission_rejected", {
+                        requestID,
+                        permission: permissionName,
+                        patterns,
+                      });
+                    } catch (error) {
+                      // The one case the server-side config cannot cover:
+                      // the reject control itself did not run. Settled
+                      // promptly rather than left to the silence tripwire —
+                      // see the second door below, exactly like the prompt
+                      // failure above.
+                      state.failure = formatPermissionRejectFailureDetail(
+                        permissionName,
+                        patterns,
+                        (error as Error).message,
+                      );
+                      state.ended = true;
+                      state.wake?.();
+                      state.wake = undefined;
+                    }
+                  })();
+                }
+              }
+              const rawSize = Buffer.byteLength(JSON.stringify(raw), "utf8");
+              state.queueBytes += rawSize;
+              if (state.queueBytes > 4 * 1024 * 1024) {
+                state.turn.integrityFailure =
+                  "[pr-hero] opencode client: raw subscription queue cap exceeded (cap exhaustion)";
+                state.wake?.();
+                state.wake = undefined;
+                break;
+              }
               state.queue.push(raw);
               state.wake?.();
               state.wake = undefined;
@@ -1111,19 +2596,48 @@ export function createOpenCodeClient(
         // which reads the same `state.failure`.
         void (async () => {
           try {
-            unwrap(
-              await api.session.prompt({
-                path: { id: sessionId },
-                query: { directory: input.cwd },
-                body: {
-                  model: { ...options.model },
-                  system: systemPrompt,
-                  tools,
-                  parts: [{ type: "text", text: input.userPrompt }],
-                },
-              }),
+            const variant = options.variant ?? options.model.variant;
+            const promptParams: OpenCodeSdkPromptParameters = {
+              sessionID: sessionId,
+              messageID: userMessageId,
+              directory: input.cwd,
+              model: {
+                providerID: options.model.providerID,
+                modelID: options.model.modelID,
+              },
+              ...(variant !== undefined ? { variant } : {}),
+              system: systemPrompt,
+              tools,
+              parts: [{ type: "text", text: input.userPrompt }],
+            };
+            Object.defineProperty(promptParams, "body", {
+              value: {
+                model: promptParams.model,
+                system: promptParams.system,
+                tools: promptParams.tools,
+                parts: promptParams.parts,
+              },
+              enumerable: false,
+            });
+            checkCancelled();
+            const promptResult = unwrap(
+              await api.session.prompt(promptParams, requestOptions),
               "session.prompt",
             );
+            evidence.record("prompt_result", promptResult);
+            if (asRecord(asRecord(promptResult)?.info) !== undefined) {
+              // #223: this reconcile is INGEST ONLY — its `events` are
+              // discarded because the event stream, never this blocking HTTP
+              // response, is the delivery channel (see the "FIRED, never
+              // awaited" comment above). `emit: false` keeps that discard
+              // honest: two of twelve live opencode 1.18.30 attempts had this
+              // call race ahead of the SAME text part's own announce -> delta
+              // -> snapshot lifecycle on the stream, and letting it advance
+              // `emittedText` here — for text nobody was actually handed —
+              // made the stream's own, perfectly ordinary snapshot look like
+              // a conflicting one and threw away a correct answer.
+              reconcileMessages([promptResult], state.turn, { emit: false });
+            }
           } catch (error) {
             state.failure = (error as Error).message;
             state.ended = true;
@@ -1146,7 +2660,7 @@ export function createOpenCodeClient(
         // against the shared server for as long as a sibling keeps it alive.
         if (subscription !== undefined) {
           const iterator = subscription.stream[Symbol.asyncIterator]();
-          await iterator.return?.();
+          await cleanup(async () => iterator.return?.());
         }
         // Unwind whatever this call managed to create. Without this the
         // caller gets an exception and no id, so nothing can be released by
@@ -1169,9 +2683,11 @@ export function createOpenCodeClient(
           // caused the unwind is the one the caller must still see — masking
           // it with a teardown detail would trade a diagnosis for a symptom.
           try {
-            unwrap(
-              await api.session.abort({ path: { id: sessionId } }),
-              "session.abort",
+            await cleanup(async (signal) =>
+              unwrap(
+                await api.session.abort({ sessionID: sessionId }, { signal }),
+                "session.abort",
+              ),
             );
           } catch (abortError) {
             const detail = (abortError as Error).message;
@@ -1200,7 +2716,15 @@ export function createOpenCodeClient(
       // through the same door — so there is no handoff to race.
       for (;;) {
         while (state.queue.length > 0) {
-          yield* mapOpenCodeEvents(state.queue.shift(), session.id, state.turn);
+          const raw = state.queue.shift();
+          state.queueBytes = Math.max(
+            0,
+            state.queueBytes - Buffer.byteLength(JSON.stringify(raw), "utf8"),
+          );
+          yield* mapOpenCodeEvents(raw, session.id, state.turn);
+        }
+        if (state.turn.integrityFailure !== undefined) {
+          throw new Error(state.turn.integrityFailure);
         }
         // Checked AFTER the drain and BEFORE `ended`: anything the provider
         // already said is delivered first — a terminal buffered before the
@@ -1216,6 +2740,7 @@ export function createOpenCodeClient(
 
     async pollStatus(
       session: OpenCodeClientSession,
+      signal?: AbortSignal,
     ): Promise<OpenCodePollResult> {
       const state = states.get(session.id);
       // #131: abort() owns the Map release. Absence must not throw (a throw
@@ -1227,6 +2752,9 @@ export function createOpenCodeClient(
       // abort_unconfirmed.
       if (state === undefined) {
         return { kind: "pending" };
+      }
+      if (state.turn.integrityFailure !== undefined) {
+        return { kind: "failed", detail: state.turn.integrityFailure };
       }
 
       // #127: the BOUNDARY first, and from a different endpoint. This observer
@@ -1249,16 +2777,47 @@ export function createOpenCodeClient(
       // permanently blind and §197 down to one observer again. The explicit
       // arm is still honoured for the build that does send it.
       //
-      // NO `directory` query, and that is measured too: the session is created
-      // without one, so it registers under the SERVER's cwd, while prompts
-      // carry the step's cwd. `GET /session/status?directory=<step cwd>`
-      // returned {} for a session that was BUSY at that moment. Passing the
-      // step cwd here would have made every busy session look absent — which
-      // is to say, look finished — and reopened #127 through its own fix.
+      // #223: `directory` IS required, and it must be the SAME one
+      // session.create used for this session — `state.turn.expectedCwd`,
+      // set from `input.cwd` by `createTurnState` (and the exact value
+      // `session.messages` below queries with too). Measured against
+      // opencode 1.18.30: `GET /session/status` is scoped by directory
+      // instance exactly like `GET /event` above, so omitting it — or
+      // naming a different one — watches an instance that has never heard
+      // of this session and reports it `{}` even while it is BUSY. That is
+      // indistinguishable from "finished" in the response shape, which is
+      // #127 reopened: a wrong scope silently discards the model's answer
+      // once the useful-progress deadline elapses, because this observer
+      // never sees anything to report.
+      //
+      // The still-true half of the old rationale survives below: absence is
+      // ambiguous on its own even with the RIGHT directory, because it is
+      // also what a session this call has simply never seen looks like.
       const statuses = asRecord(
-        unwrap(await state.api.session.status({}), "session.status"),
+        unwrap(
+          await state.api.session.status(
+            { directory: state.turn.expectedCwd },
+            { signal },
+          ),
+          "session.status",
+        ),
       );
-      const statusType = asRecord(statuses?.[session.id])?.type;
+      signal?.throwIfAborted();
+      state.evidence.record("status", { sessionId: session.id, statuses });
+      const statusRecord = asRecord(statuses?.[session.id]);
+      // #157: checked BEFORE "retry means still working" below, and it is
+      // its own second observer of the same fact the stream carries when it
+      // is still alive to carry it — see mapOpenCodeEvents's "session.status"
+      // case. `statuses?.[session.id]` is already scoped to THIS session, so
+      // no separate session-match check is needed here.
+      const limit = providerLimitFromStatus(statusRecord);
+      if (limit !== undefined) {
+        return {
+          kind: "failed",
+          detail: formatProviderLimitDetail(limit.reason, limit.message),
+        };
+      }
+      const statusType = statusRecord?.type;
       // Both are the provider still working. `retry` especially: a session in
       // backoff is neither done nor idle, and it will produce more steps — its
       // `next` timestamp is what retryHintFromStatus reads for the policy.
@@ -1272,29 +2831,83 @@ export function createOpenCodeClient(
         // endpoint. An explicit idle names it, so it arms and settles at once.
         if (statusType === "idle") state.observedActive = true;
         if (state.observedActive) {
-          const response = await state.api.session.messages({
-            path: { id: session.id },
-          });
+          signal?.throwIfAborted();
+          const response = await state.api.session.messages(
+            {
+              sessionID: session.id,
+              directory: state.turn.expectedCwd,
+            },
+            { signal },
+          );
+          signal?.throwIfAborted();
           // Throws on the error arm rather than reporting "pending": the
           // caller treats a poll that throws as a FAILED OBSERVATION and
           // counts it (opencode-sdk.ts:707), whereas a silent "pending" would
           // let the attempt run to its stall deadline on an API error the
           // provider already explained.
           const messages = unwrap(response, "session.messages");
-          const list = Array.isArray(messages) ? messages : [];
-          // The turn has ended; the last completed assistant message supplies
-          // the proof CONTENT — the same helper the stream uses, on purpose.
-          // §197 wants two INDEPENDENT observers of ONE fact, not two facts
-          // that happen to resemble each other: two copies of this derivation
-          // could drift and manufacture a conflict out of nothing.
-          //
-          // No completed message means no proof, and none is invented. The
-          // attempt then falls to the harness watchdog, which is the correct
-          // place for a turn that never produced a completion record.
-          for (let i = list.length - 1; i >= 0; i -= 1) {
-            const info = (list[i] as { info?: unknown })?.info;
-            const proof = terminalProofFromAssistant(info);
-            if (proof !== undefined) return { kind: "terminal", proof };
+          state.evidence.record("readback", {
+            sessionId: session.id,
+            cwd: state.turn.expectedCwd,
+            coverage: Array.isArray(messages) ? "complete" : "unknown",
+            messages,
+          });
+          // The qualified ordinary endpoint returns the complete array when
+          // no limit is supplied. An object/cursor is unknown coverage, not []
+          // and never an excuse to reuse a prior terminal snapshot.
+          if (!Array.isArray(messages)) {
+            state.turn.integrityFailure =
+              "[pr-hero] opencode client: unknown message readback coverage";
+            return { kind: "failed", detail: state.turn.integrityFailure };
+          }
+          const list = messages;
+
+          // #223 follow-up: this reconcile is INGEST ONLY, exactly like the
+          // prompt_result call site above — its `events` are discarded below
+          // (only `failure`/`terminalProof`/`finalText`/`usage`/
+          // `usageIncomplete` are read), because the event stream, never this
+          // polled HTTP readback, is the delivery channel. `emit: false`
+          // keeps that discard honest: without it, a poll that races ahead of
+          // the stream — observing a text part's FULL persisted snapshot
+          // while the stream has only delivered a PREFIX of it — still
+          // advanced `emittedText` to the full text here, for a consumer
+          // that was never handed the rest. The stream's own still-in-flight
+          // remaining deltas then found `emittedText` already past what was
+          // really delivered, and its own later restating snapshot (every
+          // real fixture sends one before the turn ends) found a
+          // `snapshotText` shorter than the now-advanced `emittedText` and
+          // threw "conflicting snapshot observed" — turning a turn that
+          // actually finished cleanly into a `stream_error`/`failed` outcome.
+          // `finalText` is unaffected either way: `canonicalFinalText`
+          // (opencode-client.ts reconcileMessages) is computed from
+          // `detail.text`, not `detail.emittedText`, before this gate runs.
+          const reconciled = reconcileMessages(list, state.turn, {
+            emit: false,
+          });
+          if (
+            reconciled.failure !== undefined ||
+            state.turn.integrityFailure !== undefined
+          ) {
+            return {
+              kind: "failed",
+              detail:
+                reconciled.failure ??
+                state.turn.integrityFailure ??
+                "opencode client integrity failure",
+            };
+          }
+          if (hasOutstandingTools(state.turn)) {
+            return { kind: "pending" };
+          }
+
+          if (reconciled.terminalProof !== undefined) {
+            return {
+              kind: "terminal",
+              proof: reconciled.terminalProof,
+              finalText: reconciled.finalText,
+              usage: reconciled.usage,
+              usageIncomplete: reconciled.usageIncomplete,
+            };
           }
         }
       }
@@ -1328,10 +2941,12 @@ export function createOpenCodeClient(
       // (opencode-sdk.ts's callAbortOnce) catches and stamps a note into
       // stderrTail, which keeps abort best-effort — observed, never fatal to
       // the teardown it runs inside.
+      state.evidence.record("abort_requested", { sessionId: session.id });
       unwrap(
-        await state.api.session.abort({ path: { id: session.id } }),
+        await state.api.session.abort({ sessionID: session.id }),
         "session.abort",
       );
+      state.evidence.record("abort_acknowledged", { sessionId: session.id });
       // #131: abort is the attempt's teardown, so it owns the Map release.
       // streamEvents already holds this object by reference, so in-flight
       // readers survive the delete; later pollStatus/abort see the gap.

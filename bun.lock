@@ -9,7 +9,7 @@
         "@types/bun": "latest",
       },
       "optionalDependencies": {
-        "@opencode-ai/sdk": "^1.18.23",
+        "@opencode-ai/sdk": "1.18.25",
       },
       "peerDependencies": {
         "typescript": "^5",
