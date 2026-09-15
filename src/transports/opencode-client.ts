@@ -32,6 +32,7 @@ import type {
   OpenCodeCreateSessionInput,
   OpenCodePollResult,
 } from "./opencode-sdk";
+import { formatProviderLimitDetail } from "./opencode-sdk";
 import type { OpenCodeServerHandle } from "./opencode-server";
 
 // Structural, not imported from the SDK: pr-hero ships with ZERO runtime
@@ -183,6 +184,34 @@ export function retryHintFromStatus(
   if (next === undefined) return undefined;
   const delta = next - nowMs;
   return delta > 0 ? delta : undefined;
+}
+
+// #157: SessionStatus's `retry` arm can also carry an `action` naming an
+// account/usage limit rather than an ordinary transient backoff. Only
+// "account_rate_limit" has ever been observed (pr-157-8df2fca3-4, all three
+// hunter captures, 3487 occurrences each) — this set is deliberately literal
+// rather than "any retry", so an unrecognised future reason keeps today's
+// alive-and-retrying behavior instead of guessing at a fact the provider
+// never actually stated. `message` is read from the top-level retry status,
+// not `action.message` — measured identical on the real capture, and the
+// top-level field is what retryHintFromStatus above already reads its
+// sibling `next` from.
+const ACCOUNT_LIMIT_REASONS: ReadonlySet<string> = new Set([
+  "account_rate_limit",
+]);
+
+export function providerLimitFromStatus(
+  status: unknown,
+): { reason: string; message: string } | undefined {
+  const record = asRecord(status);
+  if (record?.type !== "retry") return undefined;
+  const action = asRecord(record.action);
+  const reason = action?.reason;
+  if (typeof reason !== "string" || !ACCOUNT_LIMIT_REASONS.has(reason)) {
+    return undefined;
+  }
+  const message = typeof record.message === "string" ? record.message : "";
+  return { reason, message };
 }
 
 // TRAP 4 (issue #124): `message.part.delta` carries NO part type. Its whole
@@ -1510,6 +1539,21 @@ export function mapOpenCodeEvents(
 
     case "session.status": {
       const status = asRecord(p.status);
+      // #157: checked BEFORE the busy/heartbeat arm below — a retry status
+      // naming an account/usage limit is not "still working", it is a fact
+      // that ends the attempt. Reached only for THIS session: the shared
+      // `p.sessionID !== sessionId` guard above already returned [] for
+      // every other one.
+      const limit = providerLimitFromStatus(status);
+      if (limit !== undefined) {
+        return [
+          {
+            kind: "provider_limit",
+            reason: limit.reason,
+            message: limit.message,
+          },
+        ];
+      }
       return status?.type === "busy" ? [{ kind: "heartbeat" }] : [];
     }
 
@@ -2571,7 +2615,20 @@ export function createOpenCodeClient(
       );
       signal?.throwIfAborted();
       state.evidence.record("status", { sessionId: session.id, statuses });
-      const statusType = asRecord(statuses?.[session.id])?.type;
+      const statusRecord = asRecord(statuses?.[session.id]);
+      // #157: checked BEFORE "retry means still working" below, and it is
+      // its own second observer of the same fact the stream carries when it
+      // is still alive to carry it — see mapOpenCodeEvents's "session.status"
+      // case. `statuses?.[session.id]` is already scoped to THIS session, so
+      // no separate session-match check is needed here.
+      const limit = providerLimitFromStatus(statusRecord);
+      if (limit !== undefined) {
+        return {
+          kind: "failed",
+          detail: formatProviderLimitDetail(limit.reason, limit.message),
+        };
+      }
+      const statusType = statusRecord?.type;
       // Both are the provider still working. `retry` especially: a session in
       // backoff is neither done nor idle, and it will produce more steps — its
       // `next` timestamp is what retryHintFromStatus reads for the policy.

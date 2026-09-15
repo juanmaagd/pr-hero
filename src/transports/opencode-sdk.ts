@@ -147,6 +147,17 @@ export type OpenCodeClientEvent =
   // its own "reasoning parts were received and discarded" diagnostics, and
   // conflating tool execution into that would corrupt them.
   | { readonly kind: "activity" }
+  // #157: our own session's status named an account/usage limit (a `retry`
+  // status whose `action.reason` is one opencode-client.ts's
+  // providerLimitFromStatus recognises). Carries the provider's reason and
+  // message VERBATIM — nothing is summarized or reworded — because the
+  // classification witness has to be the provider's own fact, not this
+  // transport's paraphrase of it.
+  | {
+      readonly kind: "provider_limit";
+      readonly reason: string;
+      readonly message: string;
+    }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
@@ -304,6 +315,32 @@ const MARKER_REASONING_ONLY =
 // Deliberately digit-free per #126 (shares the witness with provider text).
 const MARKER_SILENCE =
   "[pr-hero] opencode sdk: the provider stream delivered no content event for the whole quiet-round budget; the answer is incomplete";
+// #157: pr-157-8df2fca3-4's complete capture — OpenCode reported an
+// account_rate_limit retry status (`5 hour usage limit reached...`) for our
+// own session ~3.8s into the attempt, kept retrying internally, and never
+// delivered another reasoning/text/usage event. The attempt sat quiet for
+// the whole usefulProgressMs budget before the silence tripwire settled it
+// $0/transient — the user saw "silence", never the account limit the
+// provider had already named. A spent quota cannot be outrun by a fresh
+// attempt, unlike silence or a transient stall, so this is fail-fast.
+//
+// Digit-free per #126 (the marker shares its witness with the provider's own
+// text, appended verbatim by formatProviderLimitDetail below): a prefix that
+// read like a rate limit or a socket error would let classifyFailure's
+// generic patterns decide the cause instead of this fact.
+const MARKER_PROVIDER_LIMIT =
+  "[pr-hero] opencode sdk: provider usage limit reached";
+
+// Shared by both observers of this fact — opencode-client.ts's stream
+// mapping (a `provider_limit` OpenCodeClientEvent) and its status poll (a
+// `{kind:"failed"}` OpenCodePollResult) — so the exact classification witness
+// is defined once rather than duplicated as a literal in two files.
+export function formatProviderLimitDetail(
+  reason: string,
+  message: string,
+): string {
+  return `${MARKER_PROVIDER_LIMIT} (${reason}): ${message}`;
+}
 
 type SettleReason =
   // #132: `drained` records whether the stream had gone QUIET when the
@@ -1218,6 +1255,20 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               if (settled) return;
               break;
             }
+            case "provider_limit": {
+              // #157: fail fast — no fresh attempt can outrun a spent quota,
+              // unlike an ordinary stall or silence. Reuses `stream_error`
+              // rather than a new SettleReason: the abort-trigger set and the
+              // completion/protocolIntegrity mapping already give this exact
+              // shape (failed, unverified, best-effort abort), and the
+              // classification-critical text just needs to survive inside
+              // `detail` for classifyFailure's substring match below.
+              settle({
+                kind: "stream_error",
+                detail: formatProviderLimitDetail(event.reason, event.message),
+              });
+              return;
+            }
           }
           if (settled) return;
         }
@@ -1772,6 +1823,17 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     const witness = outcome.stderrTail;
     if (witness.includes(MARKER_ABORT_UNCONFIRMED)) {
       return "remote_abort_unconfirmed";
+    }
+    // #157: FIRST among the provider-text patterns, deliberately. The
+    // provider's own message is appended verbatim after this marker (see
+    // formatProviderLimitDetail), and a message that happens to say "rate
+    // limit" or "quota exceeded" must not let the generic patterns below
+    // decide the cause instead of the fact pr-hero actually observed.
+    // `quota_exhausted` is the one §7 cause whose retry disposition is
+    // already terminal (decideRetryDisposition's default arm) — exactly
+    // right, since a fresh attempt cannot outrun quota that is already spent.
+    if (witness.includes(MARKER_PROVIDER_LIMIT)) {
+      return "quota_exhausted";
     }
     if (
       witness.includes(MARKER_CONFLICT) ||

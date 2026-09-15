@@ -888,6 +888,64 @@ describe("createOpenCodeClient", () => {
     expect((await client.pollStatus(session)).kind).toBe("terminal");
   });
 
+  // #157: pr-157-8df2fca3-4's complete capture — `GET /session/status`
+  // reported this exact retry/account_rate_limit status for the whole
+  // attempt, and the old code only ever read `type: "retry"` as "the provider
+  // is still working" (line ~2578's `observedActive = true`), so the poll
+  // kept the attempt alive for the full usefulProgressMs budget over a quota
+  // that was never coming back. `account_rate_limit` is the only
+  // `action.reason` observed across all three hunter captures of that run.
+  const LIMIT_MESSAGE =
+    "5 hour usage limit reached. It will reset in 22 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01M17B67W4Q9BE4T0910EQ0NRY/go";
+
+  test("a poll-observed account usage limit fails fast with the provider's message (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({
+      type: "retry",
+      attempt: 1,
+      message: LIMIT_MESSAGE,
+      action: {
+        reason: "account_rate_limit",
+        provider: "opencode-go",
+        title: "Go limit reached",
+      },
+    });
+
+    const result = await client.pollStatus(session);
+    expect(result.kind).toBe("failed");
+    if (result.kind !== "failed") throw new Error("unreachable");
+    expect(result.detail).toContain(LIMIT_MESSAGE);
+    expect(result.detail).toContain("account_rate_limit");
+  });
+
+  test("a poll-observed retry with no action reason keeps polling, not failed (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({ type: "retry", attempt: 2, message: "429", next: 1 });
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+  });
+
+  test("a poll-observed retry with an unrecognised action reason keeps polling (#157)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.setStatus({
+      type: "retry",
+      attempt: 1,
+      message: "provider is retrying",
+      action: { reason: "some_future_reason", provider: "opencode-go" },
+    });
+
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+  });
+
   // pr-hero F002/F003 on this PR, both BLOCKER, and both right — they are the
   // same defect seen twice. The background pump and streamEvents() iterated
   // the SAME subscription.stream. Two consumers on one async iterator race:

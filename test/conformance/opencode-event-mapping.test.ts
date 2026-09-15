@@ -368,3 +368,79 @@ describe("retryHintFromStatus", () => {
     expect(retryHintFromStatus({ type: "idle" }, 0)).toBeUndefined();
   });
 });
+
+// #157: pr-157-8df2fca3-4's complete capture — OpenCode reported this exact
+// retry status for the session's own id at ~3.8s in, kept retrying
+// internally, and no reasoning/text/usage ever arrived. The attempt sat
+// quiet for the whole usefulProgressMs budget before the silence tripwire
+// settled it $0/transient — the user saw "silence", never the account limit
+// the provider had already named. `account_rate_limit` is the only
+// `action.reason` observed across all three hunter captures of that run
+// (3487 occurrences each).
+describe("session.status account/usage limit maps to a provider_limit event (#157)", () => {
+  const LIMIT_MESSAGE =
+    "5 hour usage limit reached. It will reset in 22 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01M17B67W4Q9BE4T0910EQ0NRY/go";
+
+  function statusEvent(
+    status: Record<string, unknown>,
+    sessionID: string = SESSION_ID,
+  ) {
+    return {
+      type: "session.status",
+      properties: { sessionID, status },
+    };
+  }
+
+  test("an account_rate_limit retry for the own session maps to provider_limit, verbatim", () => {
+    const raw = statusEvent({
+      type: "retry",
+      attempt: 1,
+      message: LIMIT_MESSAGE,
+      action: {
+        reason: "account_rate_limit",
+        provider: "opencode-go",
+        title: "Go limit reached",
+      },
+    });
+    expect(mapOne(raw)).toEqual([
+      {
+        kind: "provider_limit",
+        reason: "account_rate_limit",
+        message: LIMIT_MESSAGE,
+      },
+    ]);
+  });
+
+  test("a retry with no action reason stays alive and is not progress", () => {
+    const raw = statusEvent({
+      type: "retry",
+      attempt: 2,
+      message: "429",
+      next: 1,
+    });
+    expect(mapOne(raw)).toEqual([]);
+  });
+
+  test("a retry whose action names an unrecognised reason stays alive too", () => {
+    const raw = statusEvent({
+      type: "retry",
+      attempt: 1,
+      message: "provider is retrying",
+      action: { reason: "some_future_reason", provider: "opencode-go" },
+    });
+    expect(mapOne(raw)).toEqual([]);
+  });
+
+  test("an account_rate_limit retry for a different session is ignored", () => {
+    const raw = statusEvent(
+      {
+        type: "retry",
+        attempt: 1,
+        message: LIMIT_MESSAGE,
+        action: { reason: "account_rate_limit", provider: "opencode-go" },
+      },
+      "some-other-session",
+    );
+    expect(mapOne(raw)).toEqual([]);
+  });
+});
