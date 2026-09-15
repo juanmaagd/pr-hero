@@ -415,7 +415,7 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
   test("a completed tool part on an assistant message emits one tool event", () => {
     const state = announceAssistant();
     expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
-      { kind: "tool", tool: "read" },
+      { kind: "tool", tool: "read", callId: "call_1" },
     ]);
   });
 
@@ -438,14 +438,14 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
       toolEvents(toolPart("prt_t1", "call_1", "read", "pending"), state),
     ).toEqual([]);
     expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
-      { kind: "tool", tool: "read" },
+      { kind: "tool", tool: "read", callId: "call_1" },
     ]);
   });
 
   test("restatements of the same completed callID are one invocation, not three", () => {
     const state = announceAssistant();
     expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
-      { kind: "tool", tool: "read" },
+      { kind: "tool", tool: "read", callId: "call_1" },
     ]);
     expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([]);
     expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([]);
@@ -454,10 +454,10 @@ describe("mapOpenCodeEvents tool-call parts (#214)", () => {
   test("two callIDs are two invocations", () => {
     const state = announceAssistant();
     expect(toolEvents(toolPart("prt_a", "call_a"), state)).toEqual([
-      { kind: "tool", tool: "read" },
+      { kind: "tool", tool: "read", callId: "call_a" },
     ]);
     expect(toolEvents(toolPart("prt_b", "call_b"), state)).toEqual([
-      { kind: "tool", tool: "read" },
+      { kind: "tool", tool: "read", callId: "call_b" },
     ]);
   });
 

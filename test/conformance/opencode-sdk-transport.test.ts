@@ -190,6 +190,25 @@ function streamOf(
   })();
 }
 
+// A stream that keeps producing content for `count` microtask ticks (no
+// clock timer involved) and then goes quiet forever — so #132's post-win
+// drain window keeps re-arming (`deltaSinceArm` stays true) for long enough
+// to give a scripted `polls` sequence room to deliver a SECOND terminal
+// report (a "confirming" poll of an already-won proof) before settlement,
+// and then closes cleanly (a real quiet stream, not a truncated one) once the
+// deltas stop.
+function delaysThenGoesQuiet(
+  count: number,
+): AsyncIterable<OpenCodeClientEvent> {
+  return (async function* () {
+    for (let i = 0; i < count; i += 1) {
+      yield { kind: "delta", text: "" };
+      await Promise.resolve();
+    }
+    await new Promise<never>(() => {});
+  })();
+}
+
 const completedProof = (
   eventId: string,
   status = "completed",
@@ -4049,7 +4068,7 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
           kind: "terminal",
           proof,
           finalText: '{"findings":[]}',
-          toolInvocations: 2,
+          completedToolCallIds: ["call_1", "call_2"],
         },
       ],
     });
@@ -4068,21 +4087,22 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
     );
   });
 
-  test("the stream's own count is kept when it exceeds the poll's tally (max, not last-write)", async () => {
+  test("the stream's own distinct calls are kept when a confirming poll only names one of them (union, not overwrite)", async () => {
     const proof = completedProof("evt-stream-ahead");
     const handle = makeClient({
       stream: streamOf([
-        { kind: "tool" },
-        { kind: "tool" },
-        { kind: "tool" },
+        { kind: "tool", callId: "call_1" },
+        { kind: "tool", callId: "call_2" },
+        { kind: "tool", callId: "call_3" },
         { kind: "delta", text: '{"findings":[]}' },
         { kind: "terminal", proof },
       ]),
-      // The poll observes fewer completed calls than the stream already
-      // counted (e.g. it read back before the third tool part landed). Max,
-      // not the poll's own number and not a plain overwrite, is what keeps
-      // this from UNDERcounting a hunter the stream already proved looked.
-      polls: [{ kind: "terminal", proof, toolInvocations: 1 }],
+      // The poll's confirming readback names only one of the three calls the
+      // stream already proved complete (e.g. it read back before the other
+      // two parts landed). The union must keep all three: neither the poll's
+      // smaller set nor a plain overwrite may erase what the stream already
+      // proved.
+      polls: [{ kind: "terminal", proof, completedToolCallIds: ["call_1"] }],
     });
     const rig = makeRig({ client: handle.client });
     const pending = rig.transport.execute(makeRequest(), {
@@ -4093,5 +4113,90 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
     const outcome = await pending;
 
     expect(outcome.toolInvocations).toBe(3);
+  });
+
+  // F001 (corroborated, opencode-sdk.ts:863): the poll-side tally used to be
+  // read fresh off `toolStates` at every terminal report and then OVERWRITE
+  // the running total. A later readback that shows an earlier-completed call
+  // as "error" (or anything else) lowered the recount, and this unconditional
+  // `terminalToolInvocations = polledToolInvocations` assignment (reachable
+  // on a CONFIRMING poll of an already-won terminal, not just the winning
+  // one — see `onProviderTerminalCandidate`) let that smaller number replace
+  // a correct larger one.
+  test("a later confirming poll reporting fewer completed ids does not shrink the count (F001)", async () => {
+    const proof = completedProof("evt-f001");
+    const handle = makeClient({
+      // Never-ending, so #132's drain window keeps re-arming instead of
+      // settling on its first check — giving the SECOND scripted poll (the
+      // confirming one) room to actually fire before settlement finalizes.
+      stream: delaysThenGoesQuiet(6),
+      polls: [
+        { kind: "terminal", proof, completedToolCallIds: ["call_a"] },
+        // The confirming round: same proof, but its own fresh snapshot no
+        // longer names call_a (it may have since shown "error"). The
+        // monotonic union must not un-count it.
+        { kind: "terminal", proof, completedToolCallIds: [] },
+      ],
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 12);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(1);
+  });
+
+  // F002 (opencode-sdk.ts:1633): Math.max of two independently-tallied COUNTS
+  // cannot distinguish "two different calls, one per observer" from "one call,
+  // seen twice" -- both looked like "1 and 1" and Math.max(1, 1) undercounted
+  // the former to 1 instead of 2. Identity fixes it: two DIFFERENT callIDs
+  // union to a set of size 2.
+  test("poll-only and stream-only completions of different calls both count (F002)", async () => {
+    const proof = completedProof("evt-f002");
+    const handle = makeClient({
+      stream: streamOf([
+        { kind: "tool", tool: "read", callId: "call_b" },
+        { kind: "delta", text: '{"findings":[]}' },
+        { kind: "terminal", proof },
+      ]),
+      polls: [{ kind: "terminal", proof, completedToolCallIds: ["call_a"] }],
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.toolInvocations).toBe(2);
+  });
+
+  // The mirror of F002: the SAME call observed by both the stream and a
+  // confirming poll counts once, not twice -- proving the union is keyed by
+  // identity, not merely accumulating every report it is handed.
+  test("the same call seen by both the stream and the poll counts once", async () => {
+    const proof = completedProof("evt-both-observers");
+    const handle = makeClient({
+      stream: streamOf([
+        { kind: "tool", tool: "read", callId: "call_a" },
+        { kind: "delta", text: '{"findings":[]}' },
+        { kind: "terminal", proof },
+      ]),
+      polls: [{ kind: "terminal", proof, completedToolCallIds: ["call_a"] }],
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.toolInvocations).toBe(1);
   });
 });

@@ -293,6 +293,19 @@ export interface OpenCodeTurnState {
   // suppress every real transition the stream later reports. See the WHY
   // comment at its use site in `handlePartUpdated`.
   readonly toolActivityRank: Map<string, number>;
+  // pr-hero review F001 (#214): every callID EVER observed "completed", by
+  // either the stream (`handlePartUpdated`) or the poll (`reconcileMessages`)
+  // — never removed, regardless of what a LATER observation reports for that
+  // same callID. `toolStates` above stores the provider's raw LAST-KNOWN
+  // status and is written unconditionally by both observers; a poll that
+  // recomputed "how many are completed" by re-filtering `toolStates` at each
+  // terminal (the pre-fix design) went DOWN the moment any earlier-completed
+  // call's status changed to "error" on a later readback. This set is the
+  // fix: `pollStatus` reports its members, never a fresh `toolStates`
+  // filter. Bounded by construction, not a separate cap — an id is added
+  // here only once it is already present in `toolStates`, which enforces
+  // MAX_TRACKED_PARTS before either write.
+  readonly completedToolCallIds: Set<string>;
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   // Provider event ids for text deltas actually applied to `emittedText`
@@ -383,6 +396,7 @@ export function createTurnState(
     parentLinks: new Map(),
     toolStates: new Map(),
     toolActivityRank: new Map(),
+    completedToolCallIds: new Set(),
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     deltaEventIds: new Set(),
@@ -789,7 +803,11 @@ function handlePartUpdated(
           typeof part.tool === "string" && part.tool.length > 0
             ? part.tool
             : "unknown";
-        events.push({ kind: "tool", tool });
+        // pr-hero review F001: recorded in the monotonic set REGARDLESS of
+        // whether a later observation ever reports something else for this
+        // callID — see the field's own WHY comment on `OpenCodeTurnState`.
+        state.completedToolCallIds.add(callId);
+        events.push({ kind: "tool", tool, callId });
       }
     }
     return events;
@@ -1181,18 +1199,25 @@ export function reconcileMessages(
             )
               failIntegrity(state, "tool identity cap exceeded");
             state.toolStates.set(callId, status);
+            // pr-hero review F001: recorded in the monotonic set the moment
+            // THIS readback sees "completed" — never removed by a later
+            // readback that reports a different status for the same callID.
+            // See the field's own WHY comment on `OpenCodeTurnState`.
+            if (status === "completed") {
+              state.completedToolCallIds.add(callId);
+            }
           }
           msgDetail.hasToolCalls = true;
           // #214: this write feeds `hasOutstandingTools` (so a message the
           // poll alone has seen is not declared final while a tool is still
-          // pending/running) AND, on a poll-won terminal, `pollStatus` tallies
-          // this exact map for `OpenCodePollResult.toolInvocations` — see the
-          // WHY comment there. This call site stays `emit: false` (no
-          // `{kind:"tool"}` event rides through here; the stream is still the
-          // only event-emitting observer), but a completion this observer is
-          // the FIRST to see is no longer silently uncounted: opencode-sdk.ts
-          // folds this tally into the stamped outcome at settlement via
-          // `Math.max` against the stream's own running count.
+          // pending/running) AND, on a poll-won terminal, `pollStatus` reports
+          // `completedToolCallIds`'s members as `OpenCodePollResult
+          // .completedToolCallIds` — see the WHY comment there. This call
+          // site stays `emit: false` (no `{kind:"tool"}` event rides through
+          // here; the stream is still the only event-emitting observer), but
+          // a completion this observer is the FIRST to see is no longer
+          // silently uncounted: opencode-sdk.ts unions this poll-reported set
+          // with its own stream-observed callIDs by identity at settlement.
         } else if (partType === "reasoning") {
           if (
             !state.parts.has(partId) &&
@@ -2900,26 +2925,23 @@ export function createOpenCodeClient(
           }
 
           if (reconciled.terminalProof !== undefined) {
-            // #214: tallied HERE, not inside `reconcileMessages` (whose
-            // return type stays untouched) — ownership is already enforced
-            // above it, in the parts loop that only runs past
-            // `isMessageOwned`, so every id counted below is this turn's own.
-            // Counting `toolStates` rather than re-deriving from `list`
-            // reuses the exact same completed/error terminal-rank distinction
-            // the stream side draws (TOOL_STATUS_RANK): an errored call
-            // produced no signal to reason from, and stays excluded here for
-            // the same reason it is excluded from the stream's count.
-            let toolInvocations = 0;
-            for (const status of state.turn.toolStates.values()) {
-              if (status === "completed") toolInvocations += 1;
-            }
+            // pr-hero review F001 (#214): reported HERE as the CURRENT
+            // members of `completedToolCallIds` (whose own WHY comment on
+            // `OpenCodeTurnState` carries the full reasoning), not inside
+            // `reconcileMessages` (whose return type stays untouched) and not
+            // re-derived from `toolStates`/`list` fresh at this moment — a
+            // fresh re-filter is exactly the bug: an id that reached
+            // "completed" on an earlier readback and "error" on this one
+            // would silently drop out of a live recount. Ownership is already
+            // enforced above, in the parts loop that only runs past
+            // `isMessageOwned`, so every id in this set is this turn's own.
             return {
               kind: "terminal",
               proof: reconciled.terminalProof,
               finalText: reconciled.finalText,
               usage: reconciled.usage,
               usageIncomplete: reconciled.usageIncomplete,
-              toolInvocations,
+              completedToolCallIds: Array.from(state.turn.completedToolCallIds),
             };
           }
         }

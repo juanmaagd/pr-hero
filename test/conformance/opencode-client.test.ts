@@ -1282,7 +1282,7 @@ describe("createOpenCodeClient", () => {
     const result = await client.pollStatus(session);
     expect(result.kind).toBe("terminal");
     if (result.kind !== "terminal") throw new Error("unreachable");
-    expect(result.toolInvocations).toBe(1);
+    expect(result.completedToolCallIds).toEqual(["call_read_1"]);
   });
 
   // Absence is the boundary, but it is ALSO what a wrong or missing
@@ -3170,7 +3170,7 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // this fixture's part carries no `tool` field.
     expect(toolStatus("completed")).toEqual([
       { kind: "activity" },
-      { kind: "tool", tool: "unknown" },
+      { kind: "tool", tool: "unknown", callId: "call_1" },
     ]);
   });
 
@@ -3210,7 +3210,7 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // also stamps a look.
     expect(toolStatus("completed")).toEqual([
       { kind: "activity" },
-      { kind: "tool", tool: "unknown" },
+      { kind: "tool", tool: "unknown", callId: "call_replay" },
     ]);
     expect(toolStatus("running")).toEqual([]);
   });
@@ -3245,7 +3245,7 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // also stamps a look.
     expect(toolStatus("completed")).toEqual([
       { kind: "activity" },
-      { kind: "tool", tool: "unknown" },
+      { kind: "tool", tool: "unknown", callId: "call_forward" },
     ]);
   });
 
@@ -3277,7 +3277,7 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // also stamps a look.
     expect(toolStatus("completed")).toEqual([
       { kind: "activity" },
-      { kind: "tool", tool: "unknown" },
+      { kind: "tool", tool: "unknown", callId: "call_terminal" },
     ]);
     expect(toolStatus("error")).toEqual([]);
   });
@@ -3314,6 +3314,9 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     });
     // toolStates is exactly as unconditional as before this commit.
     expect(state.toolStates.get("call_poll_race")).toBe("completed");
+    // pr-hero review F001/F002: the poll's own observation already recorded
+    // this callID in the monotonic set.
+    expect(state.completedToolCallIds.has("call_poll_race")).toBe(true);
 
     const toolStatus = (status: string) =>
       mapOpenCodeEvents(
@@ -3346,7 +3349,10 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // in `toolStates` already.
     expect(toolStatus("completed")).toEqual([
       { kind: "activity" },
-      { kind: "tool", tool: "unknown" },
+      { kind: "tool", tool: "unknown", callId: "call_poll_race" },
     ]);
+    // Same identity, seen by both observers — the set stays a union of one,
+    // not two (F002's "same call counts once" at the client layer).
+    expect(state.completedToolCallIds.size).toBe(1);
   });
 });
