@@ -28,7 +28,10 @@ import type {
   OpenCodePollResult,
   OpenCodeTransportClock,
 } from "../../src/transports/opencode-sdk";
-import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
+import {
+  formatPermissionRejectFailureDetail,
+  OpenCodeSdkTransport,
+} from "../../src/transports/opencode-sdk";
 
 // §13 line 740: SDK conformance must distinguish a confirmed abort from
 // unknown_may_continue without claiming remote cost ended, and §13 line 746
@@ -948,6 +951,42 @@ describe("OpenCodeSdkTransport provider account/usage limit (#157)", () => {
     expect(outcome.completion).toBe("failed");
     expect(outcome.stderrTail).toContain(LIMIT_MESSAGE);
     expect(rig.transport.classifyFailure(outcome)).toBe("quota_exhausted");
+    expect(handle.abortCount()).toBe(1);
+  });
+});
+
+// #157: opencode-client.ts settles a failed permission-reject the same way
+// as a failed session poll — a `{kind:"failed"}` OpenCodePollResult, so this
+// pins the classification the client-level tests in opencode-client.test.ts
+// cannot reach (they only observe `state.failure`'s message, never what
+// classifyFailure does with it).
+describe("OpenCodeSdkTransport permission-reject failure classification (#157)", () => {
+  test("a failed permission reject classifies runtime_unavailable, never protocol_truncation", async () => {
+    const detail = formatPermissionRejectFailureDetail(
+      "external_directory",
+      ["/blocked"],
+      "permission service down",
+    );
+    const handle = makeClient({
+      polls: [{ kind: "failed", detail }],
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { usefulProgressMs: 150_000 },
+    });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await flush();
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.stderrTail).toContain("permission service down");
+    expect(rig.transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+    expect(rig.transport.classifyFailure(outcome)).not.toBe(
+      "protocol_truncation",
+    );
     expect(handle.abortCount()).toBe(1);
   });
 });

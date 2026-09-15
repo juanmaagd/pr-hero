@@ -904,6 +904,12 @@ describe("createOpenCodeClient", () => {
     }
 
     expect(thrown?.message).toContain("permission service down");
+    // Ties this failure to the marker classifyFailure keys on
+    // (opencode-sdk.ts's formatPermissionRejectFailureDetail) rather than a
+    // coincidental substring match.
+    expect(thrown?.message).toContain(
+      "failed to reject an OpenCode permission request",
+    );
   });
 
   // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
