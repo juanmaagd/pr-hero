@@ -235,6 +235,13 @@ export interface OpenCodeTurnState {
     string,
     "pending" | "running" | "completed" | "error"
   >;
+  // Owned ONLY by the stream path (`handlePartUpdated`). `reconcileMessages`
+  // (the poll readback) writes `toolStates` unconditionally and can observe
+  // a LATER status before the stream delivers that tool's own earlier ones
+  // — crediting activity off `toolStates` would let a poll-advanced rank
+  // suppress every real transition the stream later reports. See the WHY
+  // comment at its use site in `handlePartUpdated`.
+  readonly toolActivityRank: Map<string, number>;
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   // Provider event ids for text deltas actually applied to `emittedText`
@@ -311,6 +318,7 @@ export function createTurnState(
     messageDetails: new Map(),
     parentLinks: new Map(),
     toolStates: new Map(),
+    toolActivityRank: new Map(),
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     deltaEventIds: new Set(),
@@ -666,16 +674,25 @@ function handlePartUpdated(
         state.toolStates.size >= MAX_TRACKED_PARTS
       )
         failIntegrity(state, "tool identity cap exceeded");
-      const previousStatus = state.toolStates.get(callId);
       // `state.toolStates` still stores the raw reported status regardless
       // of rank — other logic (e.g. `hasOutstandingTools`) reads it and
       // must keep seeing the provider's literal last-known status, not a
       // rank-filtered one. Only whether `activity` is EMITTED changes below.
       state.toolStates.set(callId, status);
-      const previousRank = previousStatus
-        ? TOOL_STATUS_RANK[previousStatus]
-        : -1;
-      transitioned = TOOL_STATUS_RANK[status] > previousRank;
+      // #228's review: credit is computed against `toolActivityRank`, a map
+      // owned ONLY by this stream path — NEVER against `toolStates`, which
+      // `reconcileMessages` (the poll readback) also writes unconditionally.
+      // Three concurrent hunters sharing one server can have a poll round
+      // observe a tool's "completed" before the stream ever delivers that
+      // same tool's "pending"/"running". Comparing against `toolStates`
+      // would then compare the stream's real "pending" against the rank the
+      // POLL already advanced to "completed", crediting nothing for work
+      // the stream is only now reporting.
+      const previousRank = state.toolActivityRank.get(callId) ?? -1;
+      const newRank = TOOL_STATUS_RANK[status];
+      transitioned = newRank > previousRank;
+      if (transitioned)
+        remember(state.toolActivityRank, callId, newRank, MAX_TRACKED_PARTS);
     }
     if (msgDetail) msgDetail.hasToolCalls = true;
     // Ownership was already established above (the `isMessageOwned` check

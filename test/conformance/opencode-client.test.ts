@@ -2701,4 +2701,65 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
     expect(toolStatus("error")).toEqual([]);
   });
+
+  // #228's review: `reconcileMessages` (the ~250ms poll readback, `emit:
+  // false`) ALSO writes `state.toolStates.set(callId, status)`
+  // unconditionally, and three concurrent hunters sharing one server can
+  // have a poll round observe a tool's "completed" status before the stream
+  // ever delivers that same tool's "pending"/"running". If activity credit
+  // were computed against `toolStates`, the stream's later real transitions
+  // would compare against the rank the POLL already advanced to
+  // "completed" and never earn credit.
+  test("tool activity credit is computed independently of the poll reconcile's toolStates writes", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    const pollReadbackObservesCompletedFirst = {
+      id: "msg_asst_1",
+      role: "assistant",
+      path: { cwd: "/tmp/work" },
+      sessionID: SESS,
+      parentID: "msg_user_1",
+      parts: [
+        {
+          id: "prt_tool_poll_race",
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          type: "tool",
+          callID: "call_poll_race",
+          state: { status: "completed" },
+        },
+      ],
+    };
+    reconcileMessages([pollReadbackObservesCompletedFirst], state, {
+      emit: false,
+    });
+    // toolStates is exactly as unconditional as before this commit.
+    expect(state.toolStates.get("call_poll_race")).toBe("completed");
+
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_poll_race",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_poll_race",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // The stream's OWN pending -> running -> completed still earns credit
+    // for every forward step, unaffected by the poll having already stored
+    // "completed" in toolStates.
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+  });
 });
