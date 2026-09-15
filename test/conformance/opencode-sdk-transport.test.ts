@@ -4032,4 +4032,66 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
     expect(outcome.toolInvocations).toBeUndefined();
     expect(outcome.diagnosticsTail ?? "").not.toContain("tool invocation");
   });
+
+  // A poll-won turn is a supported delivery path (dev's `terminalFinalText`
+  // already mirrors it for the answer text), so a hunter this observer never
+  // saw a stream "tool" event for — the stream delivered only a delta, the
+  // POLL readback is what discovered the completed tool part and the
+  // terminal — must still be able to prove it looked. Without this, a
+  // poll-won turn with a genuinely completed tool call reads as vacuous and
+  // the harness gate (#214, `isVacuousEmptyHunt`) refuses it.
+  test("a poll-won terminal carries its own tool tally when the stream never saw one", async () => {
+    const proof = completedProof("evt-poll-tool");
+    const handle = makeClient({
+      stream: streamOf([{ kind: "delta", text: '{"findings":[]}' }]),
+      polls: [
+        {
+          kind: "terminal",
+          proof,
+          finalText: '{"findings":[]}',
+          toolInvocations: 2,
+        },
+      ],
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(2);
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 2 completed tool invocation(s)",
+    );
+  });
+
+  test("the stream's own count is kept when it exceeds the poll's tally (max, not last-write)", async () => {
+    const proof = completedProof("evt-stream-ahead");
+    const handle = makeClient({
+      stream: streamOf([
+        { kind: "tool" },
+        { kind: "tool" },
+        { kind: "tool" },
+        { kind: "delta", text: '{"findings":[]}' },
+        { kind: "terminal", proof },
+      ]),
+      // The poll observes fewer completed calls than the stream already
+      // counted (e.g. it read back before the third tool part landed). Max,
+      // not the poll's own number and not a plain overwrite, is what keeps
+      // this from UNDERcounting a hunter the stream already proved looked.
+      polls: [{ kind: "terminal", proof, toolInvocations: 1 }],
+    });
+    const rig = makeRig({ client: handle.client });
+    const pending = rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+    await advance(rig.clock, 6);
+    const outcome = await pending;
+
+    expect(outcome.toolInvocations).toBe(3);
+  });
 });

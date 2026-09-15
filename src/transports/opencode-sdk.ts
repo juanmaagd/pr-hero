@@ -183,6 +183,19 @@ export type OpenCodePollResult =
         readonly costUsd?: number;
       };
       readonly usageIncomplete?: boolean;
+      // #214: this observer's own tally of COMPLETED tool-call parts, read
+      // off `toolStates` at the moment this poll itself found the terminal —
+      // see opencode-client.ts's `pollStatus`. Absent whenever this poll
+      // produced no terminal at all (`kind` is not `"terminal"`); present on
+      // EVERY terminal this poll reports, whether or not it goes on to win
+      // §197's slot — the transport, not this observer, decides that. A
+      // poll-won turn is a supported delivery path (`terminalFinalText`
+      // already mirrors it for the answer text): the stream's own "tool"
+      // events only fire for a completion the STREAM itself watched happen,
+      // so a hunter whose only observer of a completed tool call was this
+      // poll readback would otherwise be undercounted as zero and read as a
+      // hunt that never looked.
+      readonly toolInvocations?: number;
     }
   // The session itself failed, so no turn will ever produce a terminal. It is
   // NOT a terminal — the transport issues no proof of its own — and it is not
@@ -812,6 +825,11 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         }
       | undefined;
     let terminalUsageIncomplete = false;
+    // #214: the POLL's own tool tally, mirrored alongside `terminalFinalText`
+    // for the same reason — only the observer that actually produced the
+    // winning (or a confirming) terminal carries one. `undefined` here means
+    // "no poll terminal has reported a tally yet", never "zero observed".
+    let terminalToolInvocations: number | undefined;
 
     const onProviderTerminalCandidate = (
       proof: ProviderTerminalProof,
@@ -823,6 +841,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         costUsd?: number;
       },
       incompleteUsage?: boolean,
+      polledToolInvocations?: number,
     ): void => {
       if (settled) return;
       if (!isValidProof(proof)) {
@@ -840,6 +859,9 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       }
       if (incompleteUsage === true) {
         terminalUsageIncomplete = true;
+      }
+      if (polledToolInvocations !== undefined) {
+        terminalToolInvocations = polledToolInvocations;
       }
       if (slotProof === undefined) {
         slotProof = proof;
@@ -1412,6 +1434,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
             result.finalText,
             result.usage,
             result.usageIncomplete,
+            result.toolInvocations,
           );
           if (settled) return;
         }
@@ -1594,12 +1617,29 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       // tool-call parts", and the live hunt that posted a clean bill could
       // not even prove that fact. Session-creation failure never reaches
       // here, so it correctly omits the count.
+      //
+      // `Math.max`, not `??` and not a plain overwrite: the stream's
+      // `toolInvocations` and the poll's `terminalToolInvocations` are two
+      // independent, deduped-by-callID counts over the SAME underlying set of
+      // tool parts, so neither can exceed the true count and max can never
+      // OVERcount. It is needed because either side can be the one that is
+      // behind: a poll-won turn the stream never emitted a "tool" event for
+      // (the gap this change closes) leaves the stream's own count at 0,
+      // while #132's post-win drain window lets the stream keep delivering
+      // "tool" events for a beat AFTER a poll terminal already reported its
+      // (necessarily earlier, so possibly smaller) tally. Taking the max of
+      // both is the only combination that cannot UNDERcount either
+      // observer's real completions.
+      const effectiveToolInvocations = Math.max(
+        toolInvocations,
+        terminalToolInvocations ?? 0,
+      );
       const toolIds =
         completedToolIds.length === 0
           ? ""
           : ` (${completedToolIds.join(", ")})`;
       diagnostics.push(
-        `[pr-hero] opencode sdk: observed ${toolInvocations} completed tool invocation(s)${toolIds}`,
+        `[pr-hero] opencode sdk: observed ${effectiveToolInvocations} completed tool invocation(s)${toolIds}`,
       );
 
       let completion: TransportOutcome["completion"];
@@ -1796,7 +1836,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         // #214: stamped after a session ran, including 0. Absence is reserved
         // for transports that cannot observe tools (and for this transport's
         // own session-creation failure, which never opened a turn).
-        toolInvocations,
+        toolInvocations: effectiveToolInvocations,
       };
 
       // §4.1: the transport normally supplies the attempt's ONE terminal event.

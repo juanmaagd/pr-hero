@@ -1215,6 +1215,76 @@ describe("createOpenCodeClient", () => {
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
   });
 
+  // A poll-won turn is a supported delivery path (its answer text already
+  // rides `terminalFinalText`), so a hunter this observer is the FIRST to see
+  // a completed tool call for — the stream never delivered a "tool" event for
+  // this turn — must still be able to prove it looked. Two messages, dev's
+  // shape: the tool call lives on its own `finish: "tool-calls"` step, the
+  // answer on a second message parented to it (opencode-client.ts's
+  // `isIntermediateToolStep`).
+  test("a poll-only completed tool call is tallied on the terminal result (#214)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const toolStepId = "msg_tool_step";
+    const finalMessage = {
+      ...ASSISTANT,
+      id: "msg_poll_final",
+      parentID: toolStepId,
+    };
+
+    fake.setStatus({ type: "busy" });
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+      {
+        info: {
+          id: toolStepId,
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: { cwd: "/tmp/work", root: "/" },
+          finish: "tool-calls",
+          time: { completed: 1 },
+        },
+        parts: [
+          {
+            id: "prt_tool_read",
+            sessionID: SESSION_ID,
+            messageID: toolStepId,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "completed" },
+          },
+        ],
+      },
+      {
+        info: finalMessage,
+        parts: [
+          {
+            id: "prt_final",
+            sessionID: SESSION_ID,
+            messageID: "msg_poll_final",
+            type: "text",
+            text: '{"findings":[]}',
+          },
+        ],
+      },
+    ]);
+    fake.setStatus(undefined);
+
+    const result = await client.pollStatus(session);
+    expect(result.kind).toBe("terminal");
+    if (result.kind !== "terminal") throw new Error("unreachable");
+    expect(result.toolInvocations).toBe(1);
+  });
+
   // Absence is the boundary, but it is ALSO what a wrong or missing
   // `directory` scope looks like — #223 measured (opencode 1.18.30) that
   // `GET /session/status` given a directory other than the one session.create

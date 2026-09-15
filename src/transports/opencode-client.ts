@@ -1183,17 +1183,16 @@ export function reconcileMessages(
             state.toolStates.set(callId, status);
           }
           msgDetail.hasToolCalls = true;
-          // #214, known gap: this write feeds `hasOutstandingTools` (so a
-          // message the poll alone has seen is not declared final while a
-          // tool is still pending/running) but this call site is always
-          // `emit: false` — see the WHY comment at both its call sites — so a
-          // completion this observer is the FIRST to see never produces a
-          // `{kind:"tool"}` count event the way the stream path does. #214's
-          // original design had no poll observer at all, so this is not a
-          // regression; it stays a narrow gap (only reachable if the stream
-          // never once delivers a tool part the poll independently completes)
-          // rather than a second counting path to keep in sync with the
-          // stream's.
+          // #214: this write feeds `hasOutstandingTools` (so a message the
+          // poll alone has seen is not declared final while a tool is still
+          // pending/running) AND, on a poll-won terminal, `pollStatus` tallies
+          // this exact map for `OpenCodePollResult.toolInvocations` — see the
+          // WHY comment there. This call site stays `emit: false` (no
+          // `{kind:"tool"}` event rides through here; the stream is still the
+          // only event-emitting observer), but a completion this observer is
+          // the FIRST to see is no longer silently uncounted: opencode-sdk.ts
+          // folds this tally into the stamped outcome at settlement via
+          // `Math.max` against the stream's own running count.
         } else if (partType === "reasoning") {
           if (
             !state.parts.has(partId) &&
@@ -2901,12 +2900,26 @@ export function createOpenCodeClient(
           }
 
           if (reconciled.terminalProof !== undefined) {
+            // #214: tallied HERE, not inside `reconcileMessages` (whose
+            // return type stays untouched) — ownership is already enforced
+            // above it, in the parts loop that only runs past
+            // `isMessageOwned`, so every id counted below is this turn's own.
+            // Counting `toolStates` rather than re-deriving from `list`
+            // reuses the exact same completed/error terminal-rank distinction
+            // the stream side draws (TOOL_STATUS_RANK): an errored call
+            // produced no signal to reason from, and stays excluded here for
+            // the same reason it is excluded from the stream's count.
+            let toolInvocations = 0;
+            for (const status of state.turn.toolStates.values()) {
+              if (status === "completed") toolInvocations += 1;
+            }
             return {
               kind: "terminal",
               proof: reconciled.terminalProof,
               finalText: reconciled.finalText,
               usage: reconciled.usage,
               usageIncomplete: reconciled.usageIncomplete,
+              toolInvocations,
             };
           }
         }

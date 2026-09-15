@@ -2200,8 +2200,15 @@ describe("Task 5.1 RED U5 BE3a/b: generic facts, isolation safeguards, and concu
         recordedCwdOnCreate = input.cwd;
         return { id: "sess-cwd-1" };
       },
+      // #214: this step's `tools:` list is non-empty (`makeStep`'s default),
+      // so an empty `findings` draft with zero observed tool invocations
+      // reads as a hunt that never looked (`isVacuousEmptyHunt`) and the
+      // harness now refuses it — a `{kind:"tool"}` event is enough to prove
+      // this mocked session looked, without this cwd-plumbing test needing
+      // to care about findings content.
       streamEvents: () =>
         (async function* () {
+          yield { kind: "tool", tool: "read" };
           yield { kind: "delta", text: '{"findings":[]}' };
         })(),
       pollStatus: async () => ({
@@ -2261,8 +2268,12 @@ describe("Task 5.1 RED U5 BE3a/b: generic facts, isolation safeguards, and concu
     let opencodeDone = false;
     const opencodeClient: OpenCodeClientLike = {
       createSession: async () => ({ id: "sess-oc-parity" }),
+      // #214: see the WHY comment on the cwd test above — this step's tools
+      // list is non-empty, so the mocked session needs a `{kind:"tool"}`
+      // event to avoid the vacuous-hunt gate over its empty findings draft.
       streamEvents: () =>
         (async function* () {
+          yield { kind: "tool", tool: "read" };
           yield { kind: "delta", text: '{"findings":[]}' };
         })(),
       pollStatus: async () => {
@@ -2362,6 +2373,10 @@ describe("Task 5.1 RED U5 BE3a/b: generic facts, isolation safeguards, and concu
               yield { kind: "delta", text: "session-1 partial" };
             }
           } else {
+            // #214: session 2 must complete `ok` to prove it survived
+            // session 1's cancellation — see the WHY comment on the cwd test
+            // above for why a tool event is needed here too.
+            yield { kind: "tool", tool: "read" };
             yield { kind: "delta", text: '{"findings":[]}' };
           }
         })(),
