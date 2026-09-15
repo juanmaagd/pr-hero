@@ -20,6 +20,31 @@ const MAX_RECORDS = 10000;
 // terminal readback naturally lands, since it happens at the very end.
 const HEAD_MAX_RECORDS = 1000;
 const HEAD_MAX_BYTES = 1 * 1024 * 1024;
+// PR #228 review, F001: `fits()` used to reserve marker room only once
+// `elidedCount > 0` — i.e. only AFTER something had already been elided.
+// But the oversized-record pre-check and the head-admission check run the
+// identical formula for the same record at the same instant while
+// `elidedCount === 0`, so the record that fails one identically fails the
+// other and is always skipped before it can land in an empty tail. That
+// means the FIRST-EVER skip's marker is born the instant a head+tail
+// combination was already accepted WITHOUT it ever being budgeted for —
+// and head is permanent, so nothing can shrink to make room afterward.
+// Reserving this worst-case serialized marker size unconditionally, from
+// the very first record on, keeps every accepted state already compatible
+// with a marker that has not been created yet, so `snapshot()` can never
+// exceed `maxBytes` regardless of when or how many times elision starts.
+// Worst case: `observedMs` is the longest a JSON number round-trips to
+// (the most negative representable double), and `records`/`bytes` are
+// each bounded by `Number.MAX_SAFE_INTEGER` — no real capture count or
+// byte tally can ever legally exceed that.
+const MARKER_RESERVE_BYTES = Buffer.byteLength(
+  JSON.stringify({
+    seq: 0,
+    observedMs: -1.7976931348623157e308,
+    kind: "elided",
+    data: { records: Number.MAX_SAFE_INTEGER, bytes: Number.MAX_SAFE_INTEGER },
+  }),
+);
 export interface OpenCodeObservation {
   seq: number;
   observedMs: number;
@@ -83,9 +108,6 @@ export class OpenCodeEvidenceCollector {
       data: { records: this.elidedCount, bytes: this.elidedBytes },
     };
   }
-  private markerSize(): number {
-    return Buffer.byteLength(JSON.stringify(this.markerRecord()));
-  }
   // Exact accounting for the FINAL emitted sequence (head, then the marker
   // if anything was ever elided, then tail) given candidate head/tail
   // sizes — the same join-comma/wrapper formula `record()`'s overhead fix
@@ -96,13 +118,19 @@ export class OpenCodeEvidenceCollector {
     tailCount: number,
     tailBytes: number,
   ): boolean {
-    const hasMarker = this.elidedCount > 0;
-    const totalCount = headCount + (hasMarker ? 1 : 0) + tailCount;
+    // Always reserve one record slot and MARKER_RESERVE_BYTES for a marker
+    // that may not exist yet (see MARKER_RESERVE_BYTES above) — never
+    // conditioned on `this.elidedCount > 0`, since that is exactly the
+    // instant this check cannot yet know whether the marker is about to be
+    // born. The real marker, once it exists, is always <=
+    // MARKER_RESERVE_BYTES, so this is a safe over-reservation, not a
+    // separate re-check.
+    const totalCount = headCount + 1 + tailCount;
     if (totalCount > MAX_RECORDS) return false;
     const totalBytes =
       this.wrapperBytes() +
       headBytes +
-      (hasMarker ? this.markerSize() : 0) +
+      MARKER_RESERVE_BYTES +
       tailBytes +
       Math.max(0, totalCount - 1);
     return totalBytes <= this.maxBytes;

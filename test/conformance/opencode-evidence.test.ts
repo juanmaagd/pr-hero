@@ -378,3 +378,62 @@ test("SSE capture does not consume streaming response bodies or wait on an endle
   expect(response.bodyUsed).toBe(false);
   expect(c.snapshot().status).toBe("complete");
 });
+
+// PR #228 review, F001: the oversized-record pre-check in `record()` used to
+// run `fits()` BEFORE `elidedCount` was incremented — so on the very
+// first-ever skip, the check ran with no marker at all, and nothing ever
+// re-validated the already-accepted head+tail against the marker that skip
+// itself creates. Once a marker exists, later skips can also grow its
+// `records`/`bytes` digit width without anything re-checking the total
+// either. With a tail already packed close to `maxBytes`, either path could
+// push `snapshot().redactedJson` past the cap.
+function withinCap(
+  collector: OpenCodeEvidenceCollector,
+  maxBytes: number,
+): boolean {
+  return (
+    Buffer.byteLength(collector.snapshot().redactedJson, "utf8") <= maxBytes
+  );
+}
+
+test("a tail packed near the cap plus one oversized record still fits maxBytes (F001)", () => {
+  const maxBytes = 2000;
+  const c = new OpenCodeEvidenceCollector(
+    { sessionId: "s", attempt: 1 },
+    maxBytes,
+  );
+  for (let i = 0; i < 200; i++) c.record("filler", { i });
+  c.record("oversized", { blob: "x".repeat(20000) });
+  expect(withinCap(c, maxBytes)).toBe(true);
+});
+
+test("repeated oversized skips growing the marker's digit width still fit maxBytes (F001)", () => {
+  const maxBytes = 2000;
+  const c = new OpenCodeEvidenceCollector(
+    { sessionId: "s", attempt: 1 },
+    maxBytes,
+  );
+  for (let i = 0; i < 200; i++) c.record("filler", { i });
+  for (let i = 0; i < 15; i++) {
+    c.record(`oversized${i}`, { blob: "x".repeat(20000 + i) });
+  }
+  expect(withinCap(c, maxBytes)).toBe(true);
+});
+
+test("a mixed sequence of small, large and oversized records never exceeds maxBytes at any prefix (F001)", () => {
+  const maxBytes = 2000;
+  const ops: Array<{ kind: string; data: unknown }> = [];
+  for (let i = 0; i < 200; i++) ops.push({ kind: "small", data: { i } });
+  for (let i = 0; i < 10; i++) {
+    ops.push({ kind: "oversized", data: { i, blob: "w".repeat(20000 + i) } });
+    for (let j = 0; j < 3; j++) ops.push({ kind: "small", data: { i, j } });
+  }
+  for (let prefix = 1; prefix <= ops.length; prefix++) {
+    const c = new OpenCodeEvidenceCollector(
+      { sessionId: "s", attempt: 1 },
+      maxBytes,
+    );
+    for (const op of ops.slice(0, prefix)) c.record(op.kind, op.data);
+    expect(withinCap(c, maxBytes)).toBe(true);
+  }
+});
