@@ -93,7 +93,8 @@ pr-hero review
 **On step 4.** `setup` is fully non-interactive — it asks nothing and is safe to run
 unattended. It is also optional for reviewing: `review` never checks whether it ran,
 only `pr-hero doctor` reports it. What it buys is the skills, the MCP registration and
-the repo scaffold; skip it and you scaffold the repo yourself with `pr-hero init`.
+the repo scaffold; skip it and you scaffold the repo yourself with `pr-hero init`. It does
+**not** commit or `.gitignore` what it scaffolds, which is why step 5 exists.
 
 **On step 6.** `gotchas.md` is injected verbatim into every hunter's system prompt, and
 what `setup`/`init` write there is a placeholder: `- <subsystem>: <the thing that looks
