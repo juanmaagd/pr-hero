@@ -233,23 +233,22 @@ test("persistAttemptEvidence writes the OpenCode capture once overhead accountin
   const bytes = await readFile(captureFile);
   expect(evidenceSha256(bytes)).toBe(e.capture.sha256);
 });
-test("persistAttemptEvidence pins the pre-existing persist-time redaction node-budget gap instead of hiding it", async () => {
-  // DISCOVERY while verifying the overhead fix above: `record()` redacts
-  // each record's `data` with its OWN fresh 20000-node budget (a `redactEvidence`
-  // default parameter), but `persistAttemptEvidence` re-redacts the ENTIRE
-  // parsed blob in one call sharing a SINGLE 20000-node budget. A capture
-  // with many small events (delta=500, ~6800 records here) fits comfortably
-  // under the 4 MiB byte cap this commit fixes, but still blows the shared
-  // node budget by roughly 8x, and previously that failure was swallowed by
-  // the bare `catch {}` this commit also fixes.
+test("persistAttemptEvidence persists a realistic multi-thousand-record capture by redacting each record individually", async () => {
+  // SUPERSEDES the earlier pin of the "capture shape limit" gap. That gap
+  // was `persistAttemptEvidence` re-redacting the ENTIRE parsed blob in one
+  // `redactEvidence()` call sharing a SINGLE 20000-node budget
+  // (src/security/evidence-redaction.ts:35-38), while `record()` redacts
+  // each record's `data` individually with its OWN fresh budget
+  // (opencode-evidence.ts). A capture with many small events (delta=500,
+  // ~6800 records here) fits comfortably under the 4 MiB byte cap but blew
+  // the SHARED whole-blob budget by roughly 8x.
   //
-  // Raising `redactEvidence`'s budget, or redacting per-record at persist
-  // time instead of once for the whole blob, would change a SECURITY
-  // module's bound (`src/security/evidence-redaction.ts`) and is outside
-  // this slice's authorization — that decision belongs to a human call, not
-  // a writer's. This test pins the gap as an OBSERVABLE, reported drop
-  // (`captureDropped.reason` names it) rather than papering over it by
-  // tuning the payload to slip under both limits.
+  // Fix: this function now validates the wrapper shape and redacts each
+  // record's `data` on its own, one fresh budget per record — exactly the
+  // bound the collector already enforces at record time. No persisted value
+  // escapes redaction; the 4 MiB byte cap still bounds the total. Raising
+  // `redactEvidence`'s shared budget was rejected as a security-module
+  // change outside a writer's authorization.
   const collector = new OpenCodeEvidenceCollector({
     sessionId: "s",
     attempt: 1,
@@ -265,10 +264,116 @@ test("persistAttemptEvidence pins the pre-existing persist-time redaction node-b
   const e = JSON.parse(
     await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
   );
-  console.log("SHAPE_LIMIT_DROPPED", e.captureDropped, "capture", e.capture);
+  const captureFile = e.capture
+    ? path.join(x.dir, e.capture.relativePath)
+    : undefined;
+  const captureBytes = captureFile ? await readFile(captureFile) : undefined;
+  console.log(
+    "MULTI_THOUSAND_RECORD_CAPTURE",
+    "capture",
+    e.capture,
+    "dropped",
+    e.captureDropped,
+    "recordCount",
+    JSON.parse(diagnosticEvidence.redactedJson).records.length,
+    "sourceBytes",
+    Buffer.byteLength(diagnosticEvidence.redactedJson),
+    "persistedBytes",
+    captureBytes?.length,
+  );
+  expect(e.captureDropped).toBeUndefined();
+  expect(e.capture).toBeDefined();
+  expect(e.capture.schema).toBe("pr-hero.opencode-observations.v1");
+  expect(captureBytes).toBeDefined();
+  expect(evidenceSha256(captureBytes as Uint8Array)).toBe(e.capture.sha256);
+  const parsedCapture = JSON.parse((captureBytes as Buffer).toString("utf8"));
+  expect(Array.isArray(parsedCapture.records)).toBe(true);
+  expect(parsedCapture.records.length).toBeGreaterThan(2499);
+});
+test("persistAttemptEvidence redacts a secret-looking value inside a record's data even at multi-thousand-record scale", async () => {
+  // Defense in depth: `DiagnosticEvidence` is a generic transport contract,
+  // not something only OpenCodeEvidenceCollector produces, so this function
+  // cannot assume an incoming capture was already redacted. Per-record
+  // redaction (this commit) must still catch a secret that slipped through
+  // raw — and it must do so at the SAME multi-thousand-record scale that
+  // used to blow the shared whole-blob budget before any redaction ran, so
+  // this hand-builds ~3000 filler records (bypassing the collector, which
+  // would redact at record time and prove nothing about this code path)
+  // plus one record carrying a raw, unredacted secret.
+  const records: Array<{
+    seq: number;
+    observedMs: number;
+    kind: string;
+    data: unknown;
+  }> = [];
+  for (let i = 0; i < 3000; i++) {
+    records.push({
+      seq: i + 1,
+      observedMs: i,
+      kind: "event",
+      data: {
+        type: "message.part.delta",
+        properties: { delta: "x".repeat(50) },
+      },
+    });
+  }
+  records.push({
+    seq: 3001,
+    observedMs: 3001,
+    kind: "event",
+    data: { note: "Cookie: session=SYNTHETIC_UNREDACTED_SECRET_COOKIE" },
+  });
+  const redactedJson = JSON.stringify({
+    schemaVersion: 1,
+    sessionId: "s",
+    attempt: 1,
+    records,
+  });
+  const x = await setup(undefined, {
+    diagnosticEvidence: {
+      schema: "pr-hero.opencode-observations.v1",
+      status: "complete",
+      redactedJson,
+    },
+  });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log(
+    "SECRET_AT_SCALE_CAPTURE",
+    "capture",
+    e.capture,
+    "dropped",
+    e.captureDropped,
+  );
+  expect(e.captureDropped).toBeUndefined();
+  expect(e.capture).toBeDefined();
+  const captureFile = path.join(x.dir, e.capture.relativePath);
+  const rawCaptureText = (await readFile(captureFile)).toString("utf8");
+  expect(rawCaptureText).not.toContain("SYNTHETIC_UNREDACTED_SECRET_COOKIE");
+  expect(rawCaptureText).toContain("[REDACTED HEADER]");
+});
+test("persistAttemptEvidence drops a well-schemed but non-wrapper capture with a specific reason", async () => {
+  const redactedJson = JSON.stringify({ not: "a capture wrapper at all" });
+  const x = await setup(undefined, {
+    diagnosticEvidence: {
+      schema: "pr-hero.opencode-observations.v1",
+      status: "complete",
+      redactedJson,
+    },
+  });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log("NON_WRAPPER_DROPPED", e.captureDropped, "capture", e.capture);
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
-  expect(e.captureDropped.reason).toMatch(/shape limit/);
+  expect(e.captureDropped.reason).toBe(
+    "capture wrapper shape is not recognized",
+  );
+  expect(e.captureDropped.bytes).toBe(Buffer.byteLength(redactedJson));
 });
 test("persistAttemptEvidence records captureDropped with a reason and size when a capture is too large to persist", async () => {
   const oversized = "x".repeat(5 * 1024 * 1024);
