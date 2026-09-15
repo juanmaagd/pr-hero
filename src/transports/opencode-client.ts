@@ -337,6 +337,14 @@ const MAX_READBACK_BYTES = 4 * 1024 * 1024;
 const MAX_TRACKED_DELTA_EVENTS = 4096;
 // Own cap, same rationale as MAX_TRACKED_DELTA_EVENTS, for reasoningDeltaEventIds.
 const MAX_TRACKED_REASONING_DELTA_EVENTS = 4096;
+// PR #228 review, F002: same redelivery hazard as MAX_TRACKED_DELTA_EVENTS
+// (an SSE Last-Event-ID reconnect can replay an event this session already
+// saw), applied to `permission.asked` requestIDs — see SessionState's
+// `respondedPermissions`. Permission prompts are far rarer than deltas
+// within one attempt, so a smaller cap than MAX_TRACKED_DELTA_EVENTS is
+// still generous; sized to MAX_TRACKED_MESSAGES for the same "one order of
+// magnitude above anything a real attempt produces" reasoning.
+const MAX_TRACKED_PERMISSION_REQUESTS = MAX_TRACKED_MESSAGES;
 // An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
 // newer one already landed (e.g. "running" replayed after "completed" was
 // already observed) — `previousStatus !== status` alone would credit that
@@ -1956,6 +1964,14 @@ interface SessionState {
   // only door left. §197 asks for two independent observers of one fact; one
   // observer plus a blind spot is not that.
   failure?: string;
+  // PR #228 review, F002: `permission.asked` requestIDs already replied to
+  // or currently in flight. An SSE Last-Event-ID reconnect can redeliver an
+  // event this session already saw (the same hazard #227 dedupes for stream
+  // deltas via OpenCodeTurnState.deltaEventIds) — a replayed permission.asked
+  // must not send a second reply for a request the server already closed.
+  // Added to BEFORE the reply is awaited, not after it resolves, so a
+  // duplicate arriving while the first reply is still in flight also skips.
+  readonly respondedPermissions: Set<string>;
 }
 
 // #141. Returns an EMPTY registry for a request that names none, which is the
@@ -2359,6 +2375,7 @@ export function createOpenCodeClient(
           turn: createTurnState(sessionId, userMessageId, input.cwd),
           observedActive: false,
           ended: false,
+          respondedPermissions: new Set(),
         };
         states.set(sessionId, state);
 
@@ -2405,7 +2422,20 @@ export function createOpenCodeClient(
                       (p): p is string => typeof p === "string",
                     )
                   : [];
-                if (typeof requestID === "string") {
+                if (
+                  typeof requestID === "string" &&
+                  !state.respondedPermissions.has(requestID)
+                ) {
+                  // PR #228 review, F002: recorded BEFORE the reply is even
+                  // sent, not after it resolves — an SSE Last-Event-ID
+                  // reconnect can redeliver this same event, and a duplicate
+                  // arriving while this reply is still in flight must also
+                  // see it here rather than racing the await below.
+                  rememberId(
+                    state.respondedPermissions,
+                    requestID,
+                    MAX_TRACKED_PERMISSION_REQUESTS,
+                  );
                   void (async () => {
                     try {
                       unwrap(

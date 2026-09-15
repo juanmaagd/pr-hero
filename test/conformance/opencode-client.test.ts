@@ -84,6 +84,11 @@ interface FakeSdk {
   // #157: every call to `permission.reply`, verbatim, so a test can assert
   // the exact ids pr-hero sent — and how many times it sent them.
   replyCalls: () => Array<Record<string, unknown>>;
+  // F002: releases every `permission.reply` call parked on
+  // `permissionReplyHangs`, so a test can assert what happens to a
+  // DUPLICATE delivered while the first reply is still genuinely in
+  // flight, rather than a race that depends on microtask ordering.
+  releasePendingReplies: () => void;
 }
 
 function fakeSdk(
@@ -97,6 +102,12 @@ function fakeSdk(
     // `ThrowOnError = false` convention — an API-level refusal RESOLVES with
     // `{data: undefined, error}`, never a rejected promise.
     permissionReplyError?: string;
+    // F002: when true, every `permission.reply` call parks on an internal
+    // gate until the test calls `releasePendingReplies()` — the only way to
+    // deterministically hold a reply "in flight" for a concurrent-duplicate
+    // test, rather than depending on how many microtask hops a fast-resolving
+    // fake happens to take.
+    permissionReplyHangs?: boolean;
     // Distinct ids per createSession, in call order. Default is SESSION_ID
     // for every create, which is what the single-session tests pin.
     sessionIds?: readonly string[];
@@ -137,6 +148,12 @@ function fakeSdk(
   let iterators = 0;
   let streamReturns = 0;
   const replyCalls: Array<Record<string, unknown>> = [];
+  let releasePendingReplies: (() => void) | undefined;
+  const pendingRepliesGate = options.permissionReplyHangs
+    ? new Promise<void>((resolve) => {
+        releasePendingReplies = resolve;
+      })
+    : undefined;
   const sdk: OpenCodeSdkLike = {
     createOpencodeClient: () => ({
       mcp: {
@@ -148,6 +165,7 @@ function fakeSdk(
       permission: {
         reply: async (opts) => {
           replyCalls.push(opts as Record<string, unknown>);
+          if (pendingRepliesGate) await pendingRepliesGate;
           if (options.permissionReplyError !== undefined) {
             return { error: options.permissionReplyError };
           }
@@ -260,6 +278,7 @@ function fakeSdk(
     promptedAt: () => promptedAt,
     toolIdsCalls: () => toolIdsCalls,
     replyCalls: () => replyCalls,
+    releasePendingReplies: () => releasePendingReplies?.(),
     emit: (event) => {
       queue.push(event);
       notify?.();
@@ -910,6 +929,123 @@ describe("createOpenCodeClient", () => {
     expect(thrown?.message).toContain(
       "failed to reject an OpenCode permission request",
     );
+  });
+
+  // PR #228 review, F002 (CRITICAL, corroborated): the SSE client can
+  // redeliver events after a Last-Event-ID reconnect — the same redelivery
+  // hazard #227 dedupes for stream deltas. A replayed `permission.asked`
+  // used to send a SECOND reply for a request the server already closed; if
+  // that second reply failed, the catch settled a successfully-denied
+  // prompt as a terminal `runtime_unavailable`.
+  test("a redelivered permission.asked replies only once and does not fail the attempt (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_dup",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    };
+    fake.emit(event);
+    fake.emit(event); // SSE redelivery of the SAME requestID
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+
+    let thrown: Error | undefined;
+    try {
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(fake.replyCalls()).toHaveLength(1);
+    expect(thrown).toBeUndefined();
+  });
+
+  // The specific race the fix must close: the requestID has to be recorded
+  // BEFORE the reply is awaited, not after it resolves — otherwise a
+  // duplicate arriving while the first reply is genuinely still in flight
+  // races the write instead of losing to it deterministically.
+  test("a duplicate delivered while the first reply is still pending triggers no second reply (F002)", async () => {
+    const fake = fakeSdk({ permissionReplyHangs: true });
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const event = {
+      type: "permission.asked",
+      properties: {
+        id: "per_pending",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/blocked"],
+        metadata: {},
+        always: [],
+      },
+    };
+    fake.emit(event);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fake.replyCalls()).toHaveLength(1);
+
+    // The duplicate arrives while the first reply is still parked on the
+    // gate — genuinely in flight, not merely fast.
+    fake.emit(event);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fake.replyCalls()).toHaveLength(1);
+
+    fake.releasePendingReplies();
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // drain
+    }
+  });
+
+  test("permission.asked for two different requestIDs replies to both (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_a",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/a"],
+        metadata: {},
+        always: [],
+      },
+    });
+    fake.emit({
+      type: "permission.asked",
+      properties: {
+        id: "per_b",
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: ["/b"],
+        metadata: {},
+        always: [],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+    for await (const _event of client.streamEvents(session)) {
+      // drain
+    }
+
+    expect(fake.replyCalls().map((c) => c.requestID)).toEqual([
+      "per_a",
+      "per_b",
+    ]);
   });
 
   // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
