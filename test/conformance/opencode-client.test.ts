@@ -2608,4 +2608,97 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     expect(toolStatus("running")).toEqual([]);
     expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
   });
+
+  // An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
+  // newer one already landed (e.g. "running" replayed after "completed" was
+  // already observed). `previousStatus !== status` credits that as a
+  // transition — it IS a change from what was last stored, but it is not
+  // FORWARD progress, so it must not earn `activity`. Rank: pending=0,
+  // running=1, completed=2, error=2 (a terminal either way, so neither
+  // outranks the other) — only a strictly increasing rank counts, and a
+  // first observation always counts (previous rank is -1).
+  test("a replayed older tool status after a newer one already landed emits nothing", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_replay",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_replay",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([]);
+  });
+
+  test("pending -> running -> completed emits exactly 3 activities", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_forward",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_forward",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+  });
+
+  test("completed -> error emits nothing: both are terminal, equal rank", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_terminal",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_terminal",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("error")).toEqual([]);
+  });
 });

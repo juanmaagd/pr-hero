@@ -279,6 +279,22 @@ const MAX_READBACK_BYTES = 4 * 1024 * 1024;
 const MAX_TRACKED_DELTA_EVENTS = 4096;
 // Own cap, same rationale as MAX_TRACKED_DELTA_EVENTS, for reasoningDeltaEventIds.
 const MAX_TRACKED_REASONING_DELTA_EVENTS = 4096;
+// An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
+// newer one already landed (e.g. "running" replayed after "completed" was
+// already observed) — `previousStatus !== status` alone would credit that
+// replay as a transition, since it genuinely differs from what is stored.
+// Rank makes only FORWARD movement count: `completed` and `error` share a
+// rank because both are terminal outcomes and neither outranks the other, so
+// one following the other (in either direction) is not progress either.
+const TOOL_STATUS_RANK: Record<
+  "pending" | "running" | "completed" | "error",
+  number
+> = {
+  pending: 0,
+  running: 1,
+  completed: 2,
+  error: 2,
+};
 
 export function createTurnState(
   sessionId?: string,
@@ -651,8 +667,15 @@ function handlePartUpdated(
       )
         failIntegrity(state, "tool identity cap exceeded");
       const previousStatus = state.toolStates.get(callId);
+      // `state.toolStates` still stores the raw reported status regardless
+      // of rank — other logic (e.g. `hasOutstandingTools`) reads it and
+      // must keep seeing the provider's literal last-known status, not a
+      // rank-filtered one. Only whether `activity` is EMITTED changes below.
       state.toolStates.set(callId, status);
-      transitioned = previousStatus !== status;
+      const previousRank = previousStatus
+        ? TOOL_STATUS_RANK[previousStatus]
+        : -1;
+      transitioned = TOOL_STATUS_RANK[status] > previousRank;
     }
     if (msgDetail) msgDetail.hasToolCalls = true;
     // Ownership was already established above (the `isMessageOwned` check
