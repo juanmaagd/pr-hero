@@ -103,6 +103,25 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
             data = {};
           } else if (path === "/session/ses_selector/message")
             data = [
+              // #214: this fixture's `tools: ["Read"]` step with an empty
+              // `findings` draft and zero observed tool invocations used to
+              // read as a hunt that never looked (`isVacuousEmptyHunt`),
+              // which the harness now refuses to deliver as `ok`. A completed
+              // "read" tool part fixes that — but it stays on this SAME flat
+              // message, parented directly to the prompt, rather than dev's
+              // real two-step shape (a `finish:"tool-calls"` step followed by
+              // a separate parented `finish:"stop"` answer,
+              // opencode-client.ts's `isIntermediateToolStep`): the
+              // martian-evidence witness this test also exercises below
+              // (`loadQualifiedReview` / `classifyObservationEvidence`)
+              // requires EVERY assistant row in the readback to be a direct
+              // child of the user message — a pre-existing dev assumption
+              // this merge does not touch. The TEXT part is listed BEFORE the
+              // tool part on purpose: `reconcileMessages` only records a
+              // message's text part while `hasToolCalls` is still false for
+              // that message, so the tool part (which flips `hasToolCalls`
+              // true) has to be processed second or the answer text is
+              // dropped as narration and `finalText` comes back empty.
               {
                 info: {
                   id: "msg_final",
@@ -125,6 +144,15 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
                     messageID: "msg_final",
                     type: "text",
                     text: '{"findings":[]}',
+                  },
+                  {
+                    id: "prt_tool_read",
+                    sessionID: "ses_selector",
+                    messageID: "msg_final",
+                    type: "tool",
+                    callID: "call_read_1",
+                    tool: "read",
+                    state: { status: "completed" },
                   },
                 ],
               },

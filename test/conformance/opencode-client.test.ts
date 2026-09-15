@@ -19,6 +19,7 @@ import {
   assertMcpConnected,
   translateMcpConfig,
 } from "../../src/transports/opencode-mcp";
+import type { OpenCodeClientEvent } from "../../src/transports/opencode-sdk";
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";
 
 const FIXTURE_DIR = path.join(import.meta.dir, "..", "fixtures", "opencode");
@@ -1213,6 +1214,252 @@ describe("createOpenCodeClient", () => {
     // observers of one fact, not two facts that happen to look alike — so
     // both paths run through terminalProofFromAssistant.
     expect(done.proof.eventId).toBe(ASSISTANT.id as string);
+  });
+
+  // A poll-won turn is a supported delivery path (its answer text already
+  // rides `terminalFinalText`), so a hunter this observer is the FIRST to see
+  // a completed tool call for — the stream never delivered a "tool" event for
+  // this turn — must still be able to prove it looked. Two messages, dev's
+  // shape: the tool call lives on its own `finish: "tool-calls"` step, the
+  // answer on a second message parented to it (opencode-client.ts's
+  // `isIntermediateToolStep`).
+  test("a poll-only completed tool call is tallied on the terminal result (#214)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const toolStepId = "msg_tool_step";
+    const finalMessage = {
+      ...ASSISTANT,
+      id: "msg_poll_final",
+      parentID: toolStepId,
+    };
+
+    fake.setStatus({ type: "busy" });
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+      {
+        info: {
+          id: toolStepId,
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: { cwd: "/tmp/work", root: "/" },
+          finish: "tool-calls",
+          time: { completed: 1 },
+        },
+        parts: [
+          {
+            id: "prt_tool_read",
+            sessionID: SESSION_ID,
+            messageID: toolStepId,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "completed" },
+          },
+        ],
+      },
+      {
+        info: finalMessage,
+        parts: [
+          {
+            id: "prt_final",
+            sessionID: SESSION_ID,
+            messageID: "msg_poll_final",
+            type: "text",
+            text: '{"findings":[]}',
+          },
+        ],
+      },
+    ]);
+    fake.setStatus(undefined);
+
+    const result = await client.pollStatus(session);
+    expect(result.kind).toBe("terminal");
+    if (result.kind !== "terminal") throw new Error("unreachable");
+    expect(result.completedToolCallIds).toEqual(["call_read_1"]);
+  });
+
+  // pr-hero review F001 (round 2, opencode-client.ts:809): end-to-end through
+  // the REAL client and the REAL transport (not a mocked `OpenCodeClientLike`
+  // — the defect lives entirely inside `handlePartUpdated`, which a mocked
+  // transport-level test bypasses). Before the fix, the stream emitted ZERO
+  // `{kind:"tool"}` events for an error->completed callID, so this attempt's
+  // `outcome.toolInvocations` silently stayed 0 despite a real completion the
+  // stream itself watched happen.
+  test("a stream call observed error then completed still tallies once at the transport level (F001 round 2)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const transport = new OpenCodeSdkTransport({ client });
+    const sink: AsyncEventSink = {
+      push: async (_event: ProviderEvent) => "accepted" as const,
+      close: async () => {},
+    };
+    const request: TransportRequest = {
+      sessionId: "oc-sess-f001-round2",
+      attempt: 1,
+      route: {
+        backend: "opencode",
+        provider: "openai",
+        modelFamily: "gpt",
+        modelSnapshot: "gpt-test-snapshot",
+      },
+      executionModel: "gpt-test-snapshot",
+      systemPromptPath: "/tmp/system.md",
+      systemPromptSha256: "deadbeef",
+      userPrompt: "review this",
+      cwd: "/tmp/work",
+      tools: INPUT.tools,
+      isolation: {
+        credentialProjectionId: "proj-1",
+        env: {},
+        syntheticHome: "/tmp/home",
+        syntheticConfigHome: "/tmp/config",
+        syntheticTmp: "/tmp/tmp",
+        verifiedBinaryPath: "/usr/bin/true",
+      },
+    };
+
+    const pending = transport.execute(request, {
+      signal: new AbortController().signal,
+      events: sink,
+    });
+
+    // #124: createSession()/streamEvents() run inside execute() — early
+    // events survive the gap by buffering (see the "buffered events survive"
+    // test above), so emitting right away is safe.
+    fake.emit(messageEvent());
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_tool_err_ok",
+          messageID: ASSISTANT.id,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID: "call_err_then_ok",
+          tool: "read",
+          state: { status: "error" },
+        },
+      },
+    });
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_tool_err_ok",
+          messageID: ASSISTANT.id,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID: "call_err_then_ok",
+          tool: "read",
+          state: { status: "completed" },
+        },
+      },
+    });
+    fake.emit({ type: "session.idle", properties: { sessionID: SESSION_ID } });
+    fake.endStream();
+
+    const outcome = await pending;
+    expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(1);
+  });
+
+  // pr-hero review F001 (round 3, opencode-client.ts:812 as b7b45c1 left it):
+  // the D-9/D-11 race, live. A non-stream observer (here, a POLL round that
+  // reconciles the readback but is not itself the turn's final message — the
+  // same reconcile a prompt_result readback also runs) sees callID A
+  // "completed" BEFORE the stream's own SSE event for that exact completion
+  // ever arrives. Round 2 deduped the stream's `{kind:"tool"}` emission
+  // against the SHARED `completedToolCallIds` set that reconcile had already
+  // written — so the stream's own emission was suppressed. When the STREAM,
+  // not the poll, goes on to win the turn's terminal (no poll TERMINAL ever
+  // reports this callID), the transport's union never learns of it from any
+  // channel, and `toolInvocations` comes out 0 for a hunt that plainly
+  // looked. Driven at the client's own session/pollStatus/streamEvents
+  // surface (not through `OpenCodeSdkTransport`) so the ONLY poll
+  // observation is the one this test drives by hand — a transport-owned
+  // background poll loop sharing the same session would race unpredictably
+  // against it and make the exact sequence being tested nondeterministic.
+  test("a non-winning poll reconcile does not suppress the stream's own tally when the stream wins the terminal (F001 round 3)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    // Arm `observedActive` (a "busy" status is required before pollStatus
+    // will ever read back messages at all).
+    fake.setStatus({ type: "busy" });
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    // A readback of a STILL-IN-PROGRESS turn (no `time.completed`, so it can
+    // never itself be the winning terminal) that already shows call_race
+    // completed — the non-winning reconcile this test is about.
+    fake.setMessages([
+      {
+        info: { id: ASSISTANT.parentID, role: "user", sessionID: SESSION_ID },
+        parts: [],
+      },
+      {
+        info: {
+          id: ASSISTANT.id,
+          role: "assistant",
+          sessionID: SESSION_ID,
+          parentID: ASSISTANT.parentID,
+          path: ASSISTANT.path,
+          time: { created: 1 },
+        },
+        parts: [
+          {
+            id: "prt_tool_race",
+            sessionID: SESSION_ID,
+            messageID: ASSISTANT.id,
+            type: "tool",
+            callID: "call_race",
+            tool: "read",
+            state: { status: "completed" },
+          },
+        ],
+      },
+    ]);
+    fake.setStatus(undefined);
+    expect((await client.pollStatus(session)).kind).toBe("pending");
+
+    // NOW the stream independently delivers its own SSE events for the SAME
+    // callID and wins the terminal — no poll terminal ever reports it.
+    fake.emit(messageEvent());
+    fake.emit({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: "prt_tool_race",
+          messageID: ASSISTANT.id,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID: "call_race",
+          tool: "read",
+          state: { status: "completed" },
+        },
+      },
+    });
+    fake.emit({ type: "session.idle", properties: { sessionID: SESSION_ID } });
+    fake.endStream();
+
+    const toolEvents: OpenCodeClientEvent[] = [];
+    for await (const event of client.streamEvents(session)) {
+      if (event.kind === "tool") toolEvents.push(event);
+    }
+    expect(toolEvents).toEqual([
+      { kind: "tool", tool: "read", callId: "call_race" },
+    ]);
   });
 
   // Absence is the boundary, but it is ALSO what a wrong or missing
@@ -3094,7 +3341,14 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     expect(toolStatus("pending")).toEqual([]);
     expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
     expect(toolStatus("running")).toEqual([]);
-    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    // #214: a novel transition INTO "completed" also stamps a look, off the
+    // same `transitioned` gate as "activity" — see the WHY comment at the
+    // "tool" branch in `handlePartUpdated`. `tool` reads "unknown" because
+    // this fixture's part carries no `tool` field.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown", callId: "call_1" },
+    ]);
   });
 
   // An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
@@ -3129,7 +3383,12 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
         state,
       );
 
-    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    // #214: see the WHY comment above — a novel transition into "completed"
+    // also stamps a look.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown", callId: "call_replay" },
+    ]);
     expect(toolStatus("running")).toEqual([]);
   });
 
@@ -3159,7 +3418,12 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
 
     expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
     expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
-    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    // #214: see the WHY comment above — a novel transition into "completed"
+    // also stamps a look.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown", callId: "call_forward" },
+    ]);
   });
 
   test("completed -> error emits nothing: both are terminal, equal rank", () => {
@@ -3186,8 +3450,57 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
         state,
       );
 
-    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    // #214: see the WHY comment above — a novel transition into "completed"
+    // also stamps a look.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown", callId: "call_terminal" },
+    ]);
     expect(toolStatus("error")).toEqual([]);
+  });
+
+  // pr-hero review F001 (round 2, opencode-client.ts:809): the reverse order
+  // of the test above. "error" then "completed" share TOOL_STATUS_RANK, so
+  // the "completed" observation is NOT a forward transition and must not
+  // stamp a SECOND "activity" — but it IS the first time this callID is
+  // observed "completed", so the tool tally must still fire, keyed by set
+  // membership rather than by rank.
+  test("error -> completed emits the tool event but not a second activity (set membership, not rank)", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_error_then_ok",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_error_then_ok",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    // error is the FIRST observation for this callID: rank -1 -> 2 IS a
+    // forward transition, so it earns its own "activity" credit.
+    expect(toolStatus("error")).toEqual([{ kind: "activity" }]);
+    // completed shares error's rank, so no second "activity" — but the tool
+    // tally is decoupled from rank and fires on its own first sighting.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "tool", tool: "unknown", callId: "call_error_then_ok" },
+    ]);
+    expect(state.completedToolCallIds.has("call_error_then_ok")).toBe(true);
+    // A further restatement of "completed" is neither a transition nor a
+    // novel set member — nothing fires.
+    expect(toolStatus("completed")).toEqual([]);
   });
 
   // #228's review: `reconcileMessages` (the ~250ms poll readback, `emit:
@@ -3222,6 +3535,9 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     });
     // toolStates is exactly as unconditional as before this commit.
     expect(state.toolStates.get("call_poll_race")).toBe("completed");
+    // pr-hero review F001/F002: the poll's own observation already recorded
+    // this callID in the monotonic set.
+    expect(state.completedToolCallIds.has("call_poll_race")).toBe(true);
 
     const toolStatus = (status: string) =>
       mapOpenCodeEvents(
@@ -3248,6 +3564,28 @@ describe("useful-progress credit for novel reasoning deltas and tool transitions
     // "completed" in toolStates.
     expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
     expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
-    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+    // #214: "activity" is read off `toolActivityRank`, never `toolStates` —
+    // the stream's own arrival at "completed" still stamps a look even
+    // though the poll raced ahead and marked it complete in `toolStates`
+    // already. The TALLY (pr-hero review F001 round 3) is the SAME story,
+    // for the SAME reason: it is deduped against `streamCompletedToolCallIds`
+    // — STREAM-OWNED, never the shared `completedToolCallIds` the poll
+    // reconcile above already wrote. If this emission were deduped against
+    // the shared set instead (round 2's shape), the poll's earlier
+    // observation would suppress the stream's own `{kind:"tool"}` here —
+    // and if the STREAM, not the poll, goes on to win the turn's terminal,
+    // the transport's union would never learn of this callID from ANY
+    // channel. So the stream still emits its own "tool" event even though
+    // the shared set already has this callID.
+    expect(toolStatus("completed")).toEqual([
+      { kind: "activity" },
+      { kind: "tool", tool: "unknown", callId: "call_poll_race" },
+    ]);
+    // The SHARED set still stays a union of one, not two: the poll's own
+    // earlier write and the stream's later one are the same identity
+    // (F002's "same call counts once" at the client layer) — this is a
+    // reporting fact for `pollStatus`, independent of the stream's own
+    // emission dedupe above.
+    expect(state.completedToolCallIds.size).toBe(1);
   });
 });

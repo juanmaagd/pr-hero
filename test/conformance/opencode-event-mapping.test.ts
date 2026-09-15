@@ -341,6 +341,203 @@ describe("terminalProofFromAssistant", () => {
   });
 });
 
+describe("mapOpenCodeEvents tool-call parts (#214)", () => {
+  const ASSISTANT_ID = "msg_hunter";
+  const USER_ID = "msg_hunter_user";
+
+  // #228's ownership model (`isMessageOwned`) needs a `currentUserId` and a
+  // parent chain back to it — a bare `createTurnState()` leaves
+  // `currentUserId` undefined, which makes `isMessageOwned` return false
+  // unconditionally and every part on this "assistant" message get dropped
+  // before it ever reaches the tool branch.
+  function announceAssistant(): ReturnType<typeof createTurnState> {
+    const state = createTurnState(SESSION_ID, USER_ID);
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: {
+            id: ASSISTANT_ID,
+            role: "assistant",
+            sessionID: SESSION_ID,
+            parentID: USER_ID,
+            time: { created: 1 },
+          },
+        },
+      },
+      SESSION_ID,
+      state,
+    );
+    return state;
+  }
+
+  // #214's count is one signal among several a tool-part update can now
+  // produce (#228's "activity" progress credit rides the same transition) —
+  // filtering to "tool" isolates the count this describe block is about from
+  // the progress signal, which has its own coverage in opencode-client.test.ts.
+  function toolEvents(
+    raw: Record<string, unknown>,
+    state: ReturnType<typeof createTurnState>,
+  ): OpenCodeClientEvent[] {
+    return mapOpenCodeEvents(raw, SESSION_ID, state).filter(
+      (event) => event.kind === "tool",
+    );
+  }
+
+  function toolPart(
+    partId: string,
+    callID: string,
+    tool = "read",
+    status = "completed",
+  ): Record<string, unknown> {
+    return {
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: partId,
+          messageID: ASSISTANT_ID,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID,
+          tool,
+          state: { status },
+        },
+      },
+    };
+  }
+
+  test("the recorded PONG probe issued no tool-call parts", () => {
+    expect(mapAll().filter((event) => event.kind === "tool")).toEqual([]);
+  });
+
+  test("a completed tool part on an assistant message emits one tool event", () => {
+    const state = announceAssistant();
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
+  test("pending and error updates are not a look", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "pending"), state),
+    ).toEqual([]);
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "running"), state),
+    ).toEqual([]);
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "error"), state),
+    ).toEqual([]);
+  });
+
+  test("pending then completed is one invocation, counted at completed", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "pending"), state),
+    ).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
+  test("restatements of the same completed callID are one invocation, not three", () => {
+    const state = announceAssistant();
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([]);
+  });
+
+  test("two callIDs are two invocations", () => {
+    const state = announceAssistant();
+    expect(toolEvents(toolPart("prt_a", "call_a"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_a" },
+    ]);
+    expect(toolEvents(toolPart("prt_b", "call_b"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_b" },
+    ]);
+  });
+
+  // pr-hero review F001 (round 2, opencode-client.ts:809): "error" and
+  // "completed" share TOOL_STATUS_RANK (both terminal, neither outranks the
+  // other), so an error->completed transition for the same callID left
+  // `transitioned` false and the completed-tally block — nested inside
+  // `if (transitioned)` — never ran at all. The call was never added to
+  // `completedToolCallIds` and no `{kind:"tool"}` event fired, contradicting
+  // the set's own contract ("every callID EVER observed completed") whenever
+  // the poll does not independently catch the same call.
+  test("error then completed for the same callID still counts as one look", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "error"), state),
+    ).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
+  test("step-start and step-finish are not tool invocations", () => {
+    const state = announceAssistant();
+    for (const type of ["step-start", "step-finish"]) {
+      expect(
+        mapOpenCodeEvents(
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: SESSION_ID,
+              part: {
+                id: `prt_${type}`,
+                messageID: ASSISTANT_ID,
+                sessionID: SESSION_ID,
+                type,
+              },
+            },
+          },
+          SESSION_ID,
+          state,
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  test("a user-owned tool part is dropped (TRAP 2 still holds)", () => {
+    const state = createTurnState();
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: { id: "msg_user", role: "user", time: { created: 1 } },
+        },
+      },
+      SESSION_ID,
+      state,
+    );
+    expect(
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESSION_ID,
+            part: {
+              id: "prt_user_tool",
+              messageID: "msg_user",
+              type: "tool",
+              callID: "call_user",
+              tool: "read",
+            },
+          },
+        },
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("retryHintFromStatus", () => {
   // SessionStatus has a `retry {attempt, message, next}` arm and `next` is a
   // timestamp. This is the provider-issued backoff hint decideRetryDisposition

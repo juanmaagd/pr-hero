@@ -147,6 +147,24 @@ export type OpenCodeClientEvent =
   // its own "reasoning parts were received and discarded" diagnostics, and
   // conflating tool execution into that would corrupt them.
   | { readonly kind: "activity" }
+  // #214 (merged with #228's toolActivityRank): a COMPLETED tool-call part,
+  // emitted alongside "activity" at most once per callID — see
+  // opencode-client.ts's `handlePartUpdated`, which gates this on the SAME
+  // stream-owned `toolActivityRank` forward-rank check "activity" uses, never
+  // on `toolStates` (which the poll readback also writes and can race ahead
+  // of the stream). Pending/running/error restatements are dropped —
+  // announcing Read is not looking, and an errored call is excluded on
+  // purpose: it produced no signal to reason from, and no test has asked for
+  // it to count. `tool` is the provider id (`read`, `grep`, …), never
+  // arguments or output: those are model-adjacent and must not reach `notes`.
+  // `callId` (pr-hero review F001/F002 on #214): the SAME identity
+  // `handlePartUpdated` tracks in `toolStates`/`toolActivityRank` — required
+  // so the transport can union this observation with the poll's by identity
+  // rather than combine two disjoint counts. Optional only because hand-
+  // written test doubles construct this event without a real client behind
+  // it; the transport falls back to a synthetic per-event id in that case so
+  // those fixtures keep counting one event as one invocation.
+  | { readonly kind: "tool"; readonly tool?: string; readonly callId?: string }
   // #157: our own session's status named an account/usage limit (a `retry`
   // status whose `action.reason` is one opencode-client.ts's
   // providerLimitFromStatus recognises). Carries the provider's reason and
@@ -172,6 +190,27 @@ export type OpenCodePollResult =
         readonly costUsd?: number;
       };
       readonly usageIncomplete?: boolean;
+      // #214, reshaped by pr-hero review F001: the callIDs this observer has
+      // EVER seen reach "completed", read off opencode-client.ts's
+      // `OpenCodeTurnState.completedToolCallIds` — a set that only grows, so
+      // a LATER readback reporting the same callID as "error" (or anything
+      // else) can never make it vanish from this list. The previous shape
+      // (`toolInvocations: number`, recomputed fresh from `toolStates` on
+      // every poll) went DOWN exactly that way: `toolStates` stores the
+      // provider's raw last-known status and a later "error" for an
+      // earlier-"completed" call shrank the recount. Absent whenever this
+      // poll produced no terminal at all; present on EVERY terminal this
+      // poll reports, whether or not it goes on to win §197's slot — the
+      // transport, not this observer, decides that. A poll-won turn is a
+      // supported delivery path (`terminalFinalText` already mirrors it for
+      // the answer text): the stream's own "tool" events only fire for a
+      // completion the STREAM itself watched happen, so a hunter whose only
+      // observer of a completed tool call was this poll readback would
+      // otherwise be undercounted as zero and read as a hunt that never
+      // looked. Real callIDs, not a count, so the transport can union this
+      // with the stream's own observations by identity (F002) instead of
+      // combining two disjoint counts.
+      readonly completedToolCallIds?: readonly string[];
     }
   // The session itself failed, so no turn will ever produce a terminal. It is
   // NOT a terminal — the transport issues no proof of its own — and it is not
@@ -812,6 +851,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         costUsd?: number;
       },
       incompleteUsage?: boolean,
+      polledCompletedCallIds?: readonly string[],
     ): void => {
       if (settled) return;
       if (!isValidProof(proof)) {
@@ -829,6 +869,18 @@ export class OpenCodeSdkTransport implements ProviderTransport {
       }
       if (incompleteUsage === true) {
         terminalUsageIncomplete = true;
+      }
+      // pr-hero review F001: UNION, never overwrite. `completedCallIds` (the
+      // one canonical per-attempt tally, declared below with the stream's own
+      // writer) only ever grows — a CONFIRMING poll of an already-won
+      // terminal (reachable right here, on the `sameTerminal` branch further
+      // down, not just on the first win) used to overwrite the running total
+      // with whatever this specific readback's fresh recount said, and a
+      // recount can be smaller than an earlier one for the same set of real
+      // completions. Adding to the set instead means a later, poorer
+      // observation can only ever be a no-op, never a regression.
+      if (polledCompletedCallIds !== undefined) {
+        for (const id of polledCompletedCallIds) completedCallIds.add(id);
       }
       if (slotProof === undefined) {
         slotProof = proof;
@@ -1002,6 +1054,30 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // `aggregateBytes` either — reasoning is not the answer, so it must not
     // consume the answer's §4.2 content budget.
     let sawReasoning = false;
+    // #214: always stamped, including 0 — see the "tool" case below and the
+    // outcome construction further down.
+    //
+    // pr-hero review F001/F002: ONE canonical per-attempt set, keyed by the
+    // provider's callID, that BOTH the stream ("tool" events below) and the
+    // poll (`onProviderTerminalCandidate`'s `polledCompletedCallIds` above)
+    // add to. It only ever grows: no overwrite (F001 — a later, poorer
+    // observation cannot erase an earlier real completion) and no separate
+    // counts combined by `Math.max` (F002 — two different calls, one per
+    // observer, must both count, which a size comparison cannot tell apart
+    // from the same call counted twice). `toolInvocations` is this set's
+    // size, read once at settlement. Bounded transitively: every id here (a)
+    // stream events carry the id `handlePartUpdated` computed off `part
+    // .callID`/`partId`, already capped by opencode-client.ts's
+    // MAX_TRACKED_PARTS via `toolStates`, and (b) poll reports are `Array
+    // .from` of that same client-side capped set — this map never receives
+    // an id from an unbounded source, so it needs no cap of its own.
+    const completedCallIds = new Set<string>();
+    // Hand-written test doubles script a bare `{kind:"tool"}` with no
+    // `callId` (there is no real client behind them to compute one) — a
+    // per-event counter keeps each such event counting as one distinct
+    // invocation, exactly as it did before identity tracking existed.
+    let syntheticToolEventId = 0;
+    const completedToolIds: string[] = [];
     let sawContentEvent = false;
     const seenUsageIds = new Set<string>();
     let usageIncomplete = false;
@@ -1249,6 +1325,18 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               sawReasoning = true;
               break;
             }
+            case "tool": {
+              // Completed invocations only — the mapper dropped pending/error
+              // and already dedupes by callID. Never a witness: tool ids ride
+              // diagnosticsTail with the count, never `notes`.
+              completedCallIds.add(
+                event.callId ?? `synthetic-${syntheticToolEventId++}`,
+              );
+              if (event.tool !== undefined && event.tool.length > 0) {
+                completedToolIds.push(event.tool);
+              }
+              break;
+            }
             case "activity": {
               // Same shape as "reasoning" above: nothing to forward, nothing
               // to bound. The useful-progress credit was already taken above,
@@ -1387,6 +1475,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
             result.finalText,
             result.usage,
             result.usageIncomplete,
+            result.completedToolCallIds,
           );
           if (settled) return;
         }
@@ -1565,6 +1654,23 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           `[pr-hero] opencode sdk: ${invalidProofs} invalid terminal proof(s) ignored`,
         );
       }
+      // #214: always, including 0. 0 is the claim "this session issued no
+      // tool-call parts", and the live hunt that posted a clean bill could
+      // not even prove that fact. Session-creation failure never reaches
+      // here, so it correctly omits the count.
+      //
+      // pr-hero review F001/F002: the size of `completedCallIds` — see its
+      // declaration above. Neither `Math.max` nor an overwrite is needed
+      // anymore: the set itself is the union, built once, correctly, as each
+      // observation arrives.
+      const effectiveToolInvocations = completedCallIds.size;
+      const toolIds =
+        completedToolIds.length === 0
+          ? ""
+          : ` (${completedToolIds.join(", ")})`;
+      diagnostics.push(
+        `[pr-hero] opencode sdk: observed ${effectiveToolInvocations} completed tool invocation(s)${toolIds}`,
+      );
 
       let completion: TransportOutcome["completion"];
       let protocolIntegrity: TransportOutcome["protocolIntegrity"];
@@ -1757,6 +1863,10 @@ export class OpenCodeSdkTransport implements ProviderTransport {
           diagnostics.join("\n"),
           MAX_STDERR_TAIL_BYTES,
         ),
+        // #214: stamped after a session ran, including 0. Absence is reserved
+        // for transports that cannot observe tools (and for this transport's
+        // own session-creation failure, which never opened a turn).
+        toolInvocations: effectiveToolInvocations,
       };
 
       // §4.1: the transport normally supplies the attempt's ONE terminal event.

@@ -440,3 +440,94 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
     }
   });
 });
+
+describe("vacuous empty hunt is not a delivered draft (#214)", () => {
+  test("tools + zero invocations + empty findings fails the step without a format retry", async () => {
+    const dir = await tempDir();
+    const { transport, requests } = makeScriptedTransport([
+      { ...okOutcome(), toolInvocations: 0 },
+    ]);
+    const step = await makeStep(dir, {
+      tools: ["Read", "Grep"],
+      maxAttempts: 2,
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(1);
+    expect(requests.length).toBe(1);
+    expect(await Bun.file(step.outPath).exists()).toBe(false);
+
+    const log = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(log).toContain("classification: terminal");
+    expect(log).toContain("cause: legacy_terminal");
+    expect(log).toContain("tool_invocations: 0");
+    expect(log).not.toContain("classification: format");
+  });
+
+  test("looked and found nothing still delivers", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport([
+      { ...okOutcome(), toolInvocations: 1 },
+    ]);
+    const step = await makeStep(dir, { tools: ["Read"] });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("ok");
+    expect(result.output).toEqual({ findings: [] });
+    expect(await Bun.file(step.outPath).json()).toEqual({ findings: [] });
+  });
+
+  test("scout tools:[] at zero invocations still delivers", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport([
+      { ...okOutcome(), toolInvocations: 0 },
+    ]);
+    const step = await makeStep(dir, {
+      name: "scout",
+      tools: [],
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+    expect(result.status).toBe("ok");
+  });
+
+  test("an unknown count stays ungated (Claude-shaped transport)", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport([okOutcome()]);
+    const step = await makeStep(dir, { tools: ["Read"] });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+    expect(result.status).toBe("ok");
+
+    const log = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(log).toContain("classification: ok");
+    expect(log).not.toContain("tool_invocations:");
+  });
+});

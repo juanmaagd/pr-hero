@@ -293,6 +293,37 @@ export interface OpenCodeTurnState {
   // suppress every real transition the stream later reports. See the WHY
   // comment at its use site in `handlePartUpdated`.
   readonly toolActivityRank: Map<string, number>;
+  // pr-hero review F001 (#214): every callID EVER observed "completed", by
+  // either the stream (`handlePartUpdated`) or the poll (`reconcileMessages`)
+  // — never removed, regardless of what a LATER observation reports for that
+  // same callID. `toolStates` above stores the provider's raw LAST-KNOWN
+  // status and is written unconditionally by both observers; a poll that
+  // recomputed "how many are completed" by re-filtering `toolStates` at each
+  // terminal (the pre-fix design) went DOWN the moment any earlier-completed
+  // call's status changed to "error" on a later readback. This set is the
+  // fix: `pollStatus` reports its members, never a fresh `toolStates`
+  // filter. Bounded by construction, not a separate cap — an id is added
+  // here only once it is already present in `toolStates`, which enforces
+  // MAX_TRACKED_PARTS before either write.
+  readonly completedToolCallIds: Set<string>;
+  // pr-hero review F001 (round 3): STREAM-OWNED — written and read ONLY by
+  // `handlePartUpdated`, to decide whether THIS observer has already emitted
+  // its own `{kind:"tool"}` for a callID. Deliberately a SEPARATE set from
+  // `completedToolCallIds` above, which `reconcileMessages` (prompt_result's
+  // own readback at session-create, and every poll round, winning or not)
+  // also writes unconditionally. Gating the stream's emission on the SHARED
+  // set (the round-2 shape) let a non-stream reconcile that observed
+  // "completed" for a callID BEFORE the stream's own SSE event for that
+  // exact completion arrive suppress the stream's emission entirely — and
+  // when the STREAM, not the poll, goes on to win the turn's terminal (no
+  // poll terminal ever reports that callID), the transport's union receives
+  // it from NEITHER channel and undercounts a hunter that plainly looked.
+  // Emission dedupe must be decided from what THIS observer has already
+  // emitted, never from what some other observer already recorded. Bounded
+  // by construction like `completedToolCallIds` (no separate cap, no
+  // eviction): every id here is added only after `toolStates`'s own
+  // MAX_TRACKED_PARTS check above already passed for that identity.
+  readonly streamCompletedToolCallIds: Set<string>;
   readonly tombstones: Set<string>;
   readonly unknownOwnerBuffer: Array<UnknownOwnerObservation>;
   // Provider event ids for text deltas actually applied to `emittedText`
@@ -383,6 +414,8 @@ export function createTurnState(
     parentLinks: new Map(),
     toolStates: new Map(),
     toolActivityRank: new Map(),
+    completedToolCallIds: new Set(),
+    streamCompletedToolCallIds: new Set(),
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     deltaEventIds: new Set(),
@@ -766,7 +799,58 @@ function handlePartUpdated(
     // redundant update) is not new work and earns nothing. Before this, tool
     // execution time counted as silence: this branch emitted no client
     // event at all, transition or not.
-    return transitioned ? [{ kind: "activity" }] : [];
+    const events: OpenCodeClientEvent[] = [];
+    if (transitioned) {
+      events.push({ kind: "activity" });
+      // #214: count a LOOK, not an announcement. Gated on `transitioned` —
+      // computed above off `toolActivityRank`, the STREAM-owned forward rank
+      // — and deliberately NOT off `toolStates` (which `reconcileMessages`,
+      // the poll readback, also writes unconditionally). Three concurrent
+      // hunters sharing one server can have a poll round observe a tool's
+      // "completed" before the stream ever delivers that same tool's
+      // "pending"/"running"; reading `toolStates` here would let the poll's
+      // race silently swallow the stream's own real "completed" transition
+      // and undercount a hunter that plainly looked. "error" is excluded on
+      // purpose: it produced no findable signal to reason from, and no test
+      // has asked for an errored call to count as "looked".
+    }
+    // pr-hero review F001 (round 2): the completion TALLY is keyed by SET
+    // MEMBERSHIP, never by `transitioned`/rank — deliberately a SEPARATE gate
+    // from "activity" above. "error" and "completed" share TOOL_STATUS_RANK
+    // (both terminal, neither outranks the other), so an error->completed
+    // transition for the same callID leaves `transitioned` false; nesting
+    // this tally inside `if (transitioned)` (the pre-fix shape) meant that
+    // sequence was NEVER added to `completedToolCallIds` and never emitted
+    // its `{kind:"tool"}` event at all — contradicting the set's own
+    // contract ("every callID EVER observed completed") and silently
+    // undercounting whenever the poll did not independently catch the same
+    // call.
+    if (status === "completed") {
+      // Always recorded in the SHARED set, unconditionally — this is what
+      // `pollStatus` reports if the POLL ends up winning the turn's terminal
+      // instead of the stream, and it must reflect every completion
+      // regardless of which observer saw it first.
+      state.completedToolCallIds.add(callId);
+      // pr-hero review F001 (round 3): emission is deduped against the
+      // STREAM-OWNED set, never the shared one above — see that field's own
+      // WHY comment on `OpenCodeTurnState`. Deduping against the shared set
+      // let a non-stream reconcile that saw this exact callID complete FIRST
+      // (prompt_result's own readback, a non-winning poll round) suppress
+      // the stream's own emission, silently losing the count whenever the
+      // stream — not the poll — went on to win the terminal. A REPEAT
+      // "completed" this observer has already emitted for is still a
+      // no-op, and the ownership guard above already confines this to the
+      // turn's own tool calls.
+      if (!state.streamCompletedToolCallIds.has(callId)) {
+        const tool =
+          typeof part.tool === "string" && part.tool.length > 0
+            ? part.tool
+            : "unknown";
+        state.streamCompletedToolCallIds.add(callId);
+        events.push({ kind: "tool", tool, callId });
+      }
+    }
+    return events;
   }
 
   if (partType === "reasoning") {
@@ -1155,8 +1239,25 @@ export function reconcileMessages(
             )
               failIntegrity(state, "tool identity cap exceeded");
             state.toolStates.set(callId, status);
+            // pr-hero review F001: recorded in the monotonic set the moment
+            // THIS readback sees "completed" — never removed by a later
+            // readback that reports a different status for the same callID.
+            // See the field's own WHY comment on `OpenCodeTurnState`.
+            if (status === "completed") {
+              state.completedToolCallIds.add(callId);
+            }
           }
           msgDetail.hasToolCalls = true;
+          // #214: this write feeds `hasOutstandingTools` (so a message the
+          // poll alone has seen is not declared final while a tool is still
+          // pending/running) AND, on a poll-won terminal, `pollStatus` reports
+          // `completedToolCallIds`'s members as `OpenCodePollResult
+          // .completedToolCallIds` — see the WHY comment there. This call
+          // site stays `emit: false` (no `{kind:"tool"}` event rides through
+          // here; the stream is still the only event-emitting observer), but
+          // a completion this observer is the FIRST to see is no longer
+          // silently uncounted: opencode-sdk.ts unions this poll-reported set
+          // with its own stream-observed callIDs by identity at settlement.
         } else if (partType === "reasoning") {
           if (
             !state.parts.has(partId) &&
@@ -2864,12 +2965,23 @@ export function createOpenCodeClient(
           }
 
           if (reconciled.terminalProof !== undefined) {
+            // pr-hero review F001 (#214): reported HERE as the CURRENT
+            // members of `completedToolCallIds` (whose own WHY comment on
+            // `OpenCodeTurnState` carries the full reasoning), not inside
+            // `reconcileMessages` (whose return type stays untouched) and not
+            // re-derived from `toolStates`/`list` fresh at this moment — a
+            // fresh re-filter is exactly the bug: an id that reached
+            // "completed" on an earlier readback and "error" on this one
+            // would silently drop out of a live recount. Ownership is already
+            // enforced above, in the parts loop that only runs past
+            // `isMessageOwned`, so every id in this set is this turn's own.
             return {
               kind: "terminal",
               proof: reconciled.terminalProof,
               finalText: reconciled.finalText,
               usage: reconciled.usage,
               usageIncomplete: reconciled.usageIncomplete,
+              completedToolCallIds: Array.from(state.turn.completedToolCallIds),
             };
           }
         }

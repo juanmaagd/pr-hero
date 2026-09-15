@@ -307,7 +307,16 @@ async function runAttempt(events: Array<Record<string, unknown>>) {
   // post-win observation window that settles a provider terminal is one of
   // them. Nothing here sleeps a real one (PR #118: host-dependent waits are
   // how this suite flaked before).
+  //
+  // #214: TWO flushes before each fire, not one. A fixture whose stream
+  // yields more than one client event per raw SSE event (#214's "tool" event
+  // rides the same raw update as #228's "activity") needs one more
+  // microtask hop per extra event to fully drain a still-in-flight
+  // `pushGuarded` race before `clock.fireAll()` runs — one flush left that
+  // push's own stall timer as the only pending callback, which `fireAll`
+  // then "won" on `clock.fireAll`'s behalf instead of the real push.
   for (let round = 0; round < 50 && !done; round += 1) {
+    await flush();
     await flush();
     clock.fireAll();
   }
@@ -324,6 +333,7 @@ describe("a reasoning model's thinking is not the answer", () => {
     expect(outcome.finalText).not.toContain(REASONING_A);
     expect(outcome.finalText).not.toContain(REASONING_B);
     expect(outcome.completion).toBe("success");
+    expect(outcome.toolInvocations).toBe(0);
   });
 
   // TRAP 2 in its second form. The fix has to consume `message.part.updated`
@@ -406,5 +416,164 @@ describe("a turn that reasoned and never answered", () => {
         stderrTail: `${outcome.stderrTail}\n[pr-hero] opencode sdk: stream errored: 401 unauthorized`,
       }),
     ).toBe("auth_invalid");
+  });
+});
+
+describe("tool-call parts survive the SSE path (#214)", () => {
+  const TOOL_PART = "prt_tool_read";
+  const DUMP =
+    'Building the value ledger to check the tab geometry for contradictions.{"findings":[]}';
+  // #228's ownership/step model: a real OpenCode turn puts a completed tool
+  // part on its OWN step message (`finish: "tool-calls"`), never on the same
+  // message as the final answer — see opencode-client.ts's
+  // `isIntermediateToolStep` and the transport conformance test "user prompt
+  // text, reasoning, and intermediate tool-step text are excluded from final
+  // answer". A single-message fixture (tool part + answer on one id) used to
+  // work before that guard existed; now the answer text on a `hasToolCalls`
+  // message is dropped as narration, so these fixtures use a second,
+  // parented message for the real answer, matching that shape.
+  const ASSISTANT_FINAL_MESSAGE = "msg_assistant_final";
+
+  function partDeltaFor(
+    messageId: string,
+    partID: string,
+    delta: string,
+  ): Record<string, unknown> {
+    return {
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESSION_ID,
+        messageID: messageId,
+        partID,
+        field: "text",
+        delta,
+      },
+    };
+  }
+
+  function completedFor(
+    messageId: string,
+    parentId: string,
+  ): Record<string, unknown> {
+    return messageUpdated(messageId, "assistant", {
+      parentID: parentId,
+      finish: "stop",
+      time: { created: 1, completed: 1_787_811_448_694 },
+      tokens: { input: 24_012, output: 6 },
+      cost: 0.01,
+    });
+  }
+
+  test("a one-step prose dump with no tool parts stamps 0", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant"),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", ""),
+      partDelta(ANSWER_PART, DUMP),
+      partUpdated(ANSWER_PART, ASSISTANT_MESSAGE, "text", DUMP),
+      COMPLETED,
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(DUMP);
+    expect(outcome.toolInvocations).toBe(0);
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 0 completed tool invocation(s)",
+    );
+  });
+
+  test("one Read call then empty findings stamps 1", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      // Step 1: the intermediate tool-calling step.
+      messageUpdated(ASSISTANT_MESSAGE, "assistant", {
+        finish: "tool-calls",
+        time: { created: 1, completed: 2 },
+      }),
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          part: {
+            id: TOOL_PART,
+            messageID: ASSISTANT_MESSAGE,
+            sessionID: SESSION_ID,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "completed" },
+          },
+        },
+      },
+      // Step 2: the final step, parented to step 1, carrying the real answer.
+      messageUpdated(ASSISTANT_FINAL_MESSAGE, "assistant", {
+        parentID: ASSISTANT_MESSAGE,
+      }),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", ""),
+      partDeltaFor(ASSISTANT_FINAL_MESSAGE, ANSWER_PART, ANSWER),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", ANSWER),
+      completedFor(ASSISTANT_FINAL_MESSAGE, ASSISTANT_MESSAGE),
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(ANSWER);
+    expect(outcome.toolInvocations).toBe(1);
+    expect(outcome.diagnosticsTail).toContain(
+      "observed 1 completed tool invocation(s)",
+    );
+    expect(outcome.diagnosticsTail).toContain("(read)");
+  });
+
+  // #228's `hasOutstandingTools` refuses to finalize a turn while a tool is
+  // still "pending"/"running" — a genuinely-stuck pending announcement (the
+  // shape this test used to script) can no longer reach a terminal at all,
+  // so it stopped exercising "announcing is not looking" and started
+  // exercising the harness watchdog instead. "error" is the other terminal
+  // status #214 excludes from the count (see the WHY comment on the "tool"
+  // branch in opencode-client.ts's `handlePartUpdated`), and it lets the turn
+  // actually finish, so it is what this fixture now scripts.
+  test("an errored Read call then empty findings stamps 0 — an error is not a look", async () => {
+    const events: Array<Record<string, unknown>> = [
+      messageUpdated(USER_MESSAGE, "user"),
+      partUpdated(USER_PART, USER_MESSAGE, "text", "review this"),
+      messageUpdated(ASSISTANT_MESSAGE, "assistant", {
+        finish: "tool-calls",
+        time: { created: 1, completed: 2 },
+      }),
+      {
+        type: "message.part.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          part: {
+            id: TOOL_PART,
+            messageID: ASSISTANT_MESSAGE,
+            sessionID: SESSION_ID,
+            type: "tool",
+            callID: "call_read_1",
+            tool: "read",
+            state: { status: "error" },
+          },
+        },
+      },
+      messageUpdated(ASSISTANT_FINAL_MESSAGE, "assistant", {
+        parentID: ASSISTANT_MESSAGE,
+      }),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", ""),
+      partDeltaFor(ASSISTANT_FINAL_MESSAGE, ANSWER_PART, DUMP),
+      partUpdated(ANSWER_PART, ASSISTANT_FINAL_MESSAGE, "text", DUMP),
+      completedFor(ASSISTANT_FINAL_MESSAGE, ASSISTANT_MESSAGE),
+      IDLE,
+    ];
+    const { outcome } = await runAttempt(events);
+
+    expect(outcome.completion).toBe("success");
+    expect(outcome.finalText).toBe(DUMP);
+    expect(outcome.toolInvocations).toBe(0);
   });
 });
