@@ -343,7 +343,12 @@ const MAX_TRACKED_REASONING_DELTA_EVENTS = 4096;
 // `respondedPermissions`. Permission prompts are far rarer than deltas
 // within one attempt, so a smaller cap than MAX_TRACKED_DELTA_EVENTS is
 // still generous; sized to MAX_TRACKED_MESSAGES for the same "one order of
-// magnitude above anything a real attempt produces" reasoning.
+// magnitude above anything a real attempt produces" reasoning. Unlike every
+// OTHER bounded set here, reaching this cap does NOT evict the oldest id via
+// `rememberId` — round 2 of the same review: an evicted requestID is
+// indistinguishable from an unseen one, so its later redelivery would slip
+// past the dedupe guard and fire a second reply. The attempt fails closed
+// instead once this many distinct prompts have been answered in one turn.
 const MAX_TRACKED_PERMISSION_REQUESTS = MAX_TRACKED_MESSAGES;
 // An SSE `Last-Event-ID` reconnect can re-deliver an OLDER status after a
 // newer one already landed (e.g. "running" replayed after "completed" was
@@ -2426,16 +2431,42 @@ export function createOpenCodeClient(
                   typeof requestID === "string" &&
                   !state.respondedPermissions.has(requestID)
                 ) {
-                  // PR #228 review, F002: recorded BEFORE the reply is even
+                  // PR #228 review (round 2), F002: `rememberId` (used for
+                  // every OTHER bounded id set in this file) evicts the
+                  // OLDEST entry once full — fine for high-volume, low-
+                  // stakes dedup like stream deltas, but wrong here: an
+                  // evicted requestID is indistinguishable from one this
+                  // session never saw, so ITS later SSE redelivery would
+                  // pass the `!has(requestID)` guard above and fire a
+                  // SECOND `permission.reply` for a request the server
+                  // already closed — exactly the failure this set exists to
+                  // prevent. A failed second reply already fails the
+                  // attempt below, so evicting just makes that failure
+                  // depend on redelivery timing this session cannot
+                  // control. 512 distinct permission prompts inside one
+                  // step is already anomalous — `external_directory` is
+                  // denied at the server config (opencode-server.ts) — so
+                  // failing closed here, the same way `failIntegrity` fails
+                  // closed on other exhausted identity caps (e.g. "tool
+                  // identity cap exceeded"), is strictly safer than ever
+                  // forgetting a requestID this session has committed to
+                  // answering.
+                  if (
+                    state.respondedPermissions.size >=
+                    MAX_TRACKED_PERMISSION_REQUESTS
+                  ) {
+                    state.turn.integrityFailure =
+                      "[pr-hero] opencode client: permission request cap exceeded (512)";
+                    state.wake?.();
+                    state.wake = undefined;
+                    break;
+                  }
+                  // PR #228 review, F002: added BEFORE the reply is even
                   // sent, not after it resolves — an SSE Last-Event-ID
                   // reconnect can redeliver this same event, and a duplicate
                   // arriving while this reply is still in flight must also
                   // see it here rather than racing the await below.
-                  rememberId(
-                    state.respondedPermissions,
-                    requestID,
-                    MAX_TRACKED_PERMISSION_REQUESTS,
-                  );
+                  state.respondedPermissions.add(requestID);
                   void (async () => {
                     try {
                       unwrap(

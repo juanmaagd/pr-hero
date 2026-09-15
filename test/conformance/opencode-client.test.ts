@@ -1048,6 +1048,110 @@ describe("createOpenCodeClient", () => {
     ]);
   });
 
+  function askEvent(id: string) {
+    return {
+      type: "permission.asked",
+      properties: {
+        id,
+        sessionID: SESSION_ID,
+        permission: "external_directory",
+        patterns: [],
+        metadata: {},
+        always: [],
+      },
+    };
+  }
+
+  // PR #228 review (round 2), F002 (CRITICAL, corroborated): the bounded
+  // `respondedPermissions` set used to be maintained with `rememberId`,
+  // which evicts the OLDEST requestID once the cap is full — the same
+  // pattern every other bounded id set in this file uses. But an evicted
+  // requestID is indistinguishable from one this session never saw, so a
+  // later SSE redelivery of THAT evicted id would pass the dedupe guard and
+  // fire a second `permission.reply` for a request the server already
+  // closed. 512 distinct prompts inside one step is already anomalous, so
+  // the fix fails the attempt closed instead of ever forgetting an id.
+  test("the permission request cap is exceeded, fails the attempt closed instead of forgetting old requestIDs (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const CAP = 512;
+    for (let i = 0; i < CAP; i++) fake.emit(askEvent(`per_${i}`));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fake.replyCalls()).toHaveLength(CAP);
+
+    // One more DISTINCT requestID, past the cap.
+    fake.emit(askEvent("per_overflow"));
+    await new Promise((r) => setTimeout(r, 20));
+    fake.endStream();
+
+    // Races against a real, bounded timeout rather than draining forever —
+    // same pattern as "a failing reject reply settles..." above.
+    const iterator = client.streamEvents(session)[Symbol.asyncIterator]();
+    let thrown: Error | undefined;
+    try {
+      for (;;) {
+        const step = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () => reject(new Error("test timeout: stream never settled")),
+              200,
+            );
+          }),
+        ]);
+        if (step.done) break;
+      }
+    } catch (error) {
+      thrown = error as Error;
+    } finally {
+      await iterator.return?.();
+    }
+
+    expect(thrown?.message).toContain("permission request cap exceeded (512)");
+    // No reply ever went out for the id that pushed past the cap.
+    expect(fake.replyCalls()).toHaveLength(CAP);
+    expect(fake.replyCalls().some((c) => c.requestID === "per_overflow")).toBe(
+      false,
+    );
+  });
+
+  // Regression/sanity companion to the cap test above: a set holding many
+  // (but not cap-exceeding) ids must not spontaneously start misbehaving —
+  // the first id ever added is still exactly as protected as it was when
+  // the set was empty. Because it deliberately stays under the cap, this
+  // test does NOT by itself catch a `rememberId`-eviction regression (with
+  // this few ids, `rememberId`'s own eviction never triggers either) — the
+  // cap test above is the one that does.
+  test("a redelivery of the first requestID after the set holds many ids still sends no second reply (F002)", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    const session = await client.createSession(INPUT);
+
+    const MANY = 300;
+    for (let i = 0; i < MANY; i++) fake.emit(askEvent(`many_${i}`));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake.replyCalls()).toHaveLength(MANY);
+
+    // Redeliver the very FIRST requestID ever seen.
+    fake.emit(askEvent("many_0"));
+    await new Promise((r) => setTimeout(r, 20));
+    fake.endStream();
+
+    let thrown: Error | undefined;
+    try {
+      for await (const _event of client.streamEvents(session)) {
+        // drain
+      }
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(fake.replyCalls()).toHaveLength(MANY);
+    expect(thrown).toBeUndefined();
+  });
+
   // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
   // exactly like GET /event — it must query the SAME directory session.create
   // registered (state.turn.expectedCwd, which IS input.cwd) or it watches an
