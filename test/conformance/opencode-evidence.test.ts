@@ -86,7 +86,6 @@ test("capture accounts for JSON array/wrapper overhead so a full snapshot never 
     });
   const snapshot = c.snapshot();
   const bytes = Buffer.byteLength(snapshot.redactedJson);
-  console.log("CAPTURE_TOTAL_BYTES", bytes, "PERSIST_CAP", 4 * 1024 * 1024);
   expect(snapshot.status).toBe("incomplete");
   expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
 });
@@ -124,16 +123,6 @@ test("a long capture keeps the head and a rolling tail, eliding the middle with 
     kind: string;
     data: unknown;
   }>;
-
-  console.log(
-    "HEAD_TAIL_TEST",
-    "totalEmitted",
-    records.length,
-    "bytes",
-    bytes,
-    "status",
-    snapshot.status,
-  );
 
   expect(snapshot.status).toBe("incomplete");
   expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);

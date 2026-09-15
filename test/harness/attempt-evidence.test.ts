@@ -255,7 +255,6 @@ test("persistAttemptEvidence writes the OpenCode capture once overhead accountin
   const x = await setup(undefined, { diagnosticEvidence });
   await x.harness.run(x.step);
   const e = await waitForEvidence(x.step);
-  console.log("CAPTURE_PERSISTED", e.capture, "DROPPED", e.captureDropped);
   expect(e.capture).toBeDefined();
   expect(e.captureDropped).toBeUndefined();
   expect(e.capture.schema).toBe("pr-hero.opencode-observations.v1");
@@ -296,19 +295,6 @@ test("persistAttemptEvidence persists a realistic multi-thousand-record capture 
     ? path.join(x.dir, e.capture.relativePath)
     : undefined;
   const captureBytes = captureFile ? await readFile(captureFile) : undefined;
-  console.log(
-    "MULTI_THOUSAND_RECORD_CAPTURE",
-    "capture",
-    e.capture,
-    "dropped",
-    e.captureDropped,
-    "recordCount",
-    JSON.parse(diagnosticEvidence.redactedJson).records.length,
-    "sourceBytes",
-    Buffer.byteLength(diagnosticEvidence.redactedJson),
-    "persistedBytes",
-    captureBytes?.length,
-  );
   expect(e.captureDropped).toBeUndefined();
   expect(e.capture).toBeDefined();
   expect(e.capture.schema).toBe("pr-hero.opencode-observations.v1");
@@ -366,13 +352,6 @@ test("persistAttemptEvidence redacts a secret-looking value inside a record's da
   });
   await x.harness.run(x.step);
   const e = await waitForEvidence(x.step);
-  console.log(
-    "SECRET_AT_SCALE_CAPTURE",
-    "capture",
-    e.capture,
-    "dropped",
-    e.captureDropped,
-  );
   expect(e.captureDropped).toBeUndefined();
   expect(e.capture).toBeDefined();
   const captureFile = path.join(x.dir, e.capture.relativePath);
@@ -391,7 +370,6 @@ test("persistAttemptEvidence drops a well-schemed but non-wrapper capture with a
   });
   await x.harness.run(x.step);
   const e = await waitForEvidence(x.step);
-  console.log("NON_WRAPPER_DROPPED", e.captureDropped, "capture", e.capture);
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
   expect(e.captureDropped.reason).toBe(
@@ -416,12 +394,6 @@ test("persistAttemptEvidence records captureDropped with a reason and size when 
   });
   await x.harness.run(x.step);
   const e = await waitForEvidence(x.step);
-  console.log(
-    "OVERSIZED_CAPTURE_DROPPED",
-    e.captureDropped,
-    "capture",
-    e.capture,
-  );
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
   expect(typeof e.captureDropped.reason).toBe("string");
@@ -547,7 +519,6 @@ test("persistAttemptEvidence records captureDropped with a reason when a capture
   });
   await x.harness.run(x.step);
   const e = await waitForEvidence(x.step);
-  console.log("BAD_SCHEMA_DROPPED", e.captureDropped, "capture", e.capture);
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
   expect(typeof e.captureDropped.reason).toBe("string");
@@ -563,12 +534,6 @@ test("persistAttemptEvidence records captureDropped with a reason when a capture
   });
   await x.harness.run(x.step);
   const e = await waitForEvidence(x.step);
-  console.log(
-    "MALFORMED_CAPTURE_DROPPED",
-    e.captureDropped,
-    "capture",
-    e.capture,
-  );
   expect(e.capture).toBeUndefined();
   expect(e.captureDropped).toBeDefined();
   expect(typeof e.captureDropped.reason).toBe("string");
