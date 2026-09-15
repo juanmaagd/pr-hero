@@ -722,6 +722,64 @@ describe("createOpenCodeClient", () => {
     expect(kinds).toContain("terminal");
   });
 
+  // #228: the subscription loop reads ONE directory-scoped stream shared by
+  // every concurrent hunter's session on the same server, and used to
+  // `evidence.record("event", raw)` every event it saw — roughly 55% of a
+  // real capture's records turned out to be OTHER sessions' events, which
+  // filled the record/byte cap long before this session's own silence
+  // window. The provider's session id can live in `properties.sessionID`,
+  // `properties.part.sessionID`, or `properties.info.sessionID`; an event
+  // carrying none of those (no session id anywhere) is still recorded, since
+  // there is nothing to filter it against.
+  test("records only this session's own events plus session-less ones, never another session's", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake);
+    await client.createSession({
+      ...INPUT,
+      correlation: { sessionId: "h", attempt: 1 },
+    });
+
+    fake.emit({ type: "own.top", properties: { sessionID: SESSION_ID } });
+    fake.emit({ type: "foreign.top", properties: { sessionID: "ses_other" } });
+    fake.emit({
+      type: "own.part",
+      properties: { part: { sessionID: SESSION_ID } },
+    });
+    fake.emit({
+      type: "foreign.part",
+      properties: { part: { sessionID: "ses_other" } },
+    });
+    fake.emit({
+      type: "own.info",
+      properties: { info: { sessionID: SESSION_ID } },
+    });
+    fake.emit({
+      type: "foreign.info",
+      properties: { info: { sessionID: "ses_other" } },
+    });
+    fake.emit({ type: "sessionless", properties: { foo: "bar" } });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.endStream();
+
+    const capture = client.takeEvidence?.("h", 1);
+    expect(capture).toBeDefined();
+    const parsed = JSON.parse(
+      (capture as { redactedJson: string }).redactedJson,
+    );
+    const recordedTypes = (
+      parsed.records as Array<{ kind: string; data: { type?: string } }>
+    )
+      .filter((r) => r.kind === "event")
+      .map((r) => r.data.type);
+
+    expect(recordedTypes).toEqual([
+      "own.top",
+      "own.part",
+      "own.info",
+      "sessionless",
+    ]);
+  });
+
   // #223: pollStatus's boundary is GET /session/status, scoped by `directory`
   // exactly like GET /event — it must query the SAME directory session.create
   // registered (state.turn.expectedCwd, which IS input.cwd) or it watches an

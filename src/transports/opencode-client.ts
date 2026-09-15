@@ -57,6 +57,25 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+// #228: the raw provider event carries its session id in one of three
+// places depending on its shape — a plain event's own `properties.sessionID`,
+// a `message.part.*` event's `properties.part.sessionID`, or a
+// `message.updated`-shaped event's `properties.info.sessionID`. Returns
+// `undefined` when none of the three is present, which the caller treats as
+// "cannot be attributed to any session" and therefore not filterable.
+function eventSessionId(raw: unknown): string | undefined {
+  const p = props(raw);
+  if (p === undefined) return undefined;
+  if (typeof p.sessionID === "string") return p.sessionID;
+  const part = asRecord(p.part);
+  if (part !== undefined && typeof part.sessionID === "string")
+    return part.sessionID;
+  const info = asRecord(p.info);
+  if (info !== undefined && typeof info.sessionID === "string")
+    return info.sessionID;
+  return undefined;
+}
+
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value)
     ? value
@@ -2281,7 +2300,17 @@ export function createOpenCodeClient(
         void (async () => {
           try {
             for await (const raw of subscription.stream) {
-              evidence.record("event", raw);
+              // #228: this is ONE directory-scoped stream shared by every
+              // concurrent hunter's session on the same server. Recording
+              // every event unfiltered meant roughly 55% of a real
+              // multi-hunter capture was OTHER sessions' events, filling the
+              // record/byte cap long before this session's own silence
+              // window was covered. An event with no attributable session id
+              // is still recorded — there is nothing to filter it against.
+              const rawSessionId = eventSessionId(raw);
+              if (rawSessionId === undefined || rawSessionId === sessionId) {
+                evidence.record("event", raw);
+              }
               const rawSize = Buffer.byteLength(JSON.stringify(raw), "utf8");
               state.queueBytes += rawSize;
               if (state.queueBytes > 4 * 1024 * 1024) {

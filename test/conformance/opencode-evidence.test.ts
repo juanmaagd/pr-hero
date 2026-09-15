@@ -91,6 +91,98 @@ test("capture accounts for JSON array/wrapper overhead so a full snapshot never 
   expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
 });
 
+// #228: real production captures hit the 10,000-record cap at ~57.7s into a
+// 242-286s attempt, so the silence window (which is what needed diagnosing)
+// was never even in the capture. Stopping at the cap keeps only the OLDEST
+// records; a real hunter's silence trips at the END of the attempt, so the
+// part that matters most was exactly what got cut. Head+tail retention keeps
+// the identity-establishing beginning (session_identity, the prompt's
+// http_request/response) AND the outcome-establishing end (the last
+// readback, any terminal event) — the reasoning-delta-heavy middle is what
+// gets sacrificed, marked by exactly one `elided` record.
+test("a long capture keeps the head and a rolling tail, eliding the middle with one marker", () => {
+  const c = new OpenCodeEvidenceCollector({ sessionId: "s", attempt: 1 });
+  c.record("session_identity", {
+    sessionId: "s",
+    userMessageId: "u",
+    cwd: "/work",
+  });
+  const TOTAL_FILLERS = 30000;
+  for (let i = 0; i < TOTAL_FILLERS; i++) {
+    c.record("event", {
+      type: "message.part.delta",
+      properties: { delta: `filler-${i}` },
+    });
+  }
+  c.record("event", { type: "final-marker-event", marker: "LAST" });
+
+  const snapshot = c.snapshot();
+  const bytes = Buffer.byteLength(snapshot.redactedJson);
+  const parsed = JSON.parse(snapshot.redactedJson);
+  const records = parsed.records as Array<{
+    seq: number;
+    kind: string;
+    data: unknown;
+  }>;
+
+  console.log(
+    "HEAD_TAIL_TEST",
+    "totalEmitted",
+    records.length,
+    "bytes",
+    bytes,
+    "status",
+    snapshot.status,
+  );
+
+  expect(snapshot.status).toBe("incomplete");
+  expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+  expect(records.length).toBeLessThanOrEqual(10000);
+
+  // The first record recorded (session_identity) is first in the emitted sequence.
+  expect(records[0].kind).toBe("session_identity");
+  expect(records[0].seq).toBe(1);
+
+  // The very last record fed in is the very last one emitted.
+  const lastRecord = records[records.length - 1];
+  expect(lastRecord.data).toEqual({
+    type: "final-marker-event",
+    marker: "LAST",
+  });
+
+  // Exactly one elided marker, with counts that reconcile against what was
+  // actually fed in.
+  const markers = records.filter((r) => r.kind === "elided");
+  expect(markers).toHaveLength(1);
+  const totalFed = 1 /* session_identity */ + TOTAL_FILLERS + 1 /* final */;
+  const survivingNonMarker = records.length - 1;
+  expect((markers[0].data as { records: number }).records).toBe(
+    totalFed - survivingNonMarker,
+  );
+  expect((markers[0].data as { bytes: number }).bytes).toBeGreaterThan(0);
+});
+
+test("a small capture has no elided marker and stays complete", () => {
+  const c = new OpenCodeEvidenceCollector({ sessionId: "s", attempt: 1 });
+  c.record("session_identity", {
+    sessionId: "s",
+    userMessageId: "u",
+    cwd: "/work",
+  });
+  c.record("event", {
+    type: "message.part.delta",
+    properties: { delta: "hi" },
+  });
+  const snapshot = c.snapshot();
+  const parsed = JSON.parse(snapshot.redactedJson);
+  expect(
+    (parsed.records as Array<{ kind: string }>).some(
+      (r) => r.kind === "elided",
+    ),
+  ).toBe(false);
+  expect(snapshot.status).toBe("complete");
+});
+
 test("capture is bounded and never invokes getters or leaks cookie/query credentials", () => {
   const c = new OpenCodeEvidenceCollector({ sessionId: "h", attempt: 1 }, 400);
   let invoked = false;
@@ -169,6 +261,16 @@ test("actual owned complete readback distinguishes loss and valid empty from mis
     classifyObservationEvidence(observed("answer", "msg-user", "pending"), ""),
   ).toBe("inconclusive");
   expect(classifyObservationEvidence(undefined, "")).toBe("inconclusive");
+});
+// #228's collector refactor (internal head/tail retention instead of a
+// single flat array) must not change classification for the common case: a
+// small, non-elided capture (status stays "complete"). This is a pure
+// regression pin — the behavior is identical to the assertion above, kept
+// separate to name exactly what it protects.
+test("classifyObservationEvidence still classifies a complete (non-elided) capture the same after the head/tail refactor", () => {
+  expect(classifyObservationEvidence(observed("answer"), "")).toBe(
+    "demonstrated_reconstruction_defect",
+  );
 });
 test("SSE capture does not consume streaming response bodies or wait on an endless body", async () => {
   const c = new OpenCodeEvidenceCollector({ sessionId: "h", attempt: 1 });
