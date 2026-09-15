@@ -39,6 +39,14 @@ export interface ExecutionAttemptEvidence {
     sha256: string;
     relativePath: string;
   };
+  // A capture the transport actually produced but that this function could
+  // not persist (too large, an unrecognized schema, or a parse/write
+  // failure) is a diagnostic loss worth recording — silently proceeding
+  // without either `capture` or this field left every one of a real
+  // production run's failed steps with NO way to tell whether a capture was
+  // ever taken. Set only when `outcome.diagnosticEvidence` was present and
+  // `capture` above was not populated for it.
+  captureDropped?: { reason: string; bytes?: number };
 }
 /** Diagnostic control-plane persistence. Failure never changes execution/billing. */
 export async function persistAttemptEvidence(
@@ -91,25 +99,43 @@ export async function persistAttemptEvidence(
     evidence.outputPath = path.basename(step.outPath);
   }
   const capture = outcome?.diagnosticEvidence;
-  if (
-    capture &&
-    Buffer.byteLength(capture.redactedJson) <= 4 * 1024 * 1024 &&
-    /^pr-hero\.[a-z0-9.-]+$/.test(capture.schema)
-  ) {
-    try {
-      const safe = redactEvidence(JSON.parse(capture.redactedJson));
-      const captureFile = file.replace(/\.json$/, ".capture.json");
-      await mkdir(path.dirname(file), { recursive: true });
-      await writeJsonAtomically(captureFile, safe);
-      const bytes = await readFile(captureFile);
-      evidence.capture = {
-        schema: capture.schema,
-        status: capture.status,
-        sha256: evidenceSha256(bytes),
-        relativePath: path.basename(captureFile),
+  if (capture) {
+    const captureBytes = Buffer.byteLength(capture.redactedJson);
+    if (captureBytes > 4 * 1024 * 1024) {
+      evidence.captureDropped = {
+        reason: "capture exceeds the 4 MiB persist cap",
+        bytes: captureBytes,
       };
-    } catch {
-      /* Qualification requires an actual usable capture. */
+    } else if (!/^pr-hero\.[a-z0-9.-]+$/.test(capture.schema)) {
+      evidence.captureDropped = {
+        reason: `capture schema "${capture.schema}" is not recognized`,
+        bytes: captureBytes,
+      };
+    } else {
+      try {
+        const safe = redactEvidence(JSON.parse(capture.redactedJson));
+        const captureFile = file.replace(/\.json$/, ".capture.json");
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeJsonAtomically(captureFile, safe);
+        const bytes = await readFile(captureFile);
+        evidence.capture = {
+          schema: capture.schema,
+          status: capture.status,
+          sha256: evidenceSha256(bytes),
+          relativePath: path.basename(captureFile),
+        };
+      } catch (error) {
+        // Qualification requires an actual usable capture, but a capture
+        // that WAS produced and then lost to a parse or write failure is
+        // still a diagnostic loss worth recording, never a silent no-op.
+        evidence.captureDropped = {
+          reason:
+            error instanceof Error
+              ? `capture persist failed: ${error.message}`
+              : "capture persist failed",
+          bytes: captureBytes,
+        };
+      }
     }
   }
   await mkdir(path.dirname(file), { recursive: true });

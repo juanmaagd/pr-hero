@@ -4,6 +4,7 @@ import path from "node:path";
 import { evidenceSha256 } from "../../src/execution/attempt-evidence";
 import type {
   ProviderTransport,
+  TransportOutcome,
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
@@ -18,7 +19,10 @@ const block = () => {
   throw new Error("NO NETWORK/SPAWN");
 };
 
-async function setup(change?: (r: TransportRequest) => Promise<void>) {
+async function setup(
+  change?: (r: TransportRequest) => Promise<void>,
+  outcomeOverrides?: Partial<TransportOutcome>,
+) {
   const dir = await mkdtemp("/tmp/producer-negative-");
   const binary = path.join(dir, "synthetic-binary");
   const mcp = path.join(dir, "mcp.json");
@@ -72,6 +76,7 @@ async function setup(change?: (r: TransportRequest) => Promise<void>) {
         },
         stderrTail:
           "Cookie: session=SYNTHETIC_COOKIE; csrf=SYNTHETIC_CSRF\nhttps://u:SYNTHETIC_PASSWORD@host/path",
+        ...outcomeOverrides,
       };
     },
     classifyFailure: () => undefined,
@@ -196,4 +201,149 @@ test("classifier rejects non-string terminal text as inconclusive", () => {
   const verdict = classifyObservationEvidence(c.snapshot(), "");
   console.log("MALFORMED_TEXT_CLASSIFICATION", verdict);
   expect(verdict).toBe("inconclusive");
+});
+test("persistAttemptEvidence writes the OpenCode capture once overhead accounting keeps a realistic-sized snapshot under the persist cap", async () => {
+  // 1700-byte deltas land ~2313 records: comfortably under the SEPARATE
+  // 20000-node budget `redactEvidence` re-applies to the whole parsed blob at
+  // persist time (see the sibling test below, which pins that gap), while
+  // still landing (pre-fix) ~2000-2100 bytes over the byte cap every run —
+  // deterministic, not the flaky few-dozen-byte margin a coarser or finer
+  // delta size produces. This isolates the comma/wrapper overhead fix under
+  // test here from that other, pre-existing node-budget limit.
+  const collector = new OpenCodeEvidenceCollector({
+    sessionId: "s",
+    attempt: 1,
+  });
+  for (let i = 0; i < 20000; i++)
+    collector.record("event", {
+      type: "message.part.delta",
+      properties: { delta: "x".repeat(1700) },
+    });
+  const diagnosticEvidence = collector.snapshot();
+  const x = await setup(undefined, { diagnosticEvidence });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log("CAPTURE_PERSISTED", e.capture, "DROPPED", e.captureDropped);
+  expect(e.capture).toBeDefined();
+  expect(e.captureDropped).toBeUndefined();
+  expect(e.capture.schema).toBe("pr-hero.opencode-observations.v1");
+  const captureFile = path.join(x.dir, e.capture.relativePath);
+  const bytes = await readFile(captureFile);
+  expect(evidenceSha256(bytes)).toBe(e.capture.sha256);
+});
+test("persistAttemptEvidence pins the pre-existing persist-time redaction node-budget gap instead of hiding it", async () => {
+  // DISCOVERY while verifying the overhead fix above: `record()` redacts
+  // each record's `data` with its OWN fresh 20000-node budget (a `redactEvidence`
+  // default parameter), but `persistAttemptEvidence` re-redacts the ENTIRE
+  // parsed blob in one call sharing a SINGLE 20000-node budget. A capture
+  // with many small events (delta=500, ~6800 records here) fits comfortably
+  // under the 4 MiB byte cap this commit fixes, but still blows the shared
+  // node budget by roughly 8x, and previously that failure was swallowed by
+  // the bare `catch {}` this commit also fixes.
+  //
+  // Raising `redactEvidence`'s budget, or redacting per-record at persist
+  // time instead of once for the whole blob, would change a SECURITY
+  // module's bound (`src/security/evidence-redaction.ts`) and is outside
+  // this slice's authorization — that decision belongs to a human call, not
+  // a writer's. This test pins the gap as an OBSERVABLE, reported drop
+  // (`captureDropped.reason` names it) rather than papering over it by
+  // tuning the payload to slip under both limits.
+  const collector = new OpenCodeEvidenceCollector({
+    sessionId: "s",
+    attempt: 1,
+  });
+  for (let i = 0; i < 20000; i++)
+    collector.record("event", {
+      type: "message.part.delta",
+      properties: { delta: "x".repeat(500) },
+    });
+  const diagnosticEvidence = collector.snapshot();
+  const x = await setup(undefined, { diagnosticEvidence });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log("SHAPE_LIMIT_DROPPED", e.captureDropped, "capture", e.capture);
+  expect(e.capture).toBeUndefined();
+  expect(e.captureDropped).toBeDefined();
+  expect(e.captureDropped.reason).toMatch(/shape limit/);
+});
+test("persistAttemptEvidence records captureDropped with a reason and size when a capture is too large to persist", async () => {
+  const oversized = "x".repeat(5 * 1024 * 1024);
+  const redactedJson = JSON.stringify({
+    schemaVersion: 1,
+    sessionId: "s",
+    attempt: 1,
+    records: [{ seq: 1, observedMs: 0, kind: "event", data: oversized }],
+  });
+  const x = await setup(undefined, {
+    diagnosticEvidence: {
+      schema: "pr-hero.opencode-observations.v1",
+      status: "complete",
+      redactedJson,
+    },
+  });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log(
+    "OVERSIZED_CAPTURE_DROPPED",
+    e.captureDropped,
+    "capture",
+    e.capture,
+  );
+  expect(e.capture).toBeUndefined();
+  expect(e.captureDropped).toBeDefined();
+  expect(typeof e.captureDropped.reason).toBe("string");
+  expect(e.captureDropped.reason.length).toBeGreaterThan(0);
+  expect(e.captureDropped.bytes).toBe(Buffer.byteLength(redactedJson));
+});
+test("persistAttemptEvidence records captureDropped with a reason when a capture schema is not recognized", async () => {
+  const x = await setup(undefined, {
+    diagnosticEvidence: {
+      schema: "not-a-recognized-schema",
+      status: "complete",
+      redactedJson: JSON.stringify({
+        schemaVersion: 1,
+        sessionId: "s",
+        attempt: 1,
+        records: [],
+      }),
+    },
+  });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log("BAD_SCHEMA_DROPPED", e.captureDropped, "capture", e.capture);
+  expect(e.capture).toBeUndefined();
+  expect(e.captureDropped).toBeDefined();
+  expect(typeof e.captureDropped.reason).toBe("string");
+  expect(e.captureDropped.reason.length).toBeGreaterThan(0);
+});
+test("persistAttemptEvidence records captureDropped with a reason when a capture payload cannot be parsed", async () => {
+  const x = await setup(undefined, {
+    diagnosticEvidence: {
+      schema: "pr-hero.opencode-observations.v1",
+      status: "complete",
+      redactedJson: "not valid json{",
+    },
+  });
+  await x.harness.run(x.step);
+  const e = JSON.parse(
+    await readFile(attemptEvidencePath(x.step.outPath, "hunter", 1), "utf8"),
+  );
+  console.log(
+    "MALFORMED_CAPTURE_DROPPED",
+    e.captureDropped,
+    "capture",
+    e.capture,
+  );
+  expect(e.capture).toBeUndefined();
+  expect(e.captureDropped).toBeDefined();
+  expect(typeof e.captureDropped.reason).toBe("string");
+  expect(e.captureDropped.reason.length).toBeGreaterThan(0);
 });

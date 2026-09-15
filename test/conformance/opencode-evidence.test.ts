@@ -70,6 +70,27 @@ test("capture uses actual serialized SDK request and observed response, never st
   ).toContain("directory=%2Fwork");
 });
 
+test("capture accounts for JSON array/wrapper overhead so a full snapshot never exceeds the persist cap", () => {
+  // A long real hunter fills the default 4 MiB cap with thousands of small
+  // records. Each record's own JSON.stringify size was summed correctly, but
+  // the array's join commas (N-1 bytes) and the `{"schemaVersion":...,
+  // "records":[...]}` wrapper were never counted — only a flat 256-byte
+  // reserve stood in for both. With enough records the comma overhead alone
+  // dwarfs 256 bytes, so the final serialized snapshot could land past
+  // `maxBytes` even though every individual record fit under it.
+  const c = new OpenCodeEvidenceCollector({ sessionId: "s", attempt: 1 });
+  for (let i = 0; i < 20000; i++)
+    c.record("event", {
+      type: "message.part.delta",
+      properties: { delta: "x".repeat(500) },
+    });
+  const snapshot = c.snapshot();
+  const bytes = Buffer.byteLength(snapshot.redactedJson);
+  console.log("CAPTURE_TOTAL_BYTES", bytes, "PERSIST_CAP", 4 * 1024 * 1024);
+  expect(snapshot.status).toBe("incomplete");
+  expect(bytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+});
+
 test("capture is bounded and never invokes getters or leaks cookie/query credentials", () => {
   const c = new OpenCodeEvidenceCollector({ sessionId: "h", attempt: 1 }, 400);
   let invoked = false;

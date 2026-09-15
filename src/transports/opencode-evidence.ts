@@ -20,10 +20,32 @@ export class OpenCodeEvidenceCollector {
   private incomplete = false;
   private pending = 0;
   private frozen?: DiagnosticEvidence;
+  private wrapperBytesCache?: number;
   constructor(
     private correlation: { sessionId: string; attempt: number },
     private maxBytes = MAX_BYTES,
   ) {}
+  // `snapshot()` serializes `{"schemaVersion":1,...correlation,"records":[...]}`
+  // — every record beyond the first costs one extra byte for its join comma,
+  // and the object wrapper itself (schemaVersion/correlation/brackets) costs a
+  // fixed amount too. `record()` used to reserve a flat 256-byte slack for
+  // both, which a few thousand records blow through on commas alone (each is
+  // 1 byte, but there is one per record past the first) — the final
+  // `redactedJson` could then land past `maxBytes` even though every
+  // individual record fit under it. Computed once here (the wrapper shape
+  // never changes after construction) so `record()` can budget the exact
+  // overhead instead of guessing at it.
+  private wrapperBytes(): number {
+    if (this.wrapperBytesCache === undefined)
+      this.wrapperBytesCache = Buffer.byteLength(
+        JSON.stringify({
+          schemaVersion: 1,
+          ...this.correlation,
+          records: [],
+        }),
+      );
+    return this.wrapperBytesCache;
+  }
   record(kind: string, data: unknown): void {
     if (this.frozen || this.incomplete) return;
     try {
@@ -35,13 +57,14 @@ export class OpenCodeEvidenceCollector {
         data: safe,
       };
       const size = Buffer.byteLength(JSON.stringify(record));
-      if (
-        this.records.length >= 10000 ||
-        this.bytes + size > this.maxBytes - 256
-      )
+      const projectedRecordBytes = this.bytes + size;
+      const projectedCommaBytes = this.records.length; // one join comma per prior record
+      const projectedTotal =
+        this.wrapperBytes() + projectedRecordBytes + projectedCommaBytes;
+      if (this.records.length >= 10000 || projectedTotal > this.maxBytes)
         throw new Error("capture limit");
       this.records.push(record);
-      this.bytes += size;
+      this.bytes = projectedRecordBytes;
     } catch {
       this.incomplete = true;
     }
