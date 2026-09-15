@@ -183,6 +183,100 @@ test("a small capture has no elided marker and stays complete", () => {
   expect(snapshot.status).toBe("complete");
 });
 
+// #157 follow-up: the old tail-eviction loop found out a record could never
+// fit by draining every real tail entry FIRST and only then throwing
+// "capture limit" — and that throw landed in a catch which ALSO set the
+// early-return gate every future `record()` call checked, so one oversized
+// record (a multi-MB response_body at the end of an attempt is the
+// realistic case) erased every tail record that had survived up to that
+// point AND silenced the rest of the attempt. `closer` below deliberately
+// forces the very first oversized-record encounter (before any real tail
+// content exists) to make sure it does not consume the room left over for
+// the real fillers that follow.
+test("an oversized record is skipped without draining the tail or stopping later records", () => {
+  const c = new OpenCodeEvidenceCollector({ sessionId: "s", attempt: 1 }, 2000);
+  for (let i = 0; i < 5; i++) c.record("hpad", { i });
+  // Too big to ever fit, encountered before any tail content exists.
+  c.record("closer", { pad: "x".repeat(3000) });
+  // Real tail content, recorded AFTER the first oversized encounter.
+  const FILLER_COUNT = 15;
+  for (let i = 0; i < FILLER_COUNT; i++) c.record("filler", { i });
+  // The record too large to fit even an EMPTY tail.
+  c.record("oversized", { blob: "x".repeat(8000) });
+  // Recorded AFTER the oversized record.
+  c.record("event", { marker: "FINAL" });
+
+  const snapshot = c.snapshot();
+  expect(snapshot.status).toBe("incomplete");
+  const records = JSON.parse(snapshot.redactedJson).records as Array<{
+    kind: string;
+    data: unknown;
+  }>;
+
+  // The final record, recorded AFTER the oversized one, must be present —
+  // the old gate would have discarded it.
+  expect(
+    records.some(
+      (r) =>
+        r.kind === "event" &&
+        (r.data as { marker?: string }).marker === "FINAL",
+    ),
+  ).toBe(true);
+
+  // Every real filler recorded before the oversized record must survive —
+  // the old loop drained the whole tail trying (and failing) to make room
+  // for it before giving up.
+  const survivingFillers = records.filter((r) => r.kind === "filler");
+  expect(survivingFillers).toHaveLength(FILLER_COUNT);
+
+  // The oversized record and the earlier too-big "closer" never appear.
+  expect(records.some((r) => r.kind === "oversized")).toBe(false);
+  expect(records.some((r) => r.kind === "closer")).toBe(false);
+
+  // Both skips were counted, not silently dropped.
+  const marker = records.find((r) => r.kind === "elided") as
+    | { data: { records: number; bytes: number } }
+    | undefined;
+  expect(marker).toBeDefined();
+  expect(marker?.data.records).toBe(2);
+});
+
+// Same rule, the other failure surface: `body()`'s own catch (a body over
+// `maxBytes`, or the 100ms read-deadline) used to set the very same
+// `incomplete` flag that blocked every future `record()` call.
+test("a body-read failure does not stop later records from being recorded", async () => {
+  const c = new OpenCodeEvidenceCollector({ sessionId: "h", attempt: 1 }, 5000);
+  const bigBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("x".repeat(10000)));
+      controller.close();
+    },
+  });
+  const response = new Response(bigBody, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+  await c.wrapFetch(async () => response)("http://unused.invalid/thing");
+  // Let the fire-and-forget body-reading IIFE run to completion (and fail).
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  c.record("event", { marker: "AFTER_BODY_FAILURE" });
+
+  const snapshot = c.snapshot();
+  expect(snapshot.status).toBe("incomplete");
+  const records = JSON.parse(snapshot.redactedJson).records as Array<{
+    kind: string;
+    data: unknown;
+  }>;
+  expect(
+    records.some(
+      (r) =>
+        r.kind === "event" &&
+        (r.data as { marker?: string }).marker === "AFTER_BODY_FAILURE",
+    ),
+  ).toBe(true);
+});
+
 test("capture is bounded and never invokes getters or leaks cookie/query credentials", () => {
   const c = new OpenCodeEvidenceCollector({ sessionId: "h", attempt: 1 }, 400);
   let invoked = false;

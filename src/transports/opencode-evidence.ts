@@ -108,7 +108,7 @@ export class OpenCodeEvidenceCollector {
     return totalBytes <= this.maxBytes;
   }
   record(kind: string, data: unknown): void {
-    if (this.frozen || this.incomplete) return;
+    if (this.frozen) return;
     try {
       const safe = redactEvidence(data);
       const rec: OpenCodeObservation = {
@@ -135,6 +135,26 @@ export class OpenCodeEvidenceCollector {
         this.headClosed = true;
       }
 
+      // A record too large to fit even an EMPTY tail must be skipped BEFORE
+      // touching the existing tail at all. The old code found this out only
+      // by draining every real tail record first (the loop below) and then
+      // throwing "capture limit" once there was nothing left to evict — and
+      // since that throw landed in the catch below, which used to also set
+      // the early-return gate above, ONE oversized record (a multi-MB
+      // response_body at the end of an attempt is the realistic case) both
+      // erased every tail record that survived up to that point AND
+      // silenced every record for the rest of the attempt. Checked here so
+      // the existing tail is never touched for a record that could never
+      // have fit it regardless of what got evicted.
+      if (!this.fits(this.head.length, this.headBytes, 1, size)) {
+        if (this.elidedCount === 0) this.elidedObservedMs = performance.now();
+        this.elidedCount += 1;
+        this.elidedBytes += size;
+        this.incomplete = true;
+        this.nextSeq++;
+        return;
+      }
+
       // Tail phase: append `rec`, evicting the oldest tail entries first if
       // needed to stay within both the record cap and `maxBytes` — the
       // moment the FIRST eviction happens, a marker starts existing, and
@@ -157,6 +177,11 @@ export class OpenCodeEvidenceCollector {
           return;
         }
         const oldest = this.tail.shift();
+        // Unreachable given the pre-check above already proved the record
+        // fits an EMPTY tail: this loop can only run out of entries to evict
+        // before `fits()` turns true if that proof was wrong. Kept as a
+        // fail-safe — the catch below still marks `incomplete` rather than
+        // recording a wrong result, and no longer disables future recording.
         if (oldest === undefined) throw new Error("capture limit");
         this.tailBytes -= oldest.size;
         if (this.elidedCount === 0) this.elidedObservedMs = performance.now();
