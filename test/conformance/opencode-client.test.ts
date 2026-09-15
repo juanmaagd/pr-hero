@@ -2462,3 +2462,150 @@ describe("Poll-readback reconcile must not advance emission ahead of the stream 
     expect(state.integrityFailure).toBeUndefined();
   });
 });
+
+// #227 threaded the provider event id through `handlePartDelta`, giving
+// reasoning deltas replay identity they lacked when f842a8b restricted useful
+// progress to owned cumulative SNAPSHOTS only ("bare delta markers have no
+// replay identity and cannot extend the deadline"). A delta carrying a NOVEL
+// id is no longer a bare marker — replaying the SAME id (an SSE
+// Last-Event-ID reconnect) is still not new work, and an id-less delta still
+// has no identity to prove novelty with, so both keep emitting the old bare
+// marker. Tool execution time counted as silence for a separate reason: this
+// same file's `handlePartUpdated` tool branch emitted NOTHING at all for a
+// tool part update, novel status transition or not. Both gaps fed the false
+// "quiet-round budget" tripwire on reasoning-heavy or tool-heavy turns a real
+// GLM/OpenAI stream produces.
+describe("useful-progress credit for novel reasoning deltas and tool transitions", () => {
+  const SESS = "ses_progress_credit";
+
+  function ownReasoningPart(state: ReturnType<typeof createTurnState>) {
+    state.parts.set("prt_r1", "reasoning");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+  }
+
+  test("a reasoning delta with a novel provider event id counts as progress", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+
+    const events = mapOpenCodeEvents(
+      {
+        id: "evt_reasoning_novel",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_r1",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([{ kind: "reasoning", progress: true }]);
+  });
+
+  test("the same reasoning delta id replayed does not count twice", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+    const send = () =>
+      mapOpenCodeEvents(
+        {
+          id: "evt_reasoning_replay",
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESS,
+            messageID: "msg_asst_1",
+            partID: "prt_r1",
+            field: "text",
+            delta: "thinking about it",
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(send()).toEqual([{ kind: "reasoning", progress: true }]);
+    expect(send()).toEqual([{ kind: "reasoning" }]);
+  });
+
+  test("an id-less reasoning delta never counts as progress", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    ownReasoningPart(state);
+
+    const events = mapOpenCodeEvents(
+      {
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_asst_1",
+          partID: "prt_r1",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([{ kind: "reasoning" }]);
+  });
+
+  test("a reasoning delta for an unowned message emits nothing, novel id or not", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.parts.set("prt_r_foreign", "reasoning");
+    state.assistantMessages.add("msg_foreign");
+    state.parentLinks.set("msg_foreign", "someone_elses_prompt");
+
+    const events = mapOpenCodeEvents(
+      {
+        id: "evt_reasoning_foreign",
+        type: "message.part.delta",
+        properties: {
+          sessionID: SESS,
+          messageID: "msg_foreign",
+          partID: "prt_r_foreign",
+          field: "text",
+          delta: "thinking about it",
+        },
+      },
+      SESS,
+      state,
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  test("an owned tool part's novel status transition emits activity once; the same status again emits nothing", () => {
+    const state = createTurnState(SESS, "msg_user_1", "/tmp/work");
+    state.assistantMessages.add("msg_asst_1");
+    state.parentLinks.set("msg_asst_1", "msg_user_1");
+    const toolStatus = (status: string) =>
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESS,
+            part: {
+              id: "prt_tool_1",
+              messageID: "msg_asst_1",
+              sessionID: SESS,
+              type: "tool",
+              callID: "call_1",
+              state: { status },
+            },
+          },
+        },
+        SESS,
+        state,
+      );
+
+    expect(toolStatus("pending")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("pending")).toEqual([]);
+    expect(toolStatus("running")).toEqual([{ kind: "activity" }]);
+    expect(toolStatus("running")).toEqual([]);
+    expect(toolStatus("completed")).toEqual([{ kind: "activity" }]);
+  });
+});

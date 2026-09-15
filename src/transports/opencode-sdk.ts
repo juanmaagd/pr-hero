@@ -138,6 +138,15 @@ export type OpenCodeClientEvent =
   // all the transport needs to tell a turn that reasoned and never answered
   // apart from one that produced nothing at all.
   | { readonly kind: "reasoning"; readonly progress?: boolean }
+  // A tool part's status actually CHANGED (a novel pending/running/
+  // completed/error transition the client observed at most once — see
+  // opencode-client.ts's `handlePartUpdated`). Deliberately carries no
+  // payload, same reasoning as the bare "reasoning" marker above: the tool's
+  // input/output is not the answer and must not spend any content budget.
+  // Distinct from "reasoning" on purpose — the SDK uses reasoning events for
+  // its own "reasoning parts were received and discarded" diagnostics, and
+  // conflating tool execution into that would corrupt them.
+  | { readonly kind: "activity" }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
 
 export type OpenCodePollResult =
@@ -1035,6 +1044,8 @@ export class OpenCodeSdkTransport implements ProviderTransport {
             }
           } else if (event.kind === "reasoning" && event.progress === true) {
             advancedProgress = true;
+          } else if (event.kind === "activity") {
+            advancedProgress = true;
           } else if (event.kind === "usage") {
             const totalTokens =
               (event.inputTokens ?? 0) + (event.outputTokens ?? 0);
@@ -1178,6 +1189,12 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               // the content was dropped at the client boundary and only this
               // one bit survives it.
               sawReasoning = true;
+              break;
+            }
+            case "activity": {
+              // Same shape as "reasoning" above: nothing to forward, nothing
+              // to bound. The useful-progress credit was already taken above,
+              // before this switch — there is nothing left to do here.
               break;
             }
             case "heartbeat": {

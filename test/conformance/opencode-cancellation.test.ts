@@ -349,3 +349,91 @@ for (const progress of [false, true]) {
     expect((await pending).completion).toBe("failed");
   });
 }
+
+// Commit 2: a tool status transition (novel pending/running/completed/error,
+// mapped by the client to a bare `{ kind: "activity" }`) is real provider
+// work, exactly like a novel-id reasoning delta or an advancing snapshot —
+// tool execution time must not count as silence. A bare `{ kind: "reasoning"
+// }` with no `progress` key (what the client emits for a replayed or
+// id-less delta) must behave exactly like `progress: false`: `undefined !==
+// true`, so it must NOT extend the deadline either.
+test("an activity event (novel tool status transition) extends the useful-progress deadline like a novel reasoning delta", async () => {
+  const clock = new AdvancingClock();
+  let wake: (() => void) | undefined;
+  let queued: OpenCodeClientEvent | undefined;
+  let finished = false;
+  const transport = new OpenCodeSdkTransport({
+    clock,
+    cleanupMs: 1,
+    client: {
+      createSession: async () => ({ id: "s" }),
+      async *streamEvents() {
+        for (;;) {
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+          if (queued) yield queued;
+        }
+      },
+      pollStatus: async () => ({ kind: "pending" }),
+      abort: async () => {},
+    },
+  });
+  const pending = transport.execute(request, {
+    signal: new AbortController().signal,
+    events: sink,
+  });
+  void pending.then(() => {
+    finished = true;
+  });
+  await flush();
+  await clock.advance(149_000);
+  queued = { kind: "activity" };
+  wake?.();
+  await flush();
+  await clock.advance(1_001);
+  await Bun.sleep(5); // The bounded iterator cleanup uses real I/O time.
+  expect(finished).toBe(false); // extended: not settled at the old deadline
+  await clock.advance(149_000);
+  expect((await pending).completion).toBe("failed"); // no further progress ever arrives
+});
+
+test("a bare reasoning marker with no progress key (a replayed or id-less delta) does not extend the deadline", async () => {
+  const clock = new AdvancingClock();
+  let wake: (() => void) | undefined;
+  let queued: OpenCodeClientEvent | undefined;
+  let finished = false;
+  const transport = new OpenCodeSdkTransport({
+    clock,
+    cleanupMs: 1,
+    client: {
+      createSession: async () => ({ id: "s" }),
+      async *streamEvents() {
+        for (;;) {
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+          if (queued) yield queued;
+        }
+      },
+      pollStatus: async () => ({ kind: "pending" }),
+      abort: async () => {},
+    },
+  });
+  const pending = transport.execute(request, {
+    signal: new AbortController().signal,
+    events: sink,
+  });
+  void pending.then(() => {
+    finished = true;
+  });
+  await flush();
+  await clock.advance(149_000);
+  queued = { kind: "reasoning" }; // no `progress` key at all, not `progress: false`
+  wake?.();
+  await flush();
+  await clock.advance(1_001);
+  await Bun.sleep(5);
+  expect(finished).toBe(true); // NOT extended: silence still trips
+  expect((await pending).completion).toBe("failed");
+});

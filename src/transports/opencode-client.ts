@@ -240,6 +240,15 @@ export interface OpenCodeTurnState {
   // Provider event ids for text deltas actually applied to `emittedText`
   // (never ids merely seen while buffered — see `handlePartDelta`).
   readonly deltaEventIds: Set<string>;
+  // Sibling to `deltaEventIds` above, kept separate rather than shared: that
+  // set's own comment fixes its meaning as "applied to emittedText", which a
+  // reasoning delta never is (see `handlePartDelta`'s reasoning branch). A
+  // provider event id is unique across the whole stream regardless of part
+  // kind, so there is no collision risk in sharing it — this is a semantics
+  // choice, not a safety one. Records every NOVEL reasoning-delta id seen,
+  // so a replayed id (an SSE Last-Event-ID reconnect) is recognized and does
+  // not earn useful-progress credit twice.
+  readonly reasoningDeltaEventIds: Set<string>;
   readonly usage: Map<string, StepUsage>;
   readonly completedUsage: Set<string>;
   readonly payloadBytes: Map<string, number>;
@@ -268,6 +277,8 @@ const MAX_READBACK_BYTES = 4 * 1024 * 1024;
 // Same order of magnitude as MAX_TRACKED_PARTS: sized to cover an SSE
 // reconnect's Last-Event-ID replay window for one turn's answer deltas.
 const MAX_TRACKED_DELTA_EVENTS = 4096;
+// Own cap, same rationale as MAX_TRACKED_DELTA_EVENTS, for reasoningDeltaEventIds.
+const MAX_TRACKED_REASONING_DELTA_EVENTS = 4096;
 
 export function createTurnState(
   sessionId?: string,
@@ -287,6 +298,7 @@ export function createTurnState(
     tombstones: new Set(),
     unknownOwnerBuffer: [],
     deltaEventIds: new Set(),
+    reasoningDeltaEventIds: new Set(),
     usage: new Map(),
     completedUsage: new Set(),
     payloadBytes: new Map(),
@@ -631,16 +643,26 @@ function handlePartUpdated(
       | "error"
       | undefined;
     const callId = typeof part.callID === "string" ? part.callID : partId;
+    let transitioned = false;
     if (status) {
       if (
         !state.toolStates.has(callId) &&
         state.toolStates.size >= MAX_TRACKED_PARTS
       )
         failIntegrity(state, "tool identity cap exceeded");
+      const previousStatus = state.toolStates.get(callId);
       state.toolStates.set(callId, status);
+      transitioned = previousStatus !== status;
     }
     if (msgDetail) msgDetail.hasToolCalls = true;
-    return [];
+    // Ownership was already established above (the `isMessageOwned` check
+    // before this switch), so a NOVEL status transition here is real
+    // provider work — the tool actually moved pending -> running ->
+    // completed/error. Re-observing the SAME status (a re-delivered or
+    // redundant update) is not new work and earns nothing. Before this, tool
+    // execution time counted as silence: this branch emitted no client
+    // event at all, transition or not.
+    return transitioned ? [{ kind: "activity" }] : [];
   }
 
   if (partType === "reasoning") {
@@ -655,8 +677,12 @@ function handlePartUpdated(
       text: text.startsWith(previous) ? text : previous,
       emittedText: "",
     });
-    // Only an owned cumulative snapshot proving advancement is useful.
-    // Bare delta markers have no replay identity and cannot extend the deadline.
+    // An owned cumulative snapshot proving advancement is useful, and so —
+    // see `handlePartDelta`'s reasoning branch below — is a DELTA carrying a
+    // provider event id not seen before: PR #227 threaded that id through,
+    // which is exactly the replay identity this comment used to say a bare
+    // delta marker lacked. An id-less delta still has none and stays a bare
+    // marker there.
     return [
       {
         kind: "reasoning",
@@ -741,12 +767,25 @@ function handlePartDelta(
 
   const kind = state.parts.get(partId);
   if (kind === "reasoning") {
-    // No id dedup needed here: unlike the answer branch below, this emits a
-    // bare progress marker and never accumulates `delta` into any tracked
-    // text. A redelivered reasoning delta produces one extra marker, not a
-    // corrupted `emittedText` or a "conflicting snapshot" throw, so there is
-    // nothing for an id check to protect.
     if (!messageId || !isMessageOwned(messageId, state)) return [];
+    // #227 threaded the provider event id through this handler (the
+    // `eventId` parameter), which is exactly the replay identity f842a8b
+    // said a bare reasoning delta marker lacked ("bare delta markers have no
+    // replay identity and cannot extend the deadline" — the old comment
+    // here, and still true for an id-less delta). A delta whose id has not
+    // been seen before is real, novel work the model did; the SAME id
+    // redelivered (an SSE Last-Event-ID reconnect) is not. Unlike the answer
+    // branch below, nothing is accumulated into any tracked text either way
+    // — a redelivered id just falls back to the bare marker, never a
+    // corrupted `emittedText` or a "conflicting snapshot" throw.
+    if (eventId !== undefined && !state.reasoningDeltaEventIds.has(eventId)) {
+      rememberId(
+        state.reasoningDeltaEventIds,
+        eventId,
+        MAX_TRACKED_REASONING_DELTA_EVENTS,
+      );
+      return [{ kind: "reasoning", progress: true }];
+    }
     return [{ kind: "reasoning" }];
   }
   if (kind === "answer") {
