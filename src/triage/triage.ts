@@ -3,14 +3,14 @@
 // human, or 6c's ledger write-back) can tell "this finding was triaged" from
 // "nobody has looked yet" without parsing prose.
 //
-// NO I/O. Same contract as pr-preflight.ts/inline.ts: no gh, no git, no
+// NO I/O. Same contract as pr/preflight.ts/pr/inline.ts: no gh, no git, no
 // network, no filesystem, no clock. The consuming skill (this repo's
 // `skills/pr-hero-triage/`) runs in the CONSUMER's coding agent, outside
 // this process entirely — this module only defines the wire format both
 // sides agree on.
 //
 // Disjoint from PR_COMMENT_MARKER_PREFIX and PR_FINDING_MARKER_PREFIX on
-// purpose, same reasoning as their own disjointness (pr-preflight.ts): a
+// purpose, same reasoning as their own disjointness (pr/preflight.ts): a
 // triage reply lands in the SAME comment stream as the summary and the
 // per-finding markers (review comment threads and issue comments alike), so
 // a matcher that could confuse any of the three families would misfile a

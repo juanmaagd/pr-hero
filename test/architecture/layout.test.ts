@@ -124,6 +124,10 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "step-runner",
     ],
   },
+  {
+    domain: "pr",
+    files: ["inline", "pr", "preflight", "reverts", "reverts-preflight"],
+  },
 ];
 
 function srcRootFiles(): string[] {

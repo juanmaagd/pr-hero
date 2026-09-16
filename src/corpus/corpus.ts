@@ -12,14 +12,6 @@
 
 import path from "node:path";
 import {
-  CliError,
-  type CliOptions,
-  CliUsageError,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
-} from "#review/preflight";
-import { log } from "#ui/primitives";
-import {
   type CommitPullRef,
   DEFAULT_REVERTS_SINCE,
   GIT_LOG_FIELD_SEP,
@@ -28,7 +20,15 @@ import {
   parsePullDetails,
   pickCommitPull,
   repoSlugFromWebUrl,
-} from "../reverts-preflight";
+} from "#pr/reverts-preflight";
+import {
+  CliError,
+  type CliOptions,
+  CliUsageError,
+  parseRemoteHead,
+  repoWebUrlFromRemote,
+} from "#review/preflight";
+import { log } from "#ui/primitives";
 import {
   blameArgv,
   buildThreadBatchQuery,
@@ -77,7 +77,7 @@ import {
   walkPageKept,
 } from "./preflight";
 
-// Same helper as cli.ts's, pr.ts's and reverts.ts's, duplicated rather than
+// Same helper as cli.ts's, pr/pr.ts's and pr/reverts.ts's, duplicated rather than
 // shared so no shell imports another shell. The WHY carries over verbatim:
 // args as an ARRAY, never an interpolated shell string — refs and dates are
 // user input that reaches git verbatim, and a shell in the middle would turn
@@ -98,7 +98,7 @@ async function git(
   return { ok: exitCode === 0, stdout, stderr };
 }
 
-// Same shape as reverts.ts's gh. gh stays behind the same single seam
+// Same shape as pr/reverts.ts's gh. gh stays behind the same single seam
 // (`spawnFn`) so an offline fake spawn never depends on the GitHub CLI being
 // installed on the machine running the test.
 async function gh(
@@ -156,7 +156,7 @@ async function gh(
 }
 
 // Same resolution shape review uses, carried as this shell's own copy — the
-// same duplication reverts.ts and watch/watch.ts already make.
+// same duplication pr/reverts.ts and watch/watch.ts already make.
 async function resolveRepoRoot(repoOption: string): Promise<string> {
   const repoArg = path.resolve(repoOption);
   const toplevel = await git(repoArg, ["rev-parse", "--show-toplevel"]);
@@ -172,7 +172,7 @@ const FALLBACK_DEFAULT_BRANCHES = ["origin/main", "origin/master"];
 
 // WHY this is not cosmetic: musive's default branch is `dev`, so a hardcoded
 // `main` walks PRs that never shipped and misses the ones that did — a wrong
-// answer with a completely plausible face. Ported from reverts.ts for the
+// answer with a completely plausible face. Ported from pr/reverts.ts for the
 // same reason: only the default branch's merged PRs reached users.
 async function resolveDefaultBranchRef(repoRoot: string): Promise<string> {
   const symbolic = await git(repoRoot, [
@@ -230,7 +230,7 @@ function isNotFound(stderr: string): boolean {
 }
 
 // Fake-gh tests never send the document to GitHub, so they cannot catch a
-// truncated query. Ported from pr.ts (its W1 failure on #34): count the
+// truncated query. Ported from pr/pr.ts (its W1 failure on #34): count the
 // braces before spawn.
 function assertBalancedGraphql(document: string, what: string): void {
   const opens = (document.match(/{/g) ?? []).length;
@@ -254,7 +254,7 @@ type CommitPullsLookup =
   | { found: false };
 
 // Exported for test/corpus/corpus.test.ts, which pins the two outcomes apart; the
-// `spawnFn` seam is reverts.ts's and pr.ts's, invisible to production callers.
+// `spawnFn` seam is pr/reverts.ts's and pr/pr.ts's, invisible to production callers.
 export async function ghCommitPulls(
   operatorRoot: string,
   slug: string,

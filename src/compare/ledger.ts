@@ -1,15 +1,15 @@
 // The head-to-head ledger (ROADMAP B4), pure half: parse each run's
 // comparison.json back in, keep ONE vote per PR, and render the accumulated
-// buckets as a rate. Same purity contract as pr-preflight.ts — no fs, no
+// buckets as a rate. Same purity contract as pr/preflight.ts — no fs, no
 // git, no network, no clock. The I/O shell in cli.ts finds the files, reads
 // the bytes, supplies each file's mtime, and owns stdout.
 
-import type { RunStatus } from "#review/findings";
-import { CliUsageError, isFullCommitId } from "#review/preflight";
 import type {
   ComparisonGreptileClaim,
   ComparisonPrHeroClaim,
-} from "../pr-preflight";
+} from "#pr/preflight";
+import type { RunStatus } from "#review/findings";
+import { CliUsageError, isFullCommitId } from "#review/preflight";
 import type { Bucket } from "./compare";
 
 // Unlike ComparisonRow (written always-null), a stored row may have been

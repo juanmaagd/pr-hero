@@ -2,18 +2,19 @@
 //
 //   1. classifyAnchorability — will GitHub accept an inline review comment at
 //      this finding's path:line? (a PREDICTION — GitHub's 422 is the
-//      authority, not this function; see pr.ts's recovery path)
+//      authority, not this function; see pr/pr.ts's recovery path)
 //   2. matchPostedFindings — does this finding already have a comment from a
 //      prior run, so posting it again would duplicate?
 //   3. buildPostPlan — combine both into what to actually post this run.
 //
-// NO I/O. Same contract as preflight.ts/pr-preflight.ts: no gh, no git, no
-// network, no filesystem. cli.ts and pr.ts execute what this module plans.
+// NO I/O. Same contract as review/preflight.ts and pr/preflight.ts: no gh, no
+// git, no network, no filesystem. cli.ts and pr/pr.ts execute what this module
+// plans.
 
 import type { PrHeroFindingRef } from "#compare/compare";
 import { extractAnchor } from "#review/root-cause";
 import { diffRecordPath, splitDiffRecords } from "#review/size-gate";
-import { claimFingerprint, type ParsedFindingMarker } from "./pr-preflight";
+import { claimFingerprint, type ParsedFindingMarker } from "./preflight";
 
 // The comparison ref plus the proof_refs posting needs to re-anchor an
 // off-hunk finding onto a hunter-cited in-diff line (Musive #1727). Optional
@@ -245,7 +246,7 @@ function candidatesFor(
     // direction: a visible duplicate is self-correcting, an invisible miss
     // is not. The honest cost: claimFingerprint is sha256 over the full
     // trimmed claim text, "nowhere near enough (nor intended) to be a
-    // content-addressed identity on its own" (pr-preflight.ts), and LLM
+    // content-addressed identity on its own" (pr/preflight.ts), and LLM
     // claim wording drifts run to run for the SAME defect — so re-reviewing
     // an UNCHANGED head can now post a visible duplicate where it used to
     // silently persist. That trade is deliberate. It is also bounded: this

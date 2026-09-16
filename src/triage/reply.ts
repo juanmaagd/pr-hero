@@ -1,9 +1,9 @@
 // Pure decisions for `pr-hero triage reply` (W1 / issues #21 #20 #22).
 // The coding agent chooses the tag and writes reasoning; this module
 // chooses WHICH posted comment is the parent and whether the driver should
-// resolve the GitHub review thread. NO I/O — cli.ts/pr.ts execute the plan.
+// resolve the GitHub review thread. NO I/O — cli.ts/pr/pr.ts execute the plan.
 //
-// WHY a dedicated matcher, not matchPostedFindings (inline.ts): that matcher
+// WHY a dedicated matcher, not matchPostedFindings (pr/inline.ts): that matcher
 // uses FINDING_LINE_WINDOW and livePath/liveLine so a re-review can find a
 // prior comment after a small drift. Using it here would pick a parent by
 // "nearest line on the live diff" — the exact 1724 failure (Greptile sat
@@ -15,8 +15,8 @@ import {
   type PostedFindingComment,
   parseHunkAnchors,
   resolvePostLine,
-} from "../inline";
-import { claimFingerprint } from "../pr-preflight";
+} from "#pr/inline";
+import { claimFingerprint } from "#pr/preflight";
 import { parseTriageMarker, type TriageVerdict } from "./triage";
 
 export interface FindingIdentity {

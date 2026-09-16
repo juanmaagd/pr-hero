@@ -1,4 +1,4 @@
-// Offline tests for pr.ts's WU4/WU5 additions (ROADMAP B6): the review-level
+// Offline tests for pr/pr.ts's WU4/WU5 additions (ROADMAP B6): the review-level
 // fetcher, the atomic review submission with its 422 recovery, and the
 // per-finding issue comment. Same fake-spawn pattern as
 // test/step-runner.test.ts's makeFakeSpawn: no real gh/PR anywhere here.
@@ -27,9 +27,6 @@ import {
 } from "#ci/admission-ledger";
 import { SKIP_SIZE_COMMENT_MARKER } from "#ci/gates";
 import type { PrHeroFindingRef } from "#compare/compare";
-import type { Finding } from "#review/findings";
-import { renderIssueFindingComment } from "#review/report";
-import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import {
   CommentsTruncatedError,
   fetchCommitStatuses,
@@ -50,7 +47,7 @@ import {
   postReviewCommentReply,
   resolveReviewThreadForComment,
   upsertAdmissionCheckRun,
-} from "../src/pr";
+} from "#pr/pr";
 import {
   CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
   COMMIT_STATUS_CONTEXT,
@@ -59,12 +56,15 @@ import {
   findingMarker,
   PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
-} from "../src/pr-preflight";
+} from "#pr/preflight";
+import type { Finding } from "#review/findings";
+import { renderIssueFindingComment } from "#review/report";
+import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 
 // ---------------------------------------------------------------------------
 // FakeSpawn: scripted {stdout, stderr, exitCode} per call, in call order.
 // Mirrors makeFakeSpawn (test/step-runner.test.ts) but keyed off an argv
-// PREDICATE list instead of a flat sequence — pr.ts issues concurrent gh
+// PREDICATE list instead of a flat sequence — pr/pr.ts issues concurrent gh
 // calls (fetchPostedFindingComments's Promise.all), so "the Nth call" is not
 // a stable enough key.
 // ---------------------------------------------------------------------------

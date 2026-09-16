@@ -4,9 +4,9 @@
 // The case machine itself stays in rereview/plan.ts.
 
 import { normalizePath } from "#compare/compare";
+import { claimFingerprint } from "#pr/preflight";
 import type { Severity } from "#review/findings";
 import { parseTriageMarker } from "#triage/triage";
-import { claimFingerprint } from "../pr-preflight";
 import {
   classifyPrior,
   type PhaseBResult,
@@ -613,7 +613,7 @@ export interface PostedForPrior {
 // WHY the anchor is tested against BOTH the marker's stored path/line and the
 // live projection, taking whichever is nearer: GitHub re-anchors a review
 // comment's live `line` whenever the PR's diff changes, including when the
-// BASE advances with no new push (`src/inline.ts:213-219`). A state-block
+// BASE advances with no new push (`src/pr/inline.ts:213-219`). A state-block
 // prior still at `a.ts:100` and its own comment now projected to `a.ts:112`
 // is zero-drift; live-only matching would miss it and silently drop the
 // author's triage — the same class of invisible failure being fixed.

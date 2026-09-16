@@ -13,8 +13,8 @@ import {
   type PostedFindingComment,
   parseHunkAnchors,
   resolvePostLine,
-} from "../src/inline";
-import { claimFingerprint } from "../src/pr-preflight";
+} from "#pr/inline";
+import { claimFingerprint } from "#pr/preflight";
 
 function finding(
   path: string,

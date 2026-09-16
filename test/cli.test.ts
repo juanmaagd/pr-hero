@@ -3,11 +3,11 @@
 // pure decisions around it (postingExitCode, assertRunMatchesPr).
 //
 // PR2 verification (#3296) flagged this exact layer as load-bearing and
-// missing: pr.ts's primitives (postPrReview, postIssueComment, postPrComment)
+// missing: pr/pr.ts's primitives (postPrReview, postIssueComment, postPrComment)
 // are individually correct and individually tested, but nothing proved the
 // CALLER wires them the way design D6 requires — ordering, the
 // `sessionFailed` guard, and the exit-1 rule are all decisions this file
-// makes, not pr.ts. Same fake-gh pattern as test/pr.test.ts, extended to
+// makes, not pr/pr.ts. Same fake-gh pattern as test/pr/pr.test.ts, extended to
 // capture stdin (needed to tell a leftover W1 finding issue comment from
 // the summary comment — both hit the same `issues/<pr>/comments` endpoint).
 
@@ -25,6 +25,18 @@ import {
 } from "#ci/review-admission";
 import type { PrHeroFindingRef } from "#compare/compare";
 import type { StoredComparison } from "#compare/ledger";
+import {
+  ADMISSION_CHECK_RUN_NAME,
+  listAdmissionCheckRuns,
+  type postCommitStatus,
+} from "#pr/pr";
+import {
+  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+  type CommitStatusRequest,
+  claimFingerprint,
+  findingMarker,
+  PR_FINDING_MARKER_PREFIX,
+} from "#pr/preflight";
 import type { RereviewProvenance } from "#rereview/prepare";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
 import {
@@ -77,23 +89,11 @@ import {
 } from "../src/cli";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import { readLocalIgnoreRules } from "../src/ignore-read";
-import {
-  ADMISSION_CHECK_RUN_NAME,
-  listAdmissionCheckRuns,
-  type postCommitStatus,
-} from "../src/pr";
-import {
-  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
-  type CommitStatusRequest,
-  claimFingerprint,
-  findingMarker,
-  PR_FINDING_MARKER_PREFIX,
-} from "../src/pr-preflight";
 
 // ---------------------------------------------------------------------------
 // FakeGh: records every call's argv AND stdin (decoded), in order. Routes
-// responses by argv predicate, same shape as test/pr.test.ts's makeFakeGh —
-// duplicated rather than imported: pr.ts's test harness is a TEST file, and
+// responses by argv predicate, same shape as test/pr/pr.test.ts's makeFakeGh —
+// duplicated rather than imported: pr/pr.ts's test harness is a TEST file, and
 // importing test fixtures across test files is the kind of coupling that
 // breaks one suite when the other's fixture shape changes for unrelated
 // reasons.
@@ -676,7 +676,7 @@ describe("both review shells thread .prheroignore rules into their gate config",
     ).text();
     // The read must run against the sha `resolveCommit` already canonicalized
     // (a merged PR's baseRef is a `<sha>^1` EXPRESSION, not a sha — see
-    // pr-preflight.ts's PrTarget.baseRef comment), never the raw PrTarget
+    // pr/preflight.ts's PrTarget.baseRef comment), never the raw PrTarget
     // field, and never gitDirOwner's cwd-relative form.
     expect(source).toContain(
       "readBaseRefIgnoreRules(git, gitDirOwner, baseSha)",
@@ -766,7 +766,7 @@ describe("postInlineFindings — step-14 ordering", () => {
     expect(patchBody).toContain("src/b.ts");
   });
 
-  // GitHub #39, the sequence half. The pin (pr.ts) makes the comments
+  // GitHub #39, the sequence half. The pin (pr/pr.ts) makes the comments
   // correct; these pin the DISCLOSURE — that a head which moved under the
   // run is said out loud on the PR and handed back to the caller, instead of
   // the run publishing as though nothing happened.
@@ -1150,7 +1150,7 @@ describe("postInlineFindings — the 422 recovery never drops a finding", () => 
 
   // CRIT-A (verify-report-pr3, #3305) — the verifier's exact tie-dissolution
   // repro, driven through the FULL composition (resolveInlinePostPlan →
-  // postPrReview's 422 recovery), not just the pr.ts unit. Prior comments R1
+  // postPrReview's 422 recovery), not just the pr/pr.ts unit. Prior comments R1
   // @ line 100 and R2 @ line 104 sit equidistant (2, 2) from F001 @ line
   // 102 — a genuine ambiguous tie the ORIGINAL plan resolves by posting F001
   // fresh, per spec "Ambiguous matches post as new, never a forced match".
@@ -1630,7 +1630,7 @@ describe("postInlineFindings — comment url map reaches the summary's index", (
 
 // WARN-5 (verify-report-pr3, #3305): `previousHeadSha` and the finding
 // `claim` feed are dead at the composition layer — pinned one layer down
-// (report.ts/inline.ts) but not proven to actually REACH those functions
+// (review/report.ts/pr/inline.ts) but not proven to actually REACH those functions
 // from here. Both closed below.
 describe("postInlineFindings — previousHeadSha reaches the rendered summary", () => {
   test("a prior summary comment's head= is threaded through to the delta's 'since' clause", async () => {
@@ -4800,7 +4800,7 @@ describe("reportFatalCiError — spec 1.1's fatal `error` status, finally wired"
 // main() catches and RETURNS for the two failures docs/github-actions.md
 // names as the reasons this job can go red — a malformed argument (parseArgs
 // throws, exit 2) and a CliError/CliUsageError from a command body (exit 1,
-// which is exactly what a bad or expired GITHUB_TOKEN produces, since pr.ts
+// which is exactly what a bad or expired GITHUB_TOKEN produces, since pr/pr.ts
 // raises CliError for `gh not found` and for a failed `gh pr view`). Neither
 // ever reached runCli's catch, so a consumer workflow branching on
 // `outputs.status == 'error'` saw `status` completely unset — indistinguishable

@@ -1,5 +1,5 @@
 // Revert/hotfix mining decisions (GitHub #41), pure so every classification
-// rule is pinned offline. reverts.ts is the I/O shell: it runs `git log` over
+// rule is pinned offline. pr/reverts.ts is the I/O shell: it runs `git log` over
 // the default branch and asks `gh api` for the PR numbers and diff sizes.
 //
 // PURITY CONTRACT, and it is load-bearing rather than stylistic: nothing here
@@ -409,7 +409,7 @@ export function parsePullDetails(raw: string): PullDetails {
 }
 
 // `https://github.com/owner/repo` → `owner/repo`, the path segment `gh api
-// repos/<slug>/…` wants. Deliberately built on top of preflight.ts's
+// repos/<slug>/…` wants. Deliberately built on top of review/preflight.ts's
 // repoWebUrlFromRemote (which already normalises the three remote shapes)
 // rather than parsing a remote again: a second URL parser is a second place
 // for the owner to be wrong.

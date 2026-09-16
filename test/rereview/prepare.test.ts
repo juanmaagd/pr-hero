@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { claimFingerprint } from "#pr/preflight";
 import type { PriorRecord } from "#rereview/classify";
 import { planDiscovery } from "#rereview/plan";
 import {
@@ -18,7 +19,6 @@ import {
 } from "#rereview/prepare";
 import type { LiveFinding } from "#rereview/state";
 import { triageMarker } from "#triage/triage";
-import { claimFingerprint } from "../../src/pr-preflight";
 
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const L = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -544,7 +544,7 @@ describe("O-1c — collapseTargets ignore matcher leftovers", () => {
 
 // ---------------------------------------------------------------------------
 // F001/F002/F003 — the prior->comment binding is path:line, `c` is the
-// tie-breaker it was always documented to be (`src/pr-preflight.ts:374-379`).
+// tie-breaker it was always documented to be (`src/pr/preflight.ts:374-379`).
 //
 // Before this, both consumers keyed on `claimFingerprint(prior.claim)` ALONE
 // and their `posted` parameter type was narrowed to `{ id, marker: { c } }`,
@@ -670,7 +670,7 @@ describe("F001/F003 — prior->comment binding by path:line", () => {
 
   test("a base-driven live-line re-anchor still binds on the stored line", () => {
     // GitHub re-anchors a review comment's live `line` when the BASE advances
-    // with no new push (`src/inline.ts:213-219`). Marker stored at 100, live
+    // with no new push (`src/pr/inline.ts:213-219`). Marker stored at 100, live
     // projection 112, prior still at 100: zero drift, and live-only matching
     // would silently drop this author's triage.
     const enriched = enrichPriorsFromThreads({
@@ -723,7 +723,7 @@ describe("F001/F003 — prior->comment binding by path:line", () => {
   test("an unbreakable tie binds nothing — under-match, never over-match", () => {
     // Same path:line, same claim text, no claim on the prior to break it
     // with. Binding either one would be a guess, and the guess a ✅ on a live
-    // finding. `src/inline.ts`'s ambiguity rule, applied here.
+    // finding. `pr/inline.ts`'s ambiguity rule, applied here.
     const enriched = enrichPriorsFromThreads({
       priors: [prior({ id: "R001", locs: ["src/a.ts:10"], claim: "" })],
       posted: [
