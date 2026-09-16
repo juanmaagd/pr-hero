@@ -5,15 +5,23 @@
 // pure extraction, not a redesign — so each test asserts the concrete values
 // the two functions produce today, not a restatement of the implementation.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { CliError } from "#review/preflight";
+import { CliError, GOTCHAS_PLACEHOLDER_MARKER } from "#review/preflight";
 import {
   assertDistinctRange,
   buildTelemetry,
+  CODEGRAPH_ONLY_MCP_CONFIG,
+  EMPTY_MCP_CONFIG,
+  prepareRunnerForRoute,
   resolveGotchasPath,
   selectActiveHunters,
+  validateGotchas,
+  writeMcpConfig,
 } from "#review/run";
+import { ClaudeCodeRunner } from "#review/step-runner";
 
 describe("assertDistinctRange", () => {
   test("distinct base and head shas: no throw", () => {
@@ -127,5 +135,81 @@ describe("buildTelemetry", () => {
     } as unknown as Parameters<typeof buildTelemetry>[0];
     const telemetry = buildTelemetry(resultWithUnresolved, 1, 0);
     expect(telemetry.cost_usd_est_is_floor).toBe(true);
+  });
+});
+
+describe("writeMcpConfig / validateGotchas (P2.2)", () => {
+  let dir: string;
+
+  afterEach(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true });
+  });
+
+  test("writeMcpConfig writes the codegraph server config when available", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-run-mcp-"));
+    const mcpConfigPath = path.join(dir, "mcp.json");
+    await writeMcpConfig(mcpConfigPath, true);
+    expect(JSON.parse(await Bun.file(mcpConfigPath).text())).toEqual(
+      CODEGRAPH_ONLY_MCP_CONFIG,
+    );
+  });
+
+  test("writeMcpConfig writes the empty config when codegraph is unavailable", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-run-mcp-"));
+    const mcpConfigPath = path.join(dir, "mcp.json");
+    await writeMcpConfig(mcpConfigPath, false);
+    expect(JSON.parse(await Bun.file(mcpConfigPath).text())).toEqual(
+      EMPTY_MCP_CONFIG,
+    );
+  });
+
+  test("validateGotchas resolves for real, filled-in content", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-run-gotchas-"));
+    const gotchasPath = path.join(dir, "gotchas.md");
+    await Bun.write(gotchasPath, "This repo always squashes on merge.");
+    await expect(validateGotchas(gotchasPath)).resolves.toBeUndefined();
+  });
+
+  test("validateGotchas throws CliError for a missing file (empty)", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-run-gotchas-"));
+    const gotchasPath = path.join(dir, "does-not-exist.md");
+    await expect(validateGotchas(gotchasPath)).rejects.toThrow(CliError);
+  });
+
+  test("validateGotchas throws CliError for the unedited scaffold marker", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-run-gotchas-"));
+    const gotchasPath = path.join(dir, "gotchas.md");
+    await Bun.write(
+      gotchasPath,
+      `<!-- ${GOTCHAS_PLACEHOLDER_MARKER} -->\nfill me in`,
+    );
+    await expect(validateGotchas(gotchasPath)).rejects.toThrow(CliError);
+  });
+});
+
+describe("prepareRunnerForRoute (P2.2)", () => {
+  test("legacy path (no route plan): falls back to ClaudeCodeRunner, no transport fields", async () => {
+    const ceilingController = new AbortController();
+    const onProgress = () => {};
+    const prepared = await prepareRunnerForRoute({
+      routePlan: undefined,
+      productionAdmission: undefined,
+      workspaceRoot: "/repo",
+      runnerAuthority: {
+        runnerOptions: {
+          binaryPath: "/usr/local/bin/claude",
+          workspaceRoot: "/repo",
+          executableAllowlist: [],
+        },
+      },
+      ceilingController,
+      onProgress,
+    });
+    expect(prepared.productionRuntime).toBeUndefined();
+    expect(prepared.deps.runner).toBeInstanceOf(ClaudeCodeRunner);
+    expect(prepared.deps.ceilingController).toBe(ceilingController);
+    expect(prepared.deps.onProgress).toBe(onProgress);
+    expect(prepared.deps.transportRegistry).toBeUndefined();
+    expect(prepared.deps.admissionEvidence).toBeUndefined();
   });
 });
