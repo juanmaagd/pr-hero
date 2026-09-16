@@ -39,6 +39,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "menu",
       "plan",
       "primitives",
+      "progress",
       "result",
       "review-menu",
       "select",
