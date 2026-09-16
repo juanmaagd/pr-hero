@@ -32,7 +32,7 @@ import { type EngineAssets, resolveEngineAssets } from "../assets";
 // review-domain module. They live in ../errors and ../git/refs; this file
 // imports only the ones it uses itself.
 import { CliError, CliUsageError } from "../errors";
-import { DEFAULT_BASE_REF } from "../git/refs";
+import { DEFAULT_BASE_REF, listPaths } from "../git/refs";
 import { redactDiagnostic } from "../security/redact";
 // review/size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
