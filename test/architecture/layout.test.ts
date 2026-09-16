@@ -121,6 +121,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "report",
       "root-cause",
       "route-preflight",
+      "run",
       "scout",
       "size-gate",
       "spec",

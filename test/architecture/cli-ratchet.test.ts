@@ -23,9 +23,12 @@ const CANONICAL_CLI_FUNCTIONS = [
   "runCli",
 ].sort();
 
-// Line count ceiling as of Phase 1 completion (S5 merged).
-// Phase 2 will hollow out review() and reviewPr(), ratcheting this number downward.
-const CLI_LINE_CEILING = 2853;
+// Line count ceiling as of Phase 1 completion (S5 merged): 2853.
+// Phase 2 P2.1 (odd/tasks/cli-decomposition.md) extracted the shared pure
+// stages (assertDistinctRange, resolveGotchasPath, selectActiveHunters,
+// reviewingLine, buildTelemetry) into src/review/run.ts, ratcheting this
+// down to 2799. Later Phase 2 slices ratchet it further.
+const CLI_LINE_CEILING = 2799;
 
 const MAX_FUNCTION_LINES = 300;
 

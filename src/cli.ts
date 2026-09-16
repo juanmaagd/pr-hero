@@ -234,6 +234,12 @@ import {
   resolveRoutePlanAtConfirm,
 } from "#review/route-preflight";
 import {
+  assertDistinctRange,
+  buildTelemetry,
+  resolveGotchasPath,
+  selectActiveHunters,
+} from "#review/run";
+import {
   type ExcludedPath,
   effectiveDiffStat,
   evaluateSizeGate,
@@ -271,8 +277,7 @@ import {
   prPlanDetails,
   renderPlan,
   renderPrPlan,
-  scoutLabel,
-  summarizerLabel,
+  reviewingLine,
 } from "#ui/plan";
 
 export {
@@ -511,12 +516,7 @@ async function review(options: CliOptions): Promise<number> {
   const baseRef = await resolveBase(repoRoot, options, config);
   const baseSha = await resolveCommit(repoRoot, baseRef.ref);
   const headSha = await resolveCommit(repoRoot, options.head);
-  if (baseSha === headSha) {
-    throw new CliError(
-      `base and head resolve to the same commit (${headSha}); there is ` +
-        "nothing to review",
-    );
-  }
+  assertDistinctRange(baseSha, headSha);
   const diffFromSha = await resolveDiffFrom(
     repoRoot,
     options.twoDot,
@@ -602,9 +602,7 @@ async function review(options: CliOptions): Promise<number> {
   // file would be an untracked addition, and the clean-tree gate rightly
   // refuses), and reviewing a repo you do not control. The gotchas describe
   // the repo, not the commit, so they do not belong to the checkout.
-  const gotchasPath = options.gotchas
-    ? path.resolve(options.gotchas)
-    : path.join(repoRoot, ".prhero", "gotchas.md");
+  const gotchasPath = resolveGotchasPath(options.gotchas, repoRoot);
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
   const gotchasUnusable = gotchasUnusableReason(gotchas);
@@ -711,9 +709,7 @@ async function review(options: CliOptions): Promise<number> {
     changedPaths,
     config.parity_trigger_paths,
   );
-  const activeHunters = spec.agents.filter(
-    (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-  );
+  const activeHunters = selectActiveHunters(spec.agents, parityFires);
   const hunterCount = activeHunters.length;
   const estimate = estimateCost(
     diffStat,
@@ -816,12 +812,7 @@ async function review(options: CliOptions): Promise<number> {
 
   // 15 — run, with live progress: the expectation line up front, then one
   // stderr line per pipeline event (plus a TTY heartbeat between them).
-  log(
-    `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-      `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
-      "comparable trees have taken " +
-      "8–25 minutes",
-  );
+  log(reviewingLine(hunterCount, summary, options));
   const started = performance.now();
   const progress = startProgressRenderer(
     started,
@@ -925,24 +916,9 @@ async function review(options: CliOptions): Promise<number> {
   }
   const wallMs = Math.round(performance.now() - started);
 
-  // 16 — the artifact.
-  const telemetry: Telemetry = {
-    // Local mode neither builds nor syncs a codegraph index: it consumes
-    // whatever the repo already has, so there is no index cost to report.
-    index_ms: 0,
-    index_mode: "sync",
-    index_disk_mb: 0,
-    // Driver-MEASURED elapsed time, never the sum of the steps: hunters run
-    // in parallel, so summing their wall clocks reports a number the run
-    // never took — and this engine exists to be compared on time and cost.
-    wall_ms: wallMs,
-    tokens_in: result.usage.tokens_in,
-    tokens_out: result.usage.tokens_out,
-    tokens_total: result.usage.tokens_total,
-    cost_usd_est: result.usage.cost_usd_est,
-    ...(result.unresolved.length > 0 ? { cost_usd_est_is_floor: true } : {}),
-    per_agent: result.perAgent,
-  };
+  // 16 — the artifact. Local mode neither builds nor syncs a codegraph
+  // index (it consumes whatever the repo already has), so indexMs is 0.
+  const telemetry: Telemetry = buildTelemetry(result, wallMs, 0);
   const doc = mergeRunEnvelope({
     skillOutput: result.skillOutput,
     pr: 0,
@@ -1169,9 +1145,7 @@ async function reviewPr(
     // names itself identically in all three runtimes.
     agents.kind === "bundled" ? "default" : undefined,
   );
-  const gotchasPath = options.gotchas
-    ? path.resolve(options.gotchas)
-    : path.join(operatorRoot, ".prhero", "gotchas.md");
+  const gotchasPath = resolveGotchasPath(options.gotchas, operatorRoot);
   const gotchasFile = Bun.file(gotchasPath);
   const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
   const gotchasUnusable = gotchasUnusableReason(gotchas);
@@ -1544,12 +1518,7 @@ async function reviewPr(
     const headSha = await resolveCommit(gitDirOwner, target.headSha);
     // baseRef may be a `<sha>^1` expression (merged PR); rev-parse settles it.
     const baseSha = await resolveCommit(gitDirOwner, target.baseRef);
-    if (baseSha === headSha) {
-      throw new CliError(
-        `base and head resolve to the same commit (${headSha}); there is ` +
-          "nothing to review",
-      );
-    }
+    assertDistinctRange(baseSha, headSha);
 
     // `.prheroignore` — CI reads the RESOLVED base sha (never `target.baseRef`
     // / `target.baseRefName` directly: a merged PR's baseRef is a `<sha>^1`
@@ -1911,10 +1880,7 @@ async function reviewPr(
     );
     const activeHunters = skipDiscovery
       ? []
-      : spec.agents.filter(
-          (a) =>
-            a.role === "hunter" && (a.trigger === undefined || parityFires),
-        );
+      : selectActiveHunters(spec.agents, parityFires);
     const hunterCount = activeHunters.length;
     const maxVerificationSteps = resolveMaxVerificationSteps(config);
     const queuedVerification = Math.min(
@@ -2153,12 +2119,7 @@ async function reviewPr(
       // into a group nothing ever closes.
       let started = 0;
       await withCiWorkflowGroup(isCi, "pr-hero review", log, async () => {
-        log(
-          `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-            `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
-            "comparable trees have taken " +
-            "8–25 minutes",
-        );
+        log(reviewingLine(hunterCount, summary, options));
         // runnerAuthority resolved before confirm with the exact-binding gate.
         if (runnerAuthority.error !== undefined) {
           throw new CliError(
@@ -2295,25 +2256,10 @@ async function reviewPr(
       const wallMs = Math.round(performance.now() - started);
 
       // 12 — the artifact and the report, exactly as local mode writes them.
-      const telemetry: Telemetry = {
-        // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
-        // when it is missing, so the init cost is real and measured. Disk stays
-        // unreported, and the mode is the same synchronous build.
-        index_ms: indexMs,
-        index_mode: "sync",
-        index_disk_mb: 0,
-        // Driver-MEASURED elapsed time, never the sum of the parallel steps —
-        // same rule as local mode.
-        wall_ms: wallMs,
-        tokens_in: result.usage.tokens_in,
-        tokens_out: result.usage.tokens_out,
-        tokens_total: result.usage.tokens_total,
-        cost_usd_est: result.usage.cost_usd_est,
-        ...(result.unresolved.length > 0
-          ? { cost_usd_est_is_floor: true }
-          : {}),
-        per_agent: result.perAgent,
-      };
+      // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
+      // when it is missing, so the init cost is real and measured. Disk stays
+      // unreported, and the mode is the same synchronous build.
+      const telemetry: Telemetry = buildTelemetry(result, wallMs, indexMs);
       const doc = mergeRunEnvelope({
         skillOutput: result.skillOutput,
         pr: prNumber,
