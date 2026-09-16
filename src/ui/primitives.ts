@@ -3,7 +3,7 @@
 // split as progress.ts — everything here is a total function of its inputs
 // (the style flag and the width arrive as PARAMETERS, never sniffed inside),
 // so the whole layout is testable offline without a TTY. The shells (cli.ts,
-// watch.ts) own the one impure decision, `styleEnabled()`, and hand the
+// watch/watch.ts) own the one impure decision, `styleEnabled()`, and hand the
 // answer down.
 //
 // Deliberately independent of progress.ts: the two render different things at
@@ -17,7 +17,7 @@ import type { Severity, Tier } from "../findings";
 // The one shared writer. stderr, ALWAYS: stdout is reserved for the `ledger`
 // command's markdown, so every human-readable line in this CLI — plans,
 // progress, errors — goes to the other stream or the reserve is worthless.
-// Lived in duplicate in cli.ts and watch.ts before this module existed.
+// Lived in duplicate in cli.ts and watch/watch.ts before this module existed.
 export function log(line = ""): void {
   process.stderr.write(`${line}\n`);
 }
@@ -36,7 +36,7 @@ export function styleEnabled(
 // Width from stdout first (that is the terminal the human sized), stderr as
 // the fallback for a piped-stdout run, 80 when neither knows.
 //
-// The ONE sniff, and it belongs to the SHELLS (cli.ts, watch.ts) and to a
+// The ONE sniff, and it belongs to the SHELLS (cli.ts, watch/watch.ts) and to a
 // renderer's own entry point (renderResult). Nothing inside row()/box() calls
 // it any more: an optional width with a sniffing fallback is exactly how
 // renderPlan/renderPrPlan violated this module's contract undetected for two

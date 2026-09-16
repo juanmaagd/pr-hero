@@ -23,7 +23,7 @@ export interface PrheroLayout {
   // configPath. The watcher's opt-in registry (watch.json) and the global
   // review config (config.json) are both `string`, so re-pointing a single
   // `configPath` identifier from one file to the other would have kept
-  // compiling at all 19 `paths.configPath` sites in watch.ts while silently
+  // compiling at all 19 `paths.configPath` sites in watch/watch.ts while silently
   // reading the wrong file. The name was RETIRED rather than reused: an
   // identifier that no longer exists is the one thing tsc can flag, and no
   // test can enumerate call sites the way the type checker does.

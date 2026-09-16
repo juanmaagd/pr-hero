@@ -11,6 +11,7 @@ import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { log } from "#ui/primitives";
+import { parsePlistInterval } from "#watch/preflight";
 import { selfInvocation } from "../assets";
 import {
   acquirePidLock,
@@ -30,7 +31,6 @@ import {
   type CliOptions,
   DEFAULT_GC_INTERVAL_MIN,
 } from "../preflight";
-import { parsePlistInterval } from "../watch-preflight";
 import {
   decideGc,
   GC_LAUNCHD_LABEL,

@@ -206,7 +206,7 @@ describe("pr-hero config styling", () => {
 // rules disagree: `/…/` is a noControlCharactersInRegex ERROR, and
 // `new RegExp("\\u001b…")` is a useRegexLiterals warning that would be fixed
 // back into the error. Interpolating the byte satisfies both — the same
-// escape-in-a-regex problem corpus-preflight.ts dodges with a codepoint loop.
+// escape-in-a-regex problem corpus/preflight.ts dodges with a codepoint loop.
 // `.replace` and `.match` each reset a global regex's lastIndex, so one shared
 // instance is safe.
 const ESC = "\x1b";

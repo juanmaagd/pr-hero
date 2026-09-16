@@ -8,6 +8,7 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import { countAttempts, parsePipelineMeta } from "#watch/preflight";
 import { emptyDiversityLedger } from "../src/diversity/accounting";
 import { buildDiversityPlan } from "../src/diversity/identity";
 import {
@@ -32,7 +33,6 @@ import {
   OpenCodeProductionGatedError,
   RouteAdmissionError,
 } from "../src/transport-registry";
-import { countAttempts, parsePipelineMeta } from "../src/watch-preflight";
 
 class RecordingStepRunner implements StepRunner {
   readonly executedSteps: StepSpec[] = [];

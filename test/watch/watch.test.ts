@@ -40,9 +40,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseIgnoreFile } from "../src/ignore-file";
-import { readLocalIgnoreRules } from "../src/ignore-read";
-import { DEFAULT_SIZE_GATE, sizeGateConfig } from "../src/size-gate";
+import {
+  decideTick,
+  type TickLaunch,
+  type WatchConfig,
+  type WatchPrCandidate,
+} from "#watch/preflight";
 import {
   applyPreLaunchVeto,
   gatherRepoFacts,
@@ -50,13 +53,10 @@ import {
   selectLaunchAfterVeto,
   type WatchedRepoFacts,
   type WatchIo,
-} from "../src/watch";
-import {
-  decideTick,
-  type TickLaunch,
-  type WatchConfig,
-  type WatchPrCandidate,
-} from "../src/watch-preflight";
+} from "#watch/watch";
+import { parseIgnoreFile } from "../../src/ignore-file";
+import { readLocalIgnoreRules } from "../../src/ignore-read";
+import { DEFAULT_SIZE_GATE, sizeGateConfig } from "../../src/size-gate";
 
 const HEAD_A = "a".repeat(40);
 
@@ -338,7 +338,7 @@ describe("gatherRepoFacts — .prheroignore wiring (prheroignore Phase 6)", () =
 
 // ---------------------------------------------------------------------------
 // applyPreLaunchVeto — D6's pre-launch exclusion veto. Fixtures are built
-// directly (the same pattern watch-preflight.test.ts's decideTick tests use
+// directly (the same pattern watch/preflight.test.ts's decideTick tests use
 // for TickRepoFacts) rather than through a live gatherRepoFacts run, because
 // the scenario this veto exists FOR — an eligible, all-excluded PR — is
 // exactly the one gatherRepoFacts cannot safely reach offline (see this
@@ -495,7 +495,7 @@ describe("applyPreLaunchVeto (D6 — the pre-launch exclusion veto)", () => {
 // runTick, which spawns a real child process end to end — not something an
 // offline test drives directly (see this file's own header for the same
 // live-`gh` boundary). `launchedLine` is what `countLaunchedToday` reads back
-// as the daily-cap counter (watch-preflight.ts's own WHY on that pair), so
+// as the daily-cap counter (watch/preflight.ts's own WHY on that pair), so
 // "consumes no daily-cap unit" reduces to "the veto call happens before that
 // log line is appended" — a source-text pin, same precedent test/cli.test.ts
 // already uses for an unexported I/O shell's wiring.
@@ -512,7 +512,7 @@ describe("applyPreLaunchVeto (D6 — the pre-launch exclusion veto)", () => {
 describe("runTick source-text pin — both tick-end lines share one skipped count", () => {
   test("neither tick-end line derives its own count", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/watch.ts"),
+      path.resolve(import.meta.dir, "../../src/watch/watch.ts"),
     ).text();
     // These two are the SOURCE TEXT being asserted on, placeholder included —
     // a real template string here would interpolate it away and the pin would
@@ -539,7 +539,7 @@ describe("runTick source-text pin — both tick-end lines share one skipped coun
 describe("runTick source-text pin — the veto settles before the daily-cap-consuming log line", () => {
   test("selectLaunchAfterVeto is invoked, and re-checked for null, before launchedLine is ever appended", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/watch.ts"),
+      path.resolve(import.meta.dir, "../../src/watch/watch.ts"),
     ).text();
     const runTickStart = source.indexOf("async function runTick(");
     expect(runTickStart).toBeGreaterThan(-1);
@@ -784,7 +784,7 @@ describe("selectLaunchAfterVeto (the #205 livelock fix)", () => {
 describe("runTick source-text pin — the selector is fed the WHOLE eligible queue", () => {
   test("runTick passes decision.eligible, not just the single chosen launch", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/watch.ts"),
+      path.resolve(import.meta.dir, "../../src/watch/watch.ts"),
     ).text();
     const runTickStart = source.indexOf("async function runTick(");
     const selectorIndex = source.indexOf(
@@ -803,7 +803,7 @@ describe("runTick source-text pin — the selector is fed the WHOLE eligible que
   // indistinguishable from an idle tick in watch.log.
   test("the cap emits its own log line, between the selector call and the launch", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/watch.ts"),
+      path.resolve(import.meta.dir, "../../src/watch/watch.ts"),
     ).text();
     const runTickStart = source.indexOf("async function runTick(");
     const selectorIndex = source.indexOf(

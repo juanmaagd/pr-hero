@@ -5,9 +5,6 @@
 // render, and the notification args. All offline, literal in → literal out.
 
 import { describe, expect, test } from "bun:test";
-import { parseIgnoreFile } from "../src/ignore-file";
-import { CliUsageError, type NumstatFile, parseArgs } from "../src/preflight";
-import { DEFAULT_SIZE_GATE } from "../src/size-gate";
 import {
   contractTilde,
   countAttempts,
@@ -50,7 +47,14 @@ import {
   WATCH_LAUNCHD_LABEL,
   type WatchPrCandidate,
   type WatchStatusFacts,
-} from "../src/watch-preflight";
+} from "#watch/preflight";
+import { parseIgnoreFile } from "../../src/ignore-file";
+import {
+  CliUsageError,
+  type NumstatFile,
+  parseArgs,
+} from "../../src/preflight";
+import { DEFAULT_SIZE_GATE } from "../../src/size-gate";
 
 function file(path: string, insertions: number, deletions = 0): NumstatFile {
   return { path, insertions, deletions, binary: false };
@@ -1312,7 +1316,7 @@ describe("preLaunchExclusionVeto", () => {
     ).toBe(false);
   });
 
-  // Same truncation guard as tier 2 (gatherRepoFacts in watch.ts): a short
+  // Same truncation guard as tier 2 (gatherRepoFacts in watch/watch.ts): a short
   // list must never be trusted to justify a veto, even when every file it
   // DOES list is excluded — the opposite failure direction from tier 2's own
   // under-count risk, closed by the same guard.
@@ -1973,7 +1977,7 @@ describe("renderWatchStatus", () => {
   });
 
   // C5 / O-13, the half the identifier retirement provably cannot enforce.
-  // WatchStatusFacts is a different type from PrheroLayout, so watch.ts:907
+  // WatchStatusFacts is a different type from PrheroLayout, so watch/watch.ts:907
   // would have compiled with either name — this fixture is the only witness
   // that the hand-rename happened. The annotation is the assertion: a facts
   // object still spelling `configPath` does not typecheck. The rendered

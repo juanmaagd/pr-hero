@@ -2,7 +2,7 @@
 // PRs through `gh api graphql`, diffs and blames through git, and writes a
 // markdown artifact of CANDIDATES. Every decision — what counts as a fix
 // subject, how blame picks an introducer, the proximity window, how the
-// artifact renders — is pure in corpus-preflight.ts, where the tests live.
+// artifact renders — is pure in corpus/preflight.ts, where the tests live.
 //
 // Same scope discipline as reverts: never runs a review, never scores, never
 // labels what the defect was, never spends a cent. Read-only git + gh.
@@ -12,6 +12,23 @@
 
 import path from "node:path";
 import { log } from "#ui/primitives";
+import {
+  CliError,
+  type CliOptions,
+  CliUsageError,
+  parseRemoteHead,
+  repoWebUrlFromRemote,
+} from "../preflight";
+import {
+  type CommitPullRef,
+  DEFAULT_REVERTS_SINCE,
+  GIT_LOG_FIELD_SEP,
+  type PullDetails,
+  parseCommitPulls,
+  parsePullDetails,
+  pickCommitPull,
+  repoSlugFromWebUrl,
+} from "../reverts-preflight";
 import {
   blameArgv,
   buildThreadBatchQuery,
@@ -58,24 +75,7 @@ import {
   type ThreadCandidate,
   validateProximityDays,
   walkPageKept,
-} from "./corpus-preflight";
-import {
-  CliError,
-  type CliOptions,
-  CliUsageError,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
 } from "./preflight";
-import {
-  type CommitPullRef,
-  DEFAULT_REVERTS_SINCE,
-  GIT_LOG_FIELD_SEP,
-  type PullDetails,
-  parseCommitPulls,
-  parsePullDetails,
-  pickCommitPull,
-  repoSlugFromWebUrl,
-} from "./reverts-preflight";
 
 // Same helper as cli.ts's, pr.ts's and reverts.ts's, duplicated rather than
 // shared so no shell imports another shell. The WHY carries over verbatim:
@@ -156,7 +156,7 @@ async function gh(
 }
 
 // Same resolution shape review uses, carried as this shell's own copy — the
-// same duplication reverts.ts and watch.ts already make.
+// same duplication reverts.ts and watch/watch.ts already make.
 async function resolveRepoRoot(repoOption: string): Promise<string> {
   const repoArg = path.resolve(repoOption);
   const toplevel = await git(repoArg, ["rev-parse", "--show-toplevel"]);
@@ -253,7 +253,7 @@ type CommitPullsLookup =
   | { found: true; pulls: CommitPullRef[] }
   | { found: false };
 
-// Exported for test/corpus.test.ts, which pins the two outcomes apart; the
+// Exported for test/corpus/corpus.test.ts, which pins the two outcomes apart; the
 // `spawnFn` seam is reverts.ts's and pr.ts's, invisible to production callers.
 export async function ghCommitPulls(
   operatorRoot: string,

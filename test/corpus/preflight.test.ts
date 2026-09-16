@@ -57,8 +57,8 @@ import {
   TIER_ORDER,
   validateProximityDays,
   walkPageKept,
-} from "../src/corpus-preflight";
-import { CliUsageError, HELP_TEXT, parseArgs } from "../src/preflight";
+} from "#corpus/preflight";
+import { CliUsageError, HELP_TEXT, parseArgs } from "../../src/preflight";
 
 // SYNTHETIC 40-hex stand-ins, first-seen order pinned by nothing but these
 // tests. The a/b/c… prefixes keep fixtures readable without pretending to be
@@ -1744,7 +1744,7 @@ describe("parseArgs corpus", () => {
 
   // HELP_TEXT spells both defaults as literals rather than interpolating
   // DEFAULT_PROXIMITY_DAYS/DEFAULT_BUG_LABELS, because preflight.ts importing
-  // them back from corpus-preflight.ts (which imports CliUsageError from
+  // them back from corpus/preflight.ts (which imports CliUsageError from
   // preflight.ts) would be a real runtime cycle — the same reason
   // DEFAULT_REVERTS_SINCE is spelled out. These tests keep the pairs in step.
   test("the help text names corpus, every new flag, and the real defaults", () => {

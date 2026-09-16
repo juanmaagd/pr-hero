@@ -91,7 +91,7 @@ async function gh(
 }
 
 // Same resolution shape review uses (cli.ts's resolveRepoRoot), carried as
-// this shell's own copy — the same duplication watch.ts already makes.
+// this shell's own copy — the same duplication watch/watch.ts already makes.
 async function resolveRepoRoot(repoOption: string): Promise<string> {
   const repoArg = path.resolve(repoOption);
   const toplevel = await git(repoArg, ["rev-parse", "--show-toplevel"]);

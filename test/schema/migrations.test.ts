@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parsePipelineMeta } from "#watch/preflight";
 import { armOfRun, scoutFailed } from "../../src/floor-test";
 import {
   PIPELINE_SCHEMA_VERSION,
@@ -9,7 +10,6 @@ import {
   runPipeline,
 } from "../../src/pipeline";
 import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
-import { parsePipelineMeta } from "../../src/watch-preflight";
 
 // ---------------------------------------------------------------------------
 // D1-10c — §13's required-evidence artifact: `pipeline.json` read-back
@@ -20,7 +20,7 @@ import { parsePipelineMeta } from "../../src/watch-preflight";
 // loud rejection. Here the writer STAMPS and every reader TOLERATES, because
 // pipeline.json's readers run in places where a throw costs money —
 // `parsePipelineMeta` backs the watcher's daily attempt cap, and its own WHY
-// comment (src/watch-preflight.ts) records that a loud throw on one damaged
+// comment (src/watch/preflight.ts) records that a loud throw on one damaged
 // artifact would brick every future watcher tick. So:
 //
 //   - absence of `schema_version` means a PRE-VERSIONING artifact, never an

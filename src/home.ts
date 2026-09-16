@@ -1,5 +1,5 @@
 // I/O for the global ~/.prhero/ product home (W3 / #24). Every decision it
-// acts on lives in home-preflight.ts. cli.ts and watch.ts call this so the
+// acts on lives in home-preflight.ts. cli.ts and watch/watch.ts call this so the
 // registry read/write and the origin lookup are not copied across shells.
 //
 // Same git-runner rule as the other shells: args as an ARRAY, never an
@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { parseLockPid } from "#watch/preflight";
 import {
   canonicalRemoteId,
   decidePidLock,
@@ -23,7 +24,6 @@ import {
   touchWorktreeStamp,
 } from "./home-preflight";
 import { CliError } from "./preflight";
-import { parseLockPid } from "./watch-preflight";
 
 const PID_LOCK_ATTEMPTS = 3;
 
