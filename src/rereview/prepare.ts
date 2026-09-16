@@ -1,23 +1,24 @@
 // Impure-half orchestration for item 7 discovery (`docs/item7-rereview-design.md`
 // §3.1). Git facts arrive through `RereviewGit` so the CLI owns `cat-file`,
 // `merge-base --is-ancestor`, and `diff --name-only`, and tests inject fakes.
-// The case machine itself stays in rereview-plan.ts.
+// The case machine itself stays in rereview/plan.ts.
 
-import { normalizePath } from "./compare";
-import type { Severity } from "./findings";
-import { claimFingerprint } from "./pr-preflight";
+import { normalizePath } from "../compare";
+import type { Severity } from "../findings";
+import { claimFingerprint } from "../pr-preflight";
+import { parseTriageMarker } from "../triage";
 import {
   classifyPrior,
   type PhaseBResult,
   type PriorRecord,
   type PriorTriage,
   type RereviewCase,
-} from "./rereview-classify";
+} from "./classify";
 import {
   type FindingIdentity,
   IDENTITY_LINE_WINDOW,
   identityFromLocs,
-} from "./rereview-identity";
+} from "./identity";
 import {
   type DiscoveryPlan,
   decideLastHeadDelta,
@@ -30,13 +31,12 @@ import {
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
   unreachableLastHeadMessage,
-} from "./rereview-plan";
-import type { LiveFinding, StateFinding } from "./rereview-state";
-import type { VerifyQueueEntry } from "./rereview-verify";
-import { parseTriageMarker } from "./triage";
+} from "./plan";
+import type { LiveFinding, StateFinding } from "./state";
+import type { VerifyQueueEntry } from "./verify";
 
 // cli.ts reaches the whole re-review surface through this module and never
-// imports rereview-plan.ts directly; these two travel with `prepareDiscovery`'s
+// imports rereview/plan.ts directly; these two travel with `prepareDiscovery`'s
 // output, so they ride the same facade. The return type stays unexported here
 // — cli.ts infers it, and nothing names it across this boundary.
 export {
@@ -493,8 +493,8 @@ export function buildPhaseBQueue(input: {
   nameStatus: NameStatus;
   summaryUpdatedAt: string | null;
   // Rereview-coverage fix wiring gap: threads `DiscoveryPlan.verifyAll`
-  // (rereview-plan.ts) into classifyPrior's ctx — see PhaseBContext's WHY
-  // in rereview-classify.ts. Optional/defaulted false so every pre-existing
+  // (rereview/plan.ts) into classifyPrior's ctx — see PhaseBContext's WHY
+  // in rereview/classify.ts. Optional/defaulted false so every pre-existing
   // call site (case D/E already force verify_all off `case` alone) keeps
   // its exact behavior untouched.
   verifyAll?: boolean;
@@ -601,7 +601,7 @@ export interface PostedForPrior {
 //      a triage reply to the comment a human was looking at, and design §3.5
 //      says the marker stays strict there.
 //   2. the §3.5 loc-SET identity — `identitiesMatch`
-//      (`src/rereview-identity.ts`): equal-or-contained path sets with
+//      (`src/rereview/identity.ts`): equal-or-contained path sets with
 //      overlapping spans. It pairs two FINDINGS across runs. It cannot serve
 //      here: a posted comment has ONE anchor while a prior may carry many
 //      locs, so `identitiesMatch` would refuse every multi-loc prior its own

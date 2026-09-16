@@ -6,8 +6,8 @@
 // a silently truncated delta. `--full` widens discovery for whatever case
 // the PR is actually in; it never rewrites the case (R2-C5).
 
-import { normalizePath } from "./compare";
-import type { RereviewCase } from "./rereview-classify";
+import { normalizePath } from "../compare";
+import type { RereviewCase } from "./classify";
 
 export type LastHeadSource = "summary_marker" | "finding_markers" | "absent";
 
@@ -95,7 +95,7 @@ export function decideRereviewCase(input: {
 // PR #68 (2026-08-25): red in 8 seconds, and rebasing is routine.
 //
 // Reachability is read off the case rather than re-probed: inside
-// `prepareDiscovery` (rereview-prepare.ts) — the only production caller of
+// `prepareDiscovery` (rereview/prepare.ts) — the only production caller of
 // `decideRereviewCase`, and one that always runs `git cat-file -e L^{commit}`
 // when L is non-null — case "E" means exactly "L is non-null and that probe
 // said no".

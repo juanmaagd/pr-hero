@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { claimFingerprint } from "../src/pr-preflight";
-import type { PriorRecord } from "../src/rereview-classify";
-import { planDiscovery } from "../src/rereview-plan";
+import type { PriorRecord } from "#rereview/classify";
+import { planDiscovery } from "#rereview/plan";
 import {
   bindPriorsToPosted,
   buildPhaseBQueue,
@@ -16,9 +15,10 @@ import {
   readRereviewProvenance,
   shouldAbortEmptyDiscovery,
   toRereviewProvenance,
-} from "../src/rereview-prepare";
-import type { LiveFinding } from "../src/rereview-state";
-import { triageMarker } from "../src/triage";
+} from "#rereview/prepare";
+import type { LiveFinding } from "#rereview/state";
+import { claimFingerprint } from "../../src/pr-preflight";
+import { triageMarker } from "../../src/triage";
 
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const L = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

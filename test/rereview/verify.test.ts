@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { wrapBlock } from "../src/boundary";
 import {
   assignVerifyIds,
   capVerificationQueue,
@@ -13,7 +12,8 @@ import {
   verifyBatchPath,
   verifyStepName,
   verifySubjectId,
-} from "../src/rereview-verify";
+} from "#rereview/verify";
+import { wrapBlock } from "../../src/boundary";
 
 function entry(
   overrides: Partial<VerifyQueueEntry> &

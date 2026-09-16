@@ -157,7 +157,7 @@ async function resolveRepoRoot(repoOption: string): Promise<string> {
 
 // The DI seam gatherRepoFacts needs to be unit-testable (prheroignore Phase
 // 6, design D6): one shape per I/O call it makes, mirroring RereviewGit's
-// pattern (src/rereview-prepare.ts) rather than inventing a new one. Every
+// pattern (src/rereview/prepare.ts) rather than inventing a new one. Every
 // OTHER I/O gatherRepoFacts touches — resolveRepoHome, scanRunDirs,
 // fetchPrComments, fetchCommitStatuses — is left as real I/O on purpose: a
 // candidate that clears the size gate reaches those unconditionally, and a

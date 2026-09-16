@@ -11,15 +11,15 @@
 // because a `channel:"outside"` finding's only copy lives in this block;
 // the next PATCH would otherwise erase it (R2-S3).
 
-import type { Severity, Tier } from "./findings";
-import { claimFingerprint } from "./pr-preflight";
-import { isFullCommitId } from "./preflight";
+import type { Severity, Tier } from "../findings";
+import { claimFingerprint } from "../pr-preflight";
+import { isFullCommitId } from "../preflight";
 import type {
   FindingChannel,
   GateStatus,
   PhaseBResult,
   PriorRecord,
-} from "./rereview-classify";
+} from "./classify";
 
 export const PR_STATE_MARKER_PREFIX = "<!-- pr-hero-state ";
 export const GITHUB_ISSUE_COMMENT_MAX = 65536;

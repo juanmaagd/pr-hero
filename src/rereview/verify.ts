@@ -8,15 +8,15 @@
 // second `F001` collision.
 
 import path from "node:path";
-import { blockForgesNonce, wrapBlock } from "./boundary";
-import type { Severity } from "./findings";
-import type { GateStatus, VerifyTrigger } from "./rereview-classify";
+import { blockForgesNonce, wrapBlock } from "../boundary";
+import type { Severity } from "../findings";
+import type { GateStatus, VerifyTrigger } from "./classify";
 import {
   type IdentityInput,
   identitiesMatch,
   identityFromFinding,
   identityFromLocs,
-} from "./rereview-identity";
+} from "./identity";
 
 export const VERIFY_BATCH_FILE = "verify-batch.json";
 export const VERIFY_STEPS_DIR = "verify";
