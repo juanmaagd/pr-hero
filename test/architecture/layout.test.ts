@@ -120,6 +120,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "proof-refs",
       "report",
       "root-cause",
+      "route-preflight",
       "scout",
       "size-gate",
       "spec",

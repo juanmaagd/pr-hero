@@ -99,15 +99,6 @@ import {
 } from "#git/git";
 import { engineIdentity } from "#git/identity";
 import {
-  capabilityGateDecision,
-  produceClaudeCapabilityReport,
-} from "#model/provider-capabilities";
-import {
-  buildResolvedRoutePlan,
-  type ResolvedRoutePlan,
-  type RoutingConfig,
-} from "#model/routing";
-import {
   type CiAdmissionLedgerState,
   publishCiSkip,
   recordCiAdmissionGateSkip,
@@ -188,7 +179,6 @@ import {
 } from "#review/findings";
 import {
   changedPathsFromDiff,
-  DEFAULT_SCOUT_MODEL,
   type PipelineResult,
   parityTriggered,
   runPipeline,
@@ -219,7 +209,6 @@ import {
   resolvePost,
   resolveScout,
   resolveSummary,
-  type SummarySettings,
 } from "#review/preflight";
 
 export { createRunDir, preflightAgentsDir, resolveAgentsDir };
@@ -236,6 +225,15 @@ import {
   renderReport,
 } from "#review/report";
 import {
+  buildCliRoutePlan,
+  enforceProviderCapabilityGate,
+  type ProductionRoutePlanResult,
+  pipelineScoutInput,
+  pipelineSummarizerInput,
+  resolveProductionRoutePlanAtConfirm,
+  resolveRoutePlanAtConfirm,
+} from "#review/route-preflight";
+import {
   type ExcludedPath,
   effectiveDiffStat,
   evaluateSizeGate,
@@ -244,8 +242,17 @@ import {
   sizeGateConfig,
   sizeGateLine,
 } from "#review/size-gate";
-import { type ReviewSpec, validateReviewSpec } from "#review/spec";
+import { validateReviewSpec } from "#review/spec";
 import { ClaudeCodeRunner, killAllChildProcesses } from "#review/step-runner";
+
+export {
+  type ProductionRoutePlanResult,
+  pipelineScoutInput,
+  pipelineSummarizerInput,
+  resolveProductionRoutePlanAtConfirm,
+  resolveRoutePlanAtConfirm,
+};
+
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import { gcCommand, runGc } from "#store/gc";
 import {
@@ -303,8 +310,6 @@ import {
   parsePrFiles,
 } from "#watch/preflight";
 import { watchCommand } from "#watch/watch";
-import { resolveEngineAssets } from "./assets";
-import type { RunnerBackend } from "./execution/contracts";
 import {
   acquirePidLock,
   releasePidLock,
@@ -322,23 +327,10 @@ import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./ignore-read";
 import { resolveMenuContext } from "./menu-context";
 import {
   createProductionRuntime,
-  type ProductionAdmissionContext,
   type ProductionRuntime,
-  prepareProductionAdmissionContext,
-  probeBindingsReadiness,
 } from "./production-runtime";
-import {
-  type RunnerAuthorityOptions,
-  type RunnerAuthorityResolution,
-  resolveRunnerAuthority,
-} from "./runner-authority";
+import { resolveRunnerAuthority } from "./runner-authority";
 import { resolveOpenCodeAuthPath } from "./security/credential-broker";
-import {
-  admitRoutePlan,
-  createDefaultTransportRegistry,
-  type D1_11ReadinessEvidence,
-  type TransportRegistry,
-} from "./transport-registry";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
@@ -354,223 +346,6 @@ const CODEGRAPH_ONLY_MCP_CONFIG = {
     },
   },
 };
-
-export function pipelineSummarizerInput(
-  summary: SummarySettings,
-):
-  | { summarizer: { promptPath: string; model?: string } }
-  | Record<string, never> {
-  return summary.enabled
-    ? {
-        summarizer: {
-          promptPath: resolveEngineAssets().summarizerPromptPath,
-          ...(summary.model === undefined ? {} : { model: summary.model }),
-        },
-      }
-    : {};
-}
-
-// The scout's prompt is ENGINE-owned and lives outside the agents dir, on
-// purpose and twice over (§3.7): a `review-scout.md` dropped in the agents dir
-// without a spec entry is a hard CliError, and a new prompt-set directory
-// holding byte-identical hunter files would be a new fingerprint — which is
-// exactly the one-variable property M6 needs to be true by construction rather
-// than argued. `prompts/` is the door the summarizer already walked through.
-export function pipelineScoutInput(
-  options: Pick<CliOptions, "scout" | "scoutModel">,
-): { scout: { promptPath: string; model?: string } } | Record<string, never> {
-  return options.scout
-    ? {
-        scout: {
-          promptPath: resolveEngineAssets().scoutPromptPath,
-          ...(options.scoutModel === undefined
-            ? {}
-            : { model: options.scoutModel }),
-        },
-      }
-    : {};
-}
-
-async function buildCliRoutePlan(params: {
-  spec: ReviewSpec;
-  options: CliOptions;
-  agentFiles: Map<string, ParsedAgent>;
-  routingConfig?: RoutingConfig;
-  summary: SummarySettings;
-  summarizerEnabled?: boolean;
-  scoutEnabled?: boolean;
-}): Promise<ResolvedRoutePlan> {
-  const summarizerEnabled = params.summarizerEnabled ?? params.summary.enabled;
-  const scoutEnabled = params.scoutEnabled ?? params.options.scout;
-  let summarizerFrontmatter: string | undefined;
-  if (summarizerEnabled) {
-    try {
-      const parsed = await parseAgentFile(
-        resolveEngineAssets().summarizerPromptPath,
-      );
-      summarizerFrontmatter = parsed.model;
-    } catch {
-      // Engine-owned prompt may be unreadable in tests; route resolution still
-      // falls through CLI > spec > frontmatter precedence without it.
-    }
-  }
-  let scoutFrontmatter: string | undefined;
-  if (scoutEnabled) {
-    try {
-      const parsed = await parseAgentFile(
-        resolveEngineAssets().scoutPromptPath,
-      );
-      scoutFrontmatter = parsed.model;
-    } catch {
-      // Same contract as the summarizer branch above.
-    }
-  }
-  return buildResolvedRoutePlan({
-    agents: params.spec.agents,
-    cliModel: params.options.model,
-    routingConfig: params.routingConfig,
-    frontmatterModel: (agentKey) => params.agentFiles.get(agentKey)?.model,
-    ...(summarizerEnabled
-      ? {
-          summarizer: {
-            model: params.summary.model,
-            frontmatterModel: summarizerFrontmatter,
-          },
-        }
-      : {}),
-    ...(scoutEnabled
-      ? {
-          scout: {
-            model: params.options.scoutModel,
-            frontmatterModel: scoutFrontmatter,
-            defaultModel: DEFAULT_SCOUT_MODEL,
-          },
-        }
-      : {}),
-  });
-}
-
-// Pre-confirm route resolution: legacy runs without operator routing may omit
-// route provenance when the plan cannot be built, but admission failures must
-// always surface before confirm — never be swallowed into routePlan = undefined.
-export async function resolveRoutePlanAtConfirm(input: {
-  routingConfigured: boolean;
-  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
-  registry?: TransportRegistry;
-}): Promise<ResolvedRoutePlan | undefined> {
-  const registry =
-    input.registry ?? createDefaultTransportRegistry({ mode: "production" });
-  let routePlan: ResolvedRoutePlan;
-  try {
-    routePlan = await input.buildRoutePlan();
-  } catch (error) {
-    if (input.routingConfigured) throw error;
-    return undefined;
-  }
-  await admitRoutePlan(routePlan, registry);
-  return routePlan;
-}
-
-export interface ProductionRoutePlanResult {
-  readonly routePlan: ResolvedRoutePlan;
-  readonly productionAdmission: ProductionAdmissionContext;
-}
-
-// Production admission: discover per-backend executable authority, derive
-// D1-11 evidence from exact-binding probes, and admit with one shared registry.
-export async function resolveProductionRoutePlanAtConfirm(input: {
-  routingConfigured: boolean;
-  workspaceRoot: string;
-  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
-  authorityDeps?: import("./runner-authority").ResolveRunnerAuthorityDeps;
-  loadSdk?: () => Promise<
-    import("./transports/opencode-client").OpenCodeSdkLike
-  >;
-  env?: import("./runner-authority").RunnerAuthorityOptions["env"];
-}): Promise<ProductionRoutePlanResult | undefined> {
-  let routePlan: ResolvedRoutePlan;
-  try {
-    routePlan = await input.buildRoutePlan();
-  } catch (error) {
-    if (input.routingConfigured) throw error;
-    return undefined;
-  }
-
-  const productionAdmission = await prepareProductionAdmissionContext({
-    workspaceRoot: input.workspaceRoot,
-    plan: routePlan,
-    authorityDeps: input.authorityDeps,
-    loadSdk: input.loadSdk,
-    env: input.env,
-  });
-  if ("error" in productionAdmission) {
-    throw new CliError(
-      `production admission failed: ${productionAdmission.error}`,
-    );
-  }
-  await admitRoutePlan(routePlan, productionAdmission.registry, {
-    mode: "production",
-    evidence: productionAdmission.evidence,
-  });
-  return { routePlan, productionAdmission };
-}
-
-async function enforceProviderCapabilityGate(input: {
-  routePlan: ResolvedRoutePlan | undefined;
-  workspaceRoot: string;
-  runnerAuthority?: RunnerAuthorityResolution;
-  authorityOptions?: RunnerAuthorityOptions;
-  admissionRegistry?: TransportRegistry;
-  productionEvidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
-}): Promise<void> {
-  if (input.routePlan === undefined) {
-    if (input.runnerAuthority?.error !== undefined) {
-      throw new CliError(
-        `execution authority unavailable: ${input.runnerAuthority.error}`,
-      );
-    }
-    const capabilityReport = await produceClaudeCapabilityReport({});
-    const capabilityGate = capabilityGateDecision(capabilityReport);
-    if (!capabilityGate.ok) {
-      throw new CliError(
-        `provider capability gate failed: ${capabilityGate.reason}`,
-      );
-    }
-    return;
-  }
-  const authorityOptions =
-    input.authorityOptions ??
-    (input.runnerAuthority?.error !== undefined
-      ? undefined
-      : {
-          workspaceRoot: input.workspaceRoot,
-          binaryPath: input.runnerAuthority?.runnerOptions.binaryPath,
-          executableAllowlists: {
-            "claude-code":
-              input.runnerAuthority?.runnerOptions.executableAllowlist ?? [],
-          },
-        });
-  if (authorityOptions === undefined) {
-    throw new CliError(
-      `execution authority unavailable: ${input.runnerAuthority?.error ?? "missing production authority options"}`,
-    );
-  }
-  const probe = await probeBindingsReadiness({
-    ...authorityOptions,
-    plan: input.routePlan,
-    workspaceRoot: input.workspaceRoot,
-    registry: input.admissionRegistry,
-    mode: "production",
-    evidence: input.productionEvidence,
-  });
-  if (!probe.decision.ok) {
-    await probe.dispose();
-    throw new CliError(
-      `provider capability gate failed: ${probe.decision.reason}`,
-    );
-  }
-  await probe.dispose();
-}
 
 const EMPTY_MCP_CONFIG = { mcpServers: {} };
 
