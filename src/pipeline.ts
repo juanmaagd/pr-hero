@@ -949,7 +949,7 @@ export async function runPipeline(
   // The cost of doing it properly, stated out loud: worst-case wall clock is
   // now `pipelineTimeoutMs + graceMs`, not `pipelineTimeoutMs`. The CI job
   // bound (90 min) sits above the ceiling (75 min) with far more room than the
-  // 8.5 s this adds — see test/ci-setup.test.ts.
+  // 8.5 s this adds — see test/ci/setup.test.ts.
   // The `??` fallback is a DEGRADED mode, not a default — be precise about
   // what it cannot do. A synthesized controller is held by nobody else: the
   // runner never sees its signal, so `StepExecutionHarness.cancelSignal` stays

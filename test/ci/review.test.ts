@@ -1,12 +1,12 @@
 // Phase 3 (Pillar 3, GitHub Actions CI): Review CLI Integration & CI
-// Headless Shell. Ties Phase 1's reporter (ci-reporter.ts) and Phase 2's
-// gates (ci-gates.ts) into the CLI surface: `--ci`/`--budget-usd`/
+// Headless Shell. Ties Phase 1's reporter (ci/reporter.ts) and Phase 2's
+// gates (ci/gates.ts) into the CLI surface: `--ci`/`--budget-usd`/
 // `--step-summary` parsing, environment auto-detection, the assistant-
 // posture exit-code contract, and the pure "what to publish" compositions
 // reviewPr's shell calls mechanically (see cli.ts's reviewPr — the size-gate
 // and budget-gate CI branches, and the final `ciExitCode` return).
 //
-// Style mirrors ci-gates.test.ts / ci-reporter.test.ts: no mocks, no I/O,
+// Style mirrors ci/gates.test.ts / ci/reporter.test.ts: no mocks, no I/O,
 // plain literals for the upstream types.
 
 import { describe, expect, test } from "bun:test";
@@ -23,18 +23,18 @@ import {
   resolveCiBudgetCeiling,
   SKIP_BUDGET_COMMENT_MARKER,
   SKIP_SIZE_COMMENT_MARKER,
-} from "../src/ci-gates";
-import type { CiOutputs } from "../src/ci-reporter";
+} from "#ci/gates";
+import type { CiOutputs } from "#ci/reporter";
 import {
   planCiReview,
   shouldPublishCiReview,
   shouldWriteCiOutputs,
   shouldWriteStepSummary,
   withCiWorkflowGroup,
-} from "../src/cli";
-import type { Finding } from "../src/findings";
-import { isCiEnvironment, parseArgs } from "../src/preflight";
-import type { SizeGateVerdict } from "../src/size-gate";
+} from "../../src/cli";
+import type { Finding } from "../../src/findings";
+import { isCiEnvironment, parseArgs } from "../../src/preflight";
+import type { SizeGateVerdict } from "../../src/size-gate";
 
 function finding(overrides: Partial<Finding> & { id: string }): Finding {
   return {
@@ -423,7 +423,7 @@ describe("planCiBudgetSkip", () => {
 // `estimate.high` — a token-derived figure — against a real-dollar ceiling.
 // On a subscription route the real cash cost is $0.00, so a $10 default
 // refused work for an overrun that could not happen, and a skipped review is
-// indistinguishable from a clean one on the checks page (ci-setup.ts:50-63).
+// indistinguishable from a clean one on the checks page (ci/setup.ts:50-63).
 //
 // These compose the same three pure functions cli.ts's gate composes, in the
 // same order, so a wiring change that drops one has to break a test here.

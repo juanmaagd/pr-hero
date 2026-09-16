@@ -1346,7 +1346,7 @@ export class MultiProviderRunner implements StepRunner {
     // fire there. A ledger on that path is a state machine with no guarantee
     // to enforce. The known limitation, deliberately not addressed here: a
     // claude-code run under a real `ANTHROPIC_API_KEY` does spend money, but
-    // the engine models that backend as subscription on purpose — ci-gates.ts
+    // the engine models that backend as subscription on purpose — ci/gates.ts
     // documents why deriving it instead is an ADMISSION hazard, and
     // `resolveCiBudgetCeiling` is where that case is handled.
     //

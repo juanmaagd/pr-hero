@@ -4,8 +4,8 @@ import {
   admissionRecordFingerprint,
   reserveAdmissionAttempt,
   settleAdmissionAttempt,
-} from "../src/ci-admission-ledger";
-import { planCiReviewManualRequired, planCiReviewSkip } from "../src/ci-gates";
+} from "#ci/admission-ledger";
+import { planCiReviewManualRequired, planCiReviewSkip } from "#ci/gates";
 import {
   type CiReviewAdmissionInput,
   canonicalAdmissionFindings,
@@ -18,11 +18,11 @@ import {
   resolveCiAdmissionAttemptCount,
   resolveCiReviewPolicy,
   scanPostedFindingTiers,
-} from "../src/ci-review-admission";
-import { classifyChangedPaths } from "../src/ci-review-risk";
-import type { Tier } from "../src/findings";
-import { fetchPrComments } from "../src/pr";
-import { PR_FINDING_MARKER_PREFIX } from "../src/pr-preflight";
+} from "#ci/review-admission";
+import { classifyChangedPaths } from "#ci/review-risk";
+import type { Tier } from "../../src/findings";
+import { fetchPrComments } from "../../src/pr";
+import { PR_FINDING_MARKER_PREFIX } from "../../src/pr-preflight";
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);

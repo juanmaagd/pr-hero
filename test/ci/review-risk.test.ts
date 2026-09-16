@@ -3,14 +3,14 @@ import {
   CI_RISK_POLICY_VERSION,
   classifyChangedPaths,
   deltaRiskTriggersReview,
-} from "../src/ci-review-risk";
+} from "#ci/review-risk";
 
 describe("classifyChangedPaths", () => {
   test("docs-only delta is low risk", () => {
     const assessment = classifyChangedPaths([
       "docs/guide.md",
       "README.md",
-      "test/ci-review-risk.test.ts",
+      "test/ci/review-risk.test.ts",
     ]);
     expect(assessment).toEqual({
       version: CI_RISK_POLICY_VERSION,
@@ -19,13 +19,13 @@ describe("classifyChangedPaths", () => {
       changedPaths: [
         "README.md",
         "docs/guide.md",
-        "test/ci-review-risk.test.ts",
+        "test/ci/review-risk.test.ts",
       ],
       highRiskPaths: [],
       lowRiskPaths: [
         "README.md",
         "docs/guide.md",
-        "test/ci-review-risk.test.ts",
+        "test/ci/review-risk.test.ts",
       ],
     });
     expect(deltaRiskTriggersReview(assessment)).toBe(false);

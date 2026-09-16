@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CI_WORKFLOW_RELATIVE_PATH } from "./ci-setup";
+import { CI_WORKFLOW_RELATIVE_PATH } from "#ci/setup";
 import { resolveOpenCodeAuthPath } from "./security/credential-broker";
 
 export type SystemTool = "git" | "claude" | "gh" | "codegraph";

@@ -19,9 +19,9 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { prheroLayout } from "./home-preflight";
-import { parseRoutingConfig } from "./preflight";
-import { resolveOpenCodeAuthPath } from "./security/credential-broker";
+import { prheroLayout } from "../home-preflight";
+import { parseRoutingConfig } from "../preflight";
+import { resolveOpenCodeAuthPath } from "../security/credential-broker";
 
 export const CI_WORKFLOW_RELATIVE_PATH = path.join(
   ".github",
@@ -47,7 +47,7 @@ export interface CiWorkflowTemplateOptions {
   //
   // Since issue #156 that inherited default is a POLICY, not a number:
   // action.yml's `budget-usd` default is empty, and the CLI resolves the
-  // ceiling from the route's billing mode (ci-gates.ts's
+  // ceiling from the route's billing mode (ci/gates.ts's
   // `resolveCiBudgetCeiling`) — no ceiling on a Claude subscription, a default
   // ceiling on a metered ANTHROPIC_API_KEY route. Inheriting is therefore
   // strictly better than it was: a scaffolded repo now gets a ceiling exactly

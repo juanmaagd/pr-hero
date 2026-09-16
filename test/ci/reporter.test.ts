@@ -15,8 +15,8 @@ import {
   formatCiOutputs,
   formatWorkflowCommand,
   renderStepSummary,
-} from "../src/ci-reporter";
-import type { Finding } from "../src/findings";
+} from "#ci/reporter";
+import type { Finding } from "../../src/findings";
 
 function finding(overrides: Partial<Finding> & { id: string }): Finding {
   return {

@@ -28,7 +28,7 @@ export type UsageCostSource =
 
 // 2026-09-02, #177. THE one place that says "this environment carries a
 // per-token credential". Two callers need it and they must not each carry
-// their own copy: `deriveCiBillingMode` (ci-gates.ts) turns it into a CI spend
+// their own copy: `deriveCiBillingMode` (ci/gates.ts) turns it into a CI spend
 // ceiling, and the Claude CLI transport turns it into the `billingMode`
 // STAMPED ON EVERY USAGE RECORD it emits. This is the same anti-drift shape
 // `credentialKindBillsMetered` (runner-authority.ts) already applies to the
@@ -53,7 +53,7 @@ export type UsageCostSource =
 // credential, so this predicate reads subscription on that path — which is
 // the truth there, and was not before the strip.
 // When an OAuth token and a key are both present this repo does not know which
-// one the Claude CLI bills (ci-gates.ts states that gap at length), and does
+// one the Claude CLI bills (ci/gates.ts states that gap at length), and does
 // not need to — presence of a key answers metered, because guessing
 // subscription wrongly reports real money as not charged.
 //
