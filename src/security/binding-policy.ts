@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
+import type { StepSpec } from "#review/step-runner";
 import type {
   ResolvedModelRoute,
   RuntimeBinding,
 } from "../execution/contracts";
-import type { StepSpec } from "../step-runner";
 
 export const BINDING_ALLOWED_TOOLS = [
   "Read",

@@ -13,7 +13,7 @@
 // prefix or a stand-in where the capture recorded only the subject.
 
 import { describe, expect, test } from "bun:test";
-import { CliUsageError, HELP_TEXT, parseArgs } from "../src/preflight";
+import { CliUsageError, HELP_TEXT, parseArgs } from "#review/preflight";
 import {
   classifyRevertCommit,
   DEFAULT_REVERTS_SINCE,

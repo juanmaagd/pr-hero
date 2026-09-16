@@ -4,7 +4,7 @@
 // version, not by the prompt-set fingerprint.
 //
 // WHY this module exists in M4, one milestone before the stage is wired into
-// pipeline.ts: so the scout-probe measures the SAME parsing, capping and
+// review/pipeline.ts: so the scout-probe measures the SAME parsing, capping and
 // rendering the engine will ship in M5. A probe carrying its own parser and its
 // own caps would measure the probe's parser — and every number it produced
 // about the PROMPT would be confounded by a second implementation that no
@@ -14,7 +14,7 @@ import { normalizePath } from "#compare/compare";
 import { wrapBlock } from "#review/boundary";
 
 // Prose §3.7 turned into the engine-owned output contract, beside
-// HUNTER/REFUTER/SUMMARY_OUTPUT_CONTRACT in pipeline.ts. This text is driver
+// HUNTER/REFUTER/SUMMARY_OUTPUT_CONTRACT in review/pipeline.ts. This text is driver
 // source: it is covered by the engine version, NOT by the prompt-set
 // fingerprint.
 export const SCOUT_OUTPUT_CONTRACT = [

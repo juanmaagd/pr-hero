@@ -44,15 +44,15 @@ import {
   tallyArm,
   tallyCleanPrs,
 } from "#compare/floor-test";
-import { resolvePrTarget } from "../src/pr-preflight";
 import {
   EMPTY_LOCAL_CONFIG,
   localReviewSpec,
   parseLocalConfig,
   resolveSummary,
-} from "../src/preflight";
-import { estimateCost } from "../src/report";
-import { evaluateSizeGateAggregate, sizeGateConfig } from "../src/size-gate";
+} from "#review/preflight";
+import { estimateCost } from "#review/report";
+import { evaluateSizeGateAggregate, sizeGateConfig } from "#review/size-gate";
+import { resolvePrTarget } from "../src/pr-preflight";
 
 const CASES_PATH = path.join(
   import.meta.dir,

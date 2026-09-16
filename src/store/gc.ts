@@ -10,6 +10,11 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  CliError,
+  type CliOptions,
+  DEFAULT_GC_INTERVAL_MIN,
+} from "#review/preflight";
 import { log } from "#ui/primitives";
 import { parsePlistInterval } from "#watch/preflight";
 import { selfInvocation } from "../assets";
@@ -26,11 +31,6 @@ import {
   repoHomePaths,
   worktreeLockPath,
 } from "../home-preflight";
-import {
-  CliError,
-  type CliOptions,
-  DEFAULT_GC_INTERVAL_MIN,
-} from "../preflight";
 import {
   decideGc,
   GC_LAUNCHD_LABEL,

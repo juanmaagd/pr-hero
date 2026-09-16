@@ -14,6 +14,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
+import { buildStepArgv, type StepSpec } from "#review/step-runner";
 import { type ResultInput, renderResult } from "#ui/result";
 import type {
   ProviderCapabilityReport,
@@ -32,7 +33,6 @@ import {
   type NormalizedUsage,
   normalizeUnavailableUsage,
 } from "../../src/execution/usage-normalized";
-import { buildStepArgv, type StepSpec } from "../../src/step-runner";
 import {
   type OpenCodeClientEvent,
   OpenCodeSdkTransport,

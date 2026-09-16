@@ -555,7 +555,7 @@ describe("tier derivation (full table)", () => {
     //
     // Note what this table can and cannot see. `deriveTier` takes ONE boolean,
     // deliberately: truncation and zero-refuter configuration are orthogonal,
-    // and the caller must conjoin them before calling (src/pipeline.ts
+    // and the caller must conjoin them before calling (src/review/pipeline.ts
     // `finish()`). So "the ceiling fired but no refuter was configured"
     // appears here as `refuterCutShort: false` — cases 5 and 6 below spell out
     // both ways of arriving at that false, because they are different

@@ -56,7 +56,7 @@ const CLAIM_STOPWORDS = new Set(
 // (935/978) survives only as line numbers in the comment above — its claim
 // text was never recorded — so this design CANNOT guarantee that pair still
 // merges, and duplicates that used to collapse may now post twice. The
-// severe-loser trace in report.ts's "Not reported" section is what keeps the
+// severe-loser trace in review/report.ts's "Not reported" section is what keeps the
 // residual risk visible instead of silent.
 export const DEDUPE_CLAIM_OVERLAP_THRESHOLD = 0.35;
 

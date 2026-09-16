@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseArgs } from "../src/preflight";
+import { parseArgs } from "#review/preflight";
 import { isMachineOnboarded } from "../src/wizard";
 
 describe("Zero-argument entry & setup command dispatch", () => {

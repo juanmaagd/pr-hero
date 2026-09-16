@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { StoredComparison } from "#compare/ledger";
 import type { Finding, FindingsDocument } from "#review/findings";
+import type { PerAgentUsage } from "#review/pipeline";
 import { runGc } from "#store/gc";
 import {
   failSoftIngest,
@@ -20,7 +21,6 @@ import {
   queryUsage,
 } from "#store/metrics";
 import { prheroLayout, repoHomePaths } from "../../src/home-preflight";
-import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpDbPath(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-metrics-"));

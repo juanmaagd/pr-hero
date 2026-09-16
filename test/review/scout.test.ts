@@ -19,7 +19,7 @@ import {
   ScoutValidationError,
   scoutPrompt,
   validateScoutLeads,
-} from "../src/scout";
+} from "#review/scout";
 
 function lead(path: string, line: number, why = "a suspicion"): ScoutLead {
   return { path, line, why };

@@ -78,7 +78,14 @@
 import path from "node:path";
 import type { DraftFinding, HunterDraft, RefuterResult } from "#review/drafts";
 import type { RefuterVerdict } from "#review/findings";
+import { runPipeline } from "#review/pipeline";
 import type { ReviewSpec } from "#review/spec";
+import {
+  ClaudeCodeRunner,
+  type StepResult,
+  type StepRunner,
+  type StepSpec,
+} from "#review/step-runner";
 import {
   buildRefuterProbeFixture,
   EXPECTED_VERDICT,
@@ -88,14 +95,7 @@ import {
   type ProbeArm,
   REFUTER_AGENT_FILE,
 } from "../fixtures/refuter-probe";
-import { runPipeline } from "../src/pipeline";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import {
-  ClaudeCodeRunner,
-  type StepResult,
-  type StepRunner,
-  type StepSpec,
-} from "../src/step-runner";
 import { zeroUsage } from "../src/usage";
 
 const REPLICATES = Number(process.argv[2] ?? 3);

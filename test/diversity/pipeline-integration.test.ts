@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createResolvedRoutePlan, resolveStepRoute } from "#model/routing";
 import type { DraftFinding, HunterDraft, RefuterResult } from "#review/drafts";
+import { type PipelineInput, runPipeline } from "#review/pipeline";
 import { defaultReviewSpec, validateReviewSpec } from "#review/spec";
+import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
 import {
   appendAttempt,
   type DiversityAttemptRecord,
@@ -23,8 +25,6 @@ import {
   recordDiversityHunterResult,
 } from "../../src/diversity/pipeline-integration";
 import { normalizeInclusiveUsage } from "../../src/execution/usage-normalized";
-import { type PipelineInput, runPipeline } from "../../src/pipeline";
-import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
 import type { SessionUsage } from "../../src/usage";
 
 function usage(): SessionUsage {

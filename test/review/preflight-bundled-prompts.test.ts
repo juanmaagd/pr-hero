@@ -3,14 +3,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseAgentSource, promptSetFingerprint } from "#review/prompt-set";
-import type { EngineAssets } from "../src/assets";
-import { resolveEngineAssets } from "../src/assets";
-import {
-  loadEffectiveConfig,
-  preflightAgentsDir,
-  resolveAgentsDir,
-} from "../src/cli";
 import {
   type AgentsDirConfigSeat,
   agentFilePath,
@@ -18,7 +10,15 @@ import {
   BUNDLED_AGENTS_DIR_LABEL,
   localReviewSpec,
   resolveAgentsDirSetting,
-} from "../src/preflight";
+} from "#review/preflight";
+import { parseAgentSource, promptSetFingerprint } from "#review/prompt-set";
+import type { EngineAssets } from "../../src/assets";
+import { resolveEngineAssets } from "../../src/assets";
+import {
+  loadEffectiveConfig,
+  preflightAgentsDir,
+  resolveAgentsDir,
+} from "../../src/cli";
 
 describe("resolveAgentsDirSetting with bundled prompts default", () => {
   test("with no flag, config, or env returns the bundled default with source 'default'", () => {
@@ -82,18 +82,36 @@ describe("resolveAgentsDirSetting with bundled prompts default", () => {
 
 describe("Repo hygiene and O-15 productization scan", () => {
   test("no runtime source file in src/ references SUGGESTED_AGENTS_DIR or /Users/juanma", () => {
-    const srcDir = path.resolve(import.meta.dir, "../src");
-    const srcFiles = readdirSync(srcDir).filter((f) => f.endsWith(".ts"));
+    // RECURSIVE on purpose. This scan used to read only src/'s root, which was
+    // the whole of src/ when it was written. The domain reorganization moved
+    // files into src/<domain>/ directories and the scan silently narrowed with
+    // every move -- 93 files down to 26 -- while still passing, because a scan
+    // that inspects fewer files reports nothing. The guarded strings are the
+    // author's personal paths, so a blind spot here is exactly the leak this
+    // test exists to prevent.
+    const srcDir = path.resolve(import.meta.dir, "../../src");
+    const srcFiles = readdirSync(srcDir, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".ts"));
+
+    // A scan over an empty or near-empty list passes vacuously, so pin the
+    // floor: src/ holds well over a hundred TypeScript files across its
+    // domains, and any future move must not shrink this below the root count.
+    expect(srcFiles.length).toBeGreaterThan(100);
 
     for (const file of srcFiles) {
       const content = readFileSync(path.join(srcDir, file), "utf-8");
-      expect(content).not.toContain("SUGGESTED_AGENTS_DIR");
-      expect(content).not.toContain("/Users/juanma");
+      expect(content, `${file} leaks a guarded string`).not.toContain(
+        "SUGGESTED_AGENTS_DIR",
+      );
+      expect(content, `${file} leaks a guarded string`).not.toContain(
+        "/Users/juanma",
+      );
     }
   });
 
   test("O-15 scan over prompts/default/ has zero forbidden mentions in name/body", () => {
-    const defaultDir = path.resolve(import.meta.dir, "../prompts/default");
+    const defaultDir = path.resolve(import.meta.dir, "../../prompts/default");
     const files = readdirSync(defaultDir).filter(
       (f) => f.endsWith(".md") && f !== "PROVENANCE.md",
     );
@@ -130,7 +148,7 @@ describe("bundled prompts carry no tool-injected content", () => {
   // so the guard forbids the delimiter itself: a freeze must strip such
   // blocks, and this keeps a future freeze from importing them again.
   test("no prompt file contains an HTML comment", () => {
-    const promptsRoot = path.resolve(import.meta.dir, "../prompts");
+    const promptsRoot = path.resolve(import.meta.dir, "../../prompts");
     const files = readdirSync(promptsRoot, { recursive: true })
       .map(String)
       // PROVENANCE.md is the ledger, not a prompt: it describes what was

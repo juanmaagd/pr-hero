@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
+import { attemptEvidencePath } from "#review/step-runner";
 import {
   type BenchmarkIdentity,
   loadQualifiedReview,
@@ -18,7 +19,6 @@ import {
 import { evidenceSha256 } from "../../src/execution/attempt-evidence";
 import { StepExecutionHarness } from "../../src/execution/harness";
 import { WorkspaceReadBroker } from "../../src/security/workspace-read-broker";
-import { attemptEvidencePath } from "../../src/step-runner";
 import { qualifyOpenCodeServer } from "../../src/transports/opencode-admission";
 import { createOpenCodeClient } from "../../src/transports/opencode-client";
 import { OpenCodeSdkTransport } from "../../src/transports/opencode-sdk";

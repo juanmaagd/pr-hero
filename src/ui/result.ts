@@ -19,13 +19,13 @@
 
 import type { ComparisonResult } from "#compare/compare";
 import type { Finding, FindingsDocument } from "#review/findings";
-import type { UnresolvedSpend } from "../execution/spend-limiter";
 import {
   blobUrl,
   coverageSentence,
   formatElapsed,
   movedHeadSentence,
-} from "../report";
+} from "#review/report";
+import type { UnresolvedSpend } from "../execution/spend-limiter";
 import {
   cyan,
   dim,

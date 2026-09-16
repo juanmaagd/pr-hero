@@ -93,7 +93,7 @@ export function proofRefPathClaim(ref: string): string[] | undefined {
 // fabrication would be a false accusation, so the reviewed target is the
 // worktree AND the patch.
 //
-// Deliberately NOT `changedPathsFromDiff` (pipeline.ts), which skips
+// Deliberately NOT `changedPathsFromDiff` (review/pipeline.ts), which skips
 // deletions on purpose: that function answers "what changed, for trigger
 // evaluation", and a deleted file cannot trigger a parity hunter. This one
 // answers "what was citable", which is a different question with a different

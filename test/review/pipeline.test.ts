@@ -12,8 +12,6 @@ import {
   type Telemetry,
   validateFindingsDocument,
 } from "#review/findings";
-import { defaultReviewSpec } from "#review/spec";
-import type { NormalizedUsage } from "../src/execution/usage-normalized";
 import {
   changedPathsFromDiff,
   makeProofRefResolver,
@@ -23,11 +21,13 @@ import {
   parityTriggered,
   RUNTIME_PREAMBLE,
   runPipeline,
-} from "../src/pipeline";
-import { GOTCHAS_TEMPLATE } from "../src/preflight";
-import type { ScoutLead } from "../src/scout";
-import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
-import type { SessionUsage } from "../src/usage";
+} from "#review/pipeline";
+import { GOTCHAS_TEMPLATE } from "#review/preflight";
+import type { ScoutLead } from "#review/scout";
+import { defaultReviewSpec } from "#review/spec";
+import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
+import type { NormalizedUsage } from "../../src/execution/usage-normalized";
+import type { SessionUsage } from "../../src/usage";
 
 // ---------------------------------------------------------------------------
 // FakeStepRunner: scripted per-step-name results, records every spec it saw.
@@ -193,6 +193,7 @@ function summary(overrides: Partial<RunSummary> = {}): RunSummary {
 
 const BUNDLED_SUMMARIZER_PROMPT = path.join(
   import.meta.dir,
+  "..",
   "..",
   "prompts",
   "summarizer.md",
@@ -818,6 +819,7 @@ describe("engine-owned summarizer", () => {
 const BUNDLED_SCOUT_PROMPT = path.join(
   import.meta.dir,
   "..",
+  "..",
   "prompts",
   "scout.md",
 );
@@ -1328,7 +1330,7 @@ describe("engine-owned scout", () => {
   // a top-level `usage_v2` key in pipeline.json, summed via
   // `sumNormalizedUsage` across every step that reported normalized usage —
   // distinct from the per-step `steps[].usage_v2` recordSettlement attaches.
-  // Written BEFORE src/pipeline.ts gains any usage_v2 wiring, so it is
+  // Written BEFORE src/review/pipeline.ts gains any usage_v2 wiring, so it is
   // genuinely RED against today's plan (no usage_v2 key exists at all).
   test("§D1-08 PR2 — pipeline.json's usage_v2 rollup sums every step's normalized usage under its own key", async () => {
     const input = await makeInput();

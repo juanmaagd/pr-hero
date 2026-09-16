@@ -19,14 +19,14 @@ import {
   OWN_CI_WORKFLOW_OPTIONS,
   runCiSetup,
 } from "#ci/setup";
-import { runDoctor } from "../../src/doctor";
-import { prheroLayout } from "../../src/home-preflight";
-import { DEFAULT_PIPELINE_TIMEOUT_MS } from "../../src/pipeline";
+import { DEFAULT_PIPELINE_TIMEOUT_MS } from "#review/pipeline";
 import {
   parseArgs,
   parseGlobalConfig,
   parseLocalConfig,
-} from "../../src/preflight";
+} from "#review/preflight";
+import { runDoctor } from "../../src/doctor";
+import { prheroLayout } from "../../src/home-preflight";
 import { resolveOpenCodeAuthPath } from "../../src/security/credential-broker";
 import { checkCiConfiguration } from "../../src/system-tools";
 
@@ -188,7 +188,7 @@ describe("generateCiWorkflowTemplate (pure)", () => {
   });
 
   test("the review job is bounded ABOVE the pipeline's own ceiling", () => {
-    // DEFAULT_PIPELINE_TIMEOUT_MS is 75 minutes (src/pipeline.ts). A CI
+    // DEFAULT_PIPELINE_TIMEOUT_MS is 75 minutes (src/review/pipeline.ts). A CI
     // timeout at or below that steals the salvage path: GitHub kills the job
     // before the pipeline's own ceiling can fire, close its artifacts and
     // report. The CI bound is a backstop for a HUNG runner, not a second

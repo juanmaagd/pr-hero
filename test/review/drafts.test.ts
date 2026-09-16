@@ -156,7 +156,7 @@ describe("validateHunterDraft", () => {
 
   // proof_refs survives `Array.isArray` with null INSIDE it, and every one of
   // its elements is rendered through oneLine() on the same paid posting path
-  // (report.ts evidence block). Unlike an absent symbol a null element carries
+  // (review/report.ts evidence block). Unlike an absent symbol a null element carries
   // no recoverable meaning, so this one rejects.
   test("rejects a null element inside proof_refs", () => {
     expect(() =>

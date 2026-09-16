@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { StepSpec } from "#review/step-runner";
 import type {
   AsyncEventSink,
   ProviderEvent,
@@ -22,7 +23,6 @@ import {
   synthesizeInternalFailure,
   synthesizeUnconfirmed,
 } from "../../src/execution/settlement";
-import type { StepSpec } from "../../src/step-runner";
 
 const USAGE: TransportOutcome["usage"] = {
   wallMs: 1,

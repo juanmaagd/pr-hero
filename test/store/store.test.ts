@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { StoredComparison } from "#compare/ledger";
 import type { Finding, FindingsDocument } from "#review/findings";
+import type { PerAgentUsage } from "#review/pipeline";
 import {
   CURRENT_PRODUCT_SCHEMA_VERSION,
   projectCompleteRun,
@@ -25,7 +26,6 @@ import {
   recordFindingTriage,
   saveRunTransaction,
 } from "#store/store";
-import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpDbPath(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-store-"));

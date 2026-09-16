@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { StepSpec } from "#review/step-runner";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -19,7 +20,6 @@ import type {
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
 import type { NormalizedUsage } from "../../src/execution/usage-normalized";
-import type { StepSpec } from "../../src/step-runner";
 
 const USAGE: NormalizedUsage = {
   wallMs: 1,
@@ -421,7 +421,7 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
     );
 
     const stepRunnerImport = src.match(
-      /import\s*\{([^{}]*)\}\s*from\s*"\.\.\/step-runner"/,
+      /import\s*\{([^{}]*)\}\s*from\s*"#review\/step-runner"/,
     );
     expect(stepRunnerImport).not.toBeNull();
     expect((stepRunnerImport as RegExpMatchArray)[1]).not.toMatch(

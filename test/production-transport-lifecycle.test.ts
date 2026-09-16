@@ -19,6 +19,7 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import { type StepSpec, settlementReceiptPath } from "#review/step-runner";
 import { ConcurrencyAttemptAdmissionGate } from "../src/execution/admission";
 import { ConcurrencyLimiter } from "../src/execution/concurrency-limiter";
 import type {
@@ -40,7 +41,6 @@ import { createProductionRuntime } from "../src/production-runtime";
 import type { CredentialBroker } from "../src/security/credential-broker";
 import { OpenCodeAuthBroker } from "../src/security/credential-broker";
 import { WorkspaceReadBroker } from "../src/security/workspace-read-broker";
-import { type StepSpec, settlementReceiptPath } from "../src/step-runner";
 import type {
   D1_11ReadinessEvidence,
   TransportFactoryOptions,

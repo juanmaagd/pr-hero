@@ -86,7 +86,9 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runPipeline } from "#review/pipeline";
 import type { ReviewSpec } from "#review/spec";
+import { ClaudeCodeRunner } from "#review/step-runner";
 import {
   type GoldenRow,
   goldenKey,
@@ -94,9 +96,7 @@ import {
   type ScorableFinding,
   scoreTree,
 } from "../../deep-review/runner/scorer";
-import { runPipeline } from "../src/pipeline";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import { ClaudeCodeRunner } from "../src/step-runner";
 
 const REPLICATES = Number(process.argv[2] ?? 3);
 const LAB = "/Users/juanma/Desktop/deep-review";

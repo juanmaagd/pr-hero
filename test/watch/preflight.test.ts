@@ -5,6 +5,8 @@
 // render, and the notification args. All offline, literal in → literal out.
 
 import { describe, expect, test } from "bun:test";
+import { CliUsageError, type NumstatFile, parseArgs } from "#review/preflight";
+import { DEFAULT_SIZE_GATE } from "#review/size-gate";
 import {
   contractTilde,
   countAttempts,
@@ -49,12 +51,6 @@ import {
   type WatchStatusFacts,
 } from "#watch/preflight";
 import { parseIgnoreFile } from "../../src/ignore-file";
-import {
-  CliUsageError,
-  type NumstatFile,
-  parseArgs,
-} from "../../src/preflight";
-import { DEFAULT_SIZE_GATE } from "../../src/size-gate";
 
 function file(path: string, insertions: number, deletions = 0): NumstatFile {
   return { path, insertions, deletions, binary: false };

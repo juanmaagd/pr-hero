@@ -3,6 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DraftFinding, HunterDraft } from "#review/drafts";
+import { type PipelineInput, runPipeline } from "#review/pipeline";
 import {
   type AgentSpec,
   defaultReviewSpec,
@@ -10,8 +11,7 @@ import {
   ReviewSpecValidationError,
   validateReviewSpec,
 } from "#review/spec";
-import { type PipelineInput, runPipeline } from "../../src/pipeline";
-import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
+import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
 import type { SessionUsage } from "../../src/usage";
 
 // ---------------------------------------------------------------------------

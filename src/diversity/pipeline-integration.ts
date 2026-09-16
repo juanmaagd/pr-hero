@@ -3,12 +3,12 @@ import type { DraftFinding } from "#review/drafts";
 import { SCHEMA_VERSION_V1_1 } from "#review/findings";
 import type { AgentSpec, ReviewSpec } from "#review/spec";
 import { resolveSpecialty } from "#review/spec";
+import type { StepResult } from "#review/step-runner";
 import type { ResolvedModelRoute } from "../execution/contracts";
 import {
   type NormalizedUsage,
   normalizeInclusiveUsage,
 } from "../execution/usage-normalized";
-import type { StepResult } from "../step-runner";
 import {
   appendAttempt,
   appendObservation,

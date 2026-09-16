@@ -26,6 +26,8 @@ import {
 } from "#ci/gates";
 import type { CiOutputs } from "#ci/reporter";
 import type { Finding } from "#review/findings";
+import { isCiEnvironment, parseArgs } from "#review/preflight";
+import type { SizeGateVerdict } from "#review/size-gate";
 import {
   planCiReview,
   shouldPublishCiReview,
@@ -33,8 +35,6 @@ import {
   shouldWriteStepSummary,
   withCiWorkflowGroup,
 } from "../../src/cli";
-import { isCiEnvironment, parseArgs } from "../../src/preflight";
-import type { SizeGateVerdict } from "../../src/size-gate";
 
 function finding(overrides: Partial<Finding> & { id: string }): Finding {
   return {

@@ -14,6 +14,20 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseComparisonJson } from "#compare/ledger";
+import {
+  CliError,
+  type CliOptions,
+  CliUsageError,
+  DEFAULT_WATCH_INTERVAL_MIN,
+  type NumstatFile,
+} from "#review/preflight";
+import {
+  DEFAULT_SIZE_GATE,
+  evaluateSizeGate,
+  evaluateSizeGateAggregate,
+  type SizeGateConfig,
+  sizeGateConfig,
+} from "#review/size-gate";
 import { runGc } from "#store/gc";
 import {
   box,
@@ -46,20 +60,6 @@ import {
   latestPrHeroStatus,
   prHtmlUrl,
 } from "../pr-preflight";
-import {
-  CliError,
-  type CliOptions,
-  CliUsageError,
-  DEFAULT_WATCH_INTERVAL_MIN,
-  type NumstatFile,
-} from "../preflight";
-import {
-  DEFAULT_SIZE_GATE,
-  evaluateSizeGate,
-  evaluateSizeGateAggregate,
-  type SizeGateConfig,
-  sizeGateConfig,
-} from "../size-gate";
 import {
   countAttempts,
   countLaunchedToday,

@@ -15,6 +15,12 @@ import type {
   RoutingConfig,
 } from "#model/routing";
 import { buildResolvedRoutePlan, freezeRoutePlan } from "#model/routing";
+import {
+  ClaudeCodeRunner,
+  type StepResult,
+  type StepRunner,
+  type StepSpec,
+} from "#review/step-runner";
 // Production runtime composition (§2 design): frozen route-keyed bindings admit
 // once; MultiProviderRunner acquires a per-step transport lease, delegates
 // lifecycle to StepExecutionHarness, and disposes stream/client/server before
@@ -57,12 +63,6 @@ import {
 } from "./security/binding-policy";
 import { OPENCODE_OAUTH_PROVIDER } from "./security/credential-broker";
 import { authorizeWorkspaceCwd } from "./security/execution-authority";
-import {
-  ClaudeCodeRunner,
-  type StepResult,
-  type StepRunner,
-  type StepSpec,
-} from "./step-runner";
 import {
   type AdmitRoutePlanOptions,
   type AdmittedRoutePlanResult,

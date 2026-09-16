@@ -2,8 +2,7 @@
 // money — so every branch of it is pinned here, offline.
 
 import { describe, expect, test } from "bun:test";
-import { parseIgnoreFile } from "../src/ignore-file";
-import { type NumstatFile, parseNumstatFiles } from "../src/preflight";
+import { type NumstatFile, parseNumstatFiles } from "#review/preflight";
 import {
   DEFAULT_SIZE_GATE,
   diffRecordPath,
@@ -14,7 +13,8 @@ import {
   sizeGateConfig,
   sizeGateDisposition,
   sizeGateLine,
-} from "../src/size-gate";
+} from "#review/size-gate";
+import { parseIgnoreFile } from "../../src/ignore-file";
 
 function file(
   path: string,

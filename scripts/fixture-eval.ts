@@ -5,10 +5,10 @@
 // Run: bun run fixture-eval
 import path from "node:path";
 import { validateFinding } from "#review/findings";
+import { runPipeline } from "#review/pipeline";
+import { ClaudeCodeRunner } from "#review/step-runner";
 import { buildPlantedFixture } from "../fixtures/setup";
-import { runPipeline } from "../src/pipeline";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import { ClaudeCodeRunner } from "../src/step-runner";
 
 const SUMMARIZER_PROMPT_PATH = path.join(
   import.meta.dir,

@@ -3,6 +3,7 @@
 // sibling-path hint. All offline.
 
 import { describe, expect, test } from "bun:test";
+import { CliUsageError } from "#review/preflight";
 import {
   canonicalRemoteId,
   decidePidLock,
@@ -20,7 +21,6 @@ import {
   touchWorktreeStamp,
   worktreeLockPath,
 } from "../src/home-preflight";
-import { CliUsageError } from "../src/preflight";
 
 const HOME = "/Users/x";
 const REPO_ID = "github.com/juanmaagd/musive";

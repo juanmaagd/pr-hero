@@ -7,6 +7,7 @@ import {
   type FindingsDocument,
   validateFindingsDocument,
 } from "#review/findings";
+import { localReviewSpec } from "#review/preflight";
 import { parseAgentSource } from "#review/prompt-set";
 import {
   type ExecutionAttemptEvidence,
@@ -14,7 +15,6 @@ import {
   readEvidenceFile,
 } from "../src/execution/attempt-evidence";
 import type { ResolvedModelRoute } from "../src/execution/contracts";
-import { localReviewSpec } from "../src/preflight";
 import { hasCapturedTerminal } from "../src/transports/opencode-evidence";
 
 export interface BenchmarkIdentity {

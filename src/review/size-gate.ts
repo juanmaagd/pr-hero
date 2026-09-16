@@ -18,7 +18,7 @@ import {
   BUILTIN_IGNORE_RULES,
   compileIgnoreRules,
   type IgnoreRule,
-} from "./ignore-file";
+} from "../ignore-file";
 import type { NumstatDiffStat, NumstatFile } from "./preflight";
 
 export interface SizeGateConfig {
@@ -275,7 +275,7 @@ export function splitDiffRecords(patch: string): string[] {
 }
 
 // The DESTINATION path of a record, resolved the same way and for the same
-// reason as resolveNumstatPath (preflight.ts): a rename must be matched on
+// reason as resolveNumstatPath (review/preflight.ts): a rename must be matched on
 // where the file ENDED UP, or a renamed lockfile silently stops being
 // excluded. Preference order runs from the most explicit source to the least:
 //
@@ -289,7 +289,7 @@ export function splitDiffRecords(patch: string): string[] {
 //
 // git quotes paths with control or non-ASCII characters
 // (`"caf\303\251/bun.lock"`), and this unquotes them. resolveNumstatPath in
-// preflight.ts now unquotes too: the asymmetry was NOT harmless — such a file
+// review/preflight.ts now unquotes too: the asymmetry was NOT harmless — such a file
 // was dropped from diff.patch while its lines stayed in the gate's count, so
 // the gate could refuse a PR whose effective diff was small. Both sides must
 // keep unquoting or that divergence comes straight back.

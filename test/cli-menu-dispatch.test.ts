@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parseArgs } from "#review/preflight";
 import {
   clearDrawnLines,
   runConfigSubmenu,
@@ -10,7 +11,6 @@ import {
 } from "#ui/menu";
 import type { KeyReader } from "#ui/select";
 import { getMenuOptions } from "../src/menu-context";
-import { parseArgs } from "../src/preflight";
 
 function fakeReader(chunks: (string | undefined)[]): KeyReader {
   let i = 0;

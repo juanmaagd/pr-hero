@@ -11,14 +11,14 @@
 // interpolated shell string.
 
 import path from "node:path";
-import { log } from "#ui/primitives";
 import {
   CliError,
   type CliOptions,
   CliUsageError,
   parseRemoteHead,
   repoWebUrlFromRemote,
-} from "../preflight";
+} from "#review/preflight";
+import { log } from "#ui/primitives";
 import {
   type CommitPullRef,
   DEFAULT_REVERTS_SINCE,

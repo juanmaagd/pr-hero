@@ -37,7 +37,7 @@ import {
   formatElapsed,
   type PrCommentDelta,
   severityEmoji,
-} from "../report";
+} from "#review/report";
 
 // ---------------------------------------------------------------------------
 // Workflow commands (`::group::`, `::endgroup::`, `::notice::`, `::warning::`,

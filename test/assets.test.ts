@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { localReviewSpec } from "#review/preflight";
 import { resolveEngineAssets, selfInvocation } from "../src/assets";
-import { localReviewSpec } from "../src/preflight";
 
 describe("resolveEngineAssets", () => {
   test("returns populated assets in dev mode with existing paths", () => {

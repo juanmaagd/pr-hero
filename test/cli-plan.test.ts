@@ -16,7 +16,10 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import type { CliOptions, ConfigSources } from "#review/preflight";
 import type { ParsedAgent } from "#review/prompt-set";
+import { estimateCost, formatModelRoute } from "#review/report";
+import type { SizeGateVerdict } from "#review/size-gate";
 import type { ReviewSpec } from "#review/spec";
 import {
   type ConfigProvenance,
@@ -27,9 +30,6 @@ import {
   renderPlan,
   renderPrPlan,
 } from "../src/cli";
-import type { CliOptions, ConfigSources } from "../src/preflight";
-import { estimateCost, formatModelRoute } from "../src/report";
-import type { SizeGateVerdict } from "../src/size-gate";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");

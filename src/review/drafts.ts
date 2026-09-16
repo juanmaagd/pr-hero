@@ -113,10 +113,10 @@ function must(condition: boolean, message: string): void {
 // PAID-FOR FAILURE (PR #50, 2026-08-23): a hunter emitted `"symbol": null`,
 // neither validator looked at the field, the null was written into
 // findings.json — the artifact the sibling lab validates — and then killed the
-// POST at report.ts's oneLine(). The pipeline had already billed $3.77.
+// POST at review/report.ts's oneLine(). The pipeline had already billed $3.77.
 //
 // Mutates IN PLACE: validateHunterDraft discards this function's return value,
-// so rebuilding here would be silently inert. pipeline.ts stamps `hunter` onto
+// so rebuilding here would be silently inert. review/pipeline.ts stamps `hunter` onto
 // the same extracted object the same way.
 function normalizeOptionalString(
   f: Record<string, unknown>,
@@ -304,7 +304,7 @@ export function validateDraftFinding(
     `draft findings[${index}].proof_refs`,
   );
   // The only two optional keys on a DraftFinding. `root_cause_id` is normally
-  // engine-assigned (pipeline.ts), which does not stop a hunter emitting it.
+  // engine-assigned (review/pipeline.ts), which does not stop a hunter emitting it.
   normalizeOptionalString(f, "symbol", `draft findings[${index}].symbol`);
   normalizeOptionalString(
     f,
@@ -365,7 +365,7 @@ export function validateRefuterResult(
       `refuter results[${i}].proof_refs must be an array`,
     );
     // Preventive, not a live crash vector: only `outcome` is read off a
-    // refuter result today (pipeline.ts). Kept symmetric with the draft rule
+    // refuter result today (review/pipeline.ts). Kept symmetric with the draft rule
     // above so a future consumer cannot inherit the same class of defect.
     must(
       (r.proof_refs as unknown[]).every((ref) => typeof ref === "string"),

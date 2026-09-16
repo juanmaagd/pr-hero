@@ -3,13 +3,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { armOfRun, scoutFailed } from "#compare/floor-test";
-import { parsePipelineMeta } from "#watch/preflight";
 import {
   PIPELINE_SCHEMA_VERSION,
   type PipelineInput,
   runPipeline,
-} from "../../src/pipeline";
-import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
+} from "#review/pipeline";
+import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
+import { parsePipelineMeta } from "#watch/preflight";
 
 // ---------------------------------------------------------------------------
 // D1-10c — §13's required-evidence artifact: `pipeline.json` read-back

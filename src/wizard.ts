@@ -2,6 +2,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  GOTCHAS_PLACEHOLDER_MARKER,
+  INIT_GIT_REMINDER,
+  initConfigTemplate,
+} from "#review/preflight";
+import {
   type AgentEnvDetection,
   detectAgentEnvironments,
   registerMcpServer,
@@ -12,11 +17,6 @@ import type {
   ExactBindingCapabilityReport,
   RunnerBackend,
 } from "./execution/contracts";
-import {
-  GOTCHAS_PLACEHOLDER_MARKER,
-  INIT_GIT_REMINDER,
-  initConfigTemplate,
-} from "./preflight";
 import { collectDoctorExactBindingReports } from "./production-runtime";
 import {
   type CheckSystemToolsOptions,

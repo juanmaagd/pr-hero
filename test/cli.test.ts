@@ -27,6 +27,19 @@ import type { PrHeroFindingRef } from "#compare/compare";
 import type { StoredComparison } from "#compare/ledger";
 import type { RereviewProvenance } from "#rereview/prepare";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
+import {
+  CliError,
+  type CliOptions,
+  CliUsageError,
+  DEFAULT_MAX_VERIFICATION_STEPS,
+  EMPTY_LOCAL_CONFIG,
+  type NumstatDiffStat,
+  type NumstatFile,
+  resolveMaxVerificationSteps,
+  resolveSummary,
+  type SummarySettings,
+} from "#review/preflight";
+import { DEFAULT_SIZE_GATE, type SizeGateConfig } from "#review/size-gate";
 import { triageMarker } from "#triage/triage";
 import { resolveEngineAssets } from "../src/assets";
 import {
@@ -76,19 +89,6 @@ import {
   findingMarker,
   PR_FINDING_MARKER_PREFIX,
 } from "../src/pr-preflight";
-import {
-  CliError,
-  type CliOptions,
-  CliUsageError,
-  DEFAULT_MAX_VERIFICATION_STEPS,
-  EMPTY_LOCAL_CONFIG,
-  type NumstatDiffStat,
-  type NumstatFile,
-  resolveMaxVerificationSteps,
-  resolveSummary,
-  type SummarySettings,
-} from "../src/preflight";
-import { DEFAULT_SIZE_GATE, type SizeGateConfig } from "../src/size-gate";
 
 // ---------------------------------------------------------------------------
 // FakeGh: records every call's argv AND stdin (decoded), in order. Routes
@@ -497,11 +497,15 @@ describe("every cost-rendering call site in src/cli.ts carries the notional spli
 // `review()` and `reviewPr()` are unexported I/O shells, so no offline test
 // reaches their gotchas gate — which is exactly how the gate came to promise
 // something it did not enforce. The predicate itself is unit-tested in
-// test/preflight.test.ts; what has no other guard is that both shells actually
-// ASK it. Same precedent as the notional-split scan above: pin the wiring,
-// state the invariant rather than the line numbers.
+// test/review/preflight.test.ts; what has no other guard is that both shells
+// actually ASK it. Same precedent as the notional-split scan above: pin the
+// wiring, state the invariant rather than the line numbers.
 describe("every gotchas gate asks the shared predicate", () => {
-  const sources = ["../src/cli.ts", "../src/pipeline.ts", "../src/doctor.ts"];
+  const sources = [
+    "../src/cli.ts",
+    "../src/review/pipeline.ts",
+    "../src/doctor.ts",
+  ];
 
   test("no gate re-implements the old empty-only check", async () => {
     // The exact statements the four gates used before the placeholder was

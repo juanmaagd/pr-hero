@@ -20,6 +20,7 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import { buildStepArgv } from "#review/step-runner";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -48,7 +49,6 @@ import {
   OpenCodeAuthBroker,
 } from "../src/security/credential-broker";
 import { authorizeWorkspaceCwd } from "../src/security/execution-authority";
-import { buildStepArgv } from "../src/step-runner";
 import {
   admitRoutePlan,
   type D1_11ReadinessEvidence,
@@ -197,7 +197,7 @@ function createMockTransport(
 
 function makeStep(
   tmpDir: string,
-  overrides: Partial<import("../src/step-runner").StepSpec> = {},
+  overrides: Partial<import("#review/step-runner").StepSpec> = {},
 ) {
   return {
     name: "hunter-reliability",

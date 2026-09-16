@@ -15,7 +15,8 @@
 // PR proves something was wrong — not that a reviewer should have caught it,
 // and not which change introduced it.
 
-import { CliUsageError } from "../preflight";
+import { CliUsageError } from "#review/preflight";
+import { unquotePath } from "#review/size-gate";
 // The byte-level git protocol constants live in ONE place: a second copy of
 // "\x1f means field separator" is a second place to be wrong about a delimiter
 // no author can type but every parser here trusts.
@@ -24,7 +25,6 @@ import {
   GIT_LOG_FIELD_SEP,
   pickCommitPull,
 } from "../reverts-preflight";
-import { unquotePath } from "../size-gate";
 
 // ---------------------------------------------------------------------------
 // Flag values. Both defaults are spelled as literals inside preflight.ts's
