@@ -3,8 +3,8 @@
 // `merge-base --is-ancestor`, and `diff --name-only`, and tests inject fakes.
 // The case machine itself stays in rereview/plan.ts.
 
+import { normalizePath } from "#compare/compare";
 import { parseTriageMarker } from "#triage/triage";
-import { normalizePath } from "../compare";
 import type { Severity } from "../findings";
 import { claimFingerprint } from "../pr-preflight";
 import {

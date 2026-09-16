@@ -7,12 +7,12 @@
 // score well, and an instrument that pretended otherwise would be the third
 // thing this milestone had to throw away (§3.10bis killed the second).
 //
-// PURE on purpose, the report.ts rule: no I/O, no clock, no git. The harness
+// PURE on purpose, the ../report.ts rule: no I/O, no clock, no git. The harness
 // reads the run dirs and hands parsed objects in, so a scoring pass can be
 // re-run from artifacts on disk months later and come out byte-identical.
 
+import type { Finding, FindingsDocument } from "../findings";
 import { DEFAULT_LINE_WINDOW, normalizePath } from "./compare";
-import type { Finding, FindingsDocument } from "./findings";
 
 // §3.11's two case types, and M6 must not blur them: a `miss` case reviews the
 // PR where our engine missed something Greptile found; a `corpus` case reviews
@@ -121,7 +121,7 @@ export function parseFloorCases(raw: string): FloorCase[] {
   return cases;
 }
 
-// `compare.ts`'s window, reused rather than re-chosen: the head-to-head and
+// `compare/compare.ts`'s window, reused rather than re-chosen: the head-to-head and
 // this scorer must agree on what "the same place" means, or a finding can be
 // `both` against Greptile and a miss against the floor test at the same line.
 export { DEFAULT_LINE_WINDOW };

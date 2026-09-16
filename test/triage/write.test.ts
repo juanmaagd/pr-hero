@@ -6,9 +6,9 @@
 // it would break the real binder.
 
 import { describe, expect, test } from "bun:test";
+import type { StoredComparisonRow } from "#compare/ledger";
 import { triageMarker } from "#triage/triage";
 import { applyTriageReplies, type TriageReplyCandidate } from "#triage/write";
-import type { StoredComparisonRow } from "../../src/ledger";
 import { findingMarker } from "../../src/pr-preflight";
 
 const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
@@ -97,7 +97,7 @@ describe("applyTriageReplies — verdict composition (ROADMAP B6c)", () => {
   });
 
   // The escalation seam (ROADMAP B6b/B6c): inconclusive leaves verdict null
-  // (routes to Pending triage, ledger.ts:289) but actor IS written — that
+  // (routes to Pending triage, compare/ledger.ts:289) but actor IS written — that
   // is what lets a reader tell "adjudicated, could not settle" apart from
   // "nobody has looked yet" (both null).
   test("inconclusive: verdict stays null, actor is still written", () => {

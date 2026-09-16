@@ -8,7 +8,8 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import type { Bucket } from "../compare";
+import type { Bucket } from "#compare/compare";
+import type { StoredComparison, StoredComparisonRow } from "#compare/ledger";
 import {
   type DebugDedupedFinding,
   type DebugRefutedFinding,
@@ -22,7 +23,6 @@ import {
   type Telemetry,
   validateFindingsDocument,
 } from "../findings";
-import type { StoredComparison, StoredComparisonRow } from "../ledger";
 import {
   type CanonicalFindingRow,
   type CanonicalRunRow,

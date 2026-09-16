@@ -18,14 +18,14 @@ import { existsSync } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { writeJsonAtomically } from "../src/execution/atomic-write";
-import type { FindingsDocument } from "../src/findings";
 import {
   findingsToMartianReview,
   lookupGolden,
   type MartianGoldenPr,
   prNumberFromUrl,
-} from "../src/martian-adapter";
+} from "#compare/martian-adapter";
+import { writeJsonAtomically } from "../src/execution/atomic-write";
+import type { FindingsDocument } from "../src/findings";
 import { estimateCost } from "../src/report";
 import { DEFAULT_SIZE_GATE, evaluateSizeGateAggregate } from "../src/size-gate";
 import {

@@ -186,7 +186,7 @@ export interface ParsedTriageMarker {
 // (someone pasting a prior triage into a new comment) must never parse as a
 // fresh one. Returns null for anything malformed rather than guessing — a
 // mis-parsed triage becomes a silently wrong ledger tally (6c), exactly the
-// failure ledger.ts's loud per-field validation exists to prevent.
+// failure compare/ledger.ts's loud per-field validation exists to prevent.
 export function parseTriageMarker(body: string): ParsedTriageMarker | null {
   if (!body.startsWith(TRIAGE_MARKER_PREFIX)) return null;
   const firstLine = body.split("\n", 1)[0] ?? "";

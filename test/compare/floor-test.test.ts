@@ -10,7 +10,6 @@
 
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import type { Finding, FindingsDocument } from "../src/findings";
 import {
   armOfRun,
   type FloorCase,
@@ -22,10 +21,12 @@ import {
   scoutFailed,
   tallyArm,
   tallyCleanPrs,
-} from "../src/floor-test";
+} from "#compare/floor-test";
+import type { Finding, FindingsDocument } from "../../src/findings";
 
 const CASES_PATH = path.join(
   import.meta.dir,
+  "..",
   "..",
   "docs",
   "benchmarks",
@@ -33,6 +34,7 @@ const CASES_PATH = path.join(
 );
 const DESIGN_PATH = path.join(
   import.meta.dir,
+  "..",
   "..",
   "docs",
   "research",
@@ -486,10 +488,11 @@ describe("docs/benchmarks/m6-floor-cases.json matches §2.4septies", () => {
 describe("d3 benchmark scorer hooks", () => {
   test("offline scorer reports cash per unique TP and excludes invalid runs", async () => {
     const { scoreBenchmarkRuns, validateBenchmarkPlan } = await import(
-      "../src/diversity/benchmark"
+      "../../src/diversity/benchmark"
     );
     const planPath = path.join(
       import.meta.dir,
+      "..",
       "..",
       "docs",
       "benchmarks",

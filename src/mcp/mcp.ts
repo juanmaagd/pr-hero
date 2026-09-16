@@ -8,10 +8,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { ProductStoreClient } from "./client";
-import { prheroLayout } from "./home-preflight";
-import { type JsonRpcRequest, processMcpMessage } from "./mcp-preflight";
-import { type StoreServerHandle, startProductStoreServer } from "./server";
+import { ProductStoreClient } from "#server/client";
+import {
+  type StoreServerHandle,
+  startProductStoreServer,
+} from "#server/server";
+import { prheroLayout } from "../home-preflight";
+import { type JsonRpcRequest, processMcpMessage } from "./preflight";
 
 export interface McpServerOptions {
   socketPath?: string;

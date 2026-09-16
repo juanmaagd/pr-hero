@@ -70,7 +70,15 @@ import {
   type DeltaRiskAssessment,
 } from "#ci/review-risk";
 import { runCiSetup } from "#ci/setup";
+import type { PrHeroFindingRef } from "#compare/compare";
+import {
+  aggregateLedger,
+  parseComparisonJson,
+  renderLedger,
+  type StoredComparison,
+} from "#compare/ledger";
 import { corpusCommand } from "#corpus/corpus";
+import { runMcpServer } from "#mcp/mcp";
 import {
   capabilityGateDecision,
   produceClaudeCapabilityReport,
@@ -179,7 +187,6 @@ import {
 } from "#watch/preflight";
 import { watchCommand } from "#watch/watch";
 import { type EngineAssets, resolveEngineAssets } from "./assets";
-import type { PrHeroFindingRef } from "./compare";
 import {
   type DoctorCheckItem,
   type DoctorReport,
@@ -227,13 +234,6 @@ import {
   parseHunkAnchors,
   resolvePostLine,
 } from "./inline";
-import {
-  aggregateLedger,
-  parseComparisonJson,
-  renderLedger,
-  type StoredComparison,
-} from "./ledger";
-import { runMcpServer } from "./mcp";
 import { resolveMenuContext } from "./menu-context";
 import {
   changedPathsFromDiff,
@@ -5279,7 +5279,7 @@ async function init(options: CliOptions): Promise<number> {
 // `pr-hero ledger` (ROADMAP B4) — accumulate every run's comparison.json
 // into one markdown ledger, so the three buckets become a rate instead of a
 // per-run snapshot. Read-only over the runs root; every decision (parse,
-// latest-run-per-PR, render) is pure in ledger.ts.
+// latest-run-per-PR, render) is pure in compare/ledger.ts.
 async function ledgerCommand(options: CliOptions): Promise<number> {
   const repoRoot = await resolveRepoRoot(options.repo);
   const runsRoot = options.runs

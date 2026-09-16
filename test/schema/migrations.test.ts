@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { armOfRun, scoutFailed } from "#compare/floor-test";
 import { parsePipelineMeta } from "#watch/preflight";
-import { armOfRun, scoutFailed } from "../../src/floor-test";
 import {
   PIPELINE_SCHEMA_VERSION,
   type PipelineInput,

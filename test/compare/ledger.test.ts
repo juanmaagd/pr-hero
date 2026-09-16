@@ -15,8 +15,8 @@ import {
   renderLedger,
   type StoredComparison,
   type StoredComparisonRow,
-} from "../src/ledger";
-import { CliUsageError, parseArgs } from "../src/preflight";
+} from "#compare/ledger";
+import { CliUsageError, parseArgs } from "../../src/preflight";
 
 const PR_1682_COMPARISON = {
   pr: 1682,

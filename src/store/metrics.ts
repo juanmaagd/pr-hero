@@ -13,8 +13,8 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import type { StoredComparison } from "#compare/ledger";
 import type { FindingsDocument } from "../findings";
-import type { StoredComparison } from "../ledger";
 import type { PerAgentUsage } from "../pipeline";
 import {
   type ComparisonRowProjection,

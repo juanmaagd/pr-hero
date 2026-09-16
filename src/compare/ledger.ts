@@ -4,13 +4,13 @@
 // git, no network, no clock. The I/O shell in cli.ts finds the files, reads
 // the bytes, supplies each file's mtime, and owns stdout.
 
-import type { Bucket } from "./compare";
-import type { RunStatus } from "./findings";
+import type { RunStatus } from "../findings";
 import type {
   ComparisonGreptileClaim,
   ComparisonPrHeroClaim,
-} from "./pr-preflight";
-import { CliUsageError, isFullCommitId } from "./preflight";
+} from "../pr-preflight";
+import { CliUsageError, isFullCommitId } from "../preflight";
+import type { Bucket } from "./compare";
 
 // Unlike ComparisonRow (written always-null), a stored row may have been
 // triaged since it was written: verdict, reasoning and actor read back as
@@ -469,7 +469,7 @@ function rowIdentity(row: StoredComparisonRow): string {
   return "(no claim data)";
 }
 
-// Same hazard code() in report.ts guards: a backtick inside a claim-authored
+// Same hazard code() in ../report.ts guards: a backtick inside a claim-authored
 // path would break out of its span and mangle the rest of the line.
 function codeSpan(text: string): string {
   return `\`${text.replaceAll("`", "'")}\``;

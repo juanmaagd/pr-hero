@@ -10,9 +10,9 @@
 // closes, or labels anything. Costs nothing and runs no pr-hero review — point
 // it at an artifact a review already produced.
 
-import { compareFindings, type PrHeroFindingRef } from "../src/compare";
-import { renderComparison } from "../src/compare-report";
-import { parseGreptileComment, pickGreptileComment } from "../src/greptile";
+import { compareFindings, type PrHeroFindingRef } from "#compare/compare";
+import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
+import { renderComparison } from "#compare/report";
 
 function fail(message: string): never {
   console.error(`compare-pr: ${message}`);

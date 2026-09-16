@@ -16,7 +16,7 @@ import {
   GREPTILE_BOT_LOGIN,
   parseGreptileComment,
   pickGreptileComment,
-} from "../src/greptile";
+} from "#compare/greptile";
 
 const PR_1677_BODY = `<h3>Greptile Summary</h3>
 
