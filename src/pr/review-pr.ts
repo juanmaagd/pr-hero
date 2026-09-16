@@ -158,30 +158,18 @@ import {
   runPipeline,
 } from "#review/pipeline";
 import {
-  agentFilePath,
   allExcludedMessage,
-  assertBasenameOnly,
   CliError,
   type CliOptions,
   emptyDiffMessage,
-  gotchasErrorMessage,
-  gotchasUnusableReason,
   isCiEnvironment,
-  localReviewSpec,
   type NumstatFile,
   parseNumstatFiles,
-  preflightAgentsDir,
-  resolveAgentsDir,
   resolveMaxVerificationSteps,
   resolvePost,
   resolveScout,
   resolveSummary,
 } from "#review/preflight";
-import {
-  type ParsedAgent,
-  parseAgentFile,
-  promptSetIdentity,
-} from "#review/prompt-set";
 import {
   type DiffStat,
   envelopeModel,
@@ -198,10 +186,12 @@ import {
 import {
   assertDistinctRange,
   buildTelemetry,
-  CODEGRAPH_ONLY_MCP_CONFIG,
-  EMPTY_MCP_CONFIG,
+  prepareRunnerForRoute,
   resolveGotchasPath,
+  resolvePromptSet,
   selectActiveHunters,
+  validateGotchas,
+  writeMcpConfig,
 } from "#review/run";
 import {
   type ExcludedPath,
@@ -212,8 +202,6 @@ import {
   sizeGateConfig,
   sizeGateLine,
 } from "#review/size-gate";
-import { validateReviewSpec } from "#review/spec";
-import { ClaudeCodeRunner } from "#review/step-runner";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import { runGc } from "#store/gc";
 import {
@@ -249,10 +237,7 @@ import {
   type IgnoreFileReadResult,
   readLocalIgnoreRules,
 } from "../ignore-read";
-import {
-  createProductionRuntime,
-  type ProductionRuntime,
-} from "../production-runtime";
+import type { ProductionRuntime } from "../production-runtime";
 import { resolveRunnerAuthority } from "../runner-authority";
 import { resolveOpenCodeAuthPath } from "../security/credential-broker";
 
@@ -350,50 +335,13 @@ export async function reviewPr(
   }
   // The WHOLE resolution, not just its dir: under the compiled binary the
   // prompt set is a map of embedded paths and `dir` is only a display label.
-  const agents = resolveAgentsDir(options, loaded);
+  const { agents, spec, agentFiles, promptSet } = await resolvePromptSet(
+    options,
+    loaded,
+  );
   const { dir: agentsDir, source: agentsDirSource } = agents;
-  const spec = validateReviewSpec(localReviewSpec());
-  spec.agents.forEach((agent, i) => {
-    assertBasenameOnly(agent.file, i);
-  });
-  await preflightAgentsDir(
-    agents,
-    spec.agents.map((a) => a.file),
-  );
-  const agentFiles = new Map<string, ParsedAgent>();
-  for (const agent of spec.agents) {
-    agentFiles.set(
-      agent.key,
-      await parseAgentFile(agentFilePath(agents, agent.file)),
-    );
-  }
-
-  // The prompt set's identity (§3.9), computed from the spec's DECLARATION
-  // order — the same order the lab's promptSetFingerprint hashes in, so the
-  // two sides produce the same string for the same bytes. It is what turns
-  // M6's central claim, "both arms ran the same prompt set", from something
-  // believed into something recorded, and it fills the `prompt_set` seat
-  // review/findings.ts has declared and never populated.
-  const promptSet = await promptSetIdentity(
-    agentsDir,
-    // spec DECLARATION order, and it must stay that: promptSetFingerprint
-    // hashes the concatenated texts in the order it is handed, and
-    // `prompt_set.sha256` is compared across runs by an external consumer.
-    // Reading the list off the bundled map's keys instead would move every
-    // fingerprint ever recorded, silently — the digest still looks valid.
-    spec.agents.map((a) => agentFilePath(agents, a.file)),
-    // A bundled set has no directory basename to be named after. "default" is
-    // what dev and npm derive from prompts/default, so the same prompt set
-    // names itself identically in all three runtimes.
-    agents.kind === "bundled" ? "default" : undefined,
-  );
   const gotchasPath = resolveGotchasPath(options.gotchas, operatorRoot);
-  const gotchasFile = Bun.file(gotchasPath);
-  const gotchas = (await gotchasFile.exists()) ? await gotchasFile.text() : "";
-  const gotchasUnusable = gotchasUnusableReason(gotchas);
-  if (gotchasUnusable !== undefined) {
-    throw new CliError(gotchasErrorMessage(gotchasPath, gotchasUnusable));
-  }
+  await validateGotchas(gotchasPath);
   // Local mode's dirty-tree and HEAD-match gates are both skipped here ON
   // PURPOSE: the hunters read the worktree and never this checkout, and the
   // worktree satisfies the HEAD gate by construction (created detached at
@@ -1336,14 +1284,7 @@ export async function reviewPr(
       const codegraphAvailable = existsSync(
         path.join(worktreePath, ".codegraph"),
       );
-      await Bun.write(
-        mcpConfigPath,
-        `${JSON.stringify(
-          codegraphAvailable ? CODEGRAPH_ONLY_MCP_CONFIG : EMPTY_MCP_CONFIG,
-          null,
-          2,
-        )}\n`,
-      );
+      await writeMcpConfig(mcpConfigPath, codegraphAvailable);
 
       // 11 — run, with live progress (same shape as local mode's leg). The
       // pipeline is untouched beyond the observational tap: it gets the worktree
@@ -1382,23 +1323,15 @@ export async function reviewPr(
           summary.enabled,
         );
         try {
-          if (routePlan !== undefined && productionAdmission !== undefined) {
-            productionRuntime = await createProductionRuntime({
-              ...productionAdmission.authorityOptions,
-              plan: routePlan,
-              workspaceRoot: worktreePath,
-              registry: productionAdmission.registry,
-              evidence: productionAdmission.evidence,
-              // #182 follow-up: without this the admission may decide
-              // free-server while the bindings stay metered, and the
-              // runtime's own guard refuses the divergence — both or neither.
-              ...(productionAdmission.freeModelProbe === undefined
-                ? {}
-                : { freeModelProbe: productionAdmission.freeModelProbe }),
-              mode: "production",
-              signal: ceilingController.signal,
-            });
-          }
+          const prepared = await prepareRunnerForRoute({
+            routePlan,
+            productionAdmission,
+            workspaceRoot: worktreePath,
+            runnerAuthority,
+            ceilingController,
+            onProgress: progress.onProgress,
+          });
+          productionRuntime = prepared.productionRuntime;
           // registerActiveRun rides INSIDE this try, not before it: the
           // renderer is already ticking by now, and a throw here used to
           // leak its 250ms interval — which keeps the event loop alive and
@@ -1460,25 +1393,7 @@ export async function reviewPr(
               maxVerificationSteps,
               ...(phaseB === undefined ? {} : { phaseB }),
             },
-            {
-              runner:
-                productionRuntime !== undefined
-                  ? productionRuntime.runner
-                  : new ClaudeCodeRunner({
-                      ...runnerAuthority.runnerOptions,
-                      signal: ceilingController.signal,
-                    }),
-              ...(productionRuntime !== undefined
-                ? {
-                    transportRegistry: productionRuntime.registry,
-                    ...(productionRuntime.evidence === undefined
-                      ? {}
-                      : { admissionEvidence: productionRuntime.evidence }),
-                  }
-                : {}),
-              ceilingController,
-              onProgress: progress.onProgress,
-            },
+            prepared.deps,
           );
         } finally {
           // try/finally, never success-only: a leaked interval keeps the

@@ -360,16 +360,24 @@ describe("every gotchas gate asks the shared predicate", () => {
   });
 
   test("both review shells route through gotchasUnusableReason", async () => {
-    // Local review and PR review moved to their own modules (cli-decomp-08)
-    // but the invariant is unchanged: one gate, one error render, per shell —
-    // and every render carries the reason the predicate returned rather than
-    // a hardcoded one.
+    // Local review and PR review moved to their own modules (cli-decomp-08),
+    // then P2.2 (odd/tasks/shared-run-stages.md) moved the gate ITSELF into
+    // `#review/run`'s `validateGotchas` — both shells now call that shared
+    // function exactly once, and `validateGotchas` is the one place left
+    // that asks `gotchasUnusableReason` and renders `gotchasErrorMessage`.
+    // The invariant is unchanged: one gate, one error render, reused rather
+    // than duplicated per shell.
     for (const rel of ["../src/review/review.ts", "../src/pr/review-pr.ts"]) {
       const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
       const count = (needle: string) => source.split(needle).length - 1;
-      expect(count("gotchasUnusableReason(gotchas)")).toBe(1);
-      expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(1);
+      expect(count("validateGotchas(gotchasPath)")).toBe(1);
     }
+    const runSource = await Bun.file(
+      path.resolve(import.meta.dir, "../src/review/run.ts"),
+    ).text();
+    const count = (needle: string) => runSource.split(needle).length - 1;
+    expect(count("gotchasUnusableReason(gotchas)")).toBe(1);
+    expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(1);
   });
 
   // `init`'s own gotchas-block wiring test moved to
