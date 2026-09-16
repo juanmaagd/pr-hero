@@ -31,13 +31,13 @@
 // multiple output keys written across several tool calls). An overwrite here
 // would silently destroy an earlier step's contribution to the same file.
 import { appendFile } from "node:fs/promises";
-import type { Finding, Severity } from "./findings";
+import type { Finding, Severity } from "../findings";
 import {
   blobUrl,
   formatElapsed,
   type PrCommentDelta,
   severityEmoji,
-} from "./report";
+} from "../report";
 
 // ---------------------------------------------------------------------------
 // Workflow commands (`::group::`, `::endgroup::`, `::notice::`, `::warning::`,

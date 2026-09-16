@@ -15,16 +15,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { RereviewProvenance } from "#rereview/prepare";
-import { resolveEngineAssets } from "../src/assets";
 import {
   type AdmissionRecord,
   serializeAdmissionRecord,
-} from "../src/ci-admission-ledger";
+} from "#ci/admission-ledger";
 import {
   evaluateCiReviewAdmission,
   resolveCiAdmissionAttemptCount,
-} from "../src/ci-review-admission";
+} from "#ci/review-admission";
+import type { RereviewProvenance } from "#rereview/prepare";
+import { resolveEngineAssets } from "../src/assets";
 import {
   assertRunMatchesPr,
   computeDroppedFindingIds,

@@ -3,7 +3,7 @@
 //
 // Offline only: generateCiWorkflowTemplate is pure and asserted with Bun's
 // built-in YAML parser (Bun.YAML.parse — no new dependency); runCiSetup
-// touches only an mkdtemp fixture, the same pattern test/ci-reporter.test.ts
+// touches only an mkdtemp fixture, the same pattern test/ci/reporter.test.ts
 // uses for its impure edge functions; doctor's CI check is exercised through
 // fully injected exists/env, never real process.env, network, or spawn.
 
@@ -18,17 +18,17 @@ import {
   materializeCiOpenCodeData,
   OWN_CI_WORKFLOW_OPTIONS,
   runCiSetup,
-} from "../src/ci-setup";
-import { runDoctor } from "../src/doctor";
-import { prheroLayout } from "../src/home-preflight";
-import { DEFAULT_PIPELINE_TIMEOUT_MS } from "../src/pipeline";
+} from "#ci/setup";
+import { runDoctor } from "../../src/doctor";
+import { prheroLayout } from "../../src/home-preflight";
+import { DEFAULT_PIPELINE_TIMEOUT_MS } from "../../src/pipeline";
 import {
   parseArgs,
   parseGlobalConfig,
   parseLocalConfig,
-} from "../src/preflight";
-import { resolveOpenCodeAuthPath } from "../src/security/credential-broker";
-import { checkCiConfiguration } from "../src/system-tools";
+} from "../../src/preflight";
+import { resolveOpenCodeAuthPath } from "../../src/security/credential-broker";
+import { checkCiConfiguration } from "../../src/system-tools";
 
 const OPENCODE_CI_ROUTING = JSON.stringify({
   default: {
@@ -489,7 +489,7 @@ describe("materializeCiOpenCodeData (impure edge)", () => {
       expect(existsSync(path.join(workspace, ".local"))).toBe(false);
 
       const proc = Bun.spawn(
-        ["bun", path.resolve(__dirname, "..", "src", "ci-setup.ts")],
+        ["bun", path.resolve(__dirname, "..", "..", "src", "ci", "setup.ts")],
         {
           cwd: workspace,
           env: {
@@ -681,7 +681,7 @@ describe("doctor CI diagnostics (Pillar 3)", () => {
   // a GitHub Actions runner, where `GITHUB_ACTIONS=true` is always set and the
   // secrets this check looks for are not.
   //
-  // Verified, not theorised: `GITHUB_ACTIONS=true bun test test/ci-setup.test.ts`
+  // Verified, not theorised: `GITHUB_ACTIONS=true bun test test/ci/setup.test.ts`
   // failed both of these before the injection was added. That matters now that
   // .github/workflows/ci.yml runs this suite on every pull request — a gate
   // that goes red for a reason unrelated to any defect is how a team learns to

@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { CI_WORKFLOW_RELATIVE_PATH } from "#ci/setup";
 import {
   type EngineAssets,
   resolveEngineAssets,
   selfInvocation,
 } from "../src/assets";
-import { CI_WORKFLOW_RELATIVE_PATH } from "../src/ci-setup";
 import {
   type DoctorReport,
   PROVIDER_HINTS,

@@ -1,7 +1,7 @@
 // Current-head delta risk classification for CI admission (WU-04). Pure — no I/O.
 // Unknown never qualifies as safe; only an explicit all-low allowlist may skip.
 
-import { normalizePath } from "./compare";
+import { normalizePath } from "../compare";
 
 export const CI_RISK_POLICY_VERSION = 1;
 

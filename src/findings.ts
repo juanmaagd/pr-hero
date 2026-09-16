@@ -619,7 +619,7 @@ export function deriveTier(
   // mechanics. Saying otherwise, as this comment did until 2026-08-27,
   // invents a consequence and invites a reader to design against it — and it
   // was never even an open question: "blocking findings exit 0 in CI —
-  // reviewer, not a merge gate" (test/ci-review.test.ts) has pinned the truth
+  // reviewer, not a merge gate" (test/ci/review.test.ts) has pinned the truth
   // the whole time. Four comments justified design decisions against a premise
   // a test in this same repo already refuted.
   //

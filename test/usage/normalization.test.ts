@@ -109,7 +109,7 @@ describe("normalizePartialUsage — unproven inclusion (§8 line 457)", () => {
 
 // 2026-09-02, #177. THE one predicate that reads "does this environment carry
 // a per-token credential?", and it has exactly two callers by design:
-// `deriveCiBillingMode` (ci-gates.ts), which turns it into a CI spend ceiling,
+// `deriveCiBillingMode` (ci/gates.ts), which turns it into a CI spend ceiling,
 // and the Claude CLI transport, which turns it into the billing mode STAMPED
 // ON EVERY USAGE RECORD. Two copies would be two chances for the ceiling and
 // the records to disagree about whether one run bills — and #177 is exactly
@@ -145,7 +145,7 @@ describe("envBillsMetered — the shared metered-credential signal (#177)", () =
   });
 
   // The conservative direction. This repo does NOT know which credential the
-  // Claude CLI bills when both are present (ci-gates.ts states the gap at
+  // Claude CLI bills when both are present (ci/gates.ts states the gap at
   // length), and it does not need to: guess "subscription" wrongly and real
   // money is reported as not charged, which is the under-reporting failure
   // #177 exists to close.

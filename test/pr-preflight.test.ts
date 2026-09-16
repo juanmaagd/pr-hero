@@ -10,12 +10,12 @@
 // handles is the shape gh actually emits, not the shape a spec described.
 
 import { describe, expect, test } from "bun:test";
-import { PR_STATE_MARKER_PREFIX } from "#rereview/state";
 import {
   SKIP_BUDGET_COMMENT_MARKER,
   SKIP_COVERAGE_COMMENT_MARKER,
   SKIP_SIZE_COMMENT_MARKER,
-} from "../src/ci-gates";
+} from "#ci/gates";
+import { PR_STATE_MARKER_PREFIX } from "#rereview/state";
 import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
 import type { GreptileFinding } from "../src/greptile";
 import {

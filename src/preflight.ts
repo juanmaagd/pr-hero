@@ -5,11 +5,11 @@
 // tested is a preflight that gets tested once, live, at $10 a go.
 
 import path from "node:path";
-import { type EngineAssets, resolveEngineAssets } from "./assets";
 import {
   CI_REVIEW_POLICY_MODES,
   type CiReviewPolicyMode,
-} from "./ci-review-admission";
+} from "#ci/review-admission";
+import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type {
   ModelGateway,
   RouteMapping,
@@ -232,7 +232,7 @@ export interface CliOptions {
   ciSubcommand?: "init";
   // Unset means "no ceiling configured" (no gate, no disabled-ceiling
   // warning — there is nothing to disable). <= 0, GIVEN explicitly, disables
-  // the ceiling too, but DOES warn: see ci-gates.ts's
+  // the ceiling too, but DOES warn: see ci/gates.ts's
   // budgetDisabledWarningMessage for why the two are not the same state.
   budgetUsd?: number;
   // Tri-state like `summary`/`scout`: unset means "the shell's own default
@@ -247,7 +247,7 @@ export interface CliOptions {
 // testable without process.env being a hidden dependency the way parseArgs
 // itself refuses to have one. There is no `src/ci.ts` (design's proposed
 // home for this function) — Phases 1-2 already folded the CI surface into
-// ci-reporter.ts/ci-gates.ts instead, and this joins that same deviation
+// ci/reporter.ts/ci/gates.ts instead, and this joins that same deviation
 // rather than starting a third file for one function.
 export function isCiEnvironment(
   options: { ci?: boolean },
@@ -1254,7 +1254,7 @@ function applyValueFlag(
       return;
     // Unlike parseLimit (integer-only, size-gate's line/file counts):
     // spend is a float ($7.50), and <= 0 is a real, meaningful value (see
-    // ci-gates.ts's evaluateBudgetGate) rather than a rejected input, so this
+    // ci/gates.ts's evaluateBudgetGate) rather than a rejected input, so this
     // only refuses non-numbers, never negatives.
     case "--budget-usd": {
       const parsed = Number(value);
@@ -1970,7 +1970,7 @@ export interface LocalConfig {
   max_changed_files?: number;
   scout?: boolean;
   post?: boolean;
-  // CI admission: when to spend on a synchronize push (see ci-review-admission.ts).
+  // CI admission: when to spend on a synchronize push (see ci/review-admission.ts).
   ci_review_policy?: CiReviewPolicyMode;
   ci_max_attempts?: number;
   ci_max_reviews?: number;

@@ -44,6 +44,17 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "tree",
     ],
   },
+  {
+    domain: "ci",
+    files: [
+      "admission-ledger",
+      "gates",
+      "reporter",
+      "review-admission",
+      "review-risk",
+      "setup",
+    ],
+  },
 ];
 
 function srcRootFiles(): string[] {

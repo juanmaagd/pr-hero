@@ -31,11 +31,11 @@
 // `$GITHUB_OUTPUT` are impure edges that belong to the CI headless shell
 // (Phase 3, src/pr.ts / src/cli.ts) — this module only builds the bytes.
 //
-// Reuse: `CiSummaryData` (ci-reporter.ts) is the exported contract for the
+// Reuse: `CiSummaryData` (ci/reporter.ts) is the exported contract for the
 // step-summary payload. Its `skipped-size`/`skipped-budget` members stay
 // UNEXPORTED there by design (see that module's header) — this file names
 // them with `Extract<CiSummaryData, { kind: "..." }>` against the exported
-// union rather than asking ci-reporter.ts to promote either member. Nothing
+// union rather than asking ci/reporter.ts to promote either member. Nothing
 // here needed a member exported on its own: an object literal typed against
 // the union already type-checks structurally (renderStepSummary's own tests
 // construct `CiSummaryData` values in the exact same way), and `Extract`
@@ -60,21 +60,22 @@
 // gate skip has no code to anchor a head declaration to. Wiring these
 // markers into the idempotent find-or-create flow (`findMarkedCommentId`)
 // is Phase 3's job, once a real poster exists to consume them.
+
+import { envBillsMetered } from "../execution/usage-normalized";
+import type { SizeGateVerdict } from "../size-gate";
 import {
   type CiOutputs,
   type CiSummaryData,
   renderStepSummary,
-} from "./ci-reporter";
+} from "./reporter";
 import {
   type CiReviewAdmissionVerdict,
   type CiReviewPolicyMode,
   ciAdmissionRemainingBudget,
   ciReviewManualRequiredDetail,
   ciReviewSkipDetail,
-} from "./ci-review-admission";
-import type { DeltaRiskAssessment } from "./ci-review-risk";
-import { envBillsMetered } from "./execution/usage-normalized";
-import type { SizeGateVerdict } from "./size-gate";
+} from "./review-admission";
+import type { DeltaRiskAssessment } from "./review-risk";
 
 function usd(amount: number): string {
   return `$${amount.toFixed(2)}`;
@@ -137,7 +138,7 @@ export interface CiGateSkip {
   // Markdown for the PR comment. Posting it (or not, per `--post`) is the
   // caller's job.
   comment: string;
-  // Feeds directly into ci-reporter.ts's `renderStepSummary`.
+  // Feeds directly into ci/reporter.ts's `renderStepSummary`.
   summary: CiSummaryData;
 }
 
@@ -157,7 +158,7 @@ export const SKIP_COVERAGE_COMMENT_MARKER = "<!-- pr-hero-skip-coverage -->";
 export const MANUAL_REQUIRED_COMMENT_MARKER =
   "<!-- pr-hero-manual-required -->";
 
-// Same register as ci-reporter.ts's `skipSizeLines`/`skipBudgetLines` and
+// Same register as ci/reporter.ts's `skipSizeLines`/`skipBudgetLines` and
 // project rule 4 (assistant posture): a gate skip is a courteous notice
 // about SPEND, never a verdict on the diff's quality. "Split the PR" reads
 // as a practical option, not a correction.
@@ -261,7 +262,7 @@ export function ciBudgetGateSkip(
 // disabled." Only for an EXPLICIT <= 0 — `undefined` (the flag was never
 // given) means no ceiling was ever configured, so there is nothing to warn
 // about disabling. The shell wraps this message with
-// `formatWorkflowCommand("warning", ...)` (ci-reporter.ts); this module only
+// `formatWorkflowCommand("warning", ...)` (ci/reporter.ts); this module only
 // decides whether to and builds the text, never the annotation syntax.
 // ---------------------------------------------------------------------------
 
@@ -282,7 +283,7 @@ export function budgetDisabledWarningMessage(
 // On a Claude subscription route the real cash cost of a run is $0.00, so the
 // shipped $10 default refused to do work over an overrun that cannot happen,
 // and a skipped review is indistinguishable from a clean one to anyone
-// reading the checks (this module's own doctrine, ~110-115; ci-setup.ts:50-63).
+// reading the checks (this module's own doctrine, ~110-115; ci/setup.ts:50-63).
 // So: no ceiling by default on a subscription route, the default ceiling on a
 // metered one, and an explicit operator value honoured verbatim on either.
 // ---------------------------------------------------------------------------
@@ -337,7 +338,7 @@ export type CiBillingMode = "subscription" | "metered";
 // subscription-route CI run carries `ANTHROPIC_API_KEY=""` — and `""` is
 // already falsy, so that case never needed the trim. What the trim catches is
 // a WHITESPACE-ONLY value, which is truthy and would otherwise impose a
-// ceiling on a subscription route. `test/ci-gates.test.ts` asserts both cases
+// ceiling on a subscription route. `test/ci/gates.test.ts` asserts both cases
 // separately, and only the whitespace ones flip when the trim is removed.
 //
 // This is deliberately NOT `provider-capabilities.ts`'s
@@ -441,7 +442,7 @@ export function budgetUnlimitedNoticeMessage(
 // ---------------------------------------------------------------------------
 // CI skip plan — the ONE call reviewPr's shell makes per gate. Composes
 // ciSizeGateSkip/ciBudgetGateSkip's {comment, summary} with renderStepSummary
-// (ci-reporter.ts) and the $GITHUB_OUTPUT contract into everything the shell
+// (ci/reporter.ts) and the $GITHUB_OUTPUT contract into everything the shell
 // needs to publish, so the shell's own job is pure mechanical glue: post
 // `comment` under `markerPrefix` if `--post`, append `summaryMarkdown` if
 // step-summary is on, append `outputs` if $GITHUB_OUTPUT is set, return 0.
