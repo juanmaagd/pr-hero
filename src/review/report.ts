@@ -556,9 +556,9 @@ function findingIndexLines(
 // `commentUrlByFindingId` stays the last, OPTIONAL parameter (ROADMAP B6
 // rework, Juanma's PR #2 feedback): a finding id → its own posted
 // review-comment URL, so the index above can link straight to it. Absent
-// on the summary's FIRST creation (cli.ts creates the summary BEFORE any
+// on the summary's FIRST creation (pr/pr.ts creates the summary BEFORE any
 // per-finding comment exists, to fix its position in the PR timeline —
-// see cli.ts's postInlineFindings WHY) and present on the closing PATCH
+// see pr/pr.ts's postInlineFindings WHY) and present on the closing PATCH
 // once posting finished. Un-anchorable findings have no review-comment
 // URL; their index line stays unlinked and the bucket below has the full
 // body. A caller that omits the map gets a correct, link-free index —
@@ -571,7 +571,7 @@ function findingIndexLines(
 // sits BEFORE the link map so the type system says so. It is the PR's head
 // as GitHub reported it moments before posting, and it is set ONLY on a
 // confirmed mismatch with `doc.head_sha` — the caller does the comparison
-// once (cli.ts's postInlineFindings) so two surfaces cannot derive two
+// once (pr/pr.ts's postInlineFindings) so two surfaces cannot derive two
 // different answers from it, and this renderer is dumb: present means moved,
 // absent means unmoved OR unverifiable. An issue-mandated element whose
 // omission is SILENT is exactly the argument that made `delta` required; a
