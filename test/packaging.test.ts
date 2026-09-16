@@ -372,7 +372,7 @@ describe("Packaging & distribution configuration", () => {
       // Not five: skipped-clean was never wired (a clean review already
       // reports status=reviewed, findings_count=0) and was dropped from
       // spec.md 1.1 rather than left as a documented lie. `error` IS now
-      // wired, via reportFatalCiError (src/cli.ts).
+      // wired, via reportFatalCiError (src/ci/reporter.ts).
       const action = parsedAction();
       expect(action.outputs.status.description).toContain(
         "reviewed, skipped-size, skipped-budget, or error",

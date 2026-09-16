@@ -30,6 +30,12 @@ import {
   serializeAdmissionRecord,
 } from "#ci/admission-ledger";
 import {
+  canonicalAdmissionFindings,
+  nextStateReviewCount,
+  renderCiAdmissionBlock,
+  tierCountsFromFindings,
+} from "#ci/review-admission";
+import {
   type ComparisonResult,
   compareFindings,
   type PrHeroFindingRef,
@@ -38,16 +44,37 @@ import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
 import { renderComparison } from "#compare/report";
 import { THREAD_PAGE_SIZE } from "#corpus/preflight";
 import { git } from "#git/git";
-import type { Finding, RunStatus } from "#review/findings";
+import { collapseTargets, type RereviewProvenance } from "#rereview/prepare";
+import { parseStateBlock, renderStateBlock } from "#rereview/state";
+import type { Finding, FindingsDocument, RunStatus } from "#review/findings";
 import { CliError, isFullCommitId } from "#review/preflight";
+import {
+  type PrCommentDelta,
+  renderInlineComment,
+  renderIssueFindingComment,
+  renderPrComment,
+  rereviewDeltaFromProvenance,
+} from "#review/report";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
-import { matchPostedFindings, type PostedFindingComment } from "./inline";
+import { log } from "#ui/primitives";
+import { parseMarkerHead } from "#watch/preflight";
+import {
+  buildPostPlan,
+  computeDroppedFindingIds,
+  type InlinePostOutcome,
+  matchPostedFindings,
+  type PostedFindingComment,
+  type PostPlan,
+  parseHunkAnchors,
+  resolvePostLine,
+} from "./inline";
 import {
   buildComparisonJson,
   COMMIT_STATUS_CONTEXT,
   COMMIT_STATUS_TIMEOUT_MS,
   type CommitStatusFact,
   type CommitStatusRequest,
+  claimFingerprint,
   decideWorktree,
   findMarkedCommentId,
   parseFindingMarker,
@@ -58,8 +85,6 @@ import {
 export const GRAPHQL_COMMENT_MAX_PAGES = 50;
 
 export class CommentsTruncatedError extends CliError {}
-
-import { renderInlineComment, renderIssueFindingComment } from "#review/report";
 
 // `spawnFn` is the ONLY seam this module adds for testability, and it is
 // deliberately invisible to production callers: every existing call site
@@ -2063,4 +2088,726 @@ export async function upsertAdmissionCheckRun(
     lastStderr = result.stderr.trim();
   }
   throw new CliError(`gh api (admission check run) failed: ${lastStderr}`);
+}
+
+// ---------------------------------------------------------------------------
+// Inline review surface orchestration (ROADMAP B6, WU6) — the ONLY place
+// that composes pr/inline.ts's pure plan with this module's own I/O
+// primitives into the actual post sequence. Shared verbatim by reviewPr's
+// step 14 (a review that just finished) and postCommand (a review read off
+// disk, cli.ts): the SAME code posts either way, because a finding does not
+// know or care whether it came from a fresh run or a `--from <run-dir>`
+// replay. Extracted from cli.ts (cli-decomp S2, Cluster C).
+//
+// `spawnFn` is the same invisible-to-production seam this module's other B6
+// functions already use (see gh()'s WHY comment above) — threaded through
+// here so test/pr/inline-post.test.ts can drive the WHOLE sequence, including
+// the summary PATCH, through one shared fake gh.
+// ---------------------------------------------------------------------------
+
+// Fetch + anchor + plan, with NO posting — the exact subset `post --dry-run`
+// needs (spec "Dry-run from a prior run directory": a read-only comment
+// fetch, zero mutating HTTP calls) and the first half of postInlineFindings,
+// factored out so the two never compute two different plans for the same
+// state.
+export async function resolveInlinePostPlan(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  doc: FindingsDocument;
+  diffPatch: string;
+  spawnFn?: typeof Bun.spawn;
+}): Promise<{
+  plan: PostPlan;
+  previousHeadSha: string | undefined;
+  // Whether a marked summary comment already exists on the PR — threaded
+  // through so postInlineFindings knows whether to CREATE the summary up
+  // front (design rework: create-first fixes the summary's position in the
+  // timeline; see postInlineFindings's own WHY) or leave a pre-existing one
+  // alone until the closing PATCH.
+  existingSummaryId: number | null;
+  summaryBody: string | null;
+  // The FULL finding list the plan matched against — threaded through to
+  // postPrReview's 422 recovery so it can re-match with the SAME finding
+  // set the plan used, never a narrower one (CRIT-A, verify-report-pr3
+  // #3305: re-matching a subset can dissolve a tie the plan already
+  // resolved). See ReviewSubmissionOutcome's WHY in pr/pr.ts.
+  findingRefs: PrHeroFindingRef[];
+  posted: PostedFindingComment[];
+}> {
+  const issueComments = await fetchPrComments(input.operatorRoot, input.pr, {
+    spawnFn: input.spawnFn,
+  });
+  const existingSummaryId = findMarkedCommentId(issueComments);
+  const summaryBody = summaryBodyForId(issueComments, existingSummaryId);
+  const previousHeadSha =
+    summaryBody === null
+      ? undefined
+      : (parseMarkerHead(summaryBody) ?? undefined);
+  const posted = await fetchPostedFindingComments(
+    input.operatorRoot,
+    input.pr,
+    { spawnFn: input.spawnFn },
+  );
+  const anchors = parseHunkAnchors(input.diffPatch);
+  const findingRefs: PrHeroFindingRef[] = input.doc.findings.map((f) => {
+    const ref = {
+      id: f.id,
+      path: f.path,
+      line: f.line,
+      claim: f.claim,
+      tier: f.tier,
+      proof_refs: f.proof_refs,
+    };
+    // Resolve here, not only inside buildPostPlan: postPrReview's 422
+    // rematch uses this same list as `allFindings`, and CRIT-A requires
+    // that rematch to see the SAME lines the plan matched against. A
+    // re-anchored 544→938 finding compared at 544 against a comment stored
+    // at 938 would miss the persist and duplicate. Original order is
+    // load-bearing (a persist-first reorder dissolves the CRIT-A tie).
+    const postLine = resolvePostLine(ref, anchors);
+    return postLine === undefined ? ref : { ...ref, line: postLine };
+  });
+  const plan = buildPostPlan({
+    findings: findingRefs,
+    anchors,
+    posted,
+    headSha: input.headSha,
+  });
+  return {
+    plan,
+    previousHeadSha,
+    existingSummaryId,
+    summaryBody,
+    findingRefs,
+    posted,
+  };
+}
+
+function summaryBodyForId(
+  comments: { id: number; body: string }[],
+  summaryId: number | null,
+): string | null {
+  if (summaryId === null) return null;
+  return comments.find((c) => c.id === summaryId)?.body ?? null;
+}
+
+// A finding's own posted comment, as a clickable link for the summary's
+// index (Juanma's PR #2 feedback: each index line links to its own
+// comment). GitHub's fragment conventions for the two comment families
+// differ — a REVIEW (inline) comment anchors on `#discussion_r<id>`, a
+// top-level issue comment on `#issuecomment-<id>` — so the channel the
+// comment actually landed in decides the shape, never guessed from one.
+function findingCommentUrl(
+  webUrl: string,
+  pr: number,
+  channel: "review" | "issue",
+  id: number,
+): string {
+  const fragment =
+    channel === "review" ? `discussion_r${id}` : `issuecomment-${id}`;
+  return `${webUrl}/pull/${pr}#${fragment}`;
+}
+
+// Watchdog for the verified-gone collapse loop's `gh` calls. Every LLM step
+// in the pipeline is bounded by `stepTimeoutMs`; the collapse loop's two gh
+// calls were the only awaits on the `--post` path with no bound at all, and
+// an accepted-but-unanswered GitHub request there hangs `review --pr --post`
+// forever — including an unattended `--yes` run launched by the watcher,
+// where nothing is present to notice or ^C it. Two minutes is generous for a
+// single REST/graphql round trip and still finite; the failure it converts is
+// "hangs until someone kills it" → "one logged line, thread left open".
+const COLLAPSE_GH_TIMEOUT_MS = 120_000;
+
+// The actual post sequence (design D6, reordered per Juanma's PR #2
+// feedback item 2; W2 issues #16/#17 retire the issue-comment loop):
+// summary CREATED FIRST when none exists yet → review submission (with
+// 422 recovery into the summary Outside Diff bucket) → summary PATCHED
+// LAST with the final delta, comment links, and the Outside Diff union.
+// NO `sessionFailed` awareness here — same contract as this module's own
+// primitives (see postPrReview's own WHY): the guard belongs to the
+// caller that decides whether to invoke this at all (postInlineIfEligible,
+// below).
+//
+// WHY create-first: the summary was landing BELOW every finding in the
+// Conversation timeline (real posted evidence: review comments 13:12:43,
+// summary 13:12:45) because it was created LAST. Creation order fixes a
+// comment's position; a PATCH never moves it. So on a PR with no summary
+// yet, this posts a placeholder summary — the full index, the PLANNED
+// Outside Diff bucket (known before any write), and the PLANNED delta,
+// just without per-finding review-comment links (they do not exist yet)
+// — as the FIRST write of the run, then patches it again at the end with
+// the ACTUAL delta, the links, and any 422-demoted findings that joined
+// the bucket. On a re-run (a summary already exists), the early create is
+// skipped entirely: that comment's position was already fixed by a
+// PREVIOUS run, and creating again would either duplicate it or waste an
+// API call patching it twice.
+// The final PATCH's delta-must-describe-what-was-posted invariant (PR2
+// verification, WARN-3) is unchanged — the placeholder is provisional, the
+// closing PATCH is authoritative, same as before this rework.
+
+// One wording PER refusal, each said by both the post sequence's precondition
+// and `post --dry-run`'s preview of it. The preview and the post disagreeing
+// about whether a run dir may be published is the failure the whole $0-gate
+// suite exists to prevent, and two hand-written messages is how that starts.
+export function missingRereviewBlockMessage(
+  pr: number,
+  summaryId: number,
+): string {
+  return (
+    `PR #${pr} already carries a pr-hero summary (comment ${summaryId}), so ` +
+    "this post is a re-review — but the run directory carries no `rereview` " +
+    "block in its pipeline.json, so the summary would report the old " +
+    'absence matcher\'s "N resolved" and write no state block. Re-run ' +
+    `\`pr-hero review --pr ${pr} --post\` instead.`
+  );
+}
+
+// The same rule read in the other direction. Same shared-wording reason, and
+// it names the mismatch specifically: the run dir describes a re-review of a
+// summary the PR no longer has.
+export function vanishedPriorSummaryMessage(pr: number): string {
+  return (
+    "The run directory carries a `rereview` block in its pipeline.json, so " +
+    `this post is a re-review — but PR #${pr} no longer carries a pr-hero ` +
+    "summary comment for it to be a re-review OF. Its `live[]` rows, " +
+    "`resolved_ids` and `R###` numbering all name review threads the PR has " +
+    "no record of, so this would publish a brand new summary claiming a " +
+    `delta against a review that is not there. Re-run \`pr-hero review --pr ` +
+    `${pr} --post\` instead.`
+  );
+}
+
+// The `--pr --post` half of the same state (see the guard's WHY below): that
+// caller does not refuse, it drops the re-review framing and says so. Loud on
+// purpose — an operator who sees a first-review comment where a delta was
+// expected must be able to read WHY off the run log instead of suspecting the
+// re-review silently broke. A silent downgrade would be the same class of
+// defect as a guard that never fires.
+function vanishedPriorSummaryDegradedMessage(pr: number): string {
+  return (
+    "warning: the pr-hero summary comment this re-review was computed " +
+    `against is gone from PR #${pr} — deleted, or never re-findable, while ` +
+    "the review ran. Its `live[]` rows and `R###` ids name review threads " +
+    "the PR has no record of, so this post drops the re-review framing: no " +
+    "`Δ since` delta, no `Still live:` list and no state block. The findings " +
+    "themselves are published, as the first review of what the PR carries " +
+    `now. Re-run \`pr-hero review --pr ${pr} --post\` if you want a full ` +
+    "re-review against the PR's current state."
+  );
+}
+
+export async function postInlineFindings(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  doc: FindingsDocument;
+  diffPatch: string;
+  webUrl: string | undefined;
+  spawnFn?: typeof Bun.spawn;
+  rereview?: RereviewProvenance;
+  rereviewPriors?: readonly {
+    id: string;
+    claim: string;
+    locs: readonly string[];
+  }[];
+  // Watchdog for the collapse loop's gh calls. A seam, like `spawnFn`: no
+  // production caller sets it, the tests drive the timeout path with it.
+  ghTimeoutMs?: number;
+  // Set ONLY by `post --from` (`runPostCommand`). A PR that already carries a
+  // pr-hero summary is by definition a re-review, so publishing it without a
+  // `rereview` block renders the absence-matcher delta ("N resolved") and no
+  // state block — the PR 1759 shape, observed live on PR #49. That caller
+  // reconstructs the block from the run's `pipeline.json` and cannot see the
+  // PR, so it asks the sequence owner — which has just read the comments — to
+  // enforce the precondition and refuse before any write.
+  //
+  // A flag rather than an unconditional invariant, for two reasons that are
+  // not stylistic — and BOTH of them are about this direction only, a
+  // `rereview` block that is ABSENT. The `--pr --post` path computes its own
+  // case from the same comments and reaches `rereview === undefined` only in
+  // case A (no summary head AND no finding markers), so the check is
+  // structurally dead there — except in one race, a summary created by a
+  // concurrent run between this run's phase-B fetch and this one, where
+  // aborting a review that has already been paid for would be the wrong
+  // direction of error. And the existing postInlineFindings suites script
+  // prior summaries with no block on purpose; the flag keeps this a
+  // `post --from` rule, not a rewrite of what a first-review post means.
+  //
+  // Neither reason survives the trip to the OPPOSITE direction — a `rereview`
+  // block whose summary has vanished — which is why that case carries its own
+  // flag below instead of riding on this one. Gating it here is precisely
+  // what left it structurally dead on `--pr --post`, the primary path.
+  requireRereviewOnPriorSummary?: boolean;
+  // Also set ONLY by `post --from` (`runPostCommand`), and deliberately NOT
+  // the mirror of the flag above: unset, the vanished-summary case degrades
+  // rather than passing. The two callers meet the same state having paid very
+  // different prices for it — see the guard's own WHY below.
+  refuseOnVanishedPriorSummary?: boolean;
+}): Promise<InlinePostOutcome> {
+  const { operatorRoot, pr, headSha, doc, webUrl, spawnFn } = input;
+  const ghTimeoutMs = input.ghTimeoutMs ?? COLLAPSE_GH_TIMEOUT_MS;
+  const {
+    plan,
+    previousHeadSha,
+    existingSummaryId,
+    summaryBody,
+    findingRefs,
+    posted,
+  } = await resolveInlinePostPlan(input);
+  const postedReviewCount = nextStateReviewCount({
+    existingSummaryId,
+    state: summaryBody === null ? null : parseStateBlock(summaryBody),
+    summaryBody,
+  });
+
+  // Before the create-first POST and before the review submission — the last
+  // point at which refusing costs nothing. Keyed on `existingSummaryId`, not
+  // on `previousHeadSha`: a summary whose `head=` will not parse is still a
+  // prior review, and rendering the matcher delta over it is still the lie.
+  if (
+    input.requireRereviewOnPriorSummary === true &&
+    input.rereview === undefined &&
+    existingSummaryId !== null
+  ) {
+    throw new CliError(missingRereviewBlockMessage(pr, existingSummaryId));
+  }
+
+  // The mirror STATE, at the same point — and deliberately NOT the mirror
+  // ANSWER. The run dir CAN carry a valid `rereview` block while the summary
+  // it was computed against is gone from the PR: deleted mid-run (the window
+  // is real — the comments are read in phase B, the pipeline then runs 8-25
+  // minutes), or `post --from` run long after `review`, which this seam
+  // deliberately allows. Then `existingSummaryId === null` falls into the
+  // create-first branch below and, left alone, `renderBody`/`overlayDelta`
+  // publish a BRAND NEW comment full of re-review vocabulary sourced from a
+  // stale directory: a delta counted in `unconfirmed`/`carried`, a `Still
+  // live:` list of `R###` ids, a state block — none of it naming a thread
+  // that exists.
+  //
+  // The two callers meet that state having paid very different prices, so
+  // they answer it differently ON PURPOSE. Only `post --from` sets
+  // `refuseOnVanishedPriorSummary`:
+  //   - `post --from` REFUSES. Nothing has been spent; the operator re-runs
+  //     `review --pr <n> --post` and gets a correct result for free.
+  //   - `--pr --post` has ALREADY paid for a full review ($2.49-$6.34 on this
+  //     repo). Throwing that away to avoid a stale framing is the wrong
+  //     direction of error — the very rule the flag above cites. So it posts,
+  //     with the re-review framing DROPPED (`framing` below): no delta
+  //     overlay, no `Still live:`, no state block. That is not a downgrade of
+  //     the findings, it is an accurate description of what the run now is —
+  //     the review this one was a re-review OF is no longer on the PR, so
+  //     what remains is a first review of the current state, and the findings
+  //     are as valid as they were a minute ago. The degradation is LOGGED,
+  //     never silent: a quiet downgrade would be the same class of defect as
+  //     a guard that never fires, which is exactly what this one was while it
+  //     hung off `requireRereviewOnPriorSummary`.
+  //
+  // Narrowed to `summary_marker` on purpose: a block whose L came from
+  // `finding_markers` was ALREADY computed with no summary in sight, so a
+  // missing summary at post time is agreement, not drift — and its R### ids
+  // name finding threads that do still exist. Refusing OR degrading there
+  // would break obligation S-A ("with the summary comment absent, L is
+  // recovered from per-finding markers and the run does NOT fall to
+  // first-review semantics"), which is a case the design supports rather
+  // than a hazard.
+  const priorSummaryVanished =
+    input.rereview?.last_head_source === "summary_marker" &&
+    existingSummaryId === null;
+  if (priorSummaryVanished && input.refuseOnVanishedPriorSummary === true) {
+    throw new CliError(vanishedPriorSummaryMessage(pr));
+  }
+  if (priorSummaryVanished) log(vanishedPriorSummaryDegradedMessage(pr));
+
+  // Every re-review-framed surface reads off THIS, never `input.rereview`
+  // directly — the delta overlay, the `Still live:` list it carries, and the
+  // state block appended after the report marker. The collapse loop at the
+  // bottom deliberately does NOT: a verified-gone prior's ✅ reply and thread
+  // resolve are bound to per-finding REVIEW threads, which the summary
+  // comment's disappearance says nothing about, and `--pr --post` binds them
+  // through priors it is still holding in memory. Suppressing those would
+  // leave a thread that IS gone sitting open on the PR.
+  const framing = priorSummaryVanished ? undefined : input.rereview;
+  const rereviewDelta =
+    framing === undefined
+      ? undefined
+      : rereviewDeltaFromProvenance(framing, doc.findings.length);
+  const overlayDelta = (delta: PrCommentDelta): PrCommentDelta =>
+    rereviewDelta === undefined ? delta : { ...delta, rereview: rereviewDelta };
+  const renderBody = (
+    delta: PrCommentDelta,
+    outside: readonly Finding[],
+    moved: string | undefined,
+    urls?: ReadonlyMap<string, string>,
+  ): string => {
+    const body = renderPrComment(
+      doc,
+      webUrl,
+      overlayDelta(delta),
+      outside,
+      moved,
+      urls,
+    );
+    if (framing === undefined) {
+      const counts = tierCountsFromFindings(
+        canonicalAdmissionFindings(doc.findings),
+      );
+      return `${body}${renderCiAdmissionBlock(doc.head_sha, counts, postedReviewCount)}`;
+    }
+    return `${body}${renderStateBlock(doc.head_sha, framing.live, postedReviewCount)}`;
+  };
+
+  const byId = new Map(doc.findings.map((f) => [f.id, f]));
+  const findingsFor = (refs: PrHeroFindingRef[]): Finding[] =>
+    refs
+      .map((ref) => {
+        const found = byId.get(ref.id);
+        if (found === undefined) return undefined;
+        // The planner may have moved `line` onto a hunter-cited in-diff
+        // proof_ref (Musive #1727). GitHub's `line` and the finding marker
+        // must share that post line or a re-run duplicates. findings.json
+        // keeps the original line; only the posted comment is overlaid.
+        return found.line === ref.line ? found : { ...found, line: ref.line };
+      })
+      .filter((f): f is Finding => f !== undefined);
+
+  // Initial Outside Diff set: plan.issueComments stays the un-anchorable
+  // bucket (field name unchanged this slice). Known before any write, so
+  // the create-first POST already includes it — after the review, the
+  // closing PATCH may grow it with 422-demoted findings.
+  const plannedOutsideDiff = findingsFor(plan.issueComments);
+
+  // The id this run's own creation just returned, if any — threaded to the
+  // closing PATCH below so it updates THIS comment directly rather than
+  // re-discovering it by marker (postPrComment's `knownCommentId`; see its
+  // own WHY).
+  let summaryCommentId = existingSummaryId;
+  if (existingSummaryId === null) {
+    const plannedDelta: PrCommentDelta = { ...plan.delta, previousHeadSha };
+    const created = await postPrComment(
+      operatorRoot,
+      pr,
+      // `movedHeadSha: undefined` — the re-read has not happened yet, and it
+      // deliberately does not happen before this write. Same shape as the
+      // absent link map above: the placeholder is provisional, the closing
+      // PATCH is authoritative, and the re-read belongs as close to the
+      // ANCHOR-BEARING call as it can get, not one write earlier.
+      renderBody(plannedDelta, plannedOutsideDiff, undefined),
+      spawnFn,
+    );
+    summaryCommentId = created.commentId;
+  }
+
+  const reviewFindings = findingsFor(plan.reviewComments);
+  const reachedIds = new Set<string>();
+
+  // GitHub #39 — the head re-read, HERE and not inside postPrReview, for one
+  // reason that is not stylistic: postPrReview returns early on zero
+  // anchorable findings without touching gh at all (spec "Zero anchorable
+  // findings"), and a run with nothing to anchor STILL publishes a summary
+  // comment — the ✅ clean bill included. That summary read against a head
+  // the PR has since moved past is the same undisclosed staleness the issue
+  // is about, so the check belongs to the sequence owner, which posts on
+  // every path, rather than to the primitive that sometimes does not.
+  //
+  // Immediately before the review submission: this is the tightest window
+  // available around the anchor-bearing call, and the window is the whole
+  // point — a check run minutes earlier would answer a question about a
+  // different moment. The comparison happens exactly ONCE, here, and both
+  // surfaces render the same answer; deriving it twice is how two surfaces
+  // start disagreeing about whether the PR moved.
+  //
+  // Never aborts, never filters, never re-runs anything. What a re-review
+  // should DO about findings computed on a stale head is ROADMAP item 7's
+  // design work, and with `commit_id` pinned (pr/pr.ts) the answer here
+  // collapses to a sentence: post, pinned, and say which commit this is
+  // about. Silently dropping the post would be the invisible loss this
+  // project's direction-of-error rule ranks worst.
+  const liveHeadSha = await ghPrHeadSha(operatorRoot, pr, { spawnFn });
+  const movedHeadSha =
+    liveHeadSha !== undefined && liveHeadSha !== headSha
+      ? liveHeadSha
+      : undefined;
+
+  const reviewResult = await postPrReview({
+    operatorRoot,
+    pr,
+    headSha,
+    findings: reviewFindings,
+    // The FULL finding list, not just `reviewFindings` — see
+    // ReviewSubmissionOutcome's WHY in pr/pr.ts (CRIT-A, verify-report-pr3
+    // #3305). This is exactly the line a caller could silently narrow and
+    // reintroduce the tie-dissolution bug; test/cli.test.ts's tie-repro
+    // fails if this is ever swapped back to `reviewFindings`.
+    allFindings: findingRefs,
+    webUrl,
+    spawnFn,
+  });
+  // On 422, reviewResult.findings JOIN the Outside Diff set instead of
+  // posting as issue comments (issues #16/#17). Dedupe by id so a finding
+  // cannot appear twice if it somehow sat in both buckets.
+  let outsideDiff = plannedOutsideDiff;
+  if (reviewResult.outcome === "posted") {
+    for (const finding of reviewFindings) reachedIds.add(finding.id);
+  } else {
+    const stillUnmatched = new Set(
+      reviewResult.findings.map((finding) => finding.id),
+    );
+    for (const finding of reviewFindings) {
+      if (!stillUnmatched.has(finding.id)) reachedIds.add(finding.id);
+    }
+    const already = new Set(outsideDiff.map((finding) => finding.id));
+    outsideDiff = [
+      ...outsideDiff,
+      ...reviewResult.findings.filter((finding) => !already.has(finding.id)),
+    ];
+  }
+
+  // Outside Diff findings reached the summary — they must not fire
+  // droppedFindingIds. No rematch-before-POST: that block existed only to
+  // prevent duplicate issue comments, and this slice posts none. Re-review
+  // identity for the bucket is the next slice.
+  for (const finding of outsideDiff) reachedIds.add(finding.id);
+
+  // Receipt shape unchanged this slice: issue_comment_ids stays [].
+  const issueCommentIds: number[] = [];
+
+  const droppedFindingIds = computeDroppedFindingIds(
+    [...plan.reviewComments, ...plan.issueComments],
+    reachedIds,
+  );
+
+  const commentUrlByFindingId = await buildCommentUrlMap({
+    operatorRoot,
+    pr,
+    headSha,
+    webUrl,
+    spawnFn,
+    persisting: plan.persisting,
+    issueIdByFindingId: new Map(),
+    freshlyPostedReview:
+      reviewResult.outcome === "posted" ? reviewFindings : [],
+  });
+
+  const delta: PrCommentDelta = { ...plan.delta, previousHeadSha };
+  const patched = await postPrComment(
+    operatorRoot,
+    pr,
+    renderBody(delta, outsideDiff, movedHeadSha, commentUrlByFindingId),
+    spawnFn,
+    summaryCommentId ?? undefined,
+  );
+  // `patched.action` is always "updated" once the create-first branch above
+  // ran (this call PATCHes the comment it just created), which would report
+  // a first-EVER run as "updated" — misleading to a human reading the log
+  // or post.json. The outward-facing action names whether THIS RUN created
+  // the summary at all (existingSummaryId was null before this run), not
+  // which HTTP verb the LAST of its two calls happened to use.
+  const summary = {
+    action: existingSummaryId === null ? ("created" as const) : patched.action,
+    commentId: patched.commentId,
+  };
+
+  if (input.rereview !== undefined) {
+    const targets = collapseTargets({
+      verifiedGoneIds: input.rereview.resolved_ids ?? [],
+      priors: input.rereviewPriors ?? [],
+      posted,
+    });
+    for (const target of targets) {
+      if (target.channel !== "review") continue;
+      // The reply is bounded AND caught, and a failure `continue`s past the
+      // resolve on purpose. Resolving a thread whose ✅ reply never landed
+      // closes the conversation with no explanation of why — a silent
+      // resolve, which is the same false `resolved` the whole verified-gone
+      // path is built to never produce. Degrading to "thread left open" is
+      // always the safe direction: the finding stays visible on the PR.
+      try {
+        await postReviewCommentReply({
+          operatorRoot,
+          pr,
+          inReplyTo: target.commentId,
+          body:
+            "✅ **RESOLVED** · verified gone\n\n" +
+            "This finding was checked at the current head and is no longer present.\n",
+          spawnFn,
+          timeoutMs: ghTimeoutMs,
+        });
+      } catch (error) {
+        log(
+          `collapse skipped for ${target.priorId}: the verified-gone reply did ` +
+            `not post (${error instanceof Error ? error.message : String(error)}) ` +
+            "— thread left open",
+        );
+        continue;
+      }
+      try {
+        const resolveOutcome = await resolveReviewThreadForComment({
+          operatorRoot,
+          pr,
+          commentId: target.commentId,
+          spawnFn,
+          timeoutMs: ghTimeoutMs,
+        });
+        if (resolveOutcome === "resolved") {
+          log(`resolved: review thread for ${target.priorId} (verified-gone)`);
+        } else if (resolveOutcome === "already-resolved") {
+          log(`resolved: thread already closed for ${target.priorId}`);
+        } else {
+          log(
+            `resolve skipped: no review thread found for comment ${target.commentId}`,
+          );
+        }
+      } catch (error) {
+        log(
+          `resolve failed for ${target.priorId} after the verified-gone reply posted: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  return {
+    reviewOutcome: reviewResult.outcome,
+    reviewFindingCount: reviewFindings.length,
+    issueCommentIds,
+    outsideDiffCount: outsideDiff.length,
+    summary,
+    delta: overlayDelta(plan.delta),
+    droppedFindingIds,
+    commentUrls: commentUrlByFindingId,
+    movedHeadSha,
+  };
+}
+
+// Maps every CURRENTLY-live finding (persisting from a prior run, or
+// freshly posted this run) to its own comment's URL, for the summary's
+// closing PATCH (Juanma's PR #2 feedback: each index line links to its own
+// comment). Two sources, none of which can be read off the plan alone:
+//   - persisting matches already carry the prior comment's id/channel
+//     (`plan.persisting`, from pr/inline.ts's matcher) — free, no extra fetch;
+//     leftover W1 issue-comment orphans still resolve here via channel
+//     "issue";
+//   - fresh REVIEW comments' ids are NOT returned by `POST .../reviews` at
+//     all (GitHub's response is the review object, not its comments[]), so
+//     the only way to learn them is a follow-up read-only fetch, matched
+//     back to a finding by the SAME marker fields the identity contract
+//     already uses (path, line, this run's headSha, and the claim
+//     fingerprint) — deterministic here because this run posted them
+//     moments ago with exactly those fields.
+// Fresh un-anchorable findings have no per-finding comment (issues #16/#17:
+// they land in the summary Outside Diff section), so they contribute no
+// url; the index line stays unlinked. `issueIdByFindingId` is kept so a
+// leftover caller can still hand ids through; postInlineFindings passes
+// an empty map.
+// `webUrl === undefined` skips all of it: no repo web url means no comment
+// URL is buildable, and renderPrComment already degrades to plain text when
+// a finding's id is absent from the map, never a broken link.
+async function buildCommentUrlMap(input: {
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  webUrl: string | undefined;
+  spawnFn?: typeof Bun.spawn;
+  persisting: PostPlan["persisting"];
+  issueIdByFindingId: Map<string, number>;
+  freshlyPostedReview: Finding[];
+}): Promise<Map<string, string>> {
+  const { operatorRoot, pr, headSha, webUrl, spawnFn } = input;
+  const urls = new Map<string, string>();
+  if (webUrl === undefined) return urls;
+  for (const match of input.persisting) {
+    urls.set(
+      match.finding.id,
+      findingCommentUrl(webUrl, pr, match.posted.channel, match.posted.id),
+    );
+  }
+  for (const [findingId, id] of input.issueIdByFindingId) {
+    urls.set(findingId, findingCommentUrl(webUrl, pr, "issue", id));
+  }
+  if (input.freshlyPostedReview.length > 0) {
+    const freshReview = await fetchPrReviewComments(operatorRoot, pr, {
+      spawnFn,
+    });
+    for (const finding of input.freshlyPostedReview) {
+      const fingerprint = claimFingerprint(finding.claim);
+      const match = freshReview.find((c) => {
+        const marker = parseFindingMarker(c.body);
+        return (
+          marker !== null &&
+          marker.path === finding.path &&
+          marker.line === finding.line &&
+          marker.headSha === headSha &&
+          marker.c === fingerprint
+        );
+      });
+      if (match) {
+        urls.set(finding.id, findingCommentUrl(webUrl, pr, "review", match.id));
+      }
+    }
+  }
+  return urls;
+}
+
+// The `sessionFailed` guard (spec "sessionFailed suppresses all posting"):
+// the single decision point for BOTH callers on whether to invoke
+// postInlineFindings at all. `null` means "skipped, nothing was posted, zero
+// HTTP calls were made" — the exact shape the spec's scenario asserts.
+//
+// Neither `requireRereviewOnPriorSummary` nor `refuseOnVanishedPriorSummary`
+// is declared here, and that absence is the contract, not an oversight: this
+// is the `--pr --post` entry point, the one that has already paid for a full
+// review, and both flags exist to make `post --from` refuse where refusing is
+// free. See their WHYs on postInlineFindings.
+export async function postInlineIfEligible(input: {
+  sessionFailed: boolean;
+  skippedReason: string;
+  operatorRoot: string;
+  pr: number;
+  headSha: string;
+  doc: FindingsDocument;
+  diffPatch: string;
+  webUrl: string | undefined;
+  spawnFn?: typeof Bun.spawn;
+  rereview?: RereviewProvenance;
+  rereviewPriors?: readonly {
+    id: string;
+    claim: string;
+    locs: readonly string[];
+  }[];
+}): Promise<InlinePostOutcome | null> {
+  if (input.sessionFailed) {
+    log(input.skippedReason);
+    return null;
+  }
+  return postInlineFindings(input);
+}
+
+// post.json — the receipt (design's File Changes table): channel, comment
+// ids, demotions, mirroring pipeline.json's provenance role so the
+// idempotency proof (WU7/4.4) can read back exactly what a run posted
+// without re-deriving it from GitHub.
+export async function writePostReceipt(
+  runDir: string,
+  pr: number,
+  headSha: string,
+  outcome: InlinePostOutcome,
+): Promise<void> {
+  const receipt = {
+    pr,
+    head_sha: headSha,
+    generated_at: new Date().toISOString(),
+    review: {
+      outcome: outcome.reviewOutcome,
+      finding_count: outcome.reviewFindingCount,
+    },
+    issue_comment_ids: outcome.issueCommentIds,
+    summary_comment: outcome.summary,
+    delta: outcome.delta,
+    dropped_finding_ids: outcome.droppedFindingIds,
+  };
+  await Bun.write(
+    path.join(runDir, "post.json"),
+    `${JSON.stringify(receipt, null, 2)}\n`,
+  );
 }

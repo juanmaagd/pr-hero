@@ -386,3 +386,83 @@ export function buildPostPlan(input: {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Pure decisions and shapes behind pr.ts's postInlineFindings orchestration
+// (ROADMAP B6, WU6, cli-decomp S2 Cluster C): the exit-code rule, the
+// dropped-finding oracle, and the outcome shape both compose. Kept here
+// rather than in pr.ts: postInlineFindings imports these, so keeping them in
+// the pure module (not the shell that consumes them) is the same layering
+// this file's header already states — pr.ts executes what this module plans.
+// ---------------------------------------------------------------------------
+
+export interface InlinePostOutcome {
+  reviewOutcome: "posted" | "demoted";
+  reviewFindingCount: number;
+  // Always [] this slice (issues #16/#17): findings no longer POST as
+  // standalone issue comments. Kept on the outcome so the receipt's
+  // `issue_comment_ids` shape stays unchanged.
+  issueCommentIds: number[];
+  // Un-anchorable findings plus any 422-demoted review findings that landed
+  // in the summary Outside Diff section. Counted separately from
+  // issueCommentIds so the posted: log can name the bucket without lying
+  // that those findings became issue comments.
+  outsideDiffCount: number;
+  summary: { action: "created" | "updated"; commentId: number };
+  delta: PostPlan["delta"];
+  // Finding ids the plan classified as fresh (reviewComments + issueComments)
+  // that, after posting completed WITHOUT throwing, reached NEITHER the
+  // review NOR the summary Outside Diff bucket — the exact shape of the bug
+  // CRIT-1 (verify-report-pr2, #3296) found: a claimed comment swallowing a
+  // genuinely new finding. Computed independently of postPrReview's own
+  // return value on purpose — this is the caller's OWN check, not a re-read
+  // of the primitive's opinion, because trusting the primitive's opinion is
+  // exactly what let CRIT-1 through undetected in PR2's own test suite.
+  droppedFindingIds: string[];
+  // findingId -> the url of the comment that finding now lives at (persisting
+  // from a prior run, or posted by this one). Built by buildCommentUrlMap for
+  // the summary's index; handed OUT as well so the terminal's result block can
+  // link each finding to the thread the reader will reply in rather than to a
+  // read-only blob view. Deliberately NOT in post.json: writePostReceipt names
+  // its fields one by one, so the receipt's shape is unchanged, and a Map
+  // would JSON.stringify to `{}` anyway.
+  commentUrls: ReadonlyMap<string, string>;
+  // GitHub #39: the PR's head as GitHub reported it immediately before the
+  // review submission, when it was NOT the head this run reviewed. Undefined
+  // on an unmoved head AND on a re-read that could not be made — the two are
+  // deliberately indistinguishable here, because the only thing this field
+  // authorizes is a notice, and a notice needs a confirmed mismatch. Handed
+  // out so the terminal block can print the same disclosure the summary
+  // comment carries, and so the caller can say it in the run log at the
+  // moment it happened.
+  movedHeadSha: string | undefined;
+}
+
+// The exact oracle behind `droppedFindingIds` (design D6's exit-1 rule),
+// pinned as its own pure function — WARN-1 (verify-report-pr3, #3305): under
+// the CRIT-A fix, a genuine drop is no longer REACHABLE through normal
+// execution (every finding the plan classified fresh now ends up in exactly
+// one of `reachedIds` or the demoted-and-matched set), which is the correct
+// outcome but leaves the formula itself untestable through composition
+// alone — the only way to exercise a non-empty result is a hand-built
+// `reached` set, exactly the way `postingExitCode` is already tested against
+// a hand-built literal. Extracted so a future regression in the SET
+// arithmetic (not the posting sequence) is still caught.
+export function computeDroppedFindingIds(
+  expectedFresh: PrHeroFindingRef[],
+  reached: ReadonlySet<string>,
+): string[] {
+  const expectedIds = new Set(expectedFresh.map((f) => f.id));
+  return [...expectedIds].filter((id) => !reached.has(id));
+}
+
+// Design D6's exit-code rule, pinned as its own pure function so the rule is
+// testable without a live post: exit 1 ONLY when a finding reached neither
+// channel (the CRIT-1 failure mode); a `null` outcome (sessionFailed, or
+// `--post` never given) is not itself a posting failure — its caller already
+// decides the exit code on its own terms (e.g. reviewPr's sessionFailed
+// early-return above).
+export function postingExitCode(outcome: InlinePostOutcome | null): 0 | 1 {
+  if (outcome === null) return 0;
+  return outcome.droppedFindingIds.length > 0 ? 1 : 0;
+}

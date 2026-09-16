@@ -26,7 +26,7 @@ export interface FindingIdentity {
 }
 
 // The marker pr-hero POSTED carries the in-diff post line (resolvePostLine
-// in cli.ts's resolveInlinePostPlan), not necessarily findings.json's hunter
+// in pr/pr.ts's resolveInlinePostPlan), not necessarily findings.json's hunter
 // cite. Triage reply must remap the same way or F001 at :19 never binds to a
 // comment posted at :27 after proof_ref re-anchoring (Musive re-review).
 export function findingIdentityForMarkerMatch(input: {

@@ -61,6 +61,9 @@
 // markers into the idempotent find-or-create flow (`findMarkedCommentId`)
 // is Phase 3's job, once a real poster exists to consume them.
 
+import type { Finding, FindingsDocument } from "#review/findings";
+import { CliUsageError } from "#review/preflight";
+import type { PrCommentDelta } from "#review/report";
 import type { SizeGateVerdict } from "#review/size-gate";
 import { envBillsMetered } from "../execution/usage-normalized";
 import {
@@ -675,4 +678,118 @@ export function ciExitCode(input: {
   if (input.sessionFailed) return 1;
   if (input.droppedFindingIds > 0) return 1;
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// CI headless shell's "reviewed" (non-skip) outcome (ROADMAP Pillar 3,
+// GitHub Actions) — the summary + outputs, and the pure "should I write"
+// gates the shell checks before touching $GITHUB_STEP_SUMMARY/$GITHUB_OUTPUT.
+// planCiReviewSkip/planCiReviewManualRequired above cover the two admission
+// outcomes the same way; planCiReview is their sibling for a review that
+// actually ran. Extracted from cli.ts (cli-decomp S2, Cluster B) — this
+// module's own purity rule holds unchanged, every function below is a total
+// function of its arguments.
+// ---------------------------------------------------------------------------
+
+// Spec 2.1's "reviewed" step-summary + spec 1.1's $GITHUB_OUTPUT contract,
+// from the SAME findings array — so the two can never disagree on counts.
+// `delta`/`repoWebUrl` are optional pass-throughs (posted.delta when a run
+// posted; undefined renders plain code spans / omits the delta line).
+export function planCiReview(input: {
+  prNumber: number;
+  headSha: string;
+  findings: readonly Finding[];
+  costUsdEst: number;
+  wallMs: number;
+  model: string;
+  repoWebUrl?: string;
+  delta?: PrCommentDelta;
+  runDir: string;
+}): { summaryMarkdown: string; outputs: CiOutputs } {
+  const blockingCount = input.findings.filter(
+    (f) => f.tier === "blocking",
+  ).length;
+  const summary: CiSummaryData = {
+    kind: "reviewed",
+    prNumber: input.prNumber,
+    headSha: input.headSha,
+    findings: input.findings,
+    costUsdEst: input.costUsdEst,
+    wallMs: input.wallMs,
+    model: input.model,
+    ...(input.repoWebUrl === undefined ? {} : { repoWebUrl: input.repoWebUrl }),
+    ...(input.delta === undefined ? {} : { delta: input.delta }),
+  };
+  return {
+    summaryMarkdown: renderStepSummary(summary),
+    outputs: {
+      status: "reviewed",
+      findings_count: input.findings.length,
+      blocking_count: blockingCount,
+      advisory_count: input.findings.length - blockingCount,
+      cost_usd_est: input.costUsdEst,
+      run_dir: input.runDir,
+    },
+  };
+}
+
+// Design D6, applied to the CI headless channel: a failed session publishes
+// NOTHING. `sessionFailed` means every hunter died, which leaves the merged
+// document with zero findings — so the "reviewed" payload built from it would
+// claim `status=reviewed` + a "No findings detected" step summary for a review
+// that never ran. The job exits non-zero either way, but a human reads the job
+// summary, not the exit code, and postInlineIfEligible already suppresses PR
+// posting on exactly this condition; the CI channel must not be the one place
+// a crashed run still asserts a clean tree.
+export function shouldPublishCiReview(
+  isCi: boolean,
+  sessionFailed: boolean,
+): boolean {
+  return isCi && !sessionFailed;
+}
+
+// Spec 1.1: "Output parameter writing when $GITHUB_OUTPUT is provided" —
+// the outputs are core to the Action's own contract (declared unconditionally
+// in action.yml), so nothing beyond CI mode + a real path gates them.
+export function shouldWriteCiOutputs(
+  isCi: boolean,
+  outputPath: string | undefined,
+): boolean {
+  return isCi && outputPath !== undefined && outputPath.length > 0;
+}
+
+// Spec 2.1: step-summary writing is additionally gated on the tri-state
+// `--step-summary`/`--no-step-summary` flag (`stepSummary`), unset meaning
+// the shell's own default of on — mirroring `summary`/`scout`'s own
+// unset-means-default convention (preflight.ts's CliOptions).
+export function shouldWriteStepSummary(
+  isCi: boolean,
+  stepSummaryFlag: boolean | undefined,
+  summaryPath: string | undefined,
+): boolean {
+  return (
+    isCi &&
+    (stepSummaryFlag ?? true) &&
+    summaryPath !== undefined &&
+    summaryPath.length > 0
+  );
+}
+
+// Pure on purpose (design Threat Matrix, "Git repository selection" row,
+// deferred from PR2's verification): --from names a directory on disk, and
+// nothing stops it from pointing at a DIFFERENT PR's run than --pr names.
+// findings.json's own `pr` field is the one thing that cannot lie about
+// which review it came from — checked here, before any fetch or post,
+// rather than trusting the operator to keep --pr and --from in sync by hand.
+export function assertRunMatchesPr(
+  doc: FindingsDocument,
+  pr: number,
+  runDir: string,
+): void {
+  if (doc.pr !== pr) {
+    throw new CliUsageError(
+      `${runDir} is a run of PR #${doc.pr}, not PR #${pr} — point --from ` +
+        "at a run directory for the PR you are posting to",
+    );
+  }
 }
