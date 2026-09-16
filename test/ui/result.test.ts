@@ -8,10 +8,10 @@
 // Every assertion about a claim below is there to keep that from coming back.
 
 import { describe, expect, test } from "bun:test";
-import type { ComparisonResult } from "../src/compare";
-import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
-import type { GreptileFinding } from "../src/greptile";
-import { type ResultInput, renderResult } from "../src/ui-result";
+import { type ResultInput, renderResult } from "#ui/result";
+import type { ComparisonResult } from "../../src/compare";
+import type { Finding, FindingsDocument, Telemetry } from "../../src/findings";
+import type { GreptileFinding } from "../../src/greptile";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");

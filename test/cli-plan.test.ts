@@ -6,7 +6,7 @@
 // flag exported symbols.
 //
 // Everything here asserts the RETURNED array. `styles` arrives as a parameter
-// (ui.ts's contract), so both the painted and the unpainted shape are
+// (ui/primitives.ts's contract), so both the painted and the unpainted shape are
 // assertable offline with no TTY anywhere.
 
 import { describe, expect, test } from "bun:test";
@@ -36,7 +36,7 @@ const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 const stripAnsi = (text: string): string => text.replace(ANSI, "");
 const joined = (lines: string[]): string => stripAnsi(lines.join("\n"));
 
-// The width every case below renders at. Same value ui-result.test.ts pins,
+// The width every case below renders at. Same value ui/result.test.ts pins,
 // so the two halves of the terminal surface are asserted against one grid.
 const PINNED_WIDTH = 80;
 // Narrow enough to move the wrap points: at 40 columns the decision block's
@@ -528,7 +528,7 @@ describe("prPlanDetails", () => {
 // The regression these four renderers were written to have and did not: WIDTH
 // AS A PARAMETER. Before this block they passed no width at all, so every
 // row() and box() inside them — including the ones under decisionLines,
-// markerRowLines, planDetails and prPlanDetails — fell back to ui.ts's
+// markerRowLines, planDetails and prPlanDetails — fell back to ui/primitives.ts's
 // terminalWidth() and measured whatever terminal ran `bun test`. The suite was
 // therefore green at 80 columns and red in a ~40-column pane, on assertions
 // about wrap points nobody could stub.
@@ -875,7 +875,7 @@ describe("plan card config provenance (C5 O-7)", () => {
     expect(present).toContain("agents_dir ← global");
   });
 
-  // ui.ts's contract, on the rows this slice added: styles arrive as a
+  // ui/primitives.ts's contract, on the rows this slice added: styles arrive as a
   // parameter, and with them off nothing paints.
   test("no escape bytes with styles off, and the width still decides", () => {
     const ctx = planContext({

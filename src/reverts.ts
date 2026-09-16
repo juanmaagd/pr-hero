@@ -12,6 +12,7 @@
 // interpolated shell string.
 
 import path from "node:path";
+import { log } from "#ui/primitives";
 import {
   CliError,
   type CliOptions,
@@ -34,7 +35,6 @@ import {
   repoSlugFromWebUrl,
   selectRevertCandidates,
 } from "./reverts-preflight";
-import { log } from "./ui";
 
 // Same helper as cli.ts's and pr.ts's git, duplicated rather than shared so
 // neither shell imports the other. The WHY carries over verbatim: args as an

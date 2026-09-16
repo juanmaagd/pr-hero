@@ -1,6 +1,6 @@
 // A pure tree renderer over box-drawing characters (U+2500–U+257F). Fourth
-// member of the terminal surface's pure half (ui.ts formats, ui-select.ts
-// asks, ui-result.ts reports, this one nests): same contract as all three —
+// member of the terminal surface's pure half (ui/primitives.ts formats, ui/select.ts
+// asks, ui/result.ts reports, this one nests): same contract as all three —
 // a total function of its inputs, with the style flag AND the spinner frame
 // arriving as PARAMETERS so nothing here needs a TTY or a timer to be tested.
 //
@@ -11,9 +11,9 @@
 // `RC001 -> [F001, F002]`). Only the first is wired today; the shape below
 // deliberately assumes nothing about it.
 //
-// Deliberately self-contained, matching the rule ui.ts's own header states:
+// Deliberately self-contained, matching the rule ui/primitives.ts's own header states:
 // the ANSI convention is COPIED here, not imported, so that progress.ts —
-// which must stay independent of ui.ts — can consume this without acquiring
+// which must stay independent of ui/primitives.ts — can consume this without acquiring
 // that dependency transitively.
 
 export type TreeStatus = "pending" | "running" | "done" | "failed";
@@ -24,7 +24,7 @@ export interface TreeNode {
   status?: TreeStatus;
   // Dim, right of the label. Caller-formatted: a caller aligning sub-columns
   // pads them itself, and the string is emitted VERBATIM inside one dim wrap
-  // so those runs of spaces survive (the same rule ui.ts's row() documents).
+  // so those runs of spaces survive (the same rule ui/primitives.ts's row() documents).
   detail?: string;
   children?: TreeNode[];
   // Caller's own decision to show a branch as a summary line. Honoured

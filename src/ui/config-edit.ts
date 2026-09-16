@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { mergeConfig, parseGlobalConfig, parseLocalConfig } from "./preflight";
-import { bold, box, cyan, dim, sanitizeText, yellow } from "./ui";
-import type { KeyReader } from "./ui-select";
+import { mergeConfig, parseGlobalConfig, parseLocalConfig } from "../preflight";
+import { bold, box, cyan, dim, sanitizeText, yellow } from "./primitives";
+import type { KeyReader } from "./select";
 
 export interface ConfigEntry {
   key: string;

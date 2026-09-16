@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { type ResultInput, renderResult } from "#ui/result";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -36,7 +37,6 @@ import {
   type OpenCodeClientEvent,
   OpenCodeSdkTransport,
 } from "../../src/transports/opencode-sdk";
-import { type ResultInput, renderResult } from "../../src/ui-result";
 
 // ---- shared fixtures (mirrors test/harness/concurrency-wiring.test.ts) ----
 

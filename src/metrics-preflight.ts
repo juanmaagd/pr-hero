@@ -205,7 +205,7 @@ export function projectRunRow(input: {
 
 export interface RenderUsageOptions {
   // Accepted for the same reason every other renderer in this codebase
-  // (ui-result.ts, ui-tree.ts) takes a styles flag — a uniform signature
+  // (ui/result.ts, ui/tree.ts) takes a styles flag — a uniform signature
   // across renderers, so a caller never special-cases one of them. Usage
   // is a PIPEABLE REPORT (design decision table: "not ui-*.ts painted"):
   // this module never imports ui.ts's ANSI helpers, so there is nothing to

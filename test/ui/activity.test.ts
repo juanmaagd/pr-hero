@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { ActiveRunRecord, RunHistoryItem } from "../src/activity";
 import {
   renderActiveRuns,
   renderActivityScreen,
   renderRunHistory,
   renderWatcherSpend,
-} from "../src/ui-activity";
+} from "#ui/activity";
+import type { ActiveRunRecord, RunHistoryItem } from "../../src/activity";
 
 describe("ui-activity renderers", () => {
   const sampleRuns: ActiveRunRecord[] = [

@@ -217,7 +217,7 @@ describe("renderReport", () => {
 
   // #173 (§8: "Artifacts and reports show cash and notional totals
   // separately"). report.md is the artifact half of that sentence; the
-  // terminal's own row is asserted in test/ui-result.test.ts.
+  // terminal's own row is asserted in test/ui/result.test.ts.
   describe("cash and notional in the run line", () => {
     test("a notional figure is appended as its own labelled segment", () => {
       const markdown = renderReport(doc(), {

@@ -9,3 +9,5 @@ fixtures/.build/
 corpus-artifacts/
 dist/
 
+# ODD feature docs: local working state, mirrored to Engram, never source
+odd/

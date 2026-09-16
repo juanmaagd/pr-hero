@@ -12,7 +12,7 @@
 
 import { homedir } from "node:os";
 import path from "node:path";
-import type { Severity, Tier } from "./findings";
+import type { Severity, Tier } from "../findings";
 
 // The one shared writer. stderr, ALWAYS: stdout is reserved for the `ledger`
 // command's markdown, so every human-readable line in this CLI — plans,

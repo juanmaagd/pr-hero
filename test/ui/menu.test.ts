@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { MenuItem, RepoContext } from "../src/menu-context";
 import {
   renderContextBox,
   renderMenuCard,
   renderPersistentFooter,
   renderSolidHeader,
-} from "../src/ui-menu";
+} from "#ui/menu";
+import type { MenuItem, RepoContext } from "../../src/menu-context";
 
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
 const stripAnsi = (text: string): string => text.replace(ANSI, "");

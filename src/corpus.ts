@@ -11,6 +11,7 @@
 // interpolated shell string.
 
 import path from "node:path";
+import { log } from "#ui/primitives";
 import {
   blameArgv,
   buildThreadBatchQuery,
@@ -75,7 +76,6 @@ import {
   pickCommitPull,
   repoSlugFromWebUrl,
 } from "./reverts-preflight";
-import { log } from "./ui";
 
 // Same helper as cli.ts's, pr.ts's and reverts.ts's, duplicated rather than
 // shared so no shell imports another shell. The WHY carries over verbatim:
