@@ -555,7 +555,7 @@ export interface PrCommentMarkerFields {
 // re-review discovery seam needs to know not just WHICH head a posted
 // summary comment covers, but whether that run actually finished — a
 // PARTIAL run's own L must never be trusted the same way a COMPLETE run's
-// is (see resolveLastReviewedHead's `lastComplete` in rereview-plan.ts).
+// is (see resolveLastReviewedHead's `lastComplete` in rereview/plan.ts).
 export function parsePrCommentMarker(
   body: string,
 ): PrCommentMarkerFields | null {
@@ -581,7 +581,7 @@ export function parsePrCommentMarker(
 // Recovery is an explicit `pr-hero review --pr N`, a CI re-run of the same
 // commit (CI admission does not treat a partial same-head review as done,
 // see evaluateCiReviewAdmission), or a new push; each forces a full
-// re-review via `lastComplete` (rereview-plan.ts). Never the watcher noticing
+// re-review via `lastComplete` (rereview/plan.ts). Never the watcher noticing
 // coverage=partial and retrying on its own.
 export function markerDeclaredHeads(comments: { body: string }[]): string[] {
   const heads: string[] = [];

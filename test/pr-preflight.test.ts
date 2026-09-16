@@ -10,6 +10,7 @@
 // handles is the shape gh actually emits, not the shape a spec described.
 
 import { describe, expect, test } from "bun:test";
+import { PR_STATE_MARKER_PREFIX } from "#rereview/state";
 import {
   SKIP_BUDGET_COMMENT_MARKER,
   SKIP_COVERAGE_COMMENT_MARKER,
@@ -42,7 +43,6 @@ import {
   worktreeDirty,
 } from "../src/pr-preflight";
 import { CliError, CliUsageError, parseArgs } from "../src/preflight";
-import { PR_STATE_MARKER_PREFIX } from "../src/rereview-state";
 import { TRIAGE_MARKER_PREFIX } from "../src/triage";
 
 // Merged the ordinary way: mergeCommit present, base branch is the default.

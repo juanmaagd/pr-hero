@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { stateFinding } from "#rereview/state";
 import {
   CI_REVIEW_POLICY_SCHEMA_VERSION,
   type CiReviewAdmissionInput,
@@ -33,7 +34,6 @@ import {
   classifyChangedPaths,
 } from "../src/ci-review-risk";
 import type { Tier } from "../src/findings";
-import { stateFinding } from "../src/rereview-state";
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);

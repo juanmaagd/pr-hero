@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { PriorRecord } from "#rereview/classify";
+import type { RereviewProvenance } from "#rereview/prepare";
 import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
 import type { NormalizedUsage } from "../src/execution/usage-normalized";
 import {
@@ -22,8 +24,6 @@ import {
   runPipeline,
 } from "../src/pipeline";
 import { GOTCHAS_TEMPLATE } from "../src/preflight";
-import type { PriorRecord } from "../src/rereview-classify";
-import type { RereviewProvenance } from "../src/rereview-prepare";
 import type { ScoutLead } from "../src/scout";
 import { defaultReviewSpec } from "../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";

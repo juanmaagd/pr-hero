@@ -455,7 +455,7 @@ function leadIn(claim: string): string {
 // What a live row prints where its claim would go when there is no claim to
 // print. A prior rebuilt from a posted `<!-- pr-hero-finding -->` marker
 // carries none: the marker never stored one, and `priorsFromPostedMarkers`
-// (rereview-prepare.ts) sets `claim: ""` DELIBERATELY so `claimFingerprint("")`
+// (rereview/prepare.ts) sets `claim: ""` DELIBERATELY so `claimFingerprint("")`
 // — the single constant every claim-less prior shares — can never act as a
 // tie-break in prior→comment matching (that module's WHY at :534, :570-578
 // and :736-745). That limitation is intentional and stays; what was broken is

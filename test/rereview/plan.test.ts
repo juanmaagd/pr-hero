@@ -7,7 +7,7 @@ import {
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
   unreachableLastHeadMessage,
-} from "../src/rereview-plan";
+} from "#rereview/plan";
 
 const L = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const H = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

@@ -18,6 +18,24 @@ import { mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  buildPhaseBQueue,
+  collapseTargets,
+  decideLastHeadDelta,
+  enrichPriorsFromThreads,
+  incompleteLastReviewMessage,
+  parseNameOnly,
+  parseNameStatus,
+  prepareDiscovery,
+  priorsFromPostedMarkers,
+  priorsFromStateFindings,
+  type RereviewProvenance,
+  readRereviewProvenance,
+  shouldAbortEmptyDiscovery,
+  toRereviewProvenance,
+  unreachableLastHeadMessage,
+} from "#rereview/prepare";
+import { parseStateBlock, renderStateBlock } from "#rereview/state";
+import {
   getWatcherSpend,
   killActiveRun,
   listActiveRuns,
@@ -286,24 +304,6 @@ import {
   renderReport,
   rereviewDeltaFromProvenance,
 } from "./report";
-import {
-  buildPhaseBQueue,
-  collapseTargets,
-  decideLastHeadDelta,
-  enrichPriorsFromThreads,
-  incompleteLastReviewMessage,
-  parseNameOnly,
-  parseNameStatus,
-  prepareDiscovery,
-  priorsFromPostedMarkers,
-  priorsFromStateFindings,
-  type RereviewProvenance,
-  readRereviewProvenance,
-  shouldAbortEmptyDiscovery,
-  toRereviewProvenance,
-  unreachableLastHeadMessage,
-} from "./rereview-prepare";
-import { parseStateBlock, renderStateBlock } from "./rereview-state";
 import { revertsCommand } from "./reverts";
 import {
   type RunnerAuthorityOptions,
