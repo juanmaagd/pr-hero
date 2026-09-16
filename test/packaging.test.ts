@@ -631,9 +631,9 @@ describe("Packaging & distribution configuration", () => {
   test("this repo's own workflow overrides only the size ceiling", () => {
     const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
     expect(own).not.toContain("budget-usd:");
-    // 1500, not action.yml's 1000: D1-10c was skipped at 1023 changed lines,
-    // and a skipped review reads exactly like a clean one on the checks page.
-    expect(own).toContain("max-changed-lines: 1500");
+    // 5000, not action.yml's 1000: large refactoring slices (like cli-decomposition)
+    // exceed 2000 lines, so dogfooding requires an expanded ceiling.
+    expect(own).toContain("max-changed-lines: 5000");
   });
 
   test("build script produces standalone bundle without error", async () => {
