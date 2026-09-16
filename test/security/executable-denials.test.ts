@@ -14,16 +14,16 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  type ExecutableAllowlistEntry,
+  verifyExecutableAuthority,
+} from "#model/provider-capabilities";
 import type {
   ProviderTransport,
   StepAdmissionGate,
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
-import {
-  type ExecutableAllowlistEntry,
-  verifyExecutableAuthority,
-} from "../../src/provider-capabilities";
 import type { StepSpec } from "../../src/step-runner";
 
 // Mach-O 64-bit little-endian magic: makes verifyExecutableAuthority treat

@@ -1,16 +1,16 @@
 import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import type { CredentialKind, RunnerBackend } from "./execution/contracts";
-import type { ResolvedRoutePlan } from "./model-routing";
 import type {
   ClaudeBinaryResolutionDeps,
   ExecutableAllowlistEntry,
-} from "./provider-capabilities";
+} from "#model/provider-capabilities";
 import {
   resolveClaudeCanonicalBinary,
   verifyExecutableAuthority,
-} from "./provider-capabilities";
+} from "#model/provider-capabilities";
+import type { ResolvedRoutePlan } from "#model/routing";
+import type { CredentialKind, RunnerBackend } from "./execution/contracts";
 import {
   type CredentialBroker,
   KeychainCredentialBroker,

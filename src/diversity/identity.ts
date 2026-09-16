@@ -5,7 +5,7 @@ import {
   type ResolvedStepRoute,
   type RoutingConfig,
   resolveStepRoute,
-} from "../model-routing";
+} from "#model/routing";
 import { type AgentSpec, type ReviewSpec, resolveSpecialty } from "../spec";
 import { DiversityAdmissionError } from "./errors";
 

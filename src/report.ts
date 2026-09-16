@@ -7,8 +7,8 @@
 // come out byte-identical (the lab already replays old findings.json files;
 // a renderer that reached for `new Date()` would make that a lie).
 
+import type { ResolvedModelRoute, ResolvedStepRoute } from "#model/routing";
 import type { Finding, FindingsDocument, Severity, Tier } from "./findings";
-import type { ResolvedModelRoute, ResolvedStepRoute } from "./model-routing";
 import { findingMarker, prCommentMarker } from "./pr-preflight";
 import {
   clusterByRootCause,

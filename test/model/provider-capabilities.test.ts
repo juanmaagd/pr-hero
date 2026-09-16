@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
   CLAUDE_CAPABILITY_STATICS,
   type ClaudeCanonicalBinary,
@@ -9,8 +8,9 @@ import {
   exactBindingCapabilityIssues,
   produceClaudeCapabilityReport,
   resolveClaudeCanonicalBinary,
-} from "../src/provider-capabilities";
-import { ClaudeCodeCliTransport } from "../src/transports/claude-code-cli";
+} from "#model/provider-capabilities";
+import type { ExactBindingCapabilityReport } from "../../src/execution/contracts";
+import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
 
 const GREEN_BINARY = {
   existsFn: (p: string) => p === "/bin/claude" || p === "/usr/bin/security",

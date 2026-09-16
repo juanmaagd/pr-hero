@@ -69,6 +69,10 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "store",
     ],
   },
+  {
+    domain: "model",
+    files: ["catalog", "free-discovery", "provider-capabilities", "routing"],
+  },
 ];
 
 function srcRootFiles(): string[] {

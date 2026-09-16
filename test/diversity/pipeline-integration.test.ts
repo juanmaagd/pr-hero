@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createResolvedRoutePlan, resolveStepRoute } from "#model/routing";
 import {
   appendAttempt,
   type DiversityAttemptRecord,
@@ -25,10 +26,6 @@ import type {
   RefuterResult,
 } from "../../src/drafts";
 import { normalizeInclusiveUsage } from "../../src/execution/usage-normalized";
-import {
-  createResolvedRoutePlan,
-  resolveStepRoute,
-} from "../../src/model-routing";
 import { type PipelineInput, runPipeline } from "../../src/pipeline";
 import { defaultReviewSpec, validateReviewSpec } from "../../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";

@@ -38,7 +38,7 @@ describe("projectChildEnv", () => {
   // The invariant this states is "the gate and the spawn agree about what
   // counts as a credential". The capability gate accepts EITHER of these two
   // env vars as proof that claude is authenticated
-  // (defaultClaudeAuthProbe, src/provider-capabilities.ts), so whatever it
+  // (defaultClaudeAuthProbe, src/model/provider-capabilities.ts), so whatever it
   // accepts, the projection must carry. It did not: pr-hero's first real CI
   // self-review (2026-08-27) passed the gate on CLAUDE_CODE_OAUTH_TOKEN and
   // then died in three seconds with every step reporting "Not logged in ·

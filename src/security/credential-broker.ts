@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import type { CredentialKind } from "../provider-capabilities";
+import type { CredentialKind } from "#model/provider-capabilities";
 
 export type CredentialProjectionFile = {
   readonly path: string;

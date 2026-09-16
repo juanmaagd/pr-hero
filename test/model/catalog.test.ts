@@ -5,7 +5,7 @@ import {
   lookupAlias,
   MODEL_CATALOG,
   providerCatalog,
-} from "../src/model-catalog";
+} from "#model/catalog";
 
 describe("model catalog", () => {
   test("anthropic aliases match the engine's logical alias set", () => {

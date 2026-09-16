@@ -1,4 +1,20 @@
 import { homedir } from "node:os";
+import {
+  createFreeModelProbe,
+  type FreeModelProbe,
+  freeVerdictKey,
+} from "#model/free-discovery";
+import type { ProviderCapabilityReport } from "#model/provider-capabilities";
+import {
+  type CapabilityGateDecision,
+  exactBindingCapabilityGate,
+} from "#model/provider-capabilities";
+import type {
+  ResolvedRoutePlan,
+  ResolvedStepRoute,
+  RoutingConfig,
+} from "#model/routing";
+import { buildResolvedRoutePlan, freezeRoutePlan } from "#model/routing";
 // Production runtime composition (§2 design): frozen route-keyed bindings admit
 // once; MultiProviderRunner acquires a per-step transport lease, delegates
 // lifecycle to StepExecutionHarness, and disposes stream/client/server before
@@ -23,22 +39,6 @@ import {
   InMemorySpendLedger,
   type SpendLedger,
 } from "./execution/spend-limiter";
-import {
-  createFreeModelProbe,
-  type FreeModelProbe,
-  freeVerdictKey,
-} from "./free-model-discovery";
-import type {
-  ResolvedRoutePlan,
-  ResolvedStepRoute,
-  RoutingConfig,
-} from "./model-routing";
-import { buildResolvedRoutePlan, freezeRoutePlan } from "./model-routing";
-import type { ProviderCapabilityReport } from "./provider-capabilities";
-import {
-  type CapabilityGateDecision,
-  exactBindingCapabilityGate,
-} from "./provider-capabilities";
 import {
   type BindingAuthorityResolution,
   credentialKindBillsMetered,
@@ -547,7 +547,7 @@ async function resolveFrozenBindings(
     const probe = options.freeModelProbe;
     if (probe === undefined) return false;
     // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
-    // "/" (free-model-discovery.ts header test), so the join collides
+    // "/" (model/free-discovery.ts header test), so the join collides
     // ("a","b/c") vs ("a/b","c") — one verdict for two models.
     const key = freeVerdictKey(provider, model);
     const cached = freeVerdicts.get(key);
@@ -946,7 +946,7 @@ export async function prepareProductionAdmissionContext(input: {
     const rawProbe = probeInput;
     const memoised: FreeModelProbe = (provider: string, model: string) => {
       // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
-      // "/" (free-model-discovery.ts header test), so the join collides
+      // "/" (model/free-discovery.ts header test), so the join collides
       // ("a","b/c") vs ("a/b","c") — one verdict for two models. The display
       // joins below stay human-readable on purpose: they never key a map.
       const key = freeVerdictKey(provider, model);
@@ -1465,7 +1465,7 @@ export async function createProductionRuntime(
     const verdicts = new Map<string, Promise<boolean>>();
     const memoised: FreeModelProbe = (provider, model) => {
       // WHY freeVerdictKey, not `${provider}/${model}`: model ids may contain
-      // "/" (free-model-discovery.ts header test), so the join collides
+      // "/" (model/free-discovery.ts header test), so the join collides
       // ("a","b/c") vs ("a/b","c") — one verdict for two models. The display
       // joins below stay human-readable on purpose: they never key a map.
       const key = freeVerdictKey(provider, model);

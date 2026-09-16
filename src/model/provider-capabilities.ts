@@ -14,7 +14,7 @@ import {
 import { readFile, realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
-import type { ExactBindingCapabilityReport } from "./execution/contracts";
+import type { ExactBindingCapabilityReport } from "../execution/contracts";
 
 export type RunnerBackend =
   | "claude-code"
@@ -564,7 +564,7 @@ export async function produceClaudeCapabilityReport(
       //
       // Kept IDENTICAL to ClaudeCodeCliTransport.capabilities() on purpose:
       // "the transport contradicts the producer in no environment"
-      // (test/provider-capabilities.test.ts) is a structural guard, and a
+      // (test/model/provider-capabilities.test.ts) is a structural guard, and a
       // producer disagreeing with the transport that actually runs the route
       // is the drift it exists to catch.
       pricingReady: true,

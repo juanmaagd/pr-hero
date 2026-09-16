@@ -2,6 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  exactBindingCapabilityIssues,
+  type ProviderCapabilityReport,
+} from "#model/provider-capabilities";
+import {
   detectAgentEnvironments,
   inspectMcpRegistration,
   inspectSkillsSync,
@@ -19,10 +23,6 @@ import {
   localReviewSpec,
   resolveAgentsDirSetting,
 } from "./preflight";
-import {
-  exactBindingCapabilityIssues,
-  type ProviderCapabilityReport,
-} from "./provider-capabilities";
 import {
   type CheckSystemToolsOptions,
   checkCiConfiguration,
