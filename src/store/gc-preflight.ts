@@ -1,5 +1,5 @@
 // Worktree GC decisions (W3 / GitHub #18), pure so the keep/collect table
-// is testable offline. gc.ts is the I/O shell: it scans ~/.prhero/repos,
+// is testable offline. store/gc.ts is the I/O shell: it scans ~/.prhero/repos,
 // asks gh for PR state, and runs `git worktree remove --force`.
 //
 // Unbounded accumulation is not allowed. Collect when the PR is merged or
@@ -7,8 +7,8 @@
 // Skip an in-flight tree (a live pid on the sibling lock). Never rm -rf.
 
 import path from "node:path";
-import type { SelfInvocation } from "./assets";
-import { GC_TTL_HOURS, prheroLayout } from "./home-preflight";
+import type { SelfInvocation } from "../assets";
+import { GC_TTL_HOURS, prheroLayout } from "../home-preflight";
 
 export type PrLifecycle = "open" | "merged" | "closed" | "unknown";
 export type GcAction = "keep" | "collect";
@@ -102,7 +102,7 @@ export function worktreeRemoveArgs(worktreePath: string): string[] {
 
 // ---------------------------------------------------------------------------
 // launchd agent (macOS). Rendering is pure string-out so a test can pin
-// the exact plist; loading it is gc.ts's job. Separate label and log from
+// the exact plist; loading it is store/gc.ts's job. Separate label and log from
 // the watcher: this agent runs `pr-hero gc` (no reviews, no watch.json).
 
 export const GC_LAUNCHD_LABEL = "io.prhero.gc";

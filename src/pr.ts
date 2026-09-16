@@ -29,6 +29,7 @@ import {
   parseAdmissionRecord,
   serializeAdmissionRecord,
 } from "#ci/admission-ledger";
+import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import {
   type ComparisonResult,
   compareFindings,
@@ -37,7 +38,6 @@ import {
 import { renderComparison } from "./compare-report";
 import { THREAD_PAGE_SIZE } from "./corpus-preflight";
 import type { Finding, RunStatus } from "./findings";
-import { GH_PR_VIEW_TIMEOUT_MS } from "./gc-preflight";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
@@ -259,7 +259,7 @@ export async function ghPrList(operatorRoot: string): Promise<string> {
 // is passed, so without this an accepted-but-unanswered `gh pr view` parks on
 // `proc.exited` forever, and the tick that is holding watch.lock never
 // returns — silencing every later tick, exactly what GH_PR_VIEW_TIMEOUT_MS's
-// own WHY (gc-preflight.ts) exists to prevent, and what fetchCommitStatuses
+// own WHY (store/gc-preflight.ts) exists to prevent, and what fetchCommitStatuses
 // on the same path already spells out. Same constant as the GC's `gh pr
 // view` because this IS a `gh pr view`. A timeout surfaces as a thrown
 // CliError, which the veto's fail-open turns into "launch anyway" — the

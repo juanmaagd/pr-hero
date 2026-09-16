@@ -622,7 +622,7 @@ export const COMMIT_STATUS_CONTEXT = "pr-hero";
 // window would double-launch a slow live run still inside its watchdog.
 export const IN_FLIGHT_TTL_MS = 90 * 60 * 1000;
 
-// Same bound as GH_PR_VIEW_TIMEOUT_MS (gc-preflight.ts): a hung statuses
+// Same bound as GH_PR_VIEW_TIMEOUT_MS (store/gc-preflight.ts): a hung statuses
 // API must not pin watch.lock or delay a pipeline that already confirmed.
 export const COMMIT_STATUS_TIMEOUT_MS = 15_000;
 

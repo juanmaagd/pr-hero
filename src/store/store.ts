@@ -8,7 +8,7 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import type { Bucket } from "./compare";
+import type { Bucket } from "../compare";
 import {
   type DebugDedupedFinding,
   type DebugRefutedFinding,
@@ -21,8 +21,8 @@ import {
   SCHEMA_VERSION,
   type Telemetry,
   validateFindingsDocument,
-} from "./findings";
-import type { StoredComparison, StoredComparisonRow } from "./ledger";
+} from "../findings";
+import type { StoredComparison, StoredComparisonRow } from "../ledger";
 import {
   type CanonicalFindingRow,
   type CanonicalRunRow,
@@ -30,7 +30,7 @@ import {
   type FindingTriageRow,
   migrationsForProductStore,
   type ProjectedCompleteRun,
-} from "./store-preflight";
+} from "./preflight";
 
 const BUSY_TIMEOUT_MS = 5000;
 

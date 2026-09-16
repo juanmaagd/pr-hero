@@ -11,9 +11,9 @@ import {
   renderGcPlist,
   renderGcStatus,
   worktreeRemoveArgs,
-} from "../src/gc-preflight";
-import { GC_TTL_HOURS, prheroLayout } from "../src/home-preflight";
-import { parsePlistInterval } from "../src/watch-preflight";
+} from "#store/gc-preflight";
+import { GC_TTL_HOURS, prheroLayout } from "../../src/home-preflight";
+import { parsePlistInterval } from "../../src/watch-preflight";
 
 const NOW = Date.parse("2026-08-15T12:00:00Z");
 const HOUR = 60 * 60 * 1000;
@@ -239,7 +239,7 @@ describe("renderGcPlist", () => {
   });
 });
 
-// W4 (#23): GC (gc.ts) walks ONLY `glob.scan({ cwd: reposDir })` — it never
+// W4 (#23): GC (store/gc.ts) walks ONLY `glob.scan({ cwd: reposDir })` — it never
 // lists ~/.prhero itself. metrics.db (W4) must stay a SIBLING of reposDir,
 // never a descendant, or a future "collect everything idle under the home"
 // sweep could delete run history GC has no business touching. No prod

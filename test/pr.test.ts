@@ -26,9 +26,9 @@ import {
   serializeAdmissionRecord,
 } from "#ci/admission-ledger";
 import { SKIP_SIZE_COMMENT_MARKER } from "#ci/gates";
+import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding } from "../src/findings";
-import { GH_PR_VIEW_TIMEOUT_MS } from "../src/gc-preflight";
 import {
   CommentsTruncatedError,
   fetchCommitStatuses,

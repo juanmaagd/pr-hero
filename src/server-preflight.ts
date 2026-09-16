@@ -4,13 +4,13 @@
 //
 // Pure and testable offline: no network, no database handles, no filesystem.
 
-import type { HopTrail, Tier } from "./findings";
 import type {
   CanonicalFindingRow,
   CanonicalRunRow,
   FindingTriageRow,
   ProjectedCompleteRun,
-} from "./store-preflight";
+} from "#store/preflight";
+import type { HopTrail, Tier } from "./findings";
 
 export interface HealthResponse {
   status: "ok";

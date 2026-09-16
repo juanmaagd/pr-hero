@@ -1,16 +1,16 @@
 // The observability store (W4 / GitHub #23), pure half: the v1 schema DDL
 // and the projection from a completed run's already-on-disk facts
 // (FindingsDocument, per-agent usage, an optional StoredComparison) into the
-// flat rows metrics.ts's bun:sqlite shell writes. Artifacts on disk stay the
+// flat rows store/metrics.ts's bun:sqlite shell writes. Artifacts on disk stay the
 // source of truth — this module only reshapes what already exists into rows,
 // it never reads a file or opens a connection.
 //
 // No backfill (proposal, decided): the dataset starts empty and grows one
 // ingest at a time, from the very next completed review after ship.
 
-import type { FindingsDocument, RunStatus } from "./findings";
-import type { StoredComparison } from "./ledger";
-import type { PerAgentUsage } from "./pipeline";
+import type { FindingsDocument, RunStatus } from "../findings";
+import type { StoredComparison } from "../ledger";
+import type { PerAgentUsage } from "../pipeline";
 
 export const CURRENT_SCHEMA_VERSION = 1;
 
@@ -137,7 +137,7 @@ export interface ProjectedRun {
 }
 
 // The ONLY place a completed run's on-disk facts become sqlite rows. Pure:
-// the caller (metrics.ts's ingestRun) supplies repoId (from the SAME
+// the caller (store/metrics.ts's ingestRun) supplies repoId (from the SAME
 // resolveRepoHome call the run dir already paid for — never re-derived from
 // checkoutPath, which is diagnostic metadata only) and generatedAt (the
 // shell's clock). `doc.pr === 0` is schema 1.0.0's "not a PR" sentinel

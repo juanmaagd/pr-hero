@@ -1,6 +1,6 @@
 // Worktree GC I/O (W3 / GitHub #18). Scans ~/.prhero/repos/*/worktrees,
 // asks gh for PR state, and tears trees down with `git worktree remove
-// --force` only. Decisions live in gc-preflight.ts.
+// --force` only. Decisions live in store/gc-preflight.ts.
 //
 // Same git-runner rule as the other shells: args as an ARRAY, never an
 // interpolated shell string. Never rm -rf — a live codegraph daemon holds
@@ -11,7 +11,26 @@ import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { log } from "#ui/primitives";
-import { selfInvocation } from "./assets";
+import { selfInvocation } from "../assets";
+import {
+  acquirePidLock,
+  releasePidLock,
+  resolveRepoHome,
+  worktreeInFlight,
+} from "../home";
+import {
+  parseRepoRegistry,
+  prheroLayout,
+  type RepoRegistry,
+  repoHomePaths,
+  worktreeLockPath,
+} from "../home-preflight";
+import {
+  CliError,
+  type CliOptions,
+  DEFAULT_GC_INTERVAL_MIN,
+} from "../preflight";
+import { parsePlistInterval } from "../watch-preflight";
 import {
   decideGc,
   GC_LAUNCHD_LABEL,
@@ -25,25 +44,6 @@ import {
   renderGcStatus,
   worktreeRemoveArgs,
 } from "./gc-preflight";
-import {
-  acquirePidLock,
-  releasePidLock,
-  resolveRepoHome,
-  worktreeInFlight,
-} from "./home";
-import {
-  parseRepoRegistry,
-  prheroLayout,
-  type RepoRegistry,
-  repoHomePaths,
-  worktreeLockPath,
-} from "./home-preflight";
-import {
-  CliError,
-  type CliOptions,
-  DEFAULT_GC_INTERVAL_MIN,
-} from "./preflight";
-import { parsePlistInterval } from "./watch-preflight";
 
 async function git(
   repo: string,

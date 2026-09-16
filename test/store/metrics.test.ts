@@ -10,17 +10,17 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { Finding, FindingsDocument } from "../src/findings";
-import { runGc } from "../src/gc";
-import { prheroLayout, repoHomePaths } from "../src/home-preflight";
-import type { StoredComparison } from "../src/ledger";
+import { runGc } from "#store/gc";
 import {
   failSoftIngest,
   ingestRun,
   openMetricsDb,
   queryUsage,
-} from "../src/metrics";
-import type { PerAgentUsage } from "../src/pipeline";
+} from "#store/metrics";
+import type { Finding, FindingsDocument } from "../../src/findings";
+import { prheroLayout, repoHomePaths } from "../../src/home-preflight";
+import type { StoredComparison } from "../../src/ledger";
+import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpDbPath(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-metrics-"));
@@ -399,7 +399,7 @@ describe("GC immunity end-to-end (spec: GC after ingest)", () => {
       generatedAt: "2026-08-15T12:00:00.000Z",
     });
     // A registry.json + a worktree dir is exactly what discoverWorktrees
-    // (gc.ts) scans for — git_dir_owner only needs to exist as a directory
+    // (store/gc.ts) scans for — git_dir_owner only needs to exist as a directory
     // (ghPrStateJson's cwd), it does not need to be a real git repo.
     const gitDirOwner = await mkdtemp(
       path.join(tmpdir(), "pr-hero-metrics-owner-"),

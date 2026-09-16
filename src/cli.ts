@@ -88,6 +88,28 @@ import {
   unreachableLastHeadMessage,
 } from "#rereview/prepare";
 import { parseStateBlock, renderStateBlock } from "#rereview/state";
+import {
+  getWatcherSpend,
+  killActiveRun,
+  listActiveRuns,
+  queryRecentRuns,
+  registerActiveRun,
+  unregisterActiveRun,
+} from "#store/activity";
+import { gcCommand, runGc } from "#store/gc";
+import {
+  type FailSoftIngestInput,
+  failSoftIngest,
+  queryUsage,
+} from "#store/metrics";
+import { type RunRow, renderUsage } from "#store/metrics-preflight";
+import { projectCompleteRun } from "#store/preflight";
+import {
+  openProductStore,
+  queryRuns,
+  recordFindingTriage,
+  saveRunTransaction,
+} from "#store/store";
 import { renderActivityScreen } from "#ui/activity";
 import { renderConfig } from "#ui/config";
 import {
@@ -120,14 +142,6 @@ import {
 import { type ResultLinks, renderResult } from "#ui/result";
 import { runReviewMenu } from "#ui/review-menu";
 import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
-import {
-  getWatcherSpend,
-  killActiveRun,
-  listActiveRuns,
-  queryRecentRuns,
-  registerActiveRun,
-  unregisterActiveRun,
-} from "./activity";
 import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
@@ -147,7 +161,6 @@ import {
   validateFindingsDocument,
   writeFindings,
 } from "./findings";
-import { gcCommand, runGc } from "./gc";
 import {
   acquirePidLock,
   releasePidLock,
@@ -187,12 +200,6 @@ import {
 } from "./ledger";
 import { runMcpServer } from "./mcp";
 import { resolveMenuContext } from "./menu-context";
-import {
-  type FailSoftIngestInput,
-  failSoftIngest,
-  queryUsage,
-} from "./metrics";
-import { type RunRow, renderUsage } from "./metrics-preflight";
 import {
   buildResolvedRoutePlan,
   type ResolvedRoutePlan,
@@ -357,13 +364,6 @@ import {
 } from "./size-gate";
 import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner, killAllChildProcesses } from "./step-runner";
-import {
-  openProductStore,
-  queryRuns,
-  recordFindingTriage,
-  saveRunTransaction,
-} from "./store";
-import { projectCompleteRun } from "./store-preflight";
 import {
   admitRoutePlan,
   createDefaultTransportRegistry,

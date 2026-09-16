@@ -1,4 +1,4 @@
-import type { ActiveRunRecord, RunHistoryItem } from "../activity";
+import type { ActiveRunRecord, RunHistoryItem } from "#store/activity";
 import { bold, box, cyan, dim, green, red } from "./primitives";
 
 export interface ActivityRenderOptions {
