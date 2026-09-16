@@ -387,8 +387,13 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
     const source = await Bun.file(
       path.resolve(import.meta.dir, "../src/cli.ts"),
     ).text();
+    // CLI decomposition P2.1 (odd/tasks/cli-decomposition.md): the filter
+    // itself moved into `selectActiveHunters` in src/review/run.ts (shared
+    // with review()'s copy, tested there), but the wiring this test guards
+    // — skipDiscovery gates activeHunters directly, never a hardcoded case
+    // check — is unchanged.
     expect(source).toContain(
-      "const activeHunters = skipDiscovery\n      ? []\n      : spec.agents.filter(",
+      "const activeHunters = skipDiscovery\n      ? []\n      : selectActiveHunters(spec.agents, parityFires);",
     );
     // The one thing that must NEVER reappear: a discovery gate that special-
     // cases case B directly would silently reintroduce the exact defect this

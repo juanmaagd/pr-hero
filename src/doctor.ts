@@ -12,6 +12,7 @@ import {
   localReviewSpec,
   resolveAgentsDirSetting,
 } from "#review/preflight";
+import { resolveGotchasPath } from "#review/run";
 import {
   detectAgentEnvironments,
   inspectMcpRegistration,
@@ -352,7 +353,7 @@ export async function runDoctor(
 
   // 3. Gotchas check (only when repo root is supplied or discovered)
   if (repoDir) {
-    const gotchasPath = path.join(repoDir, ".prhero", "gotchas.md");
+    const gotchasPath = resolveGotchasPath(undefined, repoDir);
     const gotchasContent = exists(gotchasPath)
       ? readFile(gotchasPath)
       : undefined;
