@@ -10,7 +10,7 @@
 
 import type { StoredComparison } from "#compare/ledger";
 import type { FindingsDocument, RunStatus } from "#review/findings";
-import type { PerAgentUsage } from "../pipeline";
+import type { PerAgentUsage } from "#review/pipeline";
 
 export const CURRENT_SCHEMA_VERSION = 1;
 

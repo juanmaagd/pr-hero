@@ -25,7 +25,7 @@ import {
   CliUsageError,
   isFullCommitId,
   type NumstatDiffStat,
-} from "./preflight";
+} from "#review/preflight";
 
 export type PrState = "OPEN" | "CLOSED" | "MERGED";
 

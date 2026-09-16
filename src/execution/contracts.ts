@@ -6,9 +6,9 @@ import type {
   RunnerBackend,
   VerifiedExecutable,
 } from "#model/provider-capabilities";
+import type { StepSpec } from "#review/step-runner";
 import type { CredentialBroker } from "../security/credential-broker";
 import type { WorkspaceDenialCode } from "../security/workspace-read-broker";
-import type { StepSpec } from "../step-runner";
 import type {
   NormalizedTokens,
   NormalizedUsage,

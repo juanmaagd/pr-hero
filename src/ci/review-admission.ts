@@ -11,8 +11,8 @@
 import { createHash } from "node:crypto";
 import type { ParsedStateBlock } from "#rereview/state";
 import type { Tier } from "#review/findings";
+import type { LocalConfig } from "#review/preflight";
 import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "../pr-preflight";
-import type { LocalConfig } from "../preflight";
 import {
   type AdmissionRecord,
   countTerminalAttempts,

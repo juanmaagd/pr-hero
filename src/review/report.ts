@@ -20,7 +20,7 @@ import {
   type RootCauseSummary,
   rootCauseIdByFinding,
 } from "#review/root-cause";
-import { findingMarker, prCommentMarker } from "./pr-preflight";
+import { findingMarker, prCommentMarker } from "../pr-preflight";
 
 export interface DiffStat {
   files: number;
@@ -198,7 +198,7 @@ function agentRows(doc: FindingsDocument): AgentRow[] {
 // WHY "agents" and not "hunters", which is the word the issue uses: the
 // document does not record roles. `telemetry.per_agent` is keyed by
 // AgentSpec.key and carries a status, but nothing in it says which key was a
-// hunter — the refuter and the summarizer sit in the same map (pipeline.ts
+// hunter — the refuter and the summarizer sit in the same map (review/pipeline.ts
 // writes `refuter` and `summary` rows there). Excluding those two keys by
 // name would be a hardcoded list that (a) breaks the moment a spec renames
 // the refuter and (b) would print "all hunters completed" on a run that went
@@ -220,7 +220,7 @@ export function coverageSentence(
   // A partial run can name nobody at all, and the notice still has to be
   // honest about that instead of printing an empty list: the gotchas
   // early-return produces `run_status: "partial"` with an EMPTY per_agent map
-  // (pipeline.ts), a pipeline timeout abandons in-flight steps whose rows are
+  // (review/pipeline.ts), a pipeline timeout abandons in-flight steps whose rows are
   // never written, and a pre-v2 artifact has no per_agent at all. "Did not
   // complete: (none)" on any of those would read as "everything ran".
   const done =

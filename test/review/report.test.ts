@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
-import { clusterByRootCause } from "#review/root-cause";
-import {
-  findingMarker,
-  PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
-  PR_COMMENT_MARKER_PREFIX,
-  prCommentMarker,
-} from "../src/pr-preflight";
 import {
   estimateCost,
   formatElapsed,
@@ -18,7 +11,14 @@ import {
   renderReport,
   scanAidEmoji,
   severityEmoji,
-} from "../src/report";
+} from "#review/report";
+import { clusterByRootCause } from "#review/root-cause";
+import {
+  findingMarker,
+  PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
+  PR_COMMENT_MARKER_PREFIX,
+  prCommentMarker,
+} from "../../src/pr-preflight";
 
 const ANCHOR = "src/duration.ts:19-20";
 

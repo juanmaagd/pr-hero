@@ -146,7 +146,7 @@ export interface FindingsDocument {
   // Juanma's decision (verify-report-pr3, #3305), over the verifier's cheaper
   // "make `post` as permissive as `--pr --post`" suggestion: `run_status:
   // "partial"` with zero findings covers at least THREE distinct situations
-  // — every hunter failed (the true sessionFailed case, pipeline.ts:771),
+  // — every hunter failed (the true sessionFailed case, review/pipeline.ts:771),
   // no hunter ran at all because gotchas were unusable — missing, empty, or
   // still the untouched scaffold (pipeline's step-2 fail-loud,
   // sessionFailed: false), or one hunter died while the others found
@@ -590,7 +590,7 @@ export function deriveTier(
     // a refuter was configured for this run AND the run ended early (pipeline
     // ceiling / `run_status: "partial"`) rather than completing its legs.
     // Those two are orthogonal, and the name says the conjunction so no future
-    // caller can satisfy it with truncation alone (src/pipeline.ts `finish()`
+    // caller can satisfy it with truncation alone (src/review/pipeline.ts `finish()`
     // is where the conjunction is computed, and says why).
     // Defaults to FALSE on purpose: a caller that knows nothing about the
     // refuter's fate must never be able to demote by accident, so the fallback
@@ -628,7 +628,7 @@ export function deriveTier(
   //   1. a refuter was CONFIGURED for this run, so an adversarial check was
   //      genuinely owed to this finding;
   //   2. the run was truncated, so that leg was refused admission
-  //      (src/pipeline.ts §5.3) and never spawned; and
+  //      (src/review/pipeline.ts §5.3) and never spawned; and
   //   3. the verdict is `not_submitted`, the fallback `finish()` stamps on a
   //      survivor no verdict ever arrived for.
   // Parts 1 and 2 arrive pre-conjoined as `refuterCutShort` — deriveTier never

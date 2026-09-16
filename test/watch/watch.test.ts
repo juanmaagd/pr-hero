@@ -40,6 +40,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DEFAULT_SIZE_GATE, sizeGateConfig } from "#review/size-gate";
 import {
   decideTick,
   type TickLaunch,
@@ -56,7 +57,6 @@ import {
 } from "#watch/watch";
 import { parseIgnoreFile } from "../../src/ignore-file";
 import { readLocalIgnoreRules } from "../../src/ignore-read";
-import { DEFAULT_SIZE_GATE, sizeGateConfig } from "../../src/size-gate";
 
 const HEAD_A = "a".repeat(40);
 

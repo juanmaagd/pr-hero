@@ -15,9 +15,9 @@
 // collide on. This module asks for an ephemeral port and reads back the URL
 // the server actually prints.
 
+import type { SpawnedProcess } from "#review/step-runner";
 import type { CredentialKind } from "../execution/contracts";
 import type { CredentialBroker } from "../security/credential-broker";
-import type { SpawnedProcess } from "../step-runner";
 import { mcpConfigIsEmpty, type OpenCodeMcpConfig } from "./opencode-mcp";
 
 // The line the server prints on startup, verified live against

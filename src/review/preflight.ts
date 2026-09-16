@@ -22,9 +22,9 @@ import {
   type TriageTag,
   type TriageVerdict,
 } from "#triage/triage";
-import { type EngineAssets, resolveEngineAssets } from "./assets";
-import { redactDiagnostic } from "./security/redact";
-// size-gate.ts imports only a TYPE from here, so this is not a runtime
+import { type EngineAssets, resolveEngineAssets } from "../assets";
+import { redactDiagnostic } from "../security/redact";
+// review/size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
 // dependency on this module.
 import { DEFAULT_SIZE_GATE, unquotePath } from "./size-gate";
@@ -145,7 +145,7 @@ export interface CliOptions {
   // re-arms its PRs. The default (false) reviews each PR once — see the
   // re-arm policy note on candidateSkipReason in watch/preflight.ts.
   onPush: boolean;
-  // Bypass the size gate for THIS run (see size-gate.ts). Deliberately does
+  // Bypass the size gate for THIS run (see review/size-gate.ts). Deliberately does
   // NOT imply --yes: --force answers "is this diff too big to be worth its
   // cost", and the cost band's own confirmation answers "do you want to
   // spend this" — collapsing them would let one flag skip two gates.

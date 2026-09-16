@@ -13,7 +13,7 @@
 // a review, never scores, and never labels what the defect was. Everything it
 // emits is a CANDIDATE for a human glance.
 
-import { CliUsageError } from "./preflight";
+import { CliUsageError } from "#review/preflight";
 
 // Two years of default branch history. WHY this number: a revert is only
 // useful as a known-bad case while the surrounding code still resembles the

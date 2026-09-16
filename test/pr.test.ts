@@ -28,6 +28,7 @@ import {
 import { SKIP_SIZE_COMMENT_MARKER } from "#ci/gates";
 import type { PrHeroFindingRef } from "#compare/compare";
 import type { Finding } from "#review/findings";
+import { renderIssueFindingComment } from "#review/report";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import {
   CommentsTruncatedError,
@@ -59,7 +60,6 @@ import {
   PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
 } from "../src/pr-preflight";
-import { renderIssueFindingComment } from "../src/report";
 
 // ---------------------------------------------------------------------------
 // FakeSpawn: scripted {stdout, stderr, exitCode} per call, in call order.

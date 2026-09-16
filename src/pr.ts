@@ -38,6 +38,7 @@ import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
 import { renderComparison } from "#compare/report";
 import { THREAD_PAGE_SIZE } from "#corpus/preflight";
 import type { Finding, RunStatus } from "#review/findings";
+import { CliError, isFullCommitId } from "#review/preflight";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
@@ -52,13 +53,12 @@ import {
   type WorktreeDecision,
   worktreeDirty,
 } from "./pr-preflight";
-import { CliError, isFullCommitId } from "./preflight";
 
 export const GRAPHQL_COMMENT_MAX_PAGES = 50;
 
 export class CommentsTruncatedError extends CliError {}
 
-import { renderInlineComment, renderIssueFindingComment } from "./report";
+import { renderInlineComment, renderIssueFindingComment } from "#review/report";
 
 // Same helper as cli.ts's git, duplicated rather than shared so neither
 // shell imports the other. The WHY carries over verbatim: args as an ARRAY,
@@ -121,7 +121,7 @@ async function gh(
     ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
   });
   // Watchdog, same shape as ClaudeCodeRunner.runAttempt's
-  // (`src/step-runner.ts:361-378`): kill on the deadline, clear in a
+  // (`src/review/step-runner.ts:361-378`): kill on the deadline, clear in a
   // `finally`, and report the kill as a failure rather than as an empty
   // success. Bun.spawn's own `timeout` above would also reap a real process,
   // but only a real one — every `gh` seam in this codebase is a `spawnFn`,

@@ -58,7 +58,7 @@ import {
   validateProximityDays,
   walkPageKept,
 } from "#corpus/preflight";
-import { CliUsageError, HELP_TEXT, parseArgs } from "../../src/preflight";
+import { CliUsageError, HELP_TEXT, parseArgs } from "#review/preflight";
 
 // SYNTHETIC 40-hex stand-ins, first-seen order pinned by nothing but these
 // tests. The a/b/c… prefixes keep fixtures readable without pretending to be

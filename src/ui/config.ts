@@ -18,13 +18,13 @@
 // Here the exhaustive list IS the product — a key missing from the listing
 // would read as "pr-hero has no such setting".
 
-import type { SuspicionPrior } from "#review/prompt-set";
 import type {
   ConfigSource,
   ConfigSources,
   LocalConfig,
   SummaryConfig,
-} from "../preflight";
+} from "#review/preflight";
+import type { SuspicionPrior } from "#review/prompt-set";
 import {
   bold,
   cyan,

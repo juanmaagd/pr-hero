@@ -12,8 +12,8 @@
 
 import type { PrHeroFindingRef } from "#compare/compare";
 import { extractAnchor } from "#review/root-cause";
+import { diffRecordPath, splitDiffRecords } from "#review/size-gate";
 import { claimFingerprint, type ParsedFindingMarker } from "./pr-preflight";
-import { diffRecordPath, splitDiffRecords } from "./size-gate";
 
 // The comparison ref plus the proof_refs posting needs to re-anchor an
 // off-hunk finding onto a hunter-cited in-diff line (Musive #1727). Optional

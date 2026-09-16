@@ -9,30 +9,30 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import { type PipelineInput, runPipeline } from "#review/pipeline";
+import { rereviewDeltaFromProvenance } from "#review/report";
 import { type ReviewSpec, validateReviewSpec } from "#review/spec";
+import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
 import { countAttempts, parsePipelineMeta } from "#watch/preflight";
-import { emptyDiversityLedger } from "../src/diversity/accounting";
-import { buildDiversityPlan } from "../src/diversity/identity";
+import { emptyDiversityLedger } from "../../src/diversity/accounting";
+import { buildDiversityPlan } from "../../src/diversity/identity";
 import {
   diversityDebugFromLedger,
   recordDiversityHunterResult,
-} from "../src/diversity/pipeline-integration";
+} from "../../src/diversity/pipeline-integration";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
   RunnerBackend,
   TransportOutcome,
   TransportRequest,
-} from "../src/execution/contracts";
-import { type PipelineInput, runPipeline } from "../src/pipeline";
-import { rereviewDeltaFromProvenance } from "../src/report";
-import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
+} from "../../src/execution/contracts";
 import {
   type D1_11ReadinessEvidence,
   DefaultTransportRegistry,
   OpenCodeProductionGatedError,
   RouteAdmissionError,
-} from "../src/transport-registry";
+} from "../../src/transport-registry";
 
 class RecordingStepRunner implements StepRunner {
   readonly executedSteps: StepSpec[] = [];

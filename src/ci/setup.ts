@@ -19,8 +19,8 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { parseRoutingConfig } from "#review/preflight";
 import { prheroLayout } from "../home-preflight";
-import { parseRoutingConfig } from "../preflight";
 import { resolveOpenCodeAuthPath } from "../security/credential-broker";
 
 export const CI_WORKFLOW_RELATIVE_PATH = path.join(

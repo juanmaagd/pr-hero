@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parseArgs } from "#review/preflight";
 import {
   cycleStringPreset,
   getEditableLayerEntries,
@@ -13,7 +14,6 @@ import {
   toggleBooleanValue,
   unsetConfigValue,
 } from "#ui/config-edit";
-import { parseArgs } from "../../src/preflight";
 
 describe("6.1 & 6.2 & 6.3 Interactive Config Editor & Headless Set/Unset", () => {
   const tmpDir = path.join(

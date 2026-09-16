@@ -2,7 +2,7 @@ import {
   type CliOptions,
   DEFAULT_HOP_BUDGET,
   type LocalConfig,
-} from "../preflight";
+} from "#review/preflight";
 import { cycleStringPreset } from "./config-edit";
 import { clearDrawnLines } from "./menu";
 import { bold, box, cyan, dim, sanitizeText } from "./primitives";

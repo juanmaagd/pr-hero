@@ -65,7 +65,6 @@ import { DEFAULT_LINE_WINDOW, normalizePath } from "#compare/compare";
 import { selectBoundaryNonce } from "#review/boundary";
 import { extractJsonObject } from "#review/drafts";
 import { parseAgentFile } from "#review/prompt-set";
-import { resolveRunnerAuthority } from "../src/runner-authority";
 import {
   capScoutLeads,
   type HunkCoverage,
@@ -75,8 +74,9 @@ import {
   type ScoutLead,
   scoutPrompt,
   validateScoutLeads,
-} from "../src/scout";
-import { ClaudeCodeRunner, type StepSpec } from "../src/step-runner";
+} from "#review/scout";
+import { ClaudeCodeRunner, type StepSpec } from "#review/step-runner";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 
 // The frozen M0 control set (§1.1). These run dirs MUST survive until M6; the
 // probe only ever READS `diff.patch` out of them.

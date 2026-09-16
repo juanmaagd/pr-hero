@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+import { attemptEvidencePath, type StepSpec } from "#review/step-runner";
 import {
   redactEvidence,
   redactEvidenceText,
 } from "../security/evidence-redaction";
-import { attemptEvidencePath, type StepSpec } from "../step-runner";
 import { writeJsonAtomically } from "./atomic-write";
 import type { TransportOutcome, TransportRequest } from "./contracts";
 import type { SettlementReceipt } from "./settlement";

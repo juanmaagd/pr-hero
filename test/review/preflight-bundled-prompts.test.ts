@@ -3,14 +3,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { parseAgentSource, promptSetFingerprint } from "#review/prompt-set";
-import type { EngineAssets } from "../src/assets";
-import { resolveEngineAssets } from "../src/assets";
-import {
-  loadEffectiveConfig,
-  preflightAgentsDir,
-  resolveAgentsDir,
-} from "../src/cli";
 import {
   type AgentsDirConfigSeat,
   agentFilePath,
@@ -18,7 +10,15 @@ import {
   BUNDLED_AGENTS_DIR_LABEL,
   localReviewSpec,
   resolveAgentsDirSetting,
-} from "../src/preflight";
+} from "#review/preflight";
+import { parseAgentSource, promptSetFingerprint } from "#review/prompt-set";
+import type { EngineAssets } from "../../src/assets";
+import { resolveEngineAssets } from "../../src/assets";
+import {
+  loadEffectiveConfig,
+  preflightAgentsDir,
+  resolveAgentsDir,
+} from "../../src/cli";
 
 describe("resolveAgentsDirSetting with bundled prompts default", () => {
   test("with no flag, config, or env returns the bundled default with source 'default'", () => {
@@ -82,7 +82,7 @@ describe("resolveAgentsDirSetting with bundled prompts default", () => {
 
 describe("Repo hygiene and O-15 productization scan", () => {
   test("no runtime source file in src/ references SUGGESTED_AGENTS_DIR or /Users/juanma", () => {
-    const srcDir = path.resolve(import.meta.dir, "../src");
+    const srcDir = path.resolve(import.meta.dir, "../../src");
     const srcFiles = readdirSync(srcDir).filter((f) => f.endsWith(".ts"));
 
     for (const file of srcFiles) {
@@ -93,7 +93,7 @@ describe("Repo hygiene and O-15 productization scan", () => {
   });
 
   test("O-15 scan over prompts/default/ has zero forbidden mentions in name/body", () => {
-    const defaultDir = path.resolve(import.meta.dir, "../prompts/default");
+    const defaultDir = path.resolve(import.meta.dir, "../../prompts/default");
     const files = readdirSync(defaultDir).filter(
       (f) => f.endsWith(".md") && f !== "PROVENANCE.md",
     );
@@ -130,7 +130,7 @@ describe("bundled prompts carry no tool-injected content", () => {
   // so the guard forbids the delimiter itself: a freeze must strip such
   // blocks, and this keeps a future freeze from importing them again.
   test("no prompt file contains an HTML comment", () => {
-    const promptsRoot = path.resolve(import.meta.dir, "../prompts");
+    const promptsRoot = path.resolve(import.meta.dir, "../../prompts");
     const files = readdirSync(promptsRoot, { recursive: true })
       .map(String)
       // PROVENANCE.md is the ledger, not a prompt: it describes what was

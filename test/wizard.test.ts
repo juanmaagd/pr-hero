@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
   GOTCHAS_PLACEHOLDER_MARKER,
   gotchasUnusableReason,
   INIT_GIT_REMINDER,
-} from "../src/preflight";
+} from "#review/preflight";
+import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import {
   CURRENT_ONBOARDING_VERSION,
   createInitialWizardState,

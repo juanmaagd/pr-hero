@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { CliError } from "#review/preflight";
 import { parseLockPid } from "#watch/preflight";
 import {
   canonicalRemoteId,
@@ -23,7 +24,6 @@ import {
   serializeRepoRegistry,
   touchWorktreeStamp,
 } from "./home-preflight";
-import { CliError } from "./preflight";
 
 const PID_LOCK_ATTEMPTS = 3;
 

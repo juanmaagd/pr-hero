@@ -18,13 +18,13 @@ import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
 } from "#model/provider-capabilities";
+import type { StepSpec } from "#review/step-runner";
 import type {
   ProviderTransport,
   StepAdmissionGate,
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
-import type { StepSpec } from "../../src/step-runner";
 
 // Mach-O 64-bit little-endian magic: makes verifyExecutableAuthority treat
 // the fixture as a binary so its bytes go through the snapshot path.

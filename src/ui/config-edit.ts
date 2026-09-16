@@ -1,7 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { mergeConfig, parseGlobalConfig, parseLocalConfig } from "../preflight";
+import {
+  mergeConfig,
+  parseGlobalConfig,
+  parseLocalConfig,
+} from "#review/preflight";
 import { bold, box, cyan, dim, sanitizeText, yellow } from "./primitives";
 import type { KeyReader } from "./select";
 

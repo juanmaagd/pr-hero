@@ -9,15 +9,19 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
-import type { SelfInvocation } from "../assets";
-import { type PrheroLayout, prheroLayout } from "../home-preflight";
-import { PR_COMMENT_MARKER_PREFIX } from "../pr-preflight";
-import { CliUsageError, isFullCommitId, type NumstatFile } from "../preflight";
+import {
+  CliUsageError,
+  isFullCommitId,
+  type NumstatFile,
+} from "#review/preflight";
 import {
   DEFAULT_SIZE_GATE,
   evaluateSizeGate,
   type SizeGateConfig,
-} from "../size-gate";
+} from "#review/size-gate";
+import type { SelfInvocation } from "../assets";
+import { type PrheroLayout, prheroLayout } from "../home-preflight";
+import { PR_COMMENT_MARKER_PREFIX } from "../pr-preflight";
 
 // ---------------------------------------------------------------------------
 // ~/.prhero/ layout — one source for every path the watcher owns, so the

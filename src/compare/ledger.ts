@@ -5,11 +5,11 @@
 // the bytes, supplies each file's mtime, and owns stdout.
 
 import type { RunStatus } from "#review/findings";
+import { CliUsageError, isFullCommitId } from "#review/preflight";
 import type {
   ComparisonGreptileClaim,
   ComparisonPrHeroClaim,
 } from "../pr-preflight";
-import { CliUsageError, isFullCommitId } from "../preflight";
 import type { Bucket } from "./compare";
 
 // Unlike ComparisonRow (written always-null), a stored row may have been

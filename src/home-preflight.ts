@@ -12,7 +12,7 @@
 // in <checkout>/.prhero/.
 
 import path from "node:path";
-import { CliUsageError } from "./preflight";
+import { CliUsageError } from "#review/preflight";
 
 export const GC_TTL_HOURS = 72;
 

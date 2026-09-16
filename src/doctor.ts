@@ -6,6 +6,13 @@ import {
   type ProviderCapabilityReport,
 } from "#model/provider-capabilities";
 import {
+  agentFilePath,
+  GOTCHAS_PLACEHOLDER_MARKER,
+  gotchasUnusableReason,
+  localReviewSpec,
+  resolveAgentsDirSetting,
+} from "#review/preflight";
+import {
   detectAgentEnvironments,
   inspectMcpRegistration,
   inspectSkillsSync,
@@ -16,13 +23,6 @@ import {
   selfInvocation,
 } from "./assets";
 import type { ExactBindingCapabilityReport } from "./execution/contracts";
-import {
-  agentFilePath,
-  GOTCHAS_PLACEHOLDER_MARKER,
-  gotchasUnusableReason,
-  localReviewSpec,
-  resolveAgentsDirSetting,
-} from "./preflight";
 import {
   type CheckSystemToolsOptions,
   checkCiConfiguration,

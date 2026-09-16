@@ -10,13 +10,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { StoredComparison } from "#compare/ledger";
 import type { Finding, FindingsDocument } from "#review/findings";
+import type { PerAgentUsage } from "#review/pipeline";
 import { ProductStoreClient } from "#server/client";
 import { startProductStoreServer } from "#server/server";
 import {
   CURRENT_PRODUCT_SCHEMA_VERSION,
   projectCompleteRun,
 } from "#store/preflight";
-import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpServerEnv(): Promise<{
   dbPath: string;

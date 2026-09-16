@@ -15,7 +15,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import type { StoredComparison } from "#compare/ledger";
 import type { FindingsDocument } from "#review/findings";
-import type { PerAgentUsage } from "../pipeline";
+import type { PerAgentUsage } from "#review/pipeline";
 import {
   type ComparisonRowProjection,
   migrationsFor,

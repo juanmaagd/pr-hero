@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import type { StoredComparison } from "#compare/ledger";
 import type { Finding, FindingsDocument } from "#review/findings";
+import type { PerAgentUsage } from "#review/pipeline";
 import {
   CURRENT_SCHEMA_VERSION,
   migrationsFor,
@@ -15,7 +16,6 @@ import {
   type RunRow,
   renderUsage,
 } from "#store/metrics-preflight";
-import type { PerAgentUsage } from "../../src/pipeline";
 
 function baseFinding(overrides: Partial<Finding> = {}): Finding {
   return {

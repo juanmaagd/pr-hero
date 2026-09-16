@@ -10,12 +10,12 @@
 // actually produces it, and that is the fact the command exists to report.
 
 import { describe, expect, test } from "bun:test";
-import { type ConfigViewInput, configRows, renderConfig } from "#ui/config";
 import {
   CONFIG_DIRECTION,
   type ConfigLayer,
   mergeConfig,
-} from "../../src/preflight";
+} from "#review/preflight";
+import { type ConfigViewInput, configRows, renderConfig } from "#ui/config";
 
 const PATHS = {
   repoConfigPath: "/repo/.prhero/config.json",

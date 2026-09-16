@@ -13,12 +13,12 @@ import type {
   ExecutableAllowlistEntry,
   ResolvedModelRoute,
   StepAdmissionGate,
-} from "./execution/contracts";
-import { StepExecutionHarness } from "./execution/harness";
-import type { SpendReservation } from "./execution/spend-limiter";
-import type { NormalizedUsage } from "./execution/usage-normalized";
-import type { CredentialBroker } from "./security/credential-broker";
-import type { SessionUsage } from "./usage";
+} from "../execution/contracts";
+import { StepExecutionHarness } from "../execution/harness";
+import type { SpendReservation } from "../execution/spend-limiter";
+import type { NormalizedUsage } from "../execution/usage-normalized";
+import type { CredentialBroker } from "../security/credential-broker";
+import type { SessionUsage } from "../usage";
 
 export interface StepSpec {
   // "hunter-reliability" | "hunter-resilience" | "hunter-parity" | "refuter"
@@ -44,7 +44,7 @@ export interface StepSpec {
   // step stops looking merely slow — `attempts` was already counted, but only
   // after the fact in PerAgentUsage, which is a post-mortem, not a signal.
   // Nothing here may change retry behavior: no return value is read, and a
-  // throwing callback is swallowed (the same rule pipeline.ts's emit() keeps
+  // throwing callback is swallowed (the same rule review/pipeline.ts's emit() keeps
   // — a cosmetic listener must never kill a paid run).
   onRetry?(info: RetryInfo): void;
   // Stage-2 fields — typed now so specs stay forward-compatible, UNUSED in
@@ -107,7 +107,7 @@ export interface StepRunner {
 // Where a step's per-attempt artifacts land, derived from its `outPath` — part
 // of the RUNNER CONTRACT, not a harness implementation detail, because two
 // modules now depend on the answer: the harness writes the files, and
-// pipeline.ts indexes them from `pipeline.json` (D1-10c). Deriving the names
+// review/pipeline.ts indexes them from `pipeline.json` (D1-10c). Deriving the names
 // twice is how a pointer starts naming a file that was never written — the
 // exact defect the harness's own comment records ("a hardcoded settlement.json
 // in a cancellation message pointed at a file that never existed for as long as

@@ -26,12 +26,12 @@
 
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { CliError } from "#review/preflight";
 import {
   IgnoreFileError,
   type IgnoreRule,
   parseIgnoreFile,
 } from "./ignore-file";
-import { CliError } from "./preflight";
 
 export interface IgnoreFileReadResult {
   rules: IgnoreRule[];

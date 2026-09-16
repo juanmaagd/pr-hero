@@ -26,11 +26,11 @@ test("all-unknown costs and wall time remain unknown, with visible coverage", ()
   expect(metrics.missing).toBe(1);
 });
 
+import { attemptEvidencePath } from "#review/step-runner";
 import type { BenchmarkIdentity } from "../scripts/martian-evidence";
 import { evidenceSha256 } from "../src/execution/attempt-evidence";
 import type { ProviderTransport } from "../src/execution/contracts";
 import { StepExecutionHarness } from "../src/execution/harness";
-import { attemptEvidencePath } from "../src/step-runner";
 
 async function realAttemptFixture(
   backend: "claude-code" | "opencode" = "claude-code",
@@ -438,7 +438,7 @@ test("positive OpenCode frozen identity supplies the actual installed SDK reader
   const root = await mkdtemp(path.join(tmpdir(), "prhero-freeze-opencode-"));
   const agents = path.join(root, "agents");
   await mkdir(agents);
-  const { localReviewSpec } = await import("../src/preflight");
+  const { localReviewSpec } = await import("#review/preflight");
   for (const a of localReviewSpec().agents)
     await writeFile(
       path.join(agents, a.file),

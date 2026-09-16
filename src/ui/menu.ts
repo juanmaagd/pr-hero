@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_MAX_VERIFICATION_STEPS } from "#review/preflight";
+import { DEFAULT_SIZE_GATE } from "#review/size-gate";
 import { listActiveRuns } from "#store/activity";
 import { DEFAULT_DAILY_CAP } from "#watch/preflight";
 import { runDoctor } from "../doctor";
@@ -11,8 +13,6 @@ import {
   type RepoContext,
   resolveMenuContext,
 } from "../menu-context";
-import { DEFAULT_MAX_VERIFICATION_STEPS } from "../preflight";
-import { DEFAULT_SIZE_GATE } from "../size-gate";
 import {
   cycleStringPreset,
   DEFAULT_CARD_ACTIONS,

@@ -83,8 +83,8 @@ import {
   resolveSpecialty,
   validateReviewSpec,
 } from "#review/spec";
-import type { InternalCapabilityReport } from "./diversity/admission";
-import type { BenchmarkTarget } from "./diversity/identity";
+import type { InternalCapabilityReport } from "../diversity/admission";
+import type { BenchmarkTarget } from "../diversity/identity";
 import {
   assertDiversityLegRoutes,
   assertDiversitySpendUnderCap,
@@ -96,21 +96,29 @@ import {
   projectDiversityDrafts,
   recordDiversityHunterFailure,
   recordDiversityHunterResult,
-} from "./diversity/pipeline-integration";
-import { writeJsonAtomically } from "./execution/atomic-write";
+} from "../diversity/pipeline-integration";
+import { writeJsonAtomically } from "../execution/atomic-write";
 import {
   DEFAULT_CANCELLATION_DEADLINE_MS,
   HARNESS_GRACE_MARGIN_MS,
-} from "./execution/settlement";
+} from "../execution/settlement";
 import type {
   SpendReservation,
   UnresolvedSpend,
-} from "./execution/spend-limiter";
-import type { NormalizedUsage } from "./execution/usage-normalized";
-import { sumNormalizedUsage } from "./execution/usage-normalized";
+} from "../execution/spend-limiter";
+import type { NormalizedUsage } from "../execution/usage-normalized";
+import { sumNormalizedUsage } from "../execution/usage-normalized";
+import {
+  admitDiversityRoutePlan,
+  admitRoutePlan,
+  type D1_11ReadinessEvidence,
+  DefaultTransportRegistry,
+  type TransportRegistry,
+} from "../transport-registry";
+import { type SessionUsage, sumUsage, zeroUsage } from "../usage";
 // Type-only, and deliberately so: the C5 provenance block is recorded
 // verbatim, never re-derived here, so the pipeline gains a shape from
-// preflight and not a runtime dependency on it (the same seam size-gate.ts
+// preflight and not a runtime dependency on it (the same seam review/size-gate.ts
 // already uses for NumstatFile).
 import type { ConfigSources, LocalConfig } from "./preflight";
 import { agentFilePath, gotchasUnusableReason } from "./preflight";
@@ -132,14 +140,6 @@ import {
   type StepSpec,
   settlementReceiptPath,
 } from "./step-runner";
-import {
-  admitDiversityRoutePlan,
-  admitRoutePlan,
-  type D1_11ReadinessEvidence,
-  DefaultTransportRegistry,
-  type TransportRegistry,
-} from "./transport-registry";
-import { type SessionUsage, sumUsage, zeroUsage } from "./usage";
 
 export interface PipelineInput {
   pr: number;
@@ -276,7 +276,7 @@ export interface PipelineInput {
   // (W-order): overlapCandidates are priors that may still be appended.
   verifyQueue?: VerifyQueueEntry[];
   overlapCandidates?: VerifyQueueEntry[];
-  // Default 8 matches DEFAULT_MAX_VERIFICATION_STEPS in preflight.ts.
+  // Default 8 matches DEFAULT_MAX_VERIFICATION_STEPS in review/preflight.ts.
   // CLI always passes the resolved config value; this default is the
   // unattended hatch if a caller forgets.
   maxVerificationSteps?: number;

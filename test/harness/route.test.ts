@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { StepSpec } from "#review/step-runner";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -11,7 +12,6 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
-import type { StepSpec } from "../../src/step-runner";
 import { DefaultTransportRegistry } from "../../src/transport-registry";
 
 function createRecordingTransport(

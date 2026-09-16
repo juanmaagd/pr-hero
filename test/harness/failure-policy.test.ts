@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import type { FailureClass } from "#review/step-runner";
 import {
   causeFromLegacyFailureClass,
   decideRetryDisposition,
@@ -9,7 +10,6 @@ import {
   type RetryDisposition,
   resolveFailureCause,
 } from "../../src/execution/failure-policy";
-import type { FailureClass } from "../../src/step-runner";
 
 function outcome(
   overrides: Partial<{
@@ -242,7 +242,7 @@ describe("causeFromLegacyFailureClass", () => {
   // pr-hero F002 on PR #76: the bridge could not produce "watchdog_timeout"
   // at all, because step-runner's classifyFailure collapses `timedOut` into
   // the generic "transient" class BEFORE the bridge sees it
-  // (src/step-runner.ts:111), and the bridge only accepted the collapsed
+  // (src/review/step-runner.ts:111), and the bridge only accepted the collapsed
   // class. Every watchdog timeout would have been attributed to a network
   // error in the persisted attempt log the harness writes for incident
   // triage. The two causes share a disposition today, so nothing would have

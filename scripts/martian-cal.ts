@@ -25,9 +25,12 @@ import {
   prNumberFromUrl,
 } from "#compare/martian-adapter";
 import type { FindingsDocument } from "#review/findings";
+import { estimateCost } from "#review/report";
+import {
+  DEFAULT_SIZE_GATE,
+  evaluateSizeGateAggregate,
+} from "#review/size-gate";
 import { writeJsonAtomically } from "../src/execution/atomic-write";
-import { estimateCost } from "../src/report";
-import { DEFAULT_SIZE_GATE, evaluateSizeGateAggregate } from "../src/size-gate";
 import {
   type BenchmarkSchedule,
   freezeBenchmarkIdentity,

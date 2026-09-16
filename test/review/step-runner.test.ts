@@ -11,7 +11,7 @@ import {
   isTransientSessionFailure,
   type RetryInfo,
   type StepSpec,
-} from "../src/step-runner";
+} from "#review/step-runner";
 
 // ---------------------------------------------------------------------------
 // FakeSpawn: scripted {stdout, stderr, exitCode} per call, records argv/cwd.

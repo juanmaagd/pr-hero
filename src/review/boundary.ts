@@ -79,7 +79,7 @@ export function selectBoundaryNonce(
 // EMPTY CONTENT RENDERS TO THE EMPTY STRING, never to an empty tag pair. This
 // is load-bearing twice over: `renderLeadsBlock` already returns "" so a scout
 // that found nothing produces the control arm's byte-identical hunter prompt
-// (`scout.ts`'s note on M6), and an empty priors list must likewise leave no
+// (`review/scout.ts`'s note on M6), and an empty priors list must likewise leave no
 // trace in a system prompt. A `<scout_leads nonce></scout_leads nonce>` pair
 // would break both.
 //

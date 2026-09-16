@@ -438,7 +438,7 @@ describe("Task 2.1 RED: Route Admission & Transport Registry", () => {
 // the position it was handed it? That is exactly what issue #119 broke — three
 // call sites dropped the D1-11 readiness evidence argument, admission gated
 // against an empty evidence map, and a live OpenCode review died in 1.1s before
-// a single agent spawned. `src/pipeline.ts` carries the matching comment
+// a single agent spawned. `src/review/pipeline.ts` carries the matching comment
 // ("admitDiversityRoutePlan forwards straight to admitRoutePlan, so it carries
 // the exact same omission hazard"); until now nothing checked that claim.
 describe("admitDiversityRoutePlan independent contract (#142 item 4)", () => {
@@ -602,7 +602,7 @@ describe("admitDiversityRoutePlan independent contract (#142 item 4)", () => {
   });
 
   // The #119 assertions. Each one fails if the argument in that position stops
-  // arriving at `admitRoutePlan` — the 3-arg shape is the one `src/pipeline.ts`
+  // arriving at `admitRoutePlan` — the 3-arg shape is the one `src/review/pipeline.ts`
   // actually calls, the 4-arg shape is the overload the same positional forward
   // has to keep resolving correctly.
   describe("positional forwarding into the admitRoutePlan overload", () => {
@@ -677,7 +677,7 @@ describe("admitDiversityRoutePlan independent contract (#142 item 4)", () => {
     });
   });
 
-  // The property `src/pipeline.ts` asserts in prose — "forwards straight to
+  // The property `src/review/pipeline.ts` asserts in prose — "forwards straight to
   // admitRoutePlan, so it carries the exact same omission hazard" — turned into
   // a check. Same input, same outcome, in both directions.
   describe("parity with admitRoutePlan on identical input", () => {

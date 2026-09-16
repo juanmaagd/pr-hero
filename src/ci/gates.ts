@@ -61,8 +61,8 @@
 // markers into the idempotent find-or-create flow (`findMarkedCommentId`)
 // is Phase 3's job, once a real poster exists to consume them.
 
+import type { SizeGateVerdict } from "#review/size-gate";
 import { envBillsMetered } from "../execution/usage-normalized";
-import type { SizeGateVerdict } from "../size-gate";
 import {
   type CiOutputs,
   type CiSummaryData,

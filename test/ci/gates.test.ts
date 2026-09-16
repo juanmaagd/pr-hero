@@ -24,7 +24,7 @@ import {
   resolveCiBudgetCeiling,
 } from "#ci/gates";
 import { renderStepSummary } from "#ci/reporter";
-import type { SizeGateVerdict } from "../../src/size-gate";
+import type { SizeGateVerdict } from "#review/size-gate";
 
 // ---------------------------------------------------------------------------
 // evaluateBudgetGate

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { aliasCanonical } from "#model/catalog";
 import type { RoutingConfig } from "#model/routing";
-import { validateReviewSpec } from "#review/spec";
 import {
   type AgentsDirConfigSeat,
   agentsDirProblems,
@@ -48,7 +47,8 @@ import {
   runDirCandidate,
   SUMMARY_DIRECTION,
   type SummaryConfig,
-} from "../src/preflight";
+} from "#review/preflight";
+import { validateReviewSpec } from "#review/spec";
 
 describe("parseArgs", () => {
   // `base` is deliberately ABSENT here: resolving the repo's real default

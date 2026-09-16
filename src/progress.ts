@@ -16,9 +16,9 @@
 // spec.agents assigns exactly one model per agent, so a model level would
 // give every node exactly one child — a list with extra glyphs.
 
+import type { PipelineProgressEvent } from "#review/pipeline";
+import { formatElapsed } from "#review/report";
 import { renderTree, type TreeNode } from "#ui/tree";
-import type { PipelineProgressEvent } from "./pipeline";
-import { formatElapsed } from "./report";
 
 export const SPINNER_FRAMES = [
   "⠋",

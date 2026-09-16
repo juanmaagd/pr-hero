@@ -200,7 +200,7 @@ Suspicion priors:
 `;
 
 // The refuter body carries no {{PRIORS}}/{{GOTCHAS}} anchors — the pipeline
-// writes it as-is (see runRefuter in src/pipeline.ts).
+// writes it as-is (see runRefuter in src/review/pipeline.ts).
 const REFUTER_AGENT = `---
 name: review-refuter
 description: Fixture refuter — verifies each submitted finding against the code.
