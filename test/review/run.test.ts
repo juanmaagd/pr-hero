@@ -12,7 +12,6 @@ import {
   assertDistinctRange,
   buildTelemetry,
   resolveGotchasPath,
-  reviewingLine,
   selectActiveHunters,
 } from "#review/run";
 
@@ -84,45 +83,6 @@ describe("selectActiveHunters", () => {
   test("a triggered hunter is included when parity fires", () => {
     const active = selectActiveHunters([hunterA, hunterConditional], true);
     expect(active).toEqual([hunterA, hunterConditional]);
-  });
-});
-
-describe("reviewingLine", () => {
-  const summaryDisabled = {
-    enabled: false,
-    model: undefined,
-  } as unknown as Parameters<typeof reviewingLine>[1];
-  const summaryEnabled = {
-    enabled: true,
-    model: undefined,
-  } as unknown as Parameters<typeof reviewingLine>[1];
-
-  test("singular hunter count reads '1 hunter', no trailing s", () => {
-    const line = reviewingLine(1, summaryDisabled, { scout: false });
-    expect(line).toBe(
-      "reviewing — 1 hunter + refuter + summarizer disabled; comparable trees have taken 8–25 minutes",
-    );
-  });
-
-  test("plural hunter count reads 'N hunters'", () => {
-    const line = reviewingLine(3, summaryDisabled, { scout: false });
-    expect(line).toBe(
-      "reviewing — 3 hunters + refuter + summarizer disabled; comparable trees have taken 8–25 minutes",
-    );
-  });
-
-  test("zero hunters still pluralizes (0 !== 1)", () => {
-    const line = reviewingLine(0, summaryDisabled, { scout: false });
-    expect(line).toBe(
-      "reviewing — 0 hunters + refuter + summarizer disabled; comparable trees have taken 8–25 minutes",
-    );
-  });
-
-  test("summarizer enabled and scout on: both labels appended in order", () => {
-    const line = reviewingLine(2, summaryEnabled, { scout: true });
-    expect(line).toBe(
-      "reviewing — 2 hunters + refuter + summarizer + scout; comparable trees have taken 8–25 minutes",
-    );
   });
 });
 

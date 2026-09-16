@@ -13,13 +13,8 @@
 import path from "node:path";
 import type { Telemetry } from "#review/findings";
 import type { PipelineResult } from "#review/pipeline";
-import {
-  CliError,
-  type CliOptions,
-  type SummarySettings,
-} from "#review/preflight";
+import { CliError } from "#review/preflight";
 import type { AgentSpec } from "#review/spec";
-import { scoutLabel, summarizerLabel } from "#ui/plan";
 
 // Shared range guard. Both orchestrators check the same thing right after
 // resolving base/head — the copies are byte-identical apart from
@@ -61,23 +56,6 @@ export function selectActiveHunters(
 ): AgentSpec[] {
   return agents.filter(
     (a) => a.role === "hunter" && (a.trigger === undefined || parityFires),
-  );
-}
-
-// The one-line expectation printed just before the pipeline starts. Returns
-// the string only — the orchestrator still calls log(), because withCiWorkflowGroup
-// wraps the two call sites differently (PR mode groups it in a CI log group;
-// local mode does not).
-export function reviewingLine(
-  hunterCount: number,
-  summary: SummarySettings,
-  options: Pick<CliOptions, "scout">,
-): string {
-  return (
-    `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
-    `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
-    "comparable trees have taken " +
-    "8–25 minutes"
   );
 }
 

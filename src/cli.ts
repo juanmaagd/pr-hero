@@ -237,7 +237,6 @@ import {
   assertDistinctRange,
   buildTelemetry,
   resolveGotchasPath,
-  reviewingLine,
   selectActiveHunters,
 } from "#review/run";
 import {
@@ -278,6 +277,7 @@ import {
   prPlanDetails,
   renderPlan,
   renderPrPlan,
+  reviewingLine,
 } from "#ui/plan";
 
 export {

@@ -335,6 +335,29 @@ export function scoutLabel(options: Pick<CliOptions, "scout">): string {
   return options.scout ? " + scout" : "";
 }
 
+// Lives here rather than in review/run.ts, beside the two labels it composes.
+// It was first extracted into review/run.ts with the other shared run stages,
+// which made that domain module import #ui/plan by value while ui/plan already
+// imports #review/pipeline and #review/size-gate: no file-level cycle, but the
+// review domain depending on presentation. It is a log line, so it belongs to
+// the presentation layer that owns its labels.
+// The one-line expectation printed just before the pipeline starts. Returns
+// the string only — the orchestrator still calls log(), because withCiWorkflowGroup
+// wraps the two call sites differently (PR mode groups it in a CI log group;
+// local mode does not).
+export function reviewingLine(
+  hunterCount: number,
+  summary: SummarySettings,
+  options: Pick<CliOptions, "scout">,
+): string {
+  return (
+    `reviewing — ${hunterCount} hunter${hunterCount === 1 ? "" : "s"} + ` +
+    `refuter ${summarizerLabel(summary)}${scoutLabel(options)}; ` +
+    "comparable trees have taken " +
+    "8–25 minutes"
+  );
+}
+
 // The last block on screen and the only one an operator must read: the gate
 // verdict, then the money. Both used to sit mid-list, where the eye that had
 // already given up on the plan never reached them.
