@@ -26,7 +26,7 @@
 
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { CliError } from "#review/preflight";
+import { CliError } from "./errors";
 import {
   IgnoreFileError,
   type IgnoreRule,

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CliError, GOTCHAS_PLACEHOLDER_MARKER } from "#review/preflight";
+import { GOTCHAS_PLACEHOLDER_MARKER } from "#review/preflight";
 import {
   assertDistinctRange,
   buildTelemetry,
@@ -22,6 +22,7 @@ import {
   writeMcpConfig,
 } from "#review/run";
 import { ClaudeCodeRunner } from "#review/step-runner";
+import { CliError } from "../../src/errors";
 
 describe("assertDistinctRange", () => {
   test("distinct base and head shas: no throw", () => {

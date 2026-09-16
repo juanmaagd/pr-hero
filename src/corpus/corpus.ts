@@ -12,6 +12,7 @@
 
 import path from "node:path";
 import { git, resolveRepoRoot } from "#git/git";
+import { parseRemoteHead, repoWebUrlFromRemote } from "#git/refs";
 import {
   type CommitPullRef,
   DEFAULT_REVERTS_SINCE,
@@ -22,14 +23,9 @@ import {
   pickCommitPull,
   repoSlugFromWebUrl,
 } from "#pr/reverts-preflight";
-import {
-  CliError,
-  type CliOptions,
-  CliUsageError,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
-} from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import { log } from "#ui/primitives";
+import { CliError, CliUsageError } from "../errors";
 import {
   blameArgv,
   buildThreadBatchQuery,

@@ -60,8 +60,6 @@ import {
   reportFatalCiErrorIfInJobStep,
 } from "#ci/reporter";
 import {
-  CliError,
-  CliUsageError,
   createRunDir,
   DEFAULT_HEAD_REF,
   DEFAULT_HOP_BUDGET,
@@ -70,6 +68,7 @@ import {
   preflightAgentsDir,
   resolveAgentsDir,
 } from "#review/preflight";
+import { CliError, CliUsageError } from "./errors";
 
 export { createRunDir, preflightAgentsDir, resolveAgentsDir };
 

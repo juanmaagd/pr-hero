@@ -9,8 +9,9 @@ import {
   type StoredComparison,
 } from "#compare/ledger";
 import { resolveRepoRoot } from "#git/git";
-import { CliError, type CliOptions, CliUsageError } from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import { log } from "#ui/primitives";
+import { CliError, CliUsageError } from "../errors";
 import { resolveRepoHome } from "../home";
 
 // `pr-hero ledger` (ROADMAP B4) — accumulate every run's comparison.json

@@ -33,7 +33,8 @@ import {
   revertReasonBody,
   selectRevertCandidates,
 } from "#pr/reverts-preflight";
-import { CliUsageError, HELP_TEXT, parseArgs } from "#review/preflight";
+import { HELP_TEXT, parseArgs } from "#review/preflight";
+import { CliUsageError } from "../../src/errors";
 
 // The three commits of the real 478/483 revert (app/web/common). Only the
 // 9-character PREFIXES are captured — 4ee802e43, 5c8c4fa4e, fea0540a0; the

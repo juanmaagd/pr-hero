@@ -1,5 +1,5 @@
 import os from "node:os";
-import { CliError, type CliOptions } from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import {
   getWatcherSpend,
   killActiveRun,
@@ -8,6 +8,7 @@ import {
 } from "#store/activity";
 import { renderActivityScreen } from "#ui/activity";
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
+import { CliError } from "../errors";
 
 export async function activityCommand(options: CliOptions): Promise<number> {
   const home = os.homedir();

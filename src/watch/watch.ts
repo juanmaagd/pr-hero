@@ -30,9 +30,7 @@ import {
   prHtmlUrl,
 } from "#pr/preflight";
 import {
-  CliError,
   type CliOptions,
-  CliUsageError,
   DEFAULT_WATCH_INTERVAL_MIN,
   type NumstatFile,
 } from "#review/preflight";
@@ -55,6 +53,7 @@ import {
   terminalWidth,
 } from "#ui/primitives";
 import { selfInvocation } from "../assets";
+import { CliError, CliUsageError } from "../errors";
 import { resolveRepoHome } from "../home";
 import type { IgnoreRule } from "../ignore-file";
 import {

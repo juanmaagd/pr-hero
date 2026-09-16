@@ -11,14 +11,11 @@ import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { git } from "#git/git";
-import {
-  CliError,
-  type CliOptions,
-  DEFAULT_GC_INTERVAL_MIN,
-} from "#review/preflight";
+import { type CliOptions, DEFAULT_GC_INTERVAL_MIN } from "#review/preflight";
 import { log } from "#ui/primitives";
 import { parsePlistInterval } from "#watch/preflight";
 import { selfInvocation } from "../assets";
+import { CliError } from "../errors";
 import {
   acquirePidLock,
   releasePidLock,

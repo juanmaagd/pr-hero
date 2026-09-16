@@ -4,12 +4,13 @@
 // git, no network, no clock. The I/O shell in cli.ts finds the files, reads
 // the bytes, supplies each file's mtime, and owns stdout.
 
+import { isFullCommitId } from "#git/refs";
 import type {
   ComparisonGreptileClaim,
   ComparisonPrHeroClaim,
 } from "#pr/preflight";
 import type { RunStatus } from "#review/findings";
-import { CliUsageError, isFullCommitId } from "#review/preflight";
+import { CliUsageError } from "../errors";
 import type { Bucket } from "./compare";
 
 // Unlike ComparisonRow (written always-null), a stored row may have been

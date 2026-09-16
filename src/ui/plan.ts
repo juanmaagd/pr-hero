@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import type { EffectiveConfig } from "#config/config";
 import { exclusionLines } from "#git/git";
+import { isFullCommitId } from "#git/refs";
 import type { ResolvedRoutePlan } from "#model/routing";
 import type { PrTarget } from "#pr/preflight";
 import { DEFAULT_SCOUT_MODEL } from "#review/pipeline";
@@ -18,7 +19,6 @@ import {
   type ConfigSource,
   type ConfigSources,
   DEFAULT_SUMMARY_MODEL,
-  isFullCommitId,
   type LocalConfig,
   type SummarySettings,
 } from "#review/preflight";

@@ -16,7 +16,8 @@ import {
   type StoredComparison,
   type StoredComparisonRow,
 } from "#compare/ledger";
-import { CliUsageError, parseArgs } from "#review/preflight";
+import { parseArgs } from "#review/preflight";
+import { CliUsageError } from "../../src/errors";
 
 const PR_1682_COMPARISON = {
   pr: 1682,

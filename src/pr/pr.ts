@@ -44,10 +44,10 @@ import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
 import { renderComparison } from "#compare/report";
 import { THREAD_PAGE_SIZE } from "#corpus/preflight";
 import { git } from "#git/git";
+import { isFullCommitId } from "#git/refs";
 import { collapseTargets, type RereviewProvenance } from "#rereview/prepare";
 import { parseStateBlock, renderStateBlock } from "#rereview/state";
 import type { Finding, FindingsDocument, RunStatus } from "#review/findings";
-import { CliError, isFullCommitId } from "#review/preflight";
 import {
   type PrCommentDelta,
   renderInlineComment,
@@ -58,6 +58,7 @@ import {
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import { log } from "#ui/primitives";
 import { parseMarkerHead } from "#watch/preflight";
+import { CliError } from "../errors";
 import {
   buildPostPlan,
   computeDroppedFindingIds,

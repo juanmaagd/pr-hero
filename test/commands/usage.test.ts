@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { originUsageScope } from "#commands/usage";
-import { CliError } from "#review/preflight";
+import { CliError } from "../../src/errors";
 import {
   canonicalRemoteId,
   missingOriginMessage,

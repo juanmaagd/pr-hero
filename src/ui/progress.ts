@@ -7,11 +7,12 @@
 // and the progress.ts halves are the pure, tested pieces.
 
 import type { PipelineProgressEvent } from "#review/pipeline";
-import { CliError, type CliOptions } from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import { formatElapsed } from "#review/report";
 import { type SizeGateVerdict, sizeGateDisposition } from "#review/size-gate";
 import { log, styleEnabled } from "#ui/primitives";
 import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
+import { CliError } from "../errors";
 import {
   applyProgressEvent,
   createPanelState,

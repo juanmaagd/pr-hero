@@ -9,18 +9,16 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
+import { isFullCommitId } from "#git/refs";
 import { PR_COMMENT_MARKER_PREFIX } from "#pr/preflight";
-import {
-  CliUsageError,
-  isFullCommitId,
-  type NumstatFile,
-} from "#review/preflight";
+import type { NumstatFile } from "#review/preflight";
 import {
   DEFAULT_SIZE_GATE,
   evaluateSizeGate,
   type SizeGateConfig,
 } from "#review/size-gate";
 import type { SelfInvocation } from "../assets";
+import { CliUsageError } from "../errors";
 import { type PrheroLayout, prheroLayout } from "../home-preflight";
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,6 @@ import { resolveRepoRoot } from "#git/git";
 import type { FindingsDocument } from "#review/findings";
 import type { PerAgentUsage, PipelineResult } from "#review/pipeline";
 import {
-  CliError,
   type CliOptions,
   type ConfigLayer,
   type ConfigSources,
@@ -27,6 +26,7 @@ import {
 import { type FailSoftIngestInput, failSoftIngest } from "#store/metrics";
 import { projectCompleteRun } from "#store/preflight";
 import { openProductStore, saveRunTransaction } from "#store/store";
+import { CliError } from "../errors";
 import { prheroLayout } from "../home-preflight";
 
 // C5 O-6's half of the pipeline input. Unconditional, unlike its two

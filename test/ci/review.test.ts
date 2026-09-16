@@ -38,8 +38,9 @@ import {
   withCiWorkflowGroup,
 } from "#ci/reporter";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
-import { CliUsageError, isCiEnvironment, parseArgs } from "#review/preflight";
+import { isCiEnvironment, parseArgs } from "#review/preflight";
 import type { SizeGateVerdict } from "#review/size-gate";
+import { CliUsageError } from "../../src/errors";
 
 function finding(overrides: Partial<Finding> & { id: string }): Finding {
   return {

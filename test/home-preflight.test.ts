@@ -3,7 +3,7 @@
 // sibling-path hint. All offline.
 
 import { describe, expect, test } from "bun:test";
-import { CliUsageError } from "#review/preflight";
+import { CliUsageError } from "../src/errors";
 import {
   canonicalRemoteId,
   decidePidLock,

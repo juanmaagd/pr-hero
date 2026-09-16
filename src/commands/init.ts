@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadGlobalConfigLayer } from "#config/config";
 import { remoteHeadRef, resolveRepoRoot } from "#git/git";
+import { resolveBaseRef } from "#git/refs";
 import {
   BUNDLED_AGENTS_DIR_LABEL,
   type CliOptions,
@@ -12,7 +13,6 @@ import {
   initConfigTemplate,
   initGotchasInstructions,
   initTemplateOmissions,
-  resolveBaseRef,
 } from "#review/preflight";
 import { log } from "#ui/primitives";
 

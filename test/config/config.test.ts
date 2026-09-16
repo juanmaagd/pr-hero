@@ -27,12 +27,12 @@ import {
 } from "#config/config";
 import type { FindingsDocument, Telemetry } from "#review/findings";
 import {
-  CliError,
   DEFAULT_MAX_VERIFICATION_STEPS,
   EMPTY_LOCAL_CONFIG,
   resolveMaxVerificationSteps,
   resolveSummary,
 } from "#review/preflight";
+import { CliError } from "../../src/errors";
 
 const OPERATOR_ROOT = "/repo";
 const HEAD = "b".repeat(40);
