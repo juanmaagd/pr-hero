@@ -10,17 +10,17 @@
 
 import { createHash } from "node:crypto";
 import type { ParsedStateBlock } from "#rereview/state";
+import type { Tier } from "../findings";
+import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "../pr-preflight";
+import type { LocalConfig } from "../preflight";
 import {
   type AdmissionRecord,
   countTerminalAttempts,
-} from "./ci-admission-ledger";
+} from "./admission-ledger";
 import {
   type DeltaRiskAssessment,
   deltaRiskTriggersReview,
-} from "./ci-review-risk";
-import type { Tier } from "./findings";
-import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "./pr-preflight";
-import type { LocalConfig } from "./preflight";
+} from "./review-risk";
 
 export const CI_REVIEW_POLICY_SCHEMA_VERSION = 1;
 export const DEFAULT_CI_REVIEW_POLICY_MODE = "risk_aware" as const;

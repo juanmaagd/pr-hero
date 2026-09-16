@@ -331,7 +331,7 @@ export function prCommentMarker(headSha: string, complete = true): string {
 // `prefix` defaults to the summary comment's own marker, so every existing
 // caller stays byte-identical. Parameterized (ROADMAP Pillar 3) so
 // pr.ts's postPrComment can reuse this exact find-or-update logic for a CI
-// gate-skip comment under its own marker (ci-gates.ts's
+// gate-skip comment under its own marker (ci/gates.ts's
 // SKIP_SIZE_COMMENT_MARKER / SKIP_BUDGET_COMMENT_MARKER) — the same
 // idempotency the summary comment already gets, so a repeat CI run on the
 // same still-failing PR updates the existing skip comment instead of

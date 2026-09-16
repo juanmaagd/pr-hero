@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { stateFinding } from "#rereview/state";
 import {
   CI_REVIEW_POLICY_SCHEMA_VERSION,
   type CiReviewAdmissionInput,
@@ -28,12 +27,10 @@ import {
   scanPostedFindingTiers,
   stateReviewCount,
   validateAdmissionAuthority,
-} from "../src/ci-review-admission";
-import {
-  CI_RISK_POLICY_VERSION,
-  classifyChangedPaths,
-} from "../src/ci-review-risk";
-import type { Tier } from "../src/findings";
+} from "#ci/review-admission";
+import { CI_RISK_POLICY_VERSION, classifyChangedPaths } from "#ci/review-risk";
+import { stateFinding } from "#rereview/state";
+import type { Tier } from "../../src/findings";
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
@@ -86,7 +83,7 @@ function postedFindingComment(input: {
 }): string {
   const emoji = input.tier === "blocking" ? "🔴" : "🟡";
   const severity = input.tier === "blocking" ? "CRITICAL" : "WARNING";
-  const path = encodeURIComponent(input.path ?? "src/ci-review-admission.ts");
+  const path = encodeURIComponent(input.path ?? "src/ci/review-admission.ts");
   const line = input.line ?? 121;
   const c = input.c ?? "abcd1234abcd";
   return (

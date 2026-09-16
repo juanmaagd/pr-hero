@@ -4,9 +4,9 @@
 // things a CI run needs to publish — a PR comment and a step-summary
 // payload — without spawning agents or touching the filesystem/network.
 //
-// Mirrors ci-reporter.test.ts's style: no mocks, no I/O, plain literals for
+// Mirrors ci/reporter.test.ts's style: no mocks, no I/O, plain literals for
 // the upstream types (SizeGateVerdict from size-gate.ts, CiSummaryData from
-// ci-reporter.ts).
+// ci/reporter.ts).
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -22,9 +22,9 @@ import {
   deriveCiBillingMode,
   evaluateBudgetGate,
   resolveCiBudgetCeiling,
-} from "../src/ci-gates";
-import { renderStepSummary } from "../src/ci-reporter";
-import type { SizeGateVerdict } from "../src/size-gate";
+} from "#ci/gates";
+import { renderStepSummary } from "#ci/reporter";
+import type { SizeGateVerdict } from "../../src/size-gate";
 
 // ---------------------------------------------------------------------------
 // evaluateBudgetGate
@@ -531,7 +531,7 @@ describe("resolveCiBudgetCeiling", () => {
 });
 
 // ---------------------------------------------------------------------------
-// budgetUnlimitedNoticeMessage — ci-gates.ts:107-115's "a disable is only
+// budgetUnlimitedNoticeMessage — ci/gates.ts:107-115's "a disable is only
 // safe when it is loud" applied to the new no-ceiling branch, which produces
 // no ceiling and would otherwise be silent.
 // ---------------------------------------------------------------------------

@@ -404,7 +404,7 @@ describe("transport/producer parity (§11)", () => {
     // constant here would fork it.
     //
     // Issue #156's CI budget ceiling deliberately does NOT read this field --
-    // see deriveCiBillingMode in src/ci-gates.ts, which answers the narrower
+    // see deriveCiBillingMode in src/ci/gates.ts, which answers the narrower
     // "should CI impose a spend ceiling?" and reaches nothing but the ceiling.
     expect(CLAUDE_CAPABILITY_STATICS.billingMode).toBe("subscription");
 

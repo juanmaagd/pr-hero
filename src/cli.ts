@@ -18,6 +18,59 @@ import { mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
+  type AdmissionAttemptStatus,
+  type AdmissionRecord,
+  reserveAdmissionAttempt,
+  settleAdmissionAttempt,
+} from "#ci/admission-ledger";
+import {
+  type AdmissionContext,
+  budgetDisabledWarningMessage,
+  budgetUnlimitedNoticeMessage,
+  type CiGateSkipPlan,
+  ciExitCode,
+  deriveCiBillingMode,
+  planCiBudgetSkip,
+  planCiReviewManualRequired,
+  planCiReviewSkip,
+  planCiSizeSkip,
+  resolveCiBudgetCeiling,
+} from "#ci/gates";
+import {
+  appendCiOutputs,
+  appendStepSummary,
+  type CiOutputs,
+  type CiSummaryData,
+  formatWorkflowCommand,
+  renderStepSummary,
+} from "#ci/reporter";
+import {
+  type CiReviewPolicy,
+  canonicalAdmissionFindings,
+  ciReviewManualRequiredDetail,
+  ciReviewPolicyHash,
+  ciReviewSkipDetail,
+  deltaTouchesPriorFindings,
+  evaluateCiReviewAdmission,
+  formatCiAdmissionObserveNotice,
+  nextStateReviewCount,
+  parseCiAdmissionBlock,
+  pathsFromPostedFindingMarkers,
+  renderCiAdmissionBlock,
+  resolveCiAdmissionAttemptCount,
+  resolveCiReviewPolicy,
+  resolveCiTrustedActors,
+  scanPostedFindingTiers,
+  stateReviewCount,
+  tierCountsFromFindings,
+  validateAdmissionAuthority,
+} from "#ci/review-admission";
+import {
+  classifyChangedPaths,
+  type DeltaRiskAssessment,
+} from "#ci/review-risk";
+import { runCiSetup } from "#ci/setup";
+import {
   buildPhaseBQueue,
   collapseTargets,
   decideLastHeadDelta,
@@ -76,59 +129,6 @@ import {
   unregisterActiveRun,
 } from "./activity";
 import { type EngineAssets, resolveEngineAssets } from "./assets";
-import {
-  type AdmissionAttemptStatus,
-  type AdmissionRecord,
-  reserveAdmissionAttempt,
-  settleAdmissionAttempt,
-} from "./ci-admission-ledger";
-import {
-  type AdmissionContext,
-  budgetDisabledWarningMessage,
-  budgetUnlimitedNoticeMessage,
-  type CiGateSkipPlan,
-  ciExitCode,
-  deriveCiBillingMode,
-  planCiBudgetSkip,
-  planCiReviewManualRequired,
-  planCiReviewSkip,
-  planCiSizeSkip,
-  resolveCiBudgetCeiling,
-} from "./ci-gates";
-import {
-  appendCiOutputs,
-  appendStepSummary,
-  type CiOutputs,
-  type CiSummaryData,
-  formatWorkflowCommand,
-  renderStepSummary,
-} from "./ci-reporter";
-import {
-  type CiReviewPolicy,
-  canonicalAdmissionFindings,
-  ciReviewManualRequiredDetail,
-  ciReviewPolicyHash,
-  ciReviewSkipDetail,
-  deltaTouchesPriorFindings,
-  evaluateCiReviewAdmission,
-  formatCiAdmissionObserveNotice,
-  nextStateReviewCount,
-  parseCiAdmissionBlock,
-  pathsFromPostedFindingMarkers,
-  renderCiAdmissionBlock,
-  resolveCiAdmissionAttemptCount,
-  resolveCiReviewPolicy,
-  resolveCiTrustedActors,
-  scanPostedFindingTiers,
-  stateReviewCount,
-  tierCountsFromFindings,
-  validateAdmissionAuthority,
-} from "./ci-review-admission";
-import {
-  classifyChangedPaths,
-  type DeltaRiskAssessment,
-} from "./ci-review-risk";
-import { runCiSetup } from "./ci-setup";
 import type { PrHeroFindingRef } from "./compare";
 import { corpusCommand } from "./corpus";
 import {
@@ -2619,7 +2619,7 @@ async function reviewPr(
     // exactly the "blocks CI" behavior spec 2.1 forbids. `--force` bypasses
     // here too, same as the non-CI path just below, since it answers the
     // same question ("is this diff too big to be worth its cost") either
-    // way. planCiSizeSkip (ci-gates.ts) is the ONE call: it is null unless
+    // way. planCiSizeSkip (ci/gates.ts) is the ONE call: it is null unless
     // isCi && the gate actually failed, so no separate isCi guard is needed
     // around it beyond --force.
     if (!options.force) {
@@ -4248,9 +4248,9 @@ export function postingExitCode(outcome: InlinePostOutcome | null): 0 | 1 {
 // CI headless shell (ROADMAP Pillar 3, GitHub Actions) — the "reviewed"
 // (non-skip) outcome's summary + outputs, and the two pure "should I write"
 // gates the shell checks before touching $GITHUB_STEP_SUMMARY/$GITHUB_OUTPUT.
-// planCiSizeSkip/planCiBudgetSkip (ci-gates.ts) cover the two gate-skip
+// planCiSizeSkip/planCiBudgetSkip (ci/gates.ts) cover the two gate-skip
 // outcomes the same way; this is their sibling for a review that actually
-// ran. Kept here, not ci-gates.ts/ci-reporter.ts: this is reviewPr's own
+// ran. Kept here, not ci/gates.ts/ci/reporter.ts: this is reviewPr's own
 // single-consumer composition (the exact `postingExitCode` precedent above),
 // not a spend-gate decision or a report-formatting primitive.
 // ---------------------------------------------------------------------------
@@ -5603,7 +5603,7 @@ async function doctorCommand(options: CliOptions): Promise<number> {
 // Shared shell for `pr-hero setup --ci` and `pr-hero ci init` — both are the
 // same scaffolding action (runCiSetup), reached by two different command
 // spellings. The refusal-without-force branch is a safety property (see
-// spec.md §4.1 / ci-setup.ts's header comment), not a usage error, so it
+// spec.md §4.1 / ci/setup.ts's header comment), not a usage error, so it
 // returns 1 rather than throwing CliUsageError: the invocation was valid,
 // the outcome is just "nothing was written".
 async function ciSetupCommand(options: CliOptions): Promise<number> {
@@ -6996,7 +6996,7 @@ async function applySizeGate(
 // ROADMAP Pillar 3 (GitHub Actions CI). The mechanical glue behind a gate
 // skip in CI mode: every DECISION (what to say, which marker, what the
 // outputs are) already happened in `plan` (planCiSizeSkip/planCiBudgetSkip,
-// ci-gates.ts) — this function has nothing left to decide, only three
+// ci/gates.ts) — this function has nothing left to decide, only three
 // straight-line I/O calls gated by shouldWriteStepSummary/shouldWriteCiOutputs.
 // `postPrComment`'s own `markerPrefix` (Phase 3's parameterization) makes
 // this idempotent: a repeat CI run on the same still-failing PR updates its

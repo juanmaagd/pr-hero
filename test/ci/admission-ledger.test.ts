@@ -9,7 +9,7 @@ import {
   selectActiveReservation,
   serializeAdmissionRecord,
   settleAdmissionAttempt,
-} from "../src/ci-admission-ledger";
+} from "#ci/admission-ledger";
 
 const HEAD = "a".repeat(40);
 const POLICY_HASH = "abc123def4567890";

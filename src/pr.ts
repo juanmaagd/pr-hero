@@ -28,7 +28,7 @@ import {
   type AdmissionRecord,
   parseAdmissionRecord,
   serializeAdmissionRecord,
-} from "./ci-admission-ledger";
+} from "#ci/admission-ledger";
 import {
   type ComparisonResult,
   compareFindings,
@@ -663,7 +663,7 @@ export async function writeComparison(input: {
 // — both of which always pass a `knownCommentId` and never reach the lookup
 // at all — stays byte-identical. ROADMAP Pillar 3's CI skip-comment posting
 // is the first caller to exercise the lookup fallback for real, passing
-// ci-gates.ts's SKIP_SIZE_COMMENT_MARKER / SKIP_BUDGET_COMMENT_MARKER so a
+// ci/gates.ts's SKIP_SIZE_COMMENT_MARKER / SKIP_BUDGET_COMMENT_MARKER so a
 // repeat CI run finds and updates its own prior skip comment instead of
 // stacking a new one.
 export async function postPrComment(
