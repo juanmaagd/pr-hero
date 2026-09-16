@@ -9,20 +9,14 @@
 // cli.ts, unchanged in meaning or behavior.
 
 import path from "node:path";
-import {
-  type BaseRefResolution,
-  CliError,
-  type CliOptions,
-  headContainedInBaseMessage,
-  isFullCommitId,
-  type LocalConfig,
-  listPaths,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
-  resolveBaseRef,
+import type {
+  BaseRefResolution,
+  CliOptions,
+  LocalConfig,
 } from "#review/preflight";
 import { dim, markerRowLines } from "#ui/primitives";
 import type { ResultLinks } from "#ui/result";
+import { CliError } from "../errors";
 import {
   IgnoreFileError,
   parseIgnoreFile,
@@ -32,6 +26,14 @@ import {
   type IgnoreFileReadResult,
   reContextualizeIgnoreError,
 } from "../ignore-read";
+import {
+  headContainedInBaseMessage,
+  isFullCommitId,
+  listPaths,
+  parseRemoteHead,
+  repoWebUrlFromRemote,
+  resolveBaseRef,
+} from "./refs";
 
 // Exclusions are a MUTATION of the reviewed diff, so they are stated out
 // loud: an operator who is told "3 files reviewed" must be able to see that

@@ -27,6 +27,22 @@ import {
   type TriageVerdict,
 } from "#triage/triage";
 import { type EngineAssets, resolveEngineAssets } from "../assets";
+// C1 git-layering slice: CliError/CliUsageError and the git/ref pure helpers
+// used to be DEFINED here and imported by value into git.ts — the bottom
+// layer depending on a review-domain module. They now live in ../errors and
+// ../git/refs; this file imports them for its own internal use below and
+// re-exports every one of them (see the re-export block) so the ~55 existing
+// `#review/preflight` consumers need no changes in this slice.
+import { CliError, CliUsageError } from "../errors";
+import {
+  DEFAULT_BASE_REF,
+  headContainedInBaseMessage,
+  isFullCommitId,
+  listPaths,
+  parseRemoteHead,
+  repoWebUrlFromRemote,
+  resolveBaseRef,
+} from "../git/refs";
 import { redactDiagnostic } from "../security/redact";
 // review/size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
@@ -49,12 +65,6 @@ export const DEFAULT_WATCH_INTERVAL_MIN = 15;
 // does not sit until tomorrow, and cheap (gh view per tree, no LLM).
 export const DEFAULT_GC_INTERVAL_MIN = 360;
 
-// The LAST resort only. WHY it is not simply "the default": a hardcoded
-// default branch silently reviews the wrong range on every repo that does not
-// use `main` — musive's default branch is `dev`, so "main" there is not a
-// sensible fallback, it is a wrong answer with a plausible face. See
-// resolveBaseRef for the order that reaches this constant.
-export const DEFAULT_BASE_REF = "main";
 export const DEFAULT_HEAD_REF = "HEAD";
 
 // Keep this in sync with prompts/summarizer.md. The prompt remains the source
@@ -62,12 +72,22 @@ export const DEFAULT_HEAD_REF = "HEAD";
 // only the honest model label shown in a preflight plan.
 export const DEFAULT_SUMMARY_MODEL = "haiku";
 
-export class CliUsageError extends Error {}
-
-// Runtime failure (git, gh, the filesystem) as opposed to a usage error.
-// Defined here rather than in a shell so both I/O shells (cli.ts, pr/pr.ts)
-// can throw the same class without importing each other.
-export class CliError extends Error {}
+// Compatibility re-exports (C1 git-layering slice): CliError/CliUsageError
+// moved to ../errors, and DEFAULT_BASE_REF/the git-ref pure helpers moved to
+// ../git/refs, so that git.ts (the bottom layer) no longer imports this
+// review-domain module by value. Existing consumers of `#review/preflight`
+// keep working unchanged; repoint them to the new homes in a follow-up.
+export {
+  CliError,
+  CliUsageError,
+  DEFAULT_BASE_REF,
+  headContainedInBaseMessage,
+  isFullCommitId,
+  listPaths,
+  parseRemoteHead,
+  repoWebUrlFromRemote,
+  resolveBaseRef,
+};
 
 export interface CliOptions {
   // Relative on purpose: parseArgs is pure, so "resolve against cwd" is the
@@ -1384,93 +1404,6 @@ export interface BaseRefResolution {
   source: BaseRefSource;
 }
 
-// `git symbolic-ref refs/remotes/origin/HEAD` answers with the full ref name
-// (`refs/remotes/origin/dev`); everything downstream wants the branch. Split
-// out as its own function because the shell can only hand it a string, and a
-// prefix strip that is wrong by one character reviews a ref nobody named.
-// Returns undefined for anything that is not that shape — including the empty
-// output of a repo whose origin/HEAD was never set, which is not an error.
-export function parseRemoteHead(raw: string): string | undefined {
-  const trimmed = raw.trim();
-  const prefix = "refs/remotes/origin/";
-  if (!trimmed.startsWith(prefix)) return undefined;
-  const branch = trimmed.slice(prefix.length);
-  return branch.length > 0 ? branch : undefined;
-}
-
-// The repository's web URL, derived from a git remote instead of asked of
-// `gh`. WHY it exists next to pr/pr.ts's ghRepoWebUrl rather than replacing it:
-// ghRepoWebUrl is one `gh repo view` process per call and used to live ONLY
-// inside the `--post` branch, so every run without --post had no web URL and
-// the terminal could not print a single clickable link. The remote is already
-// on disk — free, offline, no API — which is what makes a link affordable on
-// EVERY run. Posting keeps ghRepoWebUrl: it is the authority GitHub itself
-// answers with (renames, transfers, forks), and the comment bodies it feeds
-// are published artifacts, not a terminal nicety.
-//
-// The three shapes a github remote actually takes, all normalised to the same
-// canonical https form: SCP-style `git@github.com:owner/repo(.git)`,
-// `https://github.com/owner/repo(.git)(/)`, and `ssh://git@github.com/owner/
-// repo(.git)`. ANYTHING else — a non-github host, an enterprise host, a
-// missing remote, an owner/repo that does not parse — returns undefined, and
-// the caller degrades to a plain `path:line`. A GUESSED url is strictly worse
-// than no url: a 404 teaches the reader to stop trusting every link in the
-// block (the same honesty rule as cli.ts's "repo web url unavailable:
-// posting plain locations").
-const GITHUB_HOST = "github.com";
-
-export function repoWebUrlFromRemote(remote: string): string | undefined {
-  const trimmed = remote.trim();
-  if (trimmed.length === 0) return undefined;
-  // SCP syntax first: it is NOT a URL (no scheme), so `new URL` rejects it —
-  // and it is the shape a cloned-over-ssh checkout carries by default.
-  const scp = /^[^@/\s]+@([^:/\s]+):(.+)$/.exec(trimmed);
-  let host: string;
-  let repoPath: string;
-  if (scp?.[1] !== undefined && scp[2] !== undefined) {
-    host = scp[1];
-    repoPath = scp[2];
-  } else {
-    let parsed: URL;
-    try {
-      parsed = new URL(trimmed);
-    } catch {
-      return undefined;
-    }
-    host = parsed.hostname;
-    repoPath = parsed.pathname;
-  }
-  if (host.toLowerCase() !== GITHUB_HOST) return undefined;
-  const slug = repoPath
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "")
-    .replace(/\.git$/, "");
-  // Exactly owner/repo. A deeper path is not a repository root, and building
-  // a blob url on top of one produces a link that resolves to nothing.
-  if (!/^[^/\s]+\/[^/\s]+$/.test(slug)) return undefined;
-  return `https://${GITHUB_HOST}/${slug}`;
-}
-
-// WHY this order, and WHY it is a function rather than a default: the base ref
-// decides WHICH range gets reviewed, and a hardcoded "main" is silently wrong
-// on any repo that does not use it (musive is on `dev`). So the explicit flag
-// wins, then the repo's own recorded choice, then what the remote actually
-// says its default branch is, and only then the historical literal. The git
-// call that produces `remoteHead` lives in the shell; this stays pure so every
-// branch of the precedence is tested without a repo.
-export function resolveBaseRef(input: {
-  flag?: string | undefined;
-  configDefaultBase?: string | undefined;
-  remoteHead?: string | undefined;
-}): BaseRefResolution {
-  if (input.flag) return { ref: input.flag, source: "flag" };
-  if (input.configDefaultBase) {
-    return { ref: input.configDefaultBase, source: "config" };
-  }
-  if (input.remoteHead) return { ref: input.remoteHead, source: "remote" };
-  return { ref: DEFAULT_BASE_REF, source: "fallback" };
-}
-
 // C5 §3.6: `"config"` is RETIRED. Two files can carry `agents_dir` now, and
 // one label covering both would tell the operator the value came from "the
 // config" while leaving them to guess which of two files to open — for the
@@ -1650,23 +1583,6 @@ export function agentsDirSeat(input: {
   };
 }
 
-// The already-merged branch, spelled out. This is not a rare edge: reviewing a
-// branch that has already landed is exactly what someone does when they want
-// to see what the reviewer would have said, and "empty diff" alone reads as a
-// bug in the tool rather than as the true answer.
-export function headContainedInBaseMessage(
-  baseRef: string,
-  headRef: string,
-): string {
-  return (
-    `the merge base of ${baseRef} and ${headRef} IS ${headRef}: head is ` +
-    "already contained in base; there is nothing this branch adds. If the " +
-    "branch has already been merged, review it against its own parent (" +
-    "--base <the-commit-before-it>) or pass --two-dot to diff the literal " +
-    "two-point range."
-  );
-}
-
 export function emptyDiffMessage(
   baseRef: string,
   headRef: string,
@@ -1691,22 +1607,6 @@ export function allExcludedMessage(droppedPaths: string[]): string {
     `(${listPaths(droppedPaths)}), so the effective diff is empty and there ` +
     "is nothing to review. Nothing was spawned and nothing was spent."
   );
-}
-
-// Enough paths to recognise the diff, never a wall of them: a lockfile-only
-// PR is the common case and a hundred-line list helps nobody.
-export function listPaths(paths: string[], limit = 5): string {
-  if (paths.length <= limit) return paths.join(", ");
-  return `${paths.slice(0, limit).join(", ")}, +${paths.length - limit} more`;
-}
-
-// A full 40-hex commit id and nothing else. WHY it is enforced this hard: an
-// abbreviated head sha once made a COMPLETED three-replicate arm — $29.15
-// already spent — unscoreable, because nothing downstream could match the
-// recorded run to the tree it reviewed. Refs are canonicalized before they
-// are written anywhere.
-export function isFullCommitId(candidate: string): boolean {
-  return /^[0-9a-f]{40}$/.test(candidate.trim());
 }
 
 export interface NumstatDiffStat {

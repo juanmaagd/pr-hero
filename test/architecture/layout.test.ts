@@ -144,7 +144,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
   },
   {
     domain: "git",
-    files: ["git", "identity"],
+    files: ["git", "identity", "refs"],
   },
 ];
 
