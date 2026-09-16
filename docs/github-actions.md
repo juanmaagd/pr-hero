@@ -12,7 +12,7 @@ merge on its own findings.
 2. **Add the workflow file.** Run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your repo.
    That writes the consumer template (`uses: juanmaagd/pr-hero@v1`). Do **not** copy this repository's
    own `.github/workflows/pr-hero.yml`: that file is generated with `OWN_CI_WORKFLOW_OPTIONS` so this
-   repo can dogfood the checkout (`uses: ./` and `max-changed-lines: 1500`). `test/packaging.test.ts`
+   repo can dogfood the checkout (`uses: ./` and `max-changed-lines: 5000`). `test/packaging.test.ts`
    asserts each file against its own generator options; it does **not** assert the two files are
    byte-identical. The consumer template already wires a credentials job plus quoted `routing` /
    `opencode-auth` inputs; empty values are absent, so Claude-only repos keep those lines.

@@ -13,20 +13,13 @@
 //   2. human-readable output goes to stderr so stdout stays clean.
 
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  type AdmissionAttemptStatus,
-  type AdmissionRecord,
-  reserveAdmissionAttempt,
-  settleAdmissionAttempt,
-} from "#ci/admission-ledger";
+import type { AdmissionRecord } from "#ci/admission-ledger";
 import {
   type AdmissionContext,
   budgetDisabledWarningMessage,
   budgetUnlimitedNoticeMessage,
-  type CiGateSkipPlan,
   ciExitCode,
   deriveCiBillingMode,
   planCiBudgetSkip,
@@ -44,10 +37,10 @@ import {
   appendStepSummary,
   formatWorkflowCommand,
   reportFatalCiError,
+  reportFatalCiErrorIfInJobStep,
   withCiWorkflowGroup,
 } from "#ci/reporter";
 import {
-  type CiReviewPolicy,
   ciReviewManualRequiredDetail,
   ciReviewPolicyHash,
   ciReviewSkipDetail,
@@ -81,7 +74,6 @@ import { upgradeCommand } from "#commands/upgrade";
 import { usageCommand } from "#commands/usage";
 import { parseComparisonJson, type StoredComparison } from "#compare/ledger";
 import {
-  type EffectiveConfig,
   ingestReviewMetrics,
   loadEffectiveConfig,
   notionalCostInput,
@@ -107,14 +99,12 @@ import {
 } from "#git/git";
 import { engineIdentity } from "#git/identity";
 import {
-  capabilityGateDecision,
-  produceClaudeCapabilityReport,
-} from "#model/provider-capabilities";
-import {
-  buildResolvedRoutePlan,
-  type ResolvedRoutePlan,
-  type RoutingConfig,
-} from "#model/routing";
+  type CiAdmissionLedgerState,
+  publishCiSkip,
+  recordCiAdmissionGateSkip,
+  reserveCiAdmissionLedger,
+  settleCiAdmissionLedger,
+} from "#pr/admission";
 import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
 import {
   CommentsTruncatedError,
@@ -133,27 +123,41 @@ import {
   ghRepoWebUrl,
   initCodegraphIndex,
   listAdmissionCheckRuns,
-  postCommitStatus,
   postInlineIfEligible,
-  postPrComment,
-  upsertAdmissionCheckRun,
   writeComparison,
   writePostReceipt,
 } from "#pr/pr";
 import {
-  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
   commitStatusCompletion,
   commitStatusRequest,
+  createPrRunDir,
   findMarkedCommentId,
-  type HeldCommitStatusLock,
   isInFlightCommitStatus,
+  type PrDryRunSizeGateResult,
+  predictPrRunDir,
   prHtmlUrl,
-  prRunDirCandidate,
   resolveCurrentPrNumber,
+  resolvePrDryRunSizeGate,
   resolvePrTarget,
-  settleRequestForCancellation,
 } from "#pr/preflight";
 import { revertsCommand } from "#pr/reverts";
+import {
+  heldCommitStatusLock,
+  holdCommitStatusLock,
+  releaseCommitStatusLock,
+  settleHeldCommitStatusOnSignal,
+  tryPublishCommitStatus,
+} from "#pr/status";
+
+export {
+  heldCommitStatusLock,
+  holdCommitStatusLock,
+  type PrDryRunSizeGateResult,
+  releaseCommitStatusLock,
+  resolvePrDryRunSizeGate,
+  settleHeldCommitStatusOnSignal,
+};
+
 import {
   buildPhaseBQueue,
   decideLastHeadDelta,
@@ -175,24 +179,18 @@ import {
 } from "#review/findings";
 import {
   changedPathsFromDiff,
-  DEFAULT_SCOUT_MODEL,
-  type PipelineProgressEvent,
   type PipelineResult,
   parityTriggered,
   runPipeline,
 } from "#review/pipeline";
 import {
-  AGENT_FILE_PATTERNS,
-  type AgentsDirResolution,
   agentFilePath,
-  agentsDirProblems,
-  agentsDirSeat,
   allExcludedMessage,
   assertBasenameOnly,
-  assertOutsideRepo,
   CliError,
   type CliOptions,
   CliUsageError,
+  createRunDir,
   DEFAULT_HEAD_REF,
   DEFAULT_HOP_BUDGET,
   emptyDiffMessage,
@@ -202,18 +200,19 @@ import {
   isCiEnvironment,
   type LocalConfig,
   localReviewSpec,
-  type NumstatDiffStat,
   type NumstatFile,
   parseArgs,
   parseNumstatFiles,
-  resolveAgentsDirSetting,
+  preflightAgentsDir,
+  resolveAgentsDir,
   resolveMaxVerificationSteps,
   resolvePost,
   resolveScout,
   resolveSummary,
-  runDirCandidate,
-  type SummarySettings,
 } from "#review/preflight";
+
+export { createRunDir, preflightAgentsDir, resolveAgentsDir };
+
 import {
   type ParsedAgent,
   parseAgentFile,
@@ -221,24 +220,39 @@ import {
 } from "#review/prompt-set";
 import {
   type DiffStat,
+  envelopeModel,
   estimateCost,
-  formatElapsed,
   renderReport,
 } from "#review/report";
+import {
+  buildCliRoutePlan,
+  enforceProviderCapabilityGate,
+  type ProductionRoutePlanResult,
+  pipelineScoutInput,
+  pipelineSummarizerInput,
+  resolveProductionRoutePlanAtConfirm,
+  resolveRoutePlanAtConfirm,
+} from "#review/route-preflight";
 import {
   type ExcludedPath,
   effectiveDiffStat,
   evaluateSizeGate,
-  evaluateSizeGateAggregate,
   filterDiffByIgnoreRules,
-  type SizeGateConfig,
   type SizeGateVerdict,
   sizeGateConfig,
-  sizeGateDisposition,
   sizeGateLine,
 } from "#review/size-gate";
-import { type ReviewSpec, validateReviewSpec } from "#review/spec";
+import { validateReviewSpec } from "#review/spec";
 import { ClaudeCodeRunner, killAllChildProcesses } from "#review/step-runner";
+
+export {
+  type ProductionRoutePlanResult,
+  pipelineScoutInput,
+  pipelineSummarizerInput,
+  resolveProductionRoutePlanAtConfirm,
+  resolveRoutePlanAtConfirm,
+};
+
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import { gcCommand, runGc } from "#store/gc";
 import {
@@ -274,9 +288,17 @@ export {
 };
 
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
+import {
+  applySizeGate,
+  confirm,
+  startPanelRenderer,
+  startProgressRenderer,
+} from "#ui/progress";
 import { type ResultLinks, renderResult } from "#ui/result";
 import { runReviewMenu } from "#ui/review-menu";
-import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
+
+export { startPanelRenderer };
+
 // Pure decision module, not a shell — same category as pr/preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
 // declaration so the delta line's "since <sha>" clause is free (report.ts's
@@ -288,14 +310,11 @@ import {
   parsePrFiles,
 } from "#watch/preflight";
 import { watchCommand } from "#watch/watch";
-import { type EngineAssets, resolveEngineAssets } from "./assets";
-import type { RunnerBackend } from "./execution/contracts";
 import {
   acquirePidLock,
   releasePidLock,
   resolveRepoHome,
   stampWorktree,
-  tryOriginRepoId,
 } from "./home";
 import {
   legacyMigrationHint,
@@ -308,28 +327,10 @@ import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./ignore-read";
 import { resolveMenuContext } from "./menu-context";
 import {
   createProductionRuntime,
-  type ProductionAdmissionContext,
   type ProductionRuntime,
-  prepareProductionAdmissionContext,
-  probeBindingsReadiness,
 } from "./production-runtime";
-import {
-  applyProgressEvent,
-  createPanelState,
-  renderPanelLines,
-} from "./progress";
-import {
-  type RunnerAuthorityOptions,
-  type RunnerAuthorityResolution,
-  resolveRunnerAuthority,
-} from "./runner-authority";
+import { resolveRunnerAuthority } from "./runner-authority";
 import { resolveOpenCodeAuthPath } from "./security/credential-broker";
-import {
-  admitRoutePlan,
-  createDefaultTransportRegistry,
-  type D1_11ReadinessEvidence,
-  type TransportRegistry,
-} from "./transport-registry";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
@@ -345,223 +346,6 @@ const CODEGRAPH_ONLY_MCP_CONFIG = {
     },
   },
 };
-
-export function pipelineSummarizerInput(
-  summary: SummarySettings,
-):
-  | { summarizer: { promptPath: string; model?: string } }
-  | Record<string, never> {
-  return summary.enabled
-    ? {
-        summarizer: {
-          promptPath: resolveEngineAssets().summarizerPromptPath,
-          ...(summary.model === undefined ? {} : { model: summary.model }),
-        },
-      }
-    : {};
-}
-
-// The scout's prompt is ENGINE-owned and lives outside the agents dir, on
-// purpose and twice over (§3.7): a `review-scout.md` dropped in the agents dir
-// without a spec entry is a hard CliError, and a new prompt-set directory
-// holding byte-identical hunter files would be a new fingerprint — which is
-// exactly the one-variable property M6 needs to be true by construction rather
-// than argued. `prompts/` is the door the summarizer already walked through.
-export function pipelineScoutInput(
-  options: Pick<CliOptions, "scout" | "scoutModel">,
-): { scout: { promptPath: string; model?: string } } | Record<string, never> {
-  return options.scout
-    ? {
-        scout: {
-          promptPath: resolveEngineAssets().scoutPromptPath,
-          ...(options.scoutModel === undefined
-            ? {}
-            : { model: options.scoutModel }),
-        },
-      }
-    : {};
-}
-
-async function buildCliRoutePlan(params: {
-  spec: ReviewSpec;
-  options: CliOptions;
-  agentFiles: Map<string, ParsedAgent>;
-  routingConfig?: RoutingConfig;
-  summary: SummarySettings;
-  summarizerEnabled?: boolean;
-  scoutEnabled?: boolean;
-}): Promise<ResolvedRoutePlan> {
-  const summarizerEnabled = params.summarizerEnabled ?? params.summary.enabled;
-  const scoutEnabled = params.scoutEnabled ?? params.options.scout;
-  let summarizerFrontmatter: string | undefined;
-  if (summarizerEnabled) {
-    try {
-      const parsed = await parseAgentFile(
-        resolveEngineAssets().summarizerPromptPath,
-      );
-      summarizerFrontmatter = parsed.model;
-    } catch {
-      // Engine-owned prompt may be unreadable in tests; route resolution still
-      // falls through CLI > spec > frontmatter precedence without it.
-    }
-  }
-  let scoutFrontmatter: string | undefined;
-  if (scoutEnabled) {
-    try {
-      const parsed = await parseAgentFile(
-        resolveEngineAssets().scoutPromptPath,
-      );
-      scoutFrontmatter = parsed.model;
-    } catch {
-      // Same contract as the summarizer branch above.
-    }
-  }
-  return buildResolvedRoutePlan({
-    agents: params.spec.agents,
-    cliModel: params.options.model,
-    routingConfig: params.routingConfig,
-    frontmatterModel: (agentKey) => params.agentFiles.get(agentKey)?.model,
-    ...(summarizerEnabled
-      ? {
-          summarizer: {
-            model: params.summary.model,
-            frontmatterModel: summarizerFrontmatter,
-          },
-        }
-      : {}),
-    ...(scoutEnabled
-      ? {
-          scout: {
-            model: params.options.scoutModel,
-            frontmatterModel: scoutFrontmatter,
-            defaultModel: DEFAULT_SCOUT_MODEL,
-          },
-        }
-      : {}),
-  });
-}
-
-// Pre-confirm route resolution: legacy runs without operator routing may omit
-// route provenance when the plan cannot be built, but admission failures must
-// always surface before confirm — never be swallowed into routePlan = undefined.
-export async function resolveRoutePlanAtConfirm(input: {
-  routingConfigured: boolean;
-  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
-  registry?: TransportRegistry;
-}): Promise<ResolvedRoutePlan | undefined> {
-  const registry =
-    input.registry ?? createDefaultTransportRegistry({ mode: "production" });
-  let routePlan: ResolvedRoutePlan;
-  try {
-    routePlan = await input.buildRoutePlan();
-  } catch (error) {
-    if (input.routingConfigured) throw error;
-    return undefined;
-  }
-  await admitRoutePlan(routePlan, registry);
-  return routePlan;
-}
-
-export interface ProductionRoutePlanResult {
-  readonly routePlan: ResolvedRoutePlan;
-  readonly productionAdmission: ProductionAdmissionContext;
-}
-
-// Production admission: discover per-backend executable authority, derive
-// D1-11 evidence from exact-binding probes, and admit with one shared registry.
-export async function resolveProductionRoutePlanAtConfirm(input: {
-  routingConfigured: boolean;
-  workspaceRoot: string;
-  buildRoutePlan: () => Promise<ResolvedRoutePlan>;
-  authorityDeps?: import("./runner-authority").ResolveRunnerAuthorityDeps;
-  loadSdk?: () => Promise<
-    import("./transports/opencode-client").OpenCodeSdkLike
-  >;
-  env?: import("./runner-authority").RunnerAuthorityOptions["env"];
-}): Promise<ProductionRoutePlanResult | undefined> {
-  let routePlan: ResolvedRoutePlan;
-  try {
-    routePlan = await input.buildRoutePlan();
-  } catch (error) {
-    if (input.routingConfigured) throw error;
-    return undefined;
-  }
-
-  const productionAdmission = await prepareProductionAdmissionContext({
-    workspaceRoot: input.workspaceRoot,
-    plan: routePlan,
-    authorityDeps: input.authorityDeps,
-    loadSdk: input.loadSdk,
-    env: input.env,
-  });
-  if ("error" in productionAdmission) {
-    throw new CliError(
-      `production admission failed: ${productionAdmission.error}`,
-    );
-  }
-  await admitRoutePlan(routePlan, productionAdmission.registry, {
-    mode: "production",
-    evidence: productionAdmission.evidence,
-  });
-  return { routePlan, productionAdmission };
-}
-
-async function enforceProviderCapabilityGate(input: {
-  routePlan: ResolvedRoutePlan | undefined;
-  workspaceRoot: string;
-  runnerAuthority?: RunnerAuthorityResolution;
-  authorityOptions?: RunnerAuthorityOptions;
-  admissionRegistry?: TransportRegistry;
-  productionEvidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
-}): Promise<void> {
-  if (input.routePlan === undefined) {
-    if (input.runnerAuthority?.error !== undefined) {
-      throw new CliError(
-        `execution authority unavailable: ${input.runnerAuthority.error}`,
-      );
-    }
-    const capabilityReport = await produceClaudeCapabilityReport({});
-    const capabilityGate = capabilityGateDecision(capabilityReport);
-    if (!capabilityGate.ok) {
-      throw new CliError(
-        `provider capability gate failed: ${capabilityGate.reason}`,
-      );
-    }
-    return;
-  }
-  const authorityOptions =
-    input.authorityOptions ??
-    (input.runnerAuthority?.error !== undefined
-      ? undefined
-      : {
-          workspaceRoot: input.workspaceRoot,
-          binaryPath: input.runnerAuthority?.runnerOptions.binaryPath,
-          executableAllowlists: {
-            "claude-code":
-              input.runnerAuthority?.runnerOptions.executableAllowlist ?? [],
-          },
-        });
-  if (authorityOptions === undefined) {
-    throw new CliError(
-      `execution authority unavailable: ${input.runnerAuthority?.error ?? "missing production authority options"}`,
-    );
-  }
-  const probe = await probeBindingsReadiness({
-    ...authorityOptions,
-    plan: input.routePlan,
-    workspaceRoot: input.workspaceRoot,
-    registry: input.admissionRegistry,
-    mode: "production",
-    evidence: input.productionEvidence,
-  });
-  if (!probe.decision.ok) {
-    await probe.dispose();
-    throw new CliError(
-      `provider capability gate failed: ${probe.decision.reason}`,
-    );
-  }
-  await probe.dispose();
-}
 
 const EMPTY_MCP_CONFIG = { mcpServers: {} };
 
@@ -1253,82 +1037,6 @@ async function review(options: CliOptions): Promise<number> {
 //     under ~/.prhero/repos/<id>/worktrees/pr-<n>. The pipeline's cwd, the
 //     tree the codegraph checks run against, and a root the run dir must
 //     stay outside of.
-
-// WHY this module-level state exists (paid for on PR #162, 2026-09-01): a run
-// cancelled by the workflow's `cancel-in-progress` concurrency group posted its
-// pending on the head it was legitimately reviewing and then never settled it,
-// because the SIGTERM/SIGINT handlers end in `process.exit()` — which skips
-// reviewPr's `finally`. The next run read that pending back through
-// isInFlightCommitStatus, saw a lock younger than the 90-minute TTL, and
-// skipped: PR #162 went unreviewed while the `review` job still reported
-// success.
-//
-// The lock cannot tell "another process is working" from "a dead process left
-// this behind" — it is a cross-machine TOCTOU guard, not a liveness probe. So
-// the fix is on the holder's side: the process that took the lock releases it
-// on the way out. This closes the CANCELLATION case, which is by far the most
-// common one, because `cancel-in-progress: true` on a head-ref concurrency
-// group fires on EVERY push, not only a force-push. A runner that dies with no
-// signal at all (hard kill, OOM, a dropped machine) still reaches nothing here
-// and remains covered only by the TTL.
-//
-// Module state, and the same precedent as `unregisterActiveRun(process.pid)`:
-// a signal handler installed in runCli cannot see reviewPr's scope, so what it
-// needs has to be parked where both can reach it.
-let heldLock: HeldCommitStatusLock | null = null;
-
-export function holdCommitStatusLock(lock: HeldCommitStatusLock): void {
-  heldLock = lock;
-}
-
-export function releaseCommitStatusLock(): void {
-  heldLock = null;
-}
-
-export function heldCommitStatusLock(): HeldCommitStatusLock | null {
-  return heldLock;
-}
-
-// Settles the pending this process is holding, then exits — the caller is a
-// signal handler and MUST still reach its `process.exit(code)`.
-//
-// Take-and-clear BEFORE the await, not after: Actions cancels with SIGINT and
-// follows with SIGTERM before the grace period ends, so both handlers can be
-// in flight at once and a peek-then-post would settle twice. `post` is a seam
-// only so the take-and-clear and the bound below are testable offline.
-//
-// Every error is swallowed on purpose. Failing to settle leaves us exactly
-// where PR #162 left us — never worse — and a throw here would cost the exit
-// code the handler owes the runner.
-export async function settleHeldCommitStatusOnSignal(
-  post: typeof postCommitStatus = postCommitStatus,
-): Promise<void> {
-  const settle = settleRequestForCancellation(heldLock);
-  releaseCommitStatusLock();
-  if (settle === null) return;
-  try {
-    await post(settle.operatorRoot, settle.sha, settle.request, undefined, {
-      attempts: 1,
-      timeoutMs: CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
-    });
-  } catch {
-    // Ignore
-  }
-}
-
-async function tryPublishCommitStatus(
-  operatorRoot: string,
-  sha: string,
-  request: ReturnType<typeof commitStatusRequest>,
-): Promise<void> {
-  try {
-    await postCommitStatus(operatorRoot, sha, request);
-  } catch (error) {
-    log(
-      `warning: commit status (${request.state}): ${(error as Error).message}`,
-    );
-  }
-}
 
 async function reviewPr(
   options: CliOptions,
@@ -2964,638 +2672,6 @@ async function reviewPr(
   }
 }
 
-// The impure half of the agents-dir chain: the seat's `configDir` is the
-// dirname of the file the WINNING layer lives in (agentsDirSeat, JD-14), and
-// only the existence check below touches the disk.
-export function resolveAgentsDir(
-  // Narrowed to what it actually reads: `--agents` is the only flag in play,
-  // and a wider type would let a caller believe this consults others.
-  options: Pick<CliOptions, "agents">,
-  loaded: EffectiveConfig,
-  // Injected only by tests, which cannot otherwise reach the compiled branch:
-  // detectAssetMode() reads `import.meta.dir` and always reports "dev" under
-  // `bun test`.
-  assets?: EngineAssets,
-): AgentsDirResolution {
-  const seat = agentsDirSeat({
-    config: loaded.effective,
-    sources: loaded.sources,
-    repoConfigPath: loaded.repoConfigPath,
-    globalConfigPath: loaded.globalConfigPath,
-  });
-  const resolution = resolveAgentsDirSetting({
-    flag: options.agents,
-    ...(seat === undefined ? {} : { config: seat }),
-    env: process.env.PRHERO_AGENTS_DIR,
-    cwd: process.cwd(),
-    ...(assets === undefined ? {} : { assets }),
-  });
-  // Only a DIRECTORY can be checked for existence, and this gate running
-  // unconditionally is the whole shipped defect: the compiled binary's bundled
-  // set has no directory, `existsSync` on the embedded root is false, and every
-  // run of the released binary died here with "agents dir does not exist"
-  // before a single step spawned. A bundled set's conformance is checked by
-  // preflightAgentsDir over the manifest's keys instead.
-  if (resolution.kind === "dir" && !existsSync(resolution.dir)) {
-    throw new CliError(`agents dir does not exist: ${resolution.dir}`);
-  }
-  return resolution;
-}
-
-export async function preflightAgentsDir(
-  agents: Pick<AgentsDirResolution, "kind" | "dir" | "files">,
-  specFiles: string[],
-): Promise<void> {
-  const present = new Set<string>();
-  if (agents.kind === "bundled") {
-    // The manifest's keys ARE the present set, and there is nothing to scan:
-    // Bun.Glob().scan() over the embedded root THROWS ENOENT rather than
-    // yielding nothing, so a bundled set reaching the glob below is not a
-    // degraded check but a crash. Key ORDER is irrelevant here — unlike the
-    // fingerprint, agentsDirProblems compares sets bidirectionally.
-    for (const file of Object.keys(agents.files ?? {})) present.add(file);
-  } else {
-    for (const pattern of AGENT_FILE_PATTERNS) {
-      for await (const entry of new Bun.Glob(pattern).scan({
-        cwd: agents.dir,
-      })) {
-        present.add(entry);
-      }
-    }
-  }
-  const problems = agentsDirProblems(specFiles, [...present]);
-  if (problems.length > 0) {
-    throw new CliError(
-      `prompt set ${agents.dir} does not match the review spec:\n` +
-        problems.map((p) => `  - ${p}`).join("\n"),
-    );
-  }
-}
-
-// repoId rides along with the run dir so the caller's fail-soft metrics
-// ingest (W4 / #23) can reuse the SAME resolveRepoHome call below instead of
-// paying for a second gitOriginUrl lookup. --out still skips resolveRepoHome
-// itself (an explicit dir needs no ~/.prhero/repos/<id> registry, and must
-// never gain the side effect of creating one just to learn an id — W4 Phase
-// 6 remediation, GitHub #23 option D) — but it now tries origin via
-// tryOriginRepoId (persist:false semantics) so a --out run on a checkout
-// WITH a resolvable origin still ingests. repoId is null only when that
-// origin lookup itself fails — the same no-origin escape hatch every other
-// global-state path already has, never a throw.
-export async function createRunDir(
-  options: CliOptions,
-  repoRoot: string,
-  headSha: string,
-): Promise<{ runDir: string; repoId: string | null }> {
-  if (options.out) {
-    const explicit = path.resolve(options.out);
-    assertOutsideRepo(explicit, repoRoot);
-    await mkdir(explicit, { recursive: true });
-    return { runDir: explicit, repoId: await tryOriginRepoId(repoRoot) };
-  }
-  const repoHome = await resolveRepoHome({
-    home: os.homedir(),
-    operatorRoot: repoRoot,
-    persist: true,
-  });
-  const root = repoHome.paths.runs;
-  // Smallest unused integer, so a second review of the same commit never
-  // overwrites the first one's artifacts — a run that cost money is evidence.
-  for (let n = 1; ; n++) {
-    const candidate = runDirCandidate(root, headSha, n);
-    if (existsSync(candidate)) continue;
-    assertOutsideRepo(candidate, repoRoot);
-    await mkdir(candidate, { recursive: true });
-    return { runDir: candidate, repoId: repoHome.repoId };
-  }
-}
-
-// PR-mode twin of createRunDir, differing in exactly two ways: the candidate
-// carries the PR number, and the outside-the-repo assertion runs against
-// BOTH roots — artifacts inside either tree would contaminate a review.
-async function createPrRunDir(
-  options: CliOptions,
-  operatorRoot: string,
-  worktreePath: string,
-  runsRoot: string,
-  prNumber: number,
-  headSha: string,
-): Promise<string> {
-  const dir = predictPrRunDir(
-    options,
-    operatorRoot,
-    worktreePath,
-    runsRoot,
-    prNumber,
-    headSha,
-  );
-  await mkdir(dir, { recursive: true });
-  return dir;
-}
-
-// The same resolution WITHOUT the mkdir, because a PR-mode --dry-run must
-// create nothing at all (local mode's dry run does create its run dir; PR
-// mode deliberately does not) — yet the plan should still print the exact
-// dir a confirmed run would use, and an --out that violates the containment
-// rule should still fail inside the free dry run.
-function predictPrRunDir(
-  options: CliOptions,
-  operatorRoot: string,
-  worktreePath: string,
-  runsRoot: string,
-  prNumber: number,
-  headSha: string,
-): string {
-  if (options.out) {
-    const explicit = path.resolve(options.out);
-    assertOutsideRepo(explicit, operatorRoot);
-    assertOutsideRepo(explicit, worktreePath);
-    return explicit;
-  }
-  const root = runsRoot;
-  // Smallest unused integer, same reason as createRunDir: a run that cost
-  // money is evidence and must never be overwritten.
-  for (let n = 1; ; n++) {
-    const candidate = prRunDirCandidate(root, prNumber, headSha, n);
-    if (existsSync(candidate)) continue;
-    assertOutsideRepo(candidate, operatorRoot);
-    assertOutsideRepo(candidate, worktreePath);
-    return candidate;
-  }
-}
-
-export interface PrDryRunSizeGateResult {
-  verdict: SizeGateVerdict;
-  note: string;
-}
-
-// PR1b Addition 1 (#5557): the PR `--dry-run` size-gate estimate, fixed to
-// use per-file data when it is trustworthy — pure, so the truncation-guard
-// branching is unit-testable without a live `gh` call.
-//
-// Ported from watch/watch.ts's tier-2 pattern, not rewritten: the aggregate path
-// (`{files, insertions, deletions}`, no paths) cannot express exclusions at
-// all, so `.prheroignore` widens what was already a "wrong in the
-// conservative direction" gap (see the WHY this replaces at the call site)
-// from tens of lines (lockfiles) to potentially thousands (a whole ignored
-// directory) — a gate that SKIPs a PR the real per-file run happily accepts
-// reads as a broken tool, not a conservative estimate.
-//
-// `perFile: null` is the caller's signal that gh's own `files` list was
-// truncated or unavailable — see watch/watch.ts:322-327's identical guard: a SHORT
-// list under-counts, and under-counting here would falsely RESCUE exactly
-// the monster this gate exists to stop, so an untrustworthy list is never
-// used to compute a passing verdict.
-export function resolvePrDryRunSizeGate(input: {
-  ghDiffStat: NumstatDiffStat;
-  perFile: NumstatFile[] | null;
-  gateConfig: SizeGateConfig;
-}): PrDryRunSizeGateResult {
-  if (input.perFile !== null) {
-    return {
-      verdict: evaluateSizeGate(input.perFile, input.gateConfig),
-      note:
-        "(estimate from gh's per-file list; `.prheroignore` exclusions " +
-        "apply, but the count is still not whitespace-adjusted — GitHub's " +
-        "counters carry no whitespace information)",
-    };
-  }
-  return {
-    verdict: evaluateSizeGateAggregate(input.ghDiffStat, input.gateConfig),
-    note:
-      "(estimate from GitHub's aggregate counters; gh's per-file list was " +
-      "truncated or unavailable, so exclusions are not applied and the " +
-      "count is not whitespace-adjusted)",
-  };
-}
-
-// Live progress for the paid leg, born from a real incident: the CLI went
-// silent for ~10 minutes between `codegraph init` and `run complete`, and a
-// paid run died to a Ctrl-C from a user who reasonably believed it hung.
-// On a TTY: a multi-line panel redrawn in place (state and frame text are
-// pure in progress.ts). Non-TTY (piped, backgrounded): one plain stderr
-// line per event. I/O by nature, untested by construction — formatElapsed
-// and the progress.ts halves are the pure, tested pieces.
-interface ProgressRenderer {
-  onProgress: (event: PipelineProgressEvent) => void;
-  stop: () => void;
-}
-
-// Height the panel assumes when the stream will not say (a TTY without rows),
-// and the rows it leaves free below itself.
-const PANEL_FALLBACK_ROWS = 24;
-const PANEL_HEADROOM = 3;
-
-function startProgressRenderer(
-  startedAtMs: number,
-  subject: string,
-  hunterKeys: string[],
-  hasRefuter = true,
-  hasSummarizer = false,
-): ProgressRenderer {
-  return process.stderr.isTTY
-    ? startPanelRenderer(
-        startedAtMs,
-        subject,
-        hunterKeys,
-        hasRefuter,
-        hasSummarizer,
-      )
-    : startLineRenderer(startedAtMs);
-}
-
-// The TTY panel: header + a TREE of agent rows (the refuter's per-finding
-// leaves under it), redrawn in place with cursor-up (\x1b[<n>A) + per-line
-// clear (\x1b[2K) on every event and on a 250ms tick that advances the
-// spinner and the elapsed clocks. The cursor is deliberately NOT hidden:
-// \x1b[?25l would need a restore on every exit path, and a leaked hidden
-// cursor wrecks the user's terminal — a visible cursor over a redrawing
-// panel is fine.
-//
-// Two things the tree made load-bearing that a fixed-height list did not:
-//   - the height budget, recomputed EVERY draw (a mid-run resize must tighten
-//     it on the next tick, not walk the cursor off the top of the screen);
-//   - \x1b[0J after the frame. The old panel could only grow, so leftover
-//     lines were impossible; a tree that collapses a finished branch shrinks,
-//     and without the erase-to-end the previous frame's tail stays on screen
-//     as orphaned rows.
-// Exported for its test, which is the only consumer outside this module: the
-// post-stop silence below is a CRITICAL invariant and an untested one regresses.
-export function startPanelRenderer(
-  startedAtMs: number,
-  subject: string,
-  hunterKeys: string[],
-  hasRefuter = true,
-  hasSummarizer = false,
-): ProgressRenderer {
-  // The NO_COLOR convention: any value disables color; a TTY alone is not
-  // consent.
-  const colors = process.env.NO_COLOR === undefined;
-  const state = createPanelState(subject, startedAtMs, hunterKeys, {
-    refuter: hasRefuter,
-    summarizer: hasSummarizer,
-  });
-  let frame = 0;
-  let drawnLines = 0;
-  // Headroom, not the whole window: the summary block prints below the final
-  // frame, and a panel that fills the terminal exactly would scroll it away
-  // the moment anything else is written. 24 is the classic default for a
-  // stream that will not say how tall it is.
-  const budget = (): number =>
-    Math.max((process.stderr.rows ?? PANEL_FALLBACK_ROWS) - PANEL_HEADROOM, 3);
-  const draw = (): void => {
-    const lines = renderPanelLines(
-      state,
-      performance.now(),
-      frame,
-      colors,
-      budget(),
-    );
-    if (drawnLines > 0) process.stderr.write(`\x1b[${drawnLines}A`);
-    for (const line of lines) {
-      process.stderr.write(`\x1b[2K${line}\n`);
-    }
-    // See the header: the frame can shrink, so anything below it must go.
-    process.stderr.write("\x1b[0J");
-    drawnLines = lines.length;
-  };
-  const ticker = setInterval(() => {
-    frame += 1;
-    draw();
-  }, 250);
-  draw();
-  // STOPPED IS LOAD-BEARING, and it is what makes \x1b[0J safe. The pipeline
-  // ceiling resolves the run while in-flight step promises are ABANDONED, not
-  // awaited (pipeline.ts: "abandoned, not awaited"), and their settle handlers
-  // emit unconditionally. So an event can arrive after stop() — after the
-  // result block has already printed below the final frame. Without this flag
-  // that late event redraws: the cursor walks back UP over the summary and
-  // \x1b[0J erases everything below it, deleting the findings of a paid run.
-  // Found live by pr-hero reviewing its own PR #7 (F002, CRITICAL,
-  // corroborated) — the erase-to-end-of-screen that fixed the shrinking-frame
-  // bug created this one.
-  let stopped = false;
-  return {
-    onProgress: (event: PipelineProgressEvent): void => {
-      if (stopped) return;
-      applyProgressEvent(state, event, performance.now());
-      draw();
-    },
-    stop: (): void => {
-      if (stopped) return;
-      clearInterval(ticker);
-      // One last draw so the completed states land; the frame then stays as
-      // the static record, and the summary prints below it.
-      draw();
-      // AFTER the final draw, so stop() itself is not a no-op.
-      stopped = true;
-    },
-  };
-}
-
-// Non-TTY: no redraw art, one plain line per event, elapsed prefix.
-function startLineRenderer(startedAtMs: number): ProgressRenderer {
-  const line = (text: string): void => {
-    log(`  [${formatElapsed(performance.now() - startedAtMs)}] ${text}`);
-  };
-  return {
-    onProgress: (event: PipelineProgressEvent): void => {
-      switch (event.kind) {
-        case "hunters-started":
-          // The expectation line printed right before runPipeline already
-          // announced the fan-out; restating it here would be its echo.
-          return;
-        case "hunter-finished":
-          // A failed hunter is honest, not alarming: one dead hunter is a
-          // partial run, never an abort.
-          line(
-            `hunter ${event.hunter}: ` +
-              (event.ok ? "done" : "failed (the run continues)"),
-          );
-          return;
-        case "dedupe-finished":
-          line(
-            `dedupe: ${event.drafts} draft${event.drafts === 1 ? "" : "s"} ` +
-              `-> ${event.findings} finding${event.findings === 1 ? "" : "s"}`,
-          );
-          return;
-        case "refuter-started":
-          line(
-            `refuter: ${event.severeFindings} severe finding` +
-              `${event.severeFindings === 1 ? "" : "s"} to judge`,
-          );
-          return;
-        case "refuter-step-finished":
-          line(`refuter ${event.findingId}: ${event.verdict}`);
-          return;
-        case "verify-started":
-          line(
-            `verify: ${event.queued} prior finding` +
-              `${event.queued === 1 ? "" : "s"} to check`,
-          );
-          return;
-        case "verify-step-finished":
-          line(`verify ${event.findingId}: ${event.verdict}`);
-          return;
-        case "summarizer-finished":
-          line(
-            `summarizer: ${event.ok ? "done" : "failed (the run continues)"}`,
-          );
-          return;
-        case "scout-started":
-          line(`scout: reading the diff (${event.model})`);
-          return;
-        case "scout-finished":
-          // "unled", never "the run continues": a scout failure is not a
-          // partial review, it is the control pipeline. Naming it as a
-          // degradation would teach an operator to distrust a complete run.
-          line(
-            event.ok
-              ? `scout: ${event.leads ?? 0} lead(s)`
-              : "scout: failed (the hunters run unled)",
-          );
-          return;
-        case "step-retry":
-          // EVERY step, hunters and refuter alike — this is the launchd log,
-          // where a retry that explains a long wall time has to be readable
-          // after the fact and nothing competes for the line.
-          line(
-            `retry ${event.step}: ` +
-              (event.reason === "format"
-                ? "format retry"
-                : `attempt ${event.attempt} of ${event.maxAttempts} ` +
-                  "(transient)"),
-          );
-          return;
-      }
-    },
-    stop: (): void => {
-      // Nothing ticking to stop — kept so both renderers share one shape.
-    },
-  };
-}
-
-// The cost band's gate. `details` is a thunk so the details view — which
-// probes the filesystem — is built only if the human asks for it, and
-// `canSkipPost` is what decides whether "Review, but don't post" exists at
-// all: offering it to a run that was never going to post is a no-op dressed
-// as a choice.
-function confirm(
-  low: number,
-  high: number,
-  canSkipPost: boolean,
-  details: () => string[],
-): Promise<ConfirmResult> {
-  return confirmReview({
-    low,
-    high,
-    canSkipPost,
-    details,
-    styles: styleEnabled(),
-  });
-}
-
-// The size-gate override. `onBlock` runs for both the hard skip and the
-// interactive prompt (PR mode prints the SKIP line here, because that path
-// never reaches the plan). Local mode passes nothing: the plan already
-// printed the verdict.
-async function applySizeGate(
-  verdict: SizeGateVerdict,
-  options: Pick<CliOptions, "force" | "yes">,
-  onBlock?: () => void,
-): Promise<"proceed" | "abort"> {
-  const disposition = sizeGateDisposition(verdict, {
-    force: options.force,
-    yes: options.yes,
-    interactive: Boolean(process.stdin.isTTY),
-  });
-  if (disposition.action === "proceed") return "proceed";
-  onBlock?.();
-  if (disposition.action === "skip") {
-    throw new CliError(disposition.message);
-  }
-  const choice = await confirmSizeGate(styleEnabled());
-  if (choice.kind === "cancel") {
-    log("aborted; nothing was spent.");
-    return "abort";
-  }
-  return "proceed";
-}
-
-// ROADMAP Pillar 3 (GitHub Actions CI). The mechanical glue behind a gate
-// skip in CI mode: every DECISION (what to say, which marker, what the
-// outputs are) already happened in `plan` (planCiSizeSkip/planCiBudgetSkip,
-// ci/gates.ts) — this function has nothing left to decide, only three
-// straight-line I/O calls gated by shouldWriteStepSummary/shouldWriteCiOutputs.
-// `postPrComment`'s own `markerPrefix` (Phase 3's parameterization) makes
-// this idempotent: a repeat CI run on the same still-failing PR updates its
-// own prior skip comment rather than stacking a new one on every push.
-type CiAdmissionLedgerState = {
-  record: AdmissionRecord;
-  checkRunId: number;
-  headSha: string;
-  operatorRoot: string;
-};
-
-async function persistCiAdmissionLedger(
-  state: CiAdmissionLedgerState,
-): Promise<void> {
-  state.checkRunId = await upsertAdmissionCheckRun(state.operatorRoot, {
-    headSha: state.headSha,
-    record: state.record,
-    checkRunId: state.checkRunId,
-  });
-}
-
-async function tryPersistCiAdmissionLedger(
-  state: CiAdmissionLedgerState | null,
-): Promise<void> {
-  if (state === null) return;
-  try {
-    await persistCiAdmissionLedger(state);
-  } catch {
-    // Best-effort: settlement must not mask the underlying review failure.
-  }
-}
-
-async function settleCiAdmissionLedger(
-  state: CiAdmissionLedgerState | null,
-  status: AdmissionAttemptStatus,
-  reason: string,
-): Promise<void> {
-  if (state === null) return;
-  const terminal = new Set<AdmissionAttemptStatus>([
-    "completed",
-    "failed",
-    "cancelled",
-    "skipped",
-  ]);
-  if (
-    terminal.has(state.record.status) &&
-    state.record.status !== "provider-started"
-  ) {
-    return;
-  }
-  state.record = settleAdmissionAttempt(state.record, status, reason);
-  await tryPersistCiAdmissionLedger(state);
-}
-
-async function reserveCiAdmissionLedger(input: {
-  operatorRoot: string;
-  prNumber: number;
-  headSha: string;
-  policy: CiReviewPolicy;
-  policyHash: string;
-  existing: readonly AdmissionRecord[];
-  decisionReason: string;
-  priorScore?: number | null;
-  blockingCount?: number | null;
-  advisoryCount?: number | null;
-}): Promise<CiAdmissionLedgerState> {
-  const { record } = reserveAdmissionAttempt({
-    existing: input.existing,
-    prNumber: input.prNumber,
-    headSha: input.headSha,
-    policyHash: input.policyHash,
-    workflowRunId: process.env.GITHUB_RUN_ID ?? null,
-    decisionReason: input.decisionReason,
-    priorScore: input.priorScore ?? null,
-    blockingCount: input.blockingCount ?? null,
-    advisoryCount: input.advisoryCount ?? null,
-    reservationTtlSeconds: input.policy.reservationTtlSeconds,
-  });
-  const checkRunId = await upsertAdmissionCheckRun(input.operatorRoot, {
-    headSha: input.headSha,
-    record,
-  });
-  return {
-    record,
-    checkRunId,
-    headSha: input.headSha,
-    operatorRoot: input.operatorRoot,
-  };
-}
-
-async function recordCiAdmissionGateSkip(input: {
-  operatorRoot: string;
-  prNumber: number;
-  headSha: string;
-  policy: CiReviewPolicy;
-  policyHash: string;
-  existing: readonly AdmissionRecord[];
-  reason: string;
-  priorScore: number | null;
-  blockingCount: number | null;
-  advisoryCount: number | null;
-}): Promise<void> {
-  try {
-    const state = await reserveCiAdmissionLedger({
-      operatorRoot: input.operatorRoot,
-      prNumber: input.prNumber,
-      headSha: input.headSha,
-      policy: input.policy,
-      policyHash: input.policyHash,
-      existing: input.existing,
-      decisionReason: input.reason,
-      priorScore: input.priorScore,
-      blockingCount: input.blockingCount,
-      advisoryCount: input.advisoryCount,
-    });
-    await settleCiAdmissionLedger(state, "skipped", input.reason);
-  } catch {
-    // The skip notice is the operator-facing outcome; a check-run write must
-    // not block publishing it.
-  }
-}
-
-async function publishCiSkip(input: {
-  operatorRoot: string;
-  prNumber: number;
-  post: boolean;
-  isCi: boolean;
-  stepSummaryFlag: boolean | undefined;
-  plan: CiGateSkipPlan;
-  noticeMessage: string;
-}): Promise<number> {
-  log(formatWorkflowCommand("notice", input.noticeMessage));
-  if (input.post) {
-    await postPrComment(
-      input.operatorRoot,
-      input.prNumber,
-      input.plan.comment,
-      undefined,
-      undefined,
-      input.plan.markerPrefix,
-    );
-  }
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (shouldWriteStepSummary(input.isCi, input.stepSummaryFlag, summaryPath)) {
-    await appendStepSummary(summaryPath as string, input.plan.summaryMarkdown);
-  }
-  const outputPath = process.env.GITHUB_OUTPUT;
-  if (shouldWriteCiOutputs(input.isCi, outputPath)) {
-    await appendCiOutputs(outputPath as string, input.plan.outputs);
-  }
-  return 0;
-}
-
-// The envelope needs ONE model string. With no --model override each agent
-// carries its own frontmatter model, so report what actually ran rather than
-// inventing a single value: identical models collapse to one name, a mixed
-// set is recorded as a mix instead of as a lie.
-function envelopeModel(
-  options: CliOptions,
-  agentFiles: Map<string, ParsedAgent>,
-): string {
-  if (options.model) return options.model;
-  const models = new Set<string>();
-  for (const agent of agentFiles.values()) {
-    if (agent.model) models.add(agent.model);
-  }
-  if (models.size === 0) return "unspecified";
-  return [...models].sort().join("+");
-}
-
 async function menuCommand(options: CliOptions): Promise<number> {
   const repoRoot = options.repo
     ? await resolveRepoRoot(options.repo).catch(() => undefined)
@@ -3705,30 +2781,6 @@ async function menuCommand(options: CliOptions): Promise<number> {
       }
     },
   });
-}
-
-// main()'s two internal catches RETURN rather than throw, so runCli()'s catch
-// — the only thing that has ever written `status=error` — never saw them. Both
-// are failures docs/github-actions.md names as reasons the job goes red: a
-// malformed argument (parseArgs, exit 2) and a CliError/CliUsageError from a
-// command body (exit 1) — which is precisely what a missing or expired
-// GITHUB_TOKEN produces, since pr/pr.ts raises CliError for `gh not found on
-// PATH` and for a failed `gh pr view`. A consumer branching on
-// `outputs.status == 'error'` therefore never saw it fire for the two most
-// common failures; it saw `status` unset, indistinguishable from a step whose
-// outputs were never read.
-//
-// $GITHUB_OUTPUT's mere presence is the CI signal here, exactly as it is for
-// reportFatalCiError: GitHub sets it for every job step before any of this
-// repo's own flags are parsed. Guarding the CALL rather than only the write is
-// deliberate — reportFatalCiError also emits an `::error::` annotation, and
-// printing workflow-command syntax on a developer's terminal after a plain
-// typo is noise, not diagnostics. Exit codes are untouched; only the write is
-// new.
-async function reportFatalCiErrorIfInJobStep(error: unknown): Promise<void> {
-  const outputPath = process.env.GITHUB_OUTPUT;
-  if (outputPath === undefined || outputPath.length === 0) return;
-  await reportFatalCiError(error, outputPath);
 }
 
 // Exported so bin/pr-hero.js can drive the exact same signal-handling +

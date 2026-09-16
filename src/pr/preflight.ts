@@ -12,6 +12,8 @@
 //   - the REVIEW root: a detached worktree at the PR's head. The pipeline's
 //     cwd, the tree the codegraph index describes. Never trusted for config.
 
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
   Bucket,
@@ -21,11 +23,20 @@ import type {
 import type { GreptileFinding } from "#compare/greptile";
 import type { RunStatus } from "#review/findings";
 import {
+  assertOutsideRepo,
   CliError,
+  type CliOptions,
   CliUsageError,
   isFullCommitId,
   type NumstatDiffStat,
+  type NumstatFile,
 } from "#review/preflight";
+import {
+  evaluateSizeGate,
+  evaluateSizeGateAggregate,
+  type SizeGateConfig,
+  type SizeGateVerdict,
+} from "#review/size-gate";
 
 export type PrState = "OPEN" | "CLOSED" | "MERGED";
 
@@ -222,6 +233,105 @@ export function prRunDirCandidate(
   n: number,
 ): string {
   return path.join(root, `pr-${pr}-${headSha.slice(0, 8)}-${n}`);
+}
+
+// PR-mode twin of createRunDir, differing in exactly two ways: the candidate
+// carries the PR number, and the outside-the-repo assertion runs against
+// BOTH roots — artifacts inside either tree would contaminate a review.
+export async function createPrRunDir(
+  options: CliOptions,
+  operatorRoot: string,
+  worktreePath: string,
+  runsRoot: string,
+  prNumber: number,
+  headSha: string,
+): Promise<string> {
+  const dir = predictPrRunDir(
+    options,
+    operatorRoot,
+    worktreePath,
+    runsRoot,
+    prNumber,
+    headSha,
+  );
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+// The same resolution WITHOUT the mkdir, because a PR-mode --dry-run must
+// create nothing at all (local mode's dry run does create its run dir; PR
+// mode deliberately does not) — yet the plan should still print the exact
+// dir a confirmed run would use, and an --out that violates the containment
+// rule should still fail inside the free dry run.
+export function predictPrRunDir(
+  options: CliOptions,
+  operatorRoot: string,
+  worktreePath: string,
+  runsRoot: string,
+  prNumber: number,
+  headSha: string,
+): string {
+  if (options.out) {
+    const explicit = path.resolve(options.out);
+    assertOutsideRepo(explicit, operatorRoot);
+    assertOutsideRepo(explicit, worktreePath);
+    return explicit;
+  }
+  const root = runsRoot;
+  // Smallest unused integer, same reason as createRunDir: a run that cost
+  // money is evidence and must never be overwritten.
+  for (let n = 1; ; n++) {
+    const candidate = prRunDirCandidate(root, prNumber, headSha, n);
+    if (existsSync(candidate)) continue;
+    assertOutsideRepo(candidate, operatorRoot);
+    assertOutsideRepo(candidate, worktreePath);
+    return candidate;
+  }
+}
+
+export interface PrDryRunSizeGateResult {
+  verdict: SizeGateVerdict;
+  note: string;
+}
+
+// PR1b Addition 1 (#5557): the PR `--dry-run` size-gate estimate, fixed to
+// use per-file data when it is trustworthy — pure, so the truncation-guard
+// branching is unit-testable without a live `gh` call.
+//
+// Ported from watch/watch.ts's tier-2 pattern, not rewritten: the aggregate path
+// (`{files, insertions, deletions}`, no paths) cannot express exclusions at
+// all, so `.prheroignore` widens what was already a "wrong in the
+// conservative direction" gap (see the WHY this replaces at the call site)
+// from tens of lines (lockfiles) to potentially thousands (a whole ignored
+// directory) — a gate that SKIPs a PR the real per-file run happily accepts
+// reads as a broken tool, not a conservative estimate.
+//
+// `perFile: null` is the caller's signal that gh's own `files` list was
+// truncated or unavailable — see watch/watch.ts:322-327's identical guard: a SHORT
+// list under-counts, and under-counting here would falsely RESCUE exactly
+// the monster this gate exists to stop, so an untrustworthy list is never
+// used to compute a passing verdict.
+export function resolvePrDryRunSizeGate(input: {
+  ghDiffStat: NumstatDiffStat;
+  perFile: NumstatFile[] | null;
+  gateConfig: SizeGateConfig;
+}): PrDryRunSizeGateResult {
+  if (input.perFile !== null) {
+    return {
+      verdict: evaluateSizeGate(input.perFile, input.gateConfig),
+      note:
+        "(estimate from gh's per-file list; `.prheroignore` exclusions " +
+        "apply, but the count is still not whitespace-adjusted — GitHub's " +
+        "counters carry no whitespace information)",
+    };
+  }
+  return {
+    verdict: evaluateSizeGateAggregate(input.ghDiffStat, input.gateConfig),
+    note:
+      "(estimate from GitHub's aggregate counters; gh's per-file list was " +
+      "truncated or unavailable, so exclusions are not applied and the " +
+      "count is not whitespace-adjusted)",
+  };
 }
 
 // `git status --porcelain` over the REVIEW worktree, reduced to one bit.

@@ -98,7 +98,7 @@ export const DEFAULT_CI_ACTION_REF = "juanmaagd/pr-hero@v1";
 // that gate is real on any route.
 export const OWN_CI_WORKFLOW_OPTIONS: CiWorkflowTemplateOptions = {
   actionRef: "./",
-  maxChangedLines: "1500",
+  maxChangedLines: "5000",
 };
 
 export function generateCiWorkflowTemplate(

@@ -570,3 +570,29 @@ export async function reportFatalCiError(
   }
   log(formatWorkflowCommand("error", message));
 }
+
+// main()'s two internal catches RETURN rather than throw, so runCli()'s catch
+// — the only thing that has ever written `status=error` — never saw them. Both
+// are failures docs/github-actions.md names as reasons the job goes red: a
+// malformed argument (parseArgs, exit 2) and a CliError/CliUsageError from a
+// command body (exit 1) — which is precisely what a missing or expired
+// GITHUB_TOKEN produces, since pr/pr.ts raises CliError for `gh not found on
+// PATH` and for a failed `gh pr view`. A consumer branching on
+// `outputs.status == 'error'` therefore never saw it fire for the two most
+// common failures; it saw `status` unset, indistinguishable from a step whose
+// outputs were never read.
+//
+// $GITHUB_OUTPUT's mere presence is the CI signal here, exactly as it is for
+// reportFatalCiError: GitHub sets it for every job step before any of this
+// repo's own flags are parsed. Guarding the CALL rather than only the write is
+// deliberate — reportFatalCiError also emits an `::error::` annotation, and
+// printing workflow-command syntax on a developer's terminal after a plain
+// typo is noise, not diagnostics. Exit codes are untouched; only the write is
+// new.
+export async function reportFatalCiErrorIfInJobStep(
+  error: unknown,
+): Promise<void> {
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (outputPath === undefined || outputPath.length === 0) return;
+  await reportFatalCiError(error, outputPath);
+}

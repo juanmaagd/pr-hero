@@ -18,7 +18,7 @@
 // (or orphan rows come back), and no draw may happen after stop().
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { startPanelRenderer } from "../src/cli";
+import { startPanelRenderer } from "#ui/progress";
 import { createPanelState, renderPanelLines } from "../src/progress";
 
 const realWrite = process.stderr.write.bind(process.stderr);

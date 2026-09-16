@@ -39,6 +39,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "menu",
       "plan",
       "primitives",
+      "progress",
       "result",
       "review-menu",
       "select",
@@ -119,6 +120,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "proof-refs",
       "report",
       "root-cause",
+      "route-preflight",
       "scout",
       "size-gate",
       "spec",
@@ -127,7 +129,15 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
   },
   {
     domain: "pr",
-    files: ["inline", "pr", "preflight", "reverts", "reverts-preflight"],
+    files: [
+      "admission",
+      "inline",
+      "pr",
+      "preflight",
+      "reverts",
+      "reverts-preflight",
+      "status",
+    ],
   },
   {
     domain: "git",

@@ -4,11 +4,15 @@
 // filesystem, git, or the network — a preflight that needs a live repo to be
 // tested is a preflight that gets tested once, live, at $10 a go.
 
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import {
   CI_REVIEW_POLICY_MODES,
   type CiReviewPolicyMode,
 } from "#ci/review-admission";
+import type { EffectiveConfig } from "#config/config";
 import type {
   ModelGateway,
   RouteMapping,
@@ -1821,6 +1825,46 @@ export function assertOutsideRepo(runDir: string, repoRoot: string): void {
   }
 }
 
+// repoId rides along with the run dir so the caller's fail-soft metrics
+// ingest (W4 / #23) can reuse the SAME resolveRepoHome call below instead of
+// paying for a second gitOriginUrl lookup. --out still skips resolveRepoHome
+// itself (an explicit dir needs no ~/.prhero/repos/<id> registry, and must
+// never gain the side effect of creating one just to learn an id — W4 Phase
+// 6 remediation, GitHub #23 option D) — but it now tries origin via
+// tryOriginRepoId (persist:false semantics) so a --out run on a checkout
+// WITH a resolvable origin still ingests. repoId is null only when that
+// origin lookup itself fails — the same no-origin escape hatch every other
+// global-state path already has, never a throw.
+export async function createRunDir(
+  options: CliOptions,
+  repoRoot: string,
+  headSha: string,
+): Promise<{ runDir: string; repoId: string | null }> {
+  if (options.out) {
+    const explicit = path.resolve(options.out);
+    assertOutsideRepo(explicit, repoRoot);
+    await mkdir(explicit, { recursive: true });
+    const { tryOriginRepoId } = await import("../home");
+    return { runDir: explicit, repoId: await tryOriginRepoId(repoRoot) };
+  }
+  const { resolveRepoHome } = await import("../home");
+  const repoHome = await resolveRepoHome({
+    home: os.homedir(),
+    operatorRoot: repoRoot,
+    persist: true,
+  });
+  const root = repoHome.paths.runs;
+  // Smallest unused integer, so a second review of the same commit never
+  // overwrites the first one's artifacts — a run that cost money is evidence.
+  for (let n = 1; ; n++) {
+    const candidate = runDirCandidate(root, headSha, n);
+    if (existsSync(candidate)) continue;
+    assertOutsideRepo(candidate, repoRoot);
+    await mkdir(candidate, { recursive: true });
+    return { runDir: candidate, repoId: repoHome.repoId };
+  }
+}
+
 // Threat matrix, ported from the lab: a ReviewSpec's `file` values name the
 // .md files that become the SYSTEM PROMPTS of spawned sessions. A basename
 // that escapes agentsDir (separator, `..`, or an absolute path) must fail
@@ -1871,6 +1915,74 @@ export function agentsDirProblems(
     }
   }
   return problems.sort();
+}
+
+// The impure half of the agents-dir chain: the seat's `configDir` is the
+// dirname of the file the WINNING layer lives in (agentsDirSeat, JD-14), and
+// only the existence check below touches the disk.
+export function resolveAgentsDir(
+  // Narrowed to what it actually reads: `--agents` is the only flag in play,
+  // and a wider type would let a caller believe this consults others.
+  options: Pick<CliOptions, "agents">,
+  loaded: EffectiveConfig,
+  // Injected only by tests, which cannot otherwise reach the compiled branch:
+  // detectAssetMode() reads `import.meta.dir` and always reports "dev" under
+  // `bun test`.
+  assets?: EngineAssets,
+): AgentsDirResolution {
+  const seat = agentsDirSeat({
+    config: loaded.effective,
+    sources: loaded.sources,
+    repoConfigPath: loaded.repoConfigPath,
+    globalConfigPath: loaded.globalConfigPath,
+  });
+  const resolution = resolveAgentsDirSetting({
+    flag: options.agents,
+    ...(seat === undefined ? {} : { config: seat }),
+    env: process.env.PRHERO_AGENTS_DIR,
+    cwd: process.cwd(),
+    ...(assets === undefined ? {} : { assets }),
+  });
+  // Only a DIRECTORY can be checked for existence, and this gate running
+  // unconditionally is the whole shipped defect: the compiled binary's bundled
+  // set has no directory, `existsSync` on the embedded root is false, and every
+  // run of the released binary died here with "agents dir does not exist"
+  // before a single step spawned. A bundled set's conformance is checked by
+  // preflightAgentsDir over the manifest's keys instead.
+  if (resolution.kind === "dir" && !existsSync(resolution.dir)) {
+    throw new CliError(`agents dir does not exist: ${resolution.dir}`);
+  }
+  return resolution;
+}
+
+export async function preflightAgentsDir(
+  agents: Pick<AgentsDirResolution, "kind" | "dir" | "files">,
+  specFiles: string[],
+): Promise<void> {
+  const present = new Set<string>();
+  if (agents.kind === "bundled") {
+    // The manifest's keys ARE the present set, and there is nothing to scan:
+    // Bun.Glob().scan() over the embedded root THROWS ENOENT rather than
+    // yielding nothing, so a bundled set reaching the glob below is not a
+    // degraded check but a crash. Key ORDER is irrelevant here — unlike the
+    // fingerprint, agentsDirProblems compares sets bidirectionally.
+    for (const file of Object.keys(agents.files ?? {})) present.add(file);
+  } else {
+    for (const pattern of AGENT_FILE_PATTERNS) {
+      for await (const entry of new Bun.Glob(pattern).scan({
+        cwd: agents.dir,
+      })) {
+        present.add(entry);
+      }
+    }
+  }
+  const problems = agentsDirProblems(specFiles, [...present]);
+  if (problems.length > 0) {
+    throw new CliError(
+      `prompt set ${agents.dir} does not match the review spec:\n` +
+        problems.map((p) => `  - ${p}`).join("\n"),
+    );
+  }
 }
 
 // Local mode's wiring: the three unconditional hunters, the conditional

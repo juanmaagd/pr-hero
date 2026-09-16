@@ -1395,3 +1395,20 @@ export function formatStepRoute(
 ): string {
   return formatModelRoute(step.route, rawLogical ?? step.logicalIdentity);
 }
+
+// The envelope needs ONE model string. With no --model override each agent
+// carries its own frontmatter model, so report what actually ran rather than
+// inventing a single value: identical models collapse to one name, a mixed
+// set is recorded as a mix instead of as a lie.
+export function envelopeModel(
+  options: { model?: string },
+  agentFiles: Map<string, { model?: string }>,
+): string {
+  if (options.model) return options.model;
+  const models = new Set<string>();
+  for (const agent of agentFiles.values()) {
+    if (agent.model) models.add(agent.model);
+  }
+  if (models.size === 0) return "unspecified";
+  return [...models].sort().join("+");
+}
