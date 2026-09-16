@@ -4,17 +4,17 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { resolveModelRoute } from "#model/routing";
 import {
+  type FindingsDocument,
+  validateFindingsDocument,
+} from "#review/findings";
+import { parseAgentSource } from "#review/prompt-set";
+import {
   type ExecutionAttemptEvidence,
   evidenceSha256,
   readEvidenceFile,
 } from "../src/execution/attempt-evidence";
 import type { ResolvedModelRoute } from "../src/execution/contracts";
-import {
-  type FindingsDocument,
-  validateFindingsDocument,
-} from "../src/findings";
 import { localReviewSpec } from "../src/preflight";
-import { parseAgentSource } from "../src/prompt-set";
 import { hasCapturedTerminal } from "../src/transports/opencode-evidence";
 
 export interface BenchmarkIdentity {

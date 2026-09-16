@@ -11,7 +11,7 @@
 // production run ever executes.
 
 import { normalizePath } from "#compare/compare";
-import { wrapBlock } from "./boundary";
+import { wrapBlock } from "#review/boundary";
 
 // Prose §3.7 turned into the engine-owned output contract, beside
 // HUNTER/REFUTER/SUMMARY_OUTPUT_CONTRACT in pipeline.ts. This text is driver

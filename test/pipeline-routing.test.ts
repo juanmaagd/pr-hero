@@ -9,6 +9,7 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import { type ReviewSpec, validateReviewSpec } from "#review/spec";
 import { countAttempts, parsePipelineMeta } from "#watch/preflight";
 import { emptyDiversityLedger } from "../src/diversity/accounting";
 import { buildDiversityPlan } from "../src/diversity/identity";
@@ -25,7 +26,6 @@ import type {
 } from "../src/execution/contracts";
 import { type PipelineInput, runPipeline } from "../src/pipeline";
 import { rereviewDeltaFromProvenance } from "../src/report";
-import { type ReviewSpec, validateReviewSpec } from "../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
 import {
   type D1_11ReadinessEvidence,

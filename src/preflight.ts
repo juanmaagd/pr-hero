@@ -15,19 +15,19 @@ import type {
   RoutingConfig,
   RunnerBackend,
 } from "#model/routing";
+import type { SuspicionPrior } from "#review/prompt-set";
+import type { ReviewSpec } from "#review/spec";
 import {
   ADJUDICATED_TAGS,
   type TriageTag,
   type TriageVerdict,
 } from "#triage/triage";
 import { type EngineAssets, resolveEngineAssets } from "./assets";
-import type { SuspicionPrior } from "./prompt-set";
 import { redactDiagnostic } from "./security/redact";
 // size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
 // dependency on this module.
 import { DEFAULT_SIZE_GATE, unquotePath } from "./size-gate";
-import type { ReviewSpec } from "./spec";
 
 // The lab's production value. Also the single biggest per-hunter cost lever
 // in the whole engine: every hop is another round of tool calls against the

@@ -27,8 +27,8 @@ import {
 } from "#ci/admission-ledger";
 import { SKIP_SIZE_COMMENT_MARKER } from "#ci/gates";
 import type { PrHeroFindingRef } from "#compare/compare";
+import type { Finding } from "#review/findings";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
-import type { Finding } from "../src/findings";
 import {
   CommentsTruncatedError,
   fetchCommitStatuses,

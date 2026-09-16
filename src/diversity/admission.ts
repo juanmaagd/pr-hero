@@ -1,5 +1,8 @@
-import { SCHEMA_VERSION_V1_1, validateFindingsDocument } from "../findings";
-import { FINDINGS_CONFORMANCE_CASES } from "../findings-conformance";
+import {
+  SCHEMA_VERSION_V1_1,
+  validateFindingsDocument,
+} from "#review/findings";
+import { FINDINGS_CONFORMANCE_CASES } from "#review/findings-conformance";
 import { DiversityCapabilityError } from "./errors";
 
 export interface InternalCapabilityReport {

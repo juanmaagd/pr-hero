@@ -18,8 +18,8 @@
 // below the header exists to end that.
 
 import type { ComparisonResult } from "#compare/compare";
+import type { Finding, FindingsDocument } from "#review/findings";
 import type { UnresolvedSpend } from "../execution/spend-limiter";
-import type { Finding, FindingsDocument } from "../findings";
 import {
   blobUrl,
   coverageSentence,
@@ -271,7 +271,7 @@ function findingLines(
 // block flattened into a bare "K distinct root cause(s)": three findings on
 // one defect and three separate defects are the same number there.
 //
-// MEASUREMENT ONLY, exactly as root-cause.ts insists: this reorders lines on a
+// MEASUREMENT ONLY, exactly as review/root-cause.ts insists: this reorders lines on a
 // terminal. Nothing here touches findings[], and findings.json is already on
 // disk by the time this runs.
 function findingsSection(

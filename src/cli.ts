@@ -107,6 +107,20 @@ import {
 } from "#rereview/prepare";
 import { parseStateBlock, renderStateBlock } from "#rereview/state";
 import {
+  type Finding,
+  type FindingsDocument,
+  mergeRunEnvelope,
+  type Telemetry,
+  validateFindingsDocument,
+  writeFindings,
+} from "#review/findings";
+import {
+  type ParsedAgent,
+  parseAgentFile,
+  promptSetIdentity,
+} from "#review/prompt-set";
+import { type ReviewSpec, validateReviewSpec } from "#review/spec";
+import {
   getWatcherSpend,
   killActiveRun,
   listActiveRuns,
@@ -195,14 +209,6 @@ import {
   runDoctor,
 } from "./doctor";
 import type { RunnerBackend } from "./execution/contracts";
-import {
-  type Finding,
-  type FindingsDocument,
-  mergeRunEnvelope,
-  type Telemetry,
-  validateFindingsDocument,
-  writeFindings,
-} from "./findings";
 import {
   acquirePidLock,
   releasePidLock,
@@ -355,11 +361,6 @@ import {
   renderPanelLines,
 } from "./progress";
 import {
-  type ParsedAgent,
-  parseAgentFile,
-  promptSetIdentity,
-} from "./prompt-set";
-import {
   type DiffStat,
   estimateCost,
   formatElapsed,
@@ -388,7 +389,6 @@ import {
   sizeGateDisposition,
   sizeGateLine,
 } from "./size-gate";
-import { type ReviewSpec, validateReviewSpec } from "./spec";
 import { ClaudeCodeRunner, killAllChildProcesses } from "./step-runner";
 import {
   admitRoutePlan,
@@ -1315,7 +1315,7 @@ async function review(options: CliOptions): Promise<number> {
   // two sides produce the same string for the same bytes. It is what turns
   // M6's central claim, "both arms ran the same prompt set", from something
   // believed into something recorded, and it fills the `prompt_set` seat
-  // findings.ts has declared and never populated.
+  // review/findings.ts has declared and never populated.
   const promptSet = await promptSetIdentity(
     agentsDir,
     // spec DECLARATION order, and it must stay that: promptSetFingerprint
@@ -1968,7 +1968,7 @@ async function reviewPr(
   // two sides produce the same string for the same bytes. It is what turns
   // M6's central claim, "both arms ran the same prompt set", from something
   // believed into something recorded, and it fills the `prompt_set` seat
-  // findings.ts has declared and never populated.
+  // review/findings.ts has declared and never populated.
   const promptSet = await promptSetIdentity(
     agentsDir,
     // spec DECLARATION order, and it must stay that: promptSetFingerprint
@@ -4486,7 +4486,7 @@ export async function runPostCommand(input: {
   // findings from SOME hunters still publishes, same as the live path.
   //
   // Back-compat is mandatory: `sessionFailed` is additive/optional
-  // (findings.ts), so a run written before this change has no such field.
+  // (review/findings.ts), so a run written before this change has no such field.
   // Absent MUST mean "unknown", never "false" — falling back to `false`
   // would publish a dead run's clean bill. The fallback is today's
   // conservative proxy, `run_status !== "complete"`: every genuinely

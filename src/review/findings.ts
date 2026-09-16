@@ -280,7 +280,7 @@ function must(condition: boolean, message: string): void {
   if (!condition) throw new FindingsValidationError(message);
 }
 
-// The artifact-side twin of drafts.ts's normalizeOptionalString — same rule,
+// The artifact-side twin of review/drafts.ts's normalizeOptionalString — same rule,
 // stated in full there. `null` on an optional string is REPAIRED to absent,
 // a present-but-wrong-typed value is rejected.
 //
@@ -641,7 +641,7 @@ export function deriveTier(
   //   - `inconclusive` means the refuter RAN and returned no positive
   //     downgrade — the standing rule above, paid for by AudioTrimmer.
   //   - `not_submitted` with NO refuter configured is the supported
-  //     zero-refuter setup (src/spec.ts allows at most one refuter, so zero is
+  //     zero-refuter setup (src/review/spec.ts allows at most one refuter, so zero is
   //     configured absence, not failure). There `not_submitted` is the designed
   //     steady state, blocking is intended, and it stays intended no matter how
   //     the run ended — a hunter-bound or verify-bound ceiling on such a spec

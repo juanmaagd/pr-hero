@@ -1,20 +1,20 @@
 // Behavioural closed-set parity test (design D3): the Hunter enum is
-// duplicated across four validators on purpose (findings.ts, spec.ts,
-// drafts.ts, plus the lab mirror out of this repo's reach) rather than
+// duplicated across four validators on purpose (review/findings.ts, review/spec.ts,
+// review/drafts.ts, plus the lab mirror out of this repo's reach) rather than
 // collapsed into one shared export. This test is the mechanical guard
 // against the "third copy is easy to miss" trap — every validator here
 // MUST accept exactly the same key set and reject the same out-of-set key.
 import { describe, expect, test } from "bun:test";
-import { type DraftFinding, validateDraftFinding } from "../src/drafts";
+import { type DraftFinding, validateDraftFinding } from "#review/drafts";
 import {
   type Finding,
   SCHEMA_VERSION,
   SCHEMA_VERSION_V1_1,
   validateFinding,
   validateFindingsDocument,
-} from "../src/findings";
-import { FINDINGS_CONFORMANCE_CASES } from "../src/findings-conformance";
-import { type AgentSpec, validateReviewSpec } from "../src/spec";
+} from "#review/findings";
+import { FINDINGS_CONFORMANCE_CASES } from "#review/findings-conformance";
+import { type AgentSpec, validateReviewSpec } from "#review/spec";
 
 const IN_ENUM = ["reliability", "resilience", "parity", "lifecycle"] as const;
 const OPEN_SLUG = "security";

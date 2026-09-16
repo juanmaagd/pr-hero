@@ -9,7 +9,7 @@
 // ingest at a time, from the very next completed review after ship.
 
 import type { StoredComparison } from "#compare/ledger";
-import type { FindingsDocument, RunStatus } from "../findings";
+import type { FindingsDocument, RunStatus } from "#review/findings";
 import type { PerAgentUsage } from "../pipeline";
 
 export const CURRENT_SCHEMA_VERSION = 1;
@@ -141,7 +141,7 @@ export interface ProjectedRun {
 // resolveRepoHome call the run dir already paid for — never re-derived from
 // checkoutPath, which is diagnostic metadata only) and generatedAt (the
 // shell's clock). `doc.pr === 0` is schema 1.0.0's "not a PR" sentinel
-// (findings.ts, unchanged) — this is the one place it becomes real SQL NULL.
+// (review/findings.ts, unchanged) — this is the one place it becomes real SQL NULL.
 export function projectRunRow(input: {
   doc: FindingsDocument;
   perAgent: Record<string, PerAgentUsage>;

@@ -1,5 +1,5 @@
-import type { Finding } from "../findings";
-import { deriveTier } from "../findings";
+import type { Finding } from "#review/findings";
+import { deriveTier } from "#review/findings";
 import type { ClusterAdjudication } from "./adjudication";
 
 export function projectAdjudicationToFindings(

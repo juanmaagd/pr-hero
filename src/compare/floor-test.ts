@@ -11,7 +11,7 @@
 // reads the run dirs and hands parsed objects in, so a scoring pass can be
 // re-run from artifacts on disk months later and come out byte-identical.
 
-import type { Finding, FindingsDocument } from "../findings";
+import type { Finding, FindingsDocument } from "#review/findings";
 import { DEFAULT_LINE_WINDOW, normalizePath } from "./compare";
 
 // §3.11's two case types, and M6 must not blur them: a `miss` case reviews the

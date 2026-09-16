@@ -4,7 +4,7 @@ import {
   extractAnchor,
   type RootCauseInput,
   rootCauseIdByFinding,
-} from "../src/root-cause";
+} from "#review/root-cause";
 
 function f(id: string, ...proof_refs: string[]): RootCauseInput {
   return { id, proof_refs };
@@ -111,7 +111,7 @@ describe("anti-over-cluster rules", () => {
     expect(summary.distinct_root_causes).toBe(2);
   });
 
-  // The failure mode `dedupe.ts` pass 2 already refuses by construction: two
+  // The failure mode `review/dedupe.ts` pass 2 already refuses by construction: two
   // unrelated defects in one file must never become one root cause just
   // because both citations degenerated to the file.
   test("two file-level anchors in the same file never merge", () => {

@@ -22,7 +22,7 @@ import {
   SCHEMA_VERSION,
   type Telemetry,
   validateFindingsDocument,
-} from "../findings";
+} from "#review/findings";
 import {
   type CanonicalFindingRow,
   type CanonicalRunRow,

@@ -19,7 +19,7 @@
 export const TRIAGE_MARKER_PREFIX = "<!-- pr-hero-triage ";
 
 // The FOUR tags an author may write (ROADMAP B6b table) — deliberately NOT
-// the `refuter_verdict` schema enum (findings.ts), which is sacred under
+// the `refuter_verdict` schema enum (review/findings.ts), which is sacred under
 // rule 5 and not ours to extend. This is a separate, project-owned
 // vocabulary the triage loop invented, so adding a tag here costs no schema
 // change and no coordination with the lab.
@@ -46,7 +46,7 @@ const TRIAGE_ACTORS: ReadonlySet<string> = new Set<TriageActor>([
 // The adjudicator's own vocabulary (ROADMAP B6b "What the adjudicator
 // returns"), NOT the same set as TriageTag — the author's tag is what they
 // claim, this is what the isolated judge independently ruled. Deliberately
-// disjoint from `refuter_verdict` (findings.ts) for the same reason TriageTag
+// disjoint from `refuter_verdict` (review/findings.ts) for the same reason TriageTag
 // is: that enum is schema-shared with the lab and sacred under rule 5, this
 // one is project-owned and costs no coordination to extend.
 export type TriageVerdict = "upheld" | "rejected" | "inconclusive";

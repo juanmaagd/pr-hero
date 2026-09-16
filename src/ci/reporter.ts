@@ -15,8 +15,8 @@
 // `$GITHUB_STEP_SUMMARY` and `$GITHUB_OUTPUT` (both files a step appends to
 // across multiple writes in the same job, never overwrites).
 //
-// Reuses report.ts/findings.ts rather than re-deriving their contracts:
-// `Finding`/`Severity`/`Tier` (findings.ts) for finding shape, and
+// Reuses report.ts/review/findings.ts rather than re-deriving their contracts:
+// `Finding`/`Severity`/`Tier` (review/findings.ts) for finding shape, and
 // `severityEmoji`, `blobUrl`, `formatElapsed`, `PrCommentDelta` (report.ts)
 // for the emoji mapping, blob-link builder, compact duration format, and
 // the re-review delta's data shape — the same severity glyph and blob URL a
@@ -31,7 +31,7 @@
 // multiple output keys written across several tool calls). An overwrite here
 // would silently destroy an earlier step's contribution to the same file.
 import { appendFile } from "node:fs/promises";
-import type { Finding, Severity } from "../findings";
+import type { Finding, Severity } from "#review/findings";
 import {
   blobUrl,
   formatElapsed,

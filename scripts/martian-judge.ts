@@ -18,8 +18,8 @@ import { readdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { lookupGolden, type MartianGoldenPr } from "#compare/martian-adapter";
+import type { Finding } from "#review/findings";
 import { readEvidenceFile } from "../src/execution/attempt-evidence";
-import type { Finding } from "../src/findings";
 import { resolveRunnerAuthority } from "../src/runner-authority";
 import { ClaudeCodeRunner } from "../src/step-runner";
 

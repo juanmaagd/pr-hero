@@ -8,14 +8,19 @@
 // a renderer that reached for `new Date()` would make that a lie).
 
 import type { ResolvedModelRoute, ResolvedStepRoute } from "#model/routing";
-import type { Finding, FindingsDocument, Severity, Tier } from "./findings";
-import { findingMarker, prCommentMarker } from "./pr-preflight";
+import type {
+  Finding,
+  FindingsDocument,
+  Severity,
+  Tier,
+} from "#review/findings";
 import {
   clusterByRootCause,
   extractAnchor,
   type RootCauseSummary,
   rootCauseIdByFinding,
-} from "./root-cause";
+} from "#review/root-cause";
+import { findingMarker, prCommentMarker } from "./pr-preflight";
 
 export interface DiffStat {
   files: number;
@@ -390,7 +395,7 @@ export function rereviewDeltaFromProvenance(
 // who learns 🔴 means BLOCKER/CRITICAL in one place must see the SAME
 // mapping everywhere, or the emoji becomes noise instead of a scan aid.
 // BLOCKER and CRITICAL share one glyph on purpose: both are the severities
-// that can ever reach `tier: "blocking"` (deriveTier, findings.ts), so this
+// that can ever reach `tier: "blocking"` (deriveTier, review/findings.ts), so this
 // is the same grouping the engine's own gate already makes. Used by the
 // summary HEADLINE, which still counts by hunter severity (PR #2: a
 // tier-based "0 blocking" hid that both findings were genuinely CRITICAL).
@@ -920,7 +925,7 @@ function findingLocationLine(
 // shown anywhere. This line closes both — but ONLY when severity and tier
 // actually disagree (a CRITICAL/BLOCKER landed advisory); printing it when
 // they agree would be a tautology ("CRITICAL, still CRITICAL"). Mirrors
-// deriveTier's own gate (findings.ts): only BLOCKER/CRITICAL can ever
+// deriveTier's own gate (review/findings.ts): only BLOCKER/CRITICAL can ever
 // disagree with their tier, since every other severity is advisory by
 // definition and never needs explaining.
 function tierExplanationLines(finding: Finding): string[] {
@@ -932,7 +937,7 @@ function tierExplanationLines(finding: Finding): string[] {
       `\`${finding.refuter_verdict}\``,
   ];
   // `downgraded-latent` is the one verdict with a documented, human-legible
-  // meaning worth spelling out inline (findings.ts's own WHY comment on the
+  // meaning worth spelling out inline (review/findings.ts's own WHY comment on the
   // type): a real defect the refuter could not currently trigger. The other
   // verdicts that can also land here (`inconclusive`; `not_submitted`, either
   // unrefuted-inferential or demoted because the run was truncated before the
@@ -1077,7 +1082,7 @@ function renderRef(
 }
 
 // Splits one proof_ref into its leading location anchor and trailing prose,
-// REUSING extractAnchor (root-cause.ts) so the comment and the root-cause
+// REUSING extractAnchor (review/root-cause.ts) so the comment and the root-cause
 // clustering read the exact same token as "the location" — two parsers for
 // one format would drift. On top of the shared token this only checks that
 // the line part is numeric (`19` or `19-20`): extractAnchor accepts any

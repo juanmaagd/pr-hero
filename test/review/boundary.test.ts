@@ -7,7 +7,7 @@ import {
   MAX_NONCE_ATTEMPTS,
   selectBoundaryNonce,
   wrapBlock,
-} from "../src/boundary";
+} from "#review/boundary";
 
 describe("generateBoundaryNonce", () => {
   test("is hex of the declared width, so a tag name has one shape", () => {

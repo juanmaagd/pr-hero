@@ -13,8 +13,8 @@ import {
   SCHEMA_VERSION_V1_1,
   validateFindingsDocument,
   writeFindings,
-} from "../src/findings";
-import { FINDINGS_CONFORMANCE_CASES } from "../src/findings-conformance";
+} from "#review/findings";
+import { FINDINGS_CONFORMANCE_CASES } from "#review/findings-conformance";
 
 function baseFinding(overrides: Partial<Finding> = {}): Finding {
   return {
@@ -398,7 +398,7 @@ describe("writeFindings", () => {
 // (e.g. CI on a lone pr-hero clone) — locally it must run.
 const historicalRunsDir = join(
   import.meta.dir,
-  "../../deep-review/bench/runs/3",
+  "../../../deep-review/bench/runs/3",
 );
 describe.skipIf(!existsSync(historicalRunsDir))(
   "v1 lab artifact compatibility",

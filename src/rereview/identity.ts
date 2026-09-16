@@ -10,12 +10,12 @@
 // against zero commits (§0.6). The unordered set of locations is what
 // survived the producer/consumer flip.
 //
-// Direction of error is under-match (S1, same posture as root-cause.ts:60-70).
+// Direction of error is under-match (S1, same posture as review/root-cause.ts:60-70).
 // A missed pairing costs a verification step or a visible duplicate; an
 // over-match can hide a live defect behind `carried`.
 
 import { normalizePath } from "#compare/compare";
-import { extractAnchor } from "../root-cause";
+import { extractAnchor } from "#review/root-cause";
 
 // Same number as `FINDING_LINE_WINDOW` in inline.ts. The posting matcher and
 // this identity layer MUST NOT drift: the design names that constant as the
