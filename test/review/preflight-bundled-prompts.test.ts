@@ -82,13 +82,31 @@ describe("resolveAgentsDirSetting with bundled prompts default", () => {
 
 describe("Repo hygiene and O-15 productization scan", () => {
   test("no runtime source file in src/ references SUGGESTED_AGENTS_DIR or /Users/juanma", () => {
+    // RECURSIVE on purpose. This scan used to read only src/'s root, which was
+    // the whole of src/ when it was written. The domain reorganization moved
+    // files into src/<domain>/ directories and the scan silently narrowed with
+    // every move -- 93 files down to 26 -- while still passing, because a scan
+    // that inspects fewer files reports nothing. The guarded strings are the
+    // author's personal paths, so a blind spot here is exactly the leak this
+    // test exists to prevent.
     const srcDir = path.resolve(import.meta.dir, "../../src");
-    const srcFiles = readdirSync(srcDir).filter((f) => f.endsWith(".ts"));
+    const srcFiles = readdirSync(srcDir, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".ts"));
+
+    // A scan over an empty or near-empty list passes vacuously, so pin the
+    // floor: src/ holds well over a hundred TypeScript files across its
+    // domains, and any future move must not shrink this below the root count.
+    expect(srcFiles.length).toBeGreaterThan(100);
 
     for (const file of srcFiles) {
       const content = readFileSync(path.join(srcDir, file), "utf-8");
-      expect(content).not.toContain("SUGGESTED_AGENTS_DIR");
-      expect(content).not.toContain("/Users/juanma");
+      expect(content, `${file} leaks a guarded string`).not.toContain(
+        "SUGGESTED_AGENTS_DIR",
+      );
+      expect(content, `${file} leaks a guarded string`).not.toContain(
+        "/Users/juanma",
+      );
     }
   });
 
