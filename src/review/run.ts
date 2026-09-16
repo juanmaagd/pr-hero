@@ -16,6 +16,24 @@ import type { PipelineResult } from "#review/pipeline";
 import { CliError } from "#review/preflight";
 import type { AgentSpec } from "#review/spec";
 
+// The codegraph server, and ONLY the codegraph server. Written per run and
+// handed to every step together with the runner's --strict-mcp-config: an
+// agent's tool surface is a threat model, not a preference, and a registry
+// the driver did not write is a channel it does not control. Shared by both
+// orchestrators (review() and reviewPr()), which is why it lives here rather
+// than in either one's own module.
+export const CODEGRAPH_ONLY_MCP_CONFIG = {
+  mcpServers: {
+    codegraph: {
+      type: "stdio" as const,
+      command: "codegraph",
+      args: ["serve", "--mcp"],
+    },
+  },
+};
+
+export const EMPTY_MCP_CONFIG = { mcpServers: {} };
+
 // Shared range guard. Both orchestrators check the same thing right after
 // resolving base/head — the copies are byte-identical apart from
 // indentation — and both throw before spending anything on a range that

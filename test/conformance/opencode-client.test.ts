@@ -307,8 +307,9 @@ function fakeSdk(
 
 const CODEGRAPH_BIN = "/opt/homebrew/bin/codegraph";
 
-// Byte-for-byte what src/cli.ts writes (CODEGRAPH_ONLY_MCP_CONFIG), so the
-// fixture cannot drift from the file the translation actually receives.
+// Byte-for-byte what review()/reviewPr() write (CODEGRAPH_ONLY_MCP_CONFIG,
+// src/review/run.ts since cli-decomp-08), so the fixture cannot drift from
+// the file the translation actually receives.
 const CLAUDE_MCP_JSON = JSON.stringify({
   mcpServers: {
     codegraph: {
@@ -319,7 +320,7 @@ const CLAUDE_MCP_JSON = JSON.stringify({
   },
 });
 
-// What a repo with no `.codegraph` index gets (src/cli.ts:1263-1272).
+// What a repo with no `.codegraph` index gets (EMPTY_MCP_CONFIG, src/review/run.ts).
 const EMPTY_MCP_JSON = JSON.stringify({ mcpServers: {} });
 
 function rig(

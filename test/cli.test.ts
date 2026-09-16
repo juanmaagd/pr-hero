@@ -290,10 +290,14 @@ describe("CLI scout activation (ROADMAP-DOORDASH M5)", () => {
 // test/preflight-bundled-prompts.test.ts.
 //
 // The invariant, not the line numbers, and stated at its real width
-// (2026-09-02, #177): every `renderResult(`/`renderReport(` call IN
-// `src/cli.ts` carries the notional companion. There are four today (two per
-// review shell); adding a FIFTH, or a third review shell inside this file, is
-// meant to trip this until it does the same.
+// (2026-09-02, #177): every `renderResult(`/`renderReport(` call IN THE TWO
+// REVIEW SHELLS carries the notional companion. There are four today (two
+// per review shell); adding a FIFTH, or a third review shell, is meant to
+// trip this until it does the same.
+//
+// cli-decomp-08 moved review() and reviewPr() out of src/cli.ts into
+// src/review/review.ts and src/pr/review-pr.ts respectively; this scan moved
+// with them rather than going dark the moment the call sites left cli.ts.
 //
 // What is deliberately OUTSIDE it, and would not trip it: every other surface
 // that renders a run's cost — `ci-reporter`'s `cost_usd_est=` in
@@ -305,11 +309,14 @@ describe("CLI scout activation (ROADMAP-DOORDASH M5)", () => {
 // is a store-schema slice (#173's commit body names it), not this one — so
 // this scan pins the shell it can actually pin rather than claiming a
 // guarantee the codebase does not yet make.
-describe("every cost-rendering call site in src/cli.ts carries the notional split (#173)", () => {
+describe("every cost-rendering call site in the review shells carries the notional split (#173)", () => {
   test("renderResult and renderReport are each paired with notionalCostInput", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
-    ).text();
+    const sources = await Promise.all(
+      ["../src/review/review.ts", "../src/pr/review-pr.ts"].map((rel) =>
+        Bun.file(path.resolve(import.meta.dir, rel)).text(),
+      ),
+    );
+    const source = sources.join("\n");
     const count = (needle: string) => source.split(needle).length - 1;
     const renderCalls = count("renderResult(") + count("renderReport(");
     expect(renderCalls).toBeGreaterThan(0);
@@ -325,7 +332,8 @@ describe("every cost-rendering call site in src/cli.ts carries the notional spli
 // wiring, state the invariant rather than the line numbers.
 describe("every gotchas gate asks the shared predicate", () => {
   const sources = [
-    "../src/cli.ts",
+    "../src/review/review.ts",
+    "../src/pr/review-pr.ts",
     "../src/review/pipeline.ts",
     "../src/doctor.ts",
   ];
@@ -351,16 +359,17 @@ describe("every gotchas gate asks the shared predicate", () => {
     expect(offenders).toEqual([]);
   });
 
-  test("both review shells in src/cli.ts route through gotchasUnusableReason", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
-    ).text();
-    const count = (needle: string) => source.split(needle).length - 1;
-    // Local review and PR review: two gates, two error renders, and every
-    // render carries the reason the predicate returned rather than a
-    // hardcoded one.
-    expect(count("gotchasUnusableReason(gotchas)")).toBe(2);
-    expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(2);
+  test("both review shells route through gotchasUnusableReason", async () => {
+    // Local review and PR review moved to their own modules (cli-decomp-08)
+    // but the invariant is unchanged: one gate, one error render, per shell —
+    // and every render carries the reason the predicate returned rather than
+    // a hardcoded one.
+    for (const rel of ["../src/review/review.ts", "../src/pr/review-pr.ts"]) {
+      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
+      const count = (needle: string) => source.split(needle).length - 1;
+      expect(count("gotchasUnusableReason(gotchas)")).toBe(1);
+      expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(1);
+    }
   });
 
   // `init`'s own gotchas-block wiring test moved to
@@ -380,12 +389,14 @@ describe("every gotchas gate asks the shared predicate", () => {
 // this fix computes rather than a hardcoded default. The pure half of this
 // —`skipDiscovery: false` / `verifyAll: true` for a forced-full case B — is
 // exhaustively covered in test/rereview/prepare.test.ts and
-// test/rereview/plan.test.ts; this only guards that cli.ts still WIRES those
-// results through.
+// test/rereview/plan.test.ts; this only guards that reviewPr() (moved to
+// src/pr/review-pr.ts by cli-decomp-08) still WIRES those results through.
 describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () => {
+  const REVIEW_PR_PATH = "../src/pr/review-pr.ts";
+
   test("activeHunters is still gated on skipDiscovery alone, not a hardcoded case check", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, REVIEW_PR_PATH),
     ).text();
     // CLI decomposition P2.1 (odd/tasks/cli-decomposition.md): the filter
     // itself moved into `selectActiveHunters` in src/review/run.ts (shared
@@ -403,7 +414,7 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
 
   test("prepareDiscovery is handed a computed summaryComplete, not a bare literal", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, REVIEW_PR_PATH),
     ).text();
     expect(source).toContain("const summaryComplete = summaryMarker?.complete");
     expect(source).toContain("summaryComplete,\n      findingMarkers:");
@@ -411,14 +422,14 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
 
   test("buildPhaseBQueue receives plan.verifyAll — the wiring gap this fix closes", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, REVIEW_PR_PATH),
     ).text();
     expect(source).toContain("verifyAll: prepared.plan.verifyAll,");
   });
 
   test("CI admission is handed the summary marker's completeness", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, REVIEW_PR_PATH),
     ).text();
     expect(source).toContain(
       "summaryBody === null ? null : parsePrCommentMarker(summaryBody);",
@@ -430,8 +441,9 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
 });
 
 // Same precedent as the gotchas-gate scan above: `review()` and `reviewPr()`
-// are unexported I/O shells, so nothing offline reaches them directly. What
-// has to be pinned here is that BOTH shells actually thread the rules a
+// are I/O shells (now src/review/review.ts and src/pr/review-pr.ts
+// respectively, cli-decomp-08), so nothing offline reaches them directly.
+// What has to be pinned here is that BOTH shells actually thread the rules a
 // `.prheroignore` read produced into their `sizeGateConfig` call, rather than
 // silently reading the file and then ignoring the result (exactly the kind
 // of drift a `.excludeRules`-only rename could not catch, because the third
@@ -439,7 +451,7 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
 describe("both review shells thread .prheroignore rules into their gate config", () => {
   test("local review reads the working tree AND passes its rules to sizeGateConfig", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, "../src/review/review.ts"),
     ).text();
     expect(source).toContain("readLocalIgnoreRules(repoRoot)");
     expect(source).toContain(
@@ -459,7 +471,7 @@ describe("both review shells thread .prheroignore rules into their gate config",
   // offline reach into this shell.
   test("the dry run degrades to the aggregate estimate when ghPrFiles fails", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
     ).text();
     expect(source).toContain("let perFile: NumstatFile[] | null;\n    try {");
     expect(source).toContain("    } catch {\n      perFile = null;\n    }");
@@ -467,7 +479,7 @@ describe("both review shells thread .prheroignore rules into their gate config",
 
   test("PR review reads the operator root eagerly for non-CI, and never reads worktreePath (O-8)", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
     ).text();
     expect(source).toContain("readLocalIgnoreRules(operatorRoot)");
     expect(source).not.toContain("readLocalIgnoreRules(worktreePath)");
@@ -475,7 +487,7 @@ describe("both review shells thread .prheroignore rules into their gate config",
 
   test("PR review's base-ref read takes the RESOLVED baseSha, not target.baseRef/baseRefName", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
     ).text();
     // The read must run against the sha `resolveCommit` already canonicalized
     // (a merged PR's baseRef is a `<sha>^1` EXPRESSION, not a sha — see
@@ -491,7 +503,7 @@ describe("both review shells thread .prheroignore rules into their gate config",
 
   test("both sizeGateConfig(options, config, ...) calls in reviewPr receive a rules argument, not just (options, config)", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/cli.ts"),
+      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
     ).text();
     const bareCalls =
       source.split("sizeGateConfig(options, config)").length - 1;
