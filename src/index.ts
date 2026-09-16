@@ -4,6 +4,11 @@
 export const ENGINE_NAME = "pr-hero";
 export const ENGINE_VERSION = "1.1.0";
 
+// errors and git/refs used to reach this surface only through re-exports in
+// review/preflight.ts; they are exported directly now that those re-exports
+// are gone, so the published symbol set is unchanged.
+export * from "./errors";
+export * from "./git/refs";
 export * from "./model/routing";
 export * from "./review/dedupe";
 export * from "./review/drafts";
