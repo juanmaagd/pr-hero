@@ -30,6 +30,20 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
     domain: "rereview",
     files: ["classify", "identity", "plan", "prepare", "state", "verify"],
   },
+  {
+    domain: "ui",
+    files: [
+      "activity",
+      "config",
+      "config-edit",
+      "menu",
+      "primitives",
+      "result",
+      "review-menu",
+      "select",
+      "tree",
+    ],
+  },
 ];
 
 function srcRootFiles(): string[] {
@@ -55,6 +69,28 @@ describe("layout ratchet: migrated domains stay out of src/ root", () => {
         stray,
         `src/ root still has flat ${domain}-*.ts file(s): ${stray.join(", ")}`,
       ).toEqual([]);
+    }
+  });
+
+  // Gap closed by T3 (odd/tasks/domain-reorg.md): the `<domain>-` prefix check
+  // above only catches a stray HYPHENATED file. It says nothing about a BARE
+  // `<domain>.ts` at src/ root — a name with no hyphen to match the prefix.
+  // rereview (T1) never exposed this hole because it had no bare
+  // `rereview.ts` to begin with; ui (T3) does — `src/ui.ts` held the shared
+  // terminal primitives and moved to `src/ui/primitives.ts`. Without this
+  // check, a forgotten `src/ui.ts` left behind (or reintroduced later) would
+  // pass the ratchet green while silently shadowing/duplicating
+  // `src/ui/primitives.ts`. Kept generic over MIGRATED_DOMAINS, like the
+  // prefix check above, so a future domain with the same shape needs no new
+  // test logic.
+  test("no bare <domain>.ts file remains at src/ root", () => {
+    const rootFiles = srcRootFiles();
+    for (const { domain } of MIGRATED_DOMAINS) {
+      const bareName = `${domain}.ts`;
+      expect(
+        rootFiles.includes(bareName),
+        `src/ root still has a bare ${bareName} file`,
+      ).toBe(false);
     }
   });
 
