@@ -2095,7 +2095,7 @@ export async function upsertAdmissionCheckRun(
 // that composes pr/inline.ts's pure plan with this module's own I/O
 // primitives into the actual post sequence. Shared verbatim by reviewPr's
 // step 14 (a review that just finished) and postCommand (a review read off
-// disk, cli.ts): the SAME code posts either way, because a finding does not
+// disk, src/commands/post.ts): the SAME code posts either way, because a finding does not
 // know or care whether it came from a fresh run or a `--from <run-dir>`
 // replay. Extracted from cli.ts (cli-decomp S2, Cluster C).
 //

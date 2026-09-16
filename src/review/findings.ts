@@ -156,8 +156,8 @@ export interface FindingsDocument {
   // validators are allowlists that never reject unknown keys, so schema
   // stays 1.0.0 (project rule 5 — lab compatibility is sacred) and an
   // existing artifact without this field still validates. Absent MUST mean
-  // "unknown", never "false" — see `runPostCommand`'s guard in cli.ts for
-  // the back-compat fallback this enables.
+  // "unknown", never "false" — see `runPostCommand`'s guard in
+  // src/commands/post.ts for the back-compat fallback this enables.
   sessionFailed?: boolean;
   summary?: RunSummary;
   telemetry: Telemetry;
@@ -287,8 +287,9 @@ function must(condition: boolean, message: string): void {
 // Repaired rather than rejected because this validator does double duty. It is
 // the write gate (writeFindings, below), but it is ALSO the read-back gate for
 // an artifact already on disk: `pr-hero post --from <run-dir>` and
-// `pr-hero triage reply --from <run-dir>` (cli.ts) both re-validate a
-// findings.json written by an earlier engine. Rejecting here would permanently
+// `pr-hero triage reply --from <run-dir>` (src/commands/post.ts and
+// src/commands/triage.ts) both re-validate a findings.json written by an
+// earlier engine. Rejecting here would permanently
 // strand every artifact the PR #50 defect already wrote — including the $3.77
 // run whose post it ate — and turn "the post crashed" into "the post can never
 // happen". Repair keeps that recovery path open and still guarantees the

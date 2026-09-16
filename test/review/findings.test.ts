@@ -148,9 +148,10 @@ describe("findings schema round-trip", () => {
   // The write gate for the same defect the draft boundary now normalises: a
   // null symbol must never survive into findings.json. REPAIRED, not rejected,
   // because this validator does double duty — `pr-hero post --from <run-dir>`
-  // (cli.ts runPostCommand) re-validates an artifact READ BACK off disk, and
-  // rejecting there would permanently strand the $3.77 PR #50 run whose post
-  // this defect already ate. Repair keeps the recovery path open.
+  // (src/commands/post.ts's runPostCommand) re-validates an artifact READ
+  // BACK off disk, and rejecting there would permanently strand the $3.77
+  // PR #50 run whose post this defect already ate. Repair keeps the
+  // recovery path open.
   test("repairs a null symbol instead of rejecting the artifact", () => {
     const doc = baseDocument([
       { ...baseFinding(), symbol: null } as unknown as Finding,
