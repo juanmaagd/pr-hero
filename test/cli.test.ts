@@ -435,9 +435,13 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
     expect(source).toContain("verifyAll: prepared.plan.verifyAll,");
   });
 
+  // Split-review-pr refactor: the CI admission gate (and this exact wiring)
+  // moved out of reviewPr() into evaluateCiAdmissionGate
+  // (src/pr/ci-admission-gate.ts) as a byte-for-byte relocation — the
+  // invariant this test guards is unchanged, only its address moved.
   test("CI admission is handed the summary marker's completeness", async () => {
     const source = await Bun.file(
-      path.resolve(import.meta.dir, REVIEW_PR_PATH),
+      path.resolve(import.meta.dir, "../src/pr/ci-admission-gate.ts"),
     ).text();
     expect(source).toContain(
       "summaryBody === null ? null : parsePrCommentMarker(summaryBody);",
