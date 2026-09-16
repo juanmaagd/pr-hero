@@ -29,6 +29,7 @@ import {
   parseAdmissionRecord,
   serializeAdmissionRecord,
 } from "#ci/admission-ledger";
+import { THREAD_PAGE_SIZE } from "#corpus/preflight";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import {
   type ComparisonResult,
@@ -36,7 +37,6 @@ import {
   type PrHeroFindingRef,
 } from "./compare";
 import { renderComparison } from "./compare-report";
-import { THREAD_PAGE_SIZE } from "./corpus-preflight";
 import type { Finding, RunStatus } from "./findings";
 import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
@@ -254,7 +254,7 @@ export async function ghPrList(operatorRoot: string): Promise<string> {
 // "changeType":…}]}`.
 //
 // BOUNDED, and the bound is load-bearing since PR #205 put this call on the
-// WATCH TICK path (the pre-launch exclusion veto in watch.ts calls it every
+// WATCH TICK path (the pre-launch exclusion veto in watch/watch.ts calls it every
 // tick, for the chosen launch). `gh()`'s watchdog only arms when a timeoutMs
 // is passed, so without this an accepted-but-unanswered `gh pr view` parks on
 // `proc.exited` forever, and the tick that is holding watch.lock never
@@ -742,8 +742,8 @@ export async function postPrComment(
 // pickGreptileComment reads "newest" as LAST.
 //
 // Exported since B3: the watch guard reads the same comments to learn which
-// heads a pr-hero marker already declares (watch.ts imports this one-way;
-// pr.ts never imports watch.ts, so the no-mutual-shells rule holds).
+// heads a pr-hero marker already declares (watch/watch.ts imports this one-way;
+// pr.ts never imports watch/watch.ts, so the no-mutual-shells rule holds).
 export async function fetchPrComments(
   operatorRoot: string,
   pr: number,

@@ -3,10 +3,10 @@
 // `merge-base --is-ancestor`, and `diff --name-only`, and tests inject fakes.
 // The case machine itself stays in rereview/plan.ts.
 
+import { parseTriageMarker } from "#triage/triage";
 import { normalizePath } from "../compare";
 import type { Severity } from "../findings";
 import { claimFingerprint } from "../pr-preflight";
-import { parseTriageMarker } from "../triage";
 import {
   classifyPrior,
   type PhaseBResult,
@@ -596,7 +596,7 @@ export interface PostedForPrior {
 // interchangeable. Naming them together because conflating two of them is
 // exactly the defect this function replaces:
 //
-//   1. marker-strict — `matchPostedFindingExact` (`src/triage-reply.ts:63-88`):
+//   1. marker-strict — `matchPostedFindingExact` (`src/triage/reply.ts:63-88`):
 //      path + line + headSha + c, live projection ignored ON PURPOSE. It binds
 //      a triage reply to the comment a human was looking at, and design §3.5
 //      says the marker stays strict there.

@@ -8,8 +8,8 @@
 // paths and re-enters at rule 1 (R2-C1); triage outranks touched (O-3);
 // `resolved` is never inferred from absence (C1).
 
+import type { TriageTag, TriageVerdict } from "#triage/triage";
 import type { Severity, Tier } from "../findings";
-import type { TriageTag, TriageVerdict } from "../triage";
 import {
   type FindingIdentity,
   formatLocs,
@@ -42,7 +42,7 @@ export type FindingChannel = "inline" | "outside";
 
 export interface PriorTriage {
   tag: TriageTag;
-  // `applied` carries no adjudicator verdict (`src/triage.ts` ADJUDICATED_TAGS).
+  // `applied` carries no adjudicator verdict (`src/triage/triage.ts` ADJUDICATED_TAGS).
   verdict: TriageVerdict | null;
   // ISO-8601 from GitHub. Null means we cannot prove newness (R2-S9).
   createdAt: string | null;

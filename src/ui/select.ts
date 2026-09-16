@@ -6,7 +6,7 @@
 // means, what "Show details" does) is a total function testable with no TTY.
 //
 // The threat model that shapes the whole file: the watcher spawns reviews with
-// `--yes` AND `stdin: "ignore"` (watch.ts). The old confirm() degraded there by
+// `--yes` AND `stdin: "ignore"` (watch/watch.ts). The old confirm() degraded there by
 // accident — its stdin read resolved `{ value: undefined }` immediately — but
 // `setRawMode` in that same position THROWS under launchd. So raw mode is
 // entered only behind an isTTY + setRawMode-exists guard, the non-TTY path

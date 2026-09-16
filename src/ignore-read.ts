@@ -4,13 +4,13 @@
 //
 // It exists as its OWN module rather than living in cli.ts because
 // `pr-hero watch` needs the same read, and importing it from cli.ts made
-// cli.ts and watch.ts import EACH OTHER (cli.ts already imports
-// `watchCommand` from watch.ts for dispatch). That cycle happened to work,
+// cli.ts and watch/watch.ts import EACH OTHER (cli.ts already imports
+// `watchCommand` from watch/watch.ts for dispatch). That cycle happened to work,
 // but only because the binding was an `export async function` DECLARATION:
-// function declarations are hoisted and bound at link time, so watch.ts
+// function declarations are hoisted and bound at link time, so watch/watch.ts
 // could reference it at its own top level before cli.ts's body ran. Convert
 // it to `export const … = async () => …` and the same code crashes at
-// import time with a ReferenceError, in production only — watch.ts is the
+// import time with a ReferenceError, in production only — watch/watch.ts is the
 // module required first in the real dispatch path, and test import order
 // need not reproduce that.
 //

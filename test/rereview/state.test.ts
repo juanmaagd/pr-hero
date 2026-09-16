@@ -11,13 +11,13 @@ import {
   type StateFinding,
   stateFinding,
 } from "#rereview/state";
+import { TRIAGE_MARKER_PREFIX } from "#triage/triage";
 import {
   PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
   parseFindingMarker,
   prCommentMarker,
 } from "../../src/pr-preflight";
-import { TRIAGE_MARKER_PREFIX } from "../../src/triage";
 
 const HEAD = "8da9fad5bc9f650df38fc8cb0237253d80ff3245";
 

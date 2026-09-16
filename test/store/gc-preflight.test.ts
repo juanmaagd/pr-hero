@@ -12,8 +12,8 @@ import {
   renderGcStatus,
   worktreeRemoveArgs,
 } from "#store/gc-preflight";
+import { parsePlistInterval } from "#watch/preflight";
 import { GC_TTL_HOURS, prheroLayout } from "../../src/home-preflight";
-import { parsePlistInterval } from "../../src/watch-preflight";
 
 const NOW = Date.parse("2026-08-15T12:00:00Z");
 const HOUR = 60 * 60 * 1000;

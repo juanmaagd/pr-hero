@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { listActiveRuns } from "#store/activity";
+import { DEFAULT_DAILY_CAP } from "#watch/preflight";
 import { runDoctor } from "../doctor";
 import {
   getMenuOptions,
@@ -12,7 +13,6 @@ import {
 } from "../menu-context";
 import { DEFAULT_MAX_VERIFICATION_STEPS } from "../preflight";
 import { DEFAULT_SIZE_GATE } from "../size-gate";
-import { DEFAULT_DAILY_CAP } from "../watch-preflight";
 import {
   cycleStringPreset,
   DEFAULT_CARD_ACTIONS,

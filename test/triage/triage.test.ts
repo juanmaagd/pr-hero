@@ -4,16 +4,16 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-  PR_COMMENT_MARKER_PREFIX,
-  PR_FINDING_MARKER_PREFIX,
-} from "../src/pr-preflight";
-import {
   parseTriageMarker,
   renderTriageReplyBody,
   TRIAGE_MARKER_PREFIX,
   triageBadge,
   triageMarker,
-} from "../src/triage";
+} from "#triage/triage";
+import {
+  PR_COMMENT_MARKER_PREFIX,
+  PR_FINDING_MARKER_PREFIX,
+} from "../../src/pr-preflight";
 
 const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
 

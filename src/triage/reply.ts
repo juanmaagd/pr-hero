@@ -15,8 +15,8 @@ import {
   type PostedFindingComment,
   parseHunkAnchors,
   resolvePostLine,
-} from "./inline";
-import { claimFingerprint } from "./pr-preflight";
+} from "../inline";
+import { claimFingerprint } from "../pr-preflight";
 import { parseTriageMarker, type TriageVerdict } from "./triage";
 
 export interface FindingIdentity {
