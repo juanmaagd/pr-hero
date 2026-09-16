@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { createResolvedRoutePlan, resolveStepRoute } from "#model/routing";
 import { resolveRoutePlanAtConfirm } from "../src/cli";
-import {
-  createResolvedRoutePlan,
-  resolveStepRoute,
-} from "../src/model-routing";
 import {
   DefaultTransportRegistry,
   OpenCodeProductionGatedError,

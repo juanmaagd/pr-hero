@@ -13,6 +13,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { ExecutableAllowlistEntry } from "#model/provider-capabilities";
+import {
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "#model/routing";
 import { ConcurrencyAttemptAdmissionGate } from "../src/execution/admission";
 import { ConcurrencyLimiter } from "../src/execution/concurrency-limiter";
 import type {
@@ -30,13 +36,7 @@ import type {
 import { StepExecutionHarness } from "../src/execution/harness";
 import type { SettlementReceipt } from "../src/execution/settlement";
 import { InMemorySpendLedger } from "../src/execution/spend-limiter";
-import {
-  createResolvedRoutePlan,
-  type RoutingConfig,
-  resolveStepRoute,
-} from "../src/model-routing";
 import { createProductionRuntime } from "../src/production-runtime";
-import type { ExecutableAllowlistEntry } from "../src/provider-capabilities";
 import type { CredentialBroker } from "../src/security/credential-broker";
 import { OpenCodeAuthBroker } from "../src/security/credential-broker";
 import { WorkspaceReadBroker } from "../src/security/workspace-read-broker";

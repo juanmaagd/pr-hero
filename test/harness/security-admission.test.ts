@@ -10,13 +10,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { ExecutableAllowlistEntry } from "#model/provider-capabilities";
 import type {
   ProviderTransport,
   StepAdmissionGate,
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
-import type { ExecutableAllowlistEntry } from "../../src/provider-capabilities";
 import { ClaudeCodeRunner, type StepSpec } from "../../src/step-runner";
 
 describe("Security authorization and admission ordering", () => {

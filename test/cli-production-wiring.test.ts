@@ -2,12 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { createResolvedRoutePlan, resolveStepRoute } from "#model/routing";
 import { resolveProductionRoutePlanAtConfirm } from "../src/cli";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
-import {
-  createResolvedRoutePlan,
-  resolveStepRoute,
-} from "../src/model-routing";
 import {
   d1_11EvidenceFromExactBinding,
   prepareProductionAdmissionContext,

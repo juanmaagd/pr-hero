@@ -9,13 +9,13 @@ import {
   CI_REVIEW_POLICY_MODES,
   type CiReviewPolicyMode,
 } from "#ci/review-admission";
-import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type {
   ModelGateway,
   RouteMapping,
   RoutingConfig,
   RunnerBackend,
-} from "./model-routing";
+} from "#model/routing";
+import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type { SuspicionPrior } from "./prompt-set";
 import { redactDiagnostic } from "./security/redact";
 // size-gate.ts imports only a TYPE from here, so this is not a runtime

@@ -1,3 +1,4 @@
+import type { ResolvedRoutePlan, RoutingConfig } from "#model/routing";
 import type { DraftFinding } from "../drafts";
 import type { ResolvedModelRoute } from "../execution/contracts";
 import {
@@ -5,7 +6,6 @@ import {
   normalizeInclusiveUsage,
 } from "../execution/usage-normalized";
 import { SCHEMA_VERSION_V1_1 } from "../findings";
-import type { ResolvedRoutePlan, RoutingConfig } from "../model-routing";
 import type { AgentSpec, ReviewSpec } from "../spec";
 import { resolveSpecialty } from "../spec";
 import type { StepResult } from "../step-runner";

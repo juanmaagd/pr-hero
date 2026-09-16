@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { aliasCanonical, lookupAlias } from "../src/model-catalog";
+import { aliasCanonical, lookupAlias } from "#model/catalog";
 import {
   AmbiguousMappingError,
   computeRouteFingerprint,
@@ -17,8 +17,8 @@ import {
   spawnModelForClaudeCli,
   UnauthorizedRouteError,
   UnmappedRouteError,
-} from "../src/model-routing";
-import { ReviewSpecValidationError, validateReviewSpec } from "../src/spec";
+} from "#model/routing";
+import { ReviewSpecValidationError, validateReviewSpec } from "../../src/spec";
 
 describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
   test("parses explicit aliases: sonnet, opus, haiku", () => {

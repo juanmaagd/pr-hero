@@ -17,9 +17,9 @@ import {
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import type { RoutingConfig } from "#model/routing";
+import { buildResolvedRoutePlan } from "#model/routing";
 import type { ResolvedModelRoute } from "../src/execution/contracts";
-import type { RoutingConfig } from "../src/model-routing";
-import { buildResolvedRoutePlan } from "../src/model-routing";
 import type { ProductionRuntime } from "../src/production-runtime";
 import {
   createProductionRuntime,

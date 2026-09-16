@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { verifyExecutableAuthority } from "../../src/provider-capabilities";
+import { verifyExecutableAuthority } from "#model/provider-capabilities";
 
 describe("realistic script launcher compatibility", () => {
   let tempDir: string;

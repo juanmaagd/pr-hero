@@ -8,6 +8,15 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  agentStepKey,
+  buildResolvedRoutePlan,
+  type ResolvedModelRoute,
+  type ResolvedRoutePlan,
+  type RoutingConfig,
+  type RunnerBackend,
+  spawnModelForClaudeCli,
+} from "#model/routing";
+import {
   applyWorsening,
   type GateStatus,
   type PhaseBResult,
@@ -79,15 +88,6 @@ import {
   type RunSummary,
   type SkillOutput,
 } from "./findings";
-import {
-  agentStepKey,
-  buildResolvedRoutePlan,
-  type ResolvedModelRoute,
-  type ResolvedRoutePlan,
-  type RoutingConfig,
-  type RunnerBackend,
-  spawnModelForClaudeCli,
-} from "./model-routing";
 // Type-only, and deliberately so: the C5 provenance block is recorded
 // verbatim, never re-derived here, so the pipeline gains a shape from
 // preflight and not a runtime dependency on it (the same seam size-gate.ts

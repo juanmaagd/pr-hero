@@ -3,20 +3,18 @@ import { existsSync } from "node:fs";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type {
-  ProviderCapabilityReport,
-  RunnerBackend,
-} from "../src/execution/contracts";
 import {
   createFreeModelProbe,
   defaultRun,
   freeVerdictKey,
   isFreeModel,
-} from "../src/free-model-discovery";
-import {
-  createResolvedRoutePlan,
-  resolveStepRoute,
-} from "../src/model-routing";
+} from "#model/free-discovery";
+import { exactBindingCapabilityIssues } from "#model/provider-capabilities";
+import { createResolvedRoutePlan, resolveStepRoute } from "#model/routing";
+import type {
+  ProviderCapabilityReport,
+  RunnerBackend,
+} from "../src/execution/contracts";
 import {
   createProductionRuntime,
   d1_11EvidenceFromExactBinding,
@@ -25,7 +23,6 @@ import {
   productionFallbackRegistry,
   soleOpenCodeCredential,
 } from "../src/production-runtime";
-import { exactBindingCapabilityIssues } from "../src/provider-capabilities";
 import {
   credentialKindBillsMetered,
   credentialKindForRoute,

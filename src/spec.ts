@@ -4,7 +4,7 @@
 // EXACTLY the wiring the engine used to hard-code (prose Step 4), so a caller
 // that passes nothing gets byte-identical behavior.
 
-import { parseLogicalIdentity } from "./model-routing";
+import { parseLogicalIdentity } from "#model/routing";
 
 const SAFE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 

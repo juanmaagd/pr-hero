@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import type { ResolvedModelRoute, RunnerBackend } from "./execution/contracts";
+import type { ResolvedModelRoute, RunnerBackend } from "../execution/contracts";
+import { redactDiagnostic } from "../security/redact";
 import {
   isModelAlias,
   lookupAlias,
   type ModelAlias,
   reverseAliasForCanonical,
-} from "./model-catalog";
-import { redactDiagnostic } from "./security/redact";
+} from "./catalog";
 
 export type ModelGateway = "configured" | "direct" | "openrouter";
 export type { ResolvedModelRoute, RunnerBackend };
@@ -57,13 +57,13 @@ export class UnmappedRouteError extends ModelRoutingError {}
 export class AmbiguousMappingError extends ModelRoutingError {}
 export class UnauthorizedRouteError extends ModelRoutingError {}
 
-export type { ModelAlias } from "./model-catalog";
+export type { ModelAlias } from "./catalog";
 export {
   aliasCanonical,
   isModelAlias,
   lookupAlias,
   MODEL_CATALOG,
-} from "./model-catalog";
+} from "./catalog";
 
 const SLASH_GRAMMAR_REGEX =
   /^([a-zA-Z0-9_-]+)\/([a-zA-Z0-9._-]+)(?:#([a-zA-Z0-9._-]+))?$/;

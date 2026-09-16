@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CI_WORKFLOW_RELATIVE_PATH } from "#ci/setup";
+import { aliasCanonical } from "#model/catalog";
 import {
   type EngineAssets,
   resolveEngineAssets,
@@ -12,7 +13,6 @@ import {
   runDoctor,
 } from "../src/doctor";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
-import { aliasCanonical } from "../src/model-catalog";
 import { GOTCHAS_PLACEHOLDER_MARKER, GOTCHAS_TEMPLATE } from "../src/preflight";
 import { buildDoctorRoutePlan } from "../src/production-runtime";
 

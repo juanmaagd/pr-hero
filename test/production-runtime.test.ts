@@ -9,6 +9,17 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  type ExecutableAllowlistEntry,
+  exactBindingCapabilityGate,
+  exactBindingCapabilityIssues,
+} from "#model/provider-capabilities";
+import {
+  computeRouteFingerprint,
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "#model/routing";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -21,23 +32,12 @@ import {
   normalizeUnavailableUsage,
 } from "../src/execution/usage-normalized";
 import {
-  computeRouteFingerprint,
-  createResolvedRoutePlan,
-  type RoutingConfig,
-  resolveStepRoute,
-} from "../src/model-routing";
-import {
   collectDoctorExactBindingReports,
   createProductionRuntime,
   MultiProviderRunner,
   ProductionRuntimeError,
   probeBindingsReadiness,
 } from "../src/production-runtime";
-import {
-  type ExecutableAllowlistEntry,
-  exactBindingCapabilityGate,
-  exactBindingCapabilityIssues,
-} from "../src/provider-capabilities";
 import {
   resolveBindingAuthority,
   resolveRunnerAuthority,
@@ -599,7 +599,7 @@ describe("production runtime PR1", () => {
     });
 
     // FOLLOW-UP-1: the legacy ProviderCapabilityReport carries THREE billing
-    // modes (subscription | metered | unknown, provider-capabilities.ts:266)
+    // modes (subscription | metered | unknown, model/provider-capabilities.ts:266)
     // while the exact contract carries two (contracts.ts:167). The producer
     // narrows `unknown` into `"subscription"`, so `cashCostAccountingValid`
     // must NOT be derived from the narrowed value — the design doc is
@@ -614,7 +614,7 @@ describe("production runtime PR1", () => {
       routingConfig?: RoutingConfig,
     ) {
       // No routingConfig resolves through the alias fallback in
-      // model-routing.ts, which pins provider "anthropic" -- the catalogue's
+      // model/routing.ts, which pins provider "anthropic" -- the catalogue's
       // own provider. That is what keeps every arm below meaning what it meant
       // before the provider gate existed.
       //
