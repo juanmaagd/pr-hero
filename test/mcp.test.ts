@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { projectCompleteRun } from "#store/preflight";
 import { ProductStoreClient } from "../src/client";
 import type { FindingsDocument } from "../src/findings";
 import {
@@ -16,7 +17,6 @@ import {
   type ToolCallResult,
 } from "../src/mcp-preflight";
 import { startProductStoreServer } from "../src/server";
-import { projectCompleteRun } from "../src/store-preflight";
 
 function getToolResult(response: unknown): ToolCallResult {
   return (response as { result: ToolCallResult }).result;

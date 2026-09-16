@@ -5,6 +5,16 @@
 
 import type { Database } from "bun:sqlite";
 import { unlinkSync } from "node:fs";
+import type { CanonicalFindingRow, CanonicalRunRow } from "#store/preflight";
+import {
+  exportComparison,
+  exportFindingsDocument,
+  getFindingTriageByRunId,
+  getRunById,
+  openProductStore,
+  recordFindingTriage,
+  saveRunTransaction,
+} from "#store/store";
 import type { HopTrail } from "./findings";
 import {
   type FindingDetail,
@@ -21,16 +31,6 @@ import {
   type SearchFindingsResponse,
   type UsageResponse,
 } from "./server-preflight";
-import {
-  exportComparison,
-  exportFindingsDocument,
-  getFindingTriageByRunId,
-  getRunById,
-  openProductStore,
-  recordFindingTriage,
-  saveRunTransaction,
-} from "./store";
-import type { CanonicalFindingRow, CanonicalRunRow } from "./store-preflight";
 
 export interface ServerOptions {
   dbPath: string;

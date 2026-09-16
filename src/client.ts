@@ -4,6 +4,11 @@
 // Invariant: Callers do not open SQLite directly. All store interactions
 // go through this client.
 
+import type {
+  CanonicalRunRow,
+  FindingTriageRow,
+  ProjectedCompleteRun,
+} from "#store/preflight";
 import type { FindingsDocument } from "./findings";
 import type { StoredComparison } from "./ledger";
 import type {
@@ -21,11 +26,6 @@ import type {
   UsageQueryParams,
   UsageResponse,
 } from "./server-preflight";
-import type {
-  CanonicalRunRow,
-  FindingTriageRow,
-  ProjectedCompleteRun,
-} from "./store-preflight";
 
 export class StoreClientError extends Error {
   constructor(

@@ -16,9 +16,9 @@ import type {
   RunStatus,
   Severity,
   Tier,
-} from "./findings";
-import type { StoredComparison } from "./ledger";
-import type { PerAgentUsage } from "./pipeline";
+} from "../findings";
+import type { StoredComparison } from "../ledger";
+import type { PerAgentUsage } from "../pipeline";
 
 export const CURRENT_PRODUCT_SCHEMA_VERSION = 5;
 

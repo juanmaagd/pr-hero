@@ -8,14 +8,14 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { backfillHistoricalRuns, migrateMetricsDb } from "../src/backfill";
+import { backfillHistoricalRuns, migrateMetricsDb } from "#store/backfill";
 import {
   createEmptyBackfillStats,
   parseRepoIdFromRelPath,
   renderBackfillReport,
-} from "../src/backfill-preflight";
-import type { Finding, FindingsDocument } from "../src/findings";
-import { openProductStore, queryRuns } from "../src/store";
+} from "#store/backfill-preflight";
+import { openProductStore, queryRuns } from "#store/store";
+import type { Finding, FindingsDocument } from "../../src/findings";
 
 function sampleFinding(overrides: Partial<Finding> = {}): Finding {
   return {

@@ -7,16 +7,16 @@
 import { copyFileSync, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { type FindingsDocument, validateFindingsDocument } from "../findings";
+import { prheroLayout } from "../home-preflight";
+import { parseComparisonJson, type StoredComparison } from "../ledger";
 import {
   type BackfillStats,
   createEmptyBackfillStats,
   parseRepoIdFromRelPath,
 } from "./backfill-preflight";
-import { type FindingsDocument, validateFindingsDocument } from "./findings";
-import { prheroLayout } from "./home-preflight";
-import { parseComparisonJson, type StoredComparison } from "./ledger";
+import { projectCompleteRun } from "./preflight";
 import { openProductStore, saveRunTransaction } from "./store";
-import { projectCompleteRun } from "./store-preflight";
 
 export interface BackfillOptions {
   home: string;
