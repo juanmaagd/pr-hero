@@ -19,9 +19,9 @@
 // else entirely. Breaking the cycle costs one small module and removes the
 // invariant instead of documenting it.
 //
-// The CI counterpart (`readBaseRefIgnoreRules`) deliberately stays in
-// cli.ts: it needs that module's own `GitRunner` plumbing, and cli.ts owns
-// the CI flow. Both readers share the dialect and the error
+// The CI counterpart (`readBaseRefIgnoreRules`) lives in `#git/git.ts`: it
+// needs that module's own `GitRunner` plumbing, and the git domain owns the
+// CI flow's base-ref read. Both readers share the dialect and the error
 // re-contextualizing below, which is the part that must not drift.
 
 import { stat } from "node:fs/promises";

@@ -12,6 +12,7 @@
 // interpolated shell string.
 
 import path from "node:path";
+import { git, resolveRepoRoot } from "#git/git";
 import {
   CliError,
   type CliOptions,
@@ -35,27 +36,6 @@ import {
   repoSlugFromWebUrl,
   selectRevertCandidates,
 } from "./reverts-preflight";
-
-// Same helper as cli.ts's and pr/pr.ts's git, duplicated rather than shared so
-// neither shell imports the other. The WHY carries over verbatim: args as an
-// ARRAY, never an interpolated shell string — refs and dates are user input
-// that reaches git verbatim, and a shell in the middle would turn a --since
-// value into an execution surface.
-async function git(
-  repo: string,
-  args: string[],
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", "-C", repo, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { ok: exitCode === 0, stdout, stderr };
-}
 
 // Same shape as pr/pr.ts's gh, and the same single testability seam: `spawnFn`
 // is invisible to production callers, and the `Bun.which("gh")` guard is
@@ -88,17 +68,6 @@ async function gh(
     proc.exited,
   ]);
   return { ok: exitCode === 0, stdout, stderr };
-}
-
-// Same resolution shape review uses (cli.ts's resolveRepoRoot), carried as
-// this shell's own copy — the same duplication watch/watch.ts already makes.
-async function resolveRepoRoot(repoOption: string): Promise<string> {
-  const repoArg = path.resolve(repoOption);
-  const toplevel = await git(repoArg, ["rev-parse", "--show-toplevel"]);
-  if (!toplevel.ok) {
-    throw new CliError(`not a git repository: ${repoArg}`);
-  }
-  return toplevel.stdout.trim();
 }
 
 // The candidates tried, in order, when origin/HEAD is unset. Named in the

@@ -8,6 +8,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { git } from "#git/git";
 import { CliError } from "#review/preflight";
 import { parseLockPid } from "#watch/preflight";
 import {
@@ -26,22 +27,6 @@ import {
 } from "./home-preflight";
 
 const PID_LOCK_ATTEMPTS = 3;
-
-async function git(
-  repo: string,
-  args: string[],
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", "-C", repo, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { ok: exitCode === 0, stdout, stderr };
-}
 
 export async function gitOriginUrl(repoRoot: string): Promise<string> {
   const result = await git(repoRoot, ["remote", "get-url", "origin"]);

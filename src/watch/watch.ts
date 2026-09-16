@@ -14,6 +14,7 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseComparisonJson } from "#compare/ledger";
+import { git, resolveRepoRoot } from "#git/git";
 import {
   fetchCommitStatuses,
   fetchPrComments,
@@ -101,25 +102,6 @@ import {
   type WatchConfig,
 } from "./preflight";
 
-// Third copy of the tiny git runner (cli.ts and pr/pr.ts each carry their own,
-// deliberately, so no shell imports another shell). The WHY carries over
-// verbatim: args as an ARRAY, never an interpolated shell string.
-async function git(
-  repo: string,
-  args: string[],
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", "-C", repo, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { ok: exitCode === 0, stdout, stderr };
-}
-
 async function run(
   args: string[],
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -141,18 +123,6 @@ export async function watchCommand(options: CliOptions): Promise<number> {
   if (options.watch === "remove") return watchRemove(options);
   if (options.watch === "status") return watchStatus();
   return watchOnce(options.dryRun);
-}
-
-// Same resolution shape review uses (cli.ts's resolveRepoRoot), carried as
-// this shell's own copy: --repo or cwd, through git's own idea of the
-// toplevel, loud when it is not a repository.
-async function resolveRepoRoot(repoOption: string): Promise<string> {
-  const repoArg = path.resolve(repoOption);
-  const toplevel = await git(repoArg, ["rev-parse", "--show-toplevel"]);
-  if (!toplevel.ok) {
-    throw new CliError(`not a git repository: ${repoArg}`);
-  }
-  return toplevel.stdout.trim();
 }
 
 // ---------------------------------------------------------------------------

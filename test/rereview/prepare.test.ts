@@ -8,7 +8,6 @@ import {
   collapseTargets,
   decideLastHeadDelta,
   enrichPriorsFromThreads,
-  parseNameOnly,
   parseNameStatus,
   prepareDiscovery,
   priorsFromPostedMarkers,
@@ -33,15 +32,6 @@ function git(over: Partial<RereviewGit> = {}): RereviewGit {
     ...over,
   };
 }
-
-describe("parseNameOnly", () => {
-  test("sorts, trims, and drops blanks and duplicates", () => {
-    expect(parseNameOnly("src/b.ts\n\nsrc/a.ts\nsrc/b.ts\n")).toEqual([
-      "src/a.ts",
-      "src/b.ts",
-    ]);
-  });
-});
 
 describe("shouldAbortEmptyDiscovery — S-empty", () => {
   test("a first review with an empty diff still errors", () => {

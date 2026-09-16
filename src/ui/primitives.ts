@@ -160,6 +160,26 @@ export function row(label: string, value: string, opts: RowOptions): string[] {
   return chunks.map((chunk, i) => (i === 0 ? head + chunk : pad + chunk));
 }
 
+// The decision block deliberately breaks the grid above it: a one-character
+// marker instead of a label column, so the two lines that decide "spend or
+// not" do not read as two more rows of setup.
+const MARKER_ROW = { indent: 2, labelWidth: 2 } as const;
+
+// Built UNSTYLED and painted whole afterwards: row() measures the value to
+// place the wrap, and an escape sequence inside that value would be counted
+// as visible width.
+export function markerRowLines(
+  marker: string,
+  value: string,
+  paint: (text: string, styles: boolean) => string,
+  styles: boolean,
+  width: number,
+): string[] {
+  return row(marker, value, { ...MARKER_ROW, styles: false, width }).map(
+    (line) => paint(line, styles),
+  );
+}
+
 // A label column DERIVED from the labels it has to hold, for callers whose
 // label set is not fixed at design time.
 //
