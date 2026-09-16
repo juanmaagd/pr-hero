@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { aliasCanonical } from "../src/model-catalog";
-import type { RoutingConfig } from "../src/model-routing";
+import { aliasCanonical } from "#model/catalog";
+import type { RoutingConfig } from "#model/routing";
 import {
   type AgentsDirConfigSeat,
   agentsDirProblems,

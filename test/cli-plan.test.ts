@@ -10,6 +10,12 @@
 // assertable offline with no TTY anywhere.
 
 import { describe, expect, test } from "bun:test";
+import { aliasCanonical, lookupAlias } from "#model/catalog";
+import {
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "#model/routing";
 import {
   type ConfigProvenance,
   type PlanContext,
@@ -19,12 +25,6 @@ import {
   renderPlan,
   renderPrPlan,
 } from "../src/cli";
-import { aliasCanonical, lookupAlias } from "../src/model-catalog";
-import {
-  createResolvedRoutePlan,
-  type RoutingConfig,
-  resolveStepRoute,
-} from "../src/model-routing";
 import type { CliOptions, ConfigSources } from "../src/preflight";
 import type { ParsedAgent } from "../src/prompt-set";
 import { estimateCost, formatModelRoute } from "../src/report";

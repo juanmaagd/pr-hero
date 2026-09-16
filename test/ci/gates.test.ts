@@ -403,7 +403,7 @@ describe("deriveCiBillingMode", () => {
   // CLI bills when both are present: action.yml:111-112 binds both,
   // test/harness/env-projection.test.ts:48-56 asserts both survive the
   // projection with no precedence, and defaultClaudeAuthProbe
-  // (src/provider-capabilities.ts:402-405) ORs them into one boolean. This
+  // (src/model/provider-capabilities.ts:402-405) ORs them into one boolean. This
   // rule does not need that answer — a wrong "unlimited" produces a real
   // invoice, a wrong ceiling produces a skipped review the operator clears
   // with one line of YAML.

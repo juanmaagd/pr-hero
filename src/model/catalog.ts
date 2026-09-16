@@ -1,5 +1,5 @@
-import anthropicCatalog from "../config/models/anthropic.json";
-import type { RunnerBackend } from "./execution/contracts";
+import anthropicCatalog from "../../config/models/anthropic.json";
+import type { RunnerBackend } from "../execution/contracts";
 
 // #175, 2026-09-02. This catalogue holds ALIAS NAMES and nothing else.
 //
@@ -22,7 +22,7 @@ import type { RunnerBackend } from "./execution/contracts";
 // honest than a mapping of ours that pretends to.
 //
 // The operator can still pin: a routing config's `modelSnapshot` is passed
-// through verbatim (model-routing.ts) and reaches `--model` on a `configured`
+// through verbatim (model/routing.ts) and reaches `--model` on a `configured`
 // gateway. Pinning is a decision an operator makes per run, not a constant we
 // ship.
 export interface ProviderModelCatalog {

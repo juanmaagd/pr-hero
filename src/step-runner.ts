@@ -6,6 +6,7 @@
 // from v1 — port, don't rewrite.
 
 import path from "node:path";
+import type { CredentialKind } from "#model/provider-capabilities";
 import type {
   AuthEvent,
   DenialCode,
@@ -16,7 +17,6 @@ import type {
 import { StepExecutionHarness } from "./execution/harness";
 import type { SpendReservation } from "./execution/spend-limiter";
 import type { NormalizedUsage } from "./execution/usage-normalized";
-import type { CredentialKind } from "./provider-capabilities";
 import type { CredentialBroker } from "./security/credential-broker";
 import type { SessionUsage } from "./usage";
 

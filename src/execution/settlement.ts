@@ -2,7 +2,7 @@
 // termination/resource/remote status, timestamps, warnings and closed
 // late-write fence are assembled here — pure and offline-testable, with the
 // clock injected so no test ever sleeps to produce a timestamp.
-import type { RunnerBackend } from "../provider-capabilities";
+import type { RunnerBackend } from "#model/provider-capabilities";
 import type { ProviderTerminalProof } from "./contracts";
 
 // §5.1 shapes verbatim.

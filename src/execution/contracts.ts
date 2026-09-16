@@ -5,7 +5,7 @@ import type {
   ProviderCapabilityReport,
   RunnerBackend,
   VerifiedExecutable,
-} from "../provider-capabilities";
+} from "#model/provider-capabilities";
 import type { CredentialBroker } from "../security/credential-broker";
 import type { WorkspaceDenialCode } from "../security/workspace-read-broker";
 import type { StepSpec } from "../step-runner";
@@ -116,7 +116,7 @@ export interface AsyncEventSink {
 //
 // WHY this exists at all: the engine used to assert a model version up front,
 // from a hardcoded alias -> snapshot mapping that nothing verified (see the
-// #175 note atop model-catalog.ts). The Claude CLI has been reporting the
+// #175 note atop model/catalog.ts). The Claude CLI has been reporting the
 // truth in its `modelUsage` block the whole time and we discarded it.
 //
 // WHY it is a LIST and not "the model that ran": verified live 2026-09-02, a

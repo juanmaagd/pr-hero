@@ -1,5 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import {
+  type ExecutableAllowlistEntry,
+  verifyExecutableAuthority,
+} from "#model/provider-capabilities";
 // Lifecycle ownership (§2 docs/multi-runtime-model-diversity-design.md):
 //   HARNESS — StepSpec.timeoutMs watchdog, cancellation coordinator, retry/
 //   parse, write leases + settlement receipts, event sink, spend reservations,
@@ -8,10 +12,6 @@ import path from "node:path";
 //   protocol events, return TransportOutcome, classify provider/transport causes.
 //   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
 import { isVacuousEmptyHunt } from "../drafts";
-import {
-  type ExecutableAllowlistEntry,
-  verifyExecutableAuthority,
-} from "../provider-capabilities";
 import type {
   CredentialBroker,
   CredentialProjection,

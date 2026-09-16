@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { capabilityGateDecision } from "#model/provider-capabilities";
+import type { ResolvedRoutePlan, ResolvedStepRoute } from "#model/routing";
 // Route-keyed transport factory/cache: one ProviderTransport instance per
 // `${backend}:${routeFingerprint}`. `release()` drops a lease; teardown order
 // inside OpenCodeSdkTransport is stream → client.close → server (harness owns
@@ -11,8 +13,6 @@ import type {
   RunnerBackend,
 } from "./execution/contracts";
 import type { UsageBillingMode } from "./execution/usage-normalized";
-import type { ResolvedRoutePlan, ResolvedStepRoute } from "./model-routing";
-import { capabilityGateDecision } from "./provider-capabilities";
 import { credentialKindBillsMetered } from "./runner-authority";
 import {
   type CredentialBroker,

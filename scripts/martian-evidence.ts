@@ -2,6 +2,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { resolveModelRoute } from "#model/routing";
 import {
   type ExecutionAttemptEvidence,
   evidenceSha256,
@@ -12,7 +13,6 @@ import {
   type FindingsDocument,
   validateFindingsDocument,
 } from "../src/findings";
-import { resolveModelRoute } from "../src/model-routing";
 import { localReviewSpec } from "../src/preflight";
 import { parseAgentSource } from "../src/prompt-set";
 import { hasCapturedTerminal } from "../src/transports/opencode-evidence";

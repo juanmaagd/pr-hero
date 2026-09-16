@@ -71,6 +71,15 @@ import {
 } from "#ci/review-risk";
 import { runCiSetup } from "#ci/setup";
 import {
+  capabilityGateDecision,
+  produceClaudeCapabilityReport,
+} from "#model/provider-capabilities";
+import {
+  buildResolvedRoutePlan,
+  type ResolvedRoutePlan,
+  type RoutingConfig,
+} from "#model/routing";
+import {
   buildPhaseBQueue,
   collapseTargets,
   decideLastHeadDelta,
@@ -201,11 +210,6 @@ import {
 import { runMcpServer } from "./mcp";
 import { resolveMenuContext } from "./menu-context";
 import {
-  buildResolvedRoutePlan,
-  type ResolvedRoutePlan,
-  type RoutingConfig,
-} from "./model-routing";
-import {
   changedPathsFromDiff,
   DEFAULT_SCOUT_MODEL,
   type PerAgentUsage,
@@ -329,10 +333,6 @@ import {
   parseAgentFile,
   promptSetIdentity,
 } from "./prompt-set";
-import {
-  capabilityGateDecision,
-  produceClaudeCapabilityReport,
-} from "./provider-capabilities";
 import {
   type DiffStat,
   estimateCost,

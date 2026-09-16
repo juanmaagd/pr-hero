@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
+import { CLAUDE_CAPABILITY_STATICS } from "#model/provider-capabilities";
+import { spawnModelForClaudeCli } from "#model/routing";
 import type { BucketScope } from "../execution/bucket-id";
 import { deriveBucketId } from "../execution/bucket-id";
 import type {
@@ -18,8 +20,6 @@ import {
   normalizePartialUsage,
   normalizeUnavailableUsage,
 } from "../execution/usage-normalized";
-import { spawnModelForClaudeCli } from "../model-routing";
-import { CLAUDE_CAPABILITY_STATICS } from "../provider-capabilities";
 import { ACTIVE_CHILD_PROCS, type SpawnedProcess } from "../step-runner";
 
 // §9.2 non-secret provider label this transport's route always resolves to

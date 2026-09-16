@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "#model/routing";
 import { DiversityCapabilityError } from "../src/diversity/errors";
 import type {
   CredentialKind,
@@ -12,11 +17,6 @@ import {
   FINDINGS_CONFORMANCE_CASES,
   type FindingsConformanceCase,
 } from "../src/findings-conformance";
-import {
-  createResolvedRoutePlan,
-  type RoutingConfig,
-  resolveStepRoute,
-} from "../src/model-routing";
 import {
   type AdmitRoutePlanOptions,
   admitDiversityRoutePlan,

@@ -318,7 +318,7 @@ export type CiBillingMode = "subscription" | "metered";
 // action.yml:111-112 binds both into the child env unconditionally,
 // test/harness/env-projection.test.ts:48-56 deliberately asserts both survive
 // the projection with no precedence between them, and `defaultClaudeAuthProbe`
-// (provider-capabilities.ts:402-405) ORs them into a single boolean. Whichever
+// (model/provider-capabilities.ts:402-405) ORs them into a single boolean. Whichever
 // one the Claude CLI itself prefers wins, and that fact is recorded nowhere in
 // this codebase.
 //
@@ -341,7 +341,7 @@ export type CiBillingMode = "subscription" | "metered";
 // ceiling on a subscription route. `test/ci/gates.test.ts` asserts both cases
 // separately, and only the whitespace ones flip when the trim is removed.
 //
-// This is deliberately NOT `provider-capabilities.ts`'s
+// This is deliberately NOT `model/provider-capabilities.ts`'s
 // `CLAUDE_CAPABILITY_STATICS.billingMode`, and the two must not be "unified"
 // later — but the REASON changed under it, so do not quote the old one.
 //

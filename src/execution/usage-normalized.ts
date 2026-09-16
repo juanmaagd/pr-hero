@@ -74,7 +74,7 @@ export type UsageCostSource =
 // DO NOT wire this into route ADMISSION. It is a hazard verified before it was
 // written, and it has exactly two forbidden consumers:
 //
-//   * `CLAUDE_CAPABILITY_STATICS.billingMode` (provider-capabilities.ts) —
+//   * `CLAUDE_CAPABILITY_STATICS.billingMode` (model/provider-capabilities.ts) —
 //     static "subscription" on purpose.
 //   * `FrozenRuntimeBinding.capabilities()` (production-runtime.ts) — which
 //     derives the exact binding's mode from `credential.kind`.

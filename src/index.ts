@@ -8,7 +8,7 @@ export * from "./dedupe";
 export * from "./drafts";
 export * from "./findings";
 export * from "./findings-conformance";
-export * from "./model-routing";
+export * from "./model/routing";
 export * from "./pipeline";
 export * from "./preflight";
 export * from "./prompt-set";
