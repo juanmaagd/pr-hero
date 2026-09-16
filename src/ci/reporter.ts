@@ -38,6 +38,7 @@ import {
   type PrCommentDelta,
   severityEmoji,
 } from "#review/report";
+import { log } from "#ui/primitives";
 
 // ---------------------------------------------------------------------------
 // Workflow commands (`::group::`, `::endgroup::`, `::notice::`, `::warning::`,
@@ -499,4 +500,73 @@ export async function appendCiOutputs(
   outputs: CiOutputs,
 ): Promise<void> {
   await appendFile(outputFilePath, formatCiOutputs(outputs));
+}
+
+// ---------------------------------------------------------------------------
+// CI headless shell composition (ROADMAP Pillar 3) — the `::group::` wrapper
+// built on `formatWorkflowCommand` above, and the fatal-error reporter built
+// on `appendCiOutputs` above. Extracted from cli.ts (cli-decomp S2,
+// Cluster B): neither touches the filesystem directly (`appendCiOutputs`
+// remains the only function here that does), so the module header's purity
+// split still holds for its own two functions — these two compose them.
+// ---------------------------------------------------------------------------
+
+// Spec 2.1's `::group::` / `::endgroup::` pairing, owned by ONE function so
+// the arm and the close cannot drift apart. An unclosed group is not
+// cosmetic: GitHub folds every line logged after it into a collapsed section,
+// so a crash mid-review hides its own `::error::` annotation from the reader
+// who most needs it. Putting the arm at the call site and the close in some
+// later `finally` leaves a window — whatever runs in between — where a throw
+// escapes with the group still open; here there is no in-between.
+//
+// `emit` is a parameter rather than this module's `log`: a guarantee nothing
+// can observe is a guarantee nobody can test, and the failure path is exactly
+// the one that has to be proven.
+export async function withCiWorkflowGroup<T>(
+  isCi: boolean,
+  name: string,
+  emit: (line: string) => void,
+  body: () => Promise<T>,
+): Promise<T> {
+  if (!isCi) return await body();
+  emit(formatWorkflowCommand("group", name));
+  try {
+    return await body();
+  } finally {
+    emit(formatWorkflowCommand("endgroup"));
+  }
+}
+
+// Spec 1.1's `status` output enum names `error` alongside `reviewed` /
+// `skipped-size` / `skipped-budget`, but before this function nothing ever
+// wrote it: main()'s own catch only handles CliError/CliUsageError (exit 1,
+// no $GITHUB_OUTPUT write); every OTHER thrown error — a genuine fatal
+// failure, e.g. bad credentials deep inside reviewPr() — was simply
+// rethrown, crashing the process with no output at all. A workflow branching
+// on `steps.x.outputs.status == 'error'` could then never fire.
+//
+// $GITHUB_OUTPUT existing at all is itself the CI signal here: GitHub sets it
+// unconditionally for every job step, before any of this repo's own flags
+// are parsed, so this needs no separate isCiEnvironment() computation — and
+// it fails closed for a genuinely local crash (outputPath undefined), which
+// runCli()'s caller rethrows so the developer still sees a full stack trace
+// instead of a swallowed one-line message.
+export async function reportFatalCiError(
+  error: unknown,
+  outputPath: string | undefined,
+): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (outputPath !== undefined && outputPath.length > 0) {
+    // Best-effort: an unwritable $GITHUB_OUTPUT must not mask the original
+    // fatal error or suppress the ::error:: annotation below.
+    await appendCiOutputs(outputPath, {
+      status: "error",
+      findings_count: 0,
+      blocking_count: 0,
+      advisory_count: 0,
+      cost_usd_est: 0,
+      run_dir: "",
+    }).catch(() => {});
+  }
+  log(formatWorkflowCommand("error", message));
 }

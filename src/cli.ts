@@ -25,24 +25,28 @@ import {
 } from "#ci/admission-ledger";
 import {
   type AdmissionContext,
+  assertRunMatchesPr,
   budgetDisabledWarningMessage,
   budgetUnlimitedNoticeMessage,
   type CiGateSkipPlan,
   ciExitCode,
   deriveCiBillingMode,
   planCiBudgetSkip,
+  planCiReview,
   planCiReviewManualRequired,
   planCiReviewSkip,
   planCiSizeSkip,
   resolveCiBudgetCeiling,
+  shouldPublishCiReview,
+  shouldWriteCiOutputs,
+  shouldWriteStepSummary,
 } from "#ci/gates";
 import {
   appendCiOutputs,
   appendStepSummary,
-  type CiOutputs,
-  type CiSummaryData,
   formatWorkflowCommand,
-  renderStepSummary,
+  reportFatalCiError,
+  withCiWorkflowGroup,
 } from "#ci/reporter";
 import {
   type CiReviewPolicy,
@@ -3795,127 +3799,6 @@ export function postingExitCode(outcome: InlinePostOutcome | null): 0 | 1 {
   return outcome.droppedFindingIds.length > 0 ? 1 : 0;
 }
 
-// ---------------------------------------------------------------------------
-// CI headless shell (ROADMAP Pillar 3, GitHub Actions) — the "reviewed"
-// (non-skip) outcome's summary + outputs, and the two pure "should I write"
-// gates the shell checks before touching $GITHUB_STEP_SUMMARY/$GITHUB_OUTPUT.
-// planCiSizeSkip/planCiBudgetSkip (ci/gates.ts) cover the two gate-skip
-// outcomes the same way; this is their sibling for a review that actually
-// ran. Kept here, not ci/gates.ts/ci/reporter.ts: this is reviewPr's own
-// single-consumer composition (the exact `postingExitCode` precedent above),
-// not a spend-gate decision or a report-formatting primitive.
-// ---------------------------------------------------------------------------
-
-// Spec 2.1's "reviewed" step-summary + spec 1.1's $GITHUB_OUTPUT contract,
-// from the SAME findings array — so the two can never disagree on counts.
-// `delta`/`repoWebUrl` are optional pass-throughs (posted.delta when a run
-// posted; undefined renders plain code spans / omits the delta line).
-export function planCiReview(input: {
-  prNumber: number;
-  headSha: string;
-  findings: readonly Finding[];
-  costUsdEst: number;
-  wallMs: number;
-  model: string;
-  repoWebUrl?: string;
-  delta?: PrCommentDelta;
-  runDir: string;
-}): { summaryMarkdown: string; outputs: CiOutputs } {
-  const blockingCount = input.findings.filter(
-    (f) => f.tier === "blocking",
-  ).length;
-  const summary: CiSummaryData = {
-    kind: "reviewed",
-    prNumber: input.prNumber,
-    headSha: input.headSha,
-    findings: input.findings,
-    costUsdEst: input.costUsdEst,
-    wallMs: input.wallMs,
-    model: input.model,
-    ...(input.repoWebUrl === undefined ? {} : { repoWebUrl: input.repoWebUrl }),
-    ...(input.delta === undefined ? {} : { delta: input.delta }),
-  };
-  return {
-    summaryMarkdown: renderStepSummary(summary),
-    outputs: {
-      status: "reviewed",
-      findings_count: input.findings.length,
-      blocking_count: blockingCount,
-      advisory_count: input.findings.length - blockingCount,
-      cost_usd_est: input.costUsdEst,
-      run_dir: input.runDir,
-    },
-  };
-}
-
-// Spec 2.1's `::group::` / `::endgroup::` pairing, owned by ONE function so
-// the arm and the close cannot drift apart. An unclosed group is not
-// cosmetic: GitHub folds every line logged after it into a collapsed section,
-// so a crash mid-review hides its own `::error::` annotation from the reader
-// who most needs it. Putting the arm at the call site and the close in some
-// later `finally` leaves a window — whatever runs in between — where a throw
-// escapes with the group still open; here there is no in-between.
-//
-// `emit` is a parameter rather than this module's `log`: a guarantee nothing
-// can observe is a guarantee nobody can test, and the failure path is exactly
-// the one that has to be proven.
-export async function withCiWorkflowGroup<T>(
-  isCi: boolean,
-  name: string,
-  emit: (line: string) => void,
-  body: () => Promise<T>,
-): Promise<T> {
-  if (!isCi) return await body();
-  emit(formatWorkflowCommand("group", name));
-  try {
-    return await body();
-  } finally {
-    emit(formatWorkflowCommand("endgroup"));
-  }
-}
-
-// Design D6, applied to the CI headless channel: a failed session publishes
-// NOTHING. `sessionFailed` means every hunter died, which leaves the merged
-// document with zero findings — so the "reviewed" payload built from it would
-// claim `status=reviewed` + a "No findings detected" step summary for a review
-// that never ran. The job exits non-zero either way, but a human reads the job
-// summary, not the exit code, and postInlineIfEligible already suppresses PR
-// posting on exactly this condition; the CI channel must not be the one place
-// a crashed run still asserts a clean tree.
-export function shouldPublishCiReview(
-  isCi: boolean,
-  sessionFailed: boolean,
-): boolean {
-  return isCi && !sessionFailed;
-}
-
-// Spec 1.1: "Output parameter writing when $GITHUB_OUTPUT is provided" —
-// the outputs are core to the Action's own contract (declared unconditionally
-// in action.yml), so nothing beyond CI mode + a real path gates them.
-export function shouldWriteCiOutputs(
-  isCi: boolean,
-  outputPath: string | undefined,
-): boolean {
-  return isCi && outputPath !== undefined && outputPath.length > 0;
-}
-
-// Spec 2.1: step-summary writing is additionally gated on the tri-state
-// `--step-summary`/`--no-step-summary` flag (`stepSummary`), unset meaning
-// the shell's own default of on — mirroring `summary`/`scout`'s own
-// unset-means-default convention (preflight.ts's CliOptions).
-export function shouldWriteStepSummary(
-  isCi: boolean,
-  stepSummaryFlag: boolean | undefined,
-  summaryPath: string | undefined,
-): boolean {
-  return (
-    isCi &&
-    (stepSummaryFlag ?? true) &&
-    summaryPath !== undefined &&
-    summaryPath.length > 0
-  );
-}
-
 // post.json — the receipt (design's File Changes table): channel, comment
 // ids, demotions, mirroring pipeline.json's provenance role so the
 // idempotency proof (WU7/4.4) can read back exactly what a run posted
@@ -3943,25 +3826,6 @@ async function writePostReceipt(
     path.join(runDir, "post.json"),
     `${JSON.stringify(receipt, null, 2)}\n`,
   );
-}
-
-// Pure on purpose (design Threat Matrix, "Git repository selection" row,
-// deferred from PR2's verification): --from names a directory on disk, and
-// nothing stops it from pointing at a DIFFERENT PR's run than --pr names.
-// findings.json's own `pr` field is the one thing that cannot lie about
-// which review it came from — checked here, before any fetch or post,
-// rather than trusting the operator to keep --pr and --from in sync by hand.
-export function assertRunMatchesPr(
-  doc: FindingsDocument,
-  pr: number,
-  runDir: string,
-): void {
-  if (doc.pr !== pr) {
-    throw new CliUsageError(
-      `${runDir} is a run of PR #${doc.pr}, not PR #${pr} — point --from ` +
-        "at a run directory for the PR you are posting to",
-    );
-  }
 }
 
 // `pr-hero post --pr <n> --from <run-dir> [--dry-run]` (ROADMAP B6, spec
@@ -7133,40 +6997,6 @@ export async function engineIdentity(assets?: EngineAssets): Promise<{
     "HEAD",
   ]);
   return deriveEngineIdentity({ version: resolved.version }, revision);
-}
-
-// Spec 1.1's `status` output enum names `error` alongside `reviewed` /
-// `skipped-size` / `skipped-budget`, but before this function nothing ever
-// wrote it: main()'s own catch only handles CliError/CliUsageError (exit 1,
-// no $GITHUB_OUTPUT write); every OTHER thrown error — a genuine fatal
-// failure, e.g. bad credentials deep inside reviewPr() — was simply
-// rethrown, crashing the process with no output at all. A workflow branching
-// on `steps.x.outputs.status == 'error'` could then never fire.
-//
-// $GITHUB_OUTPUT existing at all is itself the CI signal here: GitHub sets it
-// unconditionally for every job step, before any of this repo's own flags
-// are parsed, so this needs no separate isCiEnvironment() computation — and
-// it fails closed for a genuinely local crash (outputPath undefined), which
-// runCli()'s caller rethrows so the developer still sees a full stack trace
-// instead of a swallowed one-line message.
-export async function reportFatalCiError(
-  error: unknown,
-  outputPath: string | undefined,
-): Promise<void> {
-  const message = error instanceof Error ? error.message : String(error);
-  if (outputPath !== undefined && outputPath.length > 0) {
-    // Best-effort: an unwritable $GITHUB_OUTPUT must not mask the original
-    // fatal error or suppress the ::error:: annotation below.
-    await appendCiOutputs(outputPath, {
-      status: "error",
-      findings_count: 0,
-      blocking_count: 0,
-      advisory_count: 0,
-      cost_usd_est: 0,
-      run_dir: "",
-    }).catch(() => {});
-  }
-  log(formatWorkflowCommand("error", message));
 }
 
 // main()'s two internal catches RETURN rather than throw, so runCli()'s catch
