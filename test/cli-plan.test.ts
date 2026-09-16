@@ -29,7 +29,7 @@ import {
   prPlanDetails,
   renderPlan,
   renderPrPlan,
-} from "../src/cli";
+} from "#ui/plan";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
