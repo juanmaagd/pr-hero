@@ -340,13 +340,26 @@ describe("Packaging & distribution configuration", () => {
       if (hits) offenders[rel.replaceAll("\\", "/")] = hits.length;
     }
 
-    // src/cli.ts keeps exactly ONE, and the count is pinned so a second cannot
-    // arrive unnoticed: `engineIdentity`'s `git rev-parse` for the engine's own
-    // revision, which sits AFTER an early return for compiled mode and is
-    // therefore unreachable in the runtime where it would be wrong.
+    // `engineIdentity`'s `git rev-parse` for the engine's own revision used
+    // to be src/cli.ts's one pinned exception — it sat AFTER an early return
+    // for compiled mode and was therefore unreachable in the runtime where
+    // it would be wrong. During cli-decomp S3 engineIdentity moved to
+    // src/git/identity.ts, but the path it reads from is derived by
+    // engineCheckoutRoot() in src/assets.ts, so the exception is gone and the
+    // test's own name is now literally true: only src/assets.ts derives
+    // filesystem paths from import.meta.
+    //
+    // This assertion earned its keep in that same slice. A first version moved
+    // engineIdentity to src/git/ with its `path.join(import.meta.dir, "..")`
+    // intact, and import.meta.dir is the directory of the EVALUATING module: from
+    // src/ that expression is the checkout, from src/git/ it is src/ itself. The
+    // move shifted the path by one level, compiled, typechecked, and passed every
+    // behavioural test — because git discovers the repository upward and returned
+    // the same HEAD from src/. This test was the only thing that went red. It
+    // guards the rule, not a symptom, which is exactly why it caught a relocation
+    // no behavioural check could see.
     expect(offenders).toEqual({
       "src/assets.ts": expect.any(Number),
-      "src/cli.ts": 1,
     });
   });
 
