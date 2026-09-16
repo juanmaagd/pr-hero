@@ -10,9 +10,9 @@ import {
   DEFAULT_LINE_WINDOW,
   normalizePath,
   type PrHeroFindingRef,
-} from "../src/compare";
-import { BUCKET_HEADINGS, renderComparison } from "../src/compare-report";
-import type { GreptileFinding } from "../src/greptile";
+} from "#compare/compare";
+import type { GreptileFinding } from "#compare/greptile";
+import { BUCKET_HEADINGS, renderComparison } from "#compare/report";
 
 function greptile(over: Partial<GreptileFinding> = {}): GreptileFinding {
   return {

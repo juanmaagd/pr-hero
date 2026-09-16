@@ -15,7 +15,7 @@ import {
   recordFindingTriage,
   saveRunTransaction,
 } from "#store/store";
-import type { HopTrail } from "./findings";
+import type { HopTrail } from "../findings";
 import {
   type FindingDetail,
   type HealthResponse,
@@ -30,7 +30,7 @@ import {
   type SaveRunResponse,
   type SearchFindingsResponse,
   type UsageResponse,
-} from "./server-preflight";
+} from "./preflight";
 
 export interface ServerOptions {
   dbPath: string;

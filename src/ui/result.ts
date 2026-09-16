@@ -17,7 +17,7 @@
 // payload was the one thing you had to leave the terminal to read. Everything
 // below the header exists to end that.
 
-import type { ComparisonResult } from "../compare";
+import type { ComparisonResult } from "#compare/compare";
 import type { UnresolvedSpend } from "../execution/spend-limiter";
 import type { Finding, FindingsDocument } from "../findings";
 import {
@@ -437,7 +437,7 @@ function greptileLines(
     );
   }
   // A pr-hero-only finding is not automatically a win, and a `both` row is not
-  // automatically a match (compare.ts's window over-matches by design), so the
+  // automatically a match (compare/compare.ts's window over-matches by design), so the
   // block points at the file that shows the pairings rather than scoring them.
   if (doc.findings.length > 0 && comparison.greptileFound) {
     lines.push(PROSE_INDENT + dim("↳ pairings: comparison.md", styles));

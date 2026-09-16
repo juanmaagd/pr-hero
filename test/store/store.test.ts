@@ -9,6 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { StoredComparison } from "#compare/ledger";
 import {
   CURRENT_PRODUCT_SCHEMA_VERSION,
   projectCompleteRun,
@@ -24,7 +25,6 @@ import {
   saveRunTransaction,
 } from "#store/store";
 import type { Finding, FindingsDocument } from "../../src/findings";
-import type { StoredComparison } from "../../src/ledger";
 import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpDbPath(): Promise<string> {

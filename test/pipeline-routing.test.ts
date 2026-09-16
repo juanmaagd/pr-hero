@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { armOfRun, scoutFailed } from "#compare/floor-test";
 import { aliasCanonical } from "#model/catalog";
 import {
   createResolvedRoutePlan,
@@ -22,7 +23,6 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../src/execution/contracts";
-import { armOfRun, scoutFailed } from "../src/floor-test";
 import { type PipelineInput, runPipeline } from "../src/pipeline";
 import { rereviewDeltaFromProvenance } from "../src/report";
 import { type ReviewSpec, validateReviewSpec } from "../src/spec";

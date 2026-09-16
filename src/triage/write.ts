@@ -1,12 +1,12 @@
 // Binds triage replies (ROADMAP B6c) to their comparison.json row — the
 // pure half of `pr-hero triage`. NO I/O, same contract as pr-preflight.ts
-// and ledger.ts: no gh, no git, no filesystem, no clock. The caller
+// and compare/ledger.ts: no gh, no git, no filesystem, no clock. The caller
 // (cli.ts) fetches the PR's review comments, finds every reply
 // (`in_reply_to_id` set) and hands over only the (parent body, reply body)
 // pair — this module never sees the wider comment stream, never decides
 // what counts as a reply, and never touches disk.
 
-import type { StoredComparisonRow } from "../ledger";
+import type { StoredComparisonRow } from "#compare/ledger";
 import { claimFingerprint, parseFindingMarker } from "../pr-preflight";
 import { type ParsedTriageMarker, parseTriageMarker } from "./triage";
 
@@ -67,7 +67,7 @@ export function applyTriageReplies(
     // pr-preflight.ts's own comment on ComparisonPrHeroClaim.id). This is
     // the SAME identity pr-preflight's matcher keys on, matched here
     // against a row's `prhero` side — but path+line is NOT a unique key
-    // (compare.ts documents real production data with two distinct
+    // (compare/compare.ts documents real production data with two distinct
     // findings at the same path:line, e.g. PR 1509). `.find()` would pick
     // whichever tied row happens to be first and silently overwrite ITS
     // verdict/reasoning/actor for a reply meant for the other one,
@@ -111,7 +111,7 @@ export function applyTriageReplies(
 // would hide the single most interesting number the loop can produce (how
 // often an agent's own claim is rejected). An `inconclusive` ruling leaves
 // the row's verdict at `null` — which routes it to Pending triage
-// (ledger.ts:289) instead of inventing a settled-looking string for a
+// (compare/ledger.ts:289) instead of inventing a settled-looking string for a
 // finding nobody actually settled; `actor` is still written, which is what
 // lets a reader tell "adjudicated, could not settle" apart from "nobody
 // has looked yet" (both-null).

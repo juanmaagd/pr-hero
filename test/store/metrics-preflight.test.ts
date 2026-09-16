@@ -6,6 +6,7 @@
 // handle.
 
 import { describe, expect, test } from "bun:test";
+import type { StoredComparison } from "#compare/ledger";
 import {
   CURRENT_SCHEMA_VERSION,
   migrationsFor,
@@ -14,7 +15,6 @@ import {
   renderUsage,
 } from "#store/metrics-preflight";
 import type { Finding, FindingsDocument } from "../../src/findings";
-import type { StoredComparison } from "../../src/ledger";
 import type { PerAgentUsage } from "../../src/pipeline";
 
 function baseFinding(overrides: Partial<Finding> = {}): Finding {

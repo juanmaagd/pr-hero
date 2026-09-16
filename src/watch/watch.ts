@@ -3,7 +3,7 @@
 // review spawn, the macOS notification, and launchd install/uninstall —
 // every side effect `pr-hero watch` needs. Same contract as cli.ts and
 // pr.ts: untested by construction, and every decision it acts on is a pure
-// function in watch/preflight.ts (or ledger.ts), where the tests live.
+// function in watch/preflight.ts (or compare/ledger.ts), where the tests live.
 //
 // The tick never daemonizes. launchd (or cron) is the supervisor and the
 // scheduler; one invocation is one pass over the configured repos, at most
@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { parseComparisonJson } from "#compare/ledger";
 import { runGc } from "#store/gc";
 import {
   box,
@@ -31,7 +32,6 @@ import {
   type IgnoreFileReadResult,
   readLocalIgnoreRules,
 } from "../ignore-read";
-import { parseComparisonJson } from "../ledger";
 import {
   fetchCommitStatuses,
   fetchPrComments,

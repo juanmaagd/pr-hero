@@ -28,7 +28,10 @@
     "#model/*": "./src/model/*.ts",
     "#triage/*": "./src/triage/*.ts",
     "#watch/*": "./src/watch/*.ts",
-    "#corpus/*": "./src/corpus/*.ts"
+    "#corpus/*": "./src/corpus/*.ts",
+    "#mcp/*": "./src/mcp/*.ts",
+    "#server/*": "./src/server/*.ts",
+    "#compare/*": "./src/compare/*.ts"
   },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"

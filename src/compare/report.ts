@@ -1,6 +1,6 @@
 // Renders a head-to-head comparison as the markdown a human actually reads.
 //
-// Pure — no clock, no I/O, no randomness. Same reason as src/report.ts: a
+// Pure — no clock, no I/O, no randomness. Same reason as ../report.ts: a
 // comparison must be re-renderable from artifacts on disk months later and
 // come out byte-identical, otherwise "the report changed" and "the findings
 // changed" become indistinguishable in the ledger.
