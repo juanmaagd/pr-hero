@@ -11,7 +11,7 @@ import {
 //   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
 //   protocol events, return TransportOutcome, classify provider/transport causes.
 //   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
-import { isVacuousEmptyHunt } from "../drafts";
+import { isVacuousEmptyHunt } from "#review/drafts";
 import type {
   CredentialBroker,
   CredentialProjection,

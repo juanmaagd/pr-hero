@@ -6,7 +6,11 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
-import { type AgentSpec, type ReviewSpec, resolveSpecialty } from "../spec";
+import {
+  type AgentSpec,
+  type ReviewSpec,
+  resolveSpecialty,
+} from "#review/spec";
 import { DiversityAdmissionError } from "./errors";
 
 export interface BenchmarkTarget {

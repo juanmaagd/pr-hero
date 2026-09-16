@@ -6,7 +6,7 @@ import {
   type Stats,
 } from "node:fs";
 import path from "node:path";
-import { wrapBlock } from "../boundary";
+import { wrapBlock } from "#review/boundary";
 
 export type WorkspaceDenialCode = "path_not_approved";
 

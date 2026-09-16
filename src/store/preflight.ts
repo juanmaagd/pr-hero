@@ -17,7 +17,7 @@ import type {
   RunStatus,
   Severity,
   Tier,
-} from "../findings";
+} from "#review/findings";
 import type { PerAgentUsage } from "../pipeline";
 
 export const CURRENT_PRODUCT_SCHEMA_VERSION = 5;

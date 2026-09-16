@@ -10,8 +10,8 @@
 import { describe, expect, test } from "bun:test";
 import type { ComparisonResult } from "#compare/compare";
 import type { GreptileFinding } from "#compare/greptile";
+import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
 import { type ResultInput, renderResult } from "#ui/result";
-import type { Finding, FindingsDocument, Telemetry } from "../../src/findings";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");

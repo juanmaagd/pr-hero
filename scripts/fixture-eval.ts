@@ -4,8 +4,8 @@
 // Proves plumbing + contract end-to-end, NOT recall quality (the lab's job).
 // Run: bun run fixture-eval
 import path from "node:path";
+import { validateFinding } from "#review/findings";
 import { buildPlantedFixture } from "../fixtures/setup";
-import { validateFinding } from "../src/findings";
 import { runPipeline } from "../src/pipeline";
 import { resolveRunnerAuthority } from "../src/runner-authority";
 import { ClaudeCodeRunner } from "../src/step-runner";

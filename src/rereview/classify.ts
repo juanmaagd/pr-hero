@@ -8,8 +8,8 @@
 // paths and re-enters at rule 1 (R2-C1); triage outranks touched (O-3);
 // `resolved` is never inferred from absence (C1).
 
+import type { Severity, Tier } from "#review/findings";
 import type { TriageTag, TriageVerdict } from "#triage/triage";
-import type { Severity, Tier } from "../findings";
 import {
   type FindingIdentity,
   formatLocs,

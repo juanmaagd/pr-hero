@@ -30,7 +30,7 @@ import {
 } from "#ci/review-admission";
 import { CI_RISK_POLICY_VERSION, classifyChangedPaths } from "#ci/review-risk";
 import { stateFinding } from "#rereview/state";
-import type { Tier } from "../../src/findings";
+import type { Tier } from "#review/findings";
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);

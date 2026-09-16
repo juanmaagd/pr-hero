@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parseAgentSource, promptSetFingerprint } from "#review/prompt-set";
 import type { EngineAssets } from "../src/assets";
 import { resolveEngineAssets } from "../src/assets";
 import {
@@ -18,7 +19,6 @@ import {
   localReviewSpec,
   resolveAgentsDirSetting,
 } from "../src/preflight";
-import { parseAgentSource, promptSetFingerprint } from "../src/prompt-set";
 
 describe("resolveAgentsDirSetting with bundled prompts default", () => {
   test("with no flag, config, or env returns the bundled default with source 'default'", () => {

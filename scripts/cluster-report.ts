@@ -9,7 +9,7 @@
 // history, not only about the next run.
 //
 // Run: bun run scripts/cluster-report.ts <findings.json> [<findings.json> ...]
-import { clusterByRootCause, type RootCauseInput } from "../src/root-cause";
+import { clusterByRootCause, type RootCauseInput } from "#review/root-cause";
 
 interface Entry extends RootCauseInput {
   tier: string | undefined;

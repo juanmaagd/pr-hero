@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
+import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
+import { clusterByRootCause } from "#review/root-cause";
 import {
   findingMarker,
   PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
@@ -18,7 +19,6 @@ import {
   scanAidEmoji,
   severityEmoji,
 } from "../src/report";
-import { clusterByRootCause } from "../src/root-cause";
 
 const ANCHOR = "src/duration.ts:19-20";
 

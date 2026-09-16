@@ -4,8 +4,8 @@
 // The case machine itself stays in rereview/plan.ts.
 
 import { normalizePath } from "#compare/compare";
+import type { Severity } from "#review/findings";
 import { parseTriageMarker } from "#triage/triage";
-import type { Severity } from "../findings";
 import { claimFingerprint } from "../pr-preflight";
 import {
   classifyPrior,

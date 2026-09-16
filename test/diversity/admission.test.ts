@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { validateReviewSpec } from "#review/spec";
 import {
   assertDiversityCapabilityOrThrow,
   checkInternalFindingsCapability,
@@ -11,7 +12,6 @@ import {
   buildDiversityPlan,
   freezeDiversityPlan,
 } from "../../src/diversity/identity";
-import { validateReviewSpec } from "../../src/spec";
 
 const diversitySpec = validateReviewSpec({
   multiModelDiversity: {

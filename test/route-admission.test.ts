@@ -4,6 +4,10 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
+import {
+  FINDINGS_CONFORMANCE_CASES,
+  type FindingsConformanceCase,
+} from "#review/findings-conformance";
 import { DiversityCapabilityError } from "../src/diversity/errors";
 import type {
   CredentialKind,
@@ -13,10 +17,6 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../src/execution/contracts";
-import {
-  FINDINGS_CONFORMANCE_CASES,
-  type FindingsConformanceCase,
-} from "../src/findings-conformance";
 import {
   type AdmitRoutePlanOptions,
   admitDiversityRoutePlan,

@@ -8,8 +8,8 @@
 // second `F001` collision.
 
 import path from "node:path";
-import { blockForgesNonce, wrapBlock } from "../boundary";
-import type { Severity } from "../findings";
+import { blockForgesNonce, wrapBlock } from "#review/boundary";
+import type { Severity } from "#review/findings";
 import type { GateStatus, VerifyTrigger } from "./classify";
 import {
   type IdentityInput,

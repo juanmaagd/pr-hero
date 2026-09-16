@@ -4,7 +4,7 @@
 // git, no network, no clock. The I/O shell in cli.ts finds the files, reads
 // the bytes, supplies each file's mtime, and owns stdout.
 
-import type { RunStatus } from "../findings";
+import type { RunStatus } from "#review/findings";
 import type {
   ComparisonGreptileClaim,
   ComparisonPrHeroClaim,

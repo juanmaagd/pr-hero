@@ -1,6 +1,6 @@
 // The prompt set's IDENTITY, and it exists for one claim: M6's write-up will
 // say "both arms ran the same prompt set". Until M5 that was believed —
-// findings.ts declared `prompt_set` and nothing ever populated it — and a
+// review/findings.ts declared `prompt_set` and nothing ever populated it — and a
 // believed claim is what an A/B is least able to survive being wrong about.
 //
 // The algorithm is the lab's, ported rather than re-invented
@@ -13,7 +13,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { promptSetFingerprint, promptSetIdentity } from "../src/prompt-set";
+import { promptSetFingerprint, promptSetIdentity } from "#review/prompt-set";
 
 async function setDir(
   files: Record<string, string>,

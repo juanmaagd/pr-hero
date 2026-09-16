@@ -13,10 +13,10 @@ import {
   processMcpMessage,
   type ToolCallResult,
 } from "#mcp/preflight";
+import type { FindingsDocument } from "#review/findings";
 import { ProductStoreClient } from "#server/client";
 import { startProductStoreServer } from "#server/server";
 import { projectCompleteRun } from "#store/preflight";
-import type { FindingsDocument } from "../../src/findings";
 
 function getToolResult(response: unknown): ToolCallResult {
   return (response as { result: ToolCallResult }).result;

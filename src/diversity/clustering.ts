@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Severity } from "../findings";
+import type { Severity } from "#review/findings";
 
 export interface FindingObservation {
   readonly observationId: string;

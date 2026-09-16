@@ -4,8 +4,8 @@
 //
 // 100% pure and offline-testable: no network, no stdio handles, no filesystem.
 
+import type { Tier } from "#review/findings";
 import type { ProductStoreClient } from "#server/client";
-import type { Tier } from "../findings";
 
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 export const MCP_SERVER_NAME = "pr-hero-store";

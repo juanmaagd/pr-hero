@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildResolvedRoutePlan } from "#model/routing";
+import { validateReviewSpec } from "#review/spec";
 import { requireInternalFindingsCapability } from "../../src/diversity/admission";
 import { buildDiversityPlan } from "../../src/diversity/identity";
 import {
@@ -10,7 +11,6 @@ import {
   validateGhPrViewPayload,
 } from "../../src/diversity/target-validation";
 import { createPanelState } from "../../src/progress";
-import { validateReviewSpec } from "../../src/spec";
 
 describe("route and progress integration", () => {
   const spec = validateReviewSpec({

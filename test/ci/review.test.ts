@@ -25,6 +25,7 @@ import {
   SKIP_SIZE_COMMENT_MARKER,
 } from "#ci/gates";
 import type { CiOutputs } from "#ci/reporter";
+import type { Finding } from "#review/findings";
 import {
   planCiReview,
   shouldPublishCiReview,
@@ -32,7 +33,6 @@ import {
   shouldWriteStepSummary,
   withCiWorkflowGroup,
 } from "../../src/cli";
-import type { Finding } from "../../src/findings";
 import { isCiEnvironment, parseArgs } from "../../src/preflight";
 import type { SizeGateVerdict } from "../../src/size-gate";
 

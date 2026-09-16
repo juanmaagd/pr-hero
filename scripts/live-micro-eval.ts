@@ -4,8 +4,8 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { selectBoundaryNonce } from "../src/boundary";
-import { parseAgentFile } from "../src/prompt-set";
+import { selectBoundaryNonce } from "#review/boundary";
+import { parseAgentFile } from "#review/prompt-set";
 import { resolveRunnerAuthority } from "../src/runner-authority";
 import { scoutPrompt, validateScoutLeads } from "../src/scout";
 import { ClaudeCodeRunner } from "../src/step-runner";
