@@ -130,7 +130,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
   },
   {
     domain: "git",
-    files: ["git"],
+    files: ["git", "identity"],
   },
 ];
 

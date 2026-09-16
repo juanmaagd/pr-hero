@@ -105,6 +105,7 @@ import {
   resolveDiffFrom,
   resolveRepoRoot,
 } from "#git/git";
+import { engineIdentity } from "#git/identity";
 import {
   capabilityGateDecision,
   produceClaudeCapabilityReport,
@@ -284,11 +285,7 @@ import {
   parsePrFiles,
 } from "#watch/preflight";
 import { watchCommand } from "#watch/watch";
-import {
-  type EngineAssets,
-  engineIdentity,
-  resolveEngineAssets,
-} from "./assets";
+import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type { RunnerBackend } from "./execution/contracts";
 import {
   acquirePidLock,

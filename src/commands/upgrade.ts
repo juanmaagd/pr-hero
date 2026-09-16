@@ -2,9 +2,9 @@ import crypto from "node:crypto";
 import { chmodSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { engineIdentity } from "#git/identity";
 import { CliError, type CliOptions } from "#review/preflight";
 import { log } from "#ui/primitives";
-import { engineIdentity } from "../assets";
 import { prheroLayout } from "../home-preflight";
 import {
   detectInstallMethod,

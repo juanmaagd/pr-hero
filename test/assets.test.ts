@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { engineIdentity } from "#git/identity";
 import { localReviewSpec } from "#review/preflight";
 import {
   deriveEngineIdentity,
-  engineIdentity,
   resolveEngineAssets,
   selfInvocation,
 } from "../src/assets";
