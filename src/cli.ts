@@ -13,7 +13,6 @@
 //   2. human-readable output goes to stderr so stdout stays clean.
 
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AdmissionRecord } from "#ci/admission-ledger";
@@ -75,7 +74,6 @@ import { upgradeCommand } from "#commands/upgrade";
 import { usageCommand } from "#commands/usage";
 import { parseComparisonJson, type StoredComparison } from "#compare/ledger";
 import {
-  type EffectiveConfig,
   ingestReviewMetrics,
   loadEffectiveConfig,
   notionalCostInput,
@@ -141,11 +139,14 @@ import {
 import {
   commitStatusCompletion,
   commitStatusRequest,
+  createPrRunDir,
   findMarkedCommentId,
   isInFlightCommitStatus,
+  type PrDryRunSizeGateResult,
+  predictPrRunDir,
   prHtmlUrl,
-  prRunDirCandidate,
   resolveCurrentPrNumber,
+  resolvePrDryRunSizeGate,
   resolvePrTarget,
 } from "#pr/preflight";
 import { revertsCommand } from "#pr/reverts";
@@ -160,7 +161,9 @@ import {
 export {
   heldCommitStatusLock,
   holdCommitStatusLock,
+  type PrDryRunSizeGateResult,
   releaseCommitStatusLock,
+  resolvePrDryRunSizeGate,
   settleHeldCommitStatusOnSignal,
 };
 
@@ -191,17 +194,13 @@ import {
   runPipeline,
 } from "#review/pipeline";
 import {
-  AGENT_FILE_PATTERNS,
-  type AgentsDirResolution,
   agentFilePath,
-  agentsDirProblems,
-  agentsDirSeat,
   allExcludedMessage,
   assertBasenameOnly,
-  assertOutsideRepo,
   CliError,
   type CliOptions,
   CliUsageError,
+  createRunDir,
   DEFAULT_HEAD_REF,
   DEFAULT_HOP_BUDGET,
   emptyDiffMessage,
@@ -211,18 +210,20 @@ import {
   isCiEnvironment,
   type LocalConfig,
   localReviewSpec,
-  type NumstatDiffStat,
   type NumstatFile,
   parseArgs,
   parseNumstatFiles,
-  resolveAgentsDirSetting,
+  preflightAgentsDir,
+  resolveAgentsDir,
   resolveMaxVerificationSteps,
   resolvePost,
   resolveScout,
   resolveSummary,
-  runDirCandidate,
   type SummarySettings,
 } from "#review/preflight";
+
+export { createRunDir, preflightAgentsDir, resolveAgentsDir };
+
 import {
   type ParsedAgent,
   parseAgentFile,
@@ -238,12 +239,9 @@ import {
   type ExcludedPath,
   effectiveDiffStat,
   evaluateSizeGate,
-  evaluateSizeGateAggregate,
   filterDiffByIgnoreRules,
-  type SizeGateConfig,
   type SizeGateVerdict,
   sizeGateConfig,
-  sizeGateDisposition,
   sizeGateLine,
 } from "#review/size-gate";
 import { type ReviewSpec, validateReviewSpec } from "#review/spec";
@@ -284,13 +282,13 @@ export {
 
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
 import {
+  applySizeGate,
   confirm,
   startPanelRenderer,
   startProgressRenderer,
 } from "#ui/progress";
 import { type ResultLinks, renderResult } from "#ui/result";
 import { runReviewMenu } from "#ui/review-menu";
-import { confirmSizeGate } from "#ui/select";
 
 export { startPanelRenderer };
 
@@ -305,14 +303,13 @@ import {
   parsePrFiles,
 } from "#watch/preflight";
 import { watchCommand } from "#watch/watch";
-import { type EngineAssets, resolveEngineAssets } from "./assets";
+import { resolveEngineAssets } from "./assets";
 import type { RunnerBackend } from "./execution/contracts";
 import {
   acquirePidLock,
   releasePidLock,
   resolveRepoHome,
   stampWorktree,
-  tryOriginRepoId,
 } from "./home";
 import {
   legacyMigrationHint,
@@ -2898,238 +2895,6 @@ async function reviewPr(
       silent: true,
     });
   }
-}
-
-// The impure half of the agents-dir chain: the seat's `configDir` is the
-// dirname of the file the WINNING layer lives in (agentsDirSeat, JD-14), and
-// only the existence check below touches the disk.
-export function resolveAgentsDir(
-  // Narrowed to what it actually reads: `--agents` is the only flag in play,
-  // and a wider type would let a caller believe this consults others.
-  options: Pick<CliOptions, "agents">,
-  loaded: EffectiveConfig,
-  // Injected only by tests, which cannot otherwise reach the compiled branch:
-  // detectAssetMode() reads `import.meta.dir` and always reports "dev" under
-  // `bun test`.
-  assets?: EngineAssets,
-): AgentsDirResolution {
-  const seat = agentsDirSeat({
-    config: loaded.effective,
-    sources: loaded.sources,
-    repoConfigPath: loaded.repoConfigPath,
-    globalConfigPath: loaded.globalConfigPath,
-  });
-  const resolution = resolveAgentsDirSetting({
-    flag: options.agents,
-    ...(seat === undefined ? {} : { config: seat }),
-    env: process.env.PRHERO_AGENTS_DIR,
-    cwd: process.cwd(),
-    ...(assets === undefined ? {} : { assets }),
-  });
-  // Only a DIRECTORY can be checked for existence, and this gate running
-  // unconditionally is the whole shipped defect: the compiled binary's bundled
-  // set has no directory, `existsSync` on the embedded root is false, and every
-  // run of the released binary died here with "agents dir does not exist"
-  // before a single step spawned. A bundled set's conformance is checked by
-  // preflightAgentsDir over the manifest's keys instead.
-  if (resolution.kind === "dir" && !existsSync(resolution.dir)) {
-    throw new CliError(`agents dir does not exist: ${resolution.dir}`);
-  }
-  return resolution;
-}
-
-export async function preflightAgentsDir(
-  agents: Pick<AgentsDirResolution, "kind" | "dir" | "files">,
-  specFiles: string[],
-): Promise<void> {
-  const present = new Set<string>();
-  if (agents.kind === "bundled") {
-    // The manifest's keys ARE the present set, and there is nothing to scan:
-    // Bun.Glob().scan() over the embedded root THROWS ENOENT rather than
-    // yielding nothing, so a bundled set reaching the glob below is not a
-    // degraded check but a crash. Key ORDER is irrelevant here — unlike the
-    // fingerprint, agentsDirProblems compares sets bidirectionally.
-    for (const file of Object.keys(agents.files ?? {})) present.add(file);
-  } else {
-    for (const pattern of AGENT_FILE_PATTERNS) {
-      for await (const entry of new Bun.Glob(pattern).scan({
-        cwd: agents.dir,
-      })) {
-        present.add(entry);
-      }
-    }
-  }
-  const problems = agentsDirProblems(specFiles, [...present]);
-  if (problems.length > 0) {
-    throw new CliError(
-      `prompt set ${agents.dir} does not match the review spec:\n` +
-        problems.map((p) => `  - ${p}`).join("\n"),
-    );
-  }
-}
-
-// repoId rides along with the run dir so the caller's fail-soft metrics
-// ingest (W4 / #23) can reuse the SAME resolveRepoHome call below instead of
-// paying for a second gitOriginUrl lookup. --out still skips resolveRepoHome
-// itself (an explicit dir needs no ~/.prhero/repos/<id> registry, and must
-// never gain the side effect of creating one just to learn an id — W4 Phase
-// 6 remediation, GitHub #23 option D) — but it now tries origin via
-// tryOriginRepoId (persist:false semantics) so a --out run on a checkout
-// WITH a resolvable origin still ingests. repoId is null only when that
-// origin lookup itself fails — the same no-origin escape hatch every other
-// global-state path already has, never a throw.
-export async function createRunDir(
-  options: CliOptions,
-  repoRoot: string,
-  headSha: string,
-): Promise<{ runDir: string; repoId: string | null }> {
-  if (options.out) {
-    const explicit = path.resolve(options.out);
-    assertOutsideRepo(explicit, repoRoot);
-    await mkdir(explicit, { recursive: true });
-    return { runDir: explicit, repoId: await tryOriginRepoId(repoRoot) };
-  }
-  const repoHome = await resolveRepoHome({
-    home: os.homedir(),
-    operatorRoot: repoRoot,
-    persist: true,
-  });
-  const root = repoHome.paths.runs;
-  // Smallest unused integer, so a second review of the same commit never
-  // overwrites the first one's artifacts — a run that cost money is evidence.
-  for (let n = 1; ; n++) {
-    const candidate = runDirCandidate(root, headSha, n);
-    if (existsSync(candidate)) continue;
-    assertOutsideRepo(candidate, repoRoot);
-    await mkdir(candidate, { recursive: true });
-    return { runDir: candidate, repoId: repoHome.repoId };
-  }
-}
-
-// PR-mode twin of createRunDir, differing in exactly two ways: the candidate
-// carries the PR number, and the outside-the-repo assertion runs against
-// BOTH roots — artifacts inside either tree would contaminate a review.
-async function createPrRunDir(
-  options: CliOptions,
-  operatorRoot: string,
-  worktreePath: string,
-  runsRoot: string,
-  prNumber: number,
-  headSha: string,
-): Promise<string> {
-  const dir = predictPrRunDir(
-    options,
-    operatorRoot,
-    worktreePath,
-    runsRoot,
-    prNumber,
-    headSha,
-  );
-  await mkdir(dir, { recursive: true });
-  return dir;
-}
-
-// The same resolution WITHOUT the mkdir, because a PR-mode --dry-run must
-// create nothing at all (local mode's dry run does create its run dir; PR
-// mode deliberately does not) — yet the plan should still print the exact
-// dir a confirmed run would use, and an --out that violates the containment
-// rule should still fail inside the free dry run.
-function predictPrRunDir(
-  options: CliOptions,
-  operatorRoot: string,
-  worktreePath: string,
-  runsRoot: string,
-  prNumber: number,
-  headSha: string,
-): string {
-  if (options.out) {
-    const explicit = path.resolve(options.out);
-    assertOutsideRepo(explicit, operatorRoot);
-    assertOutsideRepo(explicit, worktreePath);
-    return explicit;
-  }
-  const root = runsRoot;
-  // Smallest unused integer, same reason as createRunDir: a run that cost
-  // money is evidence and must never be overwritten.
-  for (let n = 1; ; n++) {
-    const candidate = prRunDirCandidate(root, prNumber, headSha, n);
-    if (existsSync(candidate)) continue;
-    assertOutsideRepo(candidate, operatorRoot);
-    assertOutsideRepo(candidate, worktreePath);
-    return candidate;
-  }
-}
-
-export interface PrDryRunSizeGateResult {
-  verdict: SizeGateVerdict;
-  note: string;
-}
-
-// PR1b Addition 1 (#5557): the PR `--dry-run` size-gate estimate, fixed to
-// use per-file data when it is trustworthy — pure, so the truncation-guard
-// branching is unit-testable without a live `gh` call.
-//
-// Ported from watch/watch.ts's tier-2 pattern, not rewritten: the aggregate path
-// (`{files, insertions, deletions}`, no paths) cannot express exclusions at
-// all, so `.prheroignore` widens what was already a "wrong in the
-// conservative direction" gap (see the WHY this replaces at the call site)
-// from tens of lines (lockfiles) to potentially thousands (a whole ignored
-// directory) — a gate that SKIPs a PR the real per-file run happily accepts
-// reads as a broken tool, not a conservative estimate.
-//
-// `perFile: null` is the caller's signal that gh's own `files` list was
-// truncated or unavailable — see watch/watch.ts:322-327's identical guard: a SHORT
-// list under-counts, and under-counting here would falsely RESCUE exactly
-// the monster this gate exists to stop, so an untrustworthy list is never
-// used to compute a passing verdict.
-export function resolvePrDryRunSizeGate(input: {
-  ghDiffStat: NumstatDiffStat;
-  perFile: NumstatFile[] | null;
-  gateConfig: SizeGateConfig;
-}): PrDryRunSizeGateResult {
-  if (input.perFile !== null) {
-    return {
-      verdict: evaluateSizeGate(input.perFile, input.gateConfig),
-      note:
-        "(estimate from gh's per-file list; `.prheroignore` exclusions " +
-        "apply, but the count is still not whitespace-adjusted — GitHub's " +
-        "counters carry no whitespace information)",
-    };
-  }
-  return {
-    verdict: evaluateSizeGateAggregate(input.ghDiffStat, input.gateConfig),
-    note:
-      "(estimate from GitHub's aggregate counters; gh's per-file list was " +
-      "truncated or unavailable, so exclusions are not applied and the " +
-      "count is not whitespace-adjusted)",
-  };
-}
-
-// The size-gate override. `onBlock` runs for both the hard skip and the
-// interactive prompt (PR mode prints the SKIP line here, because that path
-// never reaches the plan). Local mode passes nothing: the plan already
-// printed the verdict.
-async function applySizeGate(
-  verdict: SizeGateVerdict,
-  options: Pick<CliOptions, "force" | "yes">,
-  onBlock?: () => void,
-): Promise<"proceed" | "abort"> {
-  const disposition = sizeGateDisposition(verdict, {
-    force: options.force,
-    yes: options.yes,
-    interactive: Boolean(process.stdin.isTTY),
-  });
-  if (disposition.action === "proceed") return "proceed";
-  onBlock?.();
-  if (disposition.action === "skip") {
-    throw new CliError(disposition.message);
-  }
-  const choice = await confirmSizeGate(styleEnabled());
-  if (choice.kind === "cancel") {
-    log("aborted; nothing was spent.");
-    return "abort";
-  }
-  return "proceed";
 }
 
 async function menuCommand(options: CliOptions): Promise<number> {

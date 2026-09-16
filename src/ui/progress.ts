@@ -7,9 +7,11 @@
 // and the progress.ts halves are the pure, tested pieces.
 
 import type { PipelineProgressEvent } from "#review/pipeline";
+import { CliError, type CliOptions } from "#review/preflight";
 import { formatElapsed } from "#review/report";
+import { type SizeGateVerdict, sizeGateDisposition } from "#review/size-gate";
 import { log, styleEnabled } from "#ui/primitives";
-import { type ConfirmResult, confirmReview } from "#ui/select";
+import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
 import {
   applyProgressEvent,
   createPanelState,
@@ -235,4 +237,31 @@ export function confirm(
     details,
     styles: styleEnabled(),
   });
+}
+
+// The size-gate override. `onBlock` runs for both the hard skip and the
+// interactive prompt (PR mode prints the SKIP line here, because that path
+// never reaches the plan). Local mode passes nothing: the plan already
+// printed the verdict.
+export async function applySizeGate(
+  verdict: SizeGateVerdict,
+  options: Pick<CliOptions, "force" | "yes">,
+  onBlock?: () => void,
+): Promise<"proceed" | "abort"> {
+  const disposition = sizeGateDisposition(verdict, {
+    force: options.force,
+    yes: options.yes,
+    interactive: Boolean(process.stdin.isTTY),
+  });
+  if (disposition.action === "proceed") return "proceed";
+  onBlock?.();
+  if (disposition.action === "skip") {
+    throw new CliError(disposition.message);
+  }
+  const choice = await confirmSizeGate(styleEnabled());
+  if (choice.kind === "cancel") {
+    log("aborted; nothing was spent.");
+    return "abort";
+  }
+  return "proceed";
 }
