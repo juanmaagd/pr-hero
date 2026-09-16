@@ -6,7 +6,7 @@
 // a silently truncated delta. `--full` widens discovery for whatever case
 // the PR is actually in; it never rewrites the case (R2-C5).
 
-import { normalizePath } from "../compare";
+import { normalizePath } from "#compare/compare";
 import type { RereviewCase } from "./classify";
 
 export type LastHeadSource = "summary_marker" | "finding_markers" | "absent";

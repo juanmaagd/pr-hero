@@ -5,9 +5,6 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { projectCompleteRun } from "#store/preflight";
-import { ProductStoreClient } from "../src/client";
-import type { FindingsDocument } from "../src/findings";
 import {
   MCP_PROTOCOL_VERSION,
   MCP_SERVER_NAME,
@@ -15,8 +12,11 @@ import {
   PRHERO_MCP_TOOLS,
   processMcpMessage,
   type ToolCallResult,
-} from "../src/mcp-preflight";
-import { startProductStoreServer } from "../src/server";
+} from "#mcp/preflight";
+import { ProductStoreClient } from "#server/client";
+import { startProductStoreServer } from "#server/server";
+import { projectCompleteRun } from "#store/preflight";
+import type { FindingsDocument } from "../../src/findings";
 
 function getToolResult(response: unknown): ToolCallResult {
   return (response as { result: ToolCallResult }).result;

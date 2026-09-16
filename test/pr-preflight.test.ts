@@ -15,10 +15,10 @@ import {
   SKIP_COVERAGE_COMMENT_MARKER,
   SKIP_SIZE_COMMENT_MARKER,
 } from "#ci/gates";
+import type { ComparisonResult, PrHeroFindingRef } from "#compare/compare";
+import type { GreptileFinding } from "#compare/greptile";
 import { PR_STATE_MARKER_PREFIX } from "#rereview/state";
 import { TRIAGE_MARKER_PREFIX } from "#triage/triage";
-import type { ComparisonResult, PrHeroFindingRef } from "../src/compare";
-import type { GreptileFinding } from "../src/greptile";
 import {
   buildComparisonJson,
   CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,

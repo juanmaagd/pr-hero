@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { Finding } from "../src/findings";
 import {
   findingsToCandidates,
   findingsToMartianReview,
   lookupGolden,
   type MartianGoldenPr,
   prNumberFromUrl,
-} from "../src/martian-adapter";
+} from "#compare/martian-adapter";
+import type { Finding } from "../../src/findings";
 
 function finding(over: Partial<Finding> = {}): Finding {
   return {

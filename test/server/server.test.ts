@@ -8,15 +8,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { StoredComparison } from "#compare/ledger";
+import { ProductStoreClient } from "#server/client";
+import { startProductStoreServer } from "#server/server";
 import {
   CURRENT_PRODUCT_SCHEMA_VERSION,
   projectCompleteRun,
 } from "#store/preflight";
-import { ProductStoreClient } from "../src/client";
-import type { Finding, FindingsDocument } from "../src/findings";
-import type { StoredComparison } from "../src/ledger";
-import type { PerAgentUsage } from "../src/pipeline";
-import { startProductStoreServer } from "../src/server";
+import type { Finding, FindingsDocument } from "../../src/findings";
+import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpServerEnv(): Promise<{
   dbPath: string;

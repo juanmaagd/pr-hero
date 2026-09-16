@@ -299,7 +299,7 @@ export function selectRevertCandidates(
 }
 
 // ---------------------------------------------------------------------------
-// gh payload readers. Same split as ledger.ts's parseComparisonJson: the pure
+// gh payload readers. Same split as compare/ledger.ts's parseComparisonJson: the pure
 // reader names the FIELD it could not read, and the shell re-wraps adding the
 // endpoint only it knows.
 

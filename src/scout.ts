@@ -10,8 +10,8 @@
 // about the PROMPT would be confounded by a second implementation that no
 // production run ever executes.
 
+import { normalizePath } from "#compare/compare";
 import { wrapBlock } from "./boundary";
-import { normalizePath } from "./compare";
 
 // Prose §3.7 turned into the engine-owned output contract, beside
 // HUNTER/REFUTER/SUMMARY_OUTPUT_CONTRACT in pipeline.ts. This text is driver
@@ -91,7 +91,7 @@ export function validateScoutLeads(candidate: unknown): ScoutLead[] {
     // §3.10's hunk metric and §3.9's ±25 attribution then all see one spelling.
     // Left unstripped, a correct suspicion at the right line scores as a
     // coverage MISS and the M4 gate silently measures prompt formatting
-    // instead of scouting. `compare.ts`'s normalizePath is deliberately NOT
+    // instead of scouting. `compare/compare.ts`'s normalizePath is deliberately NOT
     // the place for this: it defines "the same path" for the Greptile
     // head-to-head, and widening it there would invent matches across
     // `packages/`.

@@ -545,7 +545,7 @@ describe("hunkCoverage", () => {
   test("a ` ./foo.ts ` lead still matches `foo.ts` via normalizePath", () => {
     const patch = diffHunk("foo.ts", 1, 3);
     // normalizePath trims and drops a leading `./` — and NOTHING else, on
-    // purpose (`compare.ts:50`). The `a/`/`b/` case is not this function's job
+    // purpose (`compare/compare.ts:50`). The `a/`/`b/` case is not this function's job
     // and is handled one layer up, at the validator; the test below pins that.
     expect(hunkCoverage(patch, [lead(" ./foo.ts ", 2)])).toEqual({
       hunks: 1,

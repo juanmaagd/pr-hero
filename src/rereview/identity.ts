@@ -14,7 +14,7 @@
 // A missed pairing costs a verification step or a visible duplicate; an
 // over-match can hide a live defect behind `carried`.
 
-import { normalizePath } from "../compare";
+import { normalizePath } from "#compare/compare";
 import { extractAnchor } from "../root-cause";
 
 // Same number as `FINDING_LINE_WINDOW` in inline.ts. The posting matcher and

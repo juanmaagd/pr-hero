@@ -85,6 +85,25 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
     domain: "corpus",
     files: ["corpus", "preflight"],
   },
+  {
+    domain: "mcp",
+    files: ["mcp", "preflight"],
+  },
+  {
+    domain: "server",
+    files: ["client", "preflight", "server"],
+  },
+  {
+    domain: "compare",
+    files: [
+      "compare",
+      "floor-test",
+      "greptile",
+      "ledger",
+      "martian-adapter",
+      "report",
+    ],
+  },
 ];
 
 function srcRootFiles(): string[] {

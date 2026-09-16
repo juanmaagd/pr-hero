@@ -10,7 +10,7 @@ import type {
   FindingTriageRow,
   ProjectedCompleteRun,
 } from "#store/preflight";
-import type { HopTrail, Tier } from "./findings";
+import type { HopTrail, Tier } from "../findings";
 
 export interface HealthResponse {
   status: "ok";

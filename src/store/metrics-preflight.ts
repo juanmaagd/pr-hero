@@ -8,8 +8,8 @@
 // No backfill (proposal, decided): the dataset starts empty and grows one
 // ingest at a time, from the very next completed review after ship.
 
+import type { StoredComparison } from "#compare/ledger";
 import type { FindingsDocument, RunStatus } from "../findings";
-import type { StoredComparison } from "../ledger";
 import type { PerAgentUsage } from "../pipeline";
 
 export const CURRENT_SCHEMA_VERSION = 1;
@@ -217,7 +217,7 @@ export interface RenderUsageOptions {
 // table (one line per run, `pr` mapped back to "local" for the NULL rows
 // projectRunRow produced) plus a totals footer that is a real reduction
 // over the input, never a placeholder — cli.ts prints these lines straight
-// to stdout, the same split ledger.ts's markdown uses (human notes on
+// to stdout, the same split compare/ledger.ts's markdown uses (human notes on
 // stderr via log(), the report itself on stdout).
 export function renderUsage(
   rows: RunRow[],

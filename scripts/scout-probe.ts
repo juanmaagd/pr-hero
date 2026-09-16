@@ -61,8 +61,8 @@
 
 import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
+import { DEFAULT_LINE_WINDOW, normalizePath } from "#compare/compare";
 import { selectBoundaryNonce } from "../src/boundary";
-import { DEFAULT_LINE_WINDOW, normalizePath } from "../src/compare";
 import { extractJsonObject } from "../src/drafts";
 import { parseAgentFile } from "../src/prompt-set";
 import { resolveRunnerAuthority } from "../src/runner-authority";
@@ -566,7 +566,7 @@ for (let r = 1; r <= replicates; r++) {
 // ---------------------------------------------------------------------------
 // Assertions.
 
-// A hit reuses compare.ts's window rather than a second definition of "the
+// A hit reuses compare/compare.ts's window rather than a second definition of "the
 // same place": the head-to-head, the §3.9 attribution rule and this gate must
 // all agree, or a scout that "hit" here would be `unled` there.
 function hits(leads: ScoutLead[], target: CoverageTarget): boolean {

@@ -29,16 +29,16 @@ import {
   parseAdmissionRecord,
   serializeAdmissionRecord,
 } from "#ci/admission-ledger";
-import { THREAD_PAGE_SIZE } from "#corpus/preflight";
-import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import {
   type ComparisonResult,
   compareFindings,
   type PrHeroFindingRef,
-} from "./compare";
-import { renderComparison } from "./compare-report";
+} from "#compare/compare";
+import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
+import { renderComparison } from "#compare/report";
+import { THREAD_PAGE_SIZE } from "#corpus/preflight";
+import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
 import type { Finding, RunStatus } from "./findings";
-import { parseGreptileComment, pickGreptileComment } from "./greptile";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
   buildComparisonJson,
@@ -577,7 +577,7 @@ export interface ComparisonOutcome {
   // computes this to write comparison.md; discarding it left the terminal
   // structurally unable to say anything but numbers, and `greptileOnly` is
   // THE measured number — "a recall miss with a name, a file and a line"
-  // (compare.ts). IN-MEMORY ONLY: comparison.json's bytes are unchanged, and
+  // (compare/compare.ts). IN-MEMORY ONLY: comparison.json's bytes are unchanged, and
   // must stay so — the ledger reads them back through StoredComparison.
   result: ComparisonResult;
 }

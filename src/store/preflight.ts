@@ -6,6 +6,7 @@
 // Pure and testable offline: never opens a connection, never touches the clock or fs.
 
 import path from "node:path";
+import type { StoredComparison } from "#compare/ledger";
 import type {
   CausalDisposition,
   EvidenceClass,
@@ -17,7 +18,6 @@ import type {
   Severity,
   Tier,
 } from "../findings";
-import type { StoredComparison } from "../ledger";
 import type { PerAgentUsage } from "../pipeline";
 
 export const CURRENT_PRODUCT_SCHEMA_VERSION = 5;

@@ -10,7 +10,7 @@
 // NO I/O. Same contract as preflight.ts/pr-preflight.ts: no gh, no git, no
 // network, no filesystem. cli.ts and pr.ts execute what this module plans.
 
-import type { PrHeroFindingRef } from "./compare";
+import type { PrHeroFindingRef } from "#compare/compare";
 import { claimFingerprint, type ParsedFindingMarker } from "./pr-preflight";
 import { extractAnchor } from "./root-cause";
 import { diffRecordPath, splitDiffRecords } from "./size-gate";
@@ -155,7 +155,7 @@ function parseProofRefLines(
 
 // FINDING_LINE_WINDOW=5 is a JUDGEMENT CALL, not a measurement — recorded
 // here so nobody later cites it as evidence. It deliberately diverges from
-// compare.ts's DEFAULT_LINE_WINDOW=25: that window is a deliberate OVER-match
+// compare/compare.ts's DEFAULT_LINE_WINDOW=25: that window is a deliberate OVER-match
 // (show a human a pair they can reject rather than score a real agreement as
 // a miss). This window needs the OPPOSITE bias, because an over-match here
 // silently suppresses a genuinely new finding — an invisible miss, the worst

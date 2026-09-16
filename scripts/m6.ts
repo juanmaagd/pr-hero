@@ -43,7 +43,7 @@ import {
   scoutFailed,
   tallyArm,
   tallyCleanPrs,
-} from "../src/floor-test";
+} from "#compare/floor-test";
 import { resolvePrTarget } from "../src/pr-preflight";
 import {
   EMPTY_LOCAL_CONFIG,

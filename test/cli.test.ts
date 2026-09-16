@@ -23,6 +23,8 @@ import {
   evaluateCiReviewAdmission,
   resolveCiAdmissionAttemptCount,
 } from "#ci/review-admission";
+import type { PrHeroFindingRef } from "#compare/compare";
+import type { StoredComparison } from "#compare/ledger";
 import type { RereviewProvenance } from "#rereview/prepare";
 import { triageMarker } from "#triage/triage";
 import { resolveEngineAssets } from "../src/assets";
@@ -59,11 +61,9 @@ import {
   runTriageReplyCommand,
   settleHeldCommitStatusOnSignal,
 } from "../src/cli";
-import type { PrHeroFindingRef } from "../src/compare";
 import type { Finding, FindingsDocument, Telemetry } from "../src/findings";
 import { canonicalRemoteId, missingOriginMessage } from "../src/home-preflight";
 import { readLocalIgnoreRules } from "../src/ignore-read";
-import type { StoredComparison } from "../src/ledger";
 import {
   ADMISSION_CHECK_RUN_NAME,
   listAdmissionCheckRuns,
