@@ -84,7 +84,8 @@ orthogonal to layout, so it cannot detect or prevent this drift.
       from `src/index.ts`, so the lab surface is untouched. Validates the mechanism end to end.
 - [x] **T2** — Layout ratchet test (`test/architecture/layout.test.ts`), asserting only the
       domains migrated so far. Lands at the end of T1; each later PR appends its domain.
-- [ ] **T3** — `ui/` (8 files)
+- [x] **T3** — `ui/` (9 files — one more than originally scoped: `ui.ts` itself,
+      renamed to `primitives.ts`, was the domain's un-hyphenated 9th member).
 - [ ] **T4** — `ci/` (6 files)
 - [ ] **T5** — `store/` (store, backfill, gc, metrics, activity + their preflights)
 - [ ] **T6** — `model/` (catalog, routing, free-discovery, capabilities, usage, transport-registry)
@@ -152,6 +153,61 @@ verbatim `tsconfig.json`, its exact import surface, and the real package install
 Six files cite `docs/item7-rereview-design.md`, which does not exist in this repo or in
 `../deep-review`. The reference predates this move and is out of scope for a move-only PR.
 
+### Verified outcomes (T3)
+
+- 19 `git mv` renames confirmed by `git diff --cached -M --stat`: 9 modules to `src/ui/`
+  (`ui.ts` deliberately renamed to `primitives.ts` — the domain's shared terminal
+  primitives; never `index.ts`, a domain barrel is explicitly banned), 10 tests to
+  `test/ui/` (`menu-loop.test.ts` has no matching source module — it tests `menu.ts`).
+- `bun test`: 3650 pass, 0 fail. Baseline was 3649; the +1 is the new absence-of-bare-file
+  ratchet test added below. `bun run typecheck`: exit 0. `bun run check`: exit 0 over 291
+  files (after `biome check --write src test`, expected per T1's note).
+- The `activity`/`menu-context` collision the task doc warned about: `src/ui-activity.ts`
+  and `test/ui-activity.test.ts` both imported the ROOT `src/activity.ts` (a different,
+  non-migrating module) — correctly rewritten to `../activity` / `../../src/activity`
+  rather than the sibling `#ui/activity` or `./activity`. Same treatment for
+  `src/ui-menu.ts`'s and `test/ui-menu.test.ts`'s imports of `src/menu-context.ts`.
+  `src/activity.ts`, `test/activity.test.ts`, `src/menu-context.ts`, and
+  `test/menu-context.test.ts` are byte-identical (`git diff` empty).
+- ~20 stale WHY-comment path references retargeted across `src/report.ts`,
+  `src/progress.ts`, `src/watch.ts`, `src/cli.ts`, `src/metrics-preflight.ts`,
+  `src/execution/{harness,spend-limiter}.ts`, `src/ci-reporter.ts`, and several
+  non-migrating test files, using the domain-qualified sibling convention T1
+  established (e.g. `ui/primitives.ts formats, ui/select.ts asks`, not the bare
+  basename, even for comments now living inside `src/ui/` itself).
+
+### Verified outcomes (T3 ratchet extension)
+
+The prefix-only absence check (`<domain>-*.ts`) would pass vacuously forever if a bare
+`<domain>.ts` were left at `src/` root — `rereview` (T1) never exposed this because it had
+no bare `rereview.ts`; `ui` does (`src/ui.ts` itself). Added a second absence assertion,
+generic over `MIGRATED_DOMAINS`, and mutation-tested all four cases:
+
+| mutation | result |
+| --- | --- |
+| bare `src/ui.ts` touched at root | RED (new bare-file absence half) |
+| stray `src/ui-foo.ts` added | RED (existing prefix absence half) |
+| `src/ui/tree.ts` removed | RED (existing presence half) |
+| all reverted | 3 pass, 0 fail |
+
+### Gotcha found during T3, for T4 onward
+
+Grepping by the domain's own name pattern (`rg 'ui[-.]'` or similar) is NOT sufficient to
+find every non-domain sibling import that needs its relative depth adjusted after a move —
+`test/ui-menu.test.ts`'s import of `../src/menu-context` doesn't match a `ui`-shaped
+pattern, so the targeted sweep missed it; only `bun run typecheck` caught the resulting
+`TS2307`. For each moved file, audit its FULL import list (not just domain-pattern
+matches), and always run `bun run typecheck` before declaring the move done — don't rely
+on the sweep alone.
+
+### Pre-existing issue found, deliberately not fixed here (T3)
+
+`CLAUDE.md` and `AGENTS.md`'s "Architecture (one line per module)" sections still list
+`src/ui.ts`, `src/ui-select.ts`, `src/ui-result.ts`, and `src/ui-tree.ts` by their old
+pre-move paths. Out of this task's authorized scope (file moves, `package.json` imports,
+import-specifier updates, the layout ratchet — and the sweep command the task doc gives
+is explicitly scoped to `src test scripts fixtures`, not root docs). Left for a follow-up.
+
 ## Next step
 
-Open the PR against `dev`, triage the pr-hero self-review, then start T3 (`ui/`, 8 files).
+Open the PR against `dev`, triage the pr-hero self-review, then start T4 (`ci/`, 6 files).
