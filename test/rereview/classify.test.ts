@@ -4,8 +4,8 @@ import {
   classifyPrior,
   type PhaseBContext,
   type PriorRecord,
-} from "../src/rereview-classify";
-import type { FindingIdentity } from "../src/rereview-identity";
+} from "#rereview/classify";
+import type { FindingIdentity } from "#rereview/identity";
 
 function prior(overrides: Partial<PriorRecord> = {}): PriorRecord {
   return {

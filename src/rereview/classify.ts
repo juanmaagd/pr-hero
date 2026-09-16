@@ -8,7 +8,8 @@
 // paths and re-enters at rule 1 (R2-C1); triage outranks touched (O-3);
 // `resolved` is never inferred from absence (C1).
 
-import type { Severity, Tier } from "./findings";
+import type { Severity, Tier } from "../findings";
+import type { TriageTag, TriageVerdict } from "../triage";
 import {
   type FindingIdentity,
   formatLocs,
@@ -16,8 +17,7 @@ import {
   identityFromFinding,
   identityFromLocs,
   mapIdentityPaths,
-} from "./rereview-identity";
-import type { TriageTag, TriageVerdict } from "./triage";
+} from "./identity";
 
 export type RereviewCase = "A" | "B" | "C" | "D" | "E";
 
@@ -68,10 +68,10 @@ export interface PhaseBContext {
   touched: (identity: FindingIdentity) => boolean;
   summaryUpdatedAt: string | null;
   // Rereview-coverage fix wiring gap:
-  // `DiscoveryPlan.verifyAll` (rereview-plan.ts) was
+  // `DiscoveryPlan.verifyAll` (rereview/plan.ts) was
   // computed for every case but never READ by any production code — this
   // function forced verify_all purely off `case === "D" || "E"`, and
-  // buildPhaseBQueue (rereview-prepare.ts) passed it only `case`, never the
+  // buildPhaseBQueue (rereview/prepare.ts) passed it only `case`, never the
   // plan. That made `planDiscovery`'s `verifyAll: true` for a forced-full
   // case B/C (an incomplete prior run) a silent no-op: the refuter-failed
   // prior would stay merely `carried` (case B's empty L===H nameStatus never

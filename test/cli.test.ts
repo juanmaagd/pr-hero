@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { RereviewProvenance } from "#rereview/prepare";
 import { resolveEngineAssets } from "../src/assets";
 import {
   type AdmissionRecord,
@@ -86,7 +87,6 @@ import {
   resolveSummary,
   type SummarySettings,
 } from "../src/preflight";
-import type { RereviewProvenance } from "../src/rereview-prepare";
 import { DEFAULT_SIZE_GATE, type SizeGateConfig } from "../src/size-gate";
 import { triageMarker } from "../src/triage";
 
@@ -577,8 +577,8 @@ describe("every gotchas gate asks the shared predicate", () => {
 // `prepareDiscovery` and `buildPhaseBQueue` are actually handed the values
 // this fix computes rather than a hardcoded default. The pure half of this
 // —`skipDiscovery: false` / `verifyAll: true` for a forced-full case B — is
-// exhaustively covered in test/rereview-prepare.test.ts and
-// test/rereview-plan.test.ts; this only guards that cli.ts still WIRES those
+// exhaustively covered in test/rereview/prepare.test.ts and
+// test/rereview/plan.test.ts; this only guards that cli.ts still WIRES those
 // results through.
 describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () => {
   test("activeHunters is still gated on skipDiscovery alone, not a hardcoded case check", async () => {

@@ -52,7 +52,7 @@
 // `PR_FINDING_MARKER_PREFIX = "<!-- pr-hero-finding "`,
 // `PR_STATE_MARKER_PREFIX = "<!-- pr-hero-state "`,
 // `TRIAGE_MARKER_PREFIX = "<!-- pr-hero-triage "` — pr-preflight.ts,
-// rereview-state.ts, triage.ts). This module follows the shipped
+// rereview/state.ts, triage.ts). This module follows the shipped
 // convention, not the draft: `<!-- pr-hero-skip-size -->` /
 // `<!-- pr-hero-skip-budget -->`. Deliberately WITHOUT a `head=` field —
 // unlike `prCommentMarker`, the two `CiSummaryData` skip members this phase

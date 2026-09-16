@@ -1202,7 +1202,7 @@ describe("renderPrComment", () => {
   // `<!-- pr-hero-finding -->` marker has no claim BY DESIGN — the marker
   // never carried one and `priorsFromPostedMarkers` sets `claim: ""` so that
   // `claimFingerprint("")`, the one constant every claim-less prior shares,
-  // can never act as a tie-break (rereview-prepare.ts's WHY at :534 and
+  // can never act as a tie-break (rereview/prepare.ts's WHY at :534 and
   // :570-578). So the data stays as it is and the RENDER has to say so.
   const liveRowBody = (row: RereviewLiveRow): string =>
     renderPrComment(

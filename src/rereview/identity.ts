@@ -14,12 +14,12 @@
 // A missed pairing costs a verification step or a visible duplicate; an
 // over-match can hide a live defect behind `carried`.
 
-import { normalizePath } from "./compare";
-import { extractAnchor } from "./root-cause";
+import { normalizePath } from "../compare";
+import { extractAnchor } from "../root-cause";
 
 // Same number as `FINDING_LINE_WINDOW` in inline.ts. The posting matcher and
 // this identity layer MUST NOT drift: the design names that constant as the
-// span window (§3.5). A test in rereview-identity.test.ts pins the equality.
+// span window (§3.5). A test in test/rereview/identity.test.ts pins the equality.
 // Widening either independently is the size-gate 1500→2500→1500 arc.
 export const IDENTITY_LINE_WINDOW = 5;
 

@@ -9,6 +9,7 @@
 // Same-head dedup applies per head SHA; maxAttempts applies per PR.
 
 import { createHash } from "node:crypto";
+import type { ParsedStateBlock } from "#rereview/state";
 import {
   type AdmissionRecord,
   countTerminalAttempts,
@@ -20,7 +21,6 @@ import {
 import type { Tier } from "./findings";
 import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "./pr-preflight";
 import type { LocalConfig } from "./preflight";
-import type { ParsedStateBlock } from "./rereview-state";
 
 export const CI_REVIEW_POLICY_SCHEMA_VERSION = 1;
 export const DEFAULT_CI_REVIEW_POLICY_MODE = "risk_aware" as const;

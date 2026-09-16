@@ -7,6 +7,28 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
+import {
+  applyWorsening,
+  type GateStatus,
+  type PhaseBResult,
+  type PriorRecord,
+  type WorseningHit,
+} from "#rereview/classify";
+import type { RereviewProvenance } from "#rereview/prepare";
+import { assembleLive } from "#rereview/state";
+import {
+  assignVerifyIds,
+  closeVerifyQueue,
+  composeVerifyPrompt,
+  mapVerifyVerdict,
+  triggerCounts,
+  VERIFIER_AGENT,
+  type VerifyQueueEntry,
+  type VerifySubject,
+  verifyArtifactDir,
+  verifyBatchPath,
+  verifyStepName,
+} from "#rereview/verify";
 import { blockForgesNonce, selectBoundaryNonce, wrapBlock } from "./boundary";
 import {
   type DedupedSurvivor,
@@ -80,28 +102,6 @@ import {
   type SuspicionPrior,
 } from "./prompt-set";
 import { pathsNamedInDiff } from "./proof-refs";
-import {
-  applyWorsening,
-  type GateStatus,
-  type PhaseBResult,
-  type PriorRecord,
-  type WorseningHit,
-} from "./rereview-classify";
-import type { RereviewProvenance } from "./rereview-prepare";
-import { assembleLive } from "./rereview-state";
-import {
-  assignVerifyIds,
-  closeVerifyQueue,
-  composeVerifyPrompt,
-  mapVerifyVerdict,
-  triggerCounts,
-  VERIFIER_AGENT,
-  type VerifyQueueEntry,
-  type VerifySubject,
-  verifyArtifactDir,
-  verifyBatchPath,
-  verifyStepName,
-} from "./rereview-verify";
 import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
 import {
   capScoutLeads,
@@ -1656,7 +1656,7 @@ async function execute(
   }
   // §5.3 admission for the verify leg. Absence needs no backfill here:
   // `assembleLive` already reads a prior id missing from `verifyVerdicts` as
-  // `unconfirmed` (src/rereview-state.ts), which is exactly what "the check
+  // `unconfirmed` (src/rereview/state.ts), which is exactly what "the check
   // never ran" means — §3.3's "`resolved` is never inferred from absence"
   // holds without this branch writing anything.
   if (closed.verify.length > 0 && !ceilingAborted(deps, state)) {
