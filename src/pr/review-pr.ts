@@ -21,50 +21,16 @@
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AdmissionRecord } from "#ci/admission-ledger";
 import {
-  type AdmissionContext,
   budgetDisabledWarningMessage,
   budgetUnlimitedNoticeMessage,
   ciExitCode,
   deriveCiBillingMode,
   planCiBudgetSkip,
-  planCiReview,
-  planCiReviewManualRequired,
-  planCiReviewSkip,
   planCiSizeSkip,
   resolveCiBudgetCeiling,
-  shouldPublishCiReview,
-  shouldWriteCiOutputs,
-  shouldWriteStepSummary,
 } from "#ci/gates";
-import {
-  appendCiOutputs,
-  appendStepSummary,
-  formatWorkflowCommand,
-  withCiWorkflowGroup,
-} from "#ci/reporter";
-import {
-  ciReviewManualRequiredDetail,
-  ciReviewPolicyHash,
-  ciReviewSkipDetail,
-  deltaTouchesPriorFindings,
-  evaluateCiReviewAdmission,
-  formatCiAdmissionObserveNotice,
-  parseCiAdmissionBlock,
-  pathsFromPostedFindingMarkers,
-  resolveCiAdmissionAttemptCount,
-  resolveCiReviewPolicy,
-  resolveCiTrustedActors,
-  scanPostedFindingTiers,
-  stateReviewCount,
-  validateAdmissionAuthority,
-} from "#ci/review-admission";
-import {
-  classifyChangedPaths,
-  type DeltaRiskAssessment,
-} from "#ci/review-risk";
-import { parseComparisonJson, type StoredComparison } from "#compare/ledger";
+import { formatWorkflowCommand, withCiWorkflowGroup } from "#ci/reporter";
 import {
   ingestReviewMetrics,
   loadEffectiveConfig,
@@ -89,34 +55,26 @@ import { engineIdentity } from "#git/identity";
 import {
   type CiAdmissionLedgerState,
   publishCiSkip,
-  recordCiAdmissionGateSkip,
   reserveCiAdmissionLedger,
   settleCiAdmissionLedger,
 } from "#pr/admission";
+import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
+import { publishCiReviewIfEligible } from "#pr/ci-publish";
+import { computeGreptileComparison } from "#pr/comparison";
 import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
+import { postFindingsIfEnabled } from "#pr/posting";
 import {
-  CommentsTruncatedError,
-  type ComparisonOutcome,
-  ensureWorktree,
   fetchCommitStatuses,
   fetchPostedFindingComments,
   fetchPrComments,
   fetchPrRefs,
   fetchPrReviewComments,
-  ghCompareChangedFilesWithStatus,
   ghCurrentBranchPr,
   ghPrFiles,
-  ghPrHeroWorkflowRunHeads,
   ghPrView,
   ghRepoWebUrl,
-  initCodegraphIndex,
-  listAdmissionCheckRuns,
-  postInlineIfEligible,
-  writeComparison,
-  writePostReceipt,
 } from "#pr/pr";
 import {
-  commitStatusCompletion,
   commitStatusRequest,
   createPrRunDir,
   findMarkedCommentId,
@@ -127,11 +85,9 @@ import {
   resolvePrDryRunSizeGate,
   resolvePrTarget,
 } from "#pr/preflight";
-import {
-  holdCommitStatusLock,
-  releaseCommitStatusLock,
-  tryPublishCommitStatus,
-} from "#pr/status";
+import { holdCommitStatusLock, tryPublishCommitStatus } from "#pr/status";
+import { finalizePrReviewRun, settleCommitStatusAndLedger } from "#pr/teardown";
+import { setupPrWorktree } from "#pr/worktree-setup";
 import {
   buildPhaseBQueue,
   decideLastHeadDelta,
@@ -159,7 +115,6 @@ import {
 } from "#review/pipeline";
 import {
   allExcludedMessage,
-  CliError,
   type CliOptions,
   emptyDiffMessage,
   isCiEnvironment,
@@ -191,7 +146,6 @@ import {
   resolvePromptSet,
   selectActiveHunters,
   validateGotchas,
-  writeMcpConfig,
 } from "#review/run";
 import {
   type ExcludedPath,
@@ -203,7 +157,6 @@ import {
   sizeGateLine,
 } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
-import { runGc } from "#store/gc";
 import {
   configProvenanceOf,
   dryRunHunterCount,
@@ -215,17 +168,9 @@ import {
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
 import { applySizeGate, confirm, startProgressRenderer } from "#ui/progress";
 import { type ResultLinks, renderResult } from "#ui/result";
-import {
-  markerCommentSeen,
-  parsePrCommentMarker,
-  parsePrFiles,
-} from "#watch/preflight";
-import {
-  acquirePidLock,
-  releasePidLock,
-  resolveRepoHome,
-  stampWorktree,
-} from "../home";
+import { parsePrCommentMarker, parsePrFiles } from "#watch/preflight";
+import { CliError } from "../errors";
+import { acquirePidLock, resolveRepoHome } from "../home";
 import {
   legacyMigrationHint,
   legacyWorktreePath,
@@ -370,207 +315,22 @@ export async function reviewPr(
     }
   }
 
-  const ciPolicy = resolveCiReviewPolicy(config);
-  const ciPolicyHash = ciReviewPolicyHash(ciPolicy);
-  let ledgerRecords: AdmissionRecord[] = [];
+  // The CI admission gate (ROADMAP Pillar 3): decides, before any git fetch
+  // or worktree is touched, whether a CI-triggered review of an
+  // already-reviewed head should run, skip, or fall back to a human
+  // decision. See evaluateCiAdmissionGate (src/pr/ci-admission-gate.ts) for
+  // the full rationale.
+  const ciAdmissionGate = await evaluateCiAdmissionGate({
+    operatorRoot,
+    prNumber,
+    headSha: target.headSha,
+    config,
+    isCi,
+    options,
+  });
+  if (ciAdmissionGate.exitCode !== undefined) return ciAdmissionGate.exitCode;
+  const { ciPolicy, ciPolicyHash, ledgerRecords } = ciAdmissionGate;
   let ciAdmissionLedger: CiAdmissionLedgerState | null = null;
-
-  if (!options.dryRun && isCi) {
-    ledgerRecords = await listAdmissionCheckRuns(operatorRoot, target.headSha);
-  }
-
-  if (!options.dryRun && !options.force && isCi) {
-    let issueComments: Awaited<ReturnType<typeof fetchPrComments>>;
-    let reviewComments: Awaited<ReturnType<typeof fetchPrReviewComments>>;
-    let authorityFailOpen = false;
-    try {
-      [issueComments, reviewComments] = await Promise.all([
-        fetchPrComments(operatorRoot, prNumber),
-        fetchPrReviewComments(operatorRoot, prNumber),
-      ]);
-    } catch (error) {
-      if (error instanceof CommentsTruncatedError) {
-        authorityFailOpen = true;
-        issueComments = [];
-        reviewComments = [];
-      } else {
-        throw error;
-      }
-    }
-    const existingSummaryId = findMarkedCommentId(issueComments);
-    const summaryBody =
-      existingSummaryId === null
-        ? null
-        : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? null);
-    const summaryMarker =
-      summaryBody === null ? null : parsePrCommentMarker(summaryBody);
-    const summaryHead = summaryMarker?.head ?? null;
-    const summaryComplete = summaryMarker?.complete ?? true;
-    const state = summaryBody === null ? null : parseStateBlock(summaryBody);
-    const parsedAdmission =
-      summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
-    const authority = validateAdmissionAuthority({
-      summaryHead,
-      reportMarkerHead: summaryHead,
-      state,
-      admission: parsedAdmission,
-    });
-    if (!authority.ok) {
-      authorityFailOpen = true;
-    }
-    const trustedActors = resolveCiTrustedActors({
-      githubActor: process.env.GITHUB_ACTOR,
-      extra: config.ci_trusted_actors,
-    });
-    const allComments = [...reviewComments, ...issueComments];
-    const postedFindings =
-      summaryHead === null
-        ? null
-        : scanPostedFindingTiers({
-            summaryHead,
-            comments: allComments,
-            trustedActors,
-          });
-    const markerSeen = markerCommentSeen(issueComments);
-    const stateCount = stateReviewCount(state, markerSeen, parsedAdmission);
-    const headBranch = process.env.GITHUB_HEAD_REF;
-    const workflowHeads =
-      headBranch === undefined || headBranch.length === 0
-        ? new Set<string>()
-        : await ghPrHeroWorkflowRunHeads(operatorRoot, headBranch);
-    const reviewCount = resolveCiAdmissionAttemptCount({
-      stateCount,
-      workflowHeads,
-      ledgerRecords,
-    });
-    let deltaTouchesPriorFindingsFlag = false;
-    let deltaRisk: DeltaRiskAssessment | null = null;
-    if (summaryHead !== null && summaryHead !== target.headSha) {
-      const compareFiles = await ghCompareChangedFilesWithStatus(
-        operatorRoot,
-        summaryHead,
-        target.headSha,
-      );
-      const changedPaths = compareFiles.map((entry) => entry.path);
-      deltaRisk = classifyChangedPaths(
-        changedPaths,
-        compareFiles.map((entry) => ({
-          path: entry.path,
-          status: entry.status,
-        })),
-      );
-      const priorPaths = pathsFromPostedFindingMarkers(
-        allComments,
-        summaryHead,
-        trustedActors,
-      );
-      if (priorPaths.length > 0) {
-        deltaTouchesPriorFindingsFlag = deltaTouchesPriorFindings(
-          changedPaths,
-          priorPaths,
-        );
-      }
-    }
-    const admissionVerdict = evaluateCiReviewAdmission({
-      currentHead: target.headSha,
-      summaryHead,
-      summaryComplete,
-      markerSeen,
-      reviewCount,
-      state,
-      admission: parsedAdmission,
-      postedFindings,
-      policy: ciPolicy,
-      deltaTouchesPriorFindings: deltaTouchesPriorFindingsFlag,
-      deltaRisk,
-      authorityFailOpen,
-    });
-    const admissionContext: AdmissionContext = {
-      currentHead: target.headSha,
-      reviewedHead: summaryHead,
-      policyMode: ciPolicy.mode,
-      policyHash: ciPolicyHash,
-      deltaRisk,
-    };
-    const observeOnly = config.ci_admission_observe_only === true;
-    if (
-      observeOnly &&
-      (admissionVerdict.action === "skip" ||
-        admissionVerdict.action === "manual-required")
-    ) {
-      log(
-        formatWorkflowCommand(
-          "notice",
-          formatCiAdmissionObserveNotice({
-            verdict: admissionVerdict,
-            currentHead: target.headSha,
-            reviewedHead: summaryHead,
-            policyMode: ciPolicy.mode,
-            policyHash: ciPolicyHash,
-            deltaRisk,
-          }),
-        ),
-      );
-    }
-    if (!observeOnly && admissionVerdict.action === "skip") {
-      const skipReason = ciReviewSkipDetail(admissionVerdict);
-      await recordCiAdmissionGateSkip({
-        operatorRoot,
-        prNumber,
-        headSha: target.headSha,
-        policy: ciPolicy,
-        policyHash: ciPolicyHash,
-        existing: ledgerRecords,
-        reason: skipReason,
-        priorScore: admissionVerdict.prior.score,
-        blockingCount: admissionVerdict.prior.blocking,
-        advisoryCount: admissionVerdict.prior.advisory,
-      });
-      const plan = planCiReviewSkip({
-        prNumber,
-        verdict: admissionVerdict,
-        admission: admissionContext,
-      });
-      return await publishCiSkip({
-        operatorRoot,
-        prNumber,
-        post: options.post === true,
-        isCi,
-        stepSummaryFlag: options.stepSummary,
-        plan,
-        noticeMessage: `pr-hero review skipped — ${skipReason}`,
-      });
-    }
-    if (!observeOnly && admissionVerdict.action === "manual-required") {
-      const manualReason = ciReviewManualRequiredDetail(admissionVerdict);
-      await recordCiAdmissionGateSkip({
-        operatorRoot,
-        prNumber,
-        headSha: target.headSha,
-        policy: ciPolicy,
-        policyHash: ciPolicyHash,
-        existing: ledgerRecords,
-        reason: manualReason,
-        priorScore: admissionVerdict.prior.score,
-        blockingCount: admissionVerdict.prior.blocking,
-        advisoryCount: admissionVerdict.prior.advisory,
-      });
-      const plan = planCiReviewManualRequired({
-        prNumber,
-        verdict: admissionVerdict,
-        admission: admissionContext,
-      });
-      return await publishCiSkip({
-        operatorRoot,
-        prNumber,
-        post: options.post === true,
-        isCi,
-        stepSummaryFlag: options.stepSummary,
-        plan,
-        noticeMessage: `pr-hero review requires manual override — ${manualReason}`,
-      });
-    }
-  }
 
   // 3 — the free exit, BEFORE the git fetch: a PR-mode dry run still creates
   // NOTHING — no `git fetch`, no worktree, no run dir — but it does now make
@@ -1250,41 +1010,17 @@ export async function reviewPr(
     let result: PipelineResult | undefined;
     let posted: InlinePostOutcome | null = null;
     try {
-      // 8 — the review root.
-      const worktree = await ensureWorktree(gitDirOwner, worktreePath, headSha);
-      log();
-      log(`worktree ${worktree.action}: ${worktreePath} (${worktree.reason})`);
-      await stampWorktree(
-        repoHome.paths.registry,
+      // 8-10 — the review root, its own codegraph index, and the MCP
+      // registry the hunters read. See setupPrWorktree
+      // (src/pr/worktree-setup.ts) for the full rationale.
+      const { mcpConfigPath, indexMs } = await setupPrWorktree({
+        gitDirOwner,
+        worktreePath,
+        headSha,
+        registryPath: repoHome.paths.registry,
         prNumber,
-        new Date().toISOString(),
-      );
-
-      // 9 — the worktree's own index. Never another checkout's: the ROADMAP
-      // forbids riding a sibling's index, because its bytes may differ.
-      let indexMs = 0;
-      if (!existsSync(path.join(worktreePath, ".codegraph"))) {
-        if (Bun.which("codegraph") === null) {
-          log(
-            "codegraph CLI not found — no index will be built; hunters run on " +
-              "Read/Grep/Glob alone",
-          );
-        } else {
-          indexMs = await initCodegraphIndex(worktreePath);
-          log(`codegraph init: ${Math.round(indexMs / 1000)}s`);
-        }
-      }
-
-      // 10 — MCP registry, checked against the WORKTREE. Local mode checks the
-      // repo root because the repo root is what its hunters read; here the
-      // hunters' tree is the worktree, and an index found in the operator
-      // checkout would be exactly the other-checkout's index the step above
-      // refuses to ride.
-      const mcpConfigPath = path.join(runDir, "mcp.json");
-      const codegraphAvailable = existsSync(
-        path.join(worktreePath, ".codegraph"),
-      );
-      await writeMcpConfig(mcpConfigPath, codegraphAvailable);
+        runDir,
+      });
 
       // 11 — run, with live progress (same shape as local mode's leg). The
       // pipeline is untouched beyond the observational tap: it gets the worktree
@@ -1446,61 +1182,25 @@ export async function reviewPr(
         }),
       );
 
-      // 13 — the head-to-head, in-process. A failure here must NOT fail the run:
-      // the review artifacts above are already on disk and are the product, so a
-      // gh hiccup degrades to a warning, never to an exit code. A run where
-      // EVERY hunter died writes no comparison at all — "pr-hero 0" from a
-      // review that never happened would land in B4's ledger as a measured
-      // miss, and the ledger's honesty outranks the artifact's completeness.
-      let comparison: ComparisonOutcome | null = null;
-      if (result.sessionFailed) {
-        log(
-          "comparison skipped: every hunter failed, so there is no review to compare",
-        );
-      } else {
-        try {
-          comparison = await writeComparison({
-            operatorRoot,
-            pr: prNumber,
-            headSha,
-            diffFromSha,
-            runDir,
-            // The I/O shell owns the clock; the pure builder just records it.
-            generatedAt: new Date().toISOString(),
-            runStatus: doc.run_status,
-            findings: doc.findings.map((f) => ({
-              id: f.id,
-              path: f.path,
-              line: f.line,
-              claim: f.claim,
-              tier: f.tier,
-            })),
-          });
-        } catch (error) {
-          log(
-            "warning: comparison against Greptile failed — the review itself is " +
-              `intact: ${(error as Error).message}`,
-          );
-        }
-      }
-
-      // 13b — the observability store (W4 / #23). AFTER the comparison write,
-      // BEFORE posting: reuses repoHome.repoId from step 2 (no second origin
-      // lookup) and reads comparison.json back off disk — the artifact IS the
-      // source of truth, so ingest never re-derives the bucketing itself.
-      // Fail-soft, same contract as local mode: never turns a successful
-      // review into a failed one.
-      let storedComparison: StoredComparison | null = null;
-      if (comparison) {
-        try {
-          storedComparison = parseComparisonJson(
-            await Bun.file(comparison.jsonPath).text(),
-          );
-        } catch {
-          // Degrades to a run row without comparison children; ingestRun
-          // itself throwing is handled (and warned on) by failSoftIngest.
-        }
-      }
+      // 13 — the Greptile head-to-head, then (13b) the comparison.json
+      // read-back for the observability store. See computeGreptileComparison
+      // (src/pr/comparison.ts) for the full rationale.
+      const { comparison, storedComparison } = await computeGreptileComparison({
+        sessionFailed: result.sessionFailed,
+        operatorRoot,
+        pr: prNumber,
+        headSha,
+        diffFromSha,
+        runDir,
+        runStatus: doc.run_status,
+        findings: doc.findings.map((f) => ({
+          id: f.id,
+          path: f.path,
+          line: f.line,
+          claim: f.claim,
+          tier: f.tier,
+        })),
+      });
       // 13b — canonical product store & observability metrics.
       persistCanonicalReview({
         home,
@@ -1523,69 +1223,25 @@ export async function reviewPr(
         log,
       });
 
-      // 14 — the posting, only when asked. AFTER the comparison on purpose: a
-      // posting failure must never cost the comparison artifact. And unlike the
-      // comparison, posting does NOT degrade to a warning — it was explicitly
-      // requested. ROADMAP B6 rewire, W2 (issues #16/#17): posting now goes
-      // through the inline surface — anchorability, cross-run matching, the one
-      // review submission (with its 422 recovery into the summary Outside Diff
-      // bucket), and the summary PATCHed LAST so its delta line and Outside Diff
-      // section describe what this run actually posted, not what it planned to.
-      // Un-anchorable findings never get a `POST .../issues/<n>/comments`.
-      // `postInlineIfEligible` carries the
-      // `sessionFailed` guard (design D6, spec "sessionFailed suppresses all
-      // posting"): a clean-bill comment set from a review that never ran would
-      // be a public lie, same reasoning as the comparison guard above.
-      // Hoisted out of the branch below ONLY so step 15 can reuse it: when posting
-      // ran, the terminal's links must be built from the SAME web url the comments
-      // were published against, or a finding's comment fragment could hang off a
-      // different host than the comment itself.
-      let postedWebUrl: string | undefined;
-      if (postEnabled) {
-        postedWebUrl = await ghRepoWebUrl(operatorRoot);
-        if (postedWebUrl === undefined) {
-          log("repo web url unavailable: posting plain locations");
-        }
-        posted = await postInlineIfEligible({
-          sessionFailed: result.sessionFailed,
-          skippedReason:
-            "post skipped: every hunter failed, so there is no review to publish",
-          operatorRoot,
-          pr: prNumber,
-          headSha,
-          doc,
-          diffPatch: effectiveDiff.patch,
-          webUrl: postedWebUrl,
-          rereview,
-          rereviewPriors: phaseB?.priors,
-        });
-        if (posted) {
-          await writePostReceipt(runDir, prNumber, headSha, posted);
-          log(
-            `posted: review ${posted.reviewOutcome} (${posted.reviewFindingCount} ` +
-              `finding(s)), ${posted.outsideDiffCount} outside diff, ` +
-              `summary ${posted.summary.action} comment ${posted.summary.commentId}`,
-          );
-          // GitHub #39: said at the MOMENT it happened, not only in the result
-          // block minutes of scrollback later — the same reason the 422
-          // demotion below gets its own line here. The two can co-occur: a
-          // force-push both moves the head and 422s the pinned submission.
-          if (posted.movedHeadSha) {
-            log(
-              `warning: the PR head moved while the review ran — reviewed ` +
-                `${headSha}, head is now ${posted.movedHeadSha}; the comments ` +
-                "are pinned to the reviewed commit",
-            );
-          }
-          if (posted.reviewOutcome === "demoted") {
-            log(
-              "warning: the review submission was rejected (422) and recovered " +
-                "into the summary Outside Diff bucket — see the run's post.json " +
-                "for detail",
-            );
-          }
-        }
-      }
+      // 14 — the posting, only when asked. Hoisted `postedWebUrl` out of the
+      // stage ONLY so step 15 can reuse it: when posting ran, the terminal's
+      // links must be built from the SAME web url the comments were
+      // published against. See postFindingsIfEnabled (src/pr/posting.ts) for
+      // the full rationale.
+      const postingResult = await postFindingsIfEnabled({
+        postEnabled,
+        sessionFailed: result.sessionFailed,
+        operatorRoot,
+        pr: prNumber,
+        headSha,
+        doc,
+        diffPatch: effectiveDiff.patch,
+        runDir,
+        rereview,
+        rereviewPriors: phaseB?.priors,
+      });
+      posted = postingResult.posted;
+      const postedWebUrl = postingResult.postedWebUrl;
 
       // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
       // the worktree hint) ride in as optional inputs. The `posted:` line that
@@ -1653,46 +1309,24 @@ export async function reviewPr(
       })) {
         log(line);
       }
-      // 16 — CI headless publishing (ROADMAP Pillar 3): the "reviewed"
-      // outcome's step summary + $GITHUB_OUTPUT, built from the SAME `doc`
-      // renderResult just printed from above, so nothing here can disagree
-      // with what the terminal (and the PR comments, via step 14's posted
-      // outcome) already reported. `posted?.delta` reuses postInlineFindings'
-      // own re-review delta — no separate computation.
-      // The gate is shouldPublishCiReview, never a bare `isCi`: design D6's
-      // "a failed session publishes nothing" binds this channel exactly as it
-      // binds postInlineIfEligible above. See that predicate for why.
-      if (shouldPublishCiReview(isCi, result.sessionFailed)) {
-        const ciPlan = planCiReview({
-          prNumber,
-          headSha,
-          findings: doc.findings,
-          costUsdEst: result.usage.cost_usd_est,
-          wallMs,
-          model: envelopeModel(options, agentFiles),
-          ...(webUrl === undefined ? {} : { repoWebUrl: webUrl }),
-          ...(posted?.delta === undefined ? {} : { delta: posted.delta }),
-          runDir,
-        });
-        const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-        if (shouldWriteStepSummary(isCi, options.stepSummary, summaryPath)) {
-          await appendStepSummary(
-            summaryPath as string,
-            ciPlan.summaryMarkdown,
-          );
-        }
-        const outputPath = process.env.GITHUB_OUTPUT;
-        if (shouldWriteCiOutputs(isCi, outputPath)) {
-          await appendCiOutputs(outputPath as string, ciPlan.outputs);
-        }
-        log(
-          formatWorkflowCommand(
-            "notice",
-            `pr-hero review complete — ${ciPlan.outputs.findings_count} ` +
-              `finding(s) (${ciPlan.outputs.blocking_count} blocking)`,
-          ),
-        );
-      }
+      // 16 — CI headless publishing (ROADMAP Pillar 3). `posted?.delta`
+      // reuses postInlineFindings' own re-review delta — no separate
+      // computation. See publishCiReviewIfEligible (src/pr/ci-publish.ts)
+      // for the full rationale.
+      await publishCiReviewIfEligible({
+        isCi,
+        sessionFailed: result.sessionFailed,
+        prNumber,
+        headSha,
+        findings: doc.findings,
+        costUsdEst: result.usage.cost_usd_est,
+        wallMs,
+        model: envelopeModel(options, agentFiles),
+        webUrl,
+        delta: posted?.delta,
+        runDir,
+        stepSummaryFlag: options.stepSummary,
+      });
       if (result.sessionFailed) {
         await settleCiAdmissionLedger(
           ciAdmissionLedger,
@@ -1719,58 +1353,26 @@ export async function reviewPr(
           })
         : postingExitCode(posted);
     } finally {
-      const phase = commitStatusCompletion({
-        pipelineFinished: result !== undefined,
-        sessionFailed: result?.sessionFailed === true,
-      });
-      await tryPublishCommitStatus(
+      // The commit status must settle BEFORE the lock is released, and the
+      // ledger settlement must still run on throw or early return. See
+      // settleCommitStatusAndLedger (src/pr/teardown.ts) for the full
+      // rationale.
+      await settleCommitStatusAndLedger({
+        result,
+        posted,
         operatorRoot,
         headSha,
-        commitStatusRequest({
-          phase,
-          posted: posted !== null,
-          targetUrl: statusTargetUrl,
-        }),
-      );
-      // Settled, so nothing is held: the signal handlers must never post a
-      // second, contradicting status over the one just written. Released
-      // immediately after the settle so no path through this finally — throw,
-      // early return, or normal exit — can leave the lock standing.
-      releaseCommitStatusLock();
-      // Best-effort: the SIGTERM/SIGINT handlers settle the COMMIT STATUS
-      // (holdCommitStatusLock above) but still cannot reach the ledger, which
-      // has no equivalent hand-off. Any throw or early return that skipped
-      // explicit settlement does land here.
-      if (
-        ciAdmissionLedger !== null &&
-        (ciAdmissionLedger.record.status === "reserved" ||
-          ciAdmissionLedger.record.status === "provider-started")
-      ) {
-        await settleCiAdmissionLedger(
-          ciAdmissionLedger,
-          "failed",
-          "review path exited without terminal settlement",
-        );
-      }
+        statusTargetUrl,
+        ciAdmissionLedger,
+      });
     }
   } finally {
-    if (
-      ciAdmissionLedger !== null &&
-      (ciAdmissionLedger.record.status === "reserved" ||
-        ciAdmissionLedger.record.status === "provider-started")
-    ) {
-      await settleCiAdmissionLedger(
-        ciAdmissionLedger,
-        "failed",
-        "review path exited without terminal settlement",
-      );
-    }
-    await releasePidLock(lockPath);
-    await runGc({
+    // See finalizePrReviewRun (src/pr/teardown.ts) for the full rationale.
+    await finalizePrReviewRun({
+      ciAdmissionLedger,
+      lockPath,
       home,
       repoId: repoHome.repoId,
-      dryRun: false,
-      silent: true,
     });
   }
 }
