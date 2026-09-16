@@ -16,17 +16,11 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import {
-  type AdmissionAttemptStatus,
-  type AdmissionRecord,
-  reserveAdmissionAttempt,
-  settleAdmissionAttempt,
-} from "#ci/admission-ledger";
+import type { AdmissionRecord } from "#ci/admission-ledger";
 import {
   type AdmissionContext,
   budgetDisabledWarningMessage,
   budgetUnlimitedNoticeMessage,
-  type CiGateSkipPlan,
   ciExitCode,
   deriveCiBillingMode,
   planCiBudgetSkip,
@@ -44,10 +38,10 @@ import {
   appendStepSummary,
   formatWorkflowCommand,
   reportFatalCiError,
+  reportFatalCiErrorIfInJobStep,
   withCiWorkflowGroup,
 } from "#ci/reporter";
 import {
-  type CiReviewPolicy,
   ciReviewManualRequiredDetail,
   ciReviewPolicyHash,
   ciReviewSkipDetail,
@@ -115,6 +109,13 @@ import {
   type ResolvedRoutePlan,
   type RoutingConfig,
 } from "#model/routing";
+import {
+  type CiAdmissionLedgerState,
+  publishCiSkip,
+  recordCiAdmissionGateSkip,
+  reserveCiAdmissionLedger,
+  settleCiAdmissionLedger,
+} from "#pr/admission";
 import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
 import {
   CommentsTruncatedError,
@@ -134,8 +135,6 @@ import {
   initCodegraphIndex,
   listAdmissionCheckRuns,
   postInlineIfEligible,
-  postPrComment,
-  upsertAdmissionCheckRun,
   writeComparison,
   writePostReceipt,
 } from "#pr/pr";
@@ -229,7 +228,12 @@ import {
   parseAgentFile,
   promptSetIdentity,
 } from "#review/prompt-set";
-import { type DiffStat, estimateCost, renderReport } from "#review/report";
+import {
+  type DiffStat,
+  envelopeModel,
+  estimateCost,
+  renderReport,
+} from "#review/report";
 import {
   type ExcludedPath,
   effectiveDiffStat,
@@ -3128,180 +3132,6 @@ async function applySizeGate(
   return "proceed";
 }
 
-// ROADMAP Pillar 3 (GitHub Actions CI). The mechanical glue behind a gate
-// skip in CI mode: every DECISION (what to say, which marker, what the
-// outputs are) already happened in `plan` (planCiSizeSkip/planCiBudgetSkip,
-// ci/gates.ts) — this function has nothing left to decide, only three
-// straight-line I/O calls gated by shouldWriteStepSummary/shouldWriteCiOutputs.
-// `postPrComment`'s own `markerPrefix` (Phase 3's parameterization) makes
-// this idempotent: a repeat CI run on the same still-failing PR updates its
-// own prior skip comment rather than stacking a new one on every push.
-type CiAdmissionLedgerState = {
-  record: AdmissionRecord;
-  checkRunId: number;
-  headSha: string;
-  operatorRoot: string;
-};
-
-async function persistCiAdmissionLedger(
-  state: CiAdmissionLedgerState,
-): Promise<void> {
-  state.checkRunId = await upsertAdmissionCheckRun(state.operatorRoot, {
-    headSha: state.headSha,
-    record: state.record,
-    checkRunId: state.checkRunId,
-  });
-}
-
-async function tryPersistCiAdmissionLedger(
-  state: CiAdmissionLedgerState | null,
-): Promise<void> {
-  if (state === null) return;
-  try {
-    await persistCiAdmissionLedger(state);
-  } catch {
-    // Best-effort: settlement must not mask the underlying review failure.
-  }
-}
-
-async function settleCiAdmissionLedger(
-  state: CiAdmissionLedgerState | null,
-  status: AdmissionAttemptStatus,
-  reason: string,
-): Promise<void> {
-  if (state === null) return;
-  const terminal = new Set<AdmissionAttemptStatus>([
-    "completed",
-    "failed",
-    "cancelled",
-    "skipped",
-  ]);
-  if (
-    terminal.has(state.record.status) &&
-    state.record.status !== "provider-started"
-  ) {
-    return;
-  }
-  state.record = settleAdmissionAttempt(state.record, status, reason);
-  await tryPersistCiAdmissionLedger(state);
-}
-
-async function reserveCiAdmissionLedger(input: {
-  operatorRoot: string;
-  prNumber: number;
-  headSha: string;
-  policy: CiReviewPolicy;
-  policyHash: string;
-  existing: readonly AdmissionRecord[];
-  decisionReason: string;
-  priorScore?: number | null;
-  blockingCount?: number | null;
-  advisoryCount?: number | null;
-}): Promise<CiAdmissionLedgerState> {
-  const { record } = reserveAdmissionAttempt({
-    existing: input.existing,
-    prNumber: input.prNumber,
-    headSha: input.headSha,
-    policyHash: input.policyHash,
-    workflowRunId: process.env.GITHUB_RUN_ID ?? null,
-    decisionReason: input.decisionReason,
-    priorScore: input.priorScore ?? null,
-    blockingCount: input.blockingCount ?? null,
-    advisoryCount: input.advisoryCount ?? null,
-    reservationTtlSeconds: input.policy.reservationTtlSeconds,
-  });
-  const checkRunId = await upsertAdmissionCheckRun(input.operatorRoot, {
-    headSha: input.headSha,
-    record,
-  });
-  return {
-    record,
-    checkRunId,
-    headSha: input.headSha,
-    operatorRoot: input.operatorRoot,
-  };
-}
-
-async function recordCiAdmissionGateSkip(input: {
-  operatorRoot: string;
-  prNumber: number;
-  headSha: string;
-  policy: CiReviewPolicy;
-  policyHash: string;
-  existing: readonly AdmissionRecord[];
-  reason: string;
-  priorScore: number | null;
-  blockingCount: number | null;
-  advisoryCount: number | null;
-}): Promise<void> {
-  try {
-    const state = await reserveCiAdmissionLedger({
-      operatorRoot: input.operatorRoot,
-      prNumber: input.prNumber,
-      headSha: input.headSha,
-      policy: input.policy,
-      policyHash: input.policyHash,
-      existing: input.existing,
-      decisionReason: input.reason,
-      priorScore: input.priorScore,
-      blockingCount: input.blockingCount,
-      advisoryCount: input.advisoryCount,
-    });
-    await settleCiAdmissionLedger(state, "skipped", input.reason);
-  } catch {
-    // The skip notice is the operator-facing outcome; a check-run write must
-    // not block publishing it.
-  }
-}
-
-async function publishCiSkip(input: {
-  operatorRoot: string;
-  prNumber: number;
-  post: boolean;
-  isCi: boolean;
-  stepSummaryFlag: boolean | undefined;
-  plan: CiGateSkipPlan;
-  noticeMessage: string;
-}): Promise<number> {
-  log(formatWorkflowCommand("notice", input.noticeMessage));
-  if (input.post) {
-    await postPrComment(
-      input.operatorRoot,
-      input.prNumber,
-      input.plan.comment,
-      undefined,
-      undefined,
-      input.plan.markerPrefix,
-    );
-  }
-  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
-  if (shouldWriteStepSummary(input.isCi, input.stepSummaryFlag, summaryPath)) {
-    await appendStepSummary(summaryPath as string, input.plan.summaryMarkdown);
-  }
-  const outputPath = process.env.GITHUB_OUTPUT;
-  if (shouldWriteCiOutputs(input.isCi, outputPath)) {
-    await appendCiOutputs(outputPath as string, input.plan.outputs);
-  }
-  return 0;
-}
-
-// The envelope needs ONE model string. With no --model override each agent
-// carries its own frontmatter model, so report what actually ran rather than
-// inventing a single value: identical models collapse to one name, a mixed
-// set is recorded as a mix instead of as a lie.
-function envelopeModel(
-  options: CliOptions,
-  agentFiles: Map<string, ParsedAgent>,
-): string {
-  if (options.model) return options.model;
-  const models = new Set<string>();
-  for (const agent of agentFiles.values()) {
-    if (agent.model) models.add(agent.model);
-  }
-  if (models.size === 0) return "unspecified";
-  return [...models].sort().join("+");
-}
-
 async function menuCommand(options: CliOptions): Promise<number> {
   const repoRoot = options.repo
     ? await resolveRepoRoot(options.repo).catch(() => undefined)
@@ -3411,30 +3241,6 @@ async function menuCommand(options: CliOptions): Promise<number> {
       }
     },
   });
-}
-
-// main()'s two internal catches RETURN rather than throw, so runCli()'s catch
-// — the only thing that has ever written `status=error` — never saw them. Both
-// are failures docs/github-actions.md names as reasons the job goes red: a
-// malformed argument (parseArgs, exit 2) and a CliError/CliUsageError from a
-// command body (exit 1) — which is precisely what a missing or expired
-// GITHUB_TOKEN produces, since pr/pr.ts raises CliError for `gh not found on
-// PATH` and for a failed `gh pr view`. A consumer branching on
-// `outputs.status == 'error'` therefore never saw it fire for the two most
-// common failures; it saw `status` unset, indistinguishable from a step whose
-// outputs were never read.
-//
-// $GITHUB_OUTPUT's mere presence is the CI signal here, exactly as it is for
-// reportFatalCiError: GitHub sets it for every job step before any of this
-// repo's own flags are parsed. Guarding the CALL rather than only the write is
-// deliberate — reportFatalCiError also emits an `::error::` annotation, and
-// printing workflow-command syntax on a developer's terminal after a plain
-// typo is noise, not diagnostics. Exit codes are untouched; only the write is
-// new.
-async function reportFatalCiErrorIfInJobStep(error: unknown): Promise<void> {
-  const outputPath = process.env.GITHUB_OUTPUT;
-  if (outputPath === undefined || outputPath.length === 0) return;
-  await reportFatalCiError(error, outputPath);
 }
 
 // Exported so bin/pr-hero.js can drive the exact same signal-handling +

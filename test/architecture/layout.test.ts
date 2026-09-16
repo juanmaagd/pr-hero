@@ -129,6 +129,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
   {
     domain: "pr",
     files: [
+      "admission",
       "inline",
       "pr",
       "preflight",
