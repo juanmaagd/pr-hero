@@ -109,7 +109,7 @@ runs:
       env:
         ROUTING_INPUT: ${{ inputs.routing }}
         OPENCODE_AUTH_INPUT: ${{ inputs.opencode-auth }}
-      run: bun "${{ github.action_path }}/src/ci-setup.ts"
+      run: bun "${{ github.action_path }}/src/ci/setup.ts"
 
     # Pin 1.18.30 as its own step so GITHUB_PATH updates later steps only
     # (install ≠ Run pr-hero). Never unpinned. Digest verify of the official
