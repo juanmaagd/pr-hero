@@ -55,6 +55,20 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "setup",
     ],
   },
+  {
+    domain: "store",
+    files: [
+      "activity",
+      "backfill",
+      "backfill-preflight",
+      "gc",
+      "gc-preflight",
+      "metrics",
+      "metrics-preflight",
+      "preflight",
+      "store",
+    ],
+  },
 ];
 
 function srcRootFiles(): string[] {

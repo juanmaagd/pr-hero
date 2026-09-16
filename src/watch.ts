@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { runGc } from "#store/gc";
 import {
   box,
   log,
@@ -24,7 +25,6 @@ import {
   terminalWidth,
 } from "#ui/primitives";
 import { selfInvocation } from "./assets";
-import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
 import type { IgnoreRule } from "./ignore-file";
 import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./ignore-read";

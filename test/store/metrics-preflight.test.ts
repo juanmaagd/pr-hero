@@ -1,21 +1,21 @@
 // Pure-decision tests for the observability store (W4 / GitHub #23): the v1
 // DDL migration and the row projection from a completed run's already-on-
 // disk facts (FindingsDocument, per-agent usage, an optional comparison)
-// into the flat rows metrics.ts's I/O shell writes. No fs, no sqlite, no
-// clock — the shell (metrics.ts) supplies generatedAt and owns the file
+// into the flat rows store/metrics.ts's I/O shell writes. No fs, no sqlite, no
+// clock — the shell (store/metrics.ts) supplies generatedAt and owns the file
 // handle.
 
 import { describe, expect, test } from "bun:test";
-import type { Finding, FindingsDocument } from "../src/findings";
-import type { StoredComparison } from "../src/ledger";
 import {
   CURRENT_SCHEMA_VERSION,
   migrationsFor,
   projectRunRow,
   type RunRow,
   renderUsage,
-} from "../src/metrics-preflight";
-import type { PerAgentUsage } from "../src/pipeline";
+} from "#store/metrics-preflight";
+import type { Finding, FindingsDocument } from "../../src/findings";
+import type { StoredComparison } from "../../src/ledger";
+import type { PerAgentUsage } from "../../src/pipeline";
 
 function baseFinding(overrides: Partial<Finding> = {}): Finding {
   return {

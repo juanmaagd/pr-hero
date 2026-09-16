@@ -9,9 +9,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { Finding, FindingsDocument } from "../src/findings";
-import type { StoredComparison } from "../src/ledger";
-import type { PerAgentUsage } from "../src/pipeline";
+import {
+  CURRENT_PRODUCT_SCHEMA_VERSION,
+  projectCompleteRun,
+} from "#store/preflight";
 import {
   exportComparison,
   exportFindingsDocument,
@@ -21,11 +22,10 @@ import {
   queryRuns,
   recordFindingTriage,
   saveRunTransaction,
-} from "../src/store";
-import {
-  CURRENT_PRODUCT_SCHEMA_VERSION,
-  projectCompleteRun,
-} from "../src/store-preflight";
+} from "#store/store";
+import type { Finding, FindingsDocument } from "../../src/findings";
+import type { StoredComparison } from "../../src/ledger";
+import type { PerAgentUsage } from "../../src/pipeline";
 
 async function tmpDbPath(): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-store-"));

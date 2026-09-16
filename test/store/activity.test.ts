@@ -12,7 +12,7 @@ import {
   type RunHistoryItem,
   registerActiveRun,
   unregisterActiveRun,
-} from "../src/activity";
+} from "#store/activity";
 
 describe("activity (active runs tracker & store activity monitor)", () => {
   const home = "/Users/testuser";

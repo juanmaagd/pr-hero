@@ -23,7 +23,8 @@
   "imports": {
     "#rereview/*": "./src/rereview/*.ts",
     "#ui/*": "./src/ui/*.ts",
-    "#ci/*": "./src/ci/*.ts"
+    "#ci/*": "./src/ci/*.ts",
+    "#store/*": "./src/store/*.ts"
   },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"

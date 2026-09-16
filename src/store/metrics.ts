@@ -2,7 +2,7 @@
 // file handle, the migration runner, the one-transaction ingest, the
 // origin-scoped/--all read, and the fail-soft wrapper cli.ts calls after
 // every completed review (local and PR). Everything decidable without a
-// file handle lives in metrics-preflight.ts; this module only opens the db,
+// file handle lives in store/metrics-preflight.ts; this module only opens the db,
 // runs statements, and closes it.
 //
 // Fail-soft is the load-bearing contract here (proposal risk table): a
@@ -13,8 +13,9 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import type { FindingsDocument } from "./findings";
-import type { StoredComparison } from "./ledger";
+import type { FindingsDocument } from "../findings";
+import type { StoredComparison } from "../ledger";
+import type { PerAgentUsage } from "../pipeline";
 import {
   type ComparisonRowProjection,
   migrationsFor,
@@ -22,7 +23,6 @@ import {
   type RunAgentRow,
   type RunRow,
 } from "./metrics-preflight";
-import type { PerAgentUsage } from "./pipeline";
 
 // WAL + a 5s busy_timeout (design decision table, #35 concurrency out of
 // scope): two reviews of two different repos never collide on one process,
