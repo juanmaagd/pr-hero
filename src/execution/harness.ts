@@ -1898,7 +1898,7 @@ export class StepExecutionHarness implements StepRunner {
     // fence (no usage means no evidence either way — fail closed), the
     // free_nonzero_cost reason keeps the fence (priced work may be real), and
     // the metered path below is untouched. Downstream-safe:
-    // collectUnresolvedSpend (pipeline.ts) and renderResult (ui-result.ts)
+    // collectUnresolvedSpend (pipeline.ts) and renderResult (ui/result.ts)
     // only read unresolved_remote reservations, so a released_unstarted free
     // attempt is invisible to both — no floor marker, no unresolved row.
     //

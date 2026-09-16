@@ -2,7 +2,7 @@
 // case per direction, the cap-narrowed value that must read `capped` and not
 // `repo`, the key absent from both files that must read `default`, and the
 // zero-`\x1b` companion CLAUDE.md requires of every renderer beside
-// ui-result/ui-tree/ui-select.
+// ui/result/ui/tree/ui/select.
 //
 // Every case feeds the renderer `mergeConfig`'s REAL output rather than a
 // hand-written `sources` record. Hand-written provenance would prove the
@@ -10,16 +10,12 @@
 // actually produces it, and that is the fact the command exists to report.
 
 import { describe, expect, test } from "bun:test";
+import { type ConfigViewInput, configRows, renderConfig } from "#ui/config";
 import {
   CONFIG_DIRECTION,
   type ConfigLayer,
   mergeConfig,
-} from "../src/preflight";
-import {
-  type ConfigViewInput,
-  configRows,
-  renderConfig,
-} from "../src/ui-config";
+} from "../../src/preflight";
 
 const PATHS = {
   repoConfigPath: "/repo/.prhero/config.json",

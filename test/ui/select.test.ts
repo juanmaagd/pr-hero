@@ -14,7 +14,7 @@ import {
   runSizeGateConfirm,
   sizeGateMenuOptions,
   splitKeys,
-} from "../src/ui-select";
+} from "#ui/select";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*[A-Za-z]`, "g");

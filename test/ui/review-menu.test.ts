@@ -4,8 +4,8 @@ import {
   type ReviewMenuState,
   renderReviewMenuCard,
   runReviewMenu,
-} from "../src/ui-review-menu";
-import type { KeyReader } from "../src/ui-select";
+} from "#ui/review-menu";
+import type { KeyReader } from "#ui/select";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*[A-Za-z]`, "g");

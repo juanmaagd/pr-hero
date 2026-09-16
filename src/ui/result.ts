@@ -1,5 +1,5 @@
 // The end-of-run result block, as LINES. Third member of the terminal
-// surface's pure half (ui.ts formats, ui-select.ts asks, this one reports):
+// surface's pure half (ui/primitives.ts formats, ui/select.ts asks, this one reports):
 // same contract as both — everything is a total function of its inputs, the
 // style flag and the width arrive as PARAMETERS, and the I/O shell in cli.ts
 // owns the printing and every exit code.
@@ -17,15 +17,15 @@
 // payload was the one thing you had to leave the terminal to read. Everything
 // below the header exists to end that.
 
-import type { ComparisonResult } from "./compare";
-import type { UnresolvedSpend } from "./execution/spend-limiter";
-import type { Finding, FindingsDocument } from "./findings";
+import type { ComparisonResult } from "../compare";
+import type { UnresolvedSpend } from "../execution/spend-limiter";
+import type { Finding, FindingsDocument } from "../findings";
 import {
   blobUrl,
   coverageSentence,
   formatElapsed,
   movedHeadSentence,
-} from "./report";
+} from "../report";
 import {
   cyan,
   dim,
@@ -38,7 +38,7 @@ import {
   truncate,
   wrapText,
   yellow,
-} from "./ui";
+} from "./primitives";
 
 interface ResultComparison {
   greptileFound: boolean;
@@ -149,7 +149,7 @@ const MAX_GREPTILE_ROWS = 5;
 // Wide enough for the longest footer label ("estimate", "worktree") plus a gap.
 const FOOTER_LABEL_WIDTH = 12;
 
-// Deliberately NOT ui.ts's box(): box truncates every body line to fit its
+// Deliberately NOT ui/primitives.ts's box(): box truncates every body line to fit its
 // border, and the one thing this block must never truncate away is a claim.
 // So the card is a RULE — the top edge only — and the body below it is plain
 // indented text that wraps. Shape: `╭─ left ───── right ─╮`.

@@ -11,7 +11,7 @@ import {
   styleEnabled,
   truncate,
   wrapText,
-} from "../src/ui";
+} from "#ui/primitives";
 
 // Built rather than written as a literal: a regex literal carrying a raw ESC
 // trips biome's noControlCharactersInRegex.
@@ -208,11 +208,11 @@ describe("shortPath", () => {
   test("renders a path under the root relative to it", () => {
     expect(
       shortPath(
-        "/Users/juanma/Desktop/pr-hero/src/ui.ts",
+        "/Users/juanma/Desktop/pr-hero/src/ui/primitives.ts",
         "/Users/juanma/Desktop/pr-hero",
         home,
       ),
-    ).toBe("src/ui.ts");
+    ).toBe("src/ui/primitives.ts");
   });
 
   test("the root itself renders as its basename", () => {

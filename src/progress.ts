@@ -8,7 +8,7 @@
 // cure. The honest signals are a spinner, elapsed time, and per-step
 // completions.
 //
-// The panel is a TREE (ui-tree.ts), not a list of lines, for one reason: the
+// The panel is a TREE (ui/tree.ts), not a list of lines, for one reason: the
 // refuter runs ONE STEP PER FINDING and those verdicts used to be a counter
 // that overwrote itself (`judging F001 (1 of 2)…`), so a run's most expensive
 // leg reported a number instead of its results. As leaves they ACCUMULATE and
@@ -16,9 +16,9 @@
 // spec.agents assigns exactly one model per agent, so a model level would
 // give every node exactly one child — a list with extra glyphs.
 
+import { renderTree, type TreeNode } from "#ui/tree";
 import type { PipelineProgressEvent } from "./pipeline";
 import { formatElapsed } from "./report";
-import { renderTree, type TreeNode } from "./ui-tree";
 
 export const SPINNER_FRAMES = [
   "⠋",
@@ -265,7 +265,7 @@ function retryChildren(hunter: PanelHunter): TreeNode[] {
 }
 
 // Sub-columns are aligned by padding here, in the caller, exactly as
-// ui-tree.ts's `detail` contract asks: the tree owns nesting, not layout.
+// ui/tree.ts's `detail` contract asks: the tree owns nesting, not layout.
 function hunterNode(
   hunter: PanelHunter,
   state: PanelState,

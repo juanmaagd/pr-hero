@@ -11,7 +11,7 @@
 // names (harness.ts), `runPipeline`'s `collectUnresolvedSpend` gathers the
 // terminal `unresolved_remote` reservations into `PipelineResult.unresolved`
 // (pipeline.ts), and `renderResult` prints them and marks the run's cost
-// figure a floor (ui-result.ts).
+// figure a floor (ui/result.ts).
 //
 // The second axis, which "wired into the harness" alone would still hide, and
 // which held on `dev` until 2026-09-02: no production composition constructed

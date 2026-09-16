@@ -3,7 +3,7 @@
 // `$GITHUB_STEP_SUMMARY` Markdown; the impure half appends those bytes to
 // the two files GitHub Actions hands the job through the environment.
 //
-// Purity split, mirroring src/ui.ts's one documented impure pair
+// Purity split, mirroring src/ui/primitives.ts's one documented impure pair
 // (`styleEnabled()`/`terminalWidth()`): `formatWorkflowCommand`,
 // `renderStepSummary`, and `formatCiOutputs` are total functions of their
 // inputs — no file I/O, no `process.env` sniffing, no `log()` call. Every

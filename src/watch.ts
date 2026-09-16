@@ -13,6 +13,16 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  box,
+  log,
+  row,
+  section,
+  shortPath,
+  shortSha,
+  styleEnabled,
+  terminalWidth,
+} from "#ui/primitives";
 import { selfInvocation } from "./assets";
 import { runGc } from "./gc";
 import { resolveRepoHome } from "./home";
@@ -47,16 +57,6 @@ import {
   type SizeGateConfig,
   sizeGateConfig,
 } from "./size-gate";
-import {
-  box,
-  log,
-  row,
-  section,
-  shortPath,
-  shortSha,
-  styleEnabled,
-  terminalWidth,
-} from "./ui";
 import {
   countAttempts,
   countLaunchedToday,
@@ -899,7 +899,7 @@ async function lockHolder(lockPath: string): Promise<number | null> {
   }
 }
 
-// Rendered through the same src/ui.ts primitives as the review plan card, on
+// Rendered through the same src/ui/primitives.ts primitives as the review plan card, on
 // purpose: two surfaces that answer the same question ("what would this
 // spend?") that look nothing alike cost the reader a re-orientation every
 // time they switch.
