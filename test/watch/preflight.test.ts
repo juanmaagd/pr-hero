@@ -5,7 +5,7 @@
 // render, and the notification args. All offline, literal in → literal out.
 
 import { describe, expect, test } from "bun:test";
-import { CliUsageError, type NumstatFile, parseArgs } from "#review/preflight";
+import { type NumstatFile, parseArgs } from "#review/preflight";
 import { DEFAULT_SIZE_GATE } from "#review/size-gate";
 import {
   contractTilde,
@@ -50,6 +50,7 @@ import {
   type WatchPrCandidate,
   type WatchStatusFacts,
 } from "#watch/preflight";
+import { CliUsageError } from "../../src/errors";
 import { parseIgnoreFile } from "../../src/ignore-file";
 
 function file(path: string, insertions: number, deletions = 0): NumstatFile {

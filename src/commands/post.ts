@@ -18,8 +18,9 @@ import {
   readRereviewProvenance,
 } from "#rereview/prepare";
 import { validateFindingsDocument } from "#review/findings";
-import { CliError, type CliOptions, CliUsageError } from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import { log } from "#ui/primitives";
+import { CliError, CliUsageError } from "../errors";
 
 // `pr-hero post --pr <n> --from <run-dir> [--dry-run]` (ROADMAP B6, spec
 // "Offline replay via `post` verb"): the `ledger` verb's precedent — read a

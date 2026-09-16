@@ -9,8 +9,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { git } from "#git/git";
-import { CliError } from "#review/preflight";
 import { parseLockPid } from "#watch/preflight";
+import { CliError } from "./errors";
 import {
   canonicalRemoteId,
   decidePidLock,

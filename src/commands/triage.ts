@@ -15,7 +15,7 @@ import {
 } from "#pr/pr";
 import { resolveCurrentPrNumber } from "#pr/preflight";
 import { validateFindingsDocument } from "#review/findings";
-import { CliError, type CliOptions, CliUsageError } from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import { openProductStore, recordFindingTriage } from "#store/store";
 import {
   decideThreadResolve,
@@ -32,6 +32,7 @@ import {
 } from "#triage/triage";
 import { applyTriageReplies, type TriageReplyCandidate } from "#triage/write";
 import { log } from "#ui/primitives";
+import { CliError, CliUsageError } from "../errors";
 import { tryOriginRepoId } from "../home";
 import { prheroLayout } from "../home-preflight";
 

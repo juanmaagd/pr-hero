@@ -21,13 +21,11 @@ import type {
   PrHeroFindingRef,
 } from "#compare/compare";
 import type { GreptileFinding } from "#compare/greptile";
+import { isFullCommitId } from "#git/refs";
 import type { RunStatus } from "#review/findings";
 import {
   assertOutsideRepo,
-  CliError,
   type CliOptions,
-  CliUsageError,
-  isFullCommitId,
   type NumstatDiffStat,
   type NumstatFile,
 } from "#review/preflight";
@@ -37,6 +35,7 @@ import {
   type SizeGateConfig,
   type SizeGateVerdict,
 } from "#review/size-gate";
+import { CliError, CliUsageError } from "../errors";
 
 export type PrState = "OPEN" | "CLOSED" | "MERGED";
 

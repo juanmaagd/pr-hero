@@ -6,8 +6,8 @@ import { runTriageCommand, runTriageReplyCommand } from "#commands/triage";
 import type { StoredComparison } from "#compare/ledger";
 import { findingMarker } from "#pr/preflight";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
-import { CliUsageError } from "#review/preflight";
 import { triageMarker } from "#triage/triage";
+import { CliUsageError } from "../../src/errors";
 
 interface ScriptedResponse {
   stdout?: string;

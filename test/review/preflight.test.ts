@@ -1,4 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import {
+  DEFAULT_BASE_REF,
+  headContainedInBaseMessage,
+  isFullCommitId,
+  listPaths,
+  parseRemoteHead,
+  repoWebUrlFromRemote,
+  resolveBaseRef,
+} from "#git/refs";
 import { aliasCanonical } from "#model/catalog";
 import type { RoutingConfig } from "#model/routing";
 import {
@@ -8,10 +17,8 @@ import {
   allExcludedMessage,
   assertBasenameOnly,
   assertOutsideRepo,
-  CliUsageError,
   CONFIG_DIRECTION,
   type ConfigLayer,
-  DEFAULT_BASE_REF,
   DEFAULT_HOP_BUDGET,
   DEFAULT_MAX_VERIFICATION_STEPS,
   DEFAULT_SUMMARY_MODEL,
@@ -22,13 +29,10 @@ import {
   gotchasErrorMessage,
   gotchasUnusableReason,
   HELP_TEXT,
-  headContainedInBaseMessage,
   initConfigTemplate,
   initGotchasInstructions,
   initTemplateOmissions,
-  isFullCommitId,
   type LocalConfig,
-  listPaths,
   localReviewSpec,
   mergeConfig,
   parseArgs,
@@ -36,10 +40,7 @@ import {
   parseLocalConfig,
   parseNumstat,
   parseNumstatFiles,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
   resolveAgentsDirSetting,
-  resolveBaseRef,
   resolveMaxVerificationSteps,
   resolvePost,
   resolveScout,
@@ -49,6 +50,7 @@ import {
   type SummaryConfig,
 } from "#review/preflight";
 import { validateReviewSpec } from "#review/spec";
+import { CliUsageError } from "../../src/errors";
 
 describe("parseArgs", () => {
   // `base` is deliberately ABSENT here: resolving the repo's real default

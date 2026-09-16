@@ -62,9 +62,9 @@
 // is Phase 3's job, once a real poster exists to consume them.
 
 import type { Finding, FindingsDocument } from "#review/findings";
-import { CliUsageError } from "#review/preflight";
 import type { PrCommentDelta } from "#review/report";
 import type { SizeGateVerdict } from "#review/size-gate";
+import { CliUsageError } from "../errors";
 import { envBillsMetered } from "../execution/usage-normalized";
 import {
   type CiOutputs,

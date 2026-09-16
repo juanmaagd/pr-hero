@@ -13,14 +13,10 @@
 
 import path from "node:path";
 import { git, resolveRepoRoot } from "#git/git";
-import {
-  CliError,
-  type CliOptions,
-  CliUsageError,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
-} from "#review/preflight";
+import { parseRemoteHead, repoWebUrlFromRemote } from "#git/refs";
+import type { CliOptions } from "#review/preflight";
 import { log } from "#ui/primitives";
+import { CliError, CliUsageError } from "../errors";
 import {
   type CommitPullRef,
   classifyRevertCommit,

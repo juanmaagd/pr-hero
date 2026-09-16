@@ -23,8 +23,8 @@ import {
   GIT_LOG_FIELD_SEP,
   pickCommitPull,
 } from "#pr/reverts-preflight";
-import { CliUsageError } from "#review/preflight";
 import { unquotePath } from "#review/size-gate";
+import { CliUsageError } from "../errors";
 
 // ---------------------------------------------------------------------------
 // Flag values. Both defaults are spelled as literals inside review/preflight.ts's

@@ -23,7 +23,6 @@ import {
   type AgentsDirResolution,
   agentFilePath,
   assertBasenameOnly,
-  CliError,
   type CliOptions,
   gotchasErrorMessage,
   gotchasUnusableReason,
@@ -43,6 +42,7 @@ import {
   validateReviewSpec,
 } from "#review/spec";
 import { ClaudeCodeRunner } from "#review/step-runner";
+import { CliError } from "../errors";
 import {
   createProductionRuntime,
   type ProductionAdmissionContext,

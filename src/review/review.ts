@@ -38,7 +38,6 @@ import {
 } from "#review/pipeline";
 import {
   allExcludedMessage,
-  CliError,
   type CliOptions,
   createRunDir,
   emptyDiffMessage,
@@ -87,6 +86,7 @@ import {
 import { log, styleEnabled } from "#ui/primitives";
 import { applySizeGate, confirm, startProgressRenderer } from "#ui/progress";
 import { renderResult } from "#ui/result";
+import { CliError } from "../errors";
 import { prheroLayout } from "../home-preflight";
 import { readLocalIgnoreRules } from "../ignore-read";
 import type { ProductionRuntime } from "../production-runtime";

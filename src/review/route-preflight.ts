@@ -12,6 +12,7 @@ import {
   type RoutingConfig,
 } from "#model/routing";
 import { resolveEngineAssets } from "../assets";
+import { CliError } from "../errors";
 import type { RunnerBackend } from "../execution/contracts";
 import {
   type ProductionAdmissionContext,
@@ -31,7 +32,7 @@ import {
 } from "../transport-registry";
 import type { OpenCodeSdkLike } from "../transports/opencode-client";
 import { DEFAULT_SCOUT_MODEL } from "./pipeline";
-import { CliError, type CliOptions, type SummarySettings } from "./preflight";
+import type { CliOptions, SummarySettings } from "./preflight";
 import { type ParsedAgent, parseAgentFile } from "./prompt-set";
 import type { ReviewSpec } from "./spec";
 

@@ -5,7 +5,7 @@ import path from "node:path";
 import { runPostCommand } from "#commands/post";
 import { claimFingerprint } from "#pr/preflight";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
-import { CliUsageError } from "#review/preflight";
+import { CliUsageError } from "../../src/errors";
 
 interface ScriptedResponse {
   stdout?: string;

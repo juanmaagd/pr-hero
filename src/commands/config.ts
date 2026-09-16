@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadEffectiveConfig, resolveOptionalRepoRoot } from "#config/config";
-import { CliError, type CliOptions } from "#review/preflight";
+import type { CliOptions } from "#review/preflight";
 import { renderConfig } from "#ui/config";
 import {
   runConfigEditor,
@@ -10,6 +10,7 @@ import {
   unsetConfigValue,
 } from "#ui/config-edit";
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
+import { CliError } from "../errors";
 
 // `pr-hero config` (C5 O-12 / D10 / §3.10) — read-only, $0, and deliberately
 // the thinnest shell in this file: resolve the two layers through the SAME
