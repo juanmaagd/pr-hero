@@ -27,22 +27,12 @@ import {
   type TriageVerdict,
 } from "#triage/triage";
 import { type EngineAssets, resolveEngineAssets } from "../assets";
-// C1 git-layering slice: CliError/CliUsageError and the git/ref pure helpers
-// used to be DEFINED here and imported by value into git.ts — the bottom
-// layer depending on a review-domain module. They now live in ../errors and
-// ../git/refs; this file imports them for its own internal use below and
-// re-exports every one of them (see the re-export block) so the ~55 existing
-// `#review/preflight` consumers need no changes in this slice.
+// CliError/CliUsageError and the git/ref pure helpers used to be DEFINED here
+// and imported by value into git.ts — the bottom layer depending on a
+// review-domain module. They live in ../errors and ../git/refs; this file
+// imports only the ones it uses itself.
 import { CliError, CliUsageError } from "../errors";
-import {
-  DEFAULT_BASE_REF,
-  headContainedInBaseMessage,
-  isFullCommitId,
-  listPaths,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
-  resolveBaseRef,
-} from "../git/refs";
+import { DEFAULT_BASE_REF, listPaths } from "../git/refs";
 import { redactDiagnostic } from "../security/redact";
 // review/size-gate.ts imports only a TYPE from here, so this is not a runtime
 // cycle — the type import is erased and size-gate has no load-time
@@ -71,23 +61,6 @@ export const DEFAULT_HEAD_REF = "HEAD";
 // of truth for execution when no model override is configured; this value is
 // only the honest model label shown in a preflight plan.
 export const DEFAULT_SUMMARY_MODEL = "haiku";
-
-// Compatibility re-exports (C1 git-layering slice): CliError/CliUsageError
-// moved to ../errors, and DEFAULT_BASE_REF/the git-ref pure helpers moved to
-// ../git/refs, so that git.ts (the bottom layer) no longer imports this
-// review-domain module by value. Existing consumers of `#review/preflight`
-// keep working unchanged; repoint them to the new homes in a follow-up.
-export {
-  CliError,
-  CliUsageError,
-  DEFAULT_BASE_REF,
-  headContainedInBaseMessage,
-  isFullCommitId,
-  listPaths,
-  parseRemoteHead,
-  repoWebUrlFromRemote,
-  resolveBaseRef,
-};
 
 export interface CliOptions {
   // Relative on purpose: parseArgs is pure, so "resolve against cwd" is the
