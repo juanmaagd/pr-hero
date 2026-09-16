@@ -340,7 +340,7 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
     );
 
     // Verify runReviewMenu receives the effectiveConfig and initialises correctly
-    const { loadEffectiveConfig } = await import("../src/cli");
+    const { loadEffectiveConfig } = await import("#config/config");
     const { runReviewMenu } = await import("#ui/review-menu");
     const loaded = await loadEffectiveConfig({
       root: tmpRepo,

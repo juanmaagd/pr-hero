@@ -63,7 +63,7 @@ export async function freezeBenchmarkIdentity(input: {
   hunterModel?: string;
   refuterModel?: string;
 }): Promise<BenchmarkIdentity> {
-  const { loadEffectiveConfig } = await import("../src/cli");
+  const { loadEffectiveConfig } = await import("#config/config");
   const loaded = await loadEffectiveConfig({
     root: input.repo,
     home: homedir(),

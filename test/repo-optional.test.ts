@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import os from "node:os";
 import path from "node:path";
-import { loadEffectiveConfig } from "../src/cli";
+import { loadEffectiveConfig } from "#config/config";
 import { runDoctor } from "../src/doctor";
 import { runWizard } from "../src/wizard";
 
