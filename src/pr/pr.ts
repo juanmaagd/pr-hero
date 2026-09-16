@@ -37,6 +37,7 @@ import {
 import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
 import { renderComparison } from "#compare/report";
 import { THREAD_PAGE_SIZE } from "#corpus/preflight";
+import { git } from "#git/git";
 import type { Finding, RunStatus } from "#review/findings";
 import { CliError, isFullCommitId } from "#review/preflight";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
@@ -59,26 +60,6 @@ export const GRAPHQL_COMMENT_MAX_PAGES = 50;
 export class CommentsTruncatedError extends CliError {}
 
 import { renderInlineComment, renderIssueFindingComment } from "#review/report";
-
-// Same helper as cli.ts's git, duplicated rather than shared so neither
-// shell imports the other. The WHY carries over verbatim: args as an ARRAY,
-// never an interpolated shell string — refs and paths reach git verbatim,
-// and a shell in the middle would turn them into an execution surface.
-async function git(
-  repo: string,
-  args: string[],
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", "-C", repo, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { ok: exitCode === 0, stdout, stderr };
-}
 
 // `spawnFn` is the ONLY seam this module adds for testability, and it is
 // deliberately invisible to production callers: every existing call site

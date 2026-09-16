@@ -33,7 +33,8 @@
     "#server/*": "./src/server/*.ts",
     "#compare/*": "./src/compare/*.ts",
     "#review/*": "./src/review/*.ts",
-    "#pr/*": "./src/pr/*.ts"
+    "#pr/*": "./src/pr/*.ts",
+    "#git/*": "./src/git/*.ts"
   },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"

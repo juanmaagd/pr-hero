@@ -128,6 +128,10 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
     domain: "pr",
     files: ["inline", "pr", "preflight", "reverts", "reverts-preflight"],
   },
+  {
+    domain: "git",
+    files: ["git"],
+  },
 ];
 
 function srcRootFiles(): string[] {

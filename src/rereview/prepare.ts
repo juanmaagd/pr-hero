@@ -101,19 +101,6 @@ export interface RereviewProvenance {
   }[];
 }
 
-export function parseNameOnly(stdout: string): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const line of stdout.split("\n")) {
-    const path = line.trim();
-    if (path.length === 0 || seen.has(path)) continue;
-    seen.add(path);
-    out.push(path);
-  }
-  out.sort();
-  return out;
-}
-
 export function shouldAbortEmptyDiscovery(
   plan: DiscoveryPlan,
   patch: string,
