@@ -340,13 +340,15 @@ describe("Packaging & distribution configuration", () => {
       if (hits) offenders[rel.replaceAll("\\", "/")] = hits.length;
     }
 
-    // src/cli.ts keeps exactly ONE, and the count is pinned so a second cannot
-    // arrive unnoticed: `engineIdentity`'s `git rev-parse` for the engine's own
-    // revision, which sits AFTER an early return for compiled mode and is
-    // therefore unreachable in the runtime where it would be wrong.
+    // `engineIdentity`'s `git rev-parse` for the engine's own revision used
+    // to be src/cli.ts's one pinned exception — it sat AFTER an early return
+    // for compiled mode and was therefore unreachable in the runtime where
+    // it would be wrong. `engineIdentity`/`deriveEngineIdentity` moved to
+    // src/assets.ts (cli-decomp S3), so the exception is gone and the test's
+    // own name is now literally true: only src/assets.ts derives filesystem
+    // paths from import.meta.
     expect(offenders).toEqual({
       "src/assets.ts": expect.any(Number),
-      "src/cli.ts": 1,
     });
   });
 
