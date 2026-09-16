@@ -9,7 +9,7 @@ import {
   type TreeNode,
   type TreeOptions,
   type TreeStatus,
-} from "../src/ui-tree";
+} from "#ui/tree";
 
 const plain: TreeOptions = { styles: false, frame: "⠋" };
 

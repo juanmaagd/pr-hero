@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { RepoContext } from "../src/menu-context";
-import { type MenuLoopIo, runMenuLoop } from "../src/ui-menu";
-import type { KeyReader } from "../src/ui-select";
+import { type MenuLoopIo, runMenuLoop } from "#ui/menu";
+import type { KeyReader } from "#ui/select";
+import type { RepoContext } from "../../src/menu-context";
 
 const ESC = String.fromCharCode(27);
 const CTRL_C = "\x03";

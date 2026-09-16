@@ -35,6 +35,38 @@ import {
   unreachableLastHeadMessage,
 } from "#rereview/prepare";
 import { parseStateBlock, renderStateBlock } from "#rereview/state";
+import { renderActivityScreen } from "#ui/activity";
+import { renderConfig } from "#ui/config";
+import {
+  runConfigEditor,
+  setConfigValue,
+  unsetConfigValue,
+} from "#ui/config-edit";
+import {
+  runConfigSubmenu,
+  runLifecycleSubmenu,
+  runMenuLoop,
+  runWatcherSubmenu,
+} from "#ui/menu";
+import {
+  bold,
+  box,
+  dim,
+  green,
+  labelColumnWidth,
+  log,
+  red,
+  row,
+  section,
+  shortPath,
+  shortSha,
+  styleEnabled,
+  terminalWidth,
+  yellow,
+} from "#ui/primitives";
+import { type ResultLinks, renderResult } from "#ui/result";
+import { runReviewMenu } from "#ui/review-menu";
+import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
 import {
   getWatcherSpend,
   killActiveRun,
@@ -352,42 +384,6 @@ import {
   matchPostedFindingExact,
 } from "./triage-reply";
 import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
-import {
-  bold,
-  box,
-  dim,
-  green,
-  labelColumnWidth,
-  log,
-  red,
-  row,
-  section,
-  shortPath,
-  shortSha,
-  styleEnabled,
-  terminalWidth,
-  yellow,
-} from "./ui";
-import { renderActivityScreen } from "./ui-activity";
-import { renderConfig } from "./ui-config";
-import {
-  runConfigEditor,
-  setConfigValue,
-  unsetConfigValue,
-} from "./ui-config-edit";
-import {
-  runConfigSubmenu,
-  runLifecycleSubmenu,
-  runMenuLoop,
-  runWatcherSubmenu,
-} from "./ui-menu";
-import { type ResultLinks, renderResult } from "./ui-result";
-import { runReviewMenu } from "./ui-review-menu";
-import {
-  type ConfirmResult,
-  confirmReview,
-  confirmSizeGate,
-} from "./ui-select";
 import { executeUninstallPlan, planUninstallation } from "./uninstaller";
 import {
   detectInstallMethod,
@@ -5959,7 +5955,7 @@ export interface PlanContext {
   // D2 PR3: Optional resolved route plan for model routing display
   routePlan?: ResolvedRoutePlan;
   // The terminal width every row and card below is laid out against, carried
-  // in exactly as ui-result.ts's ResultInput carries it. Optional so the shell
+  // in exactly as ui/result.ts's ResultInput carries it. Optional so the shell
   // may leave the one sniff to the renderer's entry point; the tests ALWAYS
   // pin it, because these renderers were the reason `bun test` in a narrow
   // pane could fail on a wrap point no test could stub.

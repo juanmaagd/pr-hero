@@ -76,7 +76,7 @@ describe("Packaging & distribution configuration", () => {
     if (exitCode !== 0) {
       console.error(stdout, stderr);
     }
-    // log() writes to stderr unconditionally (src/ui.ts) — assert there, not stdout.
+    // log() writes to stderr unconditionally (src/ui/primitives.ts) — assert there, not stdout.
     expect(stderr.length).toBeGreaterThan(0);
     expect(stderr).toContain("pr-hero");
     expect(stderr).toContain("Usage:");

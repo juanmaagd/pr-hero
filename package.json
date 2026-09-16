@@ -21,7 +21,8 @@
     }
   },
   "imports": {
-    "#rereview/*": "./src/rereview/*.ts"
+    "#rereview/*": "./src/rereview/*.ts",
+    "#ui/*": "./src/ui/*.ts"
   },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"

@@ -1,18 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { listActiveRuns } from "./activity";
-import { runDoctor } from "./doctor";
+import { listActiveRuns } from "../activity";
+import { runDoctor } from "../doctor";
 import {
   getMenuOptions,
   type MenuItem,
   type MenuStatusInfo,
   type RepoContext,
   resolveMenuContext,
-} from "./menu-context";
-import { DEFAULT_MAX_VERIFICATION_STEPS } from "./preflight";
-import { DEFAULT_SIZE_GATE } from "./size-gate";
-import { bold, box, cyan, dim, sanitizeText, terminalWidth } from "./ui";
+} from "../menu-context";
+import { DEFAULT_MAX_VERIFICATION_STEPS } from "../preflight";
+import { DEFAULT_SIZE_GATE } from "../size-gate";
+import { DEFAULT_DAILY_CAP } from "../watch-preflight";
 import {
   cycleStringPreset,
   DEFAULT_CARD_ACTIONS,
@@ -20,9 +20,16 @@ import {
   renderConfigEditCard,
   saveLayerConfig,
   stepNumericValue,
-} from "./ui-config-edit";
-import { type KeyReader, parseKey, splitKeys } from "./ui-select";
-import { DEFAULT_DAILY_CAP } from "./watch-preflight";
+} from "./config-edit";
+import {
+  bold,
+  box,
+  cyan,
+  dim,
+  sanitizeText,
+  terminalWidth,
+} from "./primitives";
+import { type KeyReader, parseKey, splitKeys } from "./select";
 
 const SOLID_BANNER_LINES = [
   "██████╗ ██████╗       ██╗  ██╗███████╗██████╗  ██████╗ ",

@@ -1,5 +1,5 @@
-import type { ActiveRunRecord, RunHistoryItem } from "./activity";
-import { bold, box, cyan, dim, green, red } from "./ui";
+import type { ActiveRunRecord, RunHistoryItem } from "../activity";
+import { bold, box, cyan, dim, green, red } from "./primitives";
 
 export interface ActivityRenderOptions {
   styles: boolean;

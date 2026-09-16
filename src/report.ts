@@ -183,7 +183,7 @@ function agentRows(doc: FindingsDocument): AgentRow[] {
 }
 
 // The coverage sentence behind every incompleteness notice (GitHub #42,
-// ROADMAP-DOORDASH M1). Shared with ui-result.ts — exported for the same
+// ROADMAP-DOORDASH M1). Shared with ui/result.ts — exported for the same
 // reason blobUrl below is: the public comment and the terminal must name the
 // SAME agents from the SAME bytes, and two derivations of "who did not
 // finish" is exactly how one surface starts under-reporting the other.
@@ -230,7 +230,7 @@ export function coverageSentence(
 }
 
 // The one sentence behind every moved-head notice (GitHub #39,
-// ROADMAP-DOORDASH M1), shared with ui-result.ts for coverageSentence's
+// ROADMAP-DOORDASH M1), shared with ui/result.ts for coverageSentence's
 // reason: the public comment and the terminal must name the SAME two shas
 // from the SAME bytes, and `quote` is the only difference between them
 // (backticks in markdown, bare text on a terminal).
@@ -1105,7 +1105,7 @@ function parseRefAnchor(ref: string): {
   };
 }
 
-// Exported for ui-result.ts, the second surface that links a finding to its
+// Exported for ui/result.ts, the second surface that links a finding to its
 // source. Deliberately SHARED rather than re-derived: the markdown report and
 // the terminal block must point a reader at the same bytes, and two copies of
 // `/blob/<sha>/<path>#<fragment>` is exactly how the pinned line of one

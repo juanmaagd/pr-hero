@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { log } from "#ui/primitives";
 import { selfInvocation } from "./assets";
 import {
   decideGc,
@@ -42,7 +43,6 @@ import {
   type CliOptions,
   DEFAULT_GC_INTERVAL_MIN,
 } from "./preflight";
-import { log } from "./ui";
 import { parsePlistInterval } from "./watch-preflight";
 
 async function git(

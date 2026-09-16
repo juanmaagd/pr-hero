@@ -2,11 +2,11 @@ import {
   type CliOptions,
   DEFAULT_HOP_BUDGET,
   type LocalConfig,
-} from "./preflight";
-import { bold, box, cyan, dim, sanitizeText } from "./ui";
-import { cycleStringPreset } from "./ui-config-edit";
-import { clearDrawnLines } from "./ui-menu";
-import { type KeyReader, parseKey, splitKeys } from "./ui-select";
+} from "../preflight";
+import { cycleStringPreset } from "./config-edit";
+import { clearDrawnLines } from "./menu";
+import { bold, box, cyan, dim, sanitizeText } from "./primitives";
+import { type KeyReader, parseKey, splitKeys } from "./select";
 
 export interface ReviewMenuState {
   target: "branch" | "pr";

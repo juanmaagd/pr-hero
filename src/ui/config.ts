@@ -1,5 +1,5 @@
 // `pr-hero config`'s output, as LINES. Fourth member of the terminal
-// surface's pure half (ui.ts formats, ui-select.ts asks, ui-result.ts
+// surface's pure half (ui/primitives.ts formats, ui/select.ts asks, ui/result.ts
 // reports, this one explains): same contract as all three — everything is a
 // total function of its inputs, the style flag and the width arrive as
 // PARAMETERS, and the I/O shell in cli.ts owns the printing and the exit code.
@@ -23,8 +23,8 @@ import type {
   ConfigSources,
   LocalConfig,
   SummaryConfig,
-} from "./preflight";
-import type { SuspicionPrior } from "./prompt-set";
+} from "../preflight";
+import type { SuspicionPrior } from "../prompt-set";
 import {
   bold,
   cyan,
@@ -34,7 +34,7 @@ import {
   terminalWidth,
   wrapText,
   yellow,
-} from "./ui";
+} from "./primitives";
 
 export interface ConfigViewInput {
   // The MERGED config and its provenance, exactly as a review resolved them —

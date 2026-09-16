@@ -1,5 +1,5 @@
 // The terminal surface's INTERACTIVE half: the keyboard-driven menu that
-// replaced the cost band's `[y/N]` read. ui.ts stays pure by construction;
+// replaced the cost band's `[y/N]` read. ui/primitives.ts stays pure by construction;
 // this module is where the one unavoidable side effect — putting the user's
 // terminal into raw mode — is quarantined behind an injected reader, so every
 // decision above it (which options exist, where the cursor lands, what a key
@@ -13,7 +13,7 @@
 // keeps the old plain-text behaviour byte for byte, and the restore lives in a
 // `finally` so a throw mid-menu cannot strand a human in raw mode.
 
-import { bold, dim, log } from "./ui";
+import { bold, dim, log } from "./primitives";
 
 export type ConfirmResult =
   | { kind: "review"; post: boolean }
