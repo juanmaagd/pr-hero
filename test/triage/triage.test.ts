@@ -1,8 +1,12 @@
 // Pure-decision tests for the triage reply marker (ROADMAP B6b). All
 // offline, literal in → literal out — same discipline as
-// pr-preflight.test.ts's marker suites.
+// pr/preflight.test.ts's marker suites.
 
 import { describe, expect, test } from "bun:test";
+import {
+  PR_COMMENT_MARKER_PREFIX,
+  PR_FINDING_MARKER_PREFIX,
+} from "#pr/preflight";
 import {
   parseTriageMarker,
   renderTriageReplyBody,
@@ -10,15 +14,11 @@ import {
   triageBadge,
   triageMarker,
 } from "#triage/triage";
-import {
-  PR_COMMENT_MARKER_PREFIX,
-  PR_FINDING_MARKER_PREFIX,
-} from "../../src/pr-preflight";
 
 const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
 
 describe("marker prefix disjointness", () => {
-  // Extends the pr-preflight.test.ts discipline to the third marker family:
+  // Extends the pr/preflight.test.ts discipline to the third marker family:
   // none of the three may be a prefix of another, or a matcher scanning the
   // shared comment stream could misfile one as another.
   test("triage prefix is disjoint from both existing marker prefixes", () => {

@@ -9,10 +9,10 @@
 // Same-head dedup applies per head SHA; maxAttempts applies per PR.
 
 import { createHash } from "node:crypto";
+import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "#pr/preflight";
 import type { ParsedStateBlock } from "#rereview/state";
 import type { Tier } from "#review/findings";
 import type { LocalConfig } from "#review/preflight";
-import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "../pr-preflight";
 import {
   type AdmissionRecord,
   countTerminalAttempts,

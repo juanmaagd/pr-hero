@@ -44,6 +44,7 @@ import {
   tallyArm,
   tallyCleanPrs,
 } from "#compare/floor-test";
+import { resolvePrTarget } from "#pr/preflight";
 import {
   EMPTY_LOCAL_CONFIG,
   localReviewSpec,
@@ -52,7 +53,6 @@ import {
 } from "#review/preflight";
 import { estimateCost } from "#review/report";
 import { evaluateSizeGateAggregate, sizeGateConfig } from "#review/size-gate";
-import { resolvePrTarget } from "../src/pr-preflight";
 
 const CASES_PATH = path.join(
   import.meta.dir,

@@ -20,9 +20,9 @@ import {
   scanPostedFindingTiers,
 } from "#ci/review-admission";
 import { classifyChangedPaths } from "#ci/review-risk";
+import { fetchPrComments } from "#pr/pr";
+import { PR_FINDING_MARKER_PREFIX } from "#pr/preflight";
 import type { Tier } from "#review/findings";
-import { fetchPrComments } from "../../src/pr";
-import { PR_FINDING_MARKER_PREFIX } from "../../src/pr-preflight";
 
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);

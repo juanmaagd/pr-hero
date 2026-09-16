@@ -61,7 +61,7 @@ export const DEFAULT_SUMMARY_MODEL = "haiku";
 export class CliUsageError extends Error {}
 
 // Runtime failure (git, gh, the filesystem) as opposed to a usage error.
-// Defined here rather than in a shell so both I/O shells (cli.ts, pr.ts)
+// Defined here rather than in a shell so both I/O shells (cli.ts, pr/pr.ts)
 // can throw the same class without importing each other.
 export class CliError extends Error {}
 
@@ -1395,7 +1395,7 @@ export function parseRemoteHead(raw: string): string | undefined {
 }
 
 // The repository's web URL, derived from a git remote instead of asked of
-// `gh`. WHY it exists next to pr.ts's ghRepoWebUrl rather than replacing it:
+// `gh`. WHY it exists next to pr/pr.ts's ghRepoWebUrl rather than replacing it:
 // ghRepoWebUrl is one `gh repo view` process per call and used to live ONLY
 // inside the `--post` branch, so every run without --post had no web URL and
 // the terminal could not print a single clickable link. The remote is already

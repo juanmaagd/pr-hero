@@ -1,5 +1,5 @@
 // Durable CI admission attempt ledger (WU-02): pure reserve/settle/idempotency.
-// Persistence is GitHub Check Runs (pr.ts); PR comments stay presentation-only.
+// Persistence is GitHub Check Runs (pr/pr.ts); PR comments stay presentation-only.
 
 import { createHash } from "node:crypto";
 

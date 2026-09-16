@@ -11,9 +11,9 @@
 // because a `channel:"outside"` finding's only copy lives in this block;
 // the next PATCH would otherwise erase it (R2-S3).
 
+import { claimFingerprint } from "#pr/preflight";
 import type { Severity, Tier } from "#review/findings";
 import { isFullCommitId } from "#review/preflight";
-import { claimFingerprint } from "../pr-preflight";
 import type {
   FindingChannel,
   GateStatus,

@@ -17,9 +17,6 @@ import {
 } from "#ci/gates";
 import type { ComparisonResult, PrHeroFindingRef } from "#compare/compare";
 import type { GreptileFinding } from "#compare/greptile";
-import { PR_STATE_MARKER_PREFIX } from "#rereview/state";
-import { CliError, CliUsageError, parseArgs } from "#review/preflight";
-import { TRIAGE_MARKER_PREFIX } from "#triage/triage";
 import {
   buildComparisonJson,
   CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
@@ -43,7 +40,10 @@ import {
   resolvePrTarget,
   settleRequestForCancellation,
   worktreeDirty,
-} from "../src/pr-preflight";
+} from "#pr/preflight";
+import { PR_STATE_MARKER_PREFIX } from "#rereview/state";
+import { CliError, CliUsageError, parseArgs } from "#review/preflight";
+import { TRIAGE_MARKER_PREFIX } from "#triage/triage";
 
 // Merged the ordinary way: mergeCommit present, base branch is the default.
 const PR_1682_MERGED = `{"additions":21,"baseRefName":"dev","baseRefOid":"b22c3b367f6ac8531ad40e172f7aa82384dbbeb1","changedFiles":7,"deletions":8,"headRefOid":"e3ab386a63020c6f5c21d814d176ff33849eef8d","mergeCommit":{"oid":"0f7d53cc602a0dbf51372e8a601fef87ea85cc94"},"number":1682,"state":"MERGED","title":"chore(MUS-716): loading-flag resets, style arrays and fetch check (slice 5)"}`;

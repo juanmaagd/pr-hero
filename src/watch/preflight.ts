@@ -1,6 +1,6 @@
 // Everything the watcher (ROADMAP B3) must decide, expressed as pure
-// functions so it is all testable offline — same contract as preflight.ts
-// and pr-preflight.ts: nothing here touches the filesystem, git, gh, launchd
+// functions so it is all testable offline — same contract as review/preflight.ts
+// and pr/preflight.ts: nothing here touches the filesystem, git, gh, launchd
 // or the clock. watch/watch.ts is the I/O shell that acts on these.
 //
 // The watcher's model is a TICK, not a daemon: launchd (or cron) runs
@@ -9,6 +9,7 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
+import { PR_COMMENT_MARKER_PREFIX } from "#pr/preflight";
 import {
   CliUsageError,
   isFullCommitId,
@@ -21,7 +22,6 @@ import {
 } from "#review/size-gate";
 import type { SelfInvocation } from "../assets";
 import { type PrheroLayout, prheroLayout } from "../home-preflight";
-import { PR_COMMENT_MARKER_PREFIX } from "../pr-preflight";
 
 // ---------------------------------------------------------------------------
 // ~/.prhero/ layout — one source for every path the watcher owns, so the
@@ -511,7 +511,7 @@ export function parsePrFiles(raw: string): NumstatFile[] {
 
 // ---------------------------------------------------------------------------
 // The cross-machine guard. A posted pr-hero comment now declares which head
-// it reviewed (prCommentMarker in pr-preflight.ts); reading that declaration
+// it reviewed (prCommentMarker in pr/preflight.ts); reading that declaration
 // back out is how one machine's watcher learns another machine already paid
 // for this head.
 

@@ -3,7 +3,7 @@
 // merged PRs through `gh api graphql`, diffs and blames through git, and this
 // module decides what those bytes mean.
 //
-// PURITY CONTRACT, same as reverts-preflight.ts and load-bearing for the same
+// PURITY CONTRACT, same as pr/reverts-preflight.ts and load-bearing for the same
 // reason: nothing here reads the filesystem, spawns git or gh, touches the
 // network, or READS A CLOCK. The artifact must be byte-identical across two
 // renders of the same data, so `diff` on it means "history changed", never
@@ -15,8 +15,6 @@
 // PR proves something was wrong — not that a reviewer should have caught it,
 // and not which change introduced it.
 
-import { CliUsageError } from "#review/preflight";
-import { unquotePath } from "#review/size-gate";
 // The byte-level git protocol constants live in ONE place: a second copy of
 // "\x1f means field separator" is a second place to be wrong about a delimiter
 // no author can type but every parser here trusts.
@@ -24,10 +22,12 @@ import {
   type CommitPullRef,
   GIT_LOG_FIELD_SEP,
   pickCommitPull,
-} from "../reverts-preflight";
+} from "#pr/reverts-preflight";
+import { CliUsageError } from "#review/preflight";
+import { unquotePath } from "#review/size-gate";
 
 // ---------------------------------------------------------------------------
-// Flag values. Both defaults are spelled as literals inside preflight.ts's
+// Flag values. Both defaults are spelled as literals inside review/preflight.ts's
 // HELP_TEXT too; that file CANNOT import them from here (this module imports
 // CliUsageError from it, so the reverse edge would be a runtime cycle). The
 // corpus tests pin the two spellings together.

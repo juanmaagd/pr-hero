@@ -1,5 +1,5 @@
 // Binds triage replies (ROADMAP B6c) to their comparison.json row — the
-// pure half of `pr-hero triage`. NO I/O, same contract as pr-preflight.ts
+// pure half of `pr-hero triage`. NO I/O, same contract as pr/preflight.ts
 // and compare/ledger.ts: no gh, no git, no filesystem, no clock. The caller
 // (cli.ts) fetches the PR's review comments, finds every reply
 // (`in_reply_to_id` set) and hands over only the (parent body, reply body)
@@ -7,7 +7,7 @@
 // what counts as a reply, and never touches disk.
 
 import type { StoredComparisonRow } from "#compare/ledger";
-import { claimFingerprint, parseFindingMarker } from "../pr-preflight";
+import { claimFingerprint, parseFindingMarker } from "#pr/preflight";
 import { type ParsedTriageMarker, parseTriageMarker } from "./triage";
 
 export interface TriageReplyCandidate {
@@ -64,15 +64,15 @@ export function applyTriageReplies(
     }
     // Location, not id: the parent finding marker carries only path+line
     // (never the internal finding id, which is not stable across runs —
-    // pr-preflight.ts's own comment on ComparisonPrHeroClaim.id). This is
-    // the SAME identity pr-preflight's matcher keys on, matched here
+    // pr/preflight.ts's own comment on ComparisonPrHeroClaim.id). This is
+    // the SAME identity pr/preflight's matcher keys on, matched here
     // against a row's `prhero` side — but path+line is NOT a unique key
     // (compare/compare.ts documents real production data with two distinct
     // findings at the same path:line, e.g. PR 1509). `.find()` would pick
     // whichever tied row happens to be first and silently overwrite ITS
     // verdict/reasoning/actor for a reply meant for the other one,
     // corrupting the audit ledger with no error. Mirror resolveWinner's
-    // shape (inline.ts): collect every tied candidate, and when more than
+    // shape (pr/inline.ts): collect every tied candidate, and when more than
     // one ties, disambiguate with the SAME claim fingerprint the marker
     // itself carries (`c`) — never a forced pick on ambiguity.
     const candidates = updated.filter(

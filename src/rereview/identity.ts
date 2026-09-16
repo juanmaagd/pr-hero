@@ -17,7 +17,7 @@
 import { normalizePath } from "#compare/compare";
 import { extractAnchor } from "#review/root-cause";
 
-// Same number as `FINDING_LINE_WINDOW` in inline.ts. The posting matcher and
+// Same number as `FINDING_LINE_WINDOW` in pr/inline.ts. The posting matcher and
 // this identity layer MUST NOT drift: the design names that constant as the
 // span window (§3.5). A test in test/rereview/identity.test.ts pins the equality.
 // Widening either independently is the size-gate 1500→2500→1500 arc.
@@ -44,7 +44,7 @@ export interface IdentityInput {
 const LINE_SPEC = /^(\d+)(?:-(\d+))?$/;
 
 // One proof_ref may name several spans on the same path (`path.ts:64,78-90`).
-// `inline.ts`'s parseProofRefLines rejects the comma form; identity cannot,
+// `pr/inline.ts`'s parseProofRefLines rejects the comma form; identity cannot,
 // because the PR 1759 pair's defect A is stored that way.
 export function parseProofRefLocs(ref: string): IdentityLoc[] {
   const anchor = extractAnchor([ref]);

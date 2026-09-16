@@ -1,15 +1,15 @@
 // Pure-decision tests for applyTriageReplies (ROADMAP B6c) — literal in →
 // literal out, same discipline as triage/triage.test.ts and
-// pr-preflight.test.ts's marker suites. Builds real marker text via
+// pr/preflight.test.ts's marker suites. Builds real marker text via
 // findingMarker/triageMarker rather than hand-writing `<!-- pr-hero-... -->`
 // strings, so a change to either wire format breaks this suite the same way
 // it would break the real binder.
 
 import { describe, expect, test } from "bun:test";
 import type { StoredComparisonRow } from "#compare/ledger";
+import { findingMarker } from "#pr/preflight";
 import { triageMarker } from "#triage/triage";
 import { applyTriageReplies, type TriageReplyCandidate } from "#triage/write";
-import { findingMarker } from "../../src/pr-preflight";
 
 const HEAD = "e3ab386a63020c6f5c21d814d176ff33849eef8d";
 const PARENT_CLAIM = "the latch never resets";

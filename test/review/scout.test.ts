@@ -2,7 +2,7 @@
 // the output contract, lead validation, the ceiling, the leads block, and the
 // hunk-range/coverage metric the restraint gate is computed from. All offline —
 // literal in → literal out, same discipline as drafts.test.ts and
-// inline.test.ts. No spawns, no filesystem, no network.
+// pr/inline.test.ts. No spawns, no filesystem, no network.
 
 import { describe, expect, test } from "bun:test";
 import {

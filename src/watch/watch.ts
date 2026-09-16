@@ -2,7 +2,7 @@
 // runs-root scan, the comment fetch, the lockfile, the append-only log, the
 // review spawn, the macOS notification, and launchd install/uninstall —
 // every side effect `pr-hero watch` needs. Same contract as cli.ts and
-// pr.ts: untested by construction, and every decision it acts on is a pure
+// pr/pr.ts: untested by construction, and every decision it acts on is a pure
 // function in watch/preflight.ts (or compare/ledger.ts), where the tests live.
 //
 // The tick never daemonizes. launchd (or cron) is the supervisor and the
@@ -14,6 +14,20 @@ import { appendFile, mkdir, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseComparisonJson } from "#compare/ledger";
+import {
+  fetchCommitStatuses,
+  fetchPrComments,
+  ghPrFiles,
+  ghPrList,
+  ghRepoWebUrl,
+  postCommitStatus,
+} from "#pr/pr";
+import {
+  commitStatusRequest,
+  isInFlightCommitStatus,
+  latestPrHeroStatus,
+  prHtmlUrl,
+} from "#pr/preflight";
 import {
   CliError,
   type CliOptions,
@@ -46,20 +60,6 @@ import {
   type IgnoreFileReadResult,
   readLocalIgnoreRules,
 } from "../ignore-read";
-import {
-  fetchCommitStatuses,
-  fetchPrComments,
-  ghPrFiles,
-  ghPrList,
-  ghRepoWebUrl,
-  postCommitStatus,
-} from "../pr";
-import {
-  commitStatusRequest,
-  isInFlightCommitStatus,
-  latestPrHeroStatus,
-  prHtmlUrl,
-} from "../pr-preflight";
 import {
   countAttempts,
   countLaunchedToday,
@@ -101,7 +101,7 @@ import {
   type WatchConfig,
 } from "./preflight";
 
-// Third copy of the tiny git runner (cli.ts and pr.ts each carry their own,
+// Third copy of the tiny git runner (cli.ts and pr/pr.ts each carry their own,
 // deliberately, so no shell imports another shell). The WHY carries over
 // verbatim: args as an ARRAY, never an interpolated shell string.
 async function git(

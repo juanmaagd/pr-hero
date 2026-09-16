@@ -8,6 +8,7 @@
 // a renderer that reached for `new Date()` would make that a lie).
 
 import type { ResolvedModelRoute, ResolvedStepRoute } from "#model/routing";
+import { findingMarker, prCommentMarker } from "#pr/preflight";
 import type {
   Finding,
   FindingsDocument,
@@ -20,7 +21,6 @@ import {
   type RootCauseSummary,
   rootCauseIdByFinding,
 } from "#review/root-cause";
-import { findingMarker, prCommentMarker } from "../pr-preflight";
 
 export interface DiffStat {
   files: number;
@@ -298,7 +298,7 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 }
 
 // The deterministic delta line (ROADMAP B6, design D5): computed by
-// inline.ts's matcher from the live comment stream, never from a stored
+// pr/inline.ts's matcher from the live comment stream, never from a stored
 // count. `previousHeadSha` is the PRIOR summary marker's `head=` value — free
 // because the marker already carries it — and is absent on the very first
 // run (no prior marked comment exists yet) or against a pre-B3 markerless
@@ -521,7 +521,7 @@ function findingIndexLines(
 // public comment.
 //
 // The first line is the pr-hero marker carrying doc.head_sha: postPrComment
-// (pr.ts) finds the previous comment by the marker PREFIX and updates it in
+// (pr/pr.ts) finds the previous comment by the marker PREFIX and updates it in
 // place, so this renderer and that finder share one contract and posting
 // stays idempotent — while the declared head lets the watch guard (B3) tell
 // which head a posted comment covers.
@@ -868,9 +868,9 @@ function outsideDiffSection(
 
 // Per-finding comment bodies (ROADMAP B6, reworked per Juanma's PR #2
 // feedback items 2-5). Every posted finding — anchored inline or standalone
-// — carries the pr-preflight.ts identity marker as its FIRST line, mirroring
+// — carries the pr/preflight.ts identity marker as its FIRST line, mirroring
 // prCommentMarker's own contract, so a second run can tell "already posted"
-// from "new" (inline.ts's matcher) without ever touching dedupe_key or
+// from "new" (pr/inline.ts's matcher) without ever touching dedupe_key or
 // root_cause_id. Deliberately as sparse as renderPrComment on economics: no
 // cost, no tokens, nothing internal.
 //
@@ -1012,7 +1012,7 @@ export function renderInlineComment(
   return `${out.join("\n").trimEnd()}\n`;
 }
 
-// Kept for postIssueComment (src/pr.ts) and its tests: leftover W1 orphans
+// Kept for postIssueComment (src/pr/pr.ts) and its tests: leftover W1 orphans
 // from old runs still have this body shape. New posting (W2, issues #16/#17)
 // does not call this — un-anchorable findings go into the summary Outside
 // Diff section, which reuses findingBodyLines without the marker or this

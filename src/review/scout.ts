@@ -216,14 +216,14 @@ export interface HunkRange {
 }
 
 // Right-side (new-file) line ranges, one per hunk, in order of appearance.
-// Both captures matter here, unlike inline.ts's anchor scan: `d` is what turns
+// Both captures matter here, unlike pr/inline.ts's anchor scan: `d` is what turns
 // a header into a RANGE, and `d === 0` is what marks a hunk with no right side.
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
 const TARGET_HEADER = /^\+\+\+ (.+)$/;
 
 // Parsed from the `+++ b/...` headers plus each `@@` header's right-side counts.
 //
-// WHY a header scan and not inline.ts's splitDiffRecords: this metric needs the
+// WHY a header scan and not pr/inline.ts's splitDiffRecords: this metric needs the
 // hunk BOUNDARIES (a lead lands "inside hunk 3 of 7"), which the anchor-set
 // representation deliberately throws away. The cost is the one structural hole
 // splitDiffRecords closes for free — an ADDED body line whose own content

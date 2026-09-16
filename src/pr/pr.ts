@@ -2,14 +2,14 @@
 // worktree's codegraph index, and the Greptile comparison files — every side
 // effect `pr-hero review --pr <n>` needs beyond what cli.ts already owns.
 // Same contract as cli.ts: this is an I/O shell, and every decision it acts
-// on is a pure function in pr-preflight.ts / inline.ts (or preflight.ts),
+// on is a pure function in pr/preflight.ts / pr/inline.ts (or review/preflight.ts),
 // where most of the tests live.
 //
 // ROADMAP B6 exception, spelled out because it changes the file's own
 // header claim: the review-submission functions below (`postPrReview`,
 // `postIssueComment`, `fetchPrReviewComments`, `fetchPostedFindingComments`,
 // `postCommitStatus`, `fetchCommitStatuses`)
-// ARE offline-tested, in test/pr.test.ts, via an injectable `spawnFn` on the
+// ARE offline-tested, in test/pr/pr.test.ts, via an injectable `spawnFn` on the
 // internal `gh()` helper — the 422 recovery path is exactly the kind of
 // branch that must never rest on "we'll catch it live".
 //
@@ -52,7 +52,7 @@ import {
   parseFindingMarker,
   type WorktreeDecision,
   worktreeDirty,
-} from "./pr-preflight";
+} from "./preflight";
 
 export const GRAPHQL_COMMENT_MAX_PAGES = 50;
 
@@ -82,7 +82,7 @@ async function git(
 
 // `spawnFn` is the ONLY seam this module adds for testability, and it is
 // deliberately invisible to production callers: every existing call site
-// omits it and gets `Bun.spawn` exactly as before. Only test/pr.test.ts
+// omits it and gets `Bun.spawn` exactly as before. Only test/pr/pr.test.ts
 // passes one, to script gh's response (including a 422) without a live PR.
 // The `Bun.which("gh")` guard is skipped under a fake spawn on purpose — a
 // real environment missing `gh` must still fail loud, but an offline test
@@ -643,7 +643,7 @@ export async function writeComparison(input: {
 // other B6 functions (see gh()'s WHY). Needed so test/cli.test.ts can drive
 // the WHOLE step-14 sequence — review, Outside Diff in the summary, summary
 // PATCH LAST —
-// through one shared fake gh, the same way test/pr.test.ts already does for
+// through one shared fake gh, the same way test/pr/pr.test.ts already does for
 // the per-finding functions; a summary PATCH the caller-level test could not
 // see would leave the "PATCHed last" ordering unpinned.
 //
@@ -820,7 +820,7 @@ export async function fetchPrComments(
 // ---------------------------------------------------------------------------
 // Inline review surface (ROADMAP B6, WU4/WU5) — the fetcher, the atomic
 // review submission with its 422 recovery, and the per-finding issue
-// comment. inline.ts plans WHAT to post (pure); everything below executes
+// comment. pr/inline.ts plans WHAT to post (pure); everything below executes
 // that plan and is the only place in the engine allowed to.
 
 // Review-level (inline) comments, as opposed to fetchPrComments's top-level
@@ -885,9 +885,9 @@ export async function fetchPrReviewComments(
 }
 
 // Both channels pr-hero's own per-finding comments can live in, reduced to
-// inline.ts's PostedFindingComment shape. A comment that does not parse as a
+// pr/inline.ts's PostedFindingComment shape. A comment that does not parse as a
 // finding marker is silently excluded — this is where the two marker
-// prefixes' disjointness (pr-preflight.ts) actually pays for itself: the
+// prefixes' disjointness (pr/preflight.ts) actually pays for itself: the
 // summary comment's `<!-- pr-hero-report ` marker never parses as a
 // `<!-- pr-hero-finding ` one, so it drops out of this list without any
 // special-casing, and a human's reply (any shape) drops out the same way.
@@ -1485,7 +1485,7 @@ export interface ReviewSubmissionOutcome {
 // The one atomic review submission (spec "One review submission for
 // anchorable findings"), plus its 422 recovery (spec "GitHub is the anchor
 // authority", design D1). `findings` is the plan's `reviewComments` — the
-// set inline.ts already classified anchorable AND unmatched to a prior
+// set pr/inline.ts already classified anchorable AND unmatched to a prior
 // comment; an empty set never reaches gh at all (spec "Zero anchorable
 // findings": an empty `comments[]` review is never sent).
 //
@@ -1602,7 +1602,7 @@ export async function postPrReview(input: {
 // pooled). Always a fresh POST, never a PATCH — unlike postPrComment's
 // single summary comment, there is no "the" prior comment to update; a
 // finding either already has one (the caller's plan already excluded it,
-// via inline.ts's matcher) or it does not.
+// via pr/inline.ts's matcher) or it does not.
 export async function postIssueComment(
   operatorRoot: string,
   pr: number,

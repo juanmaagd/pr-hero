@@ -29,7 +29,7 @@
 // arguments. No file I/O, no `process.env` sniffing, no `log()`, no network,
 // no clock. Posting the comment and writing `$GITHUB_STEP_SUMMARY` /
 // `$GITHUB_OUTPUT` are impure edges that belong to the CI headless shell
-// (Phase 3, src/pr.ts / src/cli.ts) — this module only builds the bytes.
+// (Phase 3, src/pr/pr.ts / src/cli.ts) — this module only builds the bytes.
 //
 // Reuse: `CiSummaryData` (ci/reporter.ts) is the exported contract for the
 // step-summary payload. Its `skipped-size`/`skipped-budget` members stay
@@ -51,7 +51,7 @@
 // (`PR_COMMENT_MARKER_PREFIX = "<!-- pr-hero-report "`,
 // `PR_FINDING_MARKER_PREFIX = "<!-- pr-hero-finding "`,
 // `PR_STATE_MARKER_PREFIX = "<!-- pr-hero-state "`,
-// `TRIAGE_MARKER_PREFIX = "<!-- pr-hero-triage "` — pr-preflight.ts,
+// `TRIAGE_MARKER_PREFIX = "<!-- pr-hero-triage "` — pr/preflight.ts,
 // rereview/state.ts, triage/triage.ts). This module follows the shipped
 // convention, not the draft: `<!-- pr-hero-skip-size -->` /
 // `<!-- pr-hero-skip-budget -->`. Deliberately WITHOUT a `head=` field —
@@ -143,9 +143,9 @@ export interface CiGateSkip {
 }
 
 // Exported (Phase 3): both are legitimate consumers of these exact bytes —
-// test/pr-preflight.test.ts's marker-prefix-disjointness registry (proving
+// test/pr/preflight.test.ts's marker-prefix-disjointness registry (proving
 // neither collides with PR_COMMENT/PR_FINDING/PR_STATE/TRIAGE, the pattern
-// that test already established) and pr.ts's postPrComment, which now takes
+// that test already established) and pr/pr.ts's postPrComment, which now takes
 // a `markerPrefix` parameter so a CI skip comment is idempotent — a second
 // CI run on the same still-oversized PR (every `synchronize` push) updates
 // the existing skip comment in place instead of stacking a new one. Both are
@@ -450,7 +450,7 @@ export function budgetUnlimitedNoticeMessage(
 
 export interface CiGateSkipPlan {
   comment: string;
-  // Fed to pr.ts's postPrComment as its `markerPrefix` — idempotent per gate
+  // Fed to pr/pr.ts's postPrComment as its `markerPrefix` — idempotent per gate
   // kind, so a repeat CI run on the same still-failing PR updates the
   // existing skip comment instead of stacking a new one on every push.
   markerPrefix: string;

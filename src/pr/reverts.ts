@@ -2,7 +2,7 @@
 // DEFAULT BRANCH and asks `gh api` for the PR numbers and diff sizes, then
 // writes a markdown artifact of CANDIDATES. Every decision — what counts as a
 // revert, which duplicates collapse, how the artifact renders — is pure in
-// reverts-preflight.ts, where the tests live.
+// pr/reverts-preflight.ts, where the tests live.
 //
 // What this command deliberately does NOT do, straight from the issue's
 // scope: it never runs a review, never scores, never labels what the defect
@@ -36,7 +36,7 @@ import {
   selectRevertCandidates,
 } from "./reverts-preflight";
 
-// Same helper as cli.ts's and pr.ts's git, duplicated rather than shared so
+// Same helper as cli.ts's and pr/pr.ts's git, duplicated rather than shared so
 // neither shell imports the other. The WHY carries over verbatim: args as an
 // ARRAY, never an interpolated shell string — refs and dates are user input
 // that reaches git verbatim, and a shell in the middle would turn a --since
@@ -57,7 +57,7 @@ async function git(
   return { ok: exitCode === 0, stdout, stderr };
 }
 
-// Same shape as pr.ts's gh, and the same single testability seam: `spawnFn`
+// Same shape as pr/pr.ts's gh, and the same single testability seam: `spawnFn`
 // is invisible to production callers, and the `Bun.which("gh")` guard is
 // skipped under a fake spawn so an offline test never depends on whether the
 // machine running it happens to have the GitHub CLI installed.
@@ -75,7 +75,7 @@ async function gh(
         "GitHub CLI. Install it and authenticate (gh auth login) first.",
     );
   }
-  // cwd = operator root, same as pr.ts: gh resolves credentials and host from
+  // cwd = operator root, same as pr/pr.ts: gh resolves credentials and host from
   // the checkout, so the API consulted belongs to the repo passed as --repo.
   const proc = spawn(["gh", ...args], {
     cwd: operatorRoot,

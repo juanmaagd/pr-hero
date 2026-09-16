@@ -2,6 +2,12 @@
 // decisions (W1 / issues #20 #21 #22). Offline, no gh.
 
 import { describe, expect, test } from "bun:test";
+import type { PostedFindingComment } from "#pr/inline";
+import {
+  claimFingerprint,
+  findingMarker,
+  parseFindingMarker,
+} from "#pr/preflight";
 import {
   decideThreadResolve,
   existingTriageAtHead,
@@ -9,12 +15,6 @@ import {
   matchPostedFindingExact,
 } from "#triage/reply";
 import { triageMarker } from "#triage/triage";
-import type { PostedFindingComment } from "../../src/inline";
-import {
-  claimFingerprint,
-  findingMarker,
-  parseFindingMarker,
-} from "../../src/pr-preflight";
 
 const HEAD = "c".repeat(40);
 const OTHER_HEAD = "d".repeat(40);

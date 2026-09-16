@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import {
+  findingMarker,
+  PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
+  PR_COMMENT_MARKER_PREFIX,
+  prCommentMarker,
+} from "#pr/preflight";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
 import {
   estimateCost,
@@ -13,12 +19,6 @@ import {
   severityEmoji,
 } from "#review/report";
 import { clusterByRootCause } from "#review/root-cause";
-import {
-  findingMarker,
-  PR_COMMENT_COVERAGE_PARTIAL_TOKEN,
-  PR_COMMENT_MARKER_PREFIX,
-  prCommentMarker,
-} from "../../src/pr-preflight";
 
 const ANCHOR = "src/duration.ts:19-20";
 
@@ -871,7 +871,7 @@ describe("renderPrComment", () => {
   // GitHub #39. The defect these pin: the review POST carried no commit_id,
   // so a push landing mid-review re-anchored every comment against a newer
   // diff — silently, whenever the line still existed and now meant something
-  // else. The pin lives in pr.ts; this is the half the READER sees.
+  // else. The pin lives in pr/pr.ts; this is the half the READER sees.
   const MOVED_HEAD = "d".repeat(40);
 
   test("a moved head is disclosed above everything, naming both shas in full", () => {
@@ -1495,7 +1495,7 @@ describe("renderInlineComment", () => {
   const WEB_URL = "https://github.com/musivetech/musive";
   const HEAD = "b".repeat(40);
 
-  // The identity marker (pr-preflight.ts) is the FIRST line of every
+  // The identity marker (pr/preflight.ts) is the FIRST line of every
   // per-finding comment, mirroring prCommentMarker's own contract — this is
   // what lets a second run tell "already posted" from "new" without
   // touching dedupe_key/root_cause_id.

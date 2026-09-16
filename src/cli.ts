@@ -89,6 +89,57 @@ import {
   type RoutingConfig,
 } from "#model/routing";
 import {
+  buildPostPlan,
+  type PostedFindingComment,
+  type PostPlan,
+  parseHunkAnchors,
+  resolvePostLine,
+} from "#pr/inline";
+import {
+  CommentsTruncatedError,
+  type ComparisonOutcome,
+  ensureWorktree,
+  fetchCommitStatuses,
+  fetchPostedFindingComments,
+  fetchPrComments,
+  fetchPrRefs,
+  fetchPrReviewComments,
+  ghCompareChangedFilesWithStatus,
+  ghCurrentBranchPr,
+  ghPrFiles,
+  ghPrHeadSha,
+  ghPrHeroWorkflowRunHeads,
+  ghPrView,
+  ghRepoWebUrl,
+  initCodegraphIndex,
+  listAdmissionCheckRuns,
+  postCommitStatus,
+  postIssueTriageComment,
+  postPrComment,
+  postPrReview,
+  postReviewCommentReply,
+  resolveReviewThreadForComment,
+  upsertAdmissionCheckRun,
+  writeComparison,
+} from "#pr/pr";
+import {
+  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
+  claimFingerprint,
+  commitStatusCompletion,
+  commitStatusRequest,
+  findMarkedCommentId,
+  type HeldCommitStatusLock,
+  isInFlightCommitStatus,
+  type PrTarget,
+  parseFindingMarker,
+  prHtmlUrl,
+  prRunDirCandidate,
+  resolveCurrentPrNumber,
+  resolvePrTarget,
+  settleRequestForCancellation,
+} from "#pr/preflight";
+import { revertsCommand } from "#pr/reverts";
+import {
   buildPhaseBQueue,
   collapseTargets,
   decideLastHeadDelta,
@@ -274,7 +325,7 @@ import {
 import { type ResultLinks, renderResult } from "#ui/result";
 import { runReviewMenu } from "#ui/review-menu";
 import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
-// Pure decision module, not a shell — same category as pr-preflight.ts (see
+// Pure decision module, not a shell — same category as pr/preflight.ts (see
 // its own header comment). Reads the ALREADY-POSTED summary marker's head=
 // declaration so the delta line's "since <sha>" clause is free (report.ts's
 // PrCommentDelta.previousHeadSha), the exact reuse watch/preflight.ts's own
@@ -319,57 +370,7 @@ import {
   readLocalIgnoreRules,
   reContextualizeIgnoreError,
 } from "./ignore-read";
-import {
-  buildPostPlan,
-  type PostedFindingComment,
-  type PostPlan,
-  parseHunkAnchors,
-  resolvePostLine,
-} from "./inline";
 import { resolveMenuContext } from "./menu-context";
-import {
-  CommentsTruncatedError,
-  type ComparisonOutcome,
-  ensureWorktree,
-  fetchCommitStatuses,
-  fetchPostedFindingComments,
-  fetchPrComments,
-  fetchPrRefs,
-  fetchPrReviewComments,
-  ghCompareChangedFilesWithStatus,
-  ghCurrentBranchPr,
-  ghPrFiles,
-  ghPrHeadSha,
-  ghPrHeroWorkflowRunHeads,
-  ghPrView,
-  ghRepoWebUrl,
-  initCodegraphIndex,
-  listAdmissionCheckRuns,
-  postCommitStatus,
-  postIssueTriageComment,
-  postPrComment,
-  postPrReview,
-  postReviewCommentReply,
-  resolveReviewThreadForComment,
-  upsertAdmissionCheckRun,
-  writeComparison,
-} from "./pr";
-import {
-  CANCELLATION_COMMIT_STATUS_TIMEOUT_MS,
-  claimFingerprint,
-  commitStatusCompletion,
-  commitStatusRequest,
-  findMarkedCommentId,
-  type HeldCommitStatusLock,
-  isInFlightCommitStatus,
-  type PrTarget,
-  parseFindingMarker,
-  prHtmlUrl,
-  prRunDirCandidate,
-  resolveCurrentPrNumber,
-  resolvePrTarget,
-  settleRequestForCancellation,
-} from "./pr-preflight";
 import {
   collectDoctorExactBindingReports,
   createProductionRuntime,
@@ -383,7 +384,6 @@ import {
   createPanelState,
   renderPanelLines,
 } from "./progress";
-import { revertsCommand } from "./reverts";
 import {
   type RunnerAuthorityOptions,
   type RunnerAuthorityResolution,
@@ -2369,7 +2369,7 @@ async function reviewPr(
     // EXPRESSION, and only `baseSha` above is the canonical sha `ls-tree`
     // needs). `baseSource` — "base-branch" for an open/closed-unmerged PR,
     // "merge-commit-parent" for a merged one — decides WHICH historical
-    // revision this is (see pr-preflight.ts's PrTarget.baseRef comment): a
+    // revision this is (see pr/preflight.ts's PrTarget.baseRef comment): a
     // merged-PR replay (exactly what the lab/bench does) therefore reads the
     // `.prheroignore` as of the MERGE, not today's tip. Neither revision is
     // author-controlled, so the security property design D1 wants
@@ -3487,13 +3487,13 @@ async function reviewPr(
 
 // ---------------------------------------------------------------------------
 // Inline review surface orchestration (ROADMAP B6, WU6) — the ONLY place
-// that composes inline.ts's pure plan with pr.ts's I/O primitives into the
+// that composes pr/inline.ts's pure plan with pr/pr.ts's I/O primitives into the
 // actual post sequence. Shared verbatim by reviewPr's step 14 (a review that
 // just finished) and postCommand (a review read off disk): the SAME code
 // posts either way, because a finding does not know or care whether it came
 // from a fresh run or a `--from <run-dir>` replay.
 //
-// `spawnFn` is the same invisible-to-production seam pr.ts's own B6
+// `spawnFn` is the same invisible-to-production seam pr/pr.ts's own B6
 // functions already use (see gh()'s WHY comment there) — threaded through
 // here so test/cli.test.ts can drive the WHOLE sequence, including the
 // summary PATCH, through one shared fake gh.
@@ -3584,7 +3584,7 @@ async function resolveInlinePostPlan(input: {
   // postPrReview's 422 recovery so it can re-match with the SAME finding
   // set the plan used, never a narrower one (CRIT-A, verify-report-pr3
   // #3305: re-matching a subset can dissolve a tie the plan already
-  // resolved). See ReviewSubmissionOutcome's WHY in pr.ts.
+  // resolved). See ReviewSubmissionOutcome's WHY in pr/pr.ts.
   findingRefs: PrHeroFindingRef[];
   posted: PostedFindingComment[];
 }> {
@@ -3677,7 +3677,7 @@ const COLLAPSE_GH_TIMEOUT_MS = 120_000;
 // summary CREATED FIRST when none exists yet → review submission (with
 // 422 recovery into the summary Outside Diff bucket) → summary PATCHED
 // LAST with the final delta, comment links, and the Outside Diff union.
-// NO `sessionFailed` awareness here — same contract as pr.ts's own
+// NO `sessionFailed` awareness here — same contract as pr/pr.ts's own
 // primitives (see postPrReview's own WHY): the guard belongs to the
 // caller that decides whether to invoke this at all (postInlineIfEligible,
 // below).
@@ -3969,7 +3969,7 @@ export async function postInlineFindings(input: {
   //
   // Never aborts, never filters, never re-runs anything. What a re-review
   // should DO about findings computed on a stale head is ROADMAP item 7's
-  // design work, and with `commit_id` pinned (pr.ts) the answer here
+  // design work, and with `commit_id` pinned (pr/pr.ts) the answer here
   // collapses to a sentence: post, pinned, and say which commit this is
   // about. Silently dropping the post would be the invisible loss this
   // project's direction-of-error rule ranks worst.
@@ -3985,7 +3985,7 @@ export async function postInlineFindings(input: {
     headSha,
     findings: reviewFindings,
     // The FULL finding list, not just `reviewFindings` — see
-    // ReviewSubmissionOutcome's WHY in pr.ts (CRIT-A, verify-report-pr3
+    // ReviewSubmissionOutcome's WHY in pr/pr.ts (CRIT-A, verify-report-pr3
     // #3305). This is exactly the line a caller could silently narrow and
     // reintroduce the tie-dissolution bug; test/cli.test.ts's tie-repro
     // fails if this is ever swapped back to `reviewFindings`.
@@ -4135,7 +4135,7 @@ export async function postInlineFindings(input: {
 // closing PATCH (Juanma's PR #2 feedback: each index line links to its own
 // comment). Two sources, none of which can be read off the plan alone:
 //   - persisting matches already carry the prior comment's id/channel
-//     (`plan.persisting`, from inline.ts's matcher) — free, no extra fetch;
+//     (`plan.persisting`, from pr/inline.ts's matcher) — free, no extra fetch;
 //     leftover W1 issue-comment orphans still resolve here via channel
 //     "issue";
 //   - fresh REVIEW comments' ids are NOT returned by `POST .../reviews` at
@@ -4691,7 +4691,7 @@ export async function runPostCommand(input: {
 // reads the PR's review-comment threads, binds every triage reply (ROADMAP
 // B6b's marker) to its finding's row in that run's comparison.json, and
 // writes verdict/reasoning/actor back — the ledger's two null columns
-// (pr-preflight.ts's ComparisonRow), filled from the loop instead of by
+// (pr/preflight.ts's ComparisonRow), filled from the loop instead of by
 // hand. Same shell/pure split as postCommand: the binding decision lives in
 // triage/write.ts (pure), this function is resolveRepoRoot plus flag
 // narrowing; runTriageCommand does the actual read/fetch/write and is
@@ -7730,7 +7730,7 @@ export async function reportFatalCiError(
 // are failures docs/github-actions.md names as reasons the job goes red: a
 // malformed argument (parseArgs, exit 2) and a CliError/CliUsageError from a
 // command body (exit 1) — which is precisely what a missing or expired
-// GITHUB_TOKEN produces, since pr.ts raises CliError for `gh not found on
+// GITHUB_TOKEN produces, since pr/pr.ts raises CliError for `gh not found on
 // PATH` and for a failed `gh pr view`. A consumer branching on
 // `outputs.status == 'error'` therefore never saw it fire for the two most
 // common failures; it saw `status` unset, indistinguishable from a step whose

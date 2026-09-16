@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { FINDING_LINE_WINDOW } from "#pr/inline";
 import {
   findingsMatch,
   formatLocs,
@@ -7,7 +8,6 @@ import {
   identityFromLocs,
   parseProofRefLocs,
 } from "#rereview/identity";
-import { FINDING_LINE_WINDOW } from "../../src/inline";
 
 // Transcribed from the on-disk pair that decided D1
 // (`docs/item7-rereview-design.md` §0.6):
