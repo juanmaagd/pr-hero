@@ -6,8 +6,8 @@ import {
   validateHunterDraft,
   validateRefuterResult,
   validateSummary,
-} from "../src/drafts";
-import type { RunSummary } from "../src/findings";
+} from "#review/drafts";
+import type { RunSummary } from "#review/findings";
 
 function draft(overrides: Partial<DraftFinding> = {}): DraftFinding {
   return {

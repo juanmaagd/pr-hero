@@ -37,8 +37,8 @@ import {
 import { parseGreptileComment, pickGreptileComment } from "#compare/greptile";
 import { renderComparison } from "#compare/report";
 import { THREAD_PAGE_SIZE } from "#corpus/preflight";
+import type { Finding, RunStatus } from "#review/findings";
 import { GH_PR_VIEW_TIMEOUT_MS } from "#store/gc-preflight";
-import type { Finding, RunStatus } from "./findings";
 import { matchPostedFindings, type PostedFindingComment } from "./inline";
 import {
   buildComparisonJson,

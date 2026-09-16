@@ -6,9 +6,9 @@ import {
   DEDUPE_SYMBOL_LINE_WINDOW,
   type DedupeLoser,
   mergeAndDedupe,
-} from "../src/dedupe";
-import type { DraftFinding } from "../src/drafts";
-import fixture from "./fixtures/dedupe-142-drafts.json";
+} from "#review/dedupe";
+import type { DraftFinding } from "#review/drafts";
+import fixture from "../fixtures/dedupe-142-drafts.json";
 
 // The old default claim ("stale derived state after mutation") carried FOUR
 // distinct tokens once stopwords are dropped — below DEDUPE_CLAIM_MIN_TOKENS,

@@ -28,7 +28,7 @@
 // now out of scope; `src/index.ts:7-20` — #152's own case — still is not.
 //
 // This module is the pure half on purpose: it never touches the filesystem.
-// The reviewed tree arrives as an injected predicate, which keeps drafts.ts
+// The reviewed tree arrives as an injected predicate, which keeps review/drafts.ts
 // pure, keeps the offline suite offline, and makes every rule below testable
 // without a repo.
 

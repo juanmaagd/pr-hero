@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
 import { type ResultInput, renderResult } from "#ui/result";
 import type {
   ProviderCapabilityReport,
@@ -31,7 +32,6 @@ import {
   type NormalizedUsage,
   normalizeUnavailableUsage,
 } from "../../src/execution/usage-normalized";
-import type { Finding, FindingsDocument, Telemetry } from "../../src/findings";
 import { buildStepArgv, type StepSpec } from "../../src/step-runner";
 import {
   type OpenCodeClientEvent,

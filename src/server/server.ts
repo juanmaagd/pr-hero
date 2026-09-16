@@ -5,6 +5,7 @@
 
 import type { Database } from "bun:sqlite";
 import { unlinkSync } from "node:fs";
+import type { HopTrail } from "#review/findings";
 import type { CanonicalFindingRow, CanonicalRunRow } from "#store/preflight";
 import {
   exportComparison,
@@ -15,7 +16,6 @@ import {
   recordFindingTriage,
   saveRunTransaction,
 } from "#store/store";
-import type { HopTrail } from "../findings";
 import {
   type FindingDetail,
   type HealthResponse,

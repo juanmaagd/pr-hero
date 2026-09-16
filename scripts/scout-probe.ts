@@ -62,9 +62,9 @@
 import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_LINE_WINDOW, normalizePath } from "#compare/compare";
-import { selectBoundaryNonce } from "../src/boundary";
-import { extractJsonObject } from "../src/drafts";
-import { parseAgentFile } from "../src/prompt-set";
+import { selectBoundaryNonce } from "#review/boundary";
+import { extractJsonObject } from "#review/drafts";
+import { parseAgentFile } from "#review/prompt-set";
 import { resolveRunnerAuthority } from "../src/runner-authority";
 import {
   capScoutLeads,

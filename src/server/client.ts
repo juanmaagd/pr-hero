@@ -5,12 +5,12 @@
 // go through this client.
 
 import type { StoredComparison } from "#compare/ledger";
+import type { FindingsDocument } from "#review/findings";
 import type {
   CanonicalRunRow,
   FindingTriageRow,
   ProjectedCompleteRun,
 } from "#store/preflight";
-import type { FindingsDocument } from "../findings";
 import type {
   FindingDetail,
   GetTriageResponse,

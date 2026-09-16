@@ -40,7 +40,7 @@ export interface RootCauseInput {
 // A ref written `path.tsx: 12-14 (prose)` — a space after the colon — degenerates
 // to a bare `path.tsx:` once the prose is cut, and a token with no colon at all is
 // bare path too. Both are FILE-level, and a file-level anchor merges every finding
-// that happens to live in the same file. `dedupe.ts` already paid for this exact
+// that happens to live in the same file. `review/dedupe.ts` already paid for this exact
 // mistake: its pass 2 refuses to collapse symbol-less findings because keying on
 // path alone over-merges distinct defects file-wide (a judgment-day finding). Same
 // rule here — no location component means no anchor, so the finding stays a

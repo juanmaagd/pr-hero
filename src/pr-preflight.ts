@@ -19,7 +19,7 @@ import type {
   PrHeroFindingRef,
 } from "#compare/compare";
 import type { GreptileFinding } from "#compare/greptile";
-import type { RunStatus } from "./findings";
+import type { RunStatus } from "#review/findings";
 import {
   CliError,
   CliUsageError,

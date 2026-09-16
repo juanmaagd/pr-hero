@@ -6,7 +6,7 @@ import {
   type MartianGoldenPr,
   prNumberFromUrl,
 } from "#compare/martian-adapter";
-import type { Finding } from "../../src/findings";
+import type { Finding } from "#review/findings";
 
 function finding(over: Partial<Finding> = {}): Finding {
   return {

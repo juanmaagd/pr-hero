@@ -3,7 +3,7 @@ import {
   pathsNamedInDiff,
   proofRefPathClaim,
   unresolvedProofRefs,
-} from "../src/proof-refs";
+} from "#review/proof-refs";
 
 describe("proofRefPathClaim", () => {
   test("reads the path off every shape the prompts mandate", () => {

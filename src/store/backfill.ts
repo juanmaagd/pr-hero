@@ -8,7 +8,10 @@ import { copyFileSync, existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { parseComparisonJson, type StoredComparison } from "#compare/ledger";
-import { type FindingsDocument, validateFindingsDocument } from "../findings";
+import {
+  type FindingsDocument,
+  validateFindingsDocument,
+} from "#review/findings";
 import { prheroLayout } from "../home-preflight";
 import {
   type BackfillStats,

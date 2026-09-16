@@ -22,7 +22,7 @@ import {
   tallyArm,
   tallyCleanPrs,
 } from "#compare/floor-test";
-import type { Finding, FindingsDocument } from "../../src/findings";
+import type { Finding, FindingsDocument } from "#review/findings";
 
 const CASES_PATH = path.join(
   import.meta.dir,

@@ -15,7 +15,7 @@ import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
 // D1-10c — §13's required-evidence artifact: `pipeline.json` read-back
 // compatibility ACROSS the versioning boundary, proved in both directions.
 //
-// The migration mechanism this file guards is deliberately not findings.ts's:
+// The migration mechanism this file guards is deliberately not review/findings.ts's:
 // there, `schema_version` is validated by hard equality and a mismatch is a
 // loud rejection. Here the writer STAMPS and every reader TOLERATES, because
 // pipeline.json's readers run in places where a throw costs money —

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { defaultReviewSpec, validateReviewSpec } from "#review/spec";
 import {
   buildDiversityPlan,
   deriveExecutionKey,
@@ -6,7 +7,6 @@ import {
   diversityLegAgentKey,
   expandDiversityAgents,
 } from "../../src/diversity/identity";
-import { defaultReviewSpec, validateReviewSpec } from "../../src/spec";
 
 describe("diversity identity", () => {
   test("legacy default spec stays byte-stable without diversity config", () => {

@@ -18,7 +18,7 @@ import {
   UnauthorizedRouteError,
   UnmappedRouteError,
 } from "#model/routing";
-import { ReviewSpecValidationError, validateReviewSpec } from "../../src/spec";
+import { ReviewSpecValidationError, validateReviewSpec } from "#review/spec";
 
 describe("Task 1.1: Model Routing - parseLogicalIdentity", () => {
   test("parses explicit aliases: sonnet, opus, haiku", () => {

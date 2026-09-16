@@ -20,7 +20,7 @@ import {
   scanPostedFindingTiers,
 } from "#ci/review-admission";
 import { classifyChangedPaths } from "#ci/review-risk";
-import type { Tier } from "../../src/findings";
+import type { Tier } from "#review/findings";
 import { fetchPrComments } from "../../src/pr";
 import { PR_FINDING_MARKER_PREFIX } from "../../src/pr-preflight";
 

@@ -4,15 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PriorRecord } from "#rereview/classify";
 import type { RereviewProvenance } from "#rereview/prepare";
-import type { DraftFinding, HunterDraft, RefuterResult } from "../src/drafts";
-import type { NormalizedUsage } from "../src/execution/usage-normalized";
+import type { DraftFinding, HunterDraft, RefuterResult } from "#review/drafts";
 import {
   mergeRunEnvelope,
   type RunSummary,
   type SkillOutput,
   type Telemetry,
   validateFindingsDocument,
-} from "../src/findings";
+} from "#review/findings";
+import { defaultReviewSpec } from "#review/spec";
+import type { NormalizedUsage } from "../src/execution/usage-normalized";
 import {
   changedPathsFromDiff,
   makeProofRefResolver,
@@ -25,7 +26,6 @@ import {
 } from "../src/pipeline";
 import { GOTCHAS_TEMPLATE } from "../src/preflight";
 import type { ScoutLead } from "../src/scout";
-import { defaultReviewSpec } from "../src/spec";
 import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
 import type { SessionUsage } from "../src/usage";
 
@@ -2006,7 +2006,7 @@ describe("assembly", () => {
     expect(doc.findings[0]?.tier).toBe("blocking");
   });
 
-  // The `prompt_set` seat findings.ts has declared since v1 and nothing ever
+  // The `prompt_set` seat review/findings.ts has declared since v1 and nothing ever
   // filled (§3.9). It is optional in the schema, so an envelope carrying it
   // must still validate — and one carrying it must still carry it, which is
   // the half a "does it validate?" test alone would let regress silently.
@@ -3276,7 +3276,7 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
   //
   // `finish()` now conjoins `ceilingFired && refuterConfigured` and hands it to
   // `deriveTier` as `refuterCutShort`, which demotes precisely that pair
-  // (src/findings.ts). The default spec is used here on purpose: it CONFIGURES
+  // (src/review/findings.ts). The default spec is used here on purpose: it CONFIGURES
   // a refuter, so the ceiling really did cut an owed check short. What is NOT
   // demoted stays pinned in that module's own table, and in the two guard tests
   // below: a corroborated verdict that arrived before the ceiling still blocks,
@@ -3338,7 +3338,7 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
         }),
       "hunter-resilience": (spec) => failed(spec),
     });
-    // A spec with NO refuter: configured absence, which `src/spec.ts` permits
+    // A spec with NO refuter: configured absence, which `src/review/spec.ts` permits
     // (at most one) and which this test exists to protect. The survivor
     // therefore stays `not_submitted` with no ceiling involved at all.
     const base = defaultReviewSpec();
@@ -3359,7 +3359,7 @@ describe("pipeline ceiling admission (§13 closure line)", () => {
 
   // The SECOND guard, closing the other half of the same trap. Ceiling
   // truncation and zero-refuter configuration are ORTHOGONAL conditions: a
-  // spec with no refuter (configured absence, which `src/spec.ts` permits) can
+  // spec with no refuter (configured absence, which `src/review/spec.ts` permits) can
   // run long on its hunters or its verify legs and trip the 75-minute ceiling
   // for reasons that have nothing to do with a refuter. The guard above only
   // proves that a NON-ceiling `partial` still blocks; keyed on `ceilingFired`

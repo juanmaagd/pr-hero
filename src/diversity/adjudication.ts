@@ -4,7 +4,7 @@ import type {
   EvidenceClass,
   HopTrail,
   Severity,
-} from "../findings";
+} from "#review/findings";
 import type { AdjudicationGroup } from "./clustering";
 
 export interface CodeEvidenceReport {

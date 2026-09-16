@@ -2,17 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DraftFinding, HunterDraft } from "../src/drafts";
-import { type PipelineInput, runPipeline } from "../src/pipeline";
+import type { DraftFinding, HunterDraft } from "#review/drafts";
 import {
   type AgentSpec,
   defaultReviewSpec,
   type ReviewSpec,
   ReviewSpecValidationError,
   validateReviewSpec,
-} from "../src/spec";
-import type { StepResult, StepRunner, StepSpec } from "../src/step-runner";
-import type { SessionUsage } from "../src/usage";
+} from "#review/spec";
+import { type PipelineInput, runPipeline } from "../../src/pipeline";
+import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
+import type { SessionUsage } from "../../src/usage";
 
 // ---------------------------------------------------------------------------
 // Minimal fixtures — same shapes as pipeline.test.ts, trimmed to what the

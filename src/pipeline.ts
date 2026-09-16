@@ -38,12 +38,51 @@ import {
   verifyBatchPath,
   verifyStepName,
 } from "#rereview/verify";
-import { blockForgesNonce, selectBoundaryNonce, wrapBlock } from "./boundary";
+import {
+  blockForgesNonce,
+  selectBoundaryNonce,
+  wrapBlock,
+} from "#review/boundary";
 import {
   type DedupedSurvivor,
   type DedupeLoser,
   mergeAndDedupe,
-} from "./dedupe";
+} from "#review/dedupe";
+import {
+  type DraftFinding,
+  extractJsonObject,
+  type HunterDraft,
+  type RefuterOutcome,
+  type RefuterResult,
+  validateHunterDraft,
+  validateRefuterResult,
+  validateSummary,
+} from "#review/drafts";
+import {
+  type DebugRefutedFinding,
+  deriveTier,
+  type Finding,
+  type Hunter,
+  type RefuterVerdict,
+  type RunSummary,
+  type SkillOutput,
+} from "#review/findings";
+import {
+  parseAgentFile,
+  parseAgentSource,
+  renderAgentBody,
+  renderPriorsBlock,
+  type SuspicionPrior,
+} from "#review/prompt-set";
+import { pathsNamedInDiff } from "#review/proof-refs";
+import { clusterByRootCause, rootCauseIdByFinding } from "#review/root-cause";
+import {
+  type AgentSpec,
+  defaultReviewSpec,
+  type ReviewSpec,
+  resolveSpecialty,
+  validateReviewSpec,
+} from "#review/spec";
 import type { InternalCapabilityReport } from "./diversity/admission";
 import type { BenchmarkTarget } from "./diversity/identity";
 import {
@@ -58,16 +97,6 @@ import {
   recordDiversityHunterFailure,
   recordDiversityHunterResult,
 } from "./diversity/pipeline-integration";
-import {
-  type DraftFinding,
-  extractJsonObject,
-  type HunterDraft,
-  type RefuterOutcome,
-  type RefuterResult,
-  validateHunterDraft,
-  validateRefuterResult,
-  validateSummary,
-} from "./drafts";
 import { writeJsonAtomically } from "./execution/atomic-write";
 import {
   DEFAULT_CANCELLATION_DEADLINE_MS,
@@ -79,30 +108,12 @@ import type {
 } from "./execution/spend-limiter";
 import type { NormalizedUsage } from "./execution/usage-normalized";
 import { sumNormalizedUsage } from "./execution/usage-normalized";
-import {
-  type DebugRefutedFinding,
-  deriveTier,
-  type Finding,
-  type Hunter,
-  type RefuterVerdict,
-  type RunSummary,
-  type SkillOutput,
-} from "./findings";
 // Type-only, and deliberately so: the C5 provenance block is recorded
 // verbatim, never re-derived here, so the pipeline gains a shape from
 // preflight and not a runtime dependency on it (the same seam size-gate.ts
 // already uses for NumstatFile).
 import type { ConfigSources, LocalConfig } from "./preflight";
 import { agentFilePath, gotchasUnusableReason } from "./preflight";
-import {
-  parseAgentFile,
-  parseAgentSource,
-  renderAgentBody,
-  renderPriorsBlock,
-  type SuspicionPrior,
-} from "./prompt-set";
-import { pathsNamedInDiff } from "./proof-refs";
-import { clusterByRootCause, rootCauseIdByFinding } from "./root-cause";
 import {
   capScoutLeads,
   renderLeadsBlock,
@@ -111,13 +122,6 @@ import {
   validateScoutLeads,
 } from "./scout";
 import type { ExcludedPath } from "./size-gate";
-import {
-  type AgentSpec,
-  defaultReviewSpec,
-  type ReviewSpec,
-  resolveSpecialty,
-  validateReviewSpec,
-} from "./spec";
 import {
   attemptEvidencePath,
   attemptLogPath,
@@ -477,7 +481,7 @@ export function changedPathsFromDiff(patch: string): string[] {
 }
 
 // #152's impure half: "does the reviewed tree contain this repo-relative
-// path". The pure rules live in proof-refs.ts; only this closure touches disk.
+// path". The pure rules live in review/proof-refs.ts; only this closure touches disk.
 //
 // The reviewed target is the worktree AND the patch, in that order of intent:
 // a file the PR deletes is gone from the checkout yet fully readable in the
@@ -724,7 +728,7 @@ function triggerPatterns(agent: AgentSpec, input: PipelineInput): string[] {
 
 // The version of the `pipeline.json` SHAPE, stamped by the one writer below.
 //
-// Deliberately NOT `SCHEMA_VERSION` from findings.ts, and deliberately not
+// Deliberately NOT `SCHEMA_VERSION` from review/findings.ts, and deliberately not
 // derived from it: the two artifacts version independently, and reusing that
 // constant would make a future findings v1.1 falsely announce that
 // pipeline.json changed too. It names THIS shape — schema_version plus D1-10c's
@@ -732,7 +736,7 @@ function triggerPatterns(agent: AgentSpec, input: PipelineInput): string[] {
 // artifact, which every reader must still answer for (test/schema/migrations).
 //
 // The migration mechanism is "versioned writer, tolerant readers", not
-// findings.ts's hard-equality gate. That gate is right for a document the
+// review/findings.ts's hard-equality gate. That gate is right for a document the
 // engine is about to publish as a review; it is wrong here, where
 // `parsePipelineMeta` backs the watcher's daily attempt cap and its own WHY
 // comment records that a loud throw on one damaged artifact would brick every
@@ -873,7 +877,7 @@ interface RunState {
   // this run's spec actually configures a refuter. `ceilingFired` alone does
   // not mean an adversarial check was lost, because truncation and
   // zero-refuter configuration are ORTHOGONAL — a spec with no refuter
-  // (`src/spec.ts` allows at most one, so zero is configured absence, not
+  // (`src/review/spec.ts` allows at most one, so zero is configured absence, not
   // failure) can run long on its HUNTERS or its VERIFY legs and trip the
   // ceiling for reasons that have nothing to do with a refuter. Keyed off
   // `ceilingFired` on its own, that run would have every deterministic
@@ -1025,7 +1029,7 @@ type ExecOutcome =
 // ceiling has aborted. Marking the run here is not decoration — `partial` is
 // how a consumer sees the run was cut off, and `ceilingFired` is the flag
 // `finish()` conjoins with `refuterConfigured` to demote a survivor an
-// EXPECTED refuter never saw (src/findings.ts). Both are set, and only the
+// EXPECTED refuter never saw (src/review/findings.ts). Both are set, and only the
 // second one may feed that demotion: see the `RunState` fields for why. A run
 // that silently dropped its refuter leg and still reported `complete` would
 // promote unrefuted BLOCKERs on a truncated run.
@@ -1090,7 +1094,7 @@ async function execute(
     };
   }
 
-  // The DAG wiring is data (see spec.ts). The default spec is re-validated
+  // The DAG wiring is data (see review/spec.ts). The default spec is re-validated
   // too — it is cheap and keeps a drifted default failing loudly.
   const reviewSpec = validateReviewSpec(input.spec ?? defaultReviewSpec());
   // HERE, not beside `refuterAgent` in the refuter leg below: `finish()` needs
@@ -1686,7 +1690,7 @@ async function execute(
   // evidence_class. Severity alone is the test, because severity alone decides
   // whether a finding can reach blocking tier, and the refuter is what earns
   // that tier its credibility. (Blocking tier gates no merge — see deriveTier
-  // in src/findings.ts. It is the report's loudest register, which is exactly
+  // in src/review/findings.ts. It is the report's loudest register, which is exactly
   // why an unchecked claim must not wear it.)
   //
   // This used to also require `evidence_class === "inferential"`, on the theory
@@ -1718,7 +1722,7 @@ async function execute(
   // Half one, mechanical: it may not, WHEN a refuter was configured and
   // therefore a check really was lost. `finish()` conjoins exactly that
   // (`ceilingFired && refuterConfigured`) and hands it to `deriveTier`
-  // (src/findings.ts) as `refuterCutShort`, which demotes only the cut-short +
+  // (src/review/findings.ts) as `refuterCutShort`, which demotes only the cut-short +
   // `not_submitted` pair, so skipping THIS leg can no longer dress an
   // unchecked finding in the report's loudest register. A verdict that DID
   // arrive before the ceiling still counts for what it says, and a spec that

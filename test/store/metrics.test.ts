@@ -11,6 +11,7 @@ import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { StoredComparison } from "#compare/ledger";
+import type { Finding, FindingsDocument } from "#review/findings";
 import { runGc } from "#store/gc";
 import {
   failSoftIngest,
@@ -18,7 +19,6 @@ import {
   openMetricsDb,
   queryUsage,
 } from "#store/metrics";
-import type { Finding, FindingsDocument } from "../../src/findings";
 import { prheroLayout, repoHomePaths } from "../../src/home-preflight";
 import type { PerAgentUsage } from "../../src/pipeline";
 

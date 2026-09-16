@@ -31,7 +31,8 @@
     "#corpus/*": "./src/corpus/*.ts",
     "#mcp/*": "./src/mcp/*.ts",
     "#server/*": "./src/server/*.ts",
-    "#compare/*": "./src/compare/*.ts"
+    "#compare/*": "./src/compare/*.ts",
+    "#review/*": "./src/review/*.ts"
   },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"

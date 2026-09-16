@@ -13,7 +13,7 @@ import {
   verifyStepName,
   verifySubjectId,
 } from "#rereview/verify";
-import { wrapBlock } from "../../src/boundary";
+import { wrapBlock } from "#review/boundary";
 
 function entry(
   overrides: Partial<VerifyQueueEntry> &

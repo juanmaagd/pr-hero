@@ -11,8 +11,8 @@
 // network, no filesystem. cli.ts and pr.ts execute what this module plans.
 
 import type { PrHeroFindingRef } from "#compare/compare";
+import { extractAnchor } from "#review/root-cause";
 import { claimFingerprint, type ParsedFindingMarker } from "./pr-preflight";
-import { extractAnchor } from "./root-cause";
 import { diffRecordPath, splitDiffRecords } from "./size-gate";
 
 // The comparison ref plus the proof_refs posting needs to re-anchor an

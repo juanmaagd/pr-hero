@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { validateReviewSpec } from "#review/spec";
 import {
   appendAttempt,
   emptyDiversityLedger,
@@ -6,7 +7,6 @@ import {
 } from "../../src/diversity/accounting";
 import { buildDiversityPlan } from "../../src/diversity/identity";
 import { normalizeInclusiveUsage } from "../../src/execution/usage-normalized";
-import { validateReviewSpec } from "../../src/spec";
 
 describe("pipeline and store diversity integration", () => {
   test("assembles partial failure evidence without treating absence as agreement", () => {

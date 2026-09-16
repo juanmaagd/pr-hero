@@ -104,6 +104,20 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "report",
     ],
   },
+  {
+    domain: "review",
+    files: [
+      "boundary",
+      "dedupe",
+      "drafts",
+      "findings",
+      "findings-conformance",
+      "prompt-set",
+      "proof-refs",
+      "root-cause",
+      "spec",
+    ],
+  },
 ];
 
 function srcRootFiles(): string[] {
