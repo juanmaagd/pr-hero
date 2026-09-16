@@ -15,7 +15,7 @@
 // per-finding markers (review comment threads and issue comments alike), so
 // a matcher that could confuse any of the three families would misfile a
 // reply as a finding, or a finding as a reply. See the three-way
-// disjointness test in test/triage.test.ts.
+// disjointness test in test/triage/triage.test.ts.
 export const TRIAGE_MARKER_PREFIX = "<!-- pr-hero-triage ";
 
 // The FOUR tags an author may write (ROADMAP B6b table) — deliberately NOT

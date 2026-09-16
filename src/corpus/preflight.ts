@@ -1,5 +1,5 @@
 // Known-bad corpus decisions (GitHub #43), pure so every detector, join and
-// rendering rule is pinned offline. corpus.ts is the I/O shell: it walks
+// rendering rule is pinned offline. corpus/corpus.ts is the I/O shell: it walks
 // merged PRs through `gh api graphql`, diffs and blames through git, and this
 // module decides what those bytes mean.
 //
@@ -15,7 +15,7 @@
 // PR proves something was wrong — not that a reviewer should have caught it,
 // and not which change introduced it.
 
-import { CliUsageError } from "./preflight";
+import { CliUsageError } from "../preflight";
 // The byte-level git protocol constants live in ONE place: a second copy of
 // "\x1f means field separator" is a second place to be wrong about a delimiter
 // no author can type but every parser here trusts.
@@ -23,8 +23,8 @@ import {
   type CommitPullRef,
   GIT_LOG_FIELD_SEP,
   pickCommitPull,
-} from "./reverts-preflight";
-import { unquotePath } from "./size-gate";
+} from "../reverts-preflight";
+import { unquotePath } from "../size-gate";
 
 // ---------------------------------------------------------------------------
 // Flag values. Both defaults are spelled as literals inside preflight.ts's

@@ -73,6 +73,18 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
     domain: "model",
     files: ["catalog", "free-discovery", "provider-capabilities", "routing"],
   },
+  {
+    domain: "triage",
+    files: ["reply", "triage", "write"],
+  },
+  {
+    domain: "watch",
+    files: ["preflight", "watch"],
+  },
+  {
+    domain: "corpus",
+    files: ["corpus", "preflight"],
+  },
 ];
 
 function srcRootFiles(): string[] {

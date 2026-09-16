@@ -15,6 +15,11 @@ import type {
   RoutingConfig,
   RunnerBackend,
 } from "#model/routing";
+import {
+  ADJUDICATED_TAGS,
+  type TriageTag,
+  type TriageVerdict,
+} from "#triage/triage";
 import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type { SuspicionPrior } from "./prompt-set";
 import { redactDiagnostic } from "./security/redact";
@@ -23,7 +28,6 @@ import { redactDiagnostic } from "./security/redact";
 // dependency on this module.
 import { DEFAULT_SIZE_GATE, unquotePath } from "./size-gate";
 import type { ReviewSpec } from "./spec";
-import { ADJUDICATED_TAGS, type TriageTag, type TriageVerdict } from "./triage";
 
 // The lab's production value. Also the single biggest per-hunter cost lever
 // in the whole engine: every hop is another round of tool calls against the
@@ -139,7 +143,7 @@ export interface CliOptions {
   interval?: number;
   // watch add only: record on_push: true for the repo, so every new push
   // re-arms its PRs. The default (false) reviews each PR once — see the
-  // re-arm policy note on candidateSkipReason in watch-preflight.ts.
+  // re-arm policy note on candidateSkipReason in watch/preflight.ts.
   onPush: boolean;
   // Bypass the size gate for THIS run (see size-gate.ts). Deliberately does
   // NOT imply --yes: --force answers "is this diff too big to be worth its
@@ -184,7 +188,7 @@ export interface CliOptions {
   proximity: boolean;
   threads: boolean;
   // corpus only: the proximity window in days, kept VERBATIM like --since —
-  // validateProximityDays in corpus-preflight.ts owns the 1..90 rule where
+  // validateProximityDays in corpus/preflight.ts owns the 1..90 rule where
   // the join that consumes it is tested. Unset means DEFAULT_PROXIMITY_DAYS.
   proximityDays?: string;
   // corpus only: csv of issue labels that mark a referenced issue as a bug.
@@ -1308,7 +1312,7 @@ function applyValueFlag(
       options.since = value;
       return;
     // Kept verbatim, exactly like --since: the 1..90 range rule belongs to
-    // validateProximityDays in corpus-preflight.ts, next to the join that
+    // validateProximityDays in corpus/preflight.ts, next to the join that
     // consumes the number — an integer parser HERE would be a second opinion
     // the shell's validator contradicts. Same own-case reasoning as --since
     // (the switch's `default:` is --hop-budget's integer parser).
@@ -1904,7 +1908,7 @@ export type ConfigDirection = "person" | "repo" | "capped";
 // tsc: an undeclared direction is a bug, never a silent default.
 //
 // The `capped` rows exist because the spend rule the watcher writes down
-// (src/watch-preflight.ts:43-47) is DIRECTIONAL: the danger is a committed
+// (src/watch/preflight.ts:43-47) is DIRECTIONAL: the danger is a committed
 // repo file enlarging the OPERATOR's bill, never the reverse. Plain
 // specificity cannot express that asymmetry — "repo wins" lets a team raise
 // my bill, "person wins" forbids a team from being more frugal.

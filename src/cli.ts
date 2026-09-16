@@ -70,6 +70,7 @@ import {
   type DeltaRiskAssessment,
 } from "#ci/review-risk";
 import { runCiSetup } from "#ci/setup";
+import { corpusCommand } from "#corpus/corpus";
 import {
   capabilityGateDecision,
   produceClaudeCapabilityReport,
@@ -119,6 +120,20 @@ import {
   recordFindingTriage,
   saveRunTransaction,
 } from "#store/store";
+import {
+  decideThreadResolve,
+  existingTriageAtHead,
+  findingIdentityForMarkerMatch,
+  matchPostedFindingExact,
+} from "#triage/reply";
+import {
+  renderTriageReplyBody,
+  TRIAGE_MARKER_PREFIX,
+  type TriageMarkerFields,
+  type TriageTag,
+  type TriageVerdict,
+} from "#triage/triage";
+import { applyTriageReplies, type TriageReplyCandidate } from "#triage/write";
 import { renderActivityScreen } from "#ui/activity";
 import { renderConfig } from "#ui/config";
 import {
@@ -151,9 +166,20 @@ import {
 import { type ResultLinks, renderResult } from "#ui/result";
 import { runReviewMenu } from "#ui/review-menu";
 import { type ConfirmResult, confirmReview, confirmSizeGate } from "#ui/select";
+// Pure decision module, not a shell — same category as pr-preflight.ts (see
+// its own header comment). Reads the ALREADY-POSTED summary marker's head=
+// declaration so the delta line's "since <sha>" clause is free (report.ts's
+// PrCommentDelta.previousHeadSha), the exact reuse watch/preflight.ts's own
+// header describes for the cross-machine guard.
+import {
+  markerCommentSeen,
+  parseMarkerHead,
+  parsePrCommentMarker,
+  parsePrFiles,
+} from "#watch/preflight";
+import { watchCommand } from "#watch/watch";
 import { type EngineAssets, resolveEngineAssets } from "./assets";
 import type { PrHeroFindingRef } from "./compare";
-import { corpusCommand } from "./corpus";
 import {
   type DoctorCheckItem,
   type DoctorReport,
@@ -370,20 +396,6 @@ import {
   type D1_11ReadinessEvidence,
   type TransportRegistry,
 } from "./transport-registry";
-import {
-  renderTriageReplyBody,
-  TRIAGE_MARKER_PREFIX,
-  type TriageMarkerFields,
-  type TriageTag,
-  type TriageVerdict,
-} from "./triage";
-import {
-  decideThreadResolve,
-  existingTriageAtHead,
-  findingIdentityForMarkerMatch,
-  matchPostedFindingExact,
-} from "./triage-reply";
-import { applyTriageReplies, type TriageReplyCandidate } from "./triage-write";
 import { executeUninstallPlan, planUninstallation } from "./uninstaller";
 import {
   detectInstallMethod,
@@ -393,18 +405,6 @@ import {
   reconcileUpgrade,
   writeUpgradeCache,
 } from "./updater";
-import { watchCommand } from "./watch";
-// Pure decision module, not a shell — same category as pr-preflight.ts (see
-// its own header comment). Reads the ALREADY-POSTED summary marker's head=
-// declaration so the delta line's "since <sha>" clause is free (report.ts's
-// PrCommentDelta.previousHeadSha), the exact reuse watch-preflight.ts's own
-// header describes for the cross-machine guard.
-import {
-  markerCommentSeen,
-  parseMarkerHead,
-  parsePrCommentMarker,
-  parsePrFiles,
-} from "./watch-preflight";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // The codegraph server, and ONLY the codegraph server. Written per run and
@@ -2247,7 +2247,7 @@ async function reviewPr(
       localIgnore?.rules,
     );
     // gh's `files` list can be TRUNCATED on a very large PR (same hazard as
-    // watch.ts:322-327's tier 2). A short list under-counts, and
+    // watch/watch.ts:322-327's tier 2). A short list under-counts, and
     // under-counting here would falsely RESCUE exactly the monster this gate
     // exists to stop, so a count that disagrees with GitHub's own
     // `changedFiles` counter is never trusted to produce a passing verdict.
@@ -4693,7 +4693,7 @@ export async function runPostCommand(input: {
 // writes verdict/reasoning/actor back — the ledger's two null columns
 // (pr-preflight.ts's ComparisonRow), filled from the loop instead of by
 // hand. Same shell/pure split as postCommand: the binding decision lives in
-// triage-write.ts (pure), this function is resolveRepoRoot plus flag
+// triage/write.ts (pure), this function is resolveRepoRoot plus flag
 // narrowing; runTriageCommand does the actual read/fetch/write and is
 // exported + spawnFn-injectable for the same CRIT-B reason runPostCommand
 // is (verify-report-pr3 #3305) — a dry-run branch that could not be proven
@@ -6415,7 +6415,7 @@ export interface PrDryRunSizeGateResult {
 // use per-file data when it is trustworthy — pure, so the truncation-guard
 // branching is unit-testable without a live `gh` call.
 //
-// Ported from watch.ts's tier-2 pattern, not rewritten: the aggregate path
+// Ported from watch/watch.ts's tier-2 pattern, not rewritten: the aggregate path
 // (`{files, insertions, deletions}`, no paths) cannot express exclusions at
 // all, so `.prheroignore` widens what was already a "wrong in the
 // conservative direction" gap (see the WHY this replaces at the call site)
@@ -6424,7 +6424,7 @@ export interface PrDryRunSizeGateResult {
 // reads as a broken tool, not a conservative estimate.
 //
 // `perFile: null` is the caller's signal that gh's own `files` list was
-// truncated or unavailable — see watch.ts:322-327's identical guard: a SHORT
+// truncated or unavailable — see watch/watch.ts:322-327's identical guard: a SHORT
 // list under-counts, and under-counting here would falsely RESCUE exactly
 // the monster this gate exists to stop, so an untrustworthy list is never
 // used to compute a passing verdict.

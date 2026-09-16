@@ -3,7 +3,7 @@
 // review spawn, the macOS notification, and launchd install/uninstall —
 // every side effect `pr-hero watch` needs. Same contract as cli.ts and
 // pr.ts: untested by construction, and every decision it acts on is a pure
-// function in watch-preflight.ts (or ledger.ts), where the tests live.
+// function in watch/preflight.ts (or ledger.ts), where the tests live.
 //
 // The tick never daemonizes. launchd (or cron) is the supervisor and the
 // scheduler; one invocation is one pass over the configured repos, at most
@@ -24,11 +24,14 @@ import {
   styleEnabled,
   terminalWidth,
 } from "#ui/primitives";
-import { selfInvocation } from "./assets";
-import { resolveRepoHome } from "./home";
-import type { IgnoreRule } from "./ignore-file";
-import { type IgnoreFileReadResult, readLocalIgnoreRules } from "./ignore-read";
-import { parseComparisonJson } from "./ledger";
+import { selfInvocation } from "../assets";
+import { resolveRepoHome } from "../home";
+import type { IgnoreRule } from "../ignore-file";
+import {
+  type IgnoreFileReadResult,
+  readLocalIgnoreRules,
+} from "../ignore-read";
+import { parseComparisonJson } from "../ledger";
 import {
   fetchCommitStatuses,
   fetchPrComments,
@@ -36,27 +39,27 @@ import {
   ghPrList,
   ghRepoWebUrl,
   postCommitStatus,
-} from "./pr";
+} from "../pr";
 import {
   commitStatusRequest,
   isInFlightCommitStatus,
   latestPrHeroStatus,
   prHtmlUrl,
-} from "./pr-preflight";
+} from "../pr-preflight";
 import {
   CliError,
   type CliOptions,
   CliUsageError,
   DEFAULT_WATCH_INTERVAL_MIN,
   type NumstatFile,
-} from "./preflight";
+} from "../preflight";
 import {
   DEFAULT_SIZE_GATE,
   evaluateSizeGate,
   evaluateSizeGateAggregate,
   type SizeGateConfig,
   sizeGateConfig,
-} from "./size-gate";
+} from "../size-gate";
 import {
   countAttempts,
   countLaunchedToday,
@@ -96,7 +99,7 @@ import {
   upsertWatchRepo,
   WATCH_LAUNCHD_LABEL,
   type WatchConfig,
-} from "./watch-preflight";
+} from "./preflight";
 
 // Third copy of the tiny git runner (cli.ts and pr.ts each carry their own,
 // deliberately, so no shell imports another shell). The WHY carries over
@@ -162,9 +165,9 @@ async function resolveRepoRoot(repoOption: string): Promise<string> {
 // fetchPrComments, fetchCommitStatuses — is left as real I/O on purpose: a
 // candidate that clears the size gate reaches those unconditionally, and a
 // throwaway tmpdir git repo already exercises resolveRepoHome/scanRunDirs
-// faithfully offline (test/watch.test.ts). Faking the comments/statuses
+// faithfully offline (test/watch/watch.test.ts). Faking the comments/statuses
 // fetch too would need a live-looking `gh` response for every eligible
-// candidate an offline test can never safely construct, so test/watch.test.ts
+// candidate an offline test can never safely construct, so test/watch/watch.test.ts
 // deliberately never lets a fixture PR become eligible through
 // gatherRepoFacts itself — see that file's own header comment.
 export interface WatchIo {
@@ -461,7 +464,7 @@ export async function gatherRepoFacts(
 // runs root. comparison.json is read through the LEDGER's loud parser — the
 // reviewed-local set must come from parsed artifact fields (pr + head_sha),
 // never from directory names — while pipeline.json feeds the tolerant
-// attempts counter (see the WHY on countAttempts in watch-preflight.ts).
+// attempts counter (see the WHY on countAttempts in watch/preflight.ts).
 async function scanRunDirs(runsRoot: string): Promise<{
   facts: RunDirFact[];
   localReviews: { pr: number; head: string }[];
@@ -531,7 +534,7 @@ export interface PreLaunchVetoResult {
 }
 
 // The pre-launch veto's impure half (design D6): orchestrates the ONE
-// ghPrFiles call the pure preLaunchExclusionVeto (watch-preflight.ts) needs,
+// ghPrFiles call the pure preLaunchExclusionVeto (watch/preflight.ts) needs,
 // for the CHOSEN launch only, then re-decides. `io` is narrowed to just
 // ghPrFiles — the only I/O this needs — so tests never have to stub the
 // rest of WatchIo to exercise it.
@@ -1060,7 +1063,7 @@ async function watchUninstall(): Promise<number> {
 // ---------------------------------------------------------------------------
 // Config management (add/remove) and the read-only status view. The config
 // file is machine-owned through these verbs so nobody hand-edits JSON; every
-// decision (upsert, removal, rendering) is pure in watch-preflight.ts.
+// decision (upsert, removal, rendering) is pure in watch/preflight.ts.
 
 async function watchAdd(options: CliOptions): Promise<number> {
   const repoRoot = await resolveRepoRoot(options.repo);

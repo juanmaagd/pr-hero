@@ -288,7 +288,7 @@ export function decideWorktree(input: {
 // renderPrComment (report.ts) writes it; findMarkedCommentId reads it.
 //
 // B3 added the head declaration: the emitted marker carries the FULL head
-// sha the posted review describes, so the watch guard (watch-preflight.ts)
+// sha the posted review describes, so the watch guard (watch/preflight.ts)
 // can tell from the comment alone whether THIS head was already reviewed on
 // another machine. Matching, though, stays on the bare prefix — comments
 // already in the wild carry the old headless `<!-- pr-hero-report -->`, and
@@ -307,7 +307,7 @@ export const PR_COMMENT_MARKER_PREFIX = "<!-- pr-hero-report ";
 // and the failed refuter never re-verified anything — silently, forever,
 // until a genuinely new push arrived. This token is the fix's whole wire
 // contract: named once, spelled once, consulted by exact match only (see
-// parsePrCommentMarker in watch-preflight.ts).
+// parsePrCommentMarker in watch/preflight.ts).
 export const PR_COMMENT_COVERAGE_PARTIAL_TOKEN = "coverage=partial";
 
 // `complete` defaults to `true` so every pre-existing one-argument call —

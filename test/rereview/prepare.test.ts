@@ -17,8 +17,8 @@ import {
   toRereviewProvenance,
 } from "#rereview/prepare";
 import type { LiveFinding } from "#rereview/state";
+import { triageMarker } from "#triage/triage";
 import { claimFingerprint } from "../../src/pr-preflight";
-import { triageMarker } from "../../src/triage";
 
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const L = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

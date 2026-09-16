@@ -24,6 +24,7 @@ import {
   resolveCiAdmissionAttemptCount,
 } from "#ci/review-admission";
 import type { RereviewProvenance } from "#rereview/prepare";
+import { triageMarker } from "#triage/triage";
 import { resolveEngineAssets } from "../src/assets";
 import {
   assertRunMatchesPr,
@@ -88,7 +89,6 @@ import {
   type SummarySettings,
 } from "../src/preflight";
 import { DEFAULT_SIZE_GATE, type SizeGateConfig } from "../src/size-gate";
-import { triageMarker } from "../src/triage";
 
 // ---------------------------------------------------------------------------
 // FakeGh: records every call's argv AND stdin (decoded), in order. Routes
@@ -2854,7 +2854,7 @@ describe("postInlineIfEligible — a vanished prior summary degrades, never refu
 });
 
 // runTriageCommand — ROADMAP B6c. BINDING rules are proven once in
-// test/triage-write.test.ts; this only proves the WIRING (same real-dir +
+// test/triage/write.test.ts; this only proves the WIRING (same real-dir +
 // fake-gh split as runPostCommand's suite).
 
 function storedComparison(
@@ -3812,7 +3812,7 @@ describe("readBaseRefIgnoreRules — the base-ref read (CI mode, design D2)", ()
 // exclusions at all — no per-file paths, so `.prheroignore` widens what was
 // already a "wrong in the conservative direction" gap from tens of lines
 // (lockfiles) to potentially thousands (a whole ignored directory). Ported
-// from watch.ts's tier-2 pattern: when gh's per-file list is TRUSTWORTHY (not
+// from watch/watch.ts's tier-2 pattern: when gh's per-file list is TRUSTWORTHY (not
 // truncated), evaluate the real per-file gate; otherwise fall back to the
 // aggregate estimate and label it.
 describe("resolvePrDryRunSizeGate — the PR --dry-run size-gate estimate (Addition 1)", () => {

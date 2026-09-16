@@ -6,8 +6,8 @@
 // pair — this module never sees the wider comment stream, never decides
 // what counts as a reply, and never touches disk.
 
-import type { StoredComparisonRow } from "./ledger";
-import { claimFingerprint, parseFindingMarker } from "./pr-preflight";
+import type { StoredComparisonRow } from "../ledger";
+import { claimFingerprint, parseFindingMarker } from "../pr-preflight";
 import { type ParsedTriageMarker, parseTriageMarker } from "./triage";
 
 export interface TriageReplyCandidate {
@@ -118,7 +118,7 @@ export function applyTriageReplies(
 function composeVerdict(marker: ParsedTriageMarker): string | null {
   if (marker.tag === "applied") return "applied";
   // parseTriageMarker guarantees `verdict` is present for every other tag
-  // (the ADJUDICATED_TAGS guard in triage.ts) — this branch is exhaustive.
+  // (the ADJUDICATED_TAGS guard in triage/triage.ts) — this branch is exhaustive.
   if (marker.verdict === "inconclusive") return null;
   return `${marker.tag}/${marker.verdict}`;
 }

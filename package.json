@@ -25,7 +25,10 @@
     "#ui/*": "./src/ui/*.ts",
     "#ci/*": "./src/ci/*.ts",
     "#store/*": "./src/store/*.ts",
-    "#model/*": "./src/model/*.ts"
+    "#model/*": "./src/model/*.ts",
+    "#triage/*": "./src/triage/*.ts",
+    "#watch/*": "./src/watch/*.ts",
+    "#corpus/*": "./src/corpus/*.ts"
   },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"

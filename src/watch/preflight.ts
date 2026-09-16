@@ -1,7 +1,7 @@
 // Everything the watcher (ROADMAP B3) must decide, expressed as pure
 // functions so it is all testable offline — same contract as preflight.ts
 // and pr-preflight.ts: nothing here touches the filesystem, git, gh, launchd
-// or the clock. watch.ts is the I/O shell that acts on these.
+// or the clock. watch/watch.ts is the I/O shell that acts on these.
 //
 // The watcher's model is a TICK, not a daemon: launchd (or cron) runs
 // `pr-hero watch --once` every N minutes, each tick launches AT MOST ONE
@@ -9,15 +9,15 @@
 // money is pinned here where a test can hold it still.
 
 import path from "node:path";
-import type { SelfInvocation } from "./assets";
-import { type PrheroLayout, prheroLayout } from "./home-preflight";
-import { PR_COMMENT_MARKER_PREFIX } from "./pr-preflight";
-import { CliUsageError, isFullCommitId, type NumstatFile } from "./preflight";
+import type { SelfInvocation } from "../assets";
+import { type PrheroLayout, prheroLayout } from "../home-preflight";
+import { PR_COMMENT_MARKER_PREFIX } from "../pr-preflight";
+import { CliUsageError, isFullCommitId, type NumstatFile } from "../preflight";
 import {
   DEFAULT_SIZE_GATE,
   evaluateSizeGate,
   type SizeGateConfig,
-} from "./size-gate";
+} from "../size-gate";
 
 // ---------------------------------------------------------------------------
 // ~/.prhero/ layout — one source for every path the watcher owns, so the
@@ -994,7 +994,7 @@ function candidateSkipReason(
 }
 
 // The pre-launch exclusion veto's pure half (design D6, prheroignore Phase
-// 6): tier 2 in gatherRepoFacts (watch.ts) only runs a per-file rescue for a
+// 6): tier 2 in gatherRepoFacts (watch/watch.ts) only runs a per-file rescue for a
 // candidate whose AGGREGATE already exceeds a limit, so a PR whose aggregate
 // is already under both limits — but whose changed files are ALL excluded
 // content — never gets a per-file evaluation at all. Without this veto it
@@ -1261,7 +1261,7 @@ export interface WatchStatusFacts {
   // — C5 retired that name on PrheroLayout because it stopped identifying a
   // file. This field is the one consumer that retirement provably cannot
   // reach: it belongs to a DIFFERENT type, so `watchConfigPath: paths.
-  // watchConfigPath` in watch.ts would have compiled just as happily as
+  // watchConfigPath` in watch/watch.ts would have compiled just as happily as
   // `configPath:` did. Renamed by hand, and pinned by a test, because a
   // mechanism that cannot enforce a rule has to be paired with one that can.
   watchConfigPath: string;

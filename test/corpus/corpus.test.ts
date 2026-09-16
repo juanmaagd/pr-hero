@@ -1,5 +1,5 @@
-// Offline tests for the one corpus.ts decision that cannot live in
-// corpus-preflight.ts: whether a commit→PR lookup ANSWERED. Same fake-spawn
+// Offline tests for the one corpus/corpus.ts decision that cannot live in
+// corpus/preflight.ts: whether a commit→PR lookup ANSWERED. Same fake-spawn
 // pattern as test/pr.test.ts — no real gh anywhere here, and the `spawnFn`
 // seam is the only thing these tests need from the shell.
 //
@@ -10,7 +10,7 @@
 // complete one (12 blame-linked candidates against a clean re-run's 428).
 
 import { describe, expect, test } from "bun:test";
-import { ghCommitPulls } from "../src/corpus";
+import { ghCommitPulls } from "#corpus/corpus";
 
 interface ScriptedResponse {
   stdout?: string;
