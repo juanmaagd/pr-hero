@@ -128,7 +128,14 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
   },
   {
     domain: "pr",
-    files: ["inline", "pr", "preflight", "reverts", "reverts-preflight"],
+    files: [
+      "inline",
+      "pr",
+      "preflight",
+      "reverts",
+      "reverts-preflight",
+      "status",
+    ],
   },
   {
     domain: "git",
