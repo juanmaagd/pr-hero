@@ -20,10 +20,9 @@
 // nothing was posted when it actually was. `onPosted` is the sink:
 // reviewPr()'s own callback assigns its outer `posted` the moment this
 // module does, so a throw one line later still leaves the right value
-// behind. `ciAdmissionLedger` needs no equivalent sink — settleCiAdmission
-// Ledger mutates `state.record` on the SAME object reviewPr() already holds,
-// never reassigning the binding itself, so passing the reference through is
-// enough.
+// behind. `ciAdmissionLedger` needs no equivalent sink — settleCiAdmissionLedger
+// mutates `state.record` on the SAME object reviewPr() already holds, never
+// reassigning the binding itself, so passing the reference through is enough.
 
 import path from "node:path";
 import { ciExitCode } from "#ci/gates";

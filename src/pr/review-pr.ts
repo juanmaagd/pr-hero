@@ -589,6 +589,15 @@ export async function reviewPr(
       // finally below reads it on every exit path, including a throw from
       // inside publishRunOutcome itself), so the callback assigns it the
       // instant the posting stage resolves — never only at the end.
+      //
+      // `return await`, never a bare `return publishRunOutcome(...)`: this
+      // sits inside a try/finally, and a bare `return` hands back the
+      // pending promise WITHOUT suspending here, so the `finally` below runs
+      // synchronously right away — before publishRunOutcome has done
+      // anything, let alone fired `onPosted`. That would settle the commit
+      // status (and read `posted`) against pre-run state on every call, not
+      // just on a throw. The `await` is what makes this function actually
+      // wait for publishRunOutcome to settle before the finally can run.
       return await publishRunOutcome({
         result,
         started,

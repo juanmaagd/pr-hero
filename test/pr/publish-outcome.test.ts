@@ -5,24 +5,30 @@
 // path, including a throw partway through this tail), so `onPosted` must
 // fire the INSTANT `postFindingsIfEnabled` resolves — never only at the end.
 //
-// Boundary-doubling note (robust-testing rule: double system boundaries,
-// never the repo's own pure helpers): `postFindingsIfEnabled` (src/pr/
-// posting.ts) and `computeGreptileComparison` (src/pr/comparison.ts) call
-// real `gh`-backed helpers (`ghRepoWebUrl`, `postInlineFindings`,
-// `fetchPrComments`) WITHOUT exposing an injectable `spawnFn` at their own
-// parameter surface — confirmed by reading both files. That is the same
-// "genuine I/O shell, no offline seam" limitation test/cli.test.ts already
-// documents for reviewPr() itself and for src/pr/discovery.ts's own fetches.
-// Consequently this suite cannot make `postFindingsIfEnabled` PRODUCE a
-// truthy posted outcome without mocking those internals, which the task
-// instructions forbid. Instead:
+// Boundary-doubling note — a DELIBERATE exception to "double at boundaries
+// you do not control" (robust-testing rule 4), disclosed rather than hidden
+// behind an internal mock: `postFindingsIfEnabled` (src/pr/posting.ts) and
+// `computeGreptileComparison` (src/pr/comparison.ts) call real `gh`-backed
+// helpers (`ghRepoWebUrl`, `postInlineFindings`, `fetchPrComments`) WITHOUT
+// exposing an injectable `spawnFn` at their own parameter surface —
+// confirmed by reading both files. That is the same "genuine I/O shell, no
+// offline seam" limitation test/cli.test.ts already documents for
+// reviewPr() itself and for src/pr/discovery.ts's own fetches. Consequently
+// this suite cannot make `postFindingsIfEnabled` PRODUCE a truthy posted
+// outcome without mocking those internals, which the task instructions
+// forbid — doubling `gh`/`git` here would mean re-implementing the seam the
+// production code itself does not have, not testing through one. Instead:
 //   - `operatorRoot` is a plain (non-git) temp directory, so every `gh`/
 //     `git` call made through it fails FAST and DETERMINISTICALLY offline
 //     (verified manually: `gh pr view <n>` against a non-git directory
 //     returns in ~20ms with "fatal: not a git repository", no network
 //     round-trip) — `ghRepoWebUrl` and `gitRemoteWebUrl` both degrade to
 //     `undefined` on that failure, and `computeGreptileComparison`'s own
-//     try/catch degrades to `comparison: null`. None of this throws.
+//     try/catch degrades to `comparison: null`. None of this throws. This
+//     only holds with `GH_REPO` unset (it overrides gh's repo detection
+//     regardless of cwd) — saved/deleted/restored below, same as
+//     `GITHUB_STEP_SUMMARY`/`GITHUB_OUTPUT`, so the suite controls its own
+//     failure mode instead of assuming the ambient environment's.
 //   - `postEnabled: false` makes `postFindingsIfEnabled` a total, real,
 //     zero-I/O no-op (`{ posted: null, postedWebUrl: undefined }`) — this
 //     module's own early-return, not a double.
@@ -119,31 +125,39 @@ function captureOnPosted(): {
   };
 }
 
+// Isolation (robust-testing rule 14): every env var a test or the code
+// under test reads gets saved before and restored after, never just deleted
+// — `GH_REPO` is the one that would otherwise silently upgrade the suite's
+// "gh fails offline against a non-git dir" assumption into a live,
+// possibly-authenticated API call whenever the ambient environment sets it.
+const ISOLATED_ENV_VARS = ["GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "GH_REPO"];
+
 describe("publishRunOutcome", () => {
   let operatorRoot: string;
   let runDir: string;
   let home: string;
-  let savedStepSummary: string | undefined;
-  let savedOutput: string | undefined;
+  let savedEnv: Record<string, string | undefined>;
 
   beforeEach(async () => {
     operatorRoot = await mkdtemp(path.join(tmpdir(), "prhero-publish-op-"));
     runDir = await mkdtemp(path.join(tmpdir(), "prhero-publish-run-"));
     home = await mkdtemp(path.join(tmpdir(), "prhero-publish-home-"));
-    savedStepSummary = process.env.GITHUB_STEP_SUMMARY;
-    savedOutput = process.env.GITHUB_OUTPUT;
-    delete process.env.GITHUB_STEP_SUMMARY;
-    delete process.env.GITHUB_OUTPUT;
+    savedEnv = {};
+    for (const key of ISOLATED_ENV_VARS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
   });
 
   afterEach(async () => {
     await rm(operatorRoot, { recursive: true, force: true });
     await rm(runDir, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
-    if (savedStepSummary === undefined) delete process.env.GITHUB_STEP_SUMMARY;
-    else process.env.GITHUB_STEP_SUMMARY = savedStepSummary;
-    if (savedOutput === undefined) delete process.env.GITHUB_OUTPUT;
-    else process.env.GITHUB_OUTPUT = savedOutput;
+    for (const key of ISOLATED_ENV_VARS) {
+      const value = savedEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   function baseInput(
