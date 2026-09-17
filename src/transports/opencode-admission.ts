@@ -7,6 +7,25 @@ export interface OpenCodeObservedIdentity {
   readonly executablePath: string;
   readonly executableSha256: string;
 }
+
+// Absence and mismatch are different FACTS with different consequences, so
+// they get different error identities. A mismatch (both versions present,
+// either one wrong) is an admission-policy violation: the exact-version gate
+// is a threat model (CLAUDE.md rule 4), and admitOpenCodeVersionPair keeps
+// refusing it exactly as before. Absence (no `@opencode-ai/sdk` resolvable at
+// all — e.g. a `bun build --compile` binary run from a directory with no
+// node_modules, which is every real user's repo) is not a policy violation:
+// there is nothing to admit or refuse, the OpenCode route is simply
+// unavailable here, and Claude-only routes are unaffected. Collapsing the two
+// into one "Unsupported observed OpenCode pair: undefined/x.y.z" message is
+// what made doctor report a Claude-only setup as blocking (see
+// OpenCodeSdkUnavailableError's doctor-side handling).
+export class OpenCodeSdkUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenCodeSdkUnavailableError";
+  }
+}
 export interface OpenCodeExecutableIdentity {
   readonly absolutePath: string;
   readonly verifiedExecutionPath: string;
@@ -251,6 +270,19 @@ export async function observeOpenCodeExecutable(
       Promise.resolve(dependencies.sdkVersion?.()),
       controller.signal,
     );
+    // Absence check FIRST, and separate from the mismatch check below: a
+    // missing/blank SDK version means "not resolvable here" (see
+    // OpenCodeSdkUnavailableError above), not "resolvable but wrong". Folding
+    // this into the mismatch branch is exactly what produced
+    // "Unsupported observed OpenCode pair: undefined/1.18.30" for every
+    // compiled-binary install and made doctor report it as blocking.
+    if (typeof sdkVersion !== "string" || sdkVersion.trim() === "")
+      throw new OpenCodeSdkUnavailableError(
+        "@opencode-ai/sdk is not resolvable from this installation " +
+          "(e.g. a compiled binary run without its node_modules), so the " +
+          "OpenCode transport cannot be admitted. Claude routes are " +
+          "unaffected.",
+      );
     if (sdkVersion !== "1.18.25" || serverVersion !== "1.18.30")
       throw new Error(
         `Unsupported observed OpenCode pair: ${sdkVersion}/${serverVersion}`,

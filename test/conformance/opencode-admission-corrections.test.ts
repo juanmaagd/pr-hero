@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   consumedOpenCodeContractDigest,
   OPENCODE_CONSUMED_CONTRACT_SHA256,
+  OpenCodeSdkUnavailableError,
   observeOpenCodeExecutable,
   qualifyOpenCodeServer,
 } from "../../src/transports/opencode-admission";
@@ -88,6 +89,116 @@ test("version observer rejects changed bytes before any spawn", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// fix/opencode-sdk-absent-degraded: a compiled binary run outside the source
+// tree resolves no `@opencode-ai/sdk` at all (readInstalledOpenCodeSdkVersion
+// returns undefined). That is a DIFFERENT fact from a genuinely mismatched
+// pair (both versions present, one of them wrong) and must not throw the same
+// "Unsupported observed OpenCode pair" message doctor.ts pattern-matches on.
+function fakeSpawnReturningVersion(serverVersion: string): typeof Bun.spawn {
+  return (() => ({
+    stdout: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(serverVersion));
+        controller.close();
+      },
+    }),
+    stderr: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.close();
+      },
+    }),
+    exited: Promise.resolve(0),
+    kill() {},
+  })) as unknown as typeof Bun.spawn;
+}
+
+async function withVersionFixture(
+  run: (path: string, sha256: string) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "prhero-sdk-absent-"));
+  try {
+    const path = join(dir, "binary");
+    await writeFile(path, "fake");
+    await run(path, createHash("sha256").update("fake").digest("hex"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+describe("observed SDK absence is not a version mismatch", () => {
+  test("undefined SDK version throws OpenCodeSdkUnavailableError, not the unsupported-pair error", async () => {
+    await withVersionFixture(async (path, sha256) => {
+      let caught: unknown;
+      try {
+        await observeOpenCodeExecutable(
+          { absolutePath: path, verifiedExecutionPath: path, sha256 },
+          undefined,
+          {
+            spawn: fakeSpawnReturningVersion("1.18.30"),
+            sdkVersion: async () => undefined,
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(OpenCodeSdkUnavailableError);
+      expect((caught as Error).message).not.toContain(
+        "Unsupported observed OpenCode pair",
+      );
+    });
+  });
+
+  test("empty/whitespace SDK version throws OpenCodeSdkUnavailableError, not the unsupported-pair error", async () => {
+    await withVersionFixture(async (path, sha256) => {
+      let caught: unknown;
+      try {
+        await observeOpenCodeExecutable(
+          { absolutePath: path, verifiedExecutionPath: path, sha256 },
+          undefined,
+          {
+            spawn: fakeSpawnReturningVersion("1.18.30"),
+            sdkVersion: async () => "   ",
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(OpenCodeSdkUnavailableError);
+      expect((caught as Error).message).not.toContain(
+        "Unsupported observed OpenCode pair",
+      );
+    });
+  });
+
+  test.each([
+    ["1.18.24", "1.18.30"],
+    ["1.18.25", "1.18.29"],
+  ])(
+    "a genuinely mismatched pair (sdk %s / server %s) keeps today's error, unchanged",
+    async (sdkVersion, serverVersion) => {
+      await withVersionFixture(async (path, sha256) => {
+        let caught: unknown;
+        try {
+          await observeOpenCodeExecutable(
+            { absolutePath: path, verifiedExecutionPath: path, sha256 },
+            undefined,
+            {
+              spawn: fakeSpawnReturningVersion(serverVersion),
+              sdkVersion: async () => sdkVersion,
+            },
+          );
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).not.toBeInstanceOf(OpenCodeSdkUnavailableError);
+        expect((caught as Error).message).toBe(
+          `Unsupported observed OpenCode pair: ${sdkVersion}/${serverVersion}`,
+        );
+      });
+    },
+  );
 });
 
 test.each(["timeout", "bytes", "abort"])(

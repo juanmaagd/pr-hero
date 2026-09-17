@@ -29,6 +29,7 @@ import {
   checkCiConfiguration,
   checkSystemTools,
 } from "./system-tools";
+import { OpenCodeSdkUnavailableError } from "./transports/opencode-admission";
 
 export type DoctorSeverity = "healthy" | "degraded" | "blocking";
 
@@ -88,6 +89,34 @@ export const PROVIDER_HINTS: Record<string, string> = {
   pricing_table_missing:
     "Nothing is priced at this level: the report is produced before any route resolves. An attempt's cash cost is whatever its transport reports, and a metered route whose transport reports none is refused at admission.",
 };
+
+// fix/opencode-sdk-absent-degraded: OpenCodeSdkUnavailableError means
+// "@opencode-ai/sdk is not resolvable here" (a compiled binary run without
+// its node_modules), not "the environment is broken". Only the OpenCode
+// route is affected, so this stays `degraded`; every other capability-probe
+// failure keeps today's `blocking` treatment unchanged.
+const OPENCODE_SDK_UNAVAILABLE_HINT =
+  "Install @opencode-ai/sdk where this binary can resolve it (e.g. alongside the project's node_modules), or route the affected steps through Claude instead — Claude-only routes are unaffected.";
+
+function pushCapabilityProbeFailure(
+  checks: DoctorCheckItem[],
+  error: unknown,
+): void {
+  if (error instanceof OpenCodeSdkUnavailableError) {
+    checks.push({
+      name: "provider",
+      severity: "degraded",
+      message: `capability report production degraded: ${error.message}`,
+      hint: OPENCODE_SDK_UNAVAILABLE_HINT,
+    });
+    return;
+  }
+  checks.push({
+    name: "provider",
+    severity: "blocking",
+    message: `capability report production failed: ${(error as Error).message}`,
+  });
+}
 
 function pushProviderIssues(
   checks: DoctorCheckItem[],
@@ -527,22 +556,14 @@ export async function runDoctor(
         reports.flatMap((report) => exactBindingCapabilityIssues(report)),
       );
     } catch (error) {
-      checks.push({
-        name: "provider",
-        severity: "blocking",
-        message: `capability report production failed: ${(error as Error).message}`,
-      });
+      pushCapabilityProbeFailure(checks, error);
     }
   } else if (options.produceCapabilityReport !== undefined) {
     try {
       const capability = await options.produceCapabilityReport();
       pushProviderIssues(checks, capability.issues);
     } catch (error) {
-      checks.push({
-        name: "provider",
-        severity: "blocking",
-        message: `capability report production failed: ${(error as Error).message}`,
-      });
+      pushCapabilityProbeFailure(checks, error);
     }
   }
 
