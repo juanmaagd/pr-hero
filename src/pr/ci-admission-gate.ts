@@ -74,14 +74,29 @@ export async function evaluateCiAdmissionGate(input: {
   config: LocalConfig;
   isCi: boolean;
   options: CliOptions;
+  // Test-only seams (defaults: the real Bun.spawn / recordCiAdmissionGateSkip).
+  // Every gh() caller below already threads an invisible-to-production
+  // `spawnFn` (see pr/pr.ts's own WHY); this gate had no way to reach any of
+  // them because it never exposed the option itself. `recordSkip` covers
+  // recordCiAdmissionGateSkip specifically because it (via
+  // reserveCiAdmissionLedger -> upsertAdmissionCheckRun) has no spawnFn
+  // threading of its own and admission.ts is out of scope for this slice.
+  // publishCiSkip is deliberately NOT seamed here: with `options.post`
+  // unset it never calls gh at all, only the two env-path file writers.
+  spawnFn?: typeof Bun.spawn;
+  recordSkip?: typeof recordCiAdmissionGateSkip;
 }): Promise<CiAdmissionGateResult> {
   const { operatorRoot, prNumber, headSha, config, isCi, options } = input;
+  const spawnFn = input.spawnFn;
+  const recordSkip = input.recordSkip ?? recordCiAdmissionGateSkip;
   const ciPolicy = resolveCiReviewPolicy(config);
   const ciPolicyHash = ciReviewPolicyHash(ciPolicy);
   let ledgerRecords: AdmissionRecord[] = [];
 
   if (!options.dryRun && isCi) {
-    ledgerRecords = await listAdmissionCheckRuns(operatorRoot, headSha);
+    ledgerRecords = await listAdmissionCheckRuns(operatorRoot, headSha, {
+      spawnFn,
+    });
   }
 
   if (!options.dryRun && !options.force && isCi) {
@@ -90,8 +105,8 @@ export async function evaluateCiAdmissionGate(input: {
     let authorityFailOpen = false;
     try {
       [issueComments, reviewComments] = await Promise.all([
-        fetchPrComments(operatorRoot, prNumber),
-        fetchPrReviewComments(operatorRoot, prNumber),
+        fetchPrComments(operatorRoot, prNumber, { spawnFn }),
+        fetchPrReviewComments(operatorRoot, prNumber, { spawnFn }),
       ]);
     } catch (error) {
       if (error instanceof CommentsTruncatedError) {
@@ -141,7 +156,9 @@ export async function evaluateCiAdmissionGate(input: {
     const workflowHeads =
       headBranch === undefined || headBranch.length === 0
         ? new Set<string>()
-        : await ghPrHeroWorkflowRunHeads(operatorRoot, headBranch);
+        : await ghPrHeroWorkflowRunHeads(operatorRoot, headBranch, {
+            spawnFn,
+          });
     const reviewCount = resolveCiAdmissionAttemptCount({
       stateCount,
       workflowHeads,
@@ -154,6 +171,7 @@ export async function evaluateCiAdmissionGate(input: {
         operatorRoot,
         summaryHead,
         headSha,
+        { spawnFn },
       );
       const changedPaths = compareFiles.map((entry) => entry.path);
       deltaRisk = classifyChangedPaths(
@@ -218,7 +236,7 @@ export async function evaluateCiAdmissionGate(input: {
     }
     if (!observeOnly && admissionVerdict.action === "skip") {
       const skipReason = ciReviewSkipDetail(admissionVerdict);
-      await recordCiAdmissionGateSkip({
+      await recordSkip({
         operatorRoot,
         prNumber,
         headSha,
@@ -248,7 +266,7 @@ export async function evaluateCiAdmissionGate(input: {
     }
     if (!observeOnly && admissionVerdict.action === "manual-required") {
       const manualReason = ciReviewManualRequiredDetail(admissionVerdict);
-      await recordCiAdmissionGateSkip({
+      await recordSkip({
         operatorRoot,
         prNumber,
         headSha,

@@ -40,12 +40,19 @@ export async function postFindingsIfEnabled(input: {
     claim: string;
     locs: readonly string[];
   }[];
+  // Test-only seam (default: the real Bun.spawn). ghRepoWebUrl and
+  // postInlineIfEligible already accept an invisible-to-production spawnFn
+  // of their own (pr.ts's established seam); this stage just never exposed
+  // the option, so offline tests could not reach either without hitting gh.
+  spawnFn?: typeof Bun.spawn;
 }): Promise<PostingStageResult> {
   if (!input.postEnabled) {
     return { posted: null, postedWebUrl: undefined };
   }
 
-  const postedWebUrl = await ghRepoWebUrl(input.operatorRoot);
+  const postedWebUrl = await ghRepoWebUrl(input.operatorRoot, {
+    spawnFn: input.spawnFn,
+  });
   if (postedWebUrl === undefined) {
     log("repo web url unavailable: posting plain locations");
   }
@@ -59,6 +66,7 @@ export async function postFindingsIfEnabled(input: {
     doc: input.doc,
     diffPatch: input.diffPatch,
     webUrl: postedWebUrl,
+    spawnFn: input.spawnFn,
     rereview: input.rereview,
     rereviewPriors: input.rereviewPriors,
   });

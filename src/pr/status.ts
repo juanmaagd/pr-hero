@@ -69,13 +69,21 @@ export async function settleHeldCommitStatusOnSignal(
   }
 }
 
+// `spawnFn` is the same invisible-to-production seam postCommitStatus
+// already accepts (pr.ts's own established pattern): every existing call
+// site omits it and gets `Bun.spawn`, exactly as before. It exists so an
+// offline test can prove this function's actual swallow-errors behavior —
+// a failed `gh` call caught here and logged, never rethrown — instead of
+// replacing the whole function with a fake that can only assert it was
+// called, not what it really does when gh fails.
 export async function tryPublishCommitStatus(
   operatorRoot: string,
   sha: string,
   request: ReturnType<typeof commitStatusRequest>,
+  spawnFn?: typeof Bun.spawn,
 ): Promise<void> {
   try {
-    await postCommitStatus(operatorRoot, sha, request);
+    await postCommitStatus(operatorRoot, sha, request, spawnFn);
   } catch (error) {
     log(
       `warning: commit status (${request.state}): ${(error as Error).message}`,

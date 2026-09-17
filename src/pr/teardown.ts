@@ -20,15 +20,21 @@ import { releasePidLock } from "../home";
 // finally blocks below, because the outer one must also catch a throw from
 // inside the inner finally itself (e.g. settleCiAdmissionLedger rejecting
 // after the status publish).
+//
+// `settle` is a test-only seam (default: the real settleCiAdmissionLedger):
+// admission.ts is out of scope for this slice and its ledger persist call
+// has no spawnFn of its own, so offline tests inject a fake here instead of
+// touching that module. Every production caller omits it.
 async function settleLedgerIfPending(
   ciAdmissionLedger: CiAdmissionLedgerState | null,
+  settle: typeof settleCiAdmissionLedger = settleCiAdmissionLedger,
 ): Promise<void> {
   if (
     ciAdmissionLedger !== null &&
     (ciAdmissionLedger.record.status === "reserved" ||
       ciAdmissionLedger.record.status === "provider-started")
   ) {
-    await settleCiAdmissionLedger(
+    await settle(
       ciAdmissionLedger,
       "failed",
       "review path exited without terminal settlement",
@@ -42,6 +48,15 @@ async function settleLedgerIfPending(
 // tryPublishCommitStatus/releaseCommitStatusLock in their own try/finally
 // "for safety": today a throw from tryPublishCommitStatus skips the release,
 // and preserving that (not "fixing" it) is this function's job.
+//
+// `spawnFn` threads into tryPublishCommitStatus (status.ts's own seam,
+// invisible to production): this doubles the real `gh` boundary instead of
+// replacing tryPublishCommitStatus's swallow-errors behavior with a fake,
+// so a test can prove that behavior for real — a failed gh post still lets
+// this function release the lock and settle the ledger, exactly as a
+// successful one does. `settle` stays a whole-function seam (default: the
+// real settleCiAdmissionLedger): admission.ts is out of scope for this
+// slice and its ledger persist call has no spawnFn of its own.
 export async function settleCommitStatusAndLedger(input: {
   result: PipelineResult | undefined;
   posted: InlinePostOutcome | null;
@@ -49,6 +64,8 @@ export async function settleCommitStatusAndLedger(input: {
   headSha: string;
   statusTargetUrl: string | undefined;
   ciAdmissionLedger: CiAdmissionLedgerState | null;
+  spawnFn?: typeof Bun.spawn;
+  settle?: typeof settleCiAdmissionLedger;
 }): Promise<void> {
   const phase = commitStatusCompletion({
     pipelineFinished: input.result !== undefined,
@@ -62,27 +79,39 @@ export async function settleCommitStatusAndLedger(input: {
       posted: input.posted !== null,
       targetUrl: input.statusTargetUrl,
     }),
+    input.spawnFn,
   );
   // Settled, so nothing is held: the signal handlers must never post a
   // second, contradicting status over the one just written. Released
   // immediately after the settle so no path through this finally — throw,
   // early return, or normal exit — can leave the lock standing.
   releaseCommitStatusLock();
-  await settleLedgerIfPending(input.ciAdmissionLedger);
+  await settleLedgerIfPending(input.ciAdmissionLedger, input.settle);
 }
 
 // The outer `finally`: releases the pid lock and runs gc no matter how the
 // whole review path exited, after a last ledger-settlement chance covering a
 // throw from inside the inner finally above.
+//
+// `settle`/`gc` are test-only seams (defaults: the real
+// settleCiAdmissionLedger/runGc), same rationale as
+// settleCommitStatusAndLedger above — runGc shells out to `gh pr view` with
+// no spawnFn of its own. `releasePidLock` stays real: it is a plain
+// `fs.rm` against a caller-supplied path, so a real temp lock file is
+// already the observable, and faking it would hide the very fs effect the
+// test wants to prove.
 export async function finalizePrReviewRun(input: {
   ciAdmissionLedger: CiAdmissionLedgerState | null;
   lockPath: string;
   home: string;
   repoId: string;
+  settle?: typeof settleCiAdmissionLedger;
+  gc?: typeof runGc;
 }): Promise<void> {
-  await settleLedgerIfPending(input.ciAdmissionLedger);
+  const gc = input.gc ?? runGc;
+  await settleLedgerIfPending(input.ciAdmissionLedger, input.settle);
   await releasePidLock(input.lockPath);
-  await runGc({
+  await gc({
     home: input.home,
     repoId: input.repoId,
     dryRun: false,
