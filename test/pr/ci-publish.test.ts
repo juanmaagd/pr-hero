@@ -219,40 +219,41 @@ describe("publishCiReviewIfEligible — a real eligible run", () => {
   });
 
   test.each([
-    ["GITHUB_STEP_SUMMARY", undefined, "outputs.txt"],
-    ["GITHUB_OUTPUT", "step-summary.md", undefined],
-  ])(
-    "an unset %s writes nothing there without throwing",
-    async (_name, summaryFile, outputFile) => {
+    ["GITHUB_STEP_SUMMARY unset", false, true, false, true],
+    ["GITHUB_OUTPUT unset", true, false, true, false],
+  ] as const)(
+    "%s writes only where the env var points, without throwing",
+    async (_name, summaryEnvSet, outputEnvSet, expectSummaryWritten, expectOutputWritten) => {
       const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ci-publish-"));
-      const summaryPath =
-        summaryFile === undefined ? undefined : path.join(dir, summaryFile);
-      const outputPath =
-        outputFile === undefined ? undefined : path.join(dir, outputFile);
+      const summaryPath = path.join(dir, "step-summary.md");
+      const outputPath = path.join(dir, "outputs.txt");
       await expect(
-        withCiEnv(summaryPath, outputPath, () =>
-          publishCiReviewIfEligible({
-            isCi: true,
-            sessionFailed: false,
-            prNumber: PR,
-            headSha: HEAD,
-            findings: [],
-            costUsdEst: 0,
-            wallMs: 1000,
-            model: "sonnet",
-            webUrl: undefined,
-            delta: undefined,
-            runDir: "/runs/1",
-            stepSummaryFlag: undefined,
-          }),
+        withCiEnv(
+          summaryEnvSet ? summaryPath : undefined,
+          outputEnvSet ? outputPath : undefined,
+          () =>
+            publishCiReviewIfEligible({
+              isCi: true,
+              sessionFailed: false,
+              prNumber: PR,
+              headSha: HEAD,
+              findings: [],
+              costUsdEst: 0,
+              wallMs: 1000,
+              model: "sonnet",
+              webUrl: undefined,
+              delta: undefined,
+              runDir: "/runs/1",
+              stepSummaryFlag: undefined,
+            }),
         ),
       ).resolves.toBeUndefined();
-      if (summaryPath !== undefined) {
-        expect(await readIfExists(summaryPath)).not.toBeNull();
-      }
-      if (outputPath !== undefined) {
-        expect(await readIfExists(outputPath)).not.toBeNull();
-      }
+      expect((await readIfExists(summaryPath)) !== null).toBe(
+        expectSummaryWritten,
+      );
+      expect((await readIfExists(outputPath)) !== null).toBe(
+        expectOutputWritten,
+      );
     },
   );
 });
