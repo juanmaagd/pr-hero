@@ -1,0 +1,284 @@
+// Behavior tests for publishRunOutcome (src/pr/publish-outcome.ts), the
+// post-pipeline tail extracted out of reviewPr(). See that module's header
+// for the hazard this suite exists to prove: `posted` is declared OUTSIDE
+// reviewPr()'s try block (both its finally blocks read it on every exit
+// path, including a throw partway through this tail), so `onPosted` must
+// fire the INSTANT `postFindingsIfEnabled` resolves — never only at the end.
+//
+// Boundary-doubling note — a DELIBERATE exception to "double at boundaries
+// you do not control" (robust-testing rule 4), disclosed rather than hidden
+// behind an internal mock: `postFindingsIfEnabled` (src/pr/posting.ts) and
+// `computeGreptileComparison` (src/pr/comparison.ts) call real `gh`-backed
+// helpers (`ghRepoWebUrl`, `postInlineFindings`, `fetchPrComments`) WITHOUT
+// exposing an injectable `spawnFn` at their own parameter surface —
+// confirmed by reading both files. That is the same "genuine I/O shell, no
+// offline seam" limitation test/cli.test.ts already documents for
+// reviewPr() itself and for src/pr/discovery.ts's own fetches. Consequently
+// this suite cannot make `postFindingsIfEnabled` PRODUCE a truthy posted
+// outcome without mocking those internals, which the task instructions
+// forbid — doubling `gh`/`git` here would mean re-implementing the seam the
+// production code itself does not have, not testing through one. Instead:
+//   - `operatorRoot` is a plain (non-git) temp directory, so every `gh`/
+//     `git` call made through it fails FAST and DETERMINISTICALLY offline
+//     (verified manually: `gh pr view <n>` against a non-git directory
+//     returns in ~20ms with "fatal: not a git repository", no network
+//     round-trip) — `ghRepoWebUrl` and `gitRemoteWebUrl` both degrade to
+//     `undefined` on that failure, and `computeGreptileComparison`'s own
+//     try/catch degrades to `comparison: null`. None of this throws. This
+//     only holds with `GH_REPO` unset (it overrides gh's repo detection
+//     regardless of cwd) — saved/deleted/restored below, same as
+//     `GITHUB_STEP_SUMMARY`/`GITHUB_OUTPUT`, so the suite controls its own
+//     failure mode instead of assuming the ambient environment's.
+//   - `postEnabled: false` makes `postFindingsIfEnabled` a total, real,
+//     zero-I/O no-op (`{ posted: null, postedWebUrl: undefined }`) — this
+//     module's own early-return, not a double.
+//   - The "a later step throws" half of test 1 is forced through a REAL
+//     system-boundary failure instead: `GITHUB_STEP_SUMMARY` pointed at a
+//     path inside a directory that does not exist, so `publishCiReviewIfEligible`'s
+//     real `node:fs/promises` `appendFile` call rejects with ENOENT.
+// The result still proves the exact hazard: `onPosted`'s value is captured
+// before that later throw, and reverts to "never called" the instant the
+// call is moved past it (mutation-checked below).
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type { InlinePostOutcome } from "#pr/inline";
+import {
+  type PublishRunOutcomeInput,
+  publishRunOutcome,
+} from "#pr/publish-outcome";
+import type { SkillOutput } from "#review/findings";
+import type { PipelineResult } from "#review/pipeline";
+import type { CliOptions } from "#review/preflight";
+import { estimateCost } from "#review/report";
+import { CliError } from "../../src/errors";
+import { zeroUsage } from "../../src/usage";
+
+function baseOptions(over: Partial<CliOptions> = {}): CliOptions {
+  return {
+    repo: ".",
+    head: "HEAD",
+    hopBudget: 3,
+    scout: false,
+    full: false,
+    dryRun: false,
+    yes: false,
+    post: false,
+    twoDot: false,
+    onPush: false,
+    force: false,
+    all: false,
+    fixes: false,
+    incidents: false,
+    issues: false,
+    proximity: false,
+    threads: false,
+    ...over,
+  };
+}
+
+const HEAD_SHA = "b".repeat(40);
+const BASE_SHA = "a".repeat(40);
+
+function baseSkillOutput(): SkillOutput {
+  return {
+    findings: [],
+    debug: { refuted: [] },
+    parity_hunter_fired: false,
+    run_status: "complete",
+  };
+}
+
+function baseResult(
+  over: { sessionFailed?: boolean; skillOutput?: SkillOutput } = {},
+): PipelineResult {
+  return {
+    skillOutput: over.skillOutput ?? baseSkillOutput(),
+    perAgent: {},
+    usage: { ...zeroUsage(), cost_usd_est: 0.42 },
+    sessionFailed: over.sessionFailed ?? false,
+    unresolved: [],
+  } as unknown as PipelineResult;
+}
+
+// Every test uses the SAME sentinel discipline for the onPosted capture:
+// "not-called" is not a legal InlinePostOutcome | null value, so a test
+// asserting the capture moved off it is asserting onPosted actually ran —
+// not merely that it ran with some particular (possibly default) value.
+const NOT_CALLED = Symbol("onPosted not called");
+
+function captureOnPosted(): {
+  onPosted: (posted: InlinePostOutcome | null) => void;
+  calls: (InlinePostOutcome | null)[];
+  value: () => InlinePostOutcome | null | typeof NOT_CALLED;
+} {
+  const calls: (InlinePostOutcome | null)[] = [];
+  return {
+    onPosted: (posted) => {
+      calls.push(posted);
+    },
+    calls,
+    value: () =>
+      calls.length === 0 ? NOT_CALLED : (calls[calls.length - 1] ?? null),
+  };
+}
+
+// Isolation (robust-testing rule 14): every env var a test or the code
+// under test reads gets saved before and restored after, never just deleted
+// — `GH_REPO` is the one that would otherwise silently upgrade the suite's
+// "gh fails offline against a non-git dir" assumption into a live,
+// possibly-authenticated API call whenever the ambient environment sets it.
+const ISOLATED_ENV_VARS = ["GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "GH_REPO"];
+
+describe("publishRunOutcome", () => {
+  let operatorRoot: string;
+  let runDir: string;
+  let home: string;
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(async () => {
+    operatorRoot = await mkdtemp(path.join(tmpdir(), "prhero-publish-op-"));
+    runDir = await mkdtemp(path.join(tmpdir(), "prhero-publish-run-"));
+    home = await mkdtemp(path.join(tmpdir(), "prhero-publish-home-"));
+    savedEnv = {};
+    for (const key of ISOLATED_ENV_VARS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(async () => {
+    await rm(operatorRoot, { recursive: true, force: true });
+    await rm(runDir, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+    for (const key of ISOLATED_ENV_VARS) {
+      const value = savedEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  function baseInput(
+    over: Partial<PublishRunOutcomeInput> = {},
+  ): PublishRunOutcomeInput {
+    const { onPosted } = captureOnPosted();
+    return {
+      result: baseResult(),
+      started: performance.now(),
+      indexMs: 0,
+      runDir,
+      prNumber: 42,
+      diffFromSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      options: baseOptions(),
+      agentFiles: new Map(),
+      promptSet: { name: "default", sha256: "deadbeef" },
+      operatorRoot,
+      baseRef: "main",
+      diffStat: { files: 1, insertions: 1, deletions: 0 },
+      droppedPaths: [],
+      diffPatch: "",
+      home,
+      repoId: null,
+      postEnabled: false,
+      rereview: undefined,
+      phaseB: undefined,
+      gitDirOwner: operatorRoot,
+      worktreePath: operatorRoot,
+      isCi: false,
+      estimate: estimateCost({ files: 1, insertions: 1, deletions: 0 }, 1),
+      ciAdmissionLedger: null,
+      onPosted,
+      ...over,
+    };
+  }
+
+  // Guard clause: the extracted function starts with the SAME
+  // `result === undefined` check reviewPr() used to run before this tail —
+  // preserved verbatim, so a pipeline that never produced a result still
+  // throws before touching onPosted or any artifact.
+  test("result undefined throws the same CliError and never calls onPosted", async () => {
+    const { onPosted, calls } = captureOnPosted();
+    const input = baseInput({ result: undefined, onPosted });
+    await expect(publishRunOutcome(input)).rejects.toThrow(CliError);
+    await expect(publishRunOutcome(input)).rejects.toThrow(
+      "internal: pipeline returned no result",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  // Task item 2 (first half): posting disabled is postFindingsIfEnabled's
+  // own real, zero-I/O early return — onPosted must receive exactly what
+  // that early return produced (null), and the non-CI exit code follows
+  // postingExitCode(null) = 0.
+  test("posting disabled: onPosted(null), exits via postingExitCode(null)", async () => {
+    const { onPosted, value } = captureOnPosted();
+    const exitCode = await publishRunOutcome(
+      baseInput({ postEnabled: false, isCi: false, onPosted }),
+    );
+    expect(value()).toBeNull();
+    expect(exitCode).toBe(0);
+  });
+
+  // Task item 2 (second half): a failed session still runs the whole tail
+  // (artifacts are written, posting is attempted-but-null via
+  // postInlineIfEligible's own sessionFailed guard) and then short-circuits
+  // to exit 1 BEFORE reaching ciExitCode/postingExitCode, exactly as
+  // reviewPr() did inline.
+  test("session failed: onPosted(null), returns 1 before the exit-code ternary", async () => {
+    const { onPosted, value } = captureOnPosted();
+    const exitCode = await publishRunOutcome(
+      baseInput({
+        result: baseResult({ sessionFailed: true }),
+        postEnabled: false,
+        isCi: false,
+        onPosted,
+      }),
+    );
+    expect(value()).toBeNull();
+    expect(exitCode).toBe(1);
+  });
+
+  // Task item 3: the happy path's artifacts and return value are exactly
+  // what reviewPr() reads afterwards (findings.json / report.md on disk,
+  // exit code 0 with nothing posted and no CI ledger to settle).
+  test("happy path: writes findings.json and report.md, returns postingExitCode(null)", async () => {
+    const exitCode = await publishRunOutcome(baseInput());
+    expect(exitCode).toBe(0);
+    const findingsPath = path.join(runDir, "findings.json");
+    const reportPath = path.join(runDir, "report.md");
+    expect(await Bun.file(findingsPath).exists()).toBe(true);
+    expect(await Bun.file(reportPath).exists()).toBe(true);
+    const doc = JSON.parse(await Bun.file(findingsPath).text());
+    expect(doc.pr).toBe(42);
+    expect(doc.head_sha).toBe(HEAD_SHA);
+    expect(doc.base_sha).toBe(BASE_SHA);
+    expect(doc.run_status).toBe("complete");
+  });
+
+  // Task item 1: posting "succeeds" (postFindingsIfEnabled's real, offline
+  // no-op path — see the file header for why a truthy posted outcome is not
+  // reachable without mocking gh internals) and a LATER real step throws
+  // (publishCiReviewIfEligible's own `node:fs/promises` write, forced to
+  // fail by pointing GITHUB_STEP_SUMMARY at a nonexistent directory). The
+  // throw must propagate, and onPosted must have already fired.
+  test("a later step throws after posting resolves: error propagates, onPosted already fired", async () => {
+    process.env.GITHUB_STEP_SUMMARY = path.join(
+      operatorRoot,
+      "no-such-dir",
+      "summary.md",
+    );
+    const { onPosted, value } = captureOnPosted();
+    const input = baseInput({
+      isCi: true,
+      result: baseResult({ sessionFailed: false }),
+      postEnabled: false,
+      onPosted,
+    });
+    await expect(publishRunOutcome(input)).rejects.toThrow();
+    expect(value()).not.toBe(NOT_CALLED);
+    expect(value()).toBeNull();
+  });
+});
