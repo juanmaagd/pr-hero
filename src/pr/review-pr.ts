@@ -33,7 +33,6 @@ import {
 import { formatWorkflowCommand, withCiWorkflowGroup } from "#ci/reporter";
 import {
   ingestReviewMetrics,
-  loadEffectiveConfig,
   notionalCostInput,
   persistCanonicalReview,
   pipelineConfigInput,
@@ -102,54 +101,39 @@ import {
   unreachableLastHeadMessage,
 } from "#rereview/prepare";
 import { parseStateBlock } from "#rereview/state";
-import {
-  mergeRunEnvelope,
-  type Telemetry,
-  writeFindings,
-} from "#review/findings";
-import {
-  changedPathsFromDiff,
-  type PipelineResult,
-  parityTriggered,
-  runPipeline,
-} from "#review/pipeline";
+import type { Telemetry } from "#review/findings";
+import { type PipelineResult, runPipeline } from "#review/pipeline";
 import {
   allExcludedMessage,
   type CliOptions,
   emptyDiffMessage,
   isCiEnvironment,
   type NumstatFile,
-  parseNumstatFiles,
   resolveMaxVerificationSteps,
-  resolvePost,
-  resolveScout,
-  resolveSummary,
 } from "#review/preflight";
+import { type DiffStat, envelopeModel, estimateCost } from "#review/report";
 import {
-  type DiffStat,
-  envelopeModel,
-  estimateCost,
-  renderReport,
-} from "#review/report";
-import {
-  buildCliRoutePlan,
-  enforceProviderCapabilityGate,
   pipelineScoutInput,
   pipelineSummarizerInput,
-  resolveProductionRoutePlanAtConfirm,
 } from "#review/route-preflight";
 import {
   assertDistinctRange,
   buildTelemetry,
+  computeDiffStatAndSizeGate,
+  enforceCapabilityGate,
+  loadRunConfig,
   prepareRunnerForRoute,
   resolveGotchasPath,
+  resolveParityFires,
+  resolvePipelineRoute,
   resolvePromptSet,
   selectActiveHunters,
   validateGotchas,
+  writeRunFindings,
+  writeRunReport,
 } from "#review/run";
 import {
   type ExcludedPath,
-  effectiveDiffStat,
   evaluateSizeGate,
   filterDiffByIgnoreRules,
   type SizeGateVerdict,
@@ -210,15 +194,12 @@ export async function reviewPr(
   // yet at this point, and a `.prhero/config.json` committed by the PR author
   // must stay unread (O-8). Same loader as local mode, so the two modes
   // cannot drift on precedence.
-  const loaded = await loadEffectiveConfig({
+  const { loaded, config, summary, scout, post } = await loadRunConfig({
     root: operatorRoot,
     home,
     configFlag: options.config,
+    options,
   });
-  const config = loaded.effective;
-  const summary = resolveSummary(options, config);
-  const scout = resolveScout(options, config);
-  const post = resolvePost(options, config);
   // ROADMAP Pillar 3 (GitHub Actions CI). isCi folds in HERE, alongside
   // scout/post, so `options.yes` carries the headless bypass (spec 2.1:
   // "MUST run headlessly ... equivalent to --yes") through every downstream
@@ -687,36 +668,14 @@ export async function reviewPr(
       diffStat = { files: 0, insertions: 0, deletions: 0 };
       sizeGate = evaluateSizeGate([], gateConfig);
     } else {
-      const numstat = await git(gitDirOwner, [
-        "diff",
-        "--numstat",
-        discoveryRange,
-        ...pathArgs,
-      ]);
-      if (!numstat.ok) {
-        throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
-      }
-      const gateNumstat = await git(gitDirOwner, [
-        "diff",
-        "-w",
-        "--ignore-blank-lines",
-        "--numstat",
-        discoveryRange,
-        ...pathArgs,
-      ]);
-      if (!gateNumstat.ok) {
-        throw new CliError(
-          `git diff -w --numstat failed: ${gateNumstat.stderr}`,
-        );
-      }
-      diffStat = effectiveDiffStat(
-        parseNumstatFiles(numstat.stdout),
-        gateConfig.excludeRules,
-      );
-      sizeGate = evaluateSizeGate(
-        parseNumstatFiles(gateNumstat.stdout),
+      // See computeDiffStatAndSizeGate (src/review/run.ts) for the full
+      // rationale.
+      ({ diffStat, sizeGate } = await computeDiffStatAndSizeGate({
+        runGit: (args) => git(gitDirOwner, args),
+        range: discoveryRange,
+        pathArgs,
         gateConfig,
-      );
+      }));
     }
 
     // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
@@ -823,9 +782,8 @@ export async function reviewPr(
 
     // 7 — the plan and the paid gate, exactly like local mode but with the
     // real numstat replacing GitHub's counters.
-    const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
-    const parityFires = parityTriggered(
-      changedPaths,
+    const parityFires = resolveParityFires(
+      effectiveDiff.patch,
       config.parity_trigger_paths,
     );
     const activeHunters = skipDiscovery
@@ -894,32 +852,27 @@ export async function reviewPr(
         });
       }
     }
-    const productionRoute = await resolveProductionRoutePlanAtConfirm({
+    const productionRoute = await resolvePipelineRoute({
       routingConfigured: config.routing !== undefined,
       workspaceRoot: worktreePath,
-      buildRoutePlan: () =>
-        buildCliRoutePlan({
-          spec,
-          options,
-          agentFiles,
-          routingConfig: config.routing,
-          summary,
-          summarizerEnabled: summary.enabled && !skipDiscovery,
-          scoutEnabled: options.scout && !skipDiscovery,
-        }),
+      spec,
+      options,
+      agentFiles,
+      routingConfig: config.routing,
+      summary,
+      summarizerEnabled: summary.enabled && !skipDiscovery,
+      scoutEnabled: options.scout && !skipDiscovery,
     });
     const routePlan = productionRoute?.routePlan;
     const productionAdmission = productionRoute?.productionAdmission;
     const runnerAuthority = await resolveRunnerAuthority({
       workspaceRoot: worktreePath,
     });
-    await enforceProviderCapabilityGate({
+    await enforceCapabilityGate({
       routePlan,
       workspaceRoot: worktreePath,
       runnerAuthority,
-      authorityOptions: productionAdmission?.authorityOptions,
-      admissionRegistry: productionAdmission?.registry,
-      productionEvidence: productionAdmission?.evidence,
+      productionAdmission,
     });
     // Same reason as local mode's planContext: the card and the confirm menu's
     // details view must describe one and the same planned run.
@@ -1153,34 +1106,29 @@ export async function reviewPr(
       // when it is missing, so the init cost is real and measured. Disk stays
       // unreported, and the mode is the same synchronous build.
       const telemetry: Telemetry = buildTelemetry(result, wallMs, indexMs);
-      const doc = mergeRunEnvelope({
-        skillOutput: result.skillOutput,
+      const { doc, findingsPath } = await writeRunFindings({
+        runDir,
+        result,
         pr: prNumber,
-        base_sha: diffFromSha,
-        head_sha: headSha,
-        model: envelopeModel(options, agentFiles),
-        iteration: 0,
-        prompt_set: promptSet,
+        baseSha: diffFromSha,
+        headSha,
+        options,
+        agentFiles,
+        promptSet,
         engine: await engineIdentity(),
-        sessionFailed: result.sessionFailed,
         telemetry,
       });
-      const findingsPath = path.join(runDir, "findings.json");
-      await writeFindings(findingsPath, doc);
-      const reportPath = path.join(runDir, "report.md");
-      await Bun.write(
-        reportPath,
-        renderReport(doc, {
-          repo: path.basename(operatorRoot),
-          base: target.baseRef,
-          head: `PR #${prNumber}`,
-          diffStat,
-          excludedPaths: effectiveDiff.droppedPaths,
-          costUsd: result.usage.cost_usd_est,
-          ...notionalCostInput(result),
-          wallMs,
-        }),
-      );
+      const reportPath = await writeRunReport({
+        runDir,
+        doc,
+        repo: path.basename(operatorRoot),
+        base: target.baseRef,
+        head: `PR #${prNumber}`,
+        diffStat,
+        droppedPaths: effectiveDiff.droppedPaths,
+        result,
+        wallMs,
+      });
 
       // 13 — the Greptile head-to-head, then (13b) the comparison.json
       // read-back for the observability store. See computeGreptileComparison
