@@ -19,6 +19,7 @@ import {
   compileIgnoreRules,
   type IgnoreRule,
 } from "../ignore-file";
+import type { IgnoreFileReadResult } from "../ignore-read";
 import type { NumstatDiffStat, NumstatFile } from "./preflight";
 
 export interface SizeGateConfig {
@@ -540,6 +541,35 @@ export function sizeGateConfig(
         ? [...BUILTIN_IGNORE_RULES, ...userRules]
         : DEFAULT_SIZE_GATE.excludeRules,
   };
+}
+
+// The wiring wrapper both review shells actually call (#177/O-8): the two
+// unexported I/O shells (review(), reviewPr()) each resolve an
+// IgnoreFileReadResult from a DIFFERENT read (working tree / operator root /
+// base ref) and then must thread its `.rules` — never the read result
+// itself, never a dropped default `[]` — into sizeGateConfig's third
+// parameter. Before this wrapper existed that was a plain call to
+// sizeGateConfig with `.rules` picked out ad hoc at each of the three call
+// sites (local review, PR dry run, PR real run), which is exactly the shape
+// that can drift silently: `userRules` is OPTIONAL on sizeGateConfig itself
+// (see its own WHY), so a call that quietly drops the third argument still
+// compiles and produces a config with only the built-in exclusions — a
+// user's `.prheroignore` rule stops applying and nothing fails loud.
+// `ignore` is a REQUIRED parameter here (its VALUE may still be `undefined`,
+// e.g. reviewPr()'s CI dry run has no working-tree read to offer) precisely
+// so a caller cannot drop it by omission the way it could drop
+// sizeGateConfig's own optional third argument.
+export function sizeGateConfigFor(
+  overrides: {
+    maxChangedLines?: number;
+    maxChangedFiles?: number;
+  },
+  config:
+    | { max_changed_lines?: number; max_changed_files?: number }
+    | undefined,
+  ignore: IgnoreFileReadResult | undefined,
+): SizeGateConfig {
+  return sizeGateConfig(overrides, config, ignore?.rules);
 }
 
 // A one-line projection for the plan/dry-run output. Kept here so the local

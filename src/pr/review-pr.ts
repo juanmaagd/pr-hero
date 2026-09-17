@@ -67,6 +67,7 @@ import {
 } from "#pr/preflight";
 import {
   renderPrDryRunPlan,
+  resolvePrDryRunNumstat,
   resolvePrPromptSetAndBudget,
   resolvePrRunOptions,
   resolvePrTargetRecord,
@@ -93,7 +94,6 @@ import {
   allExcludedMessage,
   type CliOptions,
   emptyDiffMessage,
-  type NumstatFile,
 } from "#review/preflight";
 import { type DiffStat, envelopeModel, estimateCost } from "#review/report";
 import {
@@ -116,7 +116,7 @@ import {
   evaluateSizeGate,
   filterDiffByIgnoreRules,
   type SizeGateVerdict,
-  sizeGateConfig,
+  sizeGateConfigFor,
   sizeGateLine,
 } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
@@ -218,36 +218,16 @@ export async function reviewPr(
       summary.enabled,
       options.scout,
     );
-    const dryRunGateConfig = sizeGateConfig(
-      options,
-      config,
-      localIgnore?.rules,
-    );
-    // gh's `files` list can be TRUNCATED on a very large PR (same hazard as
-    // watch/watch.ts:322-327's tier 2). A short list under-counts, and
-    // under-counting here would falsely RESCUE exactly the monster this gate
-    // exists to stop, so a count that disagrees with GitHub's own
-    // `changedFiles` counter is never trusted to produce a passing verdict.
-    // UNAVAILABLE is the same answer as TRUNCATED here, and the note
-    // resolvePrDryRunSizeGate renders already says so in those words. A dry
-    // run creates nothing and is a PLAN, so it must degrade to the aggregate
-    // estimate rather than abort: `ghPrFiles` is bounded by
-    // GH_PR_VIEW_TIMEOUT_MS, and without this catch a stalled GitHub would
-    // turn `--dry-run` from "conservative estimate" into "command failed" —
-    // trading a hang for a hard stop when the fallback was already built and
-    // labelled.
-    // `null` DIRECTLY on failure, never an empty list routed through the
-    // length check below: `[].length >= 0` is true, so an empty list would
-    // sail through as trustworthy and hand the per-file gate zero lines to
-    // measure — a PASSING verdict produced by a failed fetch, which is the
-    // one outcome a size gate must never invent.
-    let perFile: NumstatFile[] | null;
-    try {
-      const rawFiles = parsePrFiles(await ghPrFiles(operatorRoot, prNumber));
-      perFile = rawFiles.length >= target.ghDiffStat.files ? rawFiles : null;
-    } catch {
-      perFile = null;
-    }
+    const dryRunGateConfig = sizeGateConfigFor(options, config, localIgnore);
+    // See resolvePrDryRunNumstat (src/pr/target.ts) for the full rationale —
+    // the degrade-to-aggregate-estimate rule PR1b Addition 1 / #5557 needs
+    // when `gh`'s per-file `files` list is truncated, unavailable, or the
+    // fetch itself throws (GH_PR_VIEW_TIMEOUT_MS bounds it).
+    const perFile = await resolvePrDryRunNumstat({
+      fetchFiles: async () =>
+        parsePrFiles(await ghPrFiles(operatorRoot, prNumber)),
+      totalFiles: target.ghDiffStat.files,
+    });
     // See renderPrDryRunPlan (src/pr/target.ts) for the full rationale.
     return renderPrDryRunPlan({
       options,
@@ -402,7 +382,7 @@ export async function reviewPr(
     if (shouldAbortEmptyDiscovery(prepared.plan, rawDiff)) {
       throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
     }
-    const gateConfig = sizeGateConfig(options, config, prIgnore.rules);
+    const gateConfig = sizeGateConfigFor(options, config, prIgnore);
     const effectiveDiff = skipPlannedDiscovery
       ? {
           patch: "",

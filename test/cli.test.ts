@@ -437,58 +437,41 @@ describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () 
 
   // Split-review-pr refactor: the CI admission gate (and this exact wiring)
   // moved out of reviewPr() into evaluateCiAdmissionGate
-  // (src/pr/ci-admission-gate.ts) as a byte-for-byte relocation — the
-  // invariant this test guards is unchanged, only its address moved.
-  test("CI admission is handed the summary marker's completeness", async () => {
+  // (src/pr/ci-admission-gate.ts) as a byte-for-byte relocation.
+  //
+  // review-pr-behavior-seams: the marker-derivation HALF of this invariant
+  // ("complete defaults to true, never a hardcoded literal") is no longer
+  // pinned here — it is `summaryMarkerFields`'s own behavior, mutation-tested
+  // in test/watch/preflight.test.ts (shared by this gate AND reviewPr()'s own
+  // discovery seam, closing the exact two-call-sites-can-drift gap the old
+  // inline duplication risked). What remains genuinely unreachable offline is
+  // this gate's OWN wiring — an I/O shell with no injectable seam for its
+  // `gh`-backed fetches (same class of limitation as the gotchas-gate scan
+  // above) — so a source check still confirms it calls the shared, tested
+  // helper rather than re-deriving the fields inline.
+  test("CI admission derives its marker fields via the shared, tested summaryMarkerFields helper", async () => {
     const source = await Bun.file(
       path.resolve(import.meta.dir, "../src/pr/ci-admission-gate.ts"),
     ).text();
     expect(source).toContain(
-      "summaryBody === null ? null : parsePrCommentMarker(summaryBody);",
+      "const { summaryHead, summaryComplete } = summaryMarkerFields(summaryMarker);",
     );
-    expect(source).toContain(
-      "summaryHead,\n      summaryComplete,\n      markerSeen,",
-    );
+    expect(source).not.toContain("summaryMarker?.complete ?? true");
   });
 });
 
-// Same precedent as the gotchas-gate scan above: `review()` and `reviewPr()`
-// are I/O shells (now src/review/review.ts and src/pr/review-pr.ts
-// respectively, cli-decomp-08), so nothing offline reaches them directly.
-// What has to be pinned here is that BOTH shells actually thread the rules a
-// `.prheroignore` read produced into their `sizeGateConfig` call, rather than
-// silently reading the file and then ignoring the result (exactly the kind
-// of drift a `.excludeRules`-only rename could not catch, because the third
-// argument is what carries user-defined rules at all).
-describe("both review shells thread .prheroignore rules into their gate config", () => {
-  test("local review reads the working tree AND passes its rules to sizeGateConfig", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/review/review.ts"),
-    ).text();
-    expect(source).toContain("readLocalIgnoreRules(repoRoot)");
-    expect(source).toContain(
-      "sizeGateConfig(\n    options,\n    loaded.effective,\n    userIgnore.rules,\n  )",
-    );
-  });
-
-  // `ghPrFiles` is bounded by GH_PR_VIEW_TIMEOUT_MS, so a stalled GitHub now
-  // THROWS where it used to hang. The dry run is a PLAN — it must degrade to
-  // the aggregate estimate, which resolvePrDryRunSizeGate's own note already
-  // calls "truncated or unavailable", not abort the command.
-  //
-  // The `null` matters more than the catch: `[].length >= 0` is true, so
-  // routing an empty list through the trustworthiness check would hand the
-  // per-file gate zero lines and produce a PASSING verdict out of a failed
-  // fetch. Pinned because both halves are one line each and neither has an
-  // offline reach into this shell.
-  test("the dry run degrades to the aggregate estimate when ghPrFiles fails", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
-    ).text();
-    expect(source).toContain("let perFile: NumstatFile[] | null;\n    try {");
-    expect(source).toContain("    } catch {\n      perFile = null;\n    }");
-  });
-
+// review-pr-behavior-seams: invariants 5, 6 and 9 (rules threaded into the
+// gate config, the dry-run degrade rule, and "no call site can drop the
+// rules argument") moved OFF this source-text scan entirely.
+//   - 5 & 9 are now `sizeGateConfigFor`'s own behavior — a REQUIRED third
+//     parameter (unlike sizeGateConfig's own optional one), tested with a
+//     real custom rule in test/review/size-gate.test.ts. Both review shells
+//     call it instead of sizeGateConfig directly.
+//   - 6 is `resolvePrDryRunNumstat`'s own behavior, tested through the real
+//     downstream size-gate verdict in test/pr/target.test.ts.
+// What is left here (7 & 8) is genuinely ROOT/REF SELECTION inside an I/O
+// shell no offline test can invoke directly — see each test's own comment.
+describe("PR review resolves .prheroignore against the correct root and ref (O-8, design D1)", () => {
   test("PR review reads the operator root eagerly for non-CI, and never reads worktreePath (O-8)", async () => {
     const source = await Bun.file(
       path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
@@ -511,15 +494,6 @@ describe("both review shells thread .prheroignore rules into their gate config",
     expect(source).not.toContain(
       "readBaseRefIgnoreRules(git, gitDirOwner, target.baseRef)",
     );
-  });
-
-  test("both sizeGateConfig(options, config, ...) calls in reviewPr receive a rules argument, not just (options, config)", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
-    ).text();
-    const bareCalls =
-      source.split("sizeGateConfig(options, config)").length - 1;
-    expect(bareCalls).toBe(0);
   });
 });
 

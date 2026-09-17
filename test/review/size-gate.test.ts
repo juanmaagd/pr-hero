@@ -11,6 +11,7 @@ import {
   evaluateSizeGateAggregate,
   filterDiffByIgnoreRules,
   sizeGateConfig,
+  sizeGateConfigFor,
   sizeGateDisposition,
   sizeGateLine,
 } from "#review/size-gate";
@@ -341,6 +342,54 @@ describe("sizeGateConfig", () => {
   test("the shipped defaults are the documented ones", () => {
     expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(1500);
     expect(DEFAULT_SIZE_GATE.maxChangedFiles).toBe(150);
+  });
+});
+
+// The wiring wrapper both review shells call instead of sizeGateConfig
+// directly (test/cli.test.ts's former "both review shells thread
+// .prheroignore rules into their gate config" pins, replaced by these
+// behavior tests — src/review/size-gate.ts's own WHY comment on
+// sizeGateConfigFor has the full rationale). `ignore` is a REQUIRED
+// parameter here specifically so a caller cannot silently drop a user's
+// rules the way an omitted THIRD argument to sizeGateConfig itself can
+// (that parameter is optional there) — falsified below by reverting the
+// implementation to `sizeGateConfig(overrides, config)` and confirming the
+// custom-rule test goes red.
+describe("sizeGateConfigFor", () => {
+  test("an IgnoreFileReadResult's rules reach the built config's exclusions", () => {
+    const userRules = parseIgnoreFile("vendor/**\n", "user");
+    const result = sizeGateConfigFor({}, undefined, {
+      rules: userRules,
+      found: true,
+    });
+    const patch =
+      "diff --git a/vendor/lib.js b/vendor/lib.js\n" +
+      "index 1111111..2222222 100644\n" +
+      "--- a/vendor/lib.js\n" +
+      "+++ b/vendor/lib.js\n" +
+      "@@ -1 +1 @@\n" +
+      "-a\n" +
+      "+b\n";
+    expect(
+      filterDiffByIgnoreRules(patch, result.excludeRules).droppedPaths,
+    ).toEqual(["vendor/lib.js"]);
+  });
+
+  // An absent `.prheroignore` (found: false) still carries an empty `rules`
+  // array — this is the "no read happened at all" case (reviewPr()'s CI dry
+  // run passes `undefined` itself), covered separately below.
+  test("no user rules means only the built-in exclusions apply", () => {
+    const result = sizeGateConfigFor({}, undefined, {
+      rules: [],
+      found: false,
+    });
+    expect(result.excludeRules).toEqual(DEFAULT_SIZE_GATE.excludeRules);
+  });
+
+  test("an undefined ignore result (no read attempted) also falls back to defaults only", () => {
+    expect(sizeGateConfigFor({}, undefined, undefined)).toEqual(
+      DEFAULT_SIZE_GATE,
+    );
   });
 });
 

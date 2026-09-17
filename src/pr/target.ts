@@ -199,6 +199,32 @@ export async function resolvePrPromptSetAndBudget(params: {
   return { ciBudgetCeiling, agents, spec, agentFiles, promptSet, gotchasPath };
 }
 
+// PR1b Addition 1 / #5557's degrade rule, extracted so it can be proven
+// offline: a dry run creates nothing and is a PLAN, so a stalled or failing
+// `gh pr view --json files` must degrade to the aggregate estimate rather
+// than abort (GH_PR_VIEW_TIMEOUT_MS bounds `ghPrFiles`, turning a hang into a
+// throw this function is what catches). `null` is returned DIRECTLY on
+// failure or on a truncated fetch, never an empty array routed through the
+// length check: `[].length >= 0` is true, so an empty list would sail
+// through as "trustworthy" and hand the per-file gate zero lines to measure —
+// a PASSING verdict manufactured out of a failed fetch, which is the one
+// outcome a size gate must never invent. `totalFiles` is GitHub's own
+// `changedFiles` counter (`target.ghDiffStat.files`); a per-file list shorter
+// than it is the same truncation hazard watch/watch.ts's tier 2 guards
+// against, and under-counting here would falsely rescue exactly the PR this
+// gate exists to catch.
+export async function resolvePrDryRunNumstat(params: {
+  fetchFiles: () => Promise<NumstatFile[]>;
+  totalFiles: number;
+}): Promise<NumstatFile[] | null> {
+  try {
+    const rawFiles = await params.fetchFiles();
+    return rawFiles.length >= params.totalFiles ? rawFiles : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ResolvedPrTargetRecord {
   repoHome: ResolvedRepoHome;
   gitDirOwner: string;

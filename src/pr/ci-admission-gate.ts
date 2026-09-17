@@ -51,7 +51,11 @@ import { findMarkedCommentId } from "#pr/preflight";
 import { parseStateBlock } from "#rereview/state";
 import type { CliOptions, LocalConfig } from "#review/preflight";
 import { log } from "#ui/primitives";
-import { markerCommentSeen, parsePrCommentMarker } from "#watch/preflight";
+import {
+  markerCommentSeen,
+  parsePrCommentMarker,
+  summaryMarkerFields,
+} from "#watch/preflight";
 
 export interface CiAdmissionGateResult {
   ciPolicy: CiReviewPolicy;
@@ -105,8 +109,7 @@ export async function evaluateCiAdmissionGate(input: {
         : (issueComments.find((c) => c.id === existingSummaryId)?.body ?? null);
     const summaryMarker =
       summaryBody === null ? null : parsePrCommentMarker(summaryBody);
-    const summaryHead = summaryMarker?.head ?? null;
-    const summaryComplete = summaryMarker?.complete ?? true;
+    const { summaryHead, summaryComplete } = summaryMarkerFields(summaryMarker);
     const state = summaryBody === null ? null : parseStateBlock(summaryBody);
     const parsedAdmission =
       summaryBody === null ? null : parseCiAdmissionBlock(summaryBody);
