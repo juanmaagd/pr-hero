@@ -3,9 +3,11 @@
 // are separate types and this pure module is the only place that maps one
 // onto the other — LLMs judge, code governs.
 
-import type { FailureClass } from "#review/step-runner";
-import { classifyFailure as classifyLegacyFailure } from "#review/step-runner";
 import type { TransportFailureCause, TransportOutcome } from "./contracts";
+import {
+  classifyFailure as classifyLegacyFailure,
+  type FailureClass,
+} from "./failure-classification";
 
 export type { TransportFailureCause };
 

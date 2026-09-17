@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import type { FailureClass } from "#review/step-runner";
+import type { FailureClass } from "../../src/execution/failure-classification";
 import {
   causeFromLegacyFailureClass,
   decideRetryDisposition,

@@ -5,7 +5,6 @@
 // Every isolation flag and retry mechanism here encodes a paid-for failure
 // from v1 — port, don't rewrite.
 
-import path from "node:path";
 import type { CredentialKind } from "#model/provider-capabilities";
 import type {
   AuthEvent,
@@ -14,6 +13,7 @@ import type {
   ResolvedModelRoute,
   StepAdmissionGate,
 } from "../execution/contracts";
+import type { FailureClass } from "../execution/failure-classification";
 import { StepExecutionHarness } from "../execution/harness";
 import type { SpendReservation } from "../execution/spend-limiter";
 import type { NormalizedUsage } from "../execution/usage-normalized";
@@ -104,85 +104,20 @@ export interface StepRunner {
   run(step: StepSpec): Promise<StepResult>;
 }
 
-// Where a step's per-attempt artifacts land, derived from its `outPath` — part
-// of the RUNNER CONTRACT, not a harness implementation detail, because two
-// modules now depend on the answer: the harness writes the files, and
-// review/pipeline.ts indexes them from `pipeline.json` (D1-10c). Deriving the names
-// twice is how a pointer starts naming a file that was never written — the
-// exact defect the harness's own comment records ("a hardcoded settlement.json
-// in a cancellation message pointed at a file that never existed for as long as
-// it shipped"), so both callers read the shape from here.
-//
-// `attempt` is the 1-based attempt NUMBER, which for a settled step equals
-// `StepResult.attempts`: the transient loop and the one format retry both
-// increment the same counter, and the format retry always ends the loop.
-export function attemptLogPath(
-  outPath: string,
-  stepName: string,
-  attempt: number,
-): string {
-  return path.join(path.dirname(outPath), "logs", `${stepName}.${attempt}.log`);
-}
-
-export function settlementReceiptPath(
-  outPath: string,
-  stepName: string,
-  attempt: number,
-): string {
-  return path.join(
-    path.dirname(outPath),
-    `settlement.${stepName}.attempt${attempt}.json`,
-  );
-}
-
-export function attemptEvidencePath(
-  outPath: string,
-  stepName: string,
-  attempt: number,
-): string {
-  return path.join(
-    path.dirname(outPath),
-    `evidence.${stepName}.attempt${attempt}.json`,
-  );
-}
+// Step-artifact paths (attemptLogPath, settlementReceiptPath,
+// attemptEvidencePath), FORMAT_RETRY_REMINDER, and the legacy v1
+// classifyFailure/isTransientSessionFailure/isTerminalSessionFailure
+// classification vocabulary moved to execution/step-artifacts.ts and
+// execution/failure-classification.ts (architecture guard C2): this module
+// depends on execution/harness.ts for StepExecutionHarness, so
+// execution/harness.ts and execution/attempt-evidence.ts and
+// execution/failure-policy.ts importing those helpers FROM here closed a
+// value-import cycle back through harness.ts.
 
 export const DEFAULT_STEP_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_STEP_MAX_ATTEMPTS = 2;
 
-export const FORMAT_RETRY_REMINDER =
-  "\n\nREMINDER: your final message must be exactly one JSON object " +
-  "matching the mandated shape — no prose, no fences.";
-
-export function isTransientSessionFailure(result: {
-  stderrTail: string;
-  resultText: string;
-}): boolean {
-  const witness = `${result.stderrTail}\n${result.resultText}`;
-  return /API Error|Connection closed|ECONNRESET|socket hang up|timed out|502|503|529|overloaded/i.test(
-    witness,
-  );
-}
-
-export function isTerminalSessionFailure(result: {
-  stderrTail: string;
-  resultText: string;
-}): boolean {
-  const witness = `${result.stderrTail}\n${result.resultText}`;
-  return /Not logged in\s*[·.]\s*Please run \/login/i.test(witness);
-}
-
-export type FailureClass = "transient" | "terminal" | "format";
 export type RetryFailureClass = Exclude<FailureClass, "terminal">;
-
-export function classifyFailure(outcome: {
-  stderrTail: string;
-  resultText: string;
-  timedOut: boolean;
-}): FailureClass {
-  if (outcome.timedOut) return "transient";
-  if (isTerminalSessionFailure(outcome)) return "terminal";
-  return isTransientSessionFailure(outcome) ? "transient" : "format";
-}
 
 export function buildStepArgv(
   step: StepSpec,
@@ -210,25 +145,12 @@ export function buildStepArgv(
   ];
 }
 
-export interface SpawnedProcess {
-  stdout: ReadableStream<Uint8Array>;
-  stderr: ReadableStream<Uint8Array>;
-  exited: Promise<number>;
-  kill(): void;
-}
-
-export const ACTIVE_CHILD_PROCS = new Set<SpawnedProcess>();
-
-export function killAllChildProcesses(): void {
-  for (const proc of ACTIVE_CHILD_PROCS) {
-    try {
-      proc.kill();
-    } catch {
-      // Swallowed — process may have already exited
-    }
-  }
-  ACTIVE_CHILD_PROCS.clear();
-}
+// SpawnedProcess, ACTIVE_CHILD_PROCS, and killAllChildProcesses moved to
+// execution/spawned-process.ts (architecture guard C2): the spawner
+// (transports/claude-code-cli.ts) is reached from execution/harness.ts via
+// transport-registry.ts, and this module depends on execution/harness.ts
+// for StepExecutionHarness — so the spawner importing this registry FROM
+// here closed a value-import cycle back through harness.ts.
 
 export interface ClaudeCodeRunnerOptions {
   spawnFn?: typeof Bun.spawn;

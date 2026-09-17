@@ -89,7 +89,6 @@ export {
 };
 
 import { review } from "#review/review";
-import { killAllChildProcesses } from "#review/step-runner";
 import { unregisterActiveRun } from "#store/activity";
 import { gcCommand } from "#store/gc";
 import {
@@ -122,6 +121,7 @@ import { startPanelRenderer } from "#ui/progress";
 export { startPanelRenderer };
 
 import { watchCommand } from "#watch/watch";
+import { killAllChildProcesses } from "./execution/spawned-process";
 import { isMachineOnboarded, runWizard } from "./wizard";
 
 // bin/pr-hero.js and the `import.meta.main` guard both go through the exported
