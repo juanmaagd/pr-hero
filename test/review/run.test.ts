@@ -14,9 +14,11 @@ import {
   assertDistinctRange,
   buildTelemetry,
   CODEGRAPH_ONLY_MCP_CONFIG,
+  computeDiffStatAndSizeGate,
   EMPTY_MCP_CONFIG,
   prepareRunnerForRoute,
   resolveGotchasPath,
+  resolveParityFires,
   selectActiveHunters,
   validateGotchas,
   writeMcpConfig,
@@ -212,5 +214,118 @@ describe("prepareRunnerForRoute (P2.2)", () => {
     expect(prepared.deps.onProgress).toBe(onProgress);
     expect(prepared.deps.transportRegistry).toBeUndefined();
     expect(prepared.deps.admissionEvidence).toBeUndefined();
+  });
+});
+
+describe("resolveParityFires (dedup slice)", () => {
+  test("fires when a changed path matches a trigger pattern", () => {
+    const patch = [
+      "diff --git a/src/foo.ts b/src/foo.ts",
+      "+++ b/src/foo.ts",
+      "@@ -1 +1 @@",
+    ].join("\n");
+    expect(resolveParityFires(patch, ["src/**"])).toBe(true);
+  });
+
+  test("does not fire when no changed path matches any trigger", () => {
+    const patch = [
+      "diff --git a/docs/readme.md b/docs/readme.md",
+      "+++ b/docs/readme.md",
+    ].join("\n");
+    expect(resolveParityFires(patch, ["src/**"])).toBe(false);
+  });
+
+  test("no trigger patterns configured: never fires", () => {
+    const patch = "+++ b/src/foo.ts";
+    expect(resolveParityFires(patch, [])).toBe(false);
+  });
+});
+
+describe("computeDiffStatAndSizeGate", () => {
+  const gateConfig = {
+    maxChangedLines: 100,
+    maxChangedFiles: 10,
+    excludeRules: [],
+  };
+
+  test("runs --numstat then -w --ignore-blank-lines --numstat, in that order, over the given range/pathArgs", async () => {
+    const calls: string[][] = [];
+    const runGit = async (args: string[]) => {
+      calls.push(args);
+      // Both calls share the same fixture output here — the two-call CONTRACT
+      // is what this test pins, not a divergent count between them.
+      return { ok: true, stdout: "5\t2\tsrc/foo.ts\n", stderr: "" };
+    };
+    const { diffStat, sizeGate } = await computeDiffStatAndSizeGate({
+      runGit,
+      range: "base..head",
+      pathArgs: ["--", "src/"],
+      gateConfig,
+    });
+    expect(calls).toEqual([
+      ["diff", "--numstat", "base..head", "--", "src/"],
+      [
+        "diff",
+        "-w",
+        "--ignore-blank-lines",
+        "--numstat",
+        "base..head",
+        "--",
+        "src/",
+      ],
+    ]);
+    expect(diffStat).toEqual({ files: 1, insertions: 5, deletions: 2 });
+    expect(sizeGate.ok).toBe(true);
+  });
+
+  test("the first (plain) numstat failing throws with the git diff --numstat message", async () => {
+    const runGit = async () => ({ ok: false, stdout: "", stderr: "boom" });
+    await expect(
+      computeDiffStatAndSizeGate({
+        runGit,
+        range: "base..head",
+        pathArgs: [],
+        gateConfig,
+      }),
+    ).rejects.toThrow("git diff --numstat failed: boom");
+  });
+
+  test("the second (-w) numstat failing throws with the -w-specific message, first call's success notwithstanding", async () => {
+    let call = 0;
+    const runGit = async () => {
+      call += 1;
+      return call === 1
+        ? { ok: true, stdout: "1\t1\tfoo.ts\n", stderr: "" }
+        : { ok: false, stdout: "", stderr: "kaboom" };
+    };
+    await expect(
+      computeDiffStatAndSizeGate({
+        runGit,
+        range: "base..head",
+        pathArgs: [],
+        gateConfig,
+      }),
+    ).rejects.toThrow("git diff -w --numstat failed: kaboom");
+  });
+
+  test("a whitespace-only change disappears from the GATE numstat but still bills in the diffStat", async () => {
+    const runGit = async (args: string[]) => {
+      const isGateNumstat = args.includes("-w");
+      return {
+        ok: true,
+        // The plain numstat still sees the file; the -w one drops it
+        // entirely — git emits no row for an all-whitespace change.
+        stdout: isGateNumstat ? "" : "3\t0\tsrc/formatted.ts\n",
+        stderr: "",
+      };
+    };
+    const { diffStat, sizeGate } = await computeDiffStatAndSizeGate({
+      runGit,
+      range: "base..head",
+      pathArgs: [],
+      gateConfig,
+    });
+    expect(diffStat).toEqual({ files: 1, insertions: 3, deletions: 0 });
+    expect(sizeGate.ok).toBe(true);
   });
 });

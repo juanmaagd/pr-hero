@@ -18,22 +18,11 @@
 //     tree the codegraph checks run against, and a root the run dir must
 //     stay outside of.
 
-import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import {
-  budgetDisabledWarningMessage,
-  budgetUnlimitedNoticeMessage,
-  ciExitCode,
-  deriveCiBillingMode,
-  planCiBudgetSkip,
-  planCiSizeSkip,
-  resolveCiBudgetCeiling,
-} from "#ci/gates";
+import { ciExitCode, planCiSizeSkip } from "#ci/gates";
 import { formatWorkflowCommand, withCiWorkflowGroup } from "#ci/reporter";
 import {
   ingestReviewMetrics,
-  loadEffectiveConfig,
   notionalCostInput,
   persistCanonicalReview,
   pipelineConfigInput,
@@ -49,7 +38,6 @@ import {
   readBaseRefIgnoreRules,
   resolveCommit,
   resolveDiffFrom,
-  resolveRepoRoot,
 } from "#git/git";
 import { engineIdentity } from "#git/identity";
 import {
@@ -62,6 +50,7 @@ import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
 import { publishCiReviewIfEligible } from "#pr/ci-publish";
 import { computeGreptileComparison } from "#pr/comparison";
 import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
+import { resolvePrPlanAndConfirm } from "#pr/plan";
 import { postFindingsIfEnabled } from "#pr/posting";
 import {
   fetchCommitStatuses,
@@ -69,23 +58,19 @@ import {
   fetchPrComments,
   fetchPrRefs,
   fetchPrReviewComments,
-  ghCurrentBranchPr,
   ghPrFiles,
-  ghPrView,
-  ghRepoWebUrl,
 } from "#pr/pr";
 import {
-  commitStatusRequest,
   createPrRunDir,
   findMarkedCommentId,
   isInFlightCommitStatus,
-  predictPrRunDir,
-  prHtmlUrl,
-  resolveCurrentPrNumber,
-  resolvePrDryRunSizeGate,
-  resolvePrTarget,
 } from "#pr/preflight";
-import { holdCommitStatusLock, tryPublishCommitStatus } from "#pr/status";
+import {
+  renderPrDryRunPlan,
+  resolvePrPromptSetAndBudget,
+  resolvePrRunOptions,
+  resolvePrTargetRecord,
+} from "#pr/target";
 import { finalizePrReviewRun, settleCommitStatusAndLedger } from "#pr/teardown";
 import { setupPrWorktree } from "#pr/worktree-setup";
 import {
@@ -102,54 +87,32 @@ import {
   unreachableLastHeadMessage,
 } from "#rereview/prepare";
 import { parseStateBlock } from "#rereview/state";
-import {
-  mergeRunEnvelope,
-  type Telemetry,
-  writeFindings,
-} from "#review/findings";
-import {
-  changedPathsFromDiff,
-  type PipelineResult,
-  parityTriggered,
-  runPipeline,
-} from "#review/pipeline";
+import type { Telemetry } from "#review/findings";
+import { type PipelineResult, runPipeline } from "#review/pipeline";
 import {
   allExcludedMessage,
   type CliOptions,
   emptyDiffMessage,
-  isCiEnvironment,
   type NumstatFile,
-  parseNumstatFiles,
-  resolveMaxVerificationSteps,
-  resolvePost,
-  resolveScout,
-  resolveSummary,
 } from "#review/preflight";
+import { type DiffStat, envelopeModel, estimateCost } from "#review/report";
 import {
-  type DiffStat,
-  envelopeModel,
-  estimateCost,
-  renderReport,
-} from "#review/report";
-import {
-  buildCliRoutePlan,
-  enforceProviderCapabilityGate,
   pipelineScoutInput,
   pipelineSummarizerInput,
-  resolveProductionRoutePlanAtConfirm,
 } from "#review/route-preflight";
 import {
   assertDistinctRange,
   buildTelemetry,
+  computeDiffStatAndSizeGate,
   prepareRunnerForRoute,
-  resolveGotchasPath,
-  resolvePromptSet,
+  resolveParityFires,
   selectActiveHunters,
   validateGotchas,
+  writeRunFindings,
+  writeRunReport,
 } from "#review/run";
 import {
   type ExcludedPath,
-  effectiveDiffStat,
   evaluateSizeGate,
   filterDiffByIgnoreRules,
   type SizeGateVerdict,
@@ -157,80 +120,32 @@ import {
   sizeGateLine,
 } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
-import {
-  configProvenanceOf,
-  dryRunHunterCount,
-  type PrPlanContext,
-  prPlanDetails,
-  renderPrPlan,
-  reviewingLine,
-} from "#ui/plan";
+import { dryRunHunterCount, reviewingLine } from "#ui/plan";
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
-import { applySizeGate, confirm, startProgressRenderer } from "#ui/progress";
+import { applySizeGate, startProgressRenderer } from "#ui/progress";
 import { type ResultLinks, renderResult } from "#ui/result";
 import { parsePrCommentMarker, parsePrFiles } from "#watch/preflight";
 import { CliError } from "../errors";
-import { acquirePidLock, resolveRepoHome } from "../home";
-import {
-  legacyMigrationHint,
-  legacyWorktreePath,
-  prheroLayout,
-  prWorktreePath,
-  worktreeLockPath,
-} from "../home-preflight";
+import { acquirePidLock } from "../home";
+import { prheroLayout, worktreeLockPath } from "../home-preflight";
 import {
   type IgnoreFileReadResult,
   readLocalIgnoreRules,
 } from "../ignore-read";
 import type { ProductionRuntime } from "../production-runtime";
-import { resolveRunnerAuthority } from "../runner-authority";
-import { resolveOpenCodeAuthPath } from "../security/credential-broker";
 
 export async function reviewPr(
   options: CliOptions,
   prArg: number | "current",
 ): Promise<number> {
-  // 1 — the operator root, and everything .prhero/ decides — loaded exactly
-  // as local mode loads it, all against the operator root.
-  const operatorRoot = await resolveRepoRoot(options.repo);
-  // Bare --pr: the PR is whichever one the operator checkout's current
-  // branch belongs to. Resolved first and said out loud, so the user sees
-  // WHICH PR is about to be reviewed before any plan prints.
-  const prNumber =
-    prArg === "current"
-      ? resolveCurrentPrNumber(await ghCurrentBranchPr(operatorRoot))
-      : prArg;
-  if (prArg === "current") {
-    log(`pr resolved from current branch: #${prNumber}`);
-  }
-  // The product home, hoisted above the config read: C5's global layer lives
-  // under it, and step 2 below needs the same value for the repo registry.
-  const home = os.homedir();
-  // `operatorRoot`, NEVER worktreePath — the worktree does not even exist
-  // yet at this point, and a `.prhero/config.json` committed by the PR author
-  // must stay unread (O-8). Same loader as local mode, so the two modes
-  // cannot drift on precedence.
-  const loaded = await loadEffectiveConfig({
-    root: operatorRoot,
-    home,
-    configFlag: options.config,
-  });
-  const config = loaded.effective;
-  const summary = resolveSummary(options, config);
-  const scout = resolveScout(options, config);
-  const post = resolvePost(options, config);
-  // ROADMAP Pillar 3 (GitHub Actions CI). isCi folds in HERE, alongside
-  // scout/post, so `options.yes` carries the headless bypass (spec 2.1:
-  // "MUST run headlessly ... equivalent to --yes") through every downstream
-  // read of `options.yes` in one move — the confirm gate below, the in-flight
-  // TOCTOU check (`if (options.yes) return 0` is the correct CI answer to a
-  // stuck pending), and applySizeGate's own `opts.yes` read. A parallel
-  // `effectiveYes` local would miss whichever of those reads came later.
-  const isCi = isCiEnvironment(options, {
-    GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
-    CI: process.env.CI,
-  });
-  options = { ...options, scout, post, yes: options.yes || isCi };
+  // 1-2 — the operator root, resolved config, prompt set, and PR record. See
+  // resolvePrRunOptions / resolvePrPromptSetAndBudget / resolvePrTargetRecord
+  // (src/pr/target.ts) for the full rationale, including why the two
+  // pinned reads below (`.prheroignore`, then gotchas) stay inline here
+  // rather than moving into that module.
+  const step1 = await resolvePrRunOptions(options, prArg);
+  options = step1.options;
+  const { operatorRoot, prNumber, home, isCi, loaded, config, summary } = step1;
   // `.prheroignore`, read EAGERLY here for the non-CI case only: the
   // operator's working tree (`operatorRoot`, NEVER `worktreePath` — O-8) is
   // available with no fetch, so both the free dry-run exit below and the
@@ -244,76 +159,27 @@ export async function reviewPr(
   const localIgnore = isCi
     ? undefined
     : await readLocalIgnoreRules(operatorRoot);
-  // Issue #156: resolve the ceiling ONCE, here, and use this same value at
-  // the budget gate far below. Resolving twice invites the announcement and
-  // the gate drifting apart. Deliberately NOT folded back into
-  // `options.budgetUsd` — the metered default is a CI-gate policy, and
-  // leaking a 10 that the operator never typed into every other read of
-  // `options.budgetUsd` would make it look configured.
-  const ciBudgetCeiling = resolveCiBudgetCeiling({
-    configured: options.budgetUsd,
-    billingMode: deriveCiBillingMode(process.env, {
-      // File presence, not envBillsMetered: that predicate stamps Claude
-      // usage and must stay Anthropic-env-only.
-      openCodeAuthPresent: existsSync(resolveOpenCodeAuthPath()),
-    }),
-  });
-  // Spec 3.1: a silent disable is indistinguishable from a passing gate, so
-  // an EXPLICIT `--budget-usd <= 0` warns even though it never skips a run.
-  // Emitted here (once, as soon as isCi/budgetUsd are both known) rather
-  // than beside the budget-gate check below, which only runs at all when
-  // there IS an estimate to compare against. The subscription notice rides
-  // the same reasoning and the same placement, one register quieter: a
-  // resolved no-ceiling is not an operator mistake, but it is still a gate
-  // that did not run, and this repo does not ship those silently.
-  if (isCi) {
-    const disabledWarning = budgetDisabledWarningMessage(
-      ciBudgetCeiling.budgetUsd,
-    );
-    if (disabledWarning !== null) {
-      log(formatWorkflowCommand("warning", disabledWarning));
-    }
-    const unlimitedNotice = budgetUnlimitedNoticeMessage(ciBudgetCeiling);
-    if (unlimitedNotice !== null) {
-      log(formatWorkflowCommand("notice", unlimitedNotice));
-    }
-  }
-  // The WHOLE resolution, not just its dir: under the compiled binary the
-  // prompt set is a map of embedded paths and `dir` is only a display label.
-  const { agents, spec, agentFiles, promptSet } = await resolvePromptSet(
+  const step2 = await resolvePrPromptSetAndBudget({
     options,
     loaded,
-  );
+    isCi,
+    operatorRoot,
+  });
+  const { ciBudgetCeiling, agents, spec, agentFiles, promptSet, gotchasPath } =
+    step2;
   const { dir: agentsDir, source: agentsDirSource } = agents;
-  const gotchasPath = resolveGotchasPath(options.gotchas, operatorRoot);
   await validateGotchas(gotchasPath);
   // Local mode's dirty-tree and HEAD-match gates are both skipped here ON
   // PURPOSE: the hunters read the worktree and never this checkout, and the
   // worktree satisfies the HEAD gate by construction (created detached at
   // the PR's own head).
-
-  // 2 — the global home (origin → repo-id → worktree/runs paths), then the
-  // PR record. `home` is resolved in step 1 above, where C5's global config
-  // layer needs it. persist is false on --dry-run so the free exit creates
-  // nothing, including registry.json.
-  const repoHome = await resolveRepoHome({
-    home,
-    operatorRoot,
-    persist: !options.dryRun,
-  });
-  const gitDirOwner = repoHome.gitDirOwner;
-  const target = resolvePrTarget(await ghPrView(operatorRoot, prNumber));
-  const worktreePath = prWorktreePath(home, repoHome.repoId, prNumber);
-  const leftover = legacyWorktreePath(operatorRoot, prNumber);
-  if (existsSync(leftover)) {
-    for (const line of legacyMigrationHint({
+  const { repoHome, gitDirOwner, target, worktreePath } =
+    await resolvePrTargetRecord({
+      home,
       operatorRoot,
-      legacyWorktree: leftover,
-      newWorktree: worktreePath,
-    })) {
-      log(line);
-    }
-  }
+      prNumber,
+      dryRun: options.dryRun,
+    });
 
   // The CI admission gate (ROADMAP Pillar 3): decides, before any git fetch
   // or worktree is touched, whether a CI-triggered review of an
@@ -382,60 +248,27 @@ export async function reviewPr(
     } catch {
       perFile = null;
     }
-    const { verdict: estimated, note: baseSizeGateNote } =
-      resolvePrDryRunSizeGate({
-        ghDiffStat: target.ghDiffStat,
-        perFile,
-        gateConfig: dryRunGateConfig,
-      });
-    // Under CI, `localIgnore` is intentionally undefined (see its own
-    // comment above) — the base-ref read needs a fetch a dry run does not
-    // perform — so this estimate applies only the 9 BUILT-IN default
-    // exclusions, never a repo's user-defined `.prheroignore` rules. Said
-    // out loud rather than discovered: a CI dry run that quietly ignored
-    // `.prheroignore` would look like the SAME bug Addition 1 exists to fix.
-    const sizeGateNote = isCi
-      ? `${baseSizeGateNote} User-defined \`.prheroignore\` rules are not ` +
-        "applied to this estimate under --ci; only the built-in defaults " +
-        "are (the base ref is not fetched until a real run)."
-      : baseSizeGateNote;
-    const dryRunPlan: PrPlanContext = {
+    // See renderPrDryRunPlan (src/pr/target.ts) for the full rationale.
+    return renderPrDryRunPlan({
       options,
       operatorRoot,
+      prNumber,
       target,
       worktreePath,
-      runDir: predictPrRunDir(
-        options,
-        operatorRoot,
-        worktreePath,
-        repoHome.paths.runs,
-        prNumber,
-        target.headSha,
-      ),
-      diffStat: target.ghDiffStat,
+      repoHome,
       agentsDir,
+      agentsDirSource,
       agentFiles,
       spec,
       config,
       summary,
-      estimate,
+      loaded,
+      isCi,
       hunterCount,
-      sizeGate: estimated,
-      sizeGateNote,
-      droppedPaths: [],
-      // On the dry run too, and it is the case that matters most: this is the
-      // free card an operator reads BEFORE deciding to spend, so a value
-      // arriving from the global layer must be visible here or it is
-      // discovered only in the bill.
-      configProvenance: configProvenanceOf(loaded, agentsDirSource),
-    };
-    for (const line of renderPrPlan(dryRunPlan, styleEnabled())) log(line);
-    log();
-    if (!estimated.ok && !options.force) {
-      log("dry run: this PR would likely be SKIPPED by the size gate.");
-    }
-    log("dry run: nothing was fetched, created, or spent.");
-    return 0;
+      estimate,
+      dryRunGateConfig,
+      perFile,
+    });
   }
 
   if (isCi) {
@@ -687,36 +520,14 @@ export async function reviewPr(
       diffStat = { files: 0, insertions: 0, deletions: 0 };
       sizeGate = evaluateSizeGate([], gateConfig);
     } else {
-      const numstat = await git(gitDirOwner, [
-        "diff",
-        "--numstat",
-        discoveryRange,
-        ...pathArgs,
-      ]);
-      if (!numstat.ok) {
-        throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
-      }
-      const gateNumstat = await git(gitDirOwner, [
-        "diff",
-        "-w",
-        "--ignore-blank-lines",
-        "--numstat",
-        discoveryRange,
-        ...pathArgs,
-      ]);
-      if (!gateNumstat.ok) {
-        throw new CliError(
-          `git diff -w --numstat failed: ${gateNumstat.stderr}`,
-        );
-      }
-      diffStat = effectiveDiffStat(
-        parseNumstatFiles(numstat.stdout),
-        gateConfig.excludeRules,
-      );
-      sizeGate = evaluateSizeGate(
-        parseNumstatFiles(gateNumstat.stdout),
+      // See computeDiffStatAndSizeGate (src/review/run.ts) for the full
+      // rationale.
+      ({ diffStat, sizeGate } = await computeDiffStatAndSizeGate({
+        runGit: (args) => git(gitDirOwner, args),
+        range: discoveryRange,
+        pathArgs,
         gateConfig,
-      );
+      }));
     }
 
     // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
@@ -823,189 +634,59 @@ export async function reviewPr(
 
     // 7 — the plan and the paid gate, exactly like local mode but with the
     // real numstat replacing GitHub's counters.
-    const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
-    const parityFires = parityTriggered(
-      changedPaths,
+    const parityFires = resolveParityFires(
+      effectiveDiff.patch,
       config.parity_trigger_paths,
     );
     const activeHunters = skipDiscovery
       ? []
       : selectActiveHunters(spec.agents, parityFires);
     const hunterCount = activeHunters.length;
-    const maxVerificationSteps = resolveMaxVerificationSteps(config);
-    const queuedVerification = Math.min(
-      verifyQueue.length,
-      maxVerificationSteps,
-    );
-    const estimate = estimateCost(
-      diffStat,
-      hunterCount,
-      summary.enabled && !skipDiscovery,
-      options.scout && !skipDiscovery,
-      queuedVerification,
-    );
-    // 7b(CI) — the budget gate, immediately after the estimate it reads and
-    // BEFORE the plan card/confirm/"committed to spending" commit-status
-    // block below: spec 3.1 ("Review MUST halt before agent spawning") is
-    // satisfied at any point before runPipeline, and this is the earliest
-    // point the REAL (parity-narrowed) estimate exists — the same one the
-    // plan card is about to show, so the skip comment's number and the
-    // (unrendered) plan's number can never have disagreed. `estimate.high`,
-    // not `.low`: report.ts's own doctrine (~97-98) is that every recorded
-    // overrun was an UNDER-estimate, so the generous side is the cheap one
-    // to be wrong on. Unlike the size gate above, this is NOT gated on
-    // `--force` — `--force`'s own doc comment (preflight.ts CliOptions)
-    // scopes it to the size gate's "is this diff too big" question, not
-    // spend. Tradeoff accepted: unlike the size gate, this runs AFTER
-    // createPrRunDir (step 6), so a budget skip can leave a near-empty run
-    // dir behind — the tidiness rationale that placement protects against
-    // (the watcher's attempt counter) does not apply to an ephemeral CI
-    // runner, and restructuring the cost estimate earlier is out of Phase
-    // 3's scope.
-    // `ciBudgetCeiling.budgetUsd`, not `options.budgetUsd`: since issue #156
-    // an unset `--budget-usd` is a POLICY, not an absent number. It resolves
-    // to no ceiling on a subscription route (where `estimate.high` is a token
-    // figure and the cash cost is $0.00, so gating on it refused work over an
-    // overrun that cannot happen) and to the default ceiling on a metered one.
-    // `undefined` here still means the gate does not run — the announcement
-    // for that already fired at the resolution site above.
-    if (isCi && ciBudgetCeiling.budgetUsd !== undefined) {
-      const budgetPlan = planCiBudgetSkip({
-        isCi,
-        estimatedCostUsd: estimate.high,
-        budgetUsd: ciBudgetCeiling.budgetUsd,
-        prNumber,
-      });
-      if (budgetPlan !== null) {
-        await settleCiAdmissionLedger(
-          ciAdmissionLedger,
-          "skipped",
-          "estimated cost exceeds the configured CI budget ceiling",
-        );
-        return await publishCiSkip({
-          operatorRoot,
-          prNumber,
-          post: options.post === true,
-          isCi,
-          stepSummaryFlag: options.stepSummary,
-          plan: budgetPlan,
-          noticeMessage:
-            "pr-hero review skipped — estimated cost exceeds the configured CI budget ceiling",
-        });
-      }
-    }
-    const productionRoute = await resolveProductionRoutePlanAtConfirm({
-      routingConfigured: config.routing !== undefined,
-      workspaceRoot: worktreePath,
-      buildRoutePlan: () =>
-        buildCliRoutePlan({
-          spec,
-          options,
-          agentFiles,
-          routingConfig: config.routing,
-          summary,
-          summarizerEnabled: summary.enabled && !skipDiscovery,
-          scoutEnabled: options.scout && !skipDiscovery,
-        }),
-    });
-    const routePlan = productionRoute?.routePlan;
-    const productionAdmission = productionRoute?.productionAdmission;
-    const runnerAuthority = await resolveRunnerAuthority({
-      workspaceRoot: worktreePath,
-    });
-    await enforceProviderCapabilityGate({
-      routePlan,
-      workspaceRoot: worktreePath,
-      runnerAuthority,
-      authorityOptions: productionAdmission?.authorityOptions,
-      admissionRegistry: productionAdmission?.registry,
-      productionEvidence: productionAdmission?.evidence,
-    });
-    // Same reason as local mode's planContext: the card and the confirm menu's
-    // details view must describe one and the same planned run.
-    const planContext: PrPlanContext = {
+    // See resolvePrPlanAndConfirm (src/pr/plan.ts) for the full rationale —
+    // the CI budget gate, route/capability resolution, the plan card, the
+    // interactive confirm, and the "committed to spending" commit-status
+    // hold that follows a successful one.
+    const planResult = await resolvePrPlanAndConfirm({
       options,
       operatorRoot,
+      prNumber,
       target,
       worktreePath,
       runDir,
+      headSha,
+      baseSha,
+      diffFromSha,
+      diffPath,
       diffStat,
+      droppedPaths: effectiveDiff.droppedPaths,
+      sizeGate,
+      sizeGateConfirmed,
       agentsDir,
+      agentsDirSource,
       agentFiles,
       spec,
       config,
       summary,
-      estimate,
+      loaded,
+      isCi,
+      ciBudgetCeiling,
+      ciAdmissionLedger,
+      skipDiscovery,
       hunterCount,
-      sizeGate,
-      droppedPaths: effectiveDiff.droppedPaths,
-      configProvenance: configProvenanceOf(loaded, agentsDirSource),
-      resolved: { baseSha, diffFromSha, diffPath, parityFires },
-      ...(sizeGateConfirmed ? { sizeGateConfirmed: true } : {}),
-      ...(queuedVerification > 0
-        ? { verificationSteps: queuedVerification }
-        : {}),
-      ...(prepared.case === "A"
-        ? {}
-        : {
-            rereview: {
-              case: prepared.case,
-              lastHead: prepared.last.L,
-              discoveryRestricted: prepared.plan.discoveryRestricted,
-              skipDiscovery,
-            },
-          }),
-      ...(routePlan === undefined ? {} : { routePlan }),
-    };
-    for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
-    // What this run will actually publish. `options` is never mutated: the plan
-    // card and the details view print what was ASKED FOR, and only the run
-    // itself follows the answer given here.
-    let postEnabled = options.post ?? false;
-    if (!options.yes) {
-      const choice = await confirm(
-        estimate.low,
-        estimate.high,
-        options.post ?? false,
-        () => prPlanDetails(planContext, styleEnabled()),
-      );
-      if (choice.kind === "cancel") {
-        log("aborted; nothing was spent.");
-        return 1;
-      }
-      postEnabled = choice.post;
-      if (options.post && !postEnabled) {
-        log("posting disabled for this run; the review still runs.");
-      }
-    }
-
-    // Committed to spending: a pending commit status is the GitHub-visible
-    // in-flight signal. Check Runs need a GitHub App; this CLI posts as the
-    // operator via `gh`, so the write path is the Statuses API. Size-gate
-    // abort and a declined confirm never reach here.
-    const statusTargetUrl = prHtmlUrl(
-      await ghRepoWebUrl(operatorRoot),
-      prNumber,
-    );
-    await tryPublishCommitStatus(
-      operatorRoot,
-      headSha,
-      commitStatusRequest({
-        phase: "pending",
-        posted: false,
-        targetUrl: statusTargetUrl,
-      }),
-    );
-    // From here the lock is HELD, and the only two ways out both clear it:
-    // the finally below on the normal path, and the signal handlers in runCli
-    // on the cancelled one. Held even if the publish above failed — a settle
-    // for a status that was never posted is a harmless no-op write, whereas
-    // skipping the hold on a publish that actually landed is the #162 bug.
-    holdCommitStatusLock({
-      operatorRoot,
-      sha: headSha,
-      targetUrl: statusTargetUrl,
+      parityFires,
+      verifyQueue,
+      prepared,
     });
+    if (planResult.exitCode !== undefined) return planResult.exitCode;
+    const {
+      postEnabled,
+      routePlan,
+      productionAdmission,
+      runnerAuthority,
+      maxVerificationSteps,
+      estimate,
+      statusTargetUrl,
+    } = planResult;
 
     let result: PipelineResult | undefined;
     let posted: InlinePostOutcome | null = null;
@@ -1153,34 +834,29 @@ export async function reviewPr(
       // when it is missing, so the init cost is real and measured. Disk stays
       // unreported, and the mode is the same synchronous build.
       const telemetry: Telemetry = buildTelemetry(result, wallMs, indexMs);
-      const doc = mergeRunEnvelope({
-        skillOutput: result.skillOutput,
+      const { doc, findingsPath } = await writeRunFindings({
+        runDir,
+        result,
         pr: prNumber,
-        base_sha: diffFromSha,
-        head_sha: headSha,
-        model: envelopeModel(options, agentFiles),
-        iteration: 0,
-        prompt_set: promptSet,
+        baseSha: diffFromSha,
+        headSha,
+        options,
+        agentFiles,
+        promptSet,
         engine: await engineIdentity(),
-        sessionFailed: result.sessionFailed,
         telemetry,
       });
-      const findingsPath = path.join(runDir, "findings.json");
-      await writeFindings(findingsPath, doc);
-      const reportPath = path.join(runDir, "report.md");
-      await Bun.write(
-        reportPath,
-        renderReport(doc, {
-          repo: path.basename(operatorRoot),
-          base: target.baseRef,
-          head: `PR #${prNumber}`,
-          diffStat,
-          excludedPaths: effectiveDiff.droppedPaths,
-          costUsd: result.usage.cost_usd_est,
-          ...notionalCostInput(result),
-          wallMs,
-        }),
-      );
+      const reportPath = await writeRunReport({
+        runDir,
+        doc,
+        repo: path.basename(operatorRoot),
+        base: target.baseRef,
+        head: `PR #${prNumber}`,
+        diffStat,
+        droppedPaths: effectiveDiff.droppedPaths,
+        result,
+        wallMs,
+      });
 
       // 13 — the Greptile head-to-head, then (13b) the comparison.json
       // read-back for the observability store. See computeGreptileComparison
