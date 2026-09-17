@@ -73,11 +73,11 @@ import {
 } from "./reporter";
 import {
   type CiReviewAdmissionVerdict,
-  type CiReviewPolicyMode,
   ciAdmissionRemainingBudget,
   ciReviewManualRequiredDetail,
   ciReviewSkipDetail,
 } from "./review-admission";
+import type { CiReviewPolicyMode } from "./review-policy";
 import type { DeltaRiskAssessment } from "./review-risk";
 
 function usd(amount: number): string {
