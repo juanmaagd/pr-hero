@@ -5,14 +5,16 @@
 // (src/pr/review-pr.ts): identifiers moved onto explicit parameters, control
 // flow and WHY comments unchanged.
 //
-// Split into three functions rather than one, deliberately: two single
-// statements sit between them — `readLocalIgnoreRules(operatorRoot)` and
-// `validateGotchas(gotchasPath)` — that test/cli.test.ts pins as literal
-// source inside reviewPr() itself (source-shape guards on an I/O shell no
-// offline test can invoke directly). Folding either statement into this
-// module would silently move the pinned text out of review-pr.ts and break
-// that guard, so reviewPr() keeps calling them inline, in between these
-// three calls, in the exact original order.
+// Split into three functions rather than one, deliberately: two calls sit
+// between them in reviewPr() itself — `resolveEagerLocalIgnore(...)`
+// (src/pr/range.ts, invariant 7/O-8) and `validateGotchas(gotchasPath)`
+// (guarded by test/architecture/review-shell-invariants.test.ts's directory
+// scan, not a per-file pin) — and both need to run in this exact relative
+// position: the ignore read right after step 1's config load, gotchas
+// validation right after step 2's prompt-set resolution, before step 2's own
+// target record is resolved. Folding either call into this module would
+// change that relative order, so reviewPr() keeps calling them inline, in
+// between these three calls, in the exact original order.
 
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -276,10 +278,9 @@ export async function resolvePrTargetRecord(params: {
 // Step 3's second half: the free dry-run exit's size-gate verdict, plan
 // card, and closing lines. Relocated out of reviewPr()'s `if (options.dryRun)`
 // block; the FIRST half of that block (hunterCount/estimate/dryRunGateConfig,
-// then the pinned `perFile` try/catch around `ghPrFiles`) stays inline in
-// reviewPr() — see this module's header for why the pin matters. This half
-// picks up right after `perFile` is known and returns the dry run's exit
-// code (always 0).
+// then the `resolvePrDryRunNumstat` call just above) stays inline in
+// reviewPr(), unchanged. This half picks up right after `perFile` is known
+// and returns the dry run's exit code (always 0).
 export function renderPrDryRunPlan(params: {
   options: CliOptions;
   operatorRoot: string;

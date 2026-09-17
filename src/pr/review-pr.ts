@@ -20,7 +20,7 @@
 
 import path from "node:path";
 import { ciExitCode, planCiSizeSkip } from "#ci/gates";
-import { formatWorkflowCommand, withCiWorkflowGroup } from "#ci/reporter";
+import { withCiWorkflowGroup } from "#ci/reporter";
 import {
   ingestReviewMetrics,
   notionalCostInput,
@@ -35,9 +35,6 @@ import {
   gitNameOnly,
   gitNameStatus,
   gitRemoteWebUrl,
-  readBaseRefIgnoreRules,
-  resolveCommit,
-  resolveDiffFrom,
 } from "#git/git";
 import { engineIdentity } from "#git/identity";
 import {
@@ -49,6 +46,7 @@ import {
 import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
 import { publishCiReviewIfEligible } from "#pr/ci-publish";
 import { computeGreptileComparison } from "#pr/comparison";
+import { discoveryHunters, resolvePrDiscovery } from "#pr/discovery";
 import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
 import { resolvePrPlanAndConfirm } from "#pr/plan";
 import { postFindingsIfEnabled } from "#pr/posting";
@@ -56,15 +54,11 @@ import {
   fetchCommitStatuses,
   fetchPostedFindingComments,
   fetchPrComments,
-  fetchPrRefs,
   fetchPrReviewComments,
   ghPrFiles,
 } from "#pr/pr";
-import {
-  createPrRunDir,
-  findMarkedCommentId,
-  isInFlightCommitStatus,
-} from "#pr/preflight";
+import { createPrRunDir, isInFlightCommitStatus } from "#pr/preflight";
+import { resolveEagerLocalIgnore, resolvePrFetchAndRange } from "#pr/range";
 import {
   renderPrDryRunPlan,
   resolvePrDryRunNumstat,
@@ -74,64 +68,33 @@ import {
 } from "#pr/target";
 import { finalizePrReviewRun, settleCommitStatusAndLedger } from "#pr/teardown";
 import { setupPrWorktree } from "#pr/worktree-setup";
-import {
-  buildPhaseBQueue,
-  decideLastHeadDelta,
-  enrichPriorsFromThreads,
-  incompleteLastReviewMessage,
-  parseNameStatus,
-  prepareDiscovery,
-  priorsFromPostedMarkers,
-  priorsFromStateFindings,
-  shouldAbortEmptyDiscovery,
-  toRereviewProvenance,
-  unreachableLastHeadMessage,
-} from "#rereview/prepare";
-import { parseStateBlock } from "#rereview/state";
 import type { Telemetry } from "#review/findings";
 import { type PipelineResult, runPipeline } from "#review/pipeline";
-import {
-  allExcludedMessage,
-  type CliOptions,
-  emptyDiffMessage,
-} from "#review/preflight";
-import { type DiffStat, envelopeModel, estimateCost } from "#review/report";
+import type { CliOptions } from "#review/preflight";
+import { envelopeModel, estimateCost } from "#review/report";
 import {
   pipelineScoutInput,
   pipelineSummarizerInput,
 } from "#review/route-preflight";
 import {
-  assertDistinctRange,
   buildTelemetry,
-  computeDiffStatAndSizeGate,
   prepareRunnerForRoute,
   resolveParityFires,
-  selectActiveHunters,
   validateGotchas,
   writeRunFindings,
   writeRunReport,
 } from "#review/run";
-import {
-  type ExcludedPath,
-  evaluateSizeGate,
-  filterDiffByIgnoreRules,
-  type SizeGateVerdict,
-  sizeGateConfigFor,
-  sizeGateLine,
-} from "#review/size-gate";
+import { sizeGateConfigFor, sizeGateLine } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import { dryRunHunterCount, reviewingLine } from "#ui/plan";
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
 import { applySizeGate, startProgressRenderer } from "#ui/progress";
 import { type ResultLinks, renderResult } from "#ui/result";
-import { parsePrCommentMarker, parsePrFiles } from "#watch/preflight";
+import { parsePrFiles } from "#watch/preflight";
 import { CliError } from "../errors";
 import { acquirePidLock } from "../home";
 import { prheroLayout, worktreeLockPath } from "../home-preflight";
-import {
-  type IgnoreFileReadResult,
-  readLocalIgnoreRules,
-} from "../ignore-read";
+import { readLocalIgnoreRules } from "../ignore-read";
 import type { ProductionRuntime } from "../production-runtime";
 
 export async function reviewPr(
@@ -140,25 +103,21 @@ export async function reviewPr(
 ): Promise<number> {
   // 1-2 — the operator root, resolved config, prompt set, and PR record. See
   // resolvePrRunOptions / resolvePrPromptSetAndBudget / resolvePrTargetRecord
-  // (src/pr/target.ts) for the full rationale, including why the two
-  // pinned reads below (`.prheroignore`, then gotchas) stay inline here
-  // rather than moving into that module.
+  // (src/pr/target.ts) for the full rationale, including why the gotchas
+  // validation call below stays inline here rather than moving into that
+  // module.
   const step1 = await resolvePrRunOptions(options, prArg);
   options = step1.options;
   const { operatorRoot, prNumber, home, isCi, loaded, config, summary } = step1;
-  // `.prheroignore`, read EAGERLY here for the non-CI case only: the
-  // operator's working tree (`operatorRoot`, NEVER `worktreePath` — O-8) is
-  // available with no fetch, so both the free dry-run exit below and the
-  // real run can share this one read. Under CI the read instead needs to
-  // come from the BASE REF — the PR author must never be able to choose
-  // which `.prheroignore` governs their own review (design D1) — which
-  // needs `baseSha` resolved AND the commit fetched, neither of which exists
-  // yet here; that read happens later, after both (see readBaseRefIgnoreRules
-  // below). `localIgnore` therefore stays `undefined` under CI on purpose —
-  // there is nothing safe to read at this point in that branch.
-  const localIgnore = isCi
-    ? undefined
-    : await readLocalIgnoreRules(operatorRoot);
+  // The eager, non-CI-only `.prheroignore` read (O-8). See
+  // resolveEagerLocalIgnore (src/pr/range.ts) for the full rationale — under
+  // CI this stays `undefined` on purpose; the CI read instead needs the
+  // RESOLVED base sha, not known yet here (see resolvePrFetchAndRange below).
+  const localIgnore = await resolveEagerLocalIgnore({
+    isCi,
+    operatorRoot,
+    readLocal: readLocalIgnoreRules,
+  });
   const step2 = await resolvePrPromptSetAndBudget({
     options,
     loaded,
@@ -274,241 +233,71 @@ export async function reviewPr(
   const lockPath = worktreeLockPath(home, repoHome.repoId, prNumber);
   await acquirePidLock(lockPath);
   try {
-    // 4 — fetch, then canonicalize. See fetchPrRefs for why that refspec pair.
-    // Object-db git runs against the git-dir OWNER, not the operator cwd: the
-    // worktree is registered there (W3).
-    await fetchPrRefs(gitDirOwner, prNumber, target.baseRefName);
-    const headSha = await resolveCommit(gitDirOwner, target.headSha);
-    // baseRef may be a `<sha>^1` expression (merged PR); rev-parse settles it.
-    const baseSha = await resolveCommit(gitDirOwner, target.baseRef);
-    assertDistinctRange(baseSha, headSha);
+    // 4 — fetch, then canonicalize, then the base-ref `.prheroignore` read.
+    // See resolvePrFetchAndRange (src/pr/range.ts) for the full rationale —
+    // fetchPrRefs's refspec pair, why baseSha must be resolveCommit's output
+    // (never target.baseRef/baseRefName directly — a merged PR's baseRef is
+    // a `<sha>^1` EXPRESSION), and design D1 (CI reads the ignore file at the
+    // resolved base sha, never author-controlled; non-CI reuses the eager
+    // `localIgnore` read above rather than re-reading).
+    const { headSha, baseSha, diffFromSha, prIgnore, headLabel } =
+      await resolvePrFetchAndRange({
+        gitDirOwner,
+        prNumber,
+        target,
+        isCi,
+        localIgnore,
+        runGit: git,
+      });
 
-    // `.prheroignore` — CI reads the RESOLVED base sha (never `target.baseRef`
-    // / `target.baseRefName` directly: a merged PR's baseRef is a `<sha>^1`
-    // EXPRESSION, and only `baseSha` above is the canonical sha `ls-tree`
-    // needs). `baseSource` — "base-branch" for an open/closed-unmerged PR,
-    // "merge-commit-parent" for a merged one — decides WHICH historical
-    // revision this is (see pr/preflight.ts's PrTarget.baseRef comment): a
-    // merged-PR replay (exactly what the lab/bench does) therefore reads the
-    // `.prheroignore` as of the MERGE, not today's tip. Neither revision is
-    // author-controlled, so the security property design D1 wants
-    // (the PR author cannot choose which `.prheroignore` governs their own
-    // review) holds for both.
-    //
-    // Non-CI already read `operatorRoot` eagerly above (`localIgnore`), and
-    // that read is reused here rather than re-read — the same value must
-    // decide the dry-run estimate and the real run.
-    //
-    // NOTE (recorded, not fixed — see design's Open Questions): this read
-    // cannot precede fetchPrRefs above, so a lookup failure here burns one CI
-    // admission attempt already reserved (the ciAdmissionLedger reservation).
-    // A persistent misconfig therefore exhausts `ci_max_attempts` into
-    // manual-required — the correct outcome for a repo-level misconfig, not a
-    // reason to reorder a settled CI mechanism.
-    const prIgnore = isCi
-      ? await readBaseRefIgnoreRules(git, gitDirOwner, baseSha)
-      : // isCi is false on this branch, so `localIgnore` above is defined.
-        (localIgnore as IgnoreFileReadResult);
-    const headLabel = `PR #${prNumber} head`;
-    const diffFromSha = await resolveDiffFrom(
-      gitDirOwner,
-      false,
-      target.baseRef,
-      headLabel,
-      baseSha,
-      headSha,
-    );
-
-    // 5 — last-reviewed head, then the TWO deltas (D9). Discovery is the
+    // 5 — last-reviewed head, the two deltas (D9), Phase B classification,
+    // and the size gate over the discovery range. Discovery is the
     // restricted L..H intersection (or full B..H); the size gate counts
     // that same discovery diff, never the whole PR, so a merge of main
     // cannot inflate the bill. Empty discovery is a re-review state, not
-    // an error (C6) — first review (case A) still fails loud.
+    // an error (C6) — first review (case A) still fails loud. See
+    // resolvePrDiscovery (src/pr/discovery.ts) for the full rationale; the
+    // three comment fetches stay here (its own header explains why).
     const [issueComments, postedFindings, reviewComments] = await Promise.all([
       fetchPrComments(operatorRoot, prNumber),
       fetchPostedFindingComments(operatorRoot, prNumber),
       fetchPrReviewComments(operatorRoot, prNumber),
     ]);
-    const existingSummaryId = findMarkedCommentId(issueComments);
-    // parsePrCommentMarker, not parseMarkerHead: this is the ONE call site
-    // that decides whether the L this run is about to trust actually
-    // finished (rereview-coverage fix). A missing or unparseable
-    // marker means "nothing to distrust" — summaryComplete defaults true and
-    // is then ignored anyway, since resolveLastReviewedHead only consults it
-    // when summaryHead itself is non-null.
-    const summaryMarker =
-      existingSummaryId === null
-        ? null
-        : parsePrCommentMarker(
-            issueComments.find((c) => c.id === existingSummaryId)?.body ?? "",
-          );
-    const summaryHead = summaryMarker?.head ?? null;
-    const summaryComplete = summaryMarker?.complete ?? true;
-    const prepared = await prepareDiscovery({
-      B: diffFromSha,
-      H: headSha,
+    const {
+      prepared,
+      skipDiscovery,
+      rawDiff,
+      effectiveDiff,
+      gateConfig,
+      rereview,
+      verifyQueue,
+      overlapCandidates,
+      phaseB,
+      diffStat,
+      sizeGate,
+    } = await resolvePrDiscovery({
+      diffFromSha,
+      headSha,
       full: options.full,
-      summaryHead,
-      summaryComplete,
-      findingMarkers: postedFindings.map((p) => ({
-        headSha: p.marker.headSha,
-        createdAt: p.created_at ?? "",
-      })),
+      baseRef: target.baseRef,
+      headLabel,
+      isCi,
+      sizeGateOverrides: options,
+      config,
+      prIgnore,
+      issueComments,
+      postedFindings,
+      reviewComments,
       git: {
         commitExists: (sha) => gitCommitExists(gitDirOwner, sha),
         isAncestor: (ancestor, descendant) =>
           gitIsAncestor(gitDirOwner, ancestor, descendant),
         nameOnly: (from, to) => gitNameOnly(gitDirOwner, from, to),
-      },
-    });
-    const discoveryRange = `${prepared.discoveryFrom}..${prepared.discoveryTo}`;
-    const pathArgs =
-      prepared.discoveryPaths !== null && prepared.discoveryPaths.length > 0
-        ? ["--", ...prepared.discoveryPaths]
-        : [];
-    const skipPlannedDiscovery =
-      prepared.plan.skipDiscovery || prepared.discoverySkippedEmptyDelta;
-
-    let rawDiff = "";
-    if (!skipPlannedDiscovery) {
-      const diff = await git(gitDirOwner, [
-        "diff",
-        discoveryRange,
-        ...pathArgs,
-      ]);
-      if (!diff.ok) throw new CliError(`git diff failed: ${diff.stderr}`);
-      rawDiff = diff.stdout;
-    }
-    if (shouldAbortEmptyDiscovery(prepared.plan, rawDiff)) {
-      throw new CliError(emptyDiffMessage(target.baseRef, headLabel, false));
-    }
-    const gateConfig = sizeGateConfigFor(options, config, prIgnore);
-    const effectiveDiff = skipPlannedDiscovery
-      ? {
-          patch: "",
-          droppedPaths: [] as string[],
-          exclusions: [] as ExcludedPath[],
-        }
-      : filterDiffByIgnoreRules(rawDiff, gateConfig.excludeRules);
-    if (
-      prepared.plan.emptyDeltaIsError &&
-      effectiveDiff.patch.trim().length === 0
-    ) {
-      throw new CliError(
-        effectiveDiff.droppedPaths.length > 0
-          ? allExcludedMessage(effectiveDiff.droppedPaths)
-          : emptyDiffMessage(target.baseRef, headLabel, false),
-      );
-    }
-    const skipDiscovery =
-      skipPlannedDiscovery || effectiveDiff.patch.trim().length === 0;
-    const rereview = toRereviewProvenance(prepared, postedFindings.length);
-    if (rereview !== undefined && skipDiscovery) {
-      rereview.discovery_skipped_empty_delta = true;
-    }
-
-    let verifyQueue: ReturnType<typeof buildPhaseBQueue>["queued"] = [];
-    let overlapCandidates: ReturnType<
-      typeof buildPhaseBQueue
-    >["overlapCandidates"] = [];
-    let phaseB:
-      | {
-          settled: ReturnType<typeof buildPhaseBQueue>["settled"];
-          priors: ReturnType<typeof priorsFromStateFindings>;
-        }
-      | undefined;
-    const lastHeadDelta = decideLastHeadDelta({
-      case: prepared.case,
-      L: prepared.last.L,
-    });
-    if (lastHeadDelta.kind !== "none") {
-      // A force-pushed L is gone from this clone, so there is no L..H delta to
-      // read and asking git for one is the crash this branch exists to avoid.
-      // Case E already planned a FULL review; an empty name-status keeps Phase
-      // B running over it, and classifyPrior's D/E branch queues every prior
-      // for verification before it would ever consult `touched`. Losing the
-      // deletion/rename settling that a real name-status buys therefore costs
-      // a verify spawn, never a dropped prior.
-      if (lastHeadDelta.kind === "unreachable") {
-        const degraded = unreachableLastHeadMessage(lastHeadDelta.sha);
-        log(isCi ? formatWorkflowCommand("notice", degraded) : degraded);
-      } else if (lastHeadDelta.kind === "diff" && !prepared.last.lastComplete) {
-        // The incomplete-review notice, same mechanism and "said once, in CI and out"
-        // rule as the unreachable one above — case E's unreachable message
-        // already explains "full review, re-verify everything" for that
-        // case, so this covers exactly the cases the unreachable branch
-        // does not: a forced-full B/C re-review because the LAST review
-        // (not this one) never finished.
-        const incomplete = incompleteLastReviewMessage(lastHeadDelta.from);
-        log(isCi ? formatWorkflowCommand("notice", incomplete) : incomplete);
-      }
-      const nameStatus = parseNameStatus(
-        lastHeadDelta.kind === "diff"
-          ? await gitNameStatus(gitDirOwner, lastHeadDelta.from, headSha)
-          : "",
-      );
-      const summaryComment =
-        existingSummaryId === null
-          ? undefined
-          : issueComments.find((c) => c.id === existingSummaryId);
-      const summaryUpdatedAt = summaryComment?.updated_at ?? null;
-      const state = parseStateBlock(summaryComment?.body ?? "");
-      const rawPriors =
-        state === null
-          ? priorsFromPostedMarkers(
-              postedFindings.map((p) => ({
-                path: p.livePath ?? p.marker.path,
-                line: p.liveLine ?? p.marker.line,
-                channel: p.channel === "issue" ? "outside" : "inline",
-              })),
-            )
-          : priorsFromStateFindings(state.findings);
-      const priors = enrichPriorsFromThreads({
-        priors: rawPriors,
-        posted: postedFindings,
-        replies: reviewComments,
-        summaryUpdatedAt,
-      });
-      const classified = buildPhaseBQueue({
-        case: prepared.case,
-        priors,
-        nameStatus,
-        summaryUpdatedAt,
-        // Rereview-coverage wiring fix: `plan.
-        // verifyAll` was computed but never read anywhere in production —
-        // classifyPrior only ever forced verify_all off `case === "D" ||
-        // "E"`, and decideRereviewCase stays UNCHANGED by this fix (the
-        // case stays B/C, only discovery widens, per R2-C5). Without this,
-        // `verifyAll: true` on a forced-full case B/C would be a silent
-        // no-op and the refuter-failed prior would never be re-verified.
-        verifyAll: prepared.plan.verifyAll,
-      });
-      verifyQueue = classified.queued;
-      overlapCandidates = classified.overlapCandidates;
-      phaseB = { settled: classified.settled, priors };
-      if (rereview !== undefined) {
-        rereview.prior_findings = priors.length;
-        rereview.settled_deterministically = classified.settled.filter(
-          (s) => s.status !== "queued",
-        ).length;
-      }
-    }
-
-    let diffStat: DiffStat;
-    let sizeGate: SizeGateVerdict;
-    if (skipDiscovery) {
-      diffStat = { files: 0, insertions: 0, deletions: 0 };
-      sizeGate = evaluateSizeGate([], gateConfig);
-    } else {
-      // See computeDiffStatAndSizeGate (src/review/run.ts) for the full
-      // rationale.
-      ({ diffStat, sizeGate } = await computeDiffStatAndSizeGate({
+        nameStatus: (from, to) => gitNameStatus(gitDirOwner, from, to),
         runGit: (args) => git(gitDirOwner, args),
-        range: discoveryRange,
-        pathArgs,
-        gateConfig,
-      }));
-    }
+      },
+      log,
+    });
 
     // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
     // CI, a hard skip in non-interactive mode THROWS a CliError (see
@@ -618,9 +407,11 @@ export async function reviewPr(
       effectiveDiff.patch,
       config.parity_trigger_paths,
     );
-    const activeHunters = skipDiscovery
-      ? []
-      : selectActiveHunters(spec.agents, parityFires);
+    const activeHunters = discoveryHunters({
+      skipDiscovery,
+      agents: spec.agents,
+      parityFires,
+    });
     const hunterCount = activeHunters.length;
     // See resolvePrPlanAndConfirm (src/pr/plan.ts) for the full rationale —
     // the CI budget gate, route/capability resolution, the plan card, the
