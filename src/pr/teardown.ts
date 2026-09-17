@@ -49,10 +49,14 @@ async function settleLedgerIfPending(
 // "for safety": today a throw from tryPublishCommitStatus skips the release,
 // and preserving that (not "fixing" it) is this function's job.
 //
-// `publish`/`settle` are test-only seams (defaults: the real
-// tryPublishCommitStatus/settleCiAdmissionLedger) — both hit `gh` with no
-// spawnFn of their own and neither status.ts nor admission.ts is in scope
-// for this slice. Every production caller omits both.
+// `spawnFn` threads into tryPublishCommitStatus (status.ts's own seam,
+// invisible to production): this doubles the real `gh` boundary instead of
+// replacing tryPublishCommitStatus's swallow-errors behavior with a fake,
+// so a test can prove that behavior for real — a failed gh post still lets
+// this function release the lock and settle the ledger, exactly as a
+// successful one does. `settle` stays a whole-function seam (default: the
+// real settleCiAdmissionLedger): admission.ts is out of scope for this
+// slice and its ledger persist call has no spawnFn of its own.
 export async function settleCommitStatusAndLedger(input: {
   result: PipelineResult | undefined;
   posted: InlinePostOutcome | null;
@@ -60,15 +64,14 @@ export async function settleCommitStatusAndLedger(input: {
   headSha: string;
   statusTargetUrl: string | undefined;
   ciAdmissionLedger: CiAdmissionLedgerState | null;
-  publish?: typeof tryPublishCommitStatus;
+  spawnFn?: typeof Bun.spawn;
   settle?: typeof settleCiAdmissionLedger;
 }): Promise<void> {
-  const publish = input.publish ?? tryPublishCommitStatus;
   const phase = commitStatusCompletion({
     pipelineFinished: input.result !== undefined,
     sessionFailed: input.result?.sessionFailed === true,
   });
-  await publish(
+  await tryPublishCommitStatus(
     input.operatorRoot,
     input.headSha,
     commitStatusRequest({
@@ -76,6 +79,7 @@ export async function settleCommitStatusAndLedger(input: {
       posted: input.posted !== null,
       targetUrl: input.statusTargetUrl,
     }),
+    input.spawnFn,
   );
   // Settled, so nothing is held: the signal handlers must never post a
   // second, contradicting status over the one just written. Released
