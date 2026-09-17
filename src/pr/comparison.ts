@@ -31,7 +31,14 @@ export async function computeGreptileComparison(input: {
   runDir: string;
   runStatus: RunStatus;
   findings: PrHeroFindingRef[];
+  // Test-only seam (default: the real writeComparison). writeComparison
+  // itself calls fetchPrComments with no spawnFn of its own, and pr.ts is
+  // out of scope for this slice — so offline tests replace the whole
+  // collaborator instead, writing a real comparison.json to a temp runDir
+  // so the read-back below (parseComparisonJson) still runs for real.
+  write?: typeof writeComparison;
 }): Promise<ComparisonStageResult> {
+  const write = input.write ?? writeComparison;
   if (input.sessionFailed) {
     log(
       "comparison skipped: every hunter failed, so there is no review to compare",
@@ -41,7 +48,7 @@ export async function computeGreptileComparison(input: {
 
   let comparison: ComparisonOutcome | null = null;
   try {
-    comparison = await writeComparison({
+    comparison = await write({
       operatorRoot: input.operatorRoot,
       pr: input.pr,
       headSha: input.headSha,
