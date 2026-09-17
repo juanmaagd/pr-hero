@@ -206,6 +206,24 @@ describe("findings schema round-trip", () => {
     const doc = { ...baseDocument(), summary: { ...summary, score: 6 } };
     expect(() => validateFindingsDocument(doc)).toThrow();
   });
+
+  // T1 (odd/tasks/logic-hunter.md): category 15 is v1.1-only. The v1.0
+  // legacy validator must stay at 1-14 — a v1.0 document (or one already on
+  // disk from before schema v1.1) must never validate a category the reader
+  // that produced it never had.
+  test("rejects category 15 (v1.1-only, not part of the v1.0 legacy range)", () => {
+    const doc = baseDocument([baseFinding({ category: 15 })]);
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /category must be 1-14/,
+    );
+  });
+
+  test("rejects category 16", () => {
+    const doc = baseDocument([baseFinding({ category: 16 })]);
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /category must be 1-14/,
+    );
+  });
 });
 
 describe("findings schema v1.1 reader boundary", () => {
@@ -268,6 +286,21 @@ describe("findings schema v1.1 reader boundary", () => {
       baseFinding({ hunter: "security" as Finding["hunter"] }),
     ]);
     expect(() => validateFindingsDocument(doc)).toThrow(/hunter invalid/);
+  });
+
+  // T1 (odd/tasks/logic-hunter.md): category 15 = "local logic error" is
+  // v1.1-only. The v1.0 legacy validator stays at 1-14 (see the sibling test
+  // below in the v1.0 round-trip block).
+  test("accepts category 15 (local logic error)", () => {
+    const doc = baseDocumentV11([baseFinding({ category: 15 })]);
+    expect(() => validateFindingsDocument(doc)).not.toThrow();
+  });
+
+  test("rejects category 16", () => {
+    const doc = baseDocumentV11([baseFinding({ category: 16 })]);
+    expect(() => validateFindingsDocument(doc)).toThrow(
+      /category must be 1-15/,
+    );
   });
 });
 

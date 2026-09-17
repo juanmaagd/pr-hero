@@ -608,7 +608,7 @@ async function writeSystemPrompt(
 const HUNTER_OUTPUT_CONTRACT = [
   "Your final message must be exactly one JSON object — no prose, no code",
   'fences — of the shape {"findings":[...]}. Each finding carries: id,',
-  "category (1-14), path, line, symbol (optional), severity",
+  "category (1-15), path, line, symbol (optional), severity",
   "(BLOCKER|CRITICAL|WARNING|SUGGESTION), evidence_class",
   "(deterministic|inferential|insufficient), causal_disposition",
   "(introduced|behavior-activated|worsened|pre-existing|base-only|unknown),",

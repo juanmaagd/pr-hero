@@ -165,6 +165,23 @@ describe("validateHunterDraft", () => {
       }),
     ).toThrow();
   });
+
+  // T1 (odd/tasks/logic-hunter.md): drafts are always merged into a v1.1
+  // document by mergeRunEnvelope (review/findings.ts), which stamps
+  // SCHEMA_VERSION_V1_1 unconditionally — so the draft validator accepts the
+  // full v1.1 range, category 15 ("local logic error") included.
+  test("accepts category 15 (local logic error)", () => {
+    const result = validateHunterDraft({
+      findings: [draft({ category: 15 })],
+    });
+    expect(result.findings[0]?.category).toBe(15);
+  });
+
+  test("rejects category 16", () => {
+    expect(() =>
+      validateHunterDraft({ findings: [draft({ category: 16 })] }),
+    ).toThrow(/category must be 1-15/);
+  });
 });
 
 describe("validateSummary", () => {

@@ -56,7 +56,12 @@ export type HopTrail = HopTrailStep[] | string[];
 
 export interface Finding {
   id: string;
-  category: number; // hunting-map.md taxonomy, 1-14
+  // hunting-map.md taxonomy: 1-14 on any document, plus 15 = "local logic
+  // error" (wrong operator/condition/comparison/unit/normalization/variable
+  // within the changed lines) on v1.1 documents only (odd/tasks/logic-hunter.md
+  // T1). The v1.0 legacy validator (validateFinding) stays closed at 1-14;
+  // the v1.1 validator (validateFindingV11) accepts the full 1-15 range.
+  category: number;
   path: string;
   line: number;
   symbol?: string;
@@ -396,8 +401,8 @@ function validateFindingV11(candidate: unknown, index: number): Finding {
     `findings[${index}].id required`,
   );
   must(
-    typeof f.category === "number" && f.category >= 1 && f.category <= 14,
-    `findings[${index}].category must be 1-14`,
+    typeof f.category === "number" && f.category >= 1 && f.category <= 15,
+    `findings[${index}].category must be 1-15`,
   );
   must(
     typeof f.path === "string" && f.path.length > 0,
