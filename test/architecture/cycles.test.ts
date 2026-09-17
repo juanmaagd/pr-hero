@@ -3,9 +3,14 @@
 // Structural enforcement: value-import cycles in TypeScript can cause runtime TDZ
 // (Temporal Dead Zone) crashes or undefined module bindings at module initialization.
 //
-// Baseline on `dev` is exactly 6 known cycles. No PR or refactor slice may introduce
-// any new value-import cycle. Type-only imports (`import type` or `{ type X }`) are
-// excluded as they are completely erased by the compiler and cannot cause TDZ issues.
+// Baseline on `dev` is exactly 0 known cycles (the last 5 — the ci/review-admission
+// <-> pr/preflight <-> review/preflight triangle, and the four review/step-runner
+// <-> execution/harness cycles — were broken by extracting shared leaf modules with
+// no back-edges: src/ci/review-policy.ts, src/execution/step-artifacts.ts,
+// src/execution/failure-classification.ts, and src/execution/spawned-process.ts).
+// No PR or refactor slice may introduce any new value-import cycle. Type-only
+// imports (`import type` or `{ type X }`) are excluded as they are completely
+// erased by the compiler and cannot cause TDZ issues.
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
@@ -177,7 +182,7 @@ function findValueImportCycles(): string[][] {
 }
 
 describe("value-import cycle guard (C2)", () => {
-  test("value-import cycles do not exceed the baseline of 6", () => {
+  test("value-import cycles do not exceed the baseline of 0", () => {
     const cycles = findValueImportCycles();
     const cycleSignatures = cycles.map(
       (c) =>
@@ -187,7 +192,7 @@ describe("value-import cycle guard (C2)", () => {
 
     expect(
       cycles.length,
-      `New value-import cycle introduced! Found ${cycles.length} cycles (baseline: 6):\n${cycleSignatures.join("\n")}`,
-    ).toBeLessThanOrEqual(6);
+      `New value-import cycle introduced! Found ${cycles.length} cycles (baseline: 0):\n${cycleSignatures.join("\n")}`,
+    ).toBeLessThanOrEqual(0);
   });
 });
