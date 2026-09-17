@@ -19,14 +19,9 @@
 //     stay outside of.
 
 import path from "node:path";
-import { ciExitCode, planCiSizeSkip } from "#ci/gates";
+import { planCiSizeSkip } from "#ci/gates";
 import { withCiWorkflowGroup } from "#ci/reporter";
-import {
-  ingestReviewMetrics,
-  notionalCostInput,
-  persistCanonicalReview,
-  pipelineConfigInput,
-} from "#config/config";
+import { pipelineConfigInput } from "#config/config";
 import {
   exclusionLines,
   git,
@@ -34,7 +29,6 @@ import {
   gitIsAncestor,
   gitNameOnly,
   gitNameStatus,
-  gitRemoteWebUrl,
 } from "#git/git";
 import { engineIdentity } from "#git/identity";
 import {
@@ -44,12 +38,9 @@ import {
   settleCiAdmissionLedger,
 } from "#pr/admission";
 import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
-import { publishCiReviewIfEligible } from "#pr/ci-publish";
-import { computeGreptileComparison } from "#pr/comparison";
 import { discoveryHunters, resolvePrDiscovery } from "#pr/discovery";
-import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
+import type { InlinePostOutcome } from "#pr/inline";
 import { resolvePrPlanAndConfirm } from "#pr/plan";
-import { postFindingsIfEnabled } from "#pr/posting";
 import {
   fetchCommitStatuses,
   fetchPostedFindingComments,
@@ -58,6 +49,7 @@ import {
   ghPrFiles,
 } from "#pr/pr";
 import { createPrRunDir, isInFlightCommitStatus } from "#pr/preflight";
+import { publishRunOutcome } from "#pr/publish-outcome";
 import { resolveEagerLocalIgnore, resolvePrFetchAndRange } from "#pr/range";
 import {
   renderPrDryRunPlan,
@@ -68,32 +60,27 @@ import {
 } from "#pr/target";
 import { finalizePrReviewRun, settleCommitStatusAndLedger } from "#pr/teardown";
 import { setupPrWorktree } from "#pr/worktree-setup";
-import type { Telemetry } from "#review/findings";
 import { type PipelineResult, runPipeline } from "#review/pipeline";
 import type { CliOptions } from "#review/preflight";
-import { envelopeModel, estimateCost } from "#review/report";
+import { estimateCost } from "#review/report";
 import {
   pipelineScoutInput,
   pipelineSummarizerInput,
 } from "#review/route-preflight";
 import {
-  buildTelemetry,
   prepareRunnerForRoute,
   resolveParityFires,
   validateGotchas,
-  writeRunFindings,
-  writeRunReport,
 } from "#review/run";
 import { sizeGateConfigFor, sizeGateLine } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import { dryRunHunterCount, reviewingLine } from "#ui/plan";
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
 import { applySizeGate, startProgressRenderer } from "#ui/progress";
-import { type ResultLinks, renderResult } from "#ui/result";
 import { parsePrFiles } from "#watch/preflight";
 import { CliError } from "../errors";
 import { acquirePidLock } from "../home";
-import { prheroLayout, worktreeLockPath } from "../home-preflight";
+import { worktreeLockPath } from "../home-preflight";
 import { readLocalIgnoreRules } from "../ignore-read";
 import type { ProductionRuntime } from "../production-runtime";
 
@@ -595,210 +582,43 @@ export async function reviewPr(
           }
         }
       });
-      if (result === undefined) {
-        throw new CliError("internal: pipeline returned no result");
-      }
-      const wallMs = Math.round(performance.now() - started);
-
-      // 12 — the artifact and the report, exactly as local mode writes them.
-      // Unlike local mode's hardcoded 0, PR mode BUILDS the worktree's index
-      // when it is missing, so the init cost is real and measured. Disk stays
-      // unreported, and the mode is the same synchronous build.
-      const telemetry: Telemetry = buildTelemetry(result, wallMs, indexMs);
-      const { doc, findingsPath } = await writeRunFindings({
-        runDir,
+      // 12-16 — everything from the artifact write through CI publishing and
+      // the ledger's terminal settlement. See publishRunOutcome
+      // (src/pr/publish-outcome.ts) for the full rationale, including the
+      // `onPosted` hazard: `posted` is declared outside this try (the
+      // finally below reads it on every exit path, including a throw from
+      // inside publishRunOutcome itself), so the callback assigns it the
+      // instant the posting stage resolves — never only at the end.
+      return await publishRunOutcome({
         result,
-        pr: prNumber,
-        baseSha: diffFromSha,
+        started,
+        indexMs,
+        runDir,
+        prNumber,
+        diffFromSha,
         headSha,
         options,
         agentFiles,
         promptSet,
-        engine: await engineIdentity(),
-        telemetry,
-      });
-      const reportPath = await writeRunReport({
-        runDir,
-        doc,
-        repo: path.basename(operatorRoot),
-        base: target.baseRef,
-        head: `PR #${prNumber}`,
+        operatorRoot,
+        baseRef: target.baseRef,
         diffStat,
         droppedPaths: effectiveDiff.droppedPaths,
-        result,
-        wallMs,
-      });
-
-      // 13 — the Greptile head-to-head, then (13b) the comparison.json
-      // read-back for the observability store. See computeGreptileComparison
-      // (src/pr/comparison.ts) for the full rationale.
-      const { comparison, storedComparison } = await computeGreptileComparison({
-        sessionFailed: result.sessionFailed,
-        operatorRoot,
-        pr: prNumber,
-        headSha,
-        diffFromSha,
-        runDir,
-        runStatus: doc.run_status,
-        findings: doc.findings.map((f) => ({
-          id: f.id,
-          path: f.path,
-          line: f.line,
-          claim: f.claim,
-          tier: f.tier,
-        })),
-      });
-      // 13b — canonical product store & observability metrics.
-      persistCanonicalReview({
+        diffPatch: effectiveDiff.patch,
         home,
         repoId: repoHome.repoId,
-        runDir,
-        checkoutPath: operatorRoot,
-        doc,
-        perAgent: result.perAgent,
-        comparison: storedComparison,
-        log,
-      });
-      ingestReviewMetrics({
-        dbPath: prheroLayout(home).metricsDbPath,
-        repoId: repoHome.repoId,
-        runDir,
-        checkoutPath: operatorRoot,
-        doc,
-        perAgent: result.perAgent,
-        comparison: storedComparison,
-        log,
-      });
-
-      // 14 — the posting, only when asked. Hoisted `postedWebUrl` out of the
-      // stage ONLY so step 15 can reuse it: when posting ran, the terminal's
-      // links must be built from the SAME web url the comments were
-      // published against. See postFindingsIfEnabled (src/pr/posting.ts) for
-      // the full rationale.
-      const postingResult = await postFindingsIfEnabled({
         postEnabled,
-        sessionFailed: result.sessionFailed,
-        operatorRoot,
-        pr: prNumber,
-        headSha,
-        doc,
-        diffPatch: effectiveDiff.patch,
-        runDir,
         rereview,
-        rereviewPriors: phaseB?.priors,
-      });
-      posted = postingResult.posted;
-      const postedWebUrl = postingResult.postedWebUrl;
-
-      // 15 — the summary. One shared renderer with local mode; the mode-specific parts (comparison,
-      // the worktree hint) ride in as optional inputs. The `posted:` line that
-      // used to sit here is GONE on purpose: step 14 already printed a richer one
-      // at the moment it happened, and two differently-worded reports of the same
-      // POST read as two postings. What this block keeps is the durable trace —
-      // post.json in the artifact list below.
-      //
-      // The links, in the order that keeps them honest: `gh`'s answer when posting
-      // already paid for it, otherwise the free git-remote derivation — so a run
-      // WITHOUT --post still prints a clickable url for every finding, which is
-      // the whole reason repoWebUrlFromRemote exists. No pushed-ness check here
-      // (unlike local mode): a PR head came out of `refs/pull/<n>/head`, so origin
-      // has it by construction.
-      const webUrl = postedWebUrl ?? (await gitRemoteWebUrl(operatorRoot));
-      const links: ResultLinks | undefined =
-        webUrl === undefined
-          ? undefined
-          : {
-              webUrl,
-              headSha,
-              pr: prNumber,
-              // Only when this run actually posted: a comment url for a comment
-              // that does not exist is the dead link the whole degradation rule
-              // exists to prevent. Absent ids fall through to a blob link.
-              ...(posted ? { commentUrls: posted.commentUrls } : {}),
-            };
-      for (const line of renderResult({
-        doc,
-        costUsd: result.usage.cost_usd_est,
-        ...notionalCostInput(result),
-        wallMs,
-        estimate: { low: estimate.low, high: estimate.high },
-        runDir,
-        artifacts: [
-          path.basename(reportPath),
-          path.basename(findingsPath),
-          ...(comparison ? [path.basename(comparison.markdownPath)] : []),
-          ...(posted ? ["post.json"] : []),
-        ],
-        ...(comparison
-          ? {
-              comparison: {
-                greptileFound: comparison.greptileFound,
-                // The buckets themselves, not their counts: writeComparison's
-                // widened outcome is what lets the block name a recall miss.
-                result: comparison.result,
-              },
-            }
-          : {}),
-        worktree: { gitDirOwner, worktreePath },
-        ...(links === undefined ? {} : { links }),
-        // GitHub #39. Only a run that actually POSTED can know this — the
-        // re-read lives in the posting sequence — so a run without --post
-        // never claims the head moved, which is correct: it published nothing
-        // that could go stale.
-        ...(posted?.movedHeadSha === undefined
-          ? {}
-          : { movedHeadSha: posted.movedHeadSha }),
-        sessionFailed: result.sessionFailed,
-        ...(result.unresolved.length > 0
-          ? { unresolved: result.unresolved }
-          : {}),
-        styles: styleEnabled(),
-      })) {
-        log(line);
-      }
-      // 16 — CI headless publishing (ROADMAP Pillar 3). `posted?.delta`
-      // reuses postInlineFindings' own re-review delta — no separate
-      // computation. See publishCiReviewIfEligible (src/pr/ci-publish.ts)
-      // for the full rationale.
-      await publishCiReviewIfEligible({
+        phaseB,
+        gitDirOwner,
+        worktreePath,
         isCi,
-        sessionFailed: result.sessionFailed,
-        prNumber,
-        headSha,
-        findings: doc.findings,
-        costUsdEst: result.usage.cost_usd_est,
-        wallMs,
-        model: envelopeModel(options, agentFiles),
-        webUrl,
-        delta: posted?.delta,
-        runDir,
-        stepSummaryFlag: options.stepSummary,
-      });
-      if (result.sessionFailed) {
-        await settleCiAdmissionLedger(
-          ciAdmissionLedger,
-          "failed",
-          "every hunter failed",
-        );
-        return 1;
-      }
-      await settleCiAdmissionLedger(
+        estimate,
         ciAdmissionLedger,
-        "completed",
-        "review complete",
-      );
-      // Assistant posture (spec 2.1): in CI mode, exit 0 even with blocking
-      // findings — ciExitCode only fails on a fatal session failure (already
-      // returned above) or a genuine posting drop (design D6). Outside CI,
-      // postingExitCode keeps its existing behavior unchanged.
-      return isCi
-        ? ciExitCode({
-            sessionFailed: result.sessionFailed,
-            droppedFindingIds: posted?.droppedFindingIds.length ?? 0,
-            blockingCount: doc.findings.filter((f) => f.tier === "blocking")
-              .length,
-          })
-        : postingExitCode(posted);
+        onPosted: (outcome) => {
+          posted = outcome;
+        },
+      });
     } finally {
       // The commit status must settle BEFORE the lock is released, and the
       // ledger settlement must still run on throw or early return. See
