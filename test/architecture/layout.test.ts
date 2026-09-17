@@ -144,6 +144,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "reverts-preflight",
       "review-pr",
       "status",
+      "target",
       "teardown",
       "worktree-setup",
     ],
