@@ -672,7 +672,6 @@ export async function reviewPr(
       ciBudgetCeiling,
       ciAdmissionLedger,
       skipDiscovery,
-      activeHunters,
       hunterCount,
       parityFires,
       verifyQueue,

@@ -6,11 +6,14 @@
 // flow and WHY comments unchanged.
 //
 // `parityFires` / `activeHunters` / `hunterCount` stay computed in
-// reviewPr() itself and arrive here as parameters: test/cli.test.ts pins
-// `const activeHunters = skipDiscovery ? [] : selectActiveHunters(spec.agents,
-// parityFires);` as literal source inside reviewPr() (a source-shape guard on
-// an I/O shell no offline test can invoke directly), so moving that
-// assignment into this module would silently break the guard.
+// reviewPr() itself: test/cli.test.ts pins `const activeHunters =
+// skipDiscovery ? [] : selectActiveHunters(spec.agents, parityFires);` as
+// literal source inside reviewPr() (a source-shape guard on an I/O shell no
+// offline test can invoke directly), so moving that assignment into this
+// module would silently break the guard. Only `hunterCount` (and
+// `parityFires`, for the plan card's `resolved` field) actually cross into
+// this function — `activeHunters` itself is read only by reviewPr()'s own
+// progress renderer, never by this stage.
 //
 // A discriminated union, not a flat result-plus-sentinel: the two early-exit
 // branches (`exitCode: number`) genuinely have no route plan, runner
@@ -43,7 +46,7 @@ import {
   resolvePipelineRoute,
 } from "#review/run";
 import type { SizeGateVerdict } from "#review/size-gate";
-import type { AgentSpec, ReviewSpec } from "#review/spec";
+import type { ReviewSpec } from "#review/spec";
 import {
   configProvenanceOf,
   type PrPlanContext,
@@ -97,7 +100,6 @@ export async function resolvePrPlanAndConfirm(params: {
   ciBudgetCeiling: { budgetUsd: number | undefined };
   ciAdmissionLedger: CiAdmissionLedgerState | null;
   skipDiscovery: boolean;
-  activeHunters: AgentSpec[];
   hunterCount: number;
   parityFires: boolean;
   verifyQueue: ReturnType<typeof buildPhaseBQueue>["queued"];
