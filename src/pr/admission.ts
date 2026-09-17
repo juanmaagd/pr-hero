@@ -38,45 +38,48 @@ export type CiAdmissionLedgerState = {
 
 export async function persistCiAdmissionLedger(
   state: CiAdmissionLedgerState,
+  options?: { spawnFn?: typeof Bun.spawn },
 ): Promise<void> {
-  state.checkRunId = await upsertAdmissionCheckRun(state.operatorRoot, {
-    headSha: state.headSha,
-    record: state.record,
-    checkRunId: state.checkRunId,
-  });
+  state.checkRunId = await upsertAdmissionCheckRun(
+    state.operatorRoot,
+    {
+      headSha: state.headSha,
+      record: state.record,
+      checkRunId: state.checkRunId,
+    },
+    options,
+  );
 }
 
 export async function tryPersistCiAdmissionLedger(
   state: CiAdmissionLedgerState | null,
+  options?: { spawnFn?: typeof Bun.spawn },
 ): Promise<void> {
   if (state === null) return;
   try {
-    await persistCiAdmissionLedger(state);
+    await persistCiAdmissionLedger(state, options);
   } catch {
     // Best-effort: settlement must not mask the underlying review failure.
   }
 }
 
+const TERMINAL_ADMISSION_STATUSES: ReadonlySet<AdmissionAttemptStatus> =
+  new Set(["completed", "failed", "cancelled", "skipped"]);
+
+// A record that already reached a terminal status is never re-settled: the
+// review shells call this from several exits (and teardown's finally), and
+// a later call must not overwrite an earlier `completed` with `failed`.
+// `spawnFn` is the gh boundary for offline tests; production omits it.
 export async function settleCiAdmissionLedger(
   state: CiAdmissionLedgerState | null,
   status: AdmissionAttemptStatus,
   reason: string,
+  options?: { spawnFn?: typeof Bun.spawn },
 ): Promise<void> {
   if (state === null) return;
-  const terminal = new Set<AdmissionAttemptStatus>([
-    "completed",
-    "failed",
-    "cancelled",
-    "skipped",
-  ]);
-  if (
-    terminal.has(state.record.status) &&
-    state.record.status !== "provider-started"
-  ) {
-    return;
-  }
+  if (TERMINAL_ADMISSION_STATUSES.has(state.record.status)) return;
   state.record = settleAdmissionAttempt(state.record, status, reason);
-  await tryPersistCiAdmissionLedger(state);
+  await tryPersistCiAdmissionLedger(state, options);
 }
 
 export async function reserveCiAdmissionLedger(input: {
