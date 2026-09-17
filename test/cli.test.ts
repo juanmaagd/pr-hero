@@ -280,111 +280,18 @@ describe("CLI scout activation (ROADMAP-DOORDASH M5)", () => {
   });
 });
 
-// The call sites themselves, guarded by shape rather than by behaviour, and
-// the reason is measured rather than assumed: `review()` and `reviewPr()` are
-// I/O shells no offline test can invoke, so with `notionalCostInput` tested
-// and both renderers tested, DELETING all four call sites still flipped zero
-// tests. That is the precise shape of the defect this issue reports — a
-// correct mechanism whose last wiring step silently never lands — so the wiring
-// gets a guard of its own, in the same spirit as the repo-hygiene scan in
-// test/preflight-bundled-prompts.test.ts.
-//
-// The invariant, not the line numbers, and stated at its real width
-// (2026-09-02, #177): every `renderResult(`/`renderReport(` call IN THE TWO
-// REVIEW SHELLS carries the notional companion. There are four today (two
-// per review shell); adding a FIFTH, or a third review shell, is meant to
-// trip this until it does the same.
-//
-// cli-decomp-08 moved review() and reviewPr() out of src/cli.ts into
-// src/review/review.ts and src/pr/review-pr.ts respectively; this scan moved
-// with them rather than going dark the moment the call sites left cli.ts.
-//
-// What is deliberately OUTSIDE it, and would not trip it: every other surface
-// that renders a run's cost — `ci-reporter`'s `cost_usd_est=` in
-// `$GITHUB_OUTPUT`, the `runs`/`run_agents` store and `pr-hero usage`,
-// metrics, the watcher feed, the server, backfill, and diversity's spend cap.
-// They all read `projectLegacyUsage`'s `cost_usd_est`, which is cash-only and
-// has no notional companion to pair with; the `runs` table has no notional
-// column at all, so `pr-hero usage` would mix two semantics across time. That
-// is a store-schema slice (#173's commit body names it), not this one — so
-// this scan pins the shell it can actually pin rather than claiming a
-// guarantee the codebase does not yet make.
-describe("every cost-rendering call site in the review shells carries the notional split (#173)", () => {
-  test("renderResult and renderReport are each paired with notionalCostInput", async () => {
-    const sources = await Promise.all(
-      ["../src/review/review.ts", "../src/pr/review-pr.ts"].map((rel) =>
-        Bun.file(path.resolve(import.meta.dir, rel)).text(),
-      ),
-    );
-    const source = sources.join("\n");
-    const count = (needle: string) => source.split(needle).length - 1;
-    const renderCalls = count("renderResult(") + count("renderReport(");
-    expect(renderCalls).toBeGreaterThan(0);
-    expect(count("notionalCostInput(result)")).toBe(renderCalls);
-  });
-});
-
-// `review()` and `reviewPr()` are unexported I/O shells, so no offline test
-// reaches their gotchas gate — which is exactly how the gate came to promise
-// something it did not enforce. The predicate itself is unit-tested in
-// test/review/preflight.test.ts; what has no other guard is that both shells
-// actually ASK it. Same precedent as the notional-split scan above: pin the
-// wiring, state the invariant rather than the line numbers.
-describe("every gotchas gate asks the shared predicate", () => {
-  const sources = [
-    "../src/review/review.ts",
-    "../src/pr/review-pr.ts",
-    "../src/review/pipeline.ts",
-    "../src/doctor.ts",
-  ];
-
-  test("no gate re-implements the old empty-only check", async () => {
-    // The exact statements the four gates used before the placeholder was
-    // rejected. The `if (` prefix is load-bearing: without it the guard also
-    // fires on the WHY comments that quote the old expression to explain why
-    // it was wrong, which would make the guard forbid naming its own subject.
-    // Collected into a list rather than asserted with `not.toContain` per
-    // file, because a failing `not.toContain` on a 7000-line source prints
-    // the whole file.
-    const offenders: string[] = [];
-    for (const rel of sources) {
-      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
-      for (const needle of [
-        "if (gotchas.trim().length === 0)",
-        "gotchasContent.trim().length === 0)",
-      ]) {
-        if (source.includes(needle)) offenders.push(`${rel}: ${needle}`);
-      }
-    }
-    expect(offenders).toEqual([]);
-  });
-
-  test("both review shells route through gotchasUnusableReason", async () => {
-    // Local review and PR review moved to their own modules (cli-decomp-08),
-    // then P2.2 (odd/tasks/shared-run-stages.md) moved the gate ITSELF into
-    // `#review/run`'s `validateGotchas` — both shells now call that shared
-    // function exactly once, and `validateGotchas` is the one place left
-    // that asks `gotchasUnusableReason` and renders `gotchasErrorMessage`.
-    // The invariant is unchanged: one gate, one error render, reused rather
-    // than duplicated per shell.
-    for (const rel of ["../src/review/review.ts", "../src/pr/review-pr.ts"]) {
-      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
-      const count = (needle: string) => source.split(needle).length - 1;
-      expect(count("validateGotchas(gotchasPath)")).toBe(1);
-    }
-    const runSource = await Bun.file(
-      path.resolve(import.meta.dir, "../src/review/run.ts"),
-    ).text();
-    const count = (needle: string) => runSource.split(needle).length - 1;
-    expect(count("gotchasUnusableReason(gotchas)")).toBe(1);
-    expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(1);
-  });
-
-  // `init`'s own gotchas-block wiring test moved to
-  // test/commands/init.test.ts (cli-decomp S3) when `init` moved to
-  // src/commands/init.ts — it tests init's wiring specifically, not the
-  // shared-predicate theme this describe covers for the two review shells.
-});
+// review-pr-behavior-seams (Goal B): invariant 10's two scans — "every
+// renderResult(/renderReport( call carries its notionalCostInput companion"
+// (#173) and "every gotchas gate asks the shared predicate, and none
+// re-implements the old empty-only check" — moved to
+// test/architecture/review-shell-invariants.test.ts as a DIRECTORY scan over
+// src/review/ and src/pr/ (plus src/doctor.ts for the gotchas-literal check,
+// which sits outside both). A hardcoded file list here would go dark the
+// moment either scanned file moved; the directory scan does not need to
+// change when that happens, and a third review shell trips it automatically
+// instead of silently going unchecked. `init`'s own gotchas-block wiring
+// stays in test/commands/init.test.ts — a different topic (init's wiring,
+// not the two review shells).
 
 // Rereview-coverage fix (GitHub #42's re-review half, MusiveTech/musive
 // #1823): reviewPr() is the SAME unexported I/O shell as the gotchas gate
