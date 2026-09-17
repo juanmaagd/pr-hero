@@ -1,0 +1,19 @@
+# pr-hero's own exclusions, on top of the 9 shipped defaults (lockfiles, minified, snapshots).
+# Dialect: a gitignore(5) subset, read from the BASE ref under CI. Last matching rule wins.
+#
+# Scope of this file: prose only. Research notes, benchmark ledgers and the roadmap are argued in
+# review comments and PR descriptions, not by a hunter — and their diffs are large, so reviewing them
+# spends real budget on text that cannot break at runtime.
+#
+# Deliberately NOT excluded: anything executable, or prose that CARRIES something executable.
+# Two goldens in our own Martian corpus live exactly there — shell under `set -u` inside a markdown
+# runbook, and a macOS-only `sed -i ''` in a shell script (docs/research/local-logic-misses.md).
+# A blanket `docs/**` or `*.md` rule would make this reviewer blind to that class.
+
+docs/research/**
+docs/benchmarks/**
+ROADMAP.md
+
+# Re-include the machine-readable case lists that live under the excluded dirs: they are data the
+# engine and its tests read, not prose, and a wrong line number there silently mis-scores a benchmark.
+!docs/benchmarks/*.json
