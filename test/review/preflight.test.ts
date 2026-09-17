@@ -879,6 +879,136 @@ describe("localReviewSpec", () => {
       expect(() => assertBasenameOnly(agent.file, i)).not.toThrow();
     }
   });
+
+  // T3 (odd/tasks/logic-hunter.md): PRHERO_EXTRA_HUNTERS is a benchmark-only
+  // experiment modifier, inert when unset. Byte-identical to the literal
+  // production wiring above is the invariant that keeps every other caller
+  // (run.ts, doctor.ts, the scripts) unaffected by this task.
+  test("is byte-identical to today's wiring when PRHERO_EXTRA_HUNTERS is unset", () => {
+    expect(localReviewSpec({})).toEqual({
+      agents: [
+        {
+          key: "reliability",
+          file: "deep-review-reliability.md",
+          role: "hunter",
+        },
+        {
+          key: "resilience",
+          file: "deep-review-resilience.md",
+          role: "hunter",
+        },
+        { key: "lifecycle", file: "deep-review-lifecycle.md", role: "hunter" },
+        {
+          key: "parity",
+          file: "deep-review-parity.md",
+          role: "hunter",
+          trigger: "input",
+        },
+        { key: "refuter", file: "review-refuter.md", role: "refuter" },
+      ],
+    });
+  });
+
+  test("is byte-identical to today's wiring when PRHERO_EXTRA_HUNTERS is empty", () => {
+    expect(localReviewSpec({ PRHERO_EXTRA_HUNTERS: "" })).toEqual(
+      localReviewSpec({}),
+    );
+  });
+
+  test("appends one extra hunter before the refuter when PRHERO_EXTRA_HUNTERS names one", () => {
+    const spec = localReviewSpec({
+      PRHERO_EXTRA_HUNTERS: "logic:deep-review-logic.md",
+    });
+    const keys = spec.agents.map((a) => a.key);
+    expect(keys).toEqual([
+      "reliability",
+      "resilience",
+      "lifecycle",
+      "parity",
+      "logic",
+      "refuter",
+    ]);
+    expect(spec.agents.find((a) => a.key === "logic")).toEqual({
+      key: "logic",
+      file: "deep-review-logic.md",
+      role: "hunter",
+    });
+    expect(() => validateReviewSpec(spec)).not.toThrow();
+  });
+
+  test("appends every extra hunter in order for a comma-separated list", () => {
+    const spec = localReviewSpec({
+      PRHERO_EXTRA_HUNTERS:
+        "logic:deep-review-logic.md,reliability-b:deep-review-reliability.md",
+    });
+    const keys = spec.agents.map((a) => a.key);
+    expect(keys).toEqual([
+      "reliability",
+      "resilience",
+      "lifecycle",
+      "parity",
+      "logic",
+      "reliability-b",
+      "refuter",
+    ]);
+    expect(spec.agents.find((a) => a.key === "reliability-b")).toEqual({
+      key: "reliability-b",
+      file: "deep-review-reliability.md",
+      role: "hunter",
+    });
+    expect(() => validateReviewSpec(spec)).not.toThrow();
+  });
+
+  test("tolerates surrounding whitespace in the env value", () => {
+    const spec = localReviewSpec({
+      PRHERO_EXTRA_HUNTERS: " logic : deep-review-logic.md ",
+    });
+    expect(spec.agents.find((a) => a.key === "logic")).toEqual({
+      key: "logic",
+      file: "deep-review-logic.md",
+      role: "hunter",
+    });
+  });
+
+  test("rejects a trailing comma (fail loud, never silently ignore)", () => {
+    expect(() =>
+      localReviewSpec({
+        PRHERO_EXTRA_HUNTERS: "logic:deep-review-logic.md,",
+      }),
+    ).toThrow(CliUsageError);
+  });
+
+  test("rejects a malformed entry with no colon", () => {
+    expect(() => localReviewSpec({ PRHERO_EXTRA_HUNTERS: "logic" })).toThrow(
+      CliUsageError,
+    );
+  });
+
+  test("rejects an entry with an unsafe key", () => {
+    expect(() =>
+      localReviewSpec({ PRHERO_EXTRA_HUNTERS: "Logic:deep-review-logic.md" }),
+    ).toThrow(CliUsageError);
+  });
+
+  test("rejects an entry whose file is not a .md basename", () => {
+    expect(() =>
+      localReviewSpec({ PRHERO_EXTRA_HUNTERS: "logic:deep-review-logic.txt" }),
+    ).toThrow(CliUsageError);
+  });
+
+  test("rejects an entry whose file escapes the agents dir", () => {
+    expect(() =>
+      localReviewSpec({
+        PRHERO_EXTRA_HUNTERS: "logic:../deep-review-logic.md",
+      }),
+    ).toThrow(CliUsageError);
+  });
+
+  test("rejects an entry with an empty key", () => {
+    expect(() =>
+      localReviewSpec({ PRHERO_EXTRA_HUNTERS: ":deep-review-logic.md" }),
+    ).toThrow(CliUsageError);
+  });
 });
 
 describe("parseLocalConfig", () => {
