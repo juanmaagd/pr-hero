@@ -19,7 +19,7 @@
 //     stay outside of.
 
 import path from "node:path";
-import { ciExitCode, planCiBudgetSkip, planCiSizeSkip } from "#ci/gates";
+import { ciExitCode, planCiSizeSkip } from "#ci/gates";
 import { formatWorkflowCommand, withCiWorkflowGroup } from "#ci/reporter";
 import {
   ingestReviewMetrics,
@@ -50,6 +50,7 @@ import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
 import { publishCiReviewIfEligible } from "#pr/ci-publish";
 import { computeGreptileComparison } from "#pr/comparison";
 import { type InlinePostOutcome, postingExitCode } from "#pr/inline";
+import { resolvePrPlanAndConfirm } from "#pr/plan";
 import { postFindingsIfEnabled } from "#pr/posting";
 import {
   fetchCommitStatuses,
@@ -58,16 +59,12 @@ import {
   fetchPrRefs,
   fetchPrReviewComments,
   ghPrFiles,
-  ghRepoWebUrl,
 } from "#pr/pr";
 import {
-  commitStatusRequest,
   createPrRunDir,
   findMarkedCommentId,
   isInFlightCommitStatus,
-  prHtmlUrl,
 } from "#pr/preflight";
-import { holdCommitStatusLock, tryPublishCommitStatus } from "#pr/status";
 import {
   renderPrDryRunPlan,
   resolvePrPromptSetAndBudget,
@@ -97,7 +94,6 @@ import {
   type CliOptions,
   emptyDiffMessage,
   type NumstatFile,
-  resolveMaxVerificationSteps,
 } from "#review/preflight";
 import { type DiffStat, envelopeModel, estimateCost } from "#review/report";
 import {
@@ -108,10 +104,8 @@ import {
   assertDistinctRange,
   buildTelemetry,
   computeDiffStatAndSizeGate,
-  enforceCapabilityGate,
   prepareRunnerForRoute,
   resolveParityFires,
-  resolvePipelineRoute,
   selectActiveHunters,
   validateGotchas,
   writeRunFindings,
@@ -126,16 +120,9 @@ import {
   sizeGateLine,
 } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
-import {
-  configProvenanceOf,
-  dryRunHunterCount,
-  type PrPlanContext,
-  prPlanDetails,
-  renderPrPlan,
-  reviewingLine,
-} from "#ui/plan";
+import { dryRunHunterCount, reviewingLine } from "#ui/plan";
 import { log, styleEnabled, terminalWidth } from "#ui/primitives";
-import { applySizeGate, confirm, startProgressRenderer } from "#ui/progress";
+import { applySizeGate, startProgressRenderer } from "#ui/progress";
 import { type ResultLinks, renderResult } from "#ui/result";
 import { parsePrCommentMarker, parsePrFiles } from "#watch/preflight";
 import { CliError } from "../errors";
@@ -146,7 +133,6 @@ import {
   readLocalIgnoreRules,
 } from "../ignore-read";
 import type { ProductionRuntime } from "../production-runtime";
-import { resolveRunnerAuthority } from "../runner-authority";
 
 export async function reviewPr(
   options: CliOptions,
@@ -656,175 +642,52 @@ export async function reviewPr(
       ? []
       : selectActiveHunters(spec.agents, parityFires);
     const hunterCount = activeHunters.length;
-    const maxVerificationSteps = resolveMaxVerificationSteps(config);
-    const queuedVerification = Math.min(
-      verifyQueue.length,
-      maxVerificationSteps,
-    );
-    const estimate = estimateCost(
-      diffStat,
-      hunterCount,
-      summary.enabled && !skipDiscovery,
-      options.scout && !skipDiscovery,
-      queuedVerification,
-    );
-    // 7b(CI) — the budget gate, immediately after the estimate it reads and
-    // BEFORE the plan card/confirm/"committed to spending" commit-status
-    // block below: spec 3.1 ("Review MUST halt before agent spawning") is
-    // satisfied at any point before runPipeline, and this is the earliest
-    // point the REAL (parity-narrowed) estimate exists — the same one the
-    // plan card is about to show, so the skip comment's number and the
-    // (unrendered) plan's number can never have disagreed. `estimate.high`,
-    // not `.low`: report.ts's own doctrine (~97-98) is that every recorded
-    // overrun was an UNDER-estimate, so the generous side is the cheap one
-    // to be wrong on. Unlike the size gate above, this is NOT gated on
-    // `--force` — `--force`'s own doc comment (preflight.ts CliOptions)
-    // scopes it to the size gate's "is this diff too big" question, not
-    // spend. Tradeoff accepted: unlike the size gate, this runs AFTER
-    // createPrRunDir (step 6), so a budget skip can leave a near-empty run
-    // dir behind — the tidiness rationale that placement protects against
-    // (the watcher's attempt counter) does not apply to an ephemeral CI
-    // runner, and restructuring the cost estimate earlier is out of Phase
-    // 3's scope.
-    // `ciBudgetCeiling.budgetUsd`, not `options.budgetUsd`: since issue #156
-    // an unset `--budget-usd` is a POLICY, not an absent number. It resolves
-    // to no ceiling on a subscription route (where `estimate.high` is a token
-    // figure and the cash cost is $0.00, so gating on it refused work over an
-    // overrun that cannot happen) and to the default ceiling on a metered one.
-    // `undefined` here still means the gate does not run — the announcement
-    // for that already fired at the resolution site above.
-    if (isCi && ciBudgetCeiling.budgetUsd !== undefined) {
-      const budgetPlan = planCiBudgetSkip({
-        isCi,
-        estimatedCostUsd: estimate.high,
-        budgetUsd: ciBudgetCeiling.budgetUsd,
-        prNumber,
-      });
-      if (budgetPlan !== null) {
-        await settleCiAdmissionLedger(
-          ciAdmissionLedger,
-          "skipped",
-          "estimated cost exceeds the configured CI budget ceiling",
-        );
-        return await publishCiSkip({
-          operatorRoot,
-          prNumber,
-          post: options.post === true,
-          isCi,
-          stepSummaryFlag: options.stepSummary,
-          plan: budgetPlan,
-          noticeMessage:
-            "pr-hero review skipped — estimated cost exceeds the configured CI budget ceiling",
-        });
-      }
-    }
-    const productionRoute = await resolvePipelineRoute({
-      routingConfigured: config.routing !== undefined,
-      workspaceRoot: worktreePath,
-      spec,
-      options,
-      agentFiles,
-      routingConfig: config.routing,
-      summary,
-      summarizerEnabled: summary.enabled && !skipDiscovery,
-      scoutEnabled: options.scout && !skipDiscovery,
-    });
-    const routePlan = productionRoute?.routePlan;
-    const productionAdmission = productionRoute?.productionAdmission;
-    const runnerAuthority = await resolveRunnerAuthority({
-      workspaceRoot: worktreePath,
-    });
-    await enforceCapabilityGate({
-      routePlan,
-      workspaceRoot: worktreePath,
-      runnerAuthority,
-      productionAdmission,
-    });
-    // Same reason as local mode's planContext: the card and the confirm menu's
-    // details view must describe one and the same planned run.
-    const planContext: PrPlanContext = {
+    // See resolvePrPlanAndConfirm (src/pr/plan.ts) for the full rationale —
+    // the CI budget gate, route/capability resolution, the plan card, the
+    // interactive confirm, and the "committed to spending" commit-status
+    // hold that follows a successful one.
+    const planResult = await resolvePrPlanAndConfirm({
       options,
       operatorRoot,
+      prNumber,
       target,
       worktreePath,
       runDir,
+      headSha,
+      baseSha,
+      diffFromSha,
+      diffPath,
       diffStat,
+      droppedPaths: effectiveDiff.droppedPaths,
+      sizeGate,
+      sizeGateConfirmed,
       agentsDir,
+      agentsDirSource,
       agentFiles,
       spec,
       config,
       summary,
-      estimate,
+      loaded,
+      isCi,
+      ciBudgetCeiling,
+      ciAdmissionLedger,
+      skipDiscovery,
+      activeHunters,
       hunterCount,
-      sizeGate,
-      droppedPaths: effectiveDiff.droppedPaths,
-      configProvenance: configProvenanceOf(loaded, agentsDirSource),
-      resolved: { baseSha, diffFromSha, diffPath, parityFires },
-      ...(sizeGateConfirmed ? { sizeGateConfirmed: true } : {}),
-      ...(queuedVerification > 0
-        ? { verificationSteps: queuedVerification }
-        : {}),
-      ...(prepared.case === "A"
-        ? {}
-        : {
-            rereview: {
-              case: prepared.case,
-              lastHead: prepared.last.L,
-              discoveryRestricted: prepared.plan.discoveryRestricted,
-              skipDiscovery,
-            },
-          }),
-      ...(routePlan === undefined ? {} : { routePlan }),
-    };
-    for (const line of renderPrPlan(planContext, styleEnabled())) log(line);
-    // What this run will actually publish. `options` is never mutated: the plan
-    // card and the details view print what was ASKED FOR, and only the run
-    // itself follows the answer given here.
-    let postEnabled = options.post ?? false;
-    if (!options.yes) {
-      const choice = await confirm(
-        estimate.low,
-        estimate.high,
-        options.post ?? false,
-        () => prPlanDetails(planContext, styleEnabled()),
-      );
-      if (choice.kind === "cancel") {
-        log("aborted; nothing was spent.");
-        return 1;
-      }
-      postEnabled = choice.post;
-      if (options.post && !postEnabled) {
-        log("posting disabled for this run; the review still runs.");
-      }
-    }
-
-    // Committed to spending: a pending commit status is the GitHub-visible
-    // in-flight signal. Check Runs need a GitHub App; this CLI posts as the
-    // operator via `gh`, so the write path is the Statuses API. Size-gate
-    // abort and a declined confirm never reach here.
-    const statusTargetUrl = prHtmlUrl(
-      await ghRepoWebUrl(operatorRoot),
-      prNumber,
-    );
-    await tryPublishCommitStatus(
-      operatorRoot,
-      headSha,
-      commitStatusRequest({
-        phase: "pending",
-        posted: false,
-        targetUrl: statusTargetUrl,
-      }),
-    );
-    // From here the lock is HELD, and the only two ways out both clear it:
-    // the finally below on the normal path, and the signal handlers in runCli
-    // on the cancelled one. Held even if the publish above failed — a settle
-    // for a status that was never posted is a harmless no-op write, whereas
-    // skipping the hold on a publish that actually landed is the #162 bug.
-    holdCommitStatusLock({
-      operatorRoot,
-      sha: headSha,
-      targetUrl: statusTargetUrl,
+      parityFires,
+      verifyQueue,
+      prepared,
     });
+    if (planResult.exitCode !== undefined) return planResult.exitCode;
+    const {
+      postEnabled,
+      routePlan,
+      productionAdmission,
+      runnerAuthority,
+      maxVerificationSteps,
+      estimate,
+      statusTargetUrl,
+    } = planResult;
 
     let result: PipelineResult | undefined;
     let posted: InlinePostOutcome | null = null;

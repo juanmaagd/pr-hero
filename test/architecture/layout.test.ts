@@ -137,6 +137,7 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
       "ci-publish",
       "comparison",
       "inline",
+      "plan",
       "pr",
       "posting",
       "preflight",
