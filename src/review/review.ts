@@ -10,7 +10,6 @@ import os from "node:os";
 import path from "node:path";
 import {
   ingestReviewMetrics,
-  loadEffectiveConfig,
   notionalCostInput,
   persistCanonicalReview,
   pipelineConfigInput,
@@ -25,56 +24,37 @@ import {
 } from "#git/git";
 import { engineIdentity } from "#git/identity";
 import { reviewPr } from "#pr/review-pr";
-import {
-  mergeRunEnvelope,
-  type Telemetry,
-  writeFindings,
-} from "#review/findings";
-import {
-  changedPathsFromDiff,
-  type PipelineResult,
-  parityTriggered,
-  runPipeline,
-} from "#review/pipeline";
+import type { Telemetry } from "#review/findings";
+import { type PipelineResult, runPipeline } from "#review/pipeline";
 import {
   allExcludedMessage,
   type CliOptions,
   createRunDir,
   emptyDiffMessage,
-  parseNumstatFiles,
-  resolvePost,
-  resolveScout,
-  resolveSummary,
 } from "#review/preflight";
+import { estimateCost } from "#review/report";
 import {
-  type DiffStat,
-  envelopeModel,
-  estimateCost,
-  renderReport,
-} from "#review/report";
-import {
-  buildCliRoutePlan,
-  enforceProviderCapabilityGate,
   pipelineScoutInput,
   pipelineSummarizerInput,
-  resolveProductionRoutePlanAtConfirm,
 } from "#review/route-preflight";
 import {
   assertDistinctRange,
   buildTelemetry,
+  computeDiffStatAndSizeGate,
+  enforceCapabilityGate,
+  loadRunConfig,
   prepareRunnerForRoute,
   resolveGotchasPath,
+  resolveParityFires,
+  resolvePipelineRoute,
   resolvePromptSet,
   selectActiveHunters,
   validateGotchas,
   writeMcpConfig,
+  writeRunFindings,
+  writeRunReport,
 } from "#review/run";
-import {
-  effectiveDiffStat,
-  evaluateSizeGate,
-  filterDiffByIgnoreRules,
-  sizeGateConfig,
-} from "#review/size-gate";
+import { filterDiffByIgnoreRules, sizeGateConfig } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import {
   configProvenanceOf,
@@ -109,15 +89,12 @@ export async function review(options: CliOptions): Promise<number> {
   // Two layers since C5, folded by loadEffectiveConfig into the one
   // LocalConfig everything below already expected. The --config missing-file
   // error and the boundary rules live there.
-  const loaded = await loadEffectiveConfig({
+  const { loaded, config, summary, scout, post } = await loadRunConfig({
     root: repoRoot,
     home: os.homedir(),
     configFlag: options.config,
+    options,
   });
-  const config = loaded.effective;
-  const summary = resolveSummary(options, config);
-  const scout = resolveScout(options, config);
-  const post = resolvePost(options, config);
   options = { ...options, scout, post };
 
   // 3 — the base ref, then the canonical refs and the range.
@@ -221,42 +198,14 @@ export async function review(options: CliOptions): Promise<number> {
     await Bun.write(path.join(runDir, "diff.raw.patch"), diff.stdout);
   }
 
-  // 9 — diff stat, TWICE and on purpose.
-  //
-  // The GATE counts from `-w --ignore-blank-lines`: a pure formatter sweep
-  // must not consume the budget, and a file whose every change is whitespace
-  // drops out of that numstat entirely (verified: git emits no row for it).
-  //
-  // The COST BAND counts from the plain numstat, exclusions applied. The
-  // hunters are handed diff.patch verbatim, whitespace hunks included, so
-  // those bytes are genuinely billed — pricing them at zero would be the same
-  // class of lie the exclusion bug was.
-  const numstat = await git(repoRoot, [
-    "diff",
-    "--numstat",
-    `${diffFromSha}..${headSha}`,
-  ]);
-  if (!numstat.ok) {
-    throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
-  }
-  const gateNumstat = await git(repoRoot, [
-    "diff",
-    "-w",
-    "--ignore-blank-lines",
-    "--numstat",
-    `${diffFromSha}..${headSha}`,
-  ]);
-  if (!gateNumstat.ok) {
-    throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
-  }
-  const diffStat: DiffStat = effectiveDiffStat(
-    parseNumstatFiles(numstat.stdout),
-    gateConfig.excludeRules,
-  );
-  const sizeGate = evaluateSizeGate(
-    parseNumstatFiles(gateNumstat.stdout),
+  // 9 — diff stat, TWICE and on purpose. See computeDiffStatAndSizeGate
+  // (src/review/run.ts) for the full rationale.
+  const { diffStat, sizeGate } = await computeDiffStatAndSizeGate({
+    runGit: (args) => git(repoRoot, args),
+    range: `${diffFromSha}..${headSha}`,
+    pathArgs: [],
     gateConfig,
-  );
+  });
 
   // 10 — MCP registry.
   const mcpConfigPath = path.join(runDir, "mcp.json");
@@ -266,9 +215,8 @@ export async function review(options: CliOptions): Promise<number> {
   // 11 — the plan. Triggers read the EFFECTIVE diff, the same bytes the
   // pipeline will read back from diff.patch: a conditional hunter must never
   // fire on a path no hunter was given.
-  const changedPaths = changedPathsFromDiff(effectiveDiff.patch);
-  const parityFires = parityTriggered(
-    changedPaths,
+  const parityFires = resolveParityFires(
+    effectiveDiff.patch,
     config.parity_trigger_paths,
   );
   const activeHunters = selectActiveHunters(spec.agents, parityFires);
@@ -279,17 +227,14 @@ export async function review(options: CliOptions): Promise<number> {
     summary.enabled,
     options.scout,
   );
-  const productionRoute = await resolveProductionRoutePlanAtConfirm({
+  const productionRoute = await resolvePipelineRoute({
     routingConfigured: config.routing !== undefined,
     workspaceRoot: repoRoot,
-    buildRoutePlan: () =>
-      buildCliRoutePlan({
-        spec,
-        options,
-        agentFiles,
-        routingConfig: config.routing,
-        summary,
-      }),
+    spec,
+    options,
+    agentFiles,
+    routingConfig: config.routing,
+    summary,
   });
   const routePlan = productionRoute?.routePlan;
   const productionAdmission = productionRoute?.productionAdmission;
@@ -342,13 +287,11 @@ export async function review(options: CliOptions): Promise<number> {
   const runnerAuthority = await resolveRunnerAuthority({
     workspaceRoot: repoRoot,
   });
-  await enforceProviderCapabilityGate({
+  await enforceCapabilityGate({
     routePlan,
     workspaceRoot: repoRoot,
     runnerAuthority,
-    authorityOptions: productionAdmission?.authorityOptions,
-    admissionRegistry: productionAdmission?.registry,
-    productionEvidence: productionAdmission?.evidence,
+    productionAdmission,
   });
 
   // 13 — the size gate, BEFORE the cost band's confirm() for the unattended
@@ -455,20 +398,18 @@ export async function review(options: CliOptions): Promise<number> {
   // 16 — the artifact. Local mode neither builds nor syncs a codegraph
   // index (it consumes whatever the repo already has), so indexMs is 0.
   const telemetry: Telemetry = buildTelemetry(result, wallMs, 0);
-  const doc = mergeRunEnvelope({
-    skillOutput: result.skillOutput,
+  const { doc, findingsPath } = await writeRunFindings({
+    runDir,
+    result,
     pr: 0,
-    base_sha: diffFromSha,
-    head_sha: headSha,
-    model: envelopeModel(options, agentFiles),
-    iteration: 0,
-    prompt_set: promptSet,
+    baseSha: diffFromSha,
+    headSha,
+    options,
+    agentFiles,
+    promptSet,
     engine: await engineIdentity(),
-    sessionFailed: result.sessionFailed,
     telemetry,
   });
-  const findingsPath = path.join(runDir, "findings.json");
-  await writeFindings(findingsPath, doc);
 
   // 16b — canonical product store & observability metrics.
   persistCanonicalReview({
@@ -492,20 +433,17 @@ export async function review(options: CliOptions): Promise<number> {
   });
 
   // 17 — the report.
-  const reportPath = path.join(runDir, "report.md");
-  await Bun.write(
-    reportPath,
-    renderReport(doc, {
-      repo: path.basename(repoRoot),
-      base: baseRef.ref,
-      head: options.head,
-      diffStat,
-      excludedPaths: effectiveDiff.droppedPaths,
-      costUsd: result.usage.cost_usd_est,
-      ...notionalCostInput(result),
-      wallMs,
-    }),
-  );
+  const reportPath = await writeRunReport({
+    runDir,
+    doc,
+    repo: path.basename(repoRoot),
+    base: baseRef.ref,
+    head: options.head,
+    diffStat,
+    droppedPaths: effectiveDiff.droppedPaths,
+    result,
+    wallMs,
+  });
 
   // 18 — the summary. Counts, the FINDINGS THEMSELVES, where the artifacts
   // landed, and a clickable url per finding: the renderer derives every number

@@ -15,10 +15,24 @@
 // owned: their POSITION differs between the orchestrators, not their data.
 
 import path from "node:path";
-import type { EffectiveConfig } from "#config/config";
-import type { ResolvedRoutePlan } from "#model/routing";
-import type { Telemetry } from "#review/findings";
-import type { PipelineDeps, PipelineResult } from "#review/pipeline";
+import {
+  type EffectiveConfig,
+  loadEffectiveConfig,
+  notionalCostInput,
+} from "#config/config";
+import type { ResolvedRoutePlan, RoutingConfig } from "#model/routing";
+import {
+  type FindingsDocument,
+  mergeRunEnvelope,
+  type Telemetry,
+  writeFindings,
+} from "#review/findings";
+import {
+  changedPathsFromDiff,
+  type PipelineDeps,
+  type PipelineResult,
+  parityTriggered,
+} from "#review/pipeline";
 import {
   type AgentsDirResolution,
   agentFilePath,
@@ -26,9 +40,15 @@ import {
   type CliOptions,
   gotchasErrorMessage,
   gotchasUnusableReason,
+  type LocalConfig,
   localReviewSpec,
+  parseNumstatFiles,
   preflightAgentsDir,
   resolveAgentsDir,
+  resolvePost,
+  resolveScout,
+  resolveSummary,
+  type SummarySettings,
 } from "#review/preflight";
 import {
   type ParsedAgent,
@@ -36,6 +56,19 @@ import {
   parseAgentFile,
   promptSetIdentity,
 } from "#review/prompt-set";
+import { type DiffStat, envelopeModel, renderReport } from "#review/report";
+import {
+  buildCliRoutePlan,
+  enforceProviderCapabilityGate,
+  type ProductionRoutePlanResult,
+  resolveProductionRoutePlanAtConfirm,
+} from "#review/route-preflight";
+import {
+  effectiveDiffStat,
+  evaluateSizeGate,
+  type SizeGateConfig,
+  type SizeGateVerdict,
+} from "#review/size-gate";
 import {
   type AgentSpec,
   type ReviewSpec,
@@ -67,6 +100,39 @@ export const CODEGRAPH_ONLY_MCP_CONFIG = {
 };
 
 export const EMPTY_MCP_CONFIG = { mcpServers: {} };
+
+export interface LoadedRunConfig {
+  loaded: EffectiveConfig;
+  config: LocalConfig;
+  summary: SummarySettings;
+  scout: boolean;
+  post: boolean;
+}
+
+// Config load + the three per-run resolvers read right after it: identical
+// in both orchestrators except the root/home they read from (repoRoot +
+// os.homedir() in review(), operatorRoot + the hoisted `home` in reviewPr()).
+// Callers still own their own `options = { ...options, scout, post, ... }`
+// reassignment — reviewPr() folds an extra `yes` field into the same spread,
+// and forcing that in here would make this a mode flag instead of an
+// explicit parameter.
+export async function loadRunConfig(params: {
+  root: string;
+  home: string;
+  configFlag: string | undefined;
+  options: Pick<CliOptions, "summary" | "model" | "scout" | "post">;
+}): Promise<LoadedRunConfig> {
+  const loaded = await loadEffectiveConfig({
+    root: params.root,
+    home: params.home,
+    configFlag: params.configFlag,
+  });
+  const config = loaded.effective;
+  const summary = resolveSummary(params.options, config);
+  const scout = resolveScout(params.options, config);
+  const post = resolvePost(params.options, config);
+  return { loaded, config, summary, scout, post };
+}
 
 // Shared range guard. Both orchestrators check the same thing right after
 // resolving base/head — the copies are byte-identical apart from
@@ -123,6 +189,74 @@ export function selectActiveHunters(
   );
 }
 
+// Whether the parity hunter fires for this diff: identical in both
+// orchestrators. `changedPathsFromDiff`'s own list is never read afterward
+// by either caller, only this boolean.
+export function resolveParityFires(
+  patch: string,
+  parityTriggerPaths: string[],
+): boolean {
+  return parityTriggered(changedPathsFromDiff(patch), parityTriggerPaths);
+}
+
+// The diff stat, TWICE and on purpose (moved here from review()'s own WHY
+// comment when reviewPr()'s copy — which never carried it — started sharing
+// this stage):
+//
+// The GATE counts from `-w --ignore-blank-lines`: a pure formatter sweep
+// must not consume the budget, and a file whose every change is whitespace
+// drops out of that numstat entirely (verified: git emits no row for it).
+//
+// The COST BAND counts from the plain numstat, exclusions applied. The
+// hunters are handed diff.patch verbatim, whitespace hunks included, so
+// those bytes are genuinely billed — pricing them at zero would be the same
+// class of lie the exclusion bug was.
+//
+// `runGit` arrives as a callback, not an import of `git()` from `#git/git`:
+// this module's import surface is deliberately narrowed to review-domain
+// modules (see header), and the two orchestrators already run it against
+// different roots (repoRoot vs gitDirOwner) — an explicit parameter here,
+// never a branch on which mode called it.
+export async function computeDiffStatAndSizeGate(params: {
+  runGit: (
+    args: string[],
+  ) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+  range: string;
+  pathArgs: string[];
+  gateConfig: SizeGateConfig;
+}): Promise<{ diffStat: DiffStat; sizeGate: SizeGateVerdict }> {
+  const numstat = await params.runGit([
+    "diff",
+    "--numstat",
+    params.range,
+    ...params.pathArgs,
+  ]);
+  if (!numstat.ok) {
+    throw new CliError(`git diff --numstat failed: ${numstat.stderr}`);
+  }
+  const gateNumstat = await params.runGit([
+    "diff",
+    "-w",
+    "--ignore-blank-lines",
+    "--numstat",
+    params.range,
+    ...params.pathArgs,
+  ]);
+  if (!gateNumstat.ok) {
+    throw new CliError(`git diff -w --numstat failed: ${gateNumstat.stderr}`);
+  }
+  return {
+    diffStat: effectiveDiffStat(
+      parseNumstatFiles(numstat.stdout),
+      params.gateConfig.excludeRules,
+    ),
+    sizeGate: evaluateSizeGate(
+      parseNumstatFiles(gateNumstat.stdout),
+      params.gateConfig,
+    ),
+  };
+}
+
 // The Telemetry artifact built right after runPipeline returns. Identical in
 // both orchestrators except `index_ms`: local mode hardcodes 0 (it neither
 // builds nor syncs a codegraph index), PR mode passes the measured build
@@ -147,6 +281,78 @@ export function buildTelemetry(
     ...(result.unresolved.length > 0 ? { cost_usd_est_is_floor: true } : {}),
     per_agent: result.perAgent,
   };
+}
+
+export interface RunFindingsResult {
+  doc: FindingsDocument;
+  findingsPath: string;
+}
+
+// The findings artifact: merge the run envelope, then write it. Identical in
+// both orchestrators except `pr` (the schema-legal 0 for "not a PR" in
+// review(), the real PR number in reviewPr()). `engine`'s type is read off
+// `mergeRunEnvelope`'s own parameter rather than imported from
+// `#git/identity` — this module's import surface stays review-domain-only
+// (see header); the caller already has an `EngineIdentity` from calling
+// `engineIdentity()` itself.
+export async function writeRunFindings(params: {
+  runDir: string;
+  result: PipelineResult;
+  pr: number;
+  baseSha: string;
+  headSha: string;
+  options: Pick<CliOptions, "model">;
+  agentFiles: Map<string, ParsedAgent>;
+  promptSet: PromptSetIdentity;
+  engine: Parameters<typeof mergeRunEnvelope>[0]["engine"];
+  telemetry: Telemetry;
+}): Promise<RunFindingsResult> {
+  const doc = mergeRunEnvelope({
+    skillOutput: params.result.skillOutput,
+    pr: params.pr,
+    base_sha: params.baseSha,
+    head_sha: params.headSha,
+    model: envelopeModel(params.options, params.agentFiles),
+    iteration: 0,
+    prompt_set: params.promptSet,
+    engine: params.engine,
+    sessionFailed: params.result.sessionFailed,
+    telemetry: params.telemetry,
+  });
+  const findingsPath = path.join(params.runDir, "findings.json");
+  await writeFindings(findingsPath, doc);
+  return { doc, findingsPath };
+}
+
+// The report artifact: renderReport + write. Identical in both orchestrators
+// except the repo/base/head labels (operator-root basename + `PR #<n>` in
+// reviewPr(), repo-root basename + `--head` in review()).
+export async function writeRunReport(params: {
+  runDir: string;
+  doc: FindingsDocument;
+  repo: string;
+  base: string;
+  head: string;
+  diffStat: DiffStat;
+  droppedPaths: string[];
+  result: PipelineResult;
+  wallMs: number;
+}): Promise<string> {
+  const reportPath = path.join(params.runDir, "report.md");
+  await Bun.write(
+    reportPath,
+    renderReport(params.doc, {
+      repo: params.repo,
+      base: params.base,
+      head: params.head,
+      diffStat: params.diffStat,
+      excludedPaths: params.droppedPaths,
+      costUsd: params.result.usage.cost_usd_est,
+      ...notionalCostInput(params.result),
+      wallMs: params.wallMs,
+    }),
+  );
+  return reportPath;
 }
 
 export interface ResolvedPromptSet {
@@ -212,6 +418,59 @@ export async function writeMcpConfig(
       2,
     )}\n`,
   );
+}
+
+// Production route resolution: identical in both orchestrators except the
+// workspace root and (reviewPr()'s skipped-discovery re-review only) the
+// summarizer/scout enable overrides. Named distinctly from
+// resolveProductionRoutePlanAtConfirm (#review/route-preflight), which this
+// wraps — `resolveProductionRoute` reads as a near-duplicate of that name at
+// a glance, which is exactly the confusion a shared wrapper should not add.
+export async function resolvePipelineRoute(params: {
+  routingConfigured: boolean;
+  workspaceRoot: string;
+  spec: ReviewSpec;
+  options: CliOptions;
+  agentFiles: Map<string, ParsedAgent>;
+  routingConfig: RoutingConfig | undefined;
+  summary: SummarySettings;
+  summarizerEnabled?: boolean;
+  scoutEnabled?: boolean;
+}): Promise<ProductionRoutePlanResult | undefined> {
+  return resolveProductionRoutePlanAtConfirm({
+    routingConfigured: params.routingConfigured,
+    workspaceRoot: params.workspaceRoot,
+    buildRoutePlan: () =>
+      buildCliRoutePlan({
+        spec: params.spec,
+        options: params.options,
+        agentFiles: params.agentFiles,
+        routingConfig: params.routingConfig,
+        summary: params.summary,
+        summarizerEnabled: params.summarizerEnabled,
+        scoutEnabled: params.scoutEnabled,
+      }),
+  });
+}
+
+// The capability gate: identical in both orchestrators except the workspace
+// root. Wraps enforceProviderCapabilityGate (#review/route-preflight),
+// unpacking the same three productionAdmission-derived fields both callers
+// pass it.
+export async function enforceCapabilityGate(params: {
+  routePlan: ResolvedRoutePlan | undefined;
+  workspaceRoot: string;
+  runnerAuthority: RunnerAuthorityResolution;
+  productionAdmission: ProductionAdmissionContext | undefined;
+}): Promise<void> {
+  await enforceProviderCapabilityGate({
+    routePlan: params.routePlan,
+    workspaceRoot: params.workspaceRoot,
+    runnerAuthority: params.runnerAuthority,
+    authorityOptions: params.productionAdmission?.authorityOptions,
+    admissionRegistry: params.productionAdmission?.registry,
+    productionEvidence: params.productionAdmission?.evidence,
+  });
 }
 
 export interface PreparedPipelineRunner {
