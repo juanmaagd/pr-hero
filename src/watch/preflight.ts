@@ -572,6 +572,29 @@ export function parsePrCommentMarker(
   return { head, complete: match[2] === undefined };
 }
 
+// The two fields every production consumer of a parsed marker actually
+// wants, with the "nothing posted yet" default folded in ONE place: a null
+// marker (no comment, or one that failed to parse) declares no head — there
+// is nothing to distrust, so it reads as complete. Both reviewPr()'s
+// discovery seam (src/pr/review-pr.ts) and the CI admission gate
+// (src/pr/ci-admission-gate.ts) independently needed `summaryHead`/
+// `summaryComplete` derived from a parsed marker; before this helper existed
+// each site re-wrote the same `marker?.head ?? null` / `marker?.complete ??
+// true` pair inline, which is exactly the shape that can drift — one call
+// site could gain a real default (a stray `true` literal, say) while the
+// other kept threading the marker's own value, silently reopening the
+// rereview-coverage fix's failure mode (a forced-full re-review from a
+// partial marker that only ONE of the two consumers still notices).
+export function summaryMarkerFields(marker: PrCommentMarkerFields | null): {
+  summaryHead: string | null;
+  summaryComplete: boolean;
+} {
+  return {
+    summaryHead: marker?.head ?? null,
+    summaryComplete: marker?.complete ?? true,
+  };
+}
+
 // Every head any pr-hero-marked comment on the PR declares. Duplicates are
 // harmless (the guard only asks "is this head among them").
 //

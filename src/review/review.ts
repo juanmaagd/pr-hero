@@ -54,7 +54,7 @@ import {
   writeRunFindings,
   writeRunReport,
 } from "#review/run";
-import { filterDiffByIgnoreRules, sizeGateConfig } from "#review/size-gate";
+import { filterDiffByIgnoreRules, sizeGateConfigFor } from "#review/size-gate";
 import { registerActiveRun, unregisterActiveRun } from "#store/activity";
 import {
   configProvenanceOf,
@@ -181,11 +181,7 @@ export async function review(options: CliOptions): Promise<number> {
   // the reviewed diff itself, or the gate discounts a lockfile the bill still
   // pays for in full (see filterDiffByIgnoreRules). diff.raw.patch keeps the
   // unfiltered bytes for audit, and only when there is a difference to audit.
-  const gateConfig = sizeGateConfig(
-    options,
-    loaded.effective,
-    userIgnore.rules,
-  );
+  const gateConfig = sizeGateConfigFor(options, loaded.effective, userIgnore);
   const effectiveDiff = filterDiffByIgnoreRules(
     diff.stdout,
     gateConfig.excludeRules,

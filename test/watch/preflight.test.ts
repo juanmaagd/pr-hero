@@ -42,6 +42,7 @@ import {
   renderWatchPlist,
   renderWatchStatus,
   skipLine,
+  summaryMarkerFields,
   type TickInput,
   type TickRepoFacts,
   tickGate,
@@ -573,6 +574,39 @@ describe("parsePrCommentMarker", () => {
   test("foreign bodies never throw", () => {
     expect(parsePrCommentMarker("LGTM")).toBeNull();
     expect(parsePrCommentMarker("")).toBeNull();
+  });
+});
+
+// Replaces test/cli.test.ts's former "reviewPr's discovery wiring stays
+// honest" and "CI admission is handed the summary marker's completeness"
+// pins for the marker-derivation half: both src/pr/review-pr.ts and
+// src/pr/ci-admission-gate.ts now call this ONE helper instead of each
+// re-deriving `marker?.head ?? null` / `marker?.complete ?? true` inline —
+// see its own WHY comment for the drift this closes. Falsified by reverting
+// either default to a bare literal (e.g. `true` regardless of the marker)
+// and confirming the matching test below goes red.
+describe("summaryMarkerFields", () => {
+  test("a partial marker's completeness survives — it is not defaulted away", () => {
+    expect(summaryMarkerFields({ head: HEAD_A, complete: false })).toEqual({
+      summaryHead: HEAD_A,
+      summaryComplete: false,
+    });
+  });
+
+  test("a complete marker's head and completeness both pass through", () => {
+    expect(summaryMarkerFields({ head: HEAD_A, complete: true })).toEqual({
+      summaryHead: HEAD_A,
+      summaryComplete: true,
+    });
+  });
+
+  // No marker (nothing posted yet, or a body that failed to parse) declares
+  // no head, and there is nothing to distrust — so it defaults to complete.
+  test("no marker at all declares no head and defaults to complete", () => {
+    expect(summaryMarkerFields(null)).toEqual({
+      summaryHead: null,
+      summaryComplete: true,
+    });
   });
 });
 

@@ -280,248 +280,58 @@ describe("CLI scout activation (ROADMAP-DOORDASH M5)", () => {
   });
 });
 
-// The call sites themselves, guarded by shape rather than by behaviour, and
-// the reason is measured rather than assumed: `review()` and `reviewPr()` are
-// I/O shells no offline test can invoke, so with `notionalCostInput` tested
-// and both renderers tested, DELETING all four call sites still flipped zero
-// tests. That is the precise shape of the defect this issue reports — a
-// correct mechanism whose last wiring step silently never lands — so the wiring
-// gets a guard of its own, in the same spirit as the repo-hygiene scan in
-// test/preflight-bundled-prompts.test.ts.
+// review-pr-behavior-seams (Goal B): invariant 10's two scans — "every
+// renderResult(/renderReport( call carries its notionalCostInput companion"
+// (#173) and "every gotchas gate asks the shared predicate, and none
+// re-implements the old empty-only check" — moved to
+// test/architecture/review-shell-invariants.test.ts as a DIRECTORY scan over
+// src/review/ and src/pr/ (plus src/doctor.ts for the gotchas-literal check,
+// which sits outside both). A hardcoded file list here would go dark the
+// moment either scanned file moved; the directory scan does not need to
+// change when that happens, and a third review shell trips it automatically
+// instead of silently going unchecked. `init`'s own gotchas-block wiring
+// stays in test/commands/init.test.ts — a different topic (init's wiring,
+// not the two review shells).
+
+// review-pr-behavior-seams: the rereview-coverage fix's wiring pins (1: the
+// activeHunters/discoveryHunters gate; 2: prepareDiscovery's computed
+// summaryComplete; 3: buildPhaseBQueue's plan.verifyAll) moved off this
+// source-text scan entirely. The whole re-review/delta-detection step
+// relocated to src/pr/discovery.ts (resolvePrDiscovery + discoveryHunters) —
+// an orchestrator over ALREADY-FETCHED comment data plus a small git
+// adapter, which is what makes it testable with fakes even though
+// reviewPr() itself has no seam for the `gh` fetches around it. See
+// test/pr/discovery.test.ts: `discoveryHunters` proves 1 directly (a pure
+// function of `skipDiscovery` alone); the two `resolvePrDiscovery` tests
+// prove 2 and 3 TOGETHER through the real, falsifiable outcome — a partial
+// last review forces `verifyAll` and queues an untouched prior for
+// re-verification, a complete one does not.
 //
-// The invariant, not the line numbers, and stated at its real width
-// (2026-09-02, #177): every `renderResult(`/`renderReport(` call IN THE TWO
-// REVIEW SHELLS carries the notional companion. There are four today (two
-// per review shell); adding a FIFTH, or a third review shell, is meant to
-// trip this until it does the same.
-//
-// cli-decomp-08 moved review() and reviewPr() out of src/cli.ts into
-// src/review/review.ts and src/pr/review-pr.ts respectively; this scan moved
-// with them rather than going dark the moment the call sites left cli.ts.
-//
-// What is deliberately OUTSIDE it, and would not trip it: every other surface
-// that renders a run's cost — `ci-reporter`'s `cost_usd_est=` in
-// `$GITHUB_OUTPUT`, the `runs`/`run_agents` store and `pr-hero usage`,
-// metrics, the watcher feed, the server, backfill, and diversity's spend cap.
-// They all read `projectLegacyUsage`'s `cost_usd_est`, which is cash-only and
-// has no notional companion to pair with; the `runs` table has no notional
-// column at all, so `pr-hero usage` would mix two semantics across time. That
-// is a store-schema slice (#173's commit body names it), not this one — so
-// this scan pins the shell it can actually pin rather than claiming a
-// guarantee the codebase does not yet make.
-describe("every cost-rendering call site in the review shells carries the notional split (#173)", () => {
-  test("renderResult and renderReport are each paired with notionalCostInput", async () => {
-    const sources = await Promise.all(
-      ["../src/review/review.ts", "../src/pr/review-pr.ts"].map((rel) =>
-        Bun.file(path.resolve(import.meta.dir, rel)).text(),
-      ),
-    );
-    const source = sources.join("\n");
-    const count = (needle: string) => source.split(needle).length - 1;
-    const renderCalls = count("renderResult(") + count("renderReport(");
-    expect(renderCalls).toBeGreaterThan(0);
-    expect(count("notionalCostInput(result)")).toBe(renderCalls);
-  });
-});
+// The CI admission gate's OWN marker-fields wiring (previously part of this
+// same family) is covered separately, just above: `summaryMarkerFields` is
+// shared and mutation-tested in test/watch/preflight.test.ts, with a narrow
+// structural check here for the gate's own gh-backed shell (no injectable
+// seam, same limitation discovery.ts's header names for its own fetches).
 
-// `review()` and `reviewPr()` are unexported I/O shells, so no offline test
-// reaches their gotchas gate — which is exactly how the gate came to promise
-// something it did not enforce. The predicate itself is unit-tested in
-// test/review/preflight.test.ts; what has no other guard is that both shells
-// actually ASK it. Same precedent as the notional-split scan above: pin the
-// wiring, state the invariant rather than the line numbers.
-describe("every gotchas gate asks the shared predicate", () => {
-  const sources = [
-    "../src/review/review.ts",
-    "../src/pr/review-pr.ts",
-    "../src/review/pipeline.ts",
-    "../src/doctor.ts",
-  ];
-
-  test("no gate re-implements the old empty-only check", async () => {
-    // The exact statements the four gates used before the placeholder was
-    // rejected. The `if (` prefix is load-bearing: without it the guard also
-    // fires on the WHY comments that quote the old expression to explain why
-    // it was wrong, which would make the guard forbid naming its own subject.
-    // Collected into a list rather than asserted with `not.toContain` per
-    // file, because a failing `not.toContain` on a 7000-line source prints
-    // the whole file.
-    const offenders: string[] = [];
-    for (const rel of sources) {
-      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
-      for (const needle of [
-        "if (gotchas.trim().length === 0)",
-        "gotchasContent.trim().length === 0)",
-      ]) {
-        if (source.includes(needle)) offenders.push(`${rel}: ${needle}`);
-      }
-    }
-    expect(offenders).toEqual([]);
-  });
-
-  test("both review shells route through gotchasUnusableReason", async () => {
-    // Local review and PR review moved to their own modules (cli-decomp-08),
-    // then P2.2 (odd/tasks/shared-run-stages.md) moved the gate ITSELF into
-    // `#review/run`'s `validateGotchas` — both shells now call that shared
-    // function exactly once, and `validateGotchas` is the one place left
-    // that asks `gotchasUnusableReason` and renders `gotchasErrorMessage`.
-    // The invariant is unchanged: one gate, one error render, reused rather
-    // than duplicated per shell.
-    for (const rel of ["../src/review/review.ts", "../src/pr/review-pr.ts"]) {
-      const source = await Bun.file(path.resolve(import.meta.dir, rel)).text();
-      const count = (needle: string) => source.split(needle).length - 1;
-      expect(count("validateGotchas(gotchasPath)")).toBe(1);
-    }
-    const runSource = await Bun.file(
-      path.resolve(import.meta.dir, "../src/review/run.ts"),
-    ).text();
-    const count = (needle: string) => runSource.split(needle).length - 1;
-    expect(count("gotchasUnusableReason(gotchas)")).toBe(1);
-    expect(count("gotchasErrorMessage(gotchasPath, ")).toBe(1);
-  });
-
-  // `init`'s own gotchas-block wiring test moved to
-  // test/commands/init.test.ts (cli-decomp S3) when `init` moved to
-  // src/commands/init.ts — it tests init's wiring specifically, not the
-  // shared-predicate theme this describe covers for the two review shells.
-});
-
-// Rereview-coverage fix (GitHub #42's re-review half, MusiveTech/musive
-// #1823): reviewPr() is the SAME unexported I/O shell as the gotchas gate
-// above, so "hunters are non-empty for a forced-full case B re-review" can't
-// be proven end-to-end offline either. What CAN be pinned, same precedent —
-// source-shape, not execution — is the wiring the fix depends on: that
-// `activeHunters` still derives from `skipDiscovery` alone (never a
-// case === "B" special-case that would defeat the fix), and that both
-// `prepareDiscovery` and `buildPhaseBQueue` are actually handed the values
-// this fix computes rather than a hardcoded default. The pure half of this
-// —`skipDiscovery: false` / `verifyAll: true` for a forced-full case B — is
-// exhaustively covered in test/rereview/prepare.test.ts and
-// test/rereview/plan.test.ts; this only guards that reviewPr() (moved to
-// src/pr/review-pr.ts by cli-decomp-08) still WIRES those results through.
-describe("reviewPr's discovery wiring stays honest (rereview-coverage fix)", () => {
-  const REVIEW_PR_PATH = "../src/pr/review-pr.ts";
-
-  test("activeHunters is still gated on skipDiscovery alone, not a hardcoded case check", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, REVIEW_PR_PATH),
-    ).text();
-    // CLI decomposition P2.1 (odd/tasks/cli-decomposition.md): the filter
-    // itself moved into `selectActiveHunters` in src/review/run.ts (shared
-    // with review()'s copy, tested there), but the wiring this test guards
-    // — skipDiscovery gates activeHunters directly, never a hardcoded case
-    // check — is unchanged.
-    expect(source).toContain(
-      "const activeHunters = skipDiscovery\n      ? []\n      : selectActiveHunters(spec.agents, parityFires);",
-    );
-    // The one thing that must NEVER reappear: a discovery gate that special-
-    // cases case B directly would silently reintroduce the exact defect this
-    // fix closes, bypassing `plan.skipDiscovery`/`lastComplete` entirely.
-    expect(source).not.toContain('prepared.case === "B"');
-  });
-
-  test("prepareDiscovery is handed a computed summaryComplete, not a bare literal", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, REVIEW_PR_PATH),
-    ).text();
-    expect(source).toContain("const summaryComplete = summaryMarker?.complete");
-    expect(source).toContain("summaryComplete,\n      findingMarkers:");
-  });
-
-  test("buildPhaseBQueue receives plan.verifyAll — the wiring gap this fix closes", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, REVIEW_PR_PATH),
-    ).text();
-    expect(source).toContain("verifyAll: prepared.plan.verifyAll,");
-  });
-
-  // Split-review-pr refactor: the CI admission gate (and this exact wiring)
-  // moved out of reviewPr() into evaluateCiAdmissionGate
-  // (src/pr/ci-admission-gate.ts) as a byte-for-byte relocation — the
-  // invariant this test guards is unchanged, only its address moved.
-  test("CI admission is handed the summary marker's completeness", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/ci-admission-gate.ts"),
-    ).text();
-    expect(source).toContain(
-      "summaryBody === null ? null : parsePrCommentMarker(summaryBody);",
-    );
-    expect(source).toContain(
-      "summaryHead,\n      summaryComplete,\n      markerSeen,",
-    );
-  });
-});
-
-// Same precedent as the gotchas-gate scan above: `review()` and `reviewPr()`
-// are I/O shells (now src/review/review.ts and src/pr/review-pr.ts
-// respectively, cli-decomp-08), so nothing offline reaches them directly.
-// What has to be pinned here is that BOTH shells actually thread the rules a
-// `.prheroignore` read produced into their `sizeGateConfig` call, rather than
-// silently reading the file and then ignoring the result (exactly the kind
-// of drift a `.excludeRules`-only rename could not catch, because the third
-// argument is what carries user-defined rules at all).
-describe("both review shells thread .prheroignore rules into their gate config", () => {
-  test("local review reads the working tree AND passes its rules to sizeGateConfig", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/review/review.ts"),
-    ).text();
-    expect(source).toContain("readLocalIgnoreRules(repoRoot)");
-    expect(source).toContain(
-      "sizeGateConfig(\n    options,\n    loaded.effective,\n    userIgnore.rules,\n  )",
-    );
-  });
-
-  // `ghPrFiles` is bounded by GH_PR_VIEW_TIMEOUT_MS, so a stalled GitHub now
-  // THROWS where it used to hang. The dry run is a PLAN — it must degrade to
-  // the aggregate estimate, which resolvePrDryRunSizeGate's own note already
-  // calls "truncated or unavailable", not abort the command.
-  //
-  // The `null` matters more than the catch: `[].length >= 0` is true, so
-  // routing an empty list through the trustworthiness check would hand the
-  // per-file gate zero lines and produce a PASSING verdict out of a failed
-  // fetch. Pinned because both halves are one line each and neither has an
-  // offline reach into this shell.
-  test("the dry run degrades to the aggregate estimate when ghPrFiles fails", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
-    ).text();
-    expect(source).toContain("let perFile: NumstatFile[] | null;\n    try {");
-    expect(source).toContain("    } catch {\n      perFile = null;\n    }");
-  });
-
-  test("PR review reads the operator root eagerly for non-CI, and never reads worktreePath (O-8)", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
-    ).text();
-    expect(source).toContain("readLocalIgnoreRules(operatorRoot)");
-    expect(source).not.toContain("readLocalIgnoreRules(worktreePath)");
-  });
-
-  test("PR review's base-ref read takes the RESOLVED baseSha, not target.baseRef/baseRefName", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
-    ).text();
-    // The read must run against the sha `resolveCommit` already canonicalized
-    // (a merged PR's baseRef is a `<sha>^1` EXPRESSION, not a sha — see
-    // pr/preflight.ts's PrTarget.baseRef comment), never the raw PrTarget
-    // field, and never gitDirOwner's cwd-relative form.
-    expect(source).toContain(
-      "readBaseRefIgnoreRules(git, gitDirOwner, baseSha)",
-    );
-    expect(source).not.toContain(
-      "readBaseRefIgnoreRules(git, gitDirOwner, target.baseRef)",
-    );
-  });
-
-  test("both sizeGateConfig(options, config, ...) calls in reviewPr receive a rules argument, not just (options, config)", async () => {
-    const source = await Bun.file(
-      path.resolve(import.meta.dir, "../src/pr/review-pr.ts"),
-    ).text();
-    const bareCalls =
-      source.split("sizeGateConfig(options, config)").length - 1;
-    expect(bareCalls).toBe(0);
-  });
-});
+// review-pr-behavior-seams: invariants 5, 6 and 9 (rules threaded into the
+// gate config, the dry-run degrade rule, and "no call site can drop the
+// rules argument") moved OFF this source-text scan entirely.
+//   - 5 & 9 are now `sizeGateConfigFor`'s own behavior — a REQUIRED third
+//     parameter (unlike sizeGateConfig's own optional one), tested with a
+//     real custom rule in test/review/size-gate.test.ts. Both review shells
+//     call it instead of sizeGateConfig directly.
+//   - 6 is `resolvePrDryRunNumstat`'s own behavior, tested through the real
+//     downstream size-gate verdict in test/pr/target.test.ts.
+//   - 7 & 8 (root/ref selection for `.prheroignore`) moved to
+//     src/pr/range.ts (resolveEagerLocalIgnore / resolveBaseRefIgnore /
+//     resolvePrFetchAndRange) and are tested in test/pr/range.test.ts: 7 with
+//     a `readLocal` fake keyed by root, 8 with the same scripted-GitRunner
+//     fake shape as readBaseRefIgnoreRules's own tests in
+//     test/git/git.test.ts (content answered only for the RESOLVED sha).
+//     resolvePrFetchAndRange's own call-site wiring keeps one narrow
+//     structural check there — it is a genuine I/O shell (fetchPrRefs has no
+//     offline seam), same class of limitation as the CI-admission check
+//     above.
 
 function runDirOptions(over: Partial<CliOptions> = {}): CliOptions {
   return {

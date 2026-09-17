@@ -5,14 +5,16 @@
 // (src/pr/review-pr.ts): identifiers moved onto explicit parameters, control
 // flow and WHY comments unchanged.
 //
-// Split into three functions rather than one, deliberately: two single
-// statements sit between them — `readLocalIgnoreRules(operatorRoot)` and
-// `validateGotchas(gotchasPath)` — that test/cli.test.ts pins as literal
-// source inside reviewPr() itself (source-shape guards on an I/O shell no
-// offline test can invoke directly). Folding either statement into this
-// module would silently move the pinned text out of review-pr.ts and break
-// that guard, so reviewPr() keeps calling them inline, in between these
-// three calls, in the exact original order.
+// Split into three functions rather than one, deliberately: two calls sit
+// between them in reviewPr() itself — `resolveEagerLocalIgnore(...)`
+// (src/pr/range.ts, invariant 7/O-8) and `validateGotchas(gotchasPath)`
+// (guarded by test/architecture/review-shell-invariants.test.ts's directory
+// scan, not a per-file pin) — and both need to run in this exact relative
+// position: the ignore read right after step 1's config load, gotchas
+// validation right after step 2's prompt-set resolution, before step 2's own
+// target record is resolved. Folding either call into this module would
+// change that relative order, so reviewPr() keeps calling them inline, in
+// between these three calls, in the exact original order.
 
 import { existsSync } from "node:fs";
 import os from "node:os";
@@ -199,6 +201,32 @@ export async function resolvePrPromptSetAndBudget(params: {
   return { ciBudgetCeiling, agents, spec, agentFiles, promptSet, gotchasPath };
 }
 
+// PR1b Addition 1 / #5557's degrade rule, extracted so it can be proven
+// offline: a dry run creates nothing and is a PLAN, so a stalled or failing
+// `gh pr view --json files` must degrade to the aggregate estimate rather
+// than abort (GH_PR_VIEW_TIMEOUT_MS bounds `ghPrFiles`, turning a hang into a
+// throw this function is what catches). `null` is returned DIRECTLY on
+// failure or on a truncated fetch, never an empty array routed through the
+// length check: `[].length >= 0` is true, so an empty list would sail
+// through as "trustworthy" and hand the per-file gate zero lines to measure —
+// a PASSING verdict manufactured out of a failed fetch, which is the one
+// outcome a size gate must never invent. `totalFiles` is GitHub's own
+// `changedFiles` counter (`target.ghDiffStat.files`); a per-file list shorter
+// than it is the same truncation hazard watch/watch.ts's tier 2 guards
+// against, and under-counting here would falsely rescue exactly the PR this
+// gate exists to catch.
+export async function resolvePrDryRunNumstat(params: {
+  fetchFiles: () => Promise<NumstatFile[]>;
+  totalFiles: number;
+}): Promise<NumstatFile[] | null> {
+  try {
+    const rawFiles = await params.fetchFiles();
+    return rawFiles.length >= params.totalFiles ? rawFiles : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ResolvedPrTargetRecord {
   repoHome: ResolvedRepoHome;
   gitDirOwner: string;
@@ -250,10 +278,9 @@ export async function resolvePrTargetRecord(params: {
 // Step 3's second half: the free dry-run exit's size-gate verdict, plan
 // card, and closing lines. Relocated out of reviewPr()'s `if (options.dryRun)`
 // block; the FIRST half of that block (hunterCount/estimate/dryRunGateConfig,
-// then the pinned `perFile` try/catch around `ghPrFiles`) stays inline in
-// reviewPr() — see this module's header for why the pin matters. This half
-// picks up right after `perFile` is known and returns the dry run's exit
-// code (always 0).
+// then the `resolvePrDryRunNumstat` call just above) stays inline in
+// reviewPr(), unchanged. This half picks up right after `perFile` is known
+// and returns the dry run's exit code (always 0).
 export function renderPrDryRunPlan(params: {
   options: CliOptions;
   operatorRoot: string;
