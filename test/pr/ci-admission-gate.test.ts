@@ -13,11 +13,22 @@
 // unset it never touches gh, only the two env-path files GITHUB_STEP_SUMMARY
 // and GITHUB_OUTPUT, so their content is asserted as the real observable
 // instead of a fake's captured args.
+//
+// Every test runs through withGateEnv, which snapshots and restores all four
+// GitHub Actions env vars this gate reads. bun:test shares one process.env
+// across every file in the run, and ci.yml runs `bun test` itself inside
+// Actions where these vars are real — a bare `delete process.env.X` here
+// would permanently erase Actions' own values for the rest of that run.
 
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  ADMISSION_CHECK_RUN_NAME,
+  type AdmissionRecord,
+  serializeAdmissionRecord,
+} from "#ci/admission-ledger";
 import { renderCiAdmissionBlock } from "#ci/review-admission";
 import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
 import { CommentsTruncatedError } from "#pr/pr";
@@ -31,6 +42,40 @@ import {
 const PR = 42;
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
+
+const GATE_ENV_KEYS = [
+  "GITHUB_STEP_SUMMARY",
+  "GITHUB_OUTPUT",
+  "GITHUB_HEAD_REF",
+  "GITHUB_ACTOR",
+] as const;
+type GateEnvKey = (typeof GATE_ENV_KEYS)[number];
+
+// Snapshots and restores every env var this gate reads, so a test's absence
+// of a value (e.g. no GITHUB_HEAD_REF) never leaks past this call — neither
+// into the next test in this file nor, inside real CI, into Actions' own
+// environment for the rest of the job.
+async function withGateEnv<T>(
+  overrides: Partial<Record<GateEnvKey, string>>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous: Partial<Record<GateEnvKey, string>> = {};
+  for (const key of GATE_ENV_KEYS) {
+    previous[key] = process.env[key];
+    const value = overrides[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const key of GATE_ENV_KEYS) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 function baseOptions(overrides: Partial<CliOptions> = {}): CliOptions {
   return {
@@ -65,6 +110,28 @@ function summaryComment(
     body:
       `${PR_COMMENT_MARKER_PREFIX}head=${head} -->\n` +
       renderCiAdmissionBlock(head, counts, reviews),
+  };
+}
+
+function admissionCheckRunRecord(
+  overrides: Partial<AdmissionRecord> = {},
+): AdmissionRecord {
+  return {
+    schemaVersion: 1,
+    prNumber: PR,
+    headSha: HEAD_B,
+    policyHash: "deadbeefcafefeed",
+    reservationId: "reservation-1",
+    attemptNumber: 1,
+    status: "completed",
+    decisionReason: "review complete",
+    priorScore: 2,
+    blockingCount: 1,
+    advisoryCount: 1,
+    workflowRunId: null,
+    createdAt: "2026-08-28T12:00:00.000Z",
+    settledAt: "2026-08-28T12:05:00.000Z",
+    ...overrides,
   };
 }
 
@@ -136,17 +203,19 @@ async function tmpCiFiles(): Promise<{
 
 describe("evaluateCiAdmissionGate — early no-op guards", () => {
   test("a dry run touches no gh call and resolves the default policy", async () => {
-    const result = await evaluateCiAdmissionGate({
-      operatorRoot: "/repo",
-      prNumber: PR,
-      headSha: HEAD_B,
-      config: EMPTY_LOCAL_CONFIG,
-      isCi: true,
-      options: baseOptions({ dryRun: true }),
-      // No spawnFn: any gh call here would throw "gh not found on PATH" in
-      // an environment without gh installed, or make a real network call in
-      // one that has it — either way, this proves the guard, not a mock.
-    });
+    const result = await withGateEnv({}, () =>
+      evaluateCiAdmissionGate({
+        operatorRoot: "/repo",
+        prNumber: PR,
+        headSha: HEAD_B,
+        config: EMPTY_LOCAL_CONFIG,
+        isCi: true,
+        options: baseOptions({ dryRun: true }),
+        // No spawnFn: any gh call here would throw "gh not found on PATH" in
+        // an environment without gh installed, or make a real network call
+        // in one that has it — either way, this proves the guard, not a mock.
+      }),
+    );
     expect(result).toEqual({
       ciPolicy: {
         schemaVersion: 1,
@@ -164,26 +233,40 @@ describe("evaluateCiAdmissionGate — early no-op guards", () => {
   });
 
   test("outside CI, the gate is a pure pass-through", async () => {
-    const result = await evaluateCiAdmissionGate({
-      operatorRoot: "/repo",
-      prNumber: PR,
-      headSha: HEAD_B,
-      config: EMPTY_LOCAL_CONFIG,
-      isCi: false,
-      options: baseOptions({ dryRun: false, force: false }),
-    });
+    const result = await withGateEnv({}, () =>
+      evaluateCiAdmissionGate({
+        operatorRoot: "/repo",
+        prNumber: PR,
+        headSha: HEAD_B,
+        config: EMPTY_LOCAL_CONFIG,
+        isCi: false,
+        options: baseOptions({ dryRun: false, force: false }),
+      }),
+    );
     expect(result.ledgerRecords).toEqual([]);
     expect(result.exitCode).toBeUndefined();
   });
 
-  test("--force still reads the ledger but skips the admission decision", async () => {
+  test("--force reads the real ledger row back but skips the admission decision", async () => {
     // The comments fetch is scripted to return an already-reviewed-this-head
     // summary — a decision the admission block would turn into a "skip" if
     // --force did not bypass it entirely. A silent no-op here would not
     // distinguish "guard held" from "guard bypassed on harmless input", so
-    // the script deliberately hands it a non-harmless one.
+    // the script deliberately hands it a non-harmless one. The check-runs
+    // response also carries one real record, so an empty ledgerRecords
+    // result can only mean "read and got nothing", never "never read".
+    const record = admissionCheckRunRecord();
     const spawnFn = makeFakeGh([
-      EMPTY_CHECK_RUNS,
+      {
+        match: ["check-runs"],
+        response: {
+          stdout: `${JSON.stringify({
+            name: ADMISSION_CHECK_RUN_NAME,
+            status: "completed",
+            output: { text: serializeAdmissionRecord(record) },
+          })}\n`,
+        },
+      },
       {
         match: ["issues", "comments"],
         response: {
@@ -193,19 +276,21 @@ describe("evaluateCiAdmissionGate — early no-op guards", () => {
       EMPTY_REVIEW_COMMENTS,
     ]);
     const recordCalls: unknown[] = [];
-    const result = await evaluateCiAdmissionGate({
-      operatorRoot: "/repo",
-      prNumber: PR,
-      headSha: HEAD_B,
-      config: EMPTY_LOCAL_CONFIG,
-      isCi: true,
-      options: baseOptions({ dryRun: false, force: true }),
-      spawnFn,
-      recordSkip: async (recorded) => {
-        recordCalls.push(recorded);
-      },
-    });
-    expect(result.ledgerRecords).toEqual([]);
+    const result = await withGateEnv({}, () =>
+      evaluateCiAdmissionGate({
+        operatorRoot: "/repo",
+        prNumber: PR,
+        headSha: HEAD_B,
+        config: EMPTY_LOCAL_CONFIG,
+        isCi: true,
+        options: baseOptions({ dryRun: false, force: true }),
+        spawnFn,
+        recordSkip: async (recorded) => {
+          recordCalls.push(recorded);
+        },
+      }),
+    );
+    expect(result.ledgerRecords).toEqual([record]);
     expect(result.exitCode).toBeUndefined();
     expect(recordCalls).toEqual([]);
   });
@@ -220,29 +305,25 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     ]);
     const recordCalls: unknown[] = [];
     const { summaryPath, outputPath } = await tmpCiFiles();
-    process.env.GITHUB_STEP_SUMMARY = summaryPath;
-    process.env.GITHUB_OUTPUT = outputPath;
-    delete process.env.GITHUB_HEAD_REF;
-    try {
-      const result = await evaluateCiAdmissionGate({
-        operatorRoot: "/repo",
-        prNumber: PR,
-        headSha: HEAD_B,
-        config: EMPTY_LOCAL_CONFIG,
-        isCi: true,
-        options: baseOptions(),
-        spawnFn,
-        recordSkip: async (recorded) => {
-          recordCalls.push(recorded);
-        },
-      });
-      expect(result.exitCode).toBeUndefined();
-      expect(recordCalls).toEqual([]);
-      await expect(readFile(summaryPath, "utf8")).rejects.toThrow();
-    } finally {
-      delete process.env.GITHUB_STEP_SUMMARY;
-      delete process.env.GITHUB_OUTPUT;
-    }
+    const result = await withGateEnv(
+      { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_OUTPUT: outputPath },
+      () =>
+        evaluateCiAdmissionGate({
+          operatorRoot: "/repo",
+          prNumber: PR,
+          headSha: HEAD_B,
+          config: EMPTY_LOCAL_CONFIG,
+          isCi: true,
+          options: baseOptions(),
+          spawnFn,
+          recordSkip: async (recorded) => {
+            recordCalls.push(recorded);
+          },
+        }),
+    );
+    expect(result.exitCode).toBeUndefined();
+    expect(recordCalls).toEqual([]);
+    await expect(readFile(summaryPath, "utf8")).rejects.toThrow();
   });
 
   test("re-running the same reviewed head skips, records it, and publishes the coverage-skip step summary", async () => {
@@ -258,37 +339,33 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     ]);
     const recordCalls: { reason: string; headSha: string }[] = [];
     const { summaryPath, outputPath } = await tmpCiFiles();
-    process.env.GITHUB_STEP_SUMMARY = summaryPath;
-    process.env.GITHUB_OUTPUT = outputPath;
-    delete process.env.GITHUB_HEAD_REF;
-    try {
-      const result = await evaluateCiAdmissionGate({
-        operatorRoot: "/repo",
-        prNumber: PR,
-        headSha: HEAD_B,
-        config: EMPTY_LOCAL_CONFIG,
-        isCi: true,
-        options: baseOptions(),
-        spawnFn,
-        recordSkip: async (recorded) => {
-          recordCalls.push({
-            reason: recorded.reason,
-            headSha: recorded.headSha,
-          });
-        },
-      });
-      expect(result.exitCode).toBe(0);
-      expect(recordCalls).toEqual([
-        { reason: "this commit was already reviewed", headSha: HEAD_B },
-      ]);
-      const summary = await readFile(summaryPath, "utf8");
-      expect(summary).toContain("this commit was already reviewed");
-      const outputs = await readFile(outputPath, "utf8");
-      expect(outputs).toContain("status=skipped-coverage");
-    } finally {
-      delete process.env.GITHUB_STEP_SUMMARY;
-      delete process.env.GITHUB_OUTPUT;
-    }
+    const result = await withGateEnv(
+      { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_OUTPUT: outputPath },
+      () =>
+        evaluateCiAdmissionGate({
+          operatorRoot: "/repo",
+          prNumber: PR,
+          headSha: HEAD_B,
+          config: EMPTY_LOCAL_CONFIG,
+          isCi: true,
+          options: baseOptions(),
+          spawnFn,
+          recordSkip: async (recorded) => {
+            recordCalls.push({
+              reason: recorded.reason,
+              headSha: recorded.headSha,
+            });
+          },
+        }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(recordCalls).toEqual([
+      { reason: "this commit was already reviewed", headSha: HEAD_B },
+    ]);
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("this commit was already reviewed");
+    const outputs = await readFile(outputPath, "utf8");
+    expect(outputs).toContain("status=skipped-coverage");
   });
 
   test("an exhausted attempt budget on a new head requires manual override", async () => {
@@ -306,39 +383,35 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     ]);
     const recordCalls: { reason: string }[] = [];
     const { summaryPath, outputPath } = await tmpCiFiles();
-    process.env.GITHUB_STEP_SUMMARY = summaryPath;
-    process.env.GITHUB_OUTPUT = outputPath;
-    delete process.env.GITHUB_HEAD_REF;
-    try {
-      const result = await evaluateCiAdmissionGate({
-        operatorRoot: "/repo",
-        prNumber: PR,
-        headSha: HEAD_B,
-        config: EMPTY_LOCAL_CONFIG,
-        isCi: true,
-        options: baseOptions(),
-        spawnFn,
-        recordSkip: async (recorded) => {
-          recordCalls.push({ reason: recorded.reason });
-        },
-      });
-      expect(result.exitCode).toBe(0);
-      expect(recordCalls).toEqual([
-        {
-          reason:
-            "automatic review budget exhausted (2/2 attempts on this PR). " +
-            "Run `pr-hero review --pr <n> --post --force` locally to override.",
-        },
-      ]);
-      const summary = await readFile(summaryPath, "utf8");
-      expect(summary).toContain("automatic review budget exhausted");
-      expect(summary).toContain("Remaining budget");
-      const outputs = await readFile(outputPath, "utf8");
-      expect(outputs).toContain("status=manual-required");
-    } finally {
-      delete process.env.GITHUB_STEP_SUMMARY;
-      delete process.env.GITHUB_OUTPUT;
-    }
+    const result = await withGateEnv(
+      { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_OUTPUT: outputPath },
+      () =>
+        evaluateCiAdmissionGate({
+          operatorRoot: "/repo",
+          prNumber: PR,
+          headSha: HEAD_B,
+          config: EMPTY_LOCAL_CONFIG,
+          isCi: true,
+          options: baseOptions(),
+          spawnFn,
+          recordSkip: async (recorded) => {
+            recordCalls.push({ reason: recorded.reason });
+          },
+        }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(recordCalls).toEqual([
+      {
+        reason:
+          "automatic review budget exhausted (2/2 attempts on this PR). " +
+          "Run `pr-hero review --pr <n> --post --force` locally to override.",
+      },
+    ]);
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain("automatic review budget exhausted");
+    expect(summary).toContain("Remaining budget");
+    const outputs = await readFile(outputPath, "utf8");
+    expect(outputs).toContain("status=manual-required");
   });
 
   test("observe-only mode logs a would-skip decision but never records or publishes it", async () => {
@@ -354,33 +427,29 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     ]);
     const recordCalls: unknown[] = [];
     const { summaryPath, outputPath } = await tmpCiFiles();
-    process.env.GITHUB_STEP_SUMMARY = summaryPath;
-    process.env.GITHUB_OUTPUT = outputPath;
-    delete process.env.GITHUB_HEAD_REF;
     const observeOnlyConfig: LocalConfig = {
       ...EMPTY_LOCAL_CONFIG,
       ci_admission_observe_only: true,
     };
-    try {
-      const result = await evaluateCiAdmissionGate({
-        operatorRoot: "/repo",
-        prNumber: PR,
-        headSha: HEAD_B,
-        config: observeOnlyConfig,
-        isCi: true,
-        options: baseOptions(),
-        spawnFn,
-        recordSkip: async (recorded) => {
-          recordCalls.push(recorded);
-        },
-      });
-      expect(result.exitCode).toBeUndefined();
-      expect(recordCalls).toEqual([]);
-      await expect(readFile(summaryPath, "utf8")).rejects.toThrow();
-    } finally {
-      delete process.env.GITHUB_STEP_SUMMARY;
-      delete process.env.GITHUB_OUTPUT;
-    }
+    const result = await withGateEnv(
+      { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_OUTPUT: outputPath },
+      () =>
+        evaluateCiAdmissionGate({
+          operatorRoot: "/repo",
+          prNumber: PR,
+          headSha: HEAD_B,
+          config: observeOnlyConfig,
+          isCi: true,
+          options: baseOptions(),
+          spawnFn,
+          recordSkip: async (recorded) => {
+            recordCalls.push(recorded);
+          },
+        }),
+    );
+    expect(result.exitCode).toBeUndefined();
+    expect(recordCalls).toEqual([]);
+    await expect(readFile(summaryPath, "utf8")).rejects.toThrow();
   });
 
   test("a truncated comment fetch fails open to run, recording nothing", async () => {
@@ -391,19 +460,20 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     // fake that always throws to prove the catch block, not a scripted
     // response, is what keeps this offline.
     const recordCalls: unknown[] = [];
-    delete process.env.GITHUB_HEAD_REF;
-    const result = await evaluateCiAdmissionGate({
-      operatorRoot: "/repo",
-      prNumber: PR,
-      headSha: HEAD_B,
-      config: EMPTY_LOCAL_CONFIG,
-      isCi: true,
-      options: baseOptions(),
-      spawnFn,
-      recordSkip: async (recorded) => {
-        recordCalls.push(recorded);
-      },
-    });
+    const result = await withGateEnv({}, () =>
+      evaluateCiAdmissionGate({
+        operatorRoot: "/repo",
+        prNumber: PR,
+        headSha: HEAD_B,
+        config: EMPTY_LOCAL_CONFIG,
+        isCi: true,
+        options: baseOptions(),
+        spawnFn,
+        recordSkip: async (recorded) => {
+          recordCalls.push(recorded);
+        },
+      }),
+    );
     expect(result.exitCode).toBeUndefined();
     expect(recordCalls).toEqual([]);
   });
