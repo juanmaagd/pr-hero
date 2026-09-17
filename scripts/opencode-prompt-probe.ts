@@ -1,9 +1,9 @@
-import { attemptEvidencePath } from "#review/step-runner";
 import {
   evidenceSha256,
   readEvidenceFile,
 } from "../src/execution/attempt-evidence";
 import type { DiagnosticEvidence } from "../src/execution/contracts";
+import { attemptEvidencePath } from "../src/execution/step-artifacts";
 import { redactEvidence } from "../src/security/evidence-redaction";
 import {
   classifyObservationEvidence,

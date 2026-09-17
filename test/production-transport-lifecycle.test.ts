@@ -19,7 +19,7 @@ import {
   type RoutingConfig,
   resolveStepRoute,
 } from "#model/routing";
-import { type StepSpec, settlementReceiptPath } from "#review/step-runner";
+import type { StepSpec } from "#review/step-runner";
 import { ConcurrencyAttemptAdmissionGate } from "../src/execution/admission";
 import { ConcurrencyLimiter } from "../src/execution/concurrency-limiter";
 import type {
@@ -37,6 +37,7 @@ import type {
 import { StepExecutionHarness } from "../src/execution/harness";
 import type { SettlementReceipt } from "../src/execution/settlement";
 import { InMemorySpendLedger } from "../src/execution/spend-limiter";
+import { settlementReceiptPath } from "../src/execution/step-artifacts";
 import { createProductionRuntime } from "../src/production-runtime";
 import type { CredentialBroker } from "../src/security/credential-broker";
 import { OpenCodeAuthBroker } from "../src/security/credential-broker";

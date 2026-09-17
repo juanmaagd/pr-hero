@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { StepSpec } from "#review/step-runner";
-import { attemptEvidencePath, attemptLogPath } from "#review/step-runner";
 import {
   evidenceSha256,
   readEvidenceFile,
@@ -13,6 +12,10 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
+import {
+  attemptEvidencePath,
+  attemptLogPath,
+} from "../../src/execution/step-artifacts";
 import {
   classifyObservationEvidence,
   OpenCodeEvidenceCollector,

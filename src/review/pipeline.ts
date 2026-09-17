@@ -106,6 +106,11 @@ import type {
   SpendReservation,
   UnresolvedSpend,
 } from "../execution/spend-limiter";
+import {
+  attemptEvidencePath,
+  attemptLogPath,
+  settlementReceiptPath,
+} from "../execution/step-artifacts";
 import type { NormalizedUsage } from "../execution/usage-normalized";
 import { sumNormalizedUsage } from "../execution/usage-normalized";
 import {
@@ -131,14 +136,11 @@ import {
 } from "./scout";
 import type { ExcludedPath } from "./size-gate";
 import {
-  attemptEvidencePath,
-  attemptLogPath,
   DEFAULT_STEP_MAX_ATTEMPTS,
   DEFAULT_STEP_TIMEOUT_MS,
   type StepResult,
   type StepRunner,
   type StepSpec,
-  settlementReceiptPath,
 } from "./step-runner";
 
 export interface PipelineInput {

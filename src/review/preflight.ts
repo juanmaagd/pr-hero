@@ -11,7 +11,7 @@ import path from "node:path";
 import {
   CI_REVIEW_POLICY_MODES,
   type CiReviewPolicyMode,
-} from "#ci/review-admission";
+} from "#ci/review-policy";
 import type { EffectiveConfig } from "#config/config";
 import type {
   ModelGateway,

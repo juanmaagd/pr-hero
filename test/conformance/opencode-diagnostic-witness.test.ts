@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { classifyFailure as classifyLegacyFailure } from "#review/step-runner";
 import type {
   AsyncEventSink,
   ProviderEvent,
@@ -7,6 +6,7 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../../src/execution/contracts";
+import { classifyFailure as classifyLegacyFailure } from "../../src/execution/failure-classification";
 import type { NormalizedUsage } from "../../src/execution/usage-normalized";
 import type {
   OpenCodeClientEvent,

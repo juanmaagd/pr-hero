@@ -8,6 +8,15 @@ export const ENGINE_VERSION = "1.1.0";
 // review/preflight.ts; they are exported directly now that those re-exports
 // are gone, so the published symbol set is unchanged.
 export * from "./errors";
+// attemptLogPath/settlementReceiptPath/attemptEvidencePath/FORMAT_RETRY_REMINDER,
+// classifyFailure/isTransientSessionFailure/isTerminalSessionFailure/FailureClass,
+// and SpawnedProcess/ACTIVE_CHILD_PROCS/killAllChildProcesses moved out of
+// review/step-runner.ts into these three leaves (architecture guard C2); exported
+// directly now that step-runner.ts no longer re-exports them, so the published
+// symbol set is unchanged.
+export * from "./execution/failure-classification";
+export * from "./execution/spawned-process";
+export * from "./execution/step-artifacts";
 export * from "./git/refs";
 export * from "./model/routing";
 export * from "./review/dedupe";

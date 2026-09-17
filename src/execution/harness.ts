@@ -12,15 +12,11 @@ import {
 //   protocol events, return TransportOutcome, classify provider/transport causes.
 //   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
 import { isVacuousEmptyHunt } from "#review/drafts";
-import {
-  attemptLogPath,
-  type FailureClass,
-  FORMAT_RETRY_REMINDER,
-  type RetryInfo,
-  type StepResult,
-  type StepRunner,
-  type StepSpec,
-  settlementReceiptPath,
+import type {
+  RetryInfo,
+  StepResult,
+  StepRunner,
+  StepSpec,
 } from "#review/step-runner";
 import type {
   CredentialBroker,
@@ -52,6 +48,7 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "./contracts";
+import type { FailureClass } from "./failure-classification";
 import {
   type CauseResolution,
   decideRetryDisposition,
@@ -80,6 +77,11 @@ import {
   SpendReservationFencedError,
   settlementFromUsage,
 } from "./spend-limiter";
+import {
+  attemptLogPath,
+  FORMAT_RETRY_REMINDER,
+  settlementReceiptPath,
+} from "./step-artifacts";
 import type { NormalizedUsage } from "./usage-normalized";
 import {
   normalizeUnavailableUsage,

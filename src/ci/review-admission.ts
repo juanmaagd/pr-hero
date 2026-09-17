@@ -17,6 +17,7 @@ import {
   type AdmissionRecord,
   countTerminalAttempts,
 } from "./admission-ledger";
+import type { CiReviewPolicyMode } from "./review-policy";
 import {
   type DeltaRiskAssessment,
   deltaRiskTriggersReview,
@@ -31,16 +32,6 @@ export const DEFAULT_CI_REREVIEW_MIN_SCORE = 4;
 export const DEFAULT_CI_BLOCKING_WEIGHT = 2;
 export const DEFAULT_CI_ADVISORY_WEIGHT = 1;
 export const DEFAULT_CI_RESERVATION_TTL_SECONDS = 3600;
-
-export const CI_REVIEW_POLICY_MODES = [
-  "once_per_pr",
-  "thresholded",
-  "risk_aware",
-  "every_push",
-  "manual_only",
-] as const;
-
-export type CiReviewPolicyMode = (typeof CI_REVIEW_POLICY_MODES)[number];
 
 export interface CiReviewPolicy {
   schemaVersion: typeof CI_REVIEW_POLICY_SCHEMA_VERSION;

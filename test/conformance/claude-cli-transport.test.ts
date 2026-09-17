@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { ACTIVE_CHILD_PROCS } from "#review/step-runner";
 import type { TransportRequest } from "../../src/execution/contracts";
+import { ACTIVE_CHILD_PROCS } from "../../src/execution/spawned-process";
 import { settlementFromUsage } from "../../src/execution/spend-limiter";
 import {
   outputTokensKnown,

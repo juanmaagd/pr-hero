@@ -421,7 +421,7 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
     );
 
     const stepRunnerImport = src.match(
-      /import\s*\{([^{}]*)\}\s*from\s*"#review\/step-runner"/,
+      /import\s+(?:type\s+)?\{([^{}]*)\}\s*from\s*"#review\/step-runner"/,
     );
     expect(stepRunnerImport).not.toBeNull();
     expect((stepRunnerImport as RegExpMatchArray)[1]).not.toMatch(

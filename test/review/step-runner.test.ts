@@ -5,13 +5,15 @@ import path from "node:path";
 import {
   buildStepArgv,
   ClaudeCodeRunner,
-  classifyFailure,
-  FORMAT_RETRY_REMINDER,
-  isTerminalSessionFailure,
-  isTransientSessionFailure,
   type RetryInfo,
   type StepSpec,
 } from "#review/step-runner";
+import {
+  classifyFailure,
+  isTerminalSessionFailure,
+  isTransientSessionFailure,
+} from "../../src/execution/failure-classification";
+import { FORMAT_RETRY_REMINDER } from "../../src/execution/step-artifacts";
 
 // ---------------------------------------------------------------------------
 // FakeSpawn: scripted {stdout, stderr, exitCode} per call, records argv/cwd.
