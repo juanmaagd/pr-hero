@@ -99,13 +99,16 @@ over** (found while wiring C5, 2026-08-23):
 ## Architecture (one line per module)
 
 - `src/spec.ts` — `ReviewSpec`/`AgentSpec`: which agents run, their role, trigger, model. THE flow config.
+  A benchmark arm can append hunters with `PRHERO_EXTRA_HUNTERS=key:file[,...]` (read once in `localReviewSpec`,
+  inert when unset).
 - `src/pipeline.ts` — `runPipeline`: gotchas fail-loud → trigger eval → parallel hunter steps → dedupe →
   per-finding refuter steps → `deriveTier` → assembled `SkillOutput` + `pipeline.json` provenance + per-agent usage.
 - `src/step-runner.ts` — `StepRunner` interface + `ClaudeCodeRunner` (isolation flags, retry ordering,
   watchdog, atomic artifacts, per-attempt logs). Stage-2 `OpenCodeRunner` obligations documented on the
   interface.
 - `src/dedupe.ts` / `src/drafts.ts` — pure: merge/renumber; extraction + draft/refuter validation.
-- `src/findings.ts` — schema v1.0.0 (shared meaning with the lab's validator; byte-compatible artifacts).
+- `src/findings.ts` — dual reader: schema v1.0.0 (closed hunter enum, category 1-14) and v1.1.0 (open
+  specialty slug, category 1-15, what the engine writes). Shared meaning with the lab's validator.
 - `src/prompt-set.ts` — agent-file parsing + `{{PRIORS}}`/`{{GOTCHAS}}` templating.
 - `src/cli.ts` + `src/preflight.ts` + `src/report.ts` — local mode (B0): the I/O shell, its pure
   decisions (all offline-tested), and the cost band + report renderer.
@@ -156,8 +159,11 @@ over** (found while wiring C5, 2026-08-23):
 4. **Isolation flags are a threat model, not preferences.** `--strict-mcp-config` + codegraph-only,
    `--setting-sources ""`, no Write/Task/Bash for agents, driver owns all file writes. Tests assert them;
    weakening one requires explicit justification.
-5. **Schema compatibility with the lab is sacred** until a coordinated v1.1 bump (tracked in ROADMAP C2).
-   Hunter spec keys are limited to the schema's `reliability|resilience|parity|lifecycle` enum until then.
+5. **Schema compatibility with the lab is sacred.** The coordinated v1.1 bump (ROADMAP C2) LANDED, both
+   sides: `validateFindingV11` takes any specialty slug as `hunter` and category `1-15`, while the v1.0
+   validator stays closed (4 hunter names, `1-14`). So a new hunter key needs no schema change — but any
+   further widening of a shared field still does, on both sides. Category 15 = local logic error (see
+   `docs/research/local-logic-misses.md`); its lab mirror is still owed.
 6. **Every live run costs money → it lands in a ledger** (lab runs in `bench/`; local evals in the
    commit/PR description).
 7. **One variable per experiment**; replicates + N-of-M semantics; attribute misses (hunter/merge/

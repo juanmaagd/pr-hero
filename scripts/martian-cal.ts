@@ -25,6 +25,7 @@ import {
   prNumberFromUrl,
 } from "#compare/martian-adapter";
 import type { FindingsDocument } from "#review/findings";
+import { localReviewSpec } from "#review/preflight";
 import { estimateCost } from "#review/report";
 import {
   DEFAULT_SIZE_GATE,
@@ -38,7 +39,7 @@ import {
   loadQualifiedReview,
 } from "./martian-evidence";
 
-const LAB_AGENTS_DIR =
+const DEFAULT_LAB_AGENTS_DIR =
   "/Users/juanma/Desktop/deep-review/agents/slice3b-lifecycle-v6-clean";
 
 const ROOT = path.join(import.meta.dir, "..");
@@ -62,7 +63,17 @@ const GOTCHAS_PATH = path.join(
 );
 const DEFAULT_REPO = path.join(homedir(), "Desktop", "martian-cal", "cal.com");
 const DEFAULT_RUNS = path.join(homedir(), "Desktop", "martian-cal", "runs");
-const HUNTERS = 3;
+// Display/cost only (never affects which agents actually run — that is
+// localReviewSpec() itself, resolved fresh per CLI subprocess in review()
+// below). Derived rather than a hand-maintained literal so an unconditional
+// hunter added to the wiring — including PRHERO_EXTRA_HUNTERS
+// (odd/tasks/logic-hunter.md T3) — is reflected in the estimate without a
+// second place to remember to update. Excludes the parity hunter: its
+// trigger never matches for Cal.com PRs (comment below), matching
+// martian-evidence.ts's freezeBenchmarkIdentity requiredSteps derivation.
+const HUNTERS = localReviewSpec().agents.filter(
+  (a) => a.role === "hunter" && a.trigger === undefined,
+).length;
 
 interface CaseRow {
   pr: number;
@@ -113,6 +124,9 @@ const all = Bun.argv.includes("--all");
 // dirs byte-for-byte addressable. `run` skips dirs that already hold
 // findings.json, so a new arm never overwrites the baseline.
 const arm = argValue("--arm") ?? "hunters";
+// A new prompt set is a new arm: `--agents` points at a copy of the scored set
+// plus the variable under test. The default stays the frozen baseline set.
+const LAB_AGENTS_DIR = argValue("--agents") ?? DEFAULT_LAB_AGENTS_DIR;
 if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(arm)) {
   fail(`--arm must match [a-zA-Z0-9_-]+, got: ${arm}`);
 }

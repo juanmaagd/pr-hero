@@ -20,7 +20,7 @@ import type {
   RunnerBackend,
 } from "#model/routing";
 import type { SuspicionPrior } from "#review/prompt-set";
-import type { ReviewSpec } from "#review/spec";
+import { type AgentSpec, isSafeSlug, type ReviewSpec } from "#review/spec";
 import {
   ADJUDICATED_TAGS,
   type TriageTag,
@@ -1858,12 +1858,57 @@ export async function preflightAgentsDir(
   }
 }
 
+// EXPERIMENT (odd/tasks/logic-hunter.md T3): benchmark-only hunter fan-out,
+// parsed once at localReviewSpec()'s call site below and INERT when unset —
+// no other caller of this env var exists anywhere in production wiring.
+// Format: "key:file[,key:file...]", e.g.
+// "logic:deep-review-logic.md,reliability-b:deep-review-reliability.md" (a
+// second leg on an EXISTING hunter file, distinguished only by key). Strict
+// on purpose: a malformed value must fail loud rather than silently run
+// fewer hunters than the operator asked for.
+function parseExtraHunters(raw: string | undefined): AgentSpec[] {
+  if (raw === undefined) return [];
+  const trimmed = raw.trim();
+  if (trimmed === "") return [];
+  return trimmed.split(",").map((rawEntry, i) => {
+    const entry = rawEntry.trim();
+    const sep = entry.indexOf(":");
+    if (sep <= 0 || sep === entry.length - 1) {
+      throw new CliUsageError(
+        `PRHERO_EXTRA_HUNTERS[${i}] must be "key:file.md", got: ${JSON.stringify(rawEntry)}`,
+      );
+    }
+    const key = entry.slice(0, sep).trim();
+    const file = entry.slice(sep + 1).trim();
+    if (!isSafeSlug(key)) {
+      throw new CliUsageError(
+        `PRHERO_EXTRA_HUNTERS[${i}].key "${key}" is not a safe slug ` +
+          "(^[a-z0-9]+(?:-[a-z0-9]+)*$, 1-64 chars)",
+      );
+    }
+    if (!file.endsWith(".md") || file.length <= ".md".length) {
+      throw new CliUsageError(
+        `PRHERO_EXTRA_HUNTERS[${i}].file "${file}" must be a ".md" basename`,
+      );
+    }
+    assertBasenameOnly(file, i);
+    return { key, file, role: "hunter" as const };
+  });
+}
+
 // Local mode's wiring: the three unconditional hunters, the conditional
 // parity hunter, and the refuter. Deliberately NOT defaultReviewSpec() — that
 // one omits the lifecycle hunter, and local mode targets the 5-file clean
 // set. Hunter keys stay inside the findings-schema v1.0.0 Hunter enum, which
 // validateReviewSpec enforces.
-export function localReviewSpec(): ReviewSpec {
+//
+// `env` is injectable (defaults to `process.env`) so PRHERO_EXTRA_HUNTERS can
+// be exercised offline without mutating the real environment — same pattern
+// as ui/primitives.ts's styleEnabled(). Unset or empty, this function returns
+// byte-identical output to before T3 (test/review/preflight.test.ts pins it).
+export function localReviewSpec(
+  env: Record<string, string | undefined> = process.env,
+): ReviewSpec {
   return {
     agents: [
       {
@@ -1879,6 +1924,7 @@ export function localReviewSpec(): ReviewSpec {
         role: "hunter",
         trigger: "input",
       },
+      ...parseExtraHunters(env.PRHERO_EXTRA_HUNTERS),
       { key: "refuter", file: "review-refuter.md", role: "refuter" },
     ],
   };

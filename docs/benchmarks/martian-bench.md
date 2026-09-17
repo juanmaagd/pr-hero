@@ -382,6 +382,58 @@ How this arm came to be (one line each, full story in the session):
 
 Surface B: **not run** (stored vendor reviews not bucketed for the ten).
 
+## Cal.com 10 arms of 2026-09-17 (luna): miss attribution, the jev scout, and the `logic` hunter
+
+Four arms, same day, same engine build, same base prompt set (`slice3b-lifecycle-v6-clean`), scout off unless
+stated, summarizer off, parity never fires, no codegraph (matching CI, which installs none). **Hunters and
+refuter ran on `opencode/openai gpt-5.6-luna`**, because the operator routing sends logical `sonnet` there —
+the same silent-routing trap already recorded for an earlier `hunters` re-run. That makes these arms
+comparable to each other and **not** to the 2026-08-19 Claude baseline. Subscription billing: $0.00 cash,
+~1.8–2.8M tokens per arm.
+
+Judge: Surface A, Martian `JUDGE_PROMPT`, Claude Code CLI `sonnet`, `tools: []` — but run from a scratch copy
+with the **evidence-qualification gate bypassed**, because the OpenCode transport left 3–5 of 10 runs per arm
+unqualified ("missing frozen request plan", "incomplete OpenCode capture"). The numbers below therefore score
+`findings.json` directly. Surface B: **not run**.
+
+| arm (mean of 2 runs) | gold TP /41 | FP | H+C /19 | precision | tokens |
+|---|---|---|---|---|---|
+| `luna-control` (3 hunters) | 14.0 | 16 | 11.5 | ~0.47 | 1.78M |
+| `reliability-b` (reliability twice — equal-effort control) | 15.0 | 23 | 11.5 | ~0.39 | 2.47M |
+| `logic` (+ logic hunter, JS/TS checklist — **contaminated, discarded**) | 19.0 | 18 | 14.0 | ~0.51 | 2.47M |
+| `logic-agnostic` (+ logic hunter, 46 CWE checks) | **19.0** | 21.5 | **14.0** (14 in both runs) | ~0.47 | 2.63M |
+| `jev-scout` (Jev as the scout stage, one run) | 18 | 19 | 13 | ~0.49 | 2.33M |
+
+Per run, so the variance is visible: control 14/14 TP and 12/11 H+C; `reliability-b` 16/14 and 14/9; `logic`
+18/20 and 12/16; `logic-agnostic` 18/20 and 14/14.
+
+**What each arm settles.**
+
+- The `logic` hunter's gain is **not** extra effort: `reliability-b` spends the same tokens for +1 TP and +7 FP.
+- It is **not** the contaminated checklist either: replacing it with 46 language-agnostic CWE checks, written
+  by a worker that never saw the goldens, keeps the same TP and the same H+C.
+- It is mostly **consistency**, not new classes: only 1–3 goldens are unique to a logic arm; the rest are
+  goldens the control finds *sometimes*. For a reviewer that runs once per PR, that is the whole point.
+- The Jev scout stage bought recall at the same exchange rate as extra hunter budget, and ~40% of its apparent
+  gain was run-to-run variance. Not adopted; `docs/research/jev-evaluation.md` records the eleven arms behind
+  that call.
+
+**Caveats.** n=10 PRs, 2 replicates, one corpus, and the logic hunter's *method* was designed from the miss
+attribution of these same PRs (its checklist was not). A validation on a corpus that played no part in the
+design is still owed.
+
+**Miss attribution over these arms** — 28 distinct missed goldens, 50 golden×arm pairs; detail in
+`docs/research/local-logic-misses.md`:
+
+| | |
+|---|---|
+| Inside the diff | 26 of 28 |
+| Never drafted by any hunter | 48 of 50 pairs (96%) |
+| Lost to the refuter / to dedupe | 0 / 0 |
+| Local-logic shape | 20 of 28 |
+| Inside some hunter's stated scope | 54% (and 7 of 8 H+C) |
+| Parity hunter fired | 0 of 20 runs |
+
 ## Benchmark qualification gates and metrics (Unit 7)
 
 Only **schema-valid, attributable completed attempts** qualify for resume and

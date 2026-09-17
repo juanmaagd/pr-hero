@@ -242,9 +242,14 @@ export function validateDraftFinding(
     typeof f.id === "string" && f.id.length > 0,
     `draft findings[${index}].id required`,
   );
+  // Drafts are always merged into a v1.1 document: mergeRunEnvelope
+  // (review/findings.ts) stamps SCHEMA_VERSION_V1_1 unconditionally, with no
+  // v1.0 production writer left (odd/tasks/logic-hunter.md T1 verified this
+  // in code before relying on it). So the draft validator accepts the full
+  // v1.1 range, 1-15, category 15 = "local logic error" included.
   must(
-    typeof f.category === "number" && f.category >= 1 && f.category <= 14,
-    `draft findings[${index}].category must be 1-14`,
+    typeof f.category === "number" && f.category >= 1 && f.category <= 15,
+    `draft findings[${index}].category must be 1-15`,
   );
   must(
     typeof f.path === "string" && f.path.length > 0,
