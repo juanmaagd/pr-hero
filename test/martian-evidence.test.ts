@@ -468,6 +468,7 @@ test("positive OpenCode frozen identity supplies the actual installed SDK reader
     "hunter-reliability",
     "hunter-resilience",
     "hunter-lifecycle",
+    "hunter-logic",
   ]);
 });
 

@@ -7,6 +7,9 @@
 import lifecyclePrompt from "../prompts/default/deep-review-lifecycle.md" with {
   type: "file",
 };
+import logicPrompt from "../prompts/default/deep-review-logic.md" with {
+  type: "file",
+};
 import parityPrompt from "../prompts/default/deep-review-parity.md" with {
   type: "file",
 };
@@ -46,6 +49,7 @@ import triageSkill from "../skills/pr-hero-triage/SKILL.md" with {
 
 export const BUNDLED_AGENT_FILES: Record<string, string> = {
   "deep-review-lifecycle.md": lifecyclePrompt,
+  "deep-review-logic.md": logicPrompt,
   "deep-review-parity.md": parityPrompt,
   "deep-review-reliability.md": reliabilityPrompt,
   "deep-review-resilience.md": resiliencePrompt,
