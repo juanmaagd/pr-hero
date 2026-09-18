@@ -821,6 +821,7 @@ describe("assertBasenameOnly", () => {
 describe("agentsDirProblems", () => {
   const CLEAN_SET = [
     "deep-review-lifecycle.md",
+    "deep-review-logic.md",
     "deep-review-parity.md",
     "deep-review-reliability.md",
     "deep-review-resilience.md",
@@ -860,13 +861,14 @@ describe("agentsDirProblems", () => {
 });
 
 describe("localReviewSpec", () => {
-  test("is valid and carries the lifecycle hunter the default spec omits", () => {
+  test("is valid and carries the lifecycle and logic hunters the default spec omits", () => {
     const spec = validateReviewSpec(localReviewSpec());
     const keys = spec.agents.map((a) => a.key);
     expect(keys).toEqual([
       "reliability",
       "resilience",
       "lifecycle",
+      "logic",
       "parity",
       "refuter",
     ]);
@@ -898,6 +900,7 @@ describe("localReviewSpec", () => {
           role: "hunter",
         },
         { key: "lifecycle", file: "deep-review-lifecycle.md", role: "hunter" },
+        { key: "logic", file: "deep-review-logic.md", role: "hunter" },
         {
           key: "parity",
           file: "deep-review-parity.md",
@@ -917,20 +920,21 @@ describe("localReviewSpec", () => {
 
   test("appends one extra hunter before the refuter when PRHERO_EXTRA_HUNTERS names one", () => {
     const spec = localReviewSpec({
-      PRHERO_EXTRA_HUNTERS: "logic:deep-review-logic.md",
+      PRHERO_EXTRA_HUNTERS: "reliability-b:deep-review-reliability.md",
     });
     const keys = spec.agents.map((a) => a.key);
     expect(keys).toEqual([
       "reliability",
       "resilience",
       "lifecycle",
-      "parity",
       "logic",
+      "parity",
+      "reliability-b",
       "refuter",
     ]);
-    expect(spec.agents.find((a) => a.key === "logic")).toEqual({
-      key: "logic",
-      file: "deep-review-logic.md",
+    expect(spec.agents.find((a) => a.key === "reliability-b")).toEqual({
+      key: "reliability-b",
+      file: "deep-review-reliability.md",
       role: "hunter",
     });
     expect(() => validateReviewSpec(spec)).not.toThrow();
@@ -939,16 +943,17 @@ describe("localReviewSpec", () => {
   test("appends every extra hunter in order for a comma-separated list", () => {
     const spec = localReviewSpec({
       PRHERO_EXTRA_HUNTERS:
-        "logic:deep-review-logic.md,reliability-b:deep-review-reliability.md",
+        "reliability-b:deep-review-reliability.md,resilience-b:deep-review-resilience.md",
     });
     const keys = spec.agents.map((a) => a.key);
     expect(keys).toEqual([
       "reliability",
       "resilience",
       "lifecycle",
-      "parity",
       "logic",
+      "parity",
       "reliability-b",
+      "resilience-b",
       "refuter",
     ]);
     expect(spec.agents.find((a) => a.key === "reliability-b")).toEqual({
@@ -961,11 +966,11 @@ describe("localReviewSpec", () => {
 
   test("tolerates surrounding whitespace in the env value", () => {
     const spec = localReviewSpec({
-      PRHERO_EXTRA_HUNTERS: " logic : deep-review-logic.md ",
+      PRHERO_EXTRA_HUNTERS: " reliability-b : deep-review-reliability.md ",
     });
-    expect(spec.agents.find((a) => a.key === "logic")).toEqual({
-      key: "logic",
-      file: "deep-review-logic.md",
+    expect(spec.agents.find((a) => a.key === "reliability-b")).toEqual({
+      key: "reliability-b",
+      file: "deep-review-reliability.md",
       role: "hunter",
     });
   });

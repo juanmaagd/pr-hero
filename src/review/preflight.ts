@@ -1896,11 +1896,11 @@ function parseExtraHunters(raw: string | undefined): AgentSpec[] {
   });
 }
 
-// Local mode's wiring: the three unconditional hunters, the conditional
+// Local mode's wiring: the four unconditional hunters, the conditional
 // parity hunter, and the refuter. Deliberately NOT defaultReviewSpec() — that
-// one omits the lifecycle hunter, and local mode targets the 5-file clean
-// set. Hunter keys stay inside the findings-schema v1.0.0 Hunter enum, which
-// validateReviewSpec enforces.
+// one omits the lifecycle and logic hunters, and local mode targets the 6-file
+// clean set. Hunter keys stay inside the findings-schema v1.1.0 Hunter/specialty
+// set, which validateReviewSpec enforces.
 //
 // `env` is injectable (defaults to `process.env`) so PRHERO_EXTRA_HUNTERS can
 // be exercised offline without mutating the real environment — same pattern
@@ -1918,6 +1918,7 @@ export function localReviewSpec(
       },
       { key: "resilience", file: "deep-review-resilience.md", role: "hunter" },
       { key: "lifecycle", file: "deep-review-lifecycle.md", role: "hunter" },
+      { key: "logic", file: "deep-review-logic.md", role: "hunter" },
       {
         key: "parity",
         file: "deep-review-parity.md",

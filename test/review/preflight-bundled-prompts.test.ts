@@ -113,7 +113,7 @@ describe("Repo hygiene and O-15 productization scan", () => {
       (f) => f.endsWith(".md") && f !== "PROVENANCE.md",
     );
 
-    expect(files.length).toBe(5);
+    expect(files.length).toBe(6);
 
     const forbiddenPatterns = [
       /deep-review/i,
@@ -185,6 +185,7 @@ function compiledAssets(
     "review-refuter.md": `${EMBEDDED_ROOT}/review-refuter-qkhw7k00.md`,
     "deep-review-parity.md": `${EMBEDDED_ROOT}/deep-review-parity-8f3ka100.md`,
     "deep-review-lifecycle.md": `${EMBEDDED_ROOT}/deep-review-lifecycle-p0zz2200.md`,
+    "deep-review-logic.md": `${EMBEDDED_ROOT}/deep-review-logic-zz11xx00.md`,
     "deep-review-resilience.md": `${EMBEDDED_ROOT}/deep-review-resilience-mm41xx00.md`,
     "deep-review-reliability.md": `${EMBEDDED_ROOT}/deep-review-reliability-7bq9dd00.md`,
   },

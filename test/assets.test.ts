@@ -21,7 +21,7 @@ describe("resolveEngineAssets", () => {
     expect(existsSync(assets.summarizerPromptPath)).toBe(true);
 
     // Bundled agent files all exist on disk
-    expect(Object.keys(assets.bundledAgentFiles).length).toBe(5);
+    expect(Object.keys(assets.bundledAgentFiles).length).toBe(6);
     for (const [logicalName, filePath] of Object.entries(
       assets.bundledAgentFiles,
     )) {
@@ -44,6 +44,7 @@ describe("resolveEngineAssets", () => {
     expect(Object.keys(assets.ciSetupSkillFiles).sort()).toEqual(
       [
         "SKILL.md",
+        "assets/admission-config.example.json",
         "assets/workflow.yml",
         "references/ci-admission.md",
         "references/opencode-ci.md",
@@ -86,7 +87,7 @@ describe("resolveEngineAssets", () => {
     expect(manifestEntries.sort()).toEqual(onDiskEntries.sort());
   });
 
-  test("manifest-loaded set satisfies localReviewSpec() (all five logical names, nothing extra)", () => {
+  test("manifest-loaded set satisfies localReviewSpec() (all six logical names, nothing extra)", () => {
     const assets = resolveEngineAssets();
     const spec = localReviewSpec();
     const specFiles = spec.agents.map((a) => a.file).sort();
