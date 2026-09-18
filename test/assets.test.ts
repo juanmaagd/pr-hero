@@ -44,6 +44,7 @@ describe("resolveEngineAssets", () => {
     expect(Object.keys(assets.ciSetupSkillFiles).sort()).toEqual(
       [
         "SKILL.md",
+        "assets/admission-config.example.json",
         "assets/workflow.yml",
         "references/ci-admission.md",
         "references/opencode-ci.md",

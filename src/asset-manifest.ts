@@ -22,6 +22,9 @@ import refuterPrompt from "../prompts/default/review-refuter.md" with {
 
 import scoutPrompt from "../prompts/scout.md" with { type: "file" };
 import summarizerPrompt from "../prompts/summarizer.md" with { type: "file" };
+import ciSetupAdmissionExample from "../skills/pr-hero-ci-setup/assets/admission-config.example.json" with {
+  type: "file",
+};
 import ciSetupWorkflow from "../skills/pr-hero-ci-setup/assets/workflow.yml" with {
   type: "file",
 };
@@ -59,6 +62,8 @@ export const TRIAGE_SKILL_FILES: Record<string, string> = {
 
 export const CI_SETUP_SKILL_FILES: Record<string, string> = {
   "SKILL.md": ciSetupSkill,
+  "assets/admission-config.example.json":
+    ciSetupAdmissionExample as unknown as string,
   "assets/workflow.yml": ciSetupWorkflow,
   "references/ci-admission.md": ciSetupAdmissionRef,
   "references/opencode-ci.md": ciSetupOpenCodeRef,
