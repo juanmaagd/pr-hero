@@ -37,6 +37,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read # admission gate lists this workflow's past runs
   contents: read # actions/checkout
   pull-requests: write # inline comments + review + step summary
   issues: write # resolving/replying on review threads (GitHub models PR conversations as issues)
@@ -244,6 +245,8 @@ The workflow's `permissions:` block needs four scopes, each for a specific reaso
   conversation as an issue thread, so this scope is required even though nothing here touches an issue.
 - **`statuses: write`** — updating the PR commit status context (pending, success, error).
 - **`checks: write`** — durable CI admission ledger (attempt reservations and terminal outcomes on Check Runs).
+- **`actions: read`** — the admission gate lists this workflow's past runs (`gh run list`). A public
+  repo serves that without the scope, so a missing grant only fails on a private repo, with HTTP 403.
 
 ## Security considerations
 
@@ -371,7 +374,7 @@ ledger — it is an explicit operator override, not a silent retry loop.
 ### Check Runs ledger
 
 Admission attempts are persisted as Check Runs named `pr-hero/ci-admission` on the reviewed commit.
-The workflow needs **`checks: write`** in addition to the four scopes listed above so pr-hero can
+The workflow needs **`checks: write`** and **`actions: read`** in addition to the four scopes listed above so pr-hero can
 reserve attempts before provider spend and record failed/cancelled outcomes. PR comments remain
 presentation only; the Check Run ledger is authoritative.
 
