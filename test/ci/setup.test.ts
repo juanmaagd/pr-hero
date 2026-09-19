@@ -67,6 +67,32 @@ describe("generateCiWorkflowTemplate (pure)", () => {
     expect(parsed.permissions.contents).toBe("read");
   });
 
+  // The CI admission gate lists this workflow's past runs (gh run list) to
+  // build its attempt ledger. On a public repo that endpoint is readable
+  // without the scope, so our own dogfooding never failed; on a private
+  // consumer repo the scoped token gets HTTP 403 (issue #266).
+  test("grants actions: read for the admission gate's gh run list", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      permissions: Record<string, string>;
+    };
+    expect(parsed.permissions.actions).toBe("read");
+  });
+
+  test("the skill's bundled workflow asset grants the same permissions", async () => {
+    const asset = Bun.YAML.parse(
+      await Bun.file(
+        new URL(
+          "../../skills/pr-hero-ci-setup/assets/workflow.yml",
+          import.meta.url,
+        ),
+      ).text(),
+    ) as { permissions: Record<string, string> };
+    const generated = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      permissions: Record<string, string>;
+    };
+    expect(asset.permissions).toEqual(generated.permissions);
+  });
+
   test("checks out with fetch-depth: 0", () => {
     const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
       jobs: { review: { steps: Array<Record<string, unknown>> } };

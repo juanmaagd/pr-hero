@@ -49,6 +49,7 @@ Skipped and manual-required posts include admission metadata in the step summary
 
 - Check Runs named `pr-hero/ci-admission` on the reviewed commit.
 - Requires workflow permission **`checks: write`** (template includes it).
+- Requires **`actions: read`** too: the gate lists this workflow's past runs, which a private repo refuses without it (HTTP 403).
 - PR comments are presentation; the ledger counts failed/cancelled attempts.
 
 ## Rollout (recommended)
