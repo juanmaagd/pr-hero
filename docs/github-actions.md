@@ -237,7 +237,7 @@ install and still starts.
 
 ## Token permissions
 
-The workflow's `permissions:` block needs four scopes, each for a specific reason:
+The workflow's `permissions:` block needs six scopes, each for a specific reason:
 
 - **`contents: read`** — `actions/checkout` needs to read repository contents.
 - **`pull-requests: write`** — posting inline findings, the summary review, and the step summary.
@@ -374,7 +374,7 @@ ledger — it is an explicit operator override, not a silent retry loop.
 ### Check Runs ledger
 
 Admission attempts are persisted as Check Runs named `pr-hero/ci-admission` on the reviewed commit.
-The workflow needs **`checks: write`** and **`actions: read`** in addition to the four scopes listed above so pr-hero can
+The workflow needs **`checks: write`** (listed under [Token permissions](#token-permissions)) so pr-hero can
 reserve attempts before provider spend and record failed/cancelled outcomes. PR comments remain
 presentation only; the Check Run ledger is authoritative.
 
