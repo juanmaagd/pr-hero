@@ -18,6 +18,7 @@ import {
 } from "../src/doctor";
 import type { ExactBindingCapabilityReport } from "../src/execution/contracts";
 import { buildDoctorRoutePlan } from "../src/production-runtime";
+import { OpenCodeSdkUnavailableError } from "../src/transports/opencode-admission";
 
 // These fixtures fake the MACHINE's filesystem. The engine's own bundle is not
 // on it — in a compiled binary the prompts live inside the executable — so a
@@ -515,6 +516,96 @@ describe("doctor tri-state evaluation", () => {
           env: { ANTHROPIC_API_KEY: "sk-test" },
         },
         produceCapabilityReport: async () => {
+          throw new Error("boom");
+        },
+      });
+
+      expect(report.overall).toBe("blocking");
+      const providerCheck = report.checks.find((c) => c.name === "provider");
+      expect(providerCheck?.severity).toBe("blocking");
+      expect(providerCheck?.message).toContain("boom");
+    });
+
+    // fix/opencode-sdk-absent-degraded: a compiled binary run from a directory
+    // with no `@opencode-ai/sdk` throws OpenCodeSdkUnavailableError, not the
+    // generic capability-report failure above. Reporting that as `blocking`
+    // told a Claude-only setup its whole environment was broken; it is
+    // `degraded` because only the OpenCode route is affected.
+    test("SDK-absent producer degrades instead of blocking (produceCapabilityReport)", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        produceCapabilityReport: async () => {
+          throw new OpenCodeSdkUnavailableError(
+            "@opencode-ai/sdk is not resolvable from this installation",
+          );
+        },
+      });
+
+      expect(report.overall).not.toBe("blocking");
+      const providerCheck = report.checks.find((c) => c.name === "provider");
+      expect(providerCheck?.severity).toBe("degraded");
+      expect(providerCheck?.message).toContain(
+        "@opencode-ai/sdk is not resolvable",
+      );
+      expect(providerCheck?.hint).toBeDefined();
+    });
+
+    test("SDK-absent producer degrades instead of blocking (probeExactBindings)", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        probeExactBindings: async () => {
+          throw new OpenCodeSdkUnavailableError(
+            "@opencode-ai/sdk is not resolvable from this installation",
+          );
+        },
+      });
+
+      expect(report.overall).not.toBe("blocking");
+      const providerCheck = report.checks.find((c) => c.name === "provider");
+      expect(providerCheck?.severity).toBe("degraded");
+      expect(providerCheck?.message).toContain(
+        "@opencode-ai/sdk is not resolvable",
+      );
+      expect(providerCheck?.hint).toBeDefined();
+    });
+
+    test("a throwing probeExactBindings that is NOT SDK-absence still fails loud as blocking", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        probeExactBindings: async () => {
           throw new Error("boom");
         },
       });
