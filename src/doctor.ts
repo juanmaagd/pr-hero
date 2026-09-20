@@ -92,11 +92,18 @@ export const PROVIDER_HINTS: Record<string, string> = {
 
 // fix/opencode-sdk-absent-degraded: OpenCodeSdkUnavailableError means
 // "@opencode-ai/sdk is not resolvable here" (a compiled binary run without
-// its node_modules), not "the environment is broken". Only the OpenCode
-// route is affected, so this stays `degraded`; every other capability-probe
-// failure keeps today's `blocking` treatment unchanged.
+// its node_modules), not "the environment is broken". Only OpenCode-backed
+// steps cannot execute, so this stays `degraded`; every other
+// capability-probe failure keeps today's `blocking` treatment unchanged.
+//
+// The hint must not claim the rest of the plan was verified. resolveFrozenBindings
+// (production-runtime.ts) awaits the OpenCode identity observation inside the
+// same loop that resolves every other route, with no per-step isolation, so
+// the rejection escapes before gateBindingsCapabilities ever runs: the probe
+// produces ZERO capability reports, Claude-backed steps included. Degraded
+// here means "unverified", not "verified fine".
 const OPENCODE_SDK_UNAVAILABLE_HINT =
-  "Install @opencode-ai/sdk where this binary can resolve it (e.g. alongside the project's node_modules), or route the affected steps through Claude instead — Claude-only routes are unaffected.";
+  "Install @opencode-ai/sdk where this binary can resolve it (e.g. alongside the project's node_modules), or route the affected steps through Claude instead. The probe stops at the first OpenCode step, so this run verified no capabilities for ANY route in the plan — Claude-backed steps are unverified here, not confirmed healthy.";
 
 function pushCapabilityProbeFailure(
   checks: DoctorCheckItem[],

@@ -590,6 +590,37 @@ describe("doctor tri-state evaluation", () => {
       expect(providerCheck?.hint).toBeDefined();
     });
 
+    // The probe has no per-step isolation: the OpenCode identity observation
+    // is awaited inside the loop that resolves every route, so the rejection
+    // escapes before any capability report is built. A hint that told the
+    // operator their Claude routes were unaffected claimed a verification
+    // this run never performed (PR #263 review).
+    test("the SDK-absent hint does not claim the rest of the plan was verified", async () => {
+      const report = await runDoctor({
+        cwd: "/repo",
+        home: "/home/user",
+        exists: (p) => p === "/repo/.prhero/gotchas.md",
+        readFile: (p) =>
+          p === "/repo/.prhero/gotchas.md"
+            ? "## Gotchas\nContent"
+            : bundledPromptBody(p),
+        checkToolsOptions: {
+          which: (bin) => `/bin/${bin}`,
+          exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+        },
+        probeExactBindings: async () => {
+          throw new OpenCodeSdkUnavailableError(
+            "@opencode-ai/sdk is not resolvable from this installation",
+          );
+        },
+      });
+
+      const hint = report.checks.find((c) => c.name === "provider")?.hint ?? "";
+      expect(hint).toContain("unverified");
+      expect(hint).not.toContain("unaffected");
+    });
+
     test("a throwing probeExactBindings that is NOT SDK-absence still fails loud as blocking", async () => {
       const report = await runDoctor({
         cwd: "/repo",
