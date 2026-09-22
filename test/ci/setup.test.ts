@@ -13,7 +13,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  CI_FORCE_WORKFLOW_RELATIVE_PATH,
   CI_WORKFLOW_RELATIVE_PATH,
+  generateCiForceWorkflowTemplate,
   generateCiWorkflowTemplate,
   materializeCiOpenCodeData,
   OWN_CI_WORKFLOW_OPTIONS,
@@ -57,6 +59,12 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       "synchronize",
       "reopened",
     ]);
+  });
+
+  test("the automatic workflow does not listen for comments", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).not.toContain("issue_comment:");
+    expect(template).not.toContain("workflow_dispatch:");
   });
 
   test("grants pull-requests: write and contents: read", () => {
@@ -573,6 +581,11 @@ describe("runCiSetup (impure edge)", () => {
       "utf8",
     );
     expect(written).toBe(generateCiWorkflowTemplate());
+    const forceWritten = await readFile(
+      path.join(dir, CI_FORCE_WORKFLOW_RELATIVE_PATH),
+      "utf8",
+    );
+    expect(forceWritten).toBe(generateCiForceWorkflowTemplate());
   });
 
   test("refuses to overwrite an existing workflow without --force", async () => {

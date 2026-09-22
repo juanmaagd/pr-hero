@@ -1,27 +1,29 @@
 ---
 name: pr-hero-ci-setup
-description: "Trigger: setup CI, add pr-hero to CI, GitHub Actions review, OpenCode, OPENCODE_AUTH_JSON, PRHERO_ROUTING, DeepSeek, admission policy, configure CI workflow. Scaffolds workflow, secrets, routing, and admission config."
+description: "Trigger: setup CI, add pr-hero to CI, GitHub Actions review, OpenCode, OPENCODE_AUTH_JSON, PRHERO_ROUTING, DeepSeek, admission policy, configure CI workflow, retrigger, force review, skipped review, pr-hero-force. Scaffolds both workflows, secrets, routing, and admission config."
 license: Apache-2.0
 metadata:
   author: juanmaagd
-  version: "2.1"
+  version: "2.2"
 ---
 
 ## Activation Contract
 
 Load when the user asks to:
-- Add `pr-hero` to GitHub Actions CI, scaffold `.github/workflows/pr-hero.yml`, or configure secrets.
+- Add `pr-hero` to GitHub Actions CI, scaffold `.github/workflows/pr-hero.yml` and `.github/workflows/pr-hero-force.yml`, or configure secrets.
 - Configure **OpenCode** in CI (`OPENCODE_AUTH_JSON`, `PRHERO_ROUTING`, DeepSeek, mixed Claude+OpenCode).
 - Tune CI spend / re-review / admission policy.
+- Retrigger a skipped CI review (size, admission, or budget) without running the review locally.
 
 ## Hard Rules
 
 - **Zero secret leakage:** NEVER print, `cat`, commit, or log API keys, tokens, or `OPENCODE_AUTH_JSON`. Reference `${{ secrets.* }}` names only. Inspect `auth.json` **keys and `type` only**.
 - **No per-provider GitHub secrets:** Do not create `OPENAI_API_KEY` or `DEEPSEEK_API_KEY`. One secret `OPENCODE_AUTH_JSON` (whole store or a CI-only subset) + public variable `PRHERO_ROUTING`. Cap 48 KB each.
-- **Deterministic scaffolding:** Run `pr-hero setup --ci` (or `pr-hero ci init`). Do not fabricate the workflow from memory. Fallback: copy `assets/workflow.yml`.
+- **Deterministic scaffolding:** Run `pr-hero setup --ci` (or `pr-hero ci init`). It writes both workflow files. Do not fabricate either from memory. Fallback: copy `assets/workflow.yml` and `assets/workflow-force.yml`.
 - **`fetch-depth: 0` is mandatory** on `actions/checkout@v4`.
 - **Assistant posture:** pr-hero is a reviewer, not a merge gate (`exit 0` on findings).
 - **Required permissions:** `contents: read`, `pull-requests: write`, `issues: write`, `statuses: write`, **`checks: write`**, **`actions: read`** (the admission gate lists past runs; a private repo 403s without it). Template in `assets/workflow.yml` includes all six.
+- **Retrigger is `gh workflow run pr-hero-force.yml -f pr=<n>`.** That dispatches GitHub Actions. The review runs on the runner. Do not run `pr-hero review --force` locally when the review should happen in CI. `gh run rerun` on `pr-hero.yml` re-evaluates the gates and does not force. `workflow_dispatch` is invisible until `pr-hero-force.yml` exists on the repository **default branch** (for this repo, `main`, not `dev`).
 - **Admission config is repo-level:** Write `.prhero/config.json` on the default branch. That file **rejects** `routing`. Person-layer only (`$HOME/.prhero/config.json` on the runner, from `vars.PRHERO_ROUTING`).
 - **`.prheroignore` is read from the base ref, not the PR branch, in CI.**
 - **OpenCode is DATA:** quoted `routing: "${{ vars.PRHERO_ROUTING }}"` + `opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}`. Unset both = Claude CI. Never a per-provider Action input. Never echo the auth blob.
@@ -45,7 +47,7 @@ Load when the user asks to:
 | First-time admission | Recommend `ci_admission_observe_only: true` — `references/ci-admission.md` |
 | User wants max CI spend | Lower `ci_max_attempts` and/or raise `ci_rereview_min_score` |
 | Custom bot posts findings | Add login to `ci_trusted_actors` |
-| Budget exhausted on PR | Guide `pr-hero review --pr <n> --post --force` |
+| CI skipped (size, admission, or budget) | Dispatch `pr-hero-force.yml` with `gh workflow run pr-hero-force.yml -f pr=<n>`. The review runs on GitHub Actions. Do not run `pr-hero review --force` locally for this. |
 
 ## Admission Interview (ask before writing config)
 
@@ -64,7 +66,7 @@ Use `assets/admission-config.example.json`. Details: `references/ci-admission.md
 1. **Inspect repo:** `git rev-parse --is-inside-work-tree`, `git remote get-url origin`, `gh auth status`.
 2. **Credential path:** Claude-only → skip OpenCode. OpenCode or mix → **read `references/opencode-ci.md`** and execute it (metadata inspect, CI-only blob, secret, routing with `modelSnapshot`).
 3. **Claude secret (if used):** `gh secret set CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (secure input, never print).
-4. **Workflow:** `pr-hero setup --ci`. Confirm `checks: write` and `actions: read`, credentials-job union includes `OPENCODE_AUTH_JSON`, quoted `routing` / `opencode-auth`. `--force` if an old template lacks them.
+4. **Workflow:** `pr-hero setup --ci`. It writes both `.github/workflows/pr-hero.yml` and `.github/workflows/pr-hero-force.yml`. Confirm `checks: write` and `actions: read`, credentials-job union includes `OPENCODE_AUTH_JSON`, quoted `routing` / `opencode-auth`. `--force` if an old template lacks them.
 5. **Admission config:** Interview above. `.prhero/config.json` on the default branch. **No `routing` key.** `pr-hero config` to verify.
 6. **Verify:** `pr-hero doctor`. `git status`. Confirm no openai `type:"api"` blob, no echoed auth, `modelSnapshot` matches `opencode models` when OpenCode is on.
 7. **Deploy:** Offer commit. Open a **same-repo** test PR (forks skip).
@@ -74,14 +76,15 @@ Use `assets/admission-config.example.json`. Details: `references/ci-admission.md
 Report:
 - Secret status (set or manual link). Names only: which of `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `OPENCODE_AUTH_JSON` exist. Never values.
 - OpenCode (if in scope): `OPENCODE_AUTH_JSON` set; blob providers **names + type only**; whether the blob was stripped to one CI provider; `PRHERO_ROUTING` JSON (no credentials); `modelSnapshot` vs `opencode models`.
-- Workflow path and whether `checks: write`, `actions: read`, credentials union, and quoted `routing` / `opencode-auth` are present.
+- Workflow paths (`pr-hero.yml` and `pr-hero-force.yml`) and whether `checks: write`, `actions: read`, credentials union, and quoted `routing` / `opencode-auth` are present.
 - Admission policy (mode, attempts, observe-only). Confirm repo `.prhero/config.json` has no `routing` key.
 - `pr-hero doctor` / `pr-hero config` outcome.
-- Next steps: push, same-repo test PR, when to turn off observe-only, override command if manual-required.
+- Next steps: push, same-repo test PR, when to turn off observe-only. If CI skipped, the override is `gh workflow run pr-hero-force.yml -f pr=<n>` after that file is on the default branch.
 
 ## References
 
-- `assets/workflow.yml` — canonical workflow template.
+- `assets/workflow.yml` — automatic review workflow (`pull_request`).
+- `assets/workflow-force.yml` — dispatch-only force workflow (`workflow_dispatch`, `force: true`).
 - `assets/admission-config.example.json` — starter `.prhero/config.json`.
 - `references/ci-admission.md` — admission keys, modes, rollout, ledger.
 - `references/opencode-ci.md` — OpenCode secret/variable procedure, routing, pin, openai vs deepseek.

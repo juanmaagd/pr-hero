@@ -71,6 +71,7 @@ describe("doctor tri-state evaluation", () => {
           p.endsWith("SKILL.md") ||
           p.endsWith("adjudicator.md") ||
           p.endsWith("workflow.yml") ||
+          p.endsWith("workflow-force.yml") ||
           p.endsWith("admission-config.example.json") ||
           p.endsWith("ci-admission.md") ||
           p.endsWith("opencode-ci.md")

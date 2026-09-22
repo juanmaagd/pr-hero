@@ -124,10 +124,11 @@ export async function resolvePrPlanAndConfirm(params: {
   // (unrendered) plan's number can never have disagreed. `estimate.high`,
   // not `.low`: report.ts's own doctrine (~97-98) is that every recorded
   // overrun was an UNDER-estimate, so the generous side is the cheap one
-  // to be wrong on. Unlike the size gate above, this is NOT gated on
-  // `--force` — `--force`'s own doc comment (preflight.ts CliOptions)
-  // scopes it to the size gate's "is this diff too big" question, not
-  // spend. Tradeoff accepted: unlike the size gate, this runs AFTER
+  // to be wrong on. `force` is passed through: a `/pr-hero review` comment
+  // sets `--force`, and that one run clears this ceiling the same way it
+  // clears the size gate and admission. The interactive cost-band prompt
+  // is a different question and still requires `--yes` on its own.
+  // Unlike the size gate, this runs AFTER
   // createPrRunDir (step 6), so a budget skip can leave a near-empty run
   // dir behind — the tidiness rationale that placement protects against
   // (the watcher's attempt counter) does not apply to an ephemeral CI
@@ -146,6 +147,7 @@ export async function resolvePrPlanAndConfirm(params: {
       estimatedCostUsd: estimate.high,
       budgetUsd: params.ciBudgetCeiling.budgetUsd,
       prNumber: params.prNumber,
+      force: params.options.force,
     });
     if (budgetPlan !== null) {
       await settleCiAdmissionLedger(

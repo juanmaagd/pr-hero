@@ -66,6 +66,7 @@ import type { PrCommentDelta } from "#review/report";
 import type { SizeGateVerdict } from "#review/size-gate";
 import { CliUsageError } from "../errors";
 import { envBillsMetered } from "../execution/usage-normalized";
+import { ciForceReviewDispatchLine } from "./force-comment";
 import {
   type CiOutputs,
   type CiSummaryData,
@@ -183,8 +184,10 @@ function buildSizeSkipComment(data: SkipSizeSummary): string {
       `(max ${data.maxChangedLines} lines / ${data.maxChangedFiles} files).`,
     "",
     "pr-hero did not run to avoid reviewing an unbounded diff. Split the " +
-      "PR or raise `max-changed-lines` / `max-changed-files` to review it " +
-      "anyway.",
+      "PR or raise `max-changed-lines` / `max-changed-files` to change the " +
+      "limit for later pushes.",
+    "",
+    ciForceReviewDispatchLine(data.prNumber),
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -199,6 +202,8 @@ function buildBudgetSkipComment(data: SkipBudgetSummary): string {
     "",
     "pr-hero did not run to stay within the configured `--budget-usd` " +
       "ceiling.",
+    "",
+    ciForceReviewDispatchLine(data.prNumber),
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -499,8 +504,13 @@ export function planCiSizeSkip(
 }
 
 export function planCiBudgetSkip(
-  input: CiBudgetGateSkipInput,
+  input: CiBudgetGateSkipInput & { force: boolean },
 ): CiGateSkipPlan | null {
+  // CI `--force` is the `/pr-hero review` comment. It answers "run this one
+  // anyway" for every CI skip, including the spend ceiling. Outside that
+  // explicit comment the ceiling still holds. Local `--force` never reaches
+  // here: the caller only invokes this plan when `isCi` is set.
+  if (input.force) return null;
   const skip = ciBudgetGateSkip(input);
   if (skip === null) return null;
   return {
@@ -534,8 +544,9 @@ function buildCoverageSkipComment(data: SkipCoverageSummary): string {
       `Attempts on this PR: ${data.reviewCount}/${data.maxAttempts}.`,
     "",
     "The existing review comment still describes the last head pr-hero " +
-      "reviewed. Push a fix for the posted findings, or run " +
-      "`pr-hero review --pr <n> --post --force` locally to override.",
+      "reviewed.",
+    "",
+    ciForceReviewDispatchLine(data.prNumber),
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -552,8 +563,9 @@ function buildManualRequiredComment(data: ManualRequiredSummary): string {
     `Attempts on this PR: ${data.reviewCount}/${data.maxAttempts}.`,
     "",
     "The existing review comment still describes the last head pr-hero " +
-      "reviewed. To force another review, run " +
-      "`pr-hero review --pr <n> --post --force` locally.",
+      "reviewed.",
+    "",
+    ciForceReviewDispatchLine(data.prNumber),
   ];
   return `${lines.join("\n")}\n`;
 }

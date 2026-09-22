@@ -744,18 +744,10 @@ export function ciReviewManualRequiredDetail(
   verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>,
 ): string {
   const { reason, reviewCount, maxAttempts } = verdict;
-  const override =
-    "Run `pr-hero review --pr <n> --post --force` locally to override.";
   switch (reason) {
     case "max-attempts-exhausted":
-      return (
-        `automatic review budget exhausted (${reviewCount}/${maxAttempts} attempts on this PR). ` +
-        override
-      );
+      return `automatic review budget exhausted (${reviewCount}/${maxAttempts} attempts on this PR).`;
     case "manual-only-policy":
-      return (
-        "ci_review_policy is manual_only and this PR already has a review. " +
-        override
-      );
+      return "ci_review_policy is manual_only and this PR already has a review.";
   }
 }
