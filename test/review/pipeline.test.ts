@@ -2261,7 +2261,9 @@ describe("assembly", () => {
     await runPipeline(input, {
       runner: {
         async run(): Promise<StepResult> {
-          throw new Error("Failed to fetch models.dev sk-secretkeyvalue");
+          throw new Error(
+            "Failed to fetch models.dev sk-secretkeyvalue github_pat_abcdefghijklmnopqrstuvwxyz secret=hunter2",
+          );
         },
       },
     });
@@ -2280,6 +2282,10 @@ describe("assembly", () => {
       expect(step.failure).toContain("Failed to fetch models.dev");
       expect(step.failure).toContain("[REDACTED]");
       expect(step.failure).not.toContain("sk-secretkeyvalue");
+      expect(step.failure).not.toContain(
+        "github_pat_abcdefghijklmnopqrstuvwxyz",
+      );
+      expect(step.failure).not.toContain("hunter2");
       expect(step.attemptLogPath).toBeUndefined();
     }
   });

@@ -113,6 +113,7 @@ import {
 } from "../execution/step-artifacts";
 import type { NormalizedUsage } from "../execution/usage-normalized";
 import { sumNormalizedUsage } from "../execution/usage-normalized";
+import { redactEvidenceText } from "../security/evidence-redaction";
 import { redactDiagnostic } from "../security/redact";
 import {
   admitDiversityRoutePlan,
@@ -2837,7 +2838,12 @@ const FAILURE_REASON_MAX = 500;
 
 function redactFailureReason(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
-  const redacted = redactDiagnostic(raw).replace(/\s+/g, " ").trim();
+  // Same two layers as writeAttemptLog (harness.ts): redactDiagnostic misses
+  // Cookie/Authorization headers, secret=, and github_pat_ tokens, and this
+  // field is now a persisted copy of that same stderr.
+  const redacted = redactEvidenceText(redactDiagnostic(raw))
+    .replace(/\s+/g, " ")
+    .trim();
   const capped = redacted.slice(0, FAILURE_REASON_MAX);
   return capped.length > 0 ? capped : "step failed before its first attempt";
 }
