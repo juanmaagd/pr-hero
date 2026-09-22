@@ -113,6 +113,8 @@ import {
 } from "../execution/step-artifacts";
 import type { NormalizedUsage } from "../execution/usage-normalized";
 import { sumNormalizedUsage } from "../execution/usage-normalized";
+import { redactEvidenceText } from "../security/evidence-redaction";
+import { redactDiagnostic } from "../security/redact";
 import {
   admitDiversityRoutePlan,
   admitRoutePlan,
@@ -803,6 +805,11 @@ interface StepMeta {
   // pipeline.json". Absent exactly when `StepResult.reservations` is: no
   // `SpendLedger` configured on the harness, or no attempt ever reserved.
   reservations?: SpendReservation[];
+  // #199. Why a step died before its first attempt. Absent once a session
+  // ran: that attempt already has a log and a receipt, and this field must
+  // not become a second, shorter copy of them. Redacted — a transport error
+  // can carry a token — and capped.
+  failure?: string;
   // D2 PR3: route attached at step construction
   route?: ResolvedModelRoute;
 }
@@ -1433,8 +1440,8 @@ async function execute(
       };
       summarizerMeta = stepMeta(summarizerSpec);
       state.steps.push(summarizerMeta);
-    } catch {
-      recordStepFailure(summarizerMeta);
+    } catch (error) {
+      recordStepFailure(summarizerMeta, error);
       state.steps.push(summarizerMeta);
       state.perAgent.summary = failedAgentEntry();
       summarizerConstructionFailed = true;
@@ -1505,9 +1512,9 @@ async function execute(
           durationMs: Date.now() - startedAt,
         });
       },
-      () => {
+      (error) => {
         state.perAgent.summary = failedAgentEntry();
-        if (summarizerMeta) recordStepFailure(summarizerMeta);
+        if (summarizerMeta) recordStepFailure(summarizerMeta, error);
         emit(deps, {
           kind: "summarizer-finished",
           ok: false,
@@ -1555,7 +1562,12 @@ async function execute(
     const outcome = settled[i];
     if (!outcome || outcome.status === "rejected") {
       state.perAgent[entry.agent.key] = failedAgentEntry();
-      recordStepFailure(entry.meta);
+      recordStepFailure(
+        entry.meta,
+        outcome?.status === "rejected"
+          ? outcome.reason
+          : "hunter step produced no result",
+      );
       state.hunterFailures++;
       state.partial = true;
       if (diversityCtx.enabled && diversityCtx.plan) {
@@ -1958,7 +1970,12 @@ async function runRefuter(
       state.usageTotal = sumUsage(state.usageTotal, result.usage);
       accumulateUsageV2(state, result);
     } else {
-      recordStepFailure(entry.meta);
+      recordStepFailure(
+        entry.meta,
+        outcome?.status === "rejected"
+          ? outcome.reason
+          : "refuter step produced no result",
+      );
     }
     if (result?.status === "ok") {
       for (const r of (result.output as RefuterResult).results) {
@@ -2128,7 +2145,12 @@ async function runVerify(
       state.usageTotal = sumUsage(state.usageTotal, result.usage);
       accumulateUsageV2(state, result);
     } else {
-      recordStepFailure(entry.meta);
+      recordStepFailure(
+        entry.meta,
+        outcome?.status === "rejected"
+          ? outcome.reason
+          : "verifier step produced no result",
+      );
     }
     if (result?.status === "ok") {
       for (const r of (result.output as RefuterResult).results) {
@@ -2253,7 +2275,7 @@ async function runScout(
   state.scout = record;
   const startedAt = Date.now();
 
-  const abandon = (): string => {
+  const abandon = (error?: unknown): string => {
     // Status only. `attempts` and the two pointers are NOT cleared here on
     // purpose: `abandon` is reached by three different roads — a prompt file
     // that never parsed, a runner that threw, and a step that SETTLED and then
@@ -2261,8 +2283,17 @@ async function runScout(
     // paid attempt really ran and really wrote its log and receipt, and those
     // are already recorded by the time this runs. Overwriting them with
     // "nothing happened" would erase the only evidence separating a scout that
-    // burned money from one that never spawned.
-    recordStepFailure(meta);
+    // burned money from one that never spawned. A pre-attempt failure has
+    // none of those artifacts, so the reason lands on the step itself (#199)
+    // and is not written over a reason recordSettlement already kept.
+    if (
+      (meta.attempts === undefined || meta.attempts < 1) &&
+      meta.failure === undefined
+    ) {
+      recordStepFailure(meta, error ?? "scout failed before its first attempt");
+    } else {
+      meta.status = "failed";
+    }
     state.perAgent.scout ??= failedAgentEntry();
     record.duration_ms = Date.now() - startedAt;
     emit(deps, {
@@ -2319,12 +2350,12 @@ async function runScout(
       },
       onRetry: (info) => emit(deps, { kind: "step-retry", ...info }),
     };
-  } catch {
+  } catch (error) {
     // A missing or malformed prompt file. The step still appears in the plan
     // with status "failed": a stage that was asked for and never spawned must
     // be visible, or the artifact reads like the flag was off.
     state.steps.push(meta);
-    return abandon();
+    return abandon(error);
   }
 
   if (spec.route !== undefined) {
@@ -2339,8 +2370,8 @@ async function runScout(
   let result: StepResult;
   try {
     result = await deps.runner.run(spec);
-  } catch {
-    return abandon();
+  } catch (error) {
+    return abandon(error);
   }
   // Usage lands in BOTH seats whatever the verdict — a failed step still
   // burned tokens, and a run whose bill excludes them under-reports the arm's
@@ -2771,8 +2802,20 @@ function recordSettlement(
   // Cancellation before the first admitted attempt, and every preflight
   // failure, return `attempts: 0` — no session ran, so no log and no receipt
   // were ever written. Pointing at `attempt0.json` would be the same lie the
-  // harness's own cancellation message was fixed for.
-  if (result.attempts < 1) return;
+  // harness's own cancellation message was fixed for. The reason still has
+  // to land somewhere: stderrTail is the only witness the runner kept, and
+  // dropping it is how a run that reviewed nothing became indistinguishable
+  // from one that found nothing (#199).
+  if (result.attempts < 1) {
+    if (result.status === "failed") {
+      const witness =
+        result.stderrTail.trim().length > 0
+          ? result.stderrTail
+          : "step failed before its first attempt";
+      meta.failure = redactFailureReason(witness);
+    }
+    return;
+  }
   meta.attemptEvidencePath = path.relative(
     runDir,
     attemptEvidencePath(meta.outPath, meta.name, result.attempts),
@@ -2791,6 +2834,21 @@ function recordSettlement(
 // got built (a missing prompt file), or the runner's promise rejected outright.
 // "failed", not "unsettled" — the difference is whether the pipeline reached a
 // verdict, not whether a session existed.
-function recordStepFailure(meta: StepMeta): void {
+const FAILURE_REASON_MAX = 500;
+
+function redactFailureReason(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  // Same two layers as writeAttemptLog (harness.ts): redactDiagnostic misses
+  // Cookie/Authorization headers, secret=, and github_pat_ tokens, and this
+  // field is now a persisted copy of that same stderr.
+  const redacted = redactEvidenceText(redactDiagnostic(raw))
+    .replace(/\s+/g, " ")
+    .trim();
+  const capped = redacted.slice(0, FAILURE_REASON_MAX);
+  return capped.length > 0 ? capped : "step failed before its first attempt";
+}
+
+function recordStepFailure(meta: StepMeta, error: unknown): void {
   meta.status = "failed";
+  meta.failure = redactFailureReason(error);
 }
