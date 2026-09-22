@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { generateCiWorkflowTemplate, OWN_CI_WORKFLOW_OPTIONS } from "#ci/setup";
+import {
+  generateCiForceWorkflowTemplate,
+  generateCiWorkflowTemplate,
+  OWN_CI_WORKFLOW_OPTIONS,
+} from "#ci/setup";
 
 describe("Packaging & distribution configuration", () => {
   const rootDir = path.resolve(__dirname, "..");
@@ -528,6 +532,20 @@ describe("Packaging & distribution configuration", () => {
     expect(existsSync(workflowPath)).toBe(true);
     const committed = readFileSync(workflowPath, "utf-8");
     expect(committed).toBe(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS));
+  });
+
+  test("committed .github/workflows/pr-hero-force.yml never drifts from generateCiForceWorkflowTemplate()", () => {
+    const workflowPath = path.join(
+      rootDir,
+      ".github",
+      "workflows",
+      "pr-hero-force.yml",
+    );
+    expect(existsSync(workflowPath)).toBe(true);
+    const committed = readFileSync(workflowPath, "utf-8");
+    expect(committed).toBe(
+      generateCiForceWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS),
+    );
   });
 
   test("skills/pr-hero-ci-setup/assets/workflow.yml never drifts from generateCiWorkflowTemplate()", () => {

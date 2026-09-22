@@ -402,9 +402,7 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     expect(result.exitCode).toBe(0);
     expect(recordCalls).toEqual([
       {
-        reason:
-          "automatic review budget exhausted (2/2 attempts on this PR). " +
-          "Run `pr-hero review --pr <n> --post --force` locally to override.",
+        reason: "automatic review budget exhausted (2/2 attempts on this PR).",
       },
     ]);
     const summary = await readFile(summaryPath, "utf8");

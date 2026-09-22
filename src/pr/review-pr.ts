@@ -360,7 +360,13 @@ export async function reviewPr(
         Date.now(),
       )
     ) {
-      if (options.yes) {
+      // `--yes` without `--force` is the watcher child: a second launch
+      // would double-spend. `--force` is the CI comment override, and the
+      // workflow's concurrency group cancels the run already holding this
+      // pending status. Treating that leftover pending as a skip would
+      // cancel the review the comment just asked for and then refuse to
+      // start the replacement.
+      if (options.yes && !options.force) {
         log("skip: a pr-hero review is already in-flight on this head");
         return 0;
       }
