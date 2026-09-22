@@ -23,6 +23,7 @@ import {
   normalizeUnavailableUsage,
   UsageModeMismatchError,
 } from "../execution/usage-normalized";
+import { redactDiagnostic } from "../security/redact";
 
 // WHY there is no @opencode-ai dependency here: production enablement over the
 // real SDK is deliberately deferred to D1-11 (§12 D1-06 vs D1-11). This slice
@@ -174,6 +175,19 @@ export type OpenCodeClientEvent =
   | {
       readonly kind: "provider_limit";
       readonly reason: string;
+      readonly message: string;
+    }
+  // #213: the bus event `session.error` (SDK EventSessionError). The model
+  // never ran — a 403 DataPolicyError arrives here with isRetryable false —
+  // and dropping it left an empty turn that the harness filed as
+  // format_violation. Carries the provider's name, status, retry flag, and
+  // message. responseBody stays off this event: it is not the witness, and
+  // it is where a provider pastes request echoes.
+  | {
+      readonly kind: "provider_refusal";
+      readonly name: string;
+      readonly statusCode?: number;
+      readonly retryable?: boolean;
       readonly message: string;
     }
   | { readonly kind: "terminal"; readonly proof: ProviderTerminalProof };
@@ -379,6 +393,50 @@ export function formatProviderLimitDetail(
   message: string,
 ): string {
   return `${MARKER_PROVIDER_LIMIT} (${reason}): ${message}`;
+}
+
+// #213. Digit-free prefix, same rule as MARKER_PROVIDER_LIMIT: the provider's
+// own message is appended after it, and a prefix that read like a rate limit
+// or a socket error would let the generic patterns decide the cause.
+const MARKER_PROVIDER_REFUSAL =
+  "[pr-hero] opencode sdk: provider refused the turn";
+
+// The message is the operator's only copy of the opt-in sentence. URLs stay
+// (that sentence IS a URL). Credentials do not: redactDiagnostic runs before
+// the line is a witness. Capped so a provider that pastes a body into
+// `data.message` cannot fill the stderr tail by itself.
+const PROVIDER_REFUSAL_MESSAGE_MAX = 500;
+
+export function formatProviderRefusalDetail(input: {
+  readonly name: string;
+  readonly statusCode?: number;
+  readonly retryable?: boolean;
+  readonly message: string;
+}): string {
+  const status =
+    input.statusCode === undefined ? "unknown" : String(input.statusCode);
+  // The flag is the first token after the marker, before any provider-owned
+  // field. classifyFailure reads only that token. `name` and `message` are
+  // the provider's, and a message that happens to say "isRetryable: true"
+  // must not flip a terminal refusal into a retry.
+  const retryable = input.retryable === true ? "yes" : "no";
+  const message = redactDiagnostic(input.message).slice(
+    0,
+    PROVIDER_REFUSAL_MESSAGE_MAX,
+  );
+  return `${MARKER_PROVIDER_REFUSAL} retryable=${retryable} (${input.name} status=${status}): ${message}`;
+}
+
+// The flag occupies a fixed slot immediately after the marker. Reading
+// anywhere else in the witness would let the provider's own message decide
+// the disposition (#213 review).
+function providerRefusalRetries(witness: string): boolean | undefined {
+  const at = witness.indexOf(MARKER_PROVIDER_REFUSAL);
+  if (at < 0) return undefined;
+  const rest = witness.slice(at + MARKER_PROVIDER_REFUSAL.length);
+  if (rest.startsWith(" retryable=yes")) return true;
+  if (rest.startsWith(" retryable=no")) return false;
+  return undefined;
 }
 
 // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
@@ -1378,6 +1436,20 @@ export class OpenCodeSdkTransport implements ProviderTransport {
               });
               return;
             }
+            case "provider_refusal": {
+              // #213: same settlement as the limit above, and for the same
+              // reason. A provider that already refused the turn (403,
+              // isRetryable false) must not sit until the silence tripwire
+              // and must not be parsed as an empty draft. The drain window
+              // is still open when this arrives after session.idle, and
+              // settle() is first-write-wins — so this still beats an empty
+              // terminal that has not closed yet.
+              settle({
+                kind: "stream_error",
+                detail: formatProviderRefusalDetail(event),
+              });
+              return;
+            }
           }
           if (settled) return;
         }
@@ -2039,6 +2111,18 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // fetch failed" is a transient network failure that keeps its retry, and
     // a refused prompt is if anything more likely to be a 429 or a 401. A
     // marker check above them would silently delete those paths.
+    // #213: after the auth/rate/network/500 patterns, same ordering rule as
+    // MARKER_PROMPT_REFUSED. A refusal whose own text is a 401 or a 500 keeps
+    // that cause. What remains is a turn the provider refused and the model
+    // never saw — runtime_unavailable, which is terminal, so the harness does
+    // not spend the format-reminder budget on an empty draft. isRetryable
+    // true is the provider asking for another attempt; that is the transient
+    // budget, never the format one.
+    if (witness.includes(MARKER_PROVIDER_REFUSAL)) {
+      return providerRefusalRetries(witness) === true
+        ? "network_transient"
+        : "runtime_unavailable";
+    }
     if (
       witness.includes(MARKER_SESSION_CREATE) ||
       witness.includes(MARKER_PROMPT_REFUSED)

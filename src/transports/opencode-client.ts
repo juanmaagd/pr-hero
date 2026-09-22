@@ -217,6 +217,35 @@ export function providerLimitFromStatus(
   return { reason, message };
 }
 
+// #213: EventSessionError's `properties.error`. `responseBody` is not read —
+// the witness is the name, the status, the retry flag, and `data.message`.
+export function providerRefusalFromProperties(properties: unknown):
+  | {
+      name: string;
+      statusCode?: number;
+      retryable?: boolean;
+      message: string;
+    }
+  | undefined {
+  const error = asRecord(asRecord(properties)?.error);
+  if (error === undefined) return undefined;
+  const name =
+    typeof error.name === "string" && error.name.length > 0
+      ? error.name
+      : "unknown";
+  const data = asRecord(error.data);
+  const message = typeof data?.message === "string" ? data.message : "";
+  const statusCode = asNumber(data?.statusCode);
+  const retryable =
+    typeof data?.isRetryable === "boolean" ? data.isRetryable : undefined;
+  return {
+    name,
+    ...(statusCode !== undefined ? { statusCode } : {}),
+    ...(retryable !== undefined ? { retryable } : {}),
+    message,
+  };
+}
+
 // TRAP 4 (issue #124): `message.part.delta` carries NO part type. Its whole
 // payload is {sessionID, messageID, partID, field, delta}, so the only way to
 // know what a delta belongs to is to correlate its `partID` against the part
@@ -1672,6 +1701,19 @@ export function mapOpenCodeEvents(
         ];
       }
       return status?.type === "busy" ? [{ kind: "heartbeat" }] : [];
+    }
+
+    // #213. The subscribed bus names this `session.error` (SDK
+    // EventSessionError, properties.error = APIError). `opencode run
+    // --format json` prints the same refusal as `type: "error"`. Neither
+    // had an arm, so the event became [] , the turn completed empty, and
+    // the harness filed format_violation. The sessionID guard above already
+    // dropped every other session's refusal.
+    case "session.error":
+    case "error": {
+      const refusal = providerRefusalFromProperties(p);
+      if (refusal === undefined) return [];
+      return [{ kind: "provider_refusal", ...refusal }];
     }
 
     default:
