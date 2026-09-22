@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { buildStepArgv, type StepSpec } from "#review/step-runner";
 import type { AttemptAdmissionGate } from "../../src/execution/admission";
 import { ConcurrencyAttemptAdmissionGate } from "../../src/execution/admission";
 import { ConcurrencyLimiter } from "../../src/execution/concurrency-limiter";
@@ -20,7 +21,6 @@ import type {
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
 import type { NormalizedUsage } from "../../src/execution/usage-normalized";
-import { buildStepArgv, type StepSpec } from "../../src/step-runner";
 
 const USAGE: NormalizedUsage = {
   wallMs: 1,

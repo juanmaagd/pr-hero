@@ -4,11 +4,11 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { selectBoundaryNonce } from "../src/boundary";
-import { parseAgentFile } from "../src/prompt-set";
+import { selectBoundaryNonce } from "#review/boundary";
+import { parseAgentFile } from "#review/prompt-set";
+import { scoutPrompt, validateScoutLeads } from "#review/scout";
+import { ClaudeCodeRunner } from "#review/step-runner";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import { scoutPrompt, validateScoutLeads } from "../src/scout";
-import { ClaudeCodeRunner } from "../src/step-runner";
 
 // `--scout` (ROADMAP-DOORDASH M5, §3.12.8) runs the SCOUT's real spawn shape
 // instead of the trivial one: the bundled prompt, the real output contract,

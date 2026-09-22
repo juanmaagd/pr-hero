@@ -1,9 +1,39 @@
 // D1-08 PR4 (§9.1): the transactional spend reservation ledger. In-memory
 // per run, behind an interface whose only stateful operations are CAS
 // transitions (design decision D7) — so a durable adapter (D1-08f) can
-// implement `SpendLedger` with zero caller changes. Not wired into the
-// harness yet; that's PR5b, per the design's own tripwire table
-// ("PR4 | None — pure by design").
+// implement `SpendLedger` with zero caller changes.
+//
+// Wiring, corrected 2026-09-02. This header used to say "Not wired into the
+// harness yet; that's PR5b, per the design's own tripwire table", and it had
+// gone stale on both axes. PR5b landed:
+// `StepExecutionHarness.runAttempt` calls `reserve()` before the transport
+// and `finalizeReservation` applies the CAS transition `settlementFromUsage`
+// names (harness.ts), `runPipeline`'s `collectUnresolvedSpend` gathers the
+// terminal `unresolved_remote` reservations into `PipelineResult.unresolved`
+// (pipeline.ts), and `renderResult` prints them and marks the run's cost
+// figure a floor (ui/result.ts).
+//
+// The second axis, which "wired into the harness" alone would still hide, and
+// which held on `dev` until 2026-09-02: no production composition constructed
+// a `SpendLedger` at all, so `this.spendLedger` was undefined on every real
+// run and none of the above executed. It is composed now —
+// `MultiProviderRunner` (production-runtime.ts) holds ONE instance for the
+// run, which is what makes `fencedBuckets` below a run-scoped fence rather
+// than a per-step no-op.
+//
+// It is composed for METERED bindings only, and that is deliberate rather
+// than partial: the guarantee this ledger enforces is about dollars, and
+// `MultiProviderRunner.run` carries the full argument. A claude-only run
+// therefore records zero reservations, and the absent `reservations` key on
+// those steps is the truthful signal, not a gap. `ClaudeCodeRunner`
+// (step-runner.ts) stays ledger-free for the same reason.
+//
+// #182 follow-up: the one exception is a FREE OpenCode binding
+// (`provider_free`), which reserves too even though its capability report says
+// subscription. Without a reservation the free-nonzero rule above would be
+// dead in production — `finalizeReservation` never runs, so a flipped model
+// would keep spending attempts instead of fencing and failing closed. A free
+// step that stays free settles 0 and never fences.
 //
 // Two couplings the spec calls out as the easiest to lose across chained
 // PRs are made TYPE-unreachable here rather than asserted at runtime:
@@ -21,13 +51,21 @@
 
 import { randomUUID } from "node:crypto";
 import type { RetryDisposition } from "./failure-policy";
-import type { NormalizedUsage } from "./usage-normalized";
+import { type NormalizedUsage, outputTokensKnown } from "./usage-normalized";
 
 // ---- Coupling 1: settlement decision ----
 
 export type SettlementDecision =
   | { readonly kind: "settle"; readonly actualUsd: number }
-  | { readonly kind: "unresolved"; readonly knownUsd?: number };
+  | {
+      readonly kind: "unresolved";
+      readonly knownUsd?: number;
+      // #182 follow-up: present ONLY on the free-nonzero arm below. The
+      // harness fail-fasts on it (terminal step failure, no retry); every
+      // other unresolved arm stays fence-only. Optional and additive so all
+      // existing producers/consumers keep compiling — tsc is the net.
+      readonly reason?: "free_nonzero_cost";
+    };
 
 // spec: "Non-Complete Usage Never Settles As A Number" — completeness other
 // than "complete" is ALWAYS the unresolved arm, carrying whatever cash cost
@@ -41,6 +79,71 @@ export function settlementFromUsage(
   }
   if (usage.cashCostUsd === undefined) {
     return { kind: "unresolved", knownUsd: undefined };
+  }
+  // 2026-09-02, the metered-zero rule: #133's under-reporting failure
+  // arriving through the other door. #133 caught a metered route REPORTED as
+  // a subscription and therefore priced at nothing; this catches a metered
+  // route that reports a NUMBER, and the number is zero.
+  //
+  // How a zero gets here: the OpenCode client reads the provider's own cost
+  // (`asNumber(info.cost)`, opencode-client.ts), and `asNumber` returns 0 for
+  // 0 rather than undefined — so a provider OpenCode holds no price for, or a
+  // custom endpoint, produces a COMPLETE usage with `cashCostUsd: 0` and
+  // `costSource: "provider"`. Every guard above passes it, and it settles as
+  // a truthful-looking zero wearing the provider's badge.
+  //
+  // The credential's billing mode discriminates, never the number: zero cash
+  // cost IS truthful for a subscription credential (the design's own
+  // subscription rule), and is not truthful for a metered credential that
+  // produced output tokens. Both halves are load-bearing — dropping the mode
+  // test would misfile every free subscription attempt as unresolved and
+  // fence its bucket; dropping the token test would misfile a metered attempt
+  // that never reached the provider (`noSessionUsage`, opencode-sdk.ts).
+  //
+  // `billingMode: "unknown"` is deliberately NOT covered: it is already a
+  // blocking preflight result (design doc line 461, enforced by
+  // `cashCostAccountingValid` in production-runtime.ts), so no such route
+  // reaches an attempt, and a second weaker enforcement point for a fact the
+  // gate refuses outright is how the two start disagreeing.
+  //
+  // No `knownUsd`: the whole point is that this 0 is not a known cost.
+  // Carrying it would relocate the same lie into the unresolved arm, where
+  // `renderResult` would print "$0 known" beside the fenced bucket.
+  if (
+    usage.billingMode === "metered" &&
+    usage.cashCostUsd === 0 &&
+    (outputTokensKnown(usage.tokens) ?? 0) > 0
+  ) {
+    return { kind: "unresolved", knownUsd: undefined };
+  }
+  // #182 follow-up, the free-nonzero rule: a model free at probe time can flip
+  // to metered before/during the attempt, and the attempt then runs
+  // credentialless under an empty projection. The flip is observable at
+  // settlement — the transport accumulates provider-reported cost per message
+  // (opencode-sdk.ts `cashCostUsd`, `costSource: "provider"`), so priced work
+  // on a free-declared route arrives here as complete usage with cash > 0.
+  //
+  // NO output-token gate, unlike metered-zero: any priced work on a
+  // free-declared route is unaccountable by definition, and cash > 0 already
+  // implies the provider did priced work. `noSessionUsage` (route-mode stamp +
+  // cash 0 + empty tokens) still settles 0 below — a free attempt that never
+  // reached the provider is a truthful zero, not a flip.
+  //
+  // `knownUsd` IS carried here — the documented asymmetry with metered-zero,
+  // which drops it. A metered 0 is an untrusted number wearing the provider's
+  // badge; a free-route cash figure is the provider's STATED price for work it
+  // claims to have billed, and the fence (`markUnresolvedRemote`) plus the
+  // harness fail-fast message both need the figure to name what happened.
+  if (
+    usage.billingMode === "free" &&
+    usage.completeness === "complete" &&
+    (usage.cashCostUsd ?? 0) > 0
+  ) {
+    return {
+      kind: "unresolved",
+      knownUsd: usage.cashCostUsd,
+      reason: "free_nonzero_cost",
+    };
   }
   return { kind: "settle", actualUsd: usage.cashCostUsd };
 }

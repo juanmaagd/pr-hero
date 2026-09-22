@@ -2,15 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getMenuOptions } from "../src/menu-context";
-import { parseArgs } from "../src/preflight";
+import { parseArgs } from "#review/preflight";
 import {
   clearDrawnLines,
   runConfigSubmenu,
   runLifecycleSubmenu,
   runWatcherSubmenu,
-} from "../src/ui-menu";
-import type { KeyReader } from "../src/ui-select";
+} from "#ui/menu";
+import type { KeyReader } from "#ui/select";
+import { getMenuOptions } from "../src/menu-context";
 
 function fakeReader(chunks: (string | undefined)[]): KeyReader {
   let i = 0;
@@ -340,8 +340,8 @@ describe("5.3 & 5.4 CLI Menu Dispatch & Dispatch Matrix", () => {
     );
 
     // Verify runReviewMenu receives the effectiveConfig and initialises correctly
-    const { loadEffectiveConfig } = await import("../src/cli");
-    const { runReviewMenu } = await import("../src/ui-review-menu");
+    const { loadEffectiveConfig } = await import("#config/config");
+    const { runReviewMenu } = await import("#ui/review-menu");
     const loaded = await loadEffectiveConfig({
       root: tmpRepo,
       home: tmpHome,

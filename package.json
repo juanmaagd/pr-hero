@@ -20,6 +20,24 @@
       "default": "./dist/index.js"
     }
   },
+  "imports": {
+    "#rereview/*": "./src/rereview/*.ts",
+    "#ui/*": "./src/ui/*.ts",
+    "#ci/*": "./src/ci/*.ts",
+    "#store/*": "./src/store/*.ts",
+    "#model/*": "./src/model/*.ts",
+    "#triage/*": "./src/triage/*.ts",
+    "#watch/*": "./src/watch/*.ts",
+    "#corpus/*": "./src/corpus/*.ts",
+    "#mcp/*": "./src/mcp/*.ts",
+    "#server/*": "./src/server/*.ts",
+    "#compare/*": "./src/compare/*.ts",
+    "#review/*": "./src/review/*.ts",
+    "#pr/*": "./src/pr/*.ts",
+    "#git/*": "./src/git/*.ts",
+    "#config/*": "./src/config/*.ts",
+    "#commands/*": "./src/commands/*.ts"
+  },
   "bin": {
     "pr-hero": "./bin/pr-hero.js"
   },
@@ -52,5 +70,9 @@
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "optionalDependencies": {
+    "@opencode-ai/sdk": "1.18.25"
   }
 }
+

@@ -61,11 +61,10 @@
 
 import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
-import { selectBoundaryNonce } from "../src/boundary";
-import { DEFAULT_LINE_WINDOW, normalizePath } from "../src/compare";
-import { extractJsonObject } from "../src/drafts";
-import { parseAgentFile } from "../src/prompt-set";
-import { resolveRunnerAuthority } from "../src/runner-authority";
+import { DEFAULT_LINE_WINDOW, normalizePath } from "#compare/compare";
+import { selectBoundaryNonce } from "#review/boundary";
+import { extractJsonObject } from "#review/drafts";
+import { parseAgentFile } from "#review/prompt-set";
 import {
   capScoutLeads,
   type HunkCoverage,
@@ -75,8 +74,9 @@ import {
   type ScoutLead,
   scoutPrompt,
   validateScoutLeads,
-} from "../src/scout";
-import { ClaudeCodeRunner, type StepSpec } from "../src/step-runner";
+} from "#review/scout";
+import { ClaudeCodeRunner, type StepSpec } from "#review/step-runner";
+import { resolveRunnerAuthority } from "../src/runner-authority";
 
 // The frozen M0 control set (§1.1). These run dirs MUST survive until M6; the
 // probe only ever READS `diff.patch` out of them.
@@ -566,7 +566,7 @@ for (let r = 1; r <= replicates; r++) {
 // ---------------------------------------------------------------------------
 // Assertions.
 
-// A hit reuses compare.ts's window rather than a second definition of "the
+// A hit reuses compare/compare.ts's window rather than a second definition of "the
 // same place": the head-to-head, the §3.9 attribution rule and this gate must
 // all agree, or a scout that "hit" here would be `unled` there.
 function hits(leads: ScoutLead[], target: CoverageTarget): boolean {

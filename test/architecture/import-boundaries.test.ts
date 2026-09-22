@@ -5,7 +5,7 @@
 // no transport file imports the three admission/spend modules, so a future
 // edit that reaches for "just import the limiter here" fails loud instead
 // of silently reopening the boundary. Same pattern as the m6 floor-table
-// drift guard (src/floor-test.ts).
+// drift guard (src/compare/floor-test.ts).
 //
 // Transports MAY import usage-normalized (they must, to populate leaves)
 // and bucket-id (already true as of PR3, for capabilities()'s optional

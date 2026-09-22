@@ -8,7 +8,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { AGENT_NAMES } from "../src/prompt-set";
+import { AGENT_NAMES } from "#review/prompt-set";
 
 export interface PlantedFixture {
   repoDir: string;
@@ -200,7 +200,7 @@ Suspicion priors:
 `;
 
 // The refuter body carries no {{PRIORS}}/{{GOTCHAS}} anchors — the pipeline
-// writes it as-is (see runRefuter in src/pipeline.ts).
+// writes it as-is (see runRefuter in src/review/pipeline.ts).
 const REFUTER_AGENT = `---
 name: review-refuter
 description: Fixture refuter — verifies each submitted finding against the code.

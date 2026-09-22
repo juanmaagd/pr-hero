@@ -1,0 +1,31 @@
+# Dependabot sees `test/security/fixtures/requirements.txt` and reads it as a
+# real pip manifest. It is not one. That file is bait: it exists so
+# `test/security/executable-denials.test.ts` can assert that a file named
+# `requirements.txt` is denied with `executable_not_approved`. The test keys on
+# the FILENAME — the pinned versions inside are never parsed, never resolved,
+# and nothing in this repo or in CI installs them (`rg "pip|requirements"
+# .github/` finds no install step). A CVE in one of those pins cannot reach us.
+#
+# Left alone, that produces a security-update PR per advisory, forever, against
+# a file whose contents are inert — one already arrived (#190, requests
+# 2.31.0 -> 2.33.0, CVE-2026-25645) and was closed for this reason.
+#
+# So: declare the directory and ignore everything in it. Per GitHub's docs, the
+# `ignore` option suppresses pull requests for BOTH version updates and
+# security updates, which is the only combination that silences this. The
+# declaration is what makes the ignore rule addressable; it enables no updates
+# on its own, because `dependency-name: "*"` cancels every one of them.
+#
+# Scope note: this file governs only what is declared here. Security updates
+# for the repo's real dependencies are driven by Dependabot alerts and are
+# untouched by this config.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/test/security/fixtures"
+    schedule:
+      interval: "monthly"
+    ignore:
+      # Every dependency in this directory, current and future. A new pin added
+      # to the fixture is bait too, and must not generate a pull request.
+      - dependency-name: "*"

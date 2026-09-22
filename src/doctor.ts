@@ -2,6 +2,18 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  exactBindingCapabilityIssues,
+  type ProviderCapabilityReport,
+} from "#model/provider-capabilities";
+import {
+  agentFilePath,
+  GOTCHAS_PLACEHOLDER_MARKER,
+  gotchasUnusableReason,
+  localReviewSpec,
+  resolveAgentsDirSetting,
+} from "#review/preflight";
+import { resolveGotchasPath } from "#review/run";
+import {
   detectAgentEnvironments,
   inspectMcpRegistration,
   inspectSkillsSync,
@@ -11,17 +23,13 @@ import {
   resolveEngineAssets,
   selfInvocation,
 } from "./assets";
-import {
-  agentFilePath,
-  localReviewSpec,
-  resolveAgentsDirSetting,
-} from "./preflight";
-import type { ProviderCapabilityReport } from "./provider-capabilities";
+import type { ExactBindingCapabilityReport } from "./execution/contracts";
 import {
   type CheckSystemToolsOptions,
   checkCiConfiguration,
   checkSystemTools,
 } from "./system-tools";
+import { OpenCodeSdkUnavailableError } from "./transports/opencode-admission";
 
 export type DoctorSeverity = "healthy" | "degraded" | "blocking";
 
@@ -45,6 +53,10 @@ export interface RunDoctorOptions {
   checkToolsOptions?: CheckSystemToolsOptions;
   exists?: (p: string) => boolean;
   readFile?: (p: string) => string | undefined;
+  // Exact-binding facts from the binding that would execute the route.
+  // When present, these win over produceCapabilityReport (stale caller
+  // readiness booleans must not determine doctor verdict).
+  probeExactBindings?: () => Promise<readonly ExactBindingCapabilityReport[]>;
   // The engine's own packaged assets. Injectable for the same reason
   // preflight.ts's resolveAgentsDirSetting takes them: the real
   // detectAssetMode() reads import.meta.dir, which under `bun test` always
@@ -57,12 +69,17 @@ export interface RunDoctorOptions {
   // because the report always carries non-blocking gaps (no pricing table,
   // no bounded event sink), which would flip every existing "healthy"
   // fixture to "degraded" for reasons unrelated to what those tests probe.
+  // Legacy injectable ProviderCapabilityReport. Ignored when
+  // probeExactBindings is provided.
   produceCapabilityReport?: () => Promise<ProviderCapabilityReport>;
 }
 
 // Remediation hints for the report's known non-blocking codes; blocking
-// issues carry their own actionable message from the producer.
-const PROVIDER_HINTS: Record<string, string> = {
+// issues carry their own actionable message from the producer. Exported
+// for a reachability test (pushProviderIssues only attaches a hint when
+// `!issue.blocking`, so a hint keyed to an always-blocking code can never
+// render).
+export const PROVIDER_HINTS: Record<string, string> = {
   credential_projection_unavailable:
     "Credential projection requires macOS with /usr/bin/security; on other platforms the child runs with enumerated-passthrough env.",
   codegraph_policy_unenforced:
@@ -70,8 +87,57 @@ const PROVIDER_HINTS: Record<string, string> = {
   bounded_events_sink_missing:
     "Usage arrives as a final snapshot until the bounded event sink is wired (D1-08 residual).",
   pricing_table_missing:
-    "Cash-cost estimates need a bundled per-model pricing table; notional estimates remain available.",
+    "Nothing is priced at this level: the report is produced before any route resolves. An attempt's cash cost is whatever its transport reports, and a metered route whose transport reports none is refused at admission.",
 };
+
+// fix/opencode-sdk-absent-degraded: OpenCodeSdkUnavailableError means
+// "@opencode-ai/sdk is not resolvable here" (a compiled binary run without
+// its node_modules), not "the environment is broken". Only OpenCode-backed
+// steps cannot execute, so this stays `degraded`; every other
+// capability-probe failure keeps today's `blocking` treatment unchanged.
+//
+// The hint must not claim the rest of the plan was verified. resolveFrozenBindings
+// (production-runtime.ts) awaits the OpenCode identity observation inside the
+// same loop that resolves every other route, with no per-step isolation, so
+// the rejection escapes before gateBindingsCapabilities ever runs: the probe
+// produces ZERO capability reports, Claude-backed steps included. Degraded
+// here means "unverified", not "verified fine".
+const OPENCODE_SDK_UNAVAILABLE_HINT =
+  "Install @opencode-ai/sdk where this binary can resolve it (e.g. alongside the project's node_modules), or route the affected steps through Claude instead. The probe stops at the first OpenCode step, so this run verified no capabilities for ANY route in the plan — Claude-backed steps are unverified here, not confirmed healthy.";
+
+function pushCapabilityProbeFailure(
+  checks: DoctorCheckItem[],
+  error: unknown,
+): void {
+  if (error instanceof OpenCodeSdkUnavailableError) {
+    checks.push({
+      name: "provider",
+      severity: "degraded",
+      message: `capability report production degraded: ${error.message}`,
+      hint: OPENCODE_SDK_UNAVAILABLE_HINT,
+    });
+    return;
+  }
+  checks.push({
+    name: "provider",
+    severity: "blocking",
+    message: `capability report production failed: ${(error as Error).message}`,
+  });
+}
+
+function pushProviderIssues(
+  checks: DoctorCheckItem[],
+  issues: readonly { code: string; message: string; blocking: boolean }[],
+): void {
+  for (const issue of issues) {
+    checks.push({
+      name: `provider:${issue.code}`,
+      severity: issue.blocking ? "blocking" : "degraded",
+      message: issue.message,
+      ...(issue.blocking ? {} : { hint: PROVIDER_HINTS[issue.code] }),
+    });
+  }
+}
 
 export function evaluateDoctorReport(checks: DoctorCheckItem[]): DoctorReport {
   let overall: DoctorSeverity = "healthy";
@@ -323,11 +389,26 @@ export async function runDoctor(
 
   // 3. Gotchas check (only when repo root is supplied or discovered)
   if (repoDir) {
-    const gotchasPath = path.join(repoDir, ".prhero", "gotchas.md");
+    const gotchasPath = resolveGotchasPath(undefined, repoDir);
     const gotchasContent = exists(gotchasPath)
       ? readFile(gotchasPath)
       : undefined;
-    if (!gotchasContent || gotchasContent.trim().length === 0) {
+    // Same predicate the review gates use, and that is the point: a doctor
+    // that answers this question its own way eventually green-lights a file
+    // the very next command refuses, and the user then hunts for the problem
+    // somewhere it is not.
+    const unusable = gotchasUnusableReason(gotchasContent ?? "");
+    if (unusable === "placeholder") {
+      checks.push({
+        name: "gotchas",
+        severity: "blocking",
+        message:
+          "Repository gotchas file (.prhero/gotchas.md) is still the untouched scaffold",
+        hint:
+          `Replace the placeholder lines with real repository invariants, then delete the \`${GOTCHAS_PLACEHOLDER_MARKER}\` ` +
+          "marker line at the top — pr-hero refuses to review while it is present.",
+      });
+    } else if (unusable !== undefined) {
       checks.push({
         name: "gotchas",
         severity: "blocking",
@@ -471,26 +552,25 @@ export async function runDoctor(
     hint: ciStatus.hint,
   });
 
-  // 7. Provider capability report (§11/D1-09) — one check item per issue:
-  // blocking report issues block the doctor verdict exactly as they block
-  // execution; non-blocking gaps render as degraded with a remediation hint.
-  if (options.produceCapabilityReport !== undefined) {
+  // 7. Provider capability report — exact-binding facts win; the legacy
+  // ProviderCapabilityReport producer is only consulted when no exact probe
+  // is supplied.
+  if (options.probeExactBindings !== undefined) {
+    try {
+      const reports = await options.probeExactBindings();
+      pushProviderIssues(
+        checks,
+        reports.flatMap((report) => exactBindingCapabilityIssues(report)),
+      );
+    } catch (error) {
+      pushCapabilityProbeFailure(checks, error);
+    }
+  } else if (options.produceCapabilityReport !== undefined) {
     try {
       const capability = await options.produceCapabilityReport();
-      for (const issue of capability.issues) {
-        checks.push({
-          name: `provider:${issue.code}`,
-          severity: issue.blocking ? "blocking" : "degraded",
-          message: issue.message,
-          ...(issue.blocking ? {} : { hint: PROVIDER_HINTS[issue.code] }),
-        });
-      }
+      pushProviderIssues(checks, capability.issues);
     } catch (error) {
-      checks.push({
-        name: "provider",
-        severity: "blocking",
-        message: `capability report production failed: ${(error as Error).message}`,
-      });
+      pushCapabilityProbeFailure(checks, error);
     }
   }
 

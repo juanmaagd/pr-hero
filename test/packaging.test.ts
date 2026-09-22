@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import {
-  generateCiWorkflowTemplate,
-  OWN_CI_WORKFLOW_OPTIONS,
-} from "../src/ci-setup";
+import { generateCiWorkflowTemplate, OWN_CI_WORKFLOW_OPTIONS } from "#ci/setup";
 
 describe("Packaging & distribution configuration", () => {
   const rootDir = path.resolve(__dirname, "..");
@@ -76,7 +73,7 @@ describe("Packaging & distribution configuration", () => {
     if (exitCode !== 0) {
       console.error(stdout, stderr);
     }
-    // log() writes to stderr unconditionally (src/ui.ts) — assert there, not stdout.
+    // log() writes to stderr unconditionally (src/ui/primitives.ts) — assert there, not stdout.
     expect(stderr.length).toBeGreaterThan(0);
     expect(stderr).toContain("pr-hero");
     expect(stderr).toContain("Usage:");
@@ -343,13 +340,26 @@ describe("Packaging & distribution configuration", () => {
       if (hits) offenders[rel.replaceAll("\\", "/")] = hits.length;
     }
 
-    // src/cli.ts keeps exactly ONE, and the count is pinned so a second cannot
-    // arrive unnoticed: `engineIdentity`'s `git rev-parse` for the engine's own
-    // revision, which sits AFTER an early return for compiled mode and is
-    // therefore unreachable in the runtime where it would be wrong.
+    // `engineIdentity`'s `git rev-parse` for the engine's own revision used
+    // to be src/cli.ts's one pinned exception — it sat AFTER an early return
+    // for compiled mode and was therefore unreachable in the runtime where
+    // it would be wrong. During cli-decomp S3 engineIdentity moved to
+    // src/git/identity.ts, but the path it reads from is derived by
+    // engineCheckoutRoot() in src/assets.ts, so the exception is gone and the
+    // test's own name is now literally true: only src/assets.ts derives
+    // filesystem paths from import.meta.
+    //
+    // This assertion earned its keep in that same slice. A first version moved
+    // engineIdentity to src/git/ with its `path.join(import.meta.dir, "..")`
+    // intact, and import.meta.dir is the directory of the EVALUATING module: from
+    // src/ that expression is the checkout, from src/git/ it is src/ itself. The
+    // move shifted the path by one level, compiled, typechecked, and passed every
+    // behavioural test — because git discovers the repository upward and returned
+    // the same HEAD from src/. This test was the only thing that went red. It
+    // guards the rule, not a symptom, which is exactly why it caught a relocation
+    // no behavioural check could see.
     expect(offenders).toEqual({
       "src/assets.ts": expect.any(Number),
-      "src/cli.ts": 1,
     });
   });
 
@@ -375,7 +385,7 @@ describe("Packaging & distribution configuration", () => {
       // Not five: skipped-clean was never wired (a clean review already
       // reports status=reviewed, findings_count=0) and was dropped from
       // spec.md 1.1 rather than left as a documented lie. `error` IS now
-      // wired, via reportFatalCiError (src/cli.ts).
+      // wired, via reportFatalCiError (src/ci/reporter.ts).
       const action = parsedAction();
       expect(action.outputs.status.description).toContain(
         "reviewed, skipped-size, skipped-budget, or error",
@@ -457,6 +467,46 @@ describe("Packaging & distribution configuration", () => {
       }
     });
 
+    // Threat matrix RED (4): every composite `run:` body, not just
+    // run-pr-hero. env: may bind inputs; the script text may not.
+    test("every step run: interpolation is github.action_path only", () => {
+      const action = parsedAction();
+      let seen = 0;
+      for (const step of action.runs.steps) {
+        const script = typeof step.run === "string" ? step.run : "";
+        const interpolations = script.match(/\$\{\{[^}]*\}\}/g) ?? [];
+        seen += interpolations.length;
+        for (const token of interpolations) {
+          expect(token).toContain("github.action_path");
+        }
+      }
+      expect(seen).toBeGreaterThan(0);
+    });
+
+    // Threat matrix RED (7): pin is its own step so GITHUB_PATH applies to
+    // later steps. Never `latest`. Install `if` may read inputs, not secrets.
+    test("OpenCode CLI install is not run-pr-hero, pins 1.18.30, and gates on inputs", () => {
+      const action = parsedAction();
+      const install = action.runs.steps.find((step) =>
+        String(step.run ?? "").includes("opencode.ai/install"),
+      ) as
+        | { id?: string; name?: string; if?: string; run?: string }
+        | undefined;
+      const run = action.runs.steps.find((step) => step.id === "run-pr-hero");
+      expect(install).toBeDefined();
+      expect(install).not.toBe(run);
+      expect(install?.id).not.toBe("run-pr-hero");
+      expect(String(install?.if)).toContain("inputs.");
+      expect(String(install?.if)).not.toContain("secrets.");
+      expect(install?.run).toContain("--version 1.18.30");
+      expect(install?.run).not.toContain("latest");
+      expect(install?.run).toContain("GITHUB_PATH");
+      const installAt = action.runs.steps.indexOf(install as never);
+      const runAt = action.runs.steps.indexOf(run as never);
+      expect(installAt).toBeGreaterThan(-1);
+      expect(runAt).toBeGreaterThan(installAt);
+    });
+
     test("never embeds a secret value — references secrets by name only", () => {
       const raw = readFileSync(actionPath, "utf-8");
       expect(raw).not.toMatch(/sk-ant-|ghp_|ghs_/);
@@ -465,7 +515,7 @@ describe("Packaging & distribution configuration", () => {
 
   test("committed .github/workflows/pr-hero.yml never drifts from generateCiWorkflowTemplate()", () => {
     // This repo's own canonical example workflow is generated by, not
-    // hand-copied from, ci-setup.ts's generateCiWorkflowTemplate() — the same
+    // hand-copied from, ci/setup.ts's generateCiWorkflowTemplate() — the same
     // function `pr-hero setup --ci` / `pr-hero ci init` runs for any caller
     // repo. A byte-for-byte equality assertion is the only thing standing
     // between the two ever silently diverging.
@@ -493,6 +543,53 @@ describe("Packaging & distribution configuration", () => {
     expect(assetContent).toBe(generateCiWorkflowTemplate());
   });
 
+  test("ci-setup skill points at the OpenCode operator procedure and that file exists", () => {
+    const skillPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "SKILL.md",
+    );
+    const refPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "references",
+      "opencode-ci.md",
+    );
+    expect(existsSync(skillPath)).toBe(true);
+    expect(existsSync(refPath)).toBe(true);
+    const skill = readFileSync(skillPath, "utf-8");
+    expect(skill).toContain("references/opencode-ci.md");
+    expect(skill).toContain("OPENCODE_AUTH_JSON");
+    expect(skill).toContain("PRHERO_ROUTING");
+    const ref = readFileSync(refPath, "utf-8");
+    expect(ref).toContain("modelSnapshot");
+    expect(ref).toContain("Do **not** create `OPENAI_API_KEY`");
+  });
+
+  test(".agents/skills/pr-hero-ci-setup/assets/workflow.yml matches the skills workflow asset", () => {
+    const skillsPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow.yml",
+    );
+    const agentsPath = path.join(
+      rootDir,
+      ".agents",
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow.yml",
+    );
+    expect(existsSync(agentsPath)).toBe(true);
+    expect(readFileSync(agentsPath, "utf-8")).toBe(
+      readFileSync(skillsPath, "utf-8"),
+    );
+  });
+
   // A consumer repo has no copy of this action's source, so it must resolve
   // the published tag. This repo DOES have the source — and resolving a tag
   // that does not exist yet would paint every PR here permanently red, which
@@ -515,8 +612,8 @@ describe("Packaging & distribution configuration", () => {
   // The byte-equality drift tests above already fail if these lines change, but
   // they fail by showing a diff — they never say WHICH side is supposed to
   // carry an override. These two state the rule directly: a scaffolded repo
-  // inherits action.yml's defaults and is never handed spend or size ceilings
-  // it did not choose, while this repo overrides both because it reviews
+  // inherits action.yml's defaults and is never handed ceilings it did not
+  // choose, while this repo raises only the size gate because it reviews
   // itself. A future edit that "helpfully" pushes an override into the
   // scaffolded template breaks this, not just a byte comparison.
   test("the scaffolded template sets neither spend nor size ceilings", () => {
@@ -525,12 +622,18 @@ describe("Packaging & distribution configuration", () => {
     expect(scaffolded).not.toContain("max-changed-lines:");
   });
 
-  test("this repo's own workflow overrides both ceilings", () => {
+  // Spend is deliberately NOT on this list since issue #156. action.yml's
+  // `budget-usd` default is now empty and the CLI resolves the ceiling from
+  // the route's billing mode, so an explicit `budget-usd: 15.00` here would
+  // impose a ceiling the policy would not otherwise apply — on a subscription
+  // route that ceiling gates a token-derived estimate against $0.00 of real
+  // spend, and a skipped review reads exactly like a clean one.
+  test("this repo's own workflow overrides only the size ceiling", () => {
     const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
-    expect(own).toContain("budget-usd: 15.00");
-    // 1500, not action.yml's 1000: D1-10c was skipped at 1023 changed lines,
-    // and a skipped review reads exactly like a clean one on the checks page.
-    expect(own).toContain("max-changed-lines: 1500");
+    expect(own).not.toContain("budget-usd:");
+    // 5000, not action.yml's 1000: large refactoring slices (like cli-decomposition)
+    // exceed 2000 lines, so dogfooding requires an expanded ceiling.
+    expect(own).toContain("max-changed-lines: 5000");
   });
 
   test("build script produces standalone bundle without error", async () => {

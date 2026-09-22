@@ -2,14 +2,22 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  GOTCHAS_PLACEHOLDER_MARKER,
+  INIT_GIT_REMINDER,
+  initConfigTemplate,
+} from "#review/preflight";
+import {
   type AgentEnvDetection,
   detectAgentEnvironments,
   registerMcpServer,
   syncSkills,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
-import { initConfigTemplate } from "./preflight";
-import { claudeCredentialProjectionReady } from "./provider-capabilities";
+import type {
+  ExactBindingCapabilityReport,
+  RunnerBackend,
+} from "./execution/contracts";
+import { collectDoctorExactBindingReports } from "./production-runtime";
 import {
   type CheckSystemToolsOptions,
   checkSystemTools,
@@ -32,18 +40,48 @@ export interface WizardDryRunState {
   skippedReason?: string;
 }
 
+export interface WizardBindingAuthProjection {
+  readonly routeKey: string;
+  readonly backend: RunnerBackend;
+  readonly projectionReady: boolean;
+}
+
 export interface WizardState {
   stepIndex: number;
   selectedIndex: number;
   toolStatuses: Record<string, SystemToolStatus>;
-  // §11/D1-09: init consumes the capability report's projection readiness —
-  // surfaced on the wizard's claude line (one existsSync probe, no spawn).
-  claudeProjectionReady?: boolean;
+  // SUGGESTION-2: one entry per binding in the resolved plan. This used to be
+  // a single `.some()`-over-every-binding boolean rendered on the `claude`
+  // tool row, which reported (say) an opencode binding's ready projection as
+  // Claude's. Readiness is a per-binding fact, so it is carried per binding.
+  exactBindingAuthProjections?: readonly WizardBindingAuthProjection[];
+  // Set only when the probe itself threw (broker/authority/transport
+  // defect) — distinct from a clean report that says the projection is
+  // not ready. Both used to collapse into the same `false`. This one is
+  // plan-wide: a single throw covers the whole collection, so it belongs to
+  // no individual binding.
+  exactBindingProbeError?: string;
   envDetections: AgentEnvDetection[];
   skillsSynced: boolean;
   mcpRegistered: boolean;
   setupStateWritten: boolean;
-  repoScaffolded: boolean;
+  // Both of these replace one `repoScaffolded: boolean`, and the split is the
+  // point. That flag was assigned `isRepo` — "cwd is a git repository" — while
+  // its name promised "we scaffolded", and step 5 read it as the trigger for
+  // BOTH halves of its closing warning. Inside a repo whose `.prhero/` already
+  // existed it was true and every word that followed it was false. A name is
+  // not a value: these two record what this run actually DID, and they are
+  // separate because the two halves of that warning have genuinely different
+  // conditions.
+  //
+  // "this run wrote at least one file into `.prhero/`" — i.e. what is now
+  // untracked, which is what INIT_GIT_REMINDER is about.
+  workspaceFilesWritten: boolean;
+  // "this run wrote the PLACEHOLDER gotchas file" — the no-entries fallback
+  // branch, the only one that emits GOTCHAS_PLACEHOLDER_MARKER. Writing
+  // `gotchas.md` is not enough: with entries collected, the file written is
+  // real, carries no marker, and the placeholder warning would be a lie.
+  placeholderGotchasWritten: boolean;
   gotchas: WizardGotchasState;
   commitChoice: "commit" | "ignore" | undefined;
   workspaceCommitted: boolean;
@@ -65,6 +103,14 @@ export interface WizardDeps {
     options?: { cwd?: string; timeoutMs?: number },
   ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
   checkToolsOptions?: CheckSystemToolsOptions;
+  // W4 remediation (opencode-production-runtime PR3 verify #4997): this used
+  // to be `() => Promise<{ projectionReady: boolean } | undefined>` — a
+  // caller-supplied boolean that let tests bypass the real capability shape
+  // entirely. It now carries the exact ExactBindingCapabilityReport[] the
+  // doctor and execution consumers derive readiness from, so a test that
+  // injects it exercises the same field (`report.auth.projectionReady`)
+  // production code reads.
+  probeExactBinding?: () => Promise<readonly ExactBindingCapabilityReport[]>;
 }
 
 export interface WizardStepDescriptor {
@@ -92,7 +138,8 @@ export function createInitialWizardState(): WizardState {
     skillsSynced: false,
     mcpRegistered: false,
     setupStateWritten: false,
-    repoScaffolded: false,
+    workspaceFilesWritten: false,
+    placeholderGotchasWritten: false,
     gotchas: {
       collected: 0,
       informedSkip: false,
@@ -260,6 +307,29 @@ async function defaultExec(
   }
 }
 
+// The Step-1 rows are system TOOLS, not runtime bindings, and only `claude`
+// has a runner backend behind it today. A tool row may therefore speak for
+// the bindings on ITS backend and no others; every other binding gets its own
+// line (see `renderUnreportedProjections`). Add a row here only when the tool
+// really is the binary a backend executes.
+const SYSTEM_TOOL_BACKENDS: Readonly<Record<string, RunnerBackend>> = {
+  claude: "claude-code",
+};
+
+function authProjectionDetail(
+  projections: readonly WizardBindingAuthProjection[],
+  backend: RunnerBackend,
+): string {
+  const forBackend = projections.filter((p) => p.backend === backend);
+  // Having no binding on this backend is not an unready projection, so the
+  // row must stay silent rather than claim "unavailable".
+  if (forBackend.length === 0) {
+    return "";
+  }
+  const ready = forBackend.every((p) => p.projectionReady);
+  return ` (auth projection: ${ready ? "ready" : "unavailable"})`;
+}
+
 export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
   // Step 1: System tools
   {
@@ -270,12 +340,46 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
         cwd: deps.cwd,
         home: deps.home,
         exists: deps.exists,
+        // WizardDeps.exec must reach the tool probes, or a caller that injected
+        // it still gets the real Bun.spawn fallback here — which runs
+        // `gh auth status`, a live network round trip, from inside a test that
+        // believed it had faked its I/O. Listed BEFORE the spread so an explicit
+        // checkToolsOptions.exec still wins; production passes neither.
+        exec: deps.exec,
         ...deps.checkToolsOptions,
       });
-      const claudeProjectionReady = claudeCredentialProjectionReady({
-        existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
-      });
-      return { toolStatuses, claudeProjectionReady };
+      const workspaceRoot = deps.cwd ?? process.cwd();
+      let exactBindingAuthProjections: readonly WizardBindingAuthProjection[] =
+        [];
+      let exactBindingProbeError: string | undefined;
+      // Both branches feed the SAME shape (ExactBindingCapabilityReport[])
+      // through the SAME readiness projection — the injected seam is no
+      // longer a caller-decided boolean, and a real probe/authority failure
+      // is captured instead of silently collapsing into "not ready".
+      try {
+        const reports = deps.probeExactBinding
+          ? await deps.probeExactBinding()
+          : await collectDoctorExactBindingReports({
+              workspaceRoot,
+              authorityDeps: {
+                existsFn: deps.exists ?? deps.checkToolsOptions?.exists,
+              },
+            });
+        exactBindingAuthProjections = reports.map((report) => ({
+          routeKey: report.routeKey,
+          backend: report.backend,
+          projectionReady: report.auth.projectionReady,
+        }));
+      } catch (error) {
+        exactBindingAuthProjections = [];
+        exactBindingProbeError =
+          error instanceof Error ? error.message : String(error);
+      }
+      return {
+        toolStatuses,
+        exactBindingAuthProjections,
+        exactBindingProbeError,
+      };
     },
     async apply(state: WizardState): Promise<Partial<WizardState>> {
       return state;
@@ -292,24 +396,56 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
 
       lines.push(bold("Step 1/5: System Tools Preflight"));
       lines.push("");
+      const projections = state.exactBindingAuthProjections ?? [];
+      const reportedBackends = new Set<RunnerBackend>();
       for (const [name, st] of Object.entries(state.toolStatuses)) {
         const icon = st.installed
           ? st.authOk === false
             ? yellow("[!]")
             : green("[✓]")
           : red("[✗]");
-        // §11/D1-09: the claude line also reports auth-projection readiness
-        // from the same capability predicate execution uses.
+        // §11/D1-09: a tool row that IS a runner backend also reports the
+        // auth-projection readiness of that backend's bindings, from the same
+        // capability predicate execution uses.
+        const backend = SYSTEM_TOOL_BACKENDS[name];
         const detail =
-          name === "claude" && st.installed
-            ? ` (auth projection: ${state.claudeProjectionReady ? "ready" : "unavailable"})`
+          backend !== undefined && st.installed
+            ? authProjectionDetail(projections, backend)
             : "";
+        if (backend !== undefined && detail !== "") {
+          reportedBackends.add(backend);
+        }
         lines.push(
           `  ${icon} ${bold(name)}: ${st.installed ? (st.version ? `v${st.version}` : "installed") : "missing"}${detail}`,
         );
         if (st.hint) {
           lines.push(`      ${st.hint}`);
         }
+      }
+      // Bindings no tool row spoke for. Folding these into the claude row is
+      // exactly the mislabeling this replaces.
+      for (const projection of projections) {
+        if (reportedBackends.has(projection.backend)) {
+          continue;
+        }
+        const icon = projection.projectionReady ? green("[✓]") : yellow("[!]");
+        lines.push(
+          `  ${icon} ${bold(projection.backend)} route ${projection.routeKey}: auth projection: ${
+            projection.projectionReady ? "ready" : "unavailable"
+          }`,
+        );
+      }
+      // A probe that THREW and a report that cleanly says "not ready" both
+      // render `unavailable` above. Without this line the operator cannot
+      // tell a broken credential broker from an unconfigured one, and
+      // `exactBindingProbeError` would be state no human ever sees. It is
+      // plan-wide, so it is attached to no binding and to no tool row — the
+      // old `name === "claude" && st.installed` gate hid it entirely
+      // whenever the claude CLI was missing.
+      if (state.exactBindingProbeError !== undefined) {
+        lines.push(
+          `  ${yellow("[!]")} exact-binding probe failed: ${state.exactBindingProbeError}`,
+        );
       }
       return lines;
     },
@@ -462,6 +598,13 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       });
       const isRepo = isGit.exitCode === 0;
 
+      // Both writes below are gated on `!exists(...)` — a file already on disk
+      // is the user's work and is never overwritten. So "we are in a repo" and
+      // "we wrote something" are different facts, and step 5 needs the second
+      // one. These start false and are set by the branch that actually writes.
+      let workspaceFilesWritten = false;
+      let placeholderGotchasWritten = false;
+
       if (isRepo) {
         // 1. Write .prhero/config.json if not present
         if (!exists(configPath)) {
@@ -469,6 +612,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
             defaultBase: state.defaultBase || "main",
           });
           await writeFile(configPath, configContent);
+          workspaceFilesWritten = true;
         }
 
         // 2. Write .prhero/gotchas.md if not present
@@ -477,9 +621,17 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
           if (state.gotchas.entries && state.gotchas.entries.length > 0) {
             gotchasContent = `# Repository Gotchas & Invariants\n\n${state.gotchas.entries.map((e) => `- ${e}`).join("\n")}\n`;
           } else {
-            gotchasContent = `<!-- human-attention-required: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Edit this file with project failure modes.)\n`;
+            // The marker is interpolated, not spelled out: it is the token
+            // `gotchasUnusableReason` refuses this file by, and two literals
+            // that must match are one edit away from not matching.
+            gotchasContent = `<!-- ${GOTCHAS_PLACEHOLDER_MARKER}: zero invariants defined during onboarding -->\n\n# Repository Gotchas & Invariants\n\n(No invariants defined during onboarding. Replace this with your project's real failure modes, then delete the marker line at the top — pr-hero refuses to review while it is there.)\n`;
+            // Set HERE, in the branch that emits the marker, and nowhere
+            // else: it is the marker that makes step 5's placeholder warning
+            // true, so the flag is set by the code that writes the marker.
+            placeholderGotchasWritten = true;
           }
           await writeFile(gotchasPath, gotchasContent);
+          workspaceFilesWritten = true;
         }
       }
 
@@ -517,7 +669,8 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       }
 
       return {
-        repoScaffolded: isRepo,
+        workspaceFilesWritten,
+        placeholderGotchasWritten,
         setupStateWritten: true,
         workspaceCommitted,
       };
@@ -572,7 +725,7 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       return { completed: true };
     },
     render(
-      _state: WizardState,
+      state: WizardState,
       opts: { styles: boolean; width: number },
     ): string[] {
       const lines: string[] = [];
@@ -581,6 +734,60 @@ export const WIZARD_STEPS: readonly WizardStepDescriptor[] = [
       lines.push(bold("Step 5/5: Verification"));
       lines.push("");
       lines.push(`  ${green("[✓]")} Onboarding completed successfully!`);
+
+      // Two warnings, two conditions, deliberately NOT one flag.
+      //
+      // The git half: `runWizard` dispatches no reducer actions, so
+      // `commitChoice` is always undefined and step 4's `git add` /
+      // `.gitignore` branches never run. Any `.prhero/` file this run wrote is
+      // therefore left UNTRACKED, which is exactly what local mode's
+      // clean-tree gate refuses — so "Run 'pr-hero review'" as the next line
+      // was an instruction that could not work. `pr-hero init` has printed
+      // INIT_GIT_REMINDER for this since it shipped; the reminder is IMPORTED
+      // rather than restated so the two cannot say different things. The
+      // condition is written against what happened, not against the choice:
+      // `workspaceCommitted` is false when a commit was attempted and failed,
+      // and that repo is just as untracked as one where nobody tried.
+      //
+      // The gotchas half: it asserts the CONTENT of a specific file, so it may
+      // only fire when this run wrote that content. It used to share the git
+      // half's flag, which was `isRepo` — so a repo whose `.prhero/gotchas.md`
+      // already held real, marker-free gotchas was told the file was a
+      // placeholder and that reviews would be refused. Both claims false.
+      // `placeholderGotchasWritten` is set by the branch that writes the
+      // marker and by nothing else.
+      const needsGitStep =
+        state.workspaceFilesWritten === true &&
+        state.workspaceCommitted !== true &&
+        state.commitChoice !== "ignore";
+      const needsGotchasStep = state.placeholderGotchasWritten === true;
+
+      if (needsGitStep || needsGotchasStep) {
+        lines.push("");
+      }
+      if (needsGitStep) {
+        lines.push(`  ${INIT_GIT_REMINDER}`);
+        lines.push("");
+      }
+      if (needsGotchasStep) {
+        // The sentence used to open with "Then", which only made sense while
+        // the two halves shared one flag and therefore always appeared
+        // together. Now that they are independent it is written to stand on
+        // its own — deliberately NOT as a `needsGitStep ? "Then write" :
+        // "Write"` conditional, because `needsGitStep` is false here only
+        // when `workspaceCommitted`/`commitChoice` say so, and nothing in
+        // production dispatches the reducer action that sets those. That
+        // branch would be a rendered line no reachable test could ever cover,
+        // which is the same untestable-by-design trap this slice exists to
+        // remove.
+        lines.push(
+          "  Write REAL gotchas in .prhero/gotchas.md — the one just " +
+            "scaffolded is a placeholder, and pr-hero refuses to review " +
+            `while its \`${GOTCHAS_PLACEHOLDER_MARKER}\` marker line is there.`,
+        );
+        lines.push("");
+      }
+
       lines.push("  Run 'pr-hero review' to start multi-agent code reviews.");
       return lines;
     },
@@ -598,7 +805,17 @@ export function renderWizardStep(
   });
 }
 
-export async function runWizard(deps: WizardDeps = {}): Promise<number> {
+// The state-PRODUCING half of `pr-hero setup`, split out from `runWizard` so
+// it can be driven in a test with injected deps. That split is not cosmetic:
+// while this loop was buried inside `runWizard`, the only way to reach step
+// 5's render was to hand-build a `WizardState`, and a hand-built state can
+// express combinations the loop cannot produce. `repoScaffolded` — a flag that
+// meant "cwd is a git repo" while its name promised "we scaffolded" — survived
+// a green suite for exactly that reason: every test that read it also wrote
+// it.
+export async function runWizardSteps(
+  deps: WizardDeps = {},
+): Promise<WizardState> {
   let state = createInitialWizardState();
 
   for (let i = 0; i < WIZARD_STEPS.length; i++) {
@@ -609,6 +826,12 @@ export async function runWizard(deps: WizardDeps = {}): Promise<number> {
     const applied = await step.apply(state, deps);
     state = { ...state, ...applied };
   }
+
+  return state;
+}
+
+export async function runWizard(deps: WizardDeps = {}): Promise<number> {
+  const state = await runWizardSteps(deps);
 
   const lines = renderWizardStep(state, {
     styles: Boolean(process.stdout.isTTY),

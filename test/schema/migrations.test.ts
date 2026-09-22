@@ -2,25 +2,25 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { armOfRun, scoutFailed } from "../../src/floor-test";
+import { armOfRun, scoutFailed } from "#compare/floor-test";
 import {
   PIPELINE_SCHEMA_VERSION,
   type PipelineInput,
   runPipeline,
-} from "../../src/pipeline";
-import type { StepResult, StepRunner, StepSpec } from "../../src/step-runner";
-import { parsePipelineMeta } from "../../src/watch-preflight";
+} from "#review/pipeline";
+import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
+import { parsePipelineMeta } from "#watch/preflight";
 
 // ---------------------------------------------------------------------------
 // D1-10c — §13's required-evidence artifact: `pipeline.json` read-back
 // compatibility ACROSS the versioning boundary, proved in both directions.
 //
-// The migration mechanism this file guards is deliberately not findings.ts's:
+// The migration mechanism this file guards is deliberately not review/findings.ts's:
 // there, `schema_version` is validated by hard equality and a mismatch is a
 // loud rejection. Here the writer STAMPS and every reader TOLERATES, because
 // pipeline.json's readers run in places where a throw costs money —
 // `parsePipelineMeta` backs the watcher's daily attempt cap, and its own WHY
-// comment (src/watch-preflight.ts) records that a loud throw on one damaged
+// comment (src/watch/preflight.ts) records that a loud throw on one damaged
 // artifact would brick every future watcher tick. So:
 //
 //   - absence of `schema_version` means a PRE-VERSIONING artifact, never an

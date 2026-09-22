@@ -54,7 +54,7 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DraftFinding, RefuterOutcome } from "../src/drafts";
+import type { DraftFinding, RefuterOutcome } from "#review/drafts";
 
 // The arm list is a tuple, not a bare union, so the script can iterate the
 // matrix without restating it — a fifth arm added here reaches the runner and

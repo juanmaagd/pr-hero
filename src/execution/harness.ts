@@ -3,28 +3,39 @@ import path from "node:path";
 import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
-} from "../provider-capabilities";
+} from "#model/provider-capabilities";
+// Lifecycle ownership (§2 docs/multi-runtime-model-diversity-design.md):
+//   HARNESS — StepSpec.timeoutMs watchdog, cancellation coordinator, retry/
+//   parse, write leases + settlement receipts, event sink, spend reservations,
+//   concurrency admission, credential projection destroy AFTER transport teardown.
+//   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
+//   protocol events, return TransportOutcome, classify provider/transport causes.
+//   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
+import { isVacuousEmptyHunt } from "#review/drafts";
+import type {
+  RetryInfo,
+  StepResult,
+  StepRunner,
+  StepSpec,
+} from "#review/step-runner";
 import type {
   CredentialBroker,
   CredentialProjection,
 } from "../security/credential-broker";
 import { CredentialProjectionError } from "../security/credential-broker";
+import { redactEvidenceText } from "../security/evidence-redaction";
 import { redactDiagnostic } from "../security/redact";
 import { WorkspaceReadBroker } from "../security/workspace-read-broker";
-import {
-  attemptLogPath,
-  type FailureClass,
-  FORMAT_RETRY_REMINDER,
-  type RetryInfo,
-  type StepResult,
-  type StepRunner,
-  type StepSpec,
-  settlementReceiptPath,
-} from "../step-runner";
+import type { TransportRegistry } from "../transport-registry";
+import { DefaultTransportRegistry } from "../transport-registry";
 import { ClaudeCodeCliTransport } from "../transports/claude-code-cli";
 import { zeroUsage } from "../usage";
 import type { AttemptAdmissionGate, AttemptLease } from "./admission";
 import { writeJsonAtomically } from "./atomic-write";
+import {
+  freezeAttemptEvidenceIdentity,
+  persistAttemptEvidence,
+} from "./attempt-evidence";
 import {
   BucketBreakerTrippedError,
   ConcurrencyAdmissionAbortedError,
@@ -37,6 +48,7 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "./contracts";
+import type { FailureClass } from "./failure-classification";
 import {
   type CauseResolution,
   decideRetryDisposition,
@@ -59,11 +71,17 @@ import {
   beginStep,
   nextCycle,
   type ReserveToken,
+  type SettlementDecision,
   type SpendLedger,
   type SpendReservation,
   SpendReservationFencedError,
   settlementFromUsage,
 } from "./spend-limiter";
+import {
+  attemptLogPath,
+  FORMAT_RETRY_REMINDER,
+  settlementReceiptPath,
+} from "./step-artifacts";
 import type { NormalizedUsage } from "./usage-normalized";
 import {
   normalizeUnavailableUsage,
@@ -78,6 +96,69 @@ const DEFAULT_SLEEP = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 const DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS = 30 * 60 * 1000;
+// Credential projection must not hang the step indefinitely when a broker
+// blocks on interactive Keychain prompts or a stalled reader.
+const DEFAULT_CREDENTIAL_PROJECTION_TIMEOUT_MS = 60_000;
+
+async function projectCredentialWithBudget(
+  broker: CredentialBroker,
+  input: Parameters<CredentialBroker["project"]>[0],
+  options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
+): Promise<CredentialProjection> {
+  let outcome: "pending" | "budget" | undefined;
+  const guarded = broker.project(input).then(async (projection) => {
+    if (outcome === "budget") {
+      await projection.destroy().catch(() => {});
+      throw new Error("credential_projection_superseded");
+    }
+    outcome = "pending";
+    return projection;
+  });
+  guarded.catch(() => {});
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const signal = options.signal;
+
+  const cleanup = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal !== undefined && onAbort !== undefined) {
+      signal.removeEventListener("abort", onAbort);
+    }
+  };
+
+  try {
+    if (signal?.aborted) {
+      throw new Error("credential_projection_aborted");
+    }
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("credential_projection_timed_out")),
+        options.timeoutMs,
+      );
+    });
+
+    const racers: Promise<CredentialProjection>[] = [guarded, timeoutPromise];
+
+    if (signal !== undefined) {
+      const abortPromise = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new Error("credential_projection_aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      racers.push(abortPromise);
+    }
+
+    return await Promise.race(racers);
+  } catch (error) {
+    if (outcome === undefined) {
+      outcome = "budget";
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
+}
 
 function cancellableSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
@@ -108,6 +189,7 @@ export interface StepExecutionHarnessOptions {
   readonly executableAllowlist?: readonly ExecutableAllowlistEntry[];
   readonly binaryPath?: string;
   readonly admissionGate?: StepAdmissionGate;
+  readonly registry?: TransportRegistry;
   readonly transport?: ProviderTransport;
   readonly onAuthEvent?: (event: AuthEvent) => void;
   readonly spawnFn?: typeof Bun.spawn;
@@ -164,6 +246,10 @@ export interface StepExecutionHarnessOptions {
   // `signal` is wired, acquire() uses AbortSignal.timeout(ms) so a stuck
   // FIFO queue cannot hang the run forever.
   readonly attemptAdmissionTimeoutMs?: number;
+  readonly credentialProjectionTimeoutMs?: number;
+  // Production leased transports: tear down the shared client/server before
+  // credential projection destroy when this step is the last active lease.
+  readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
 }
 
 // WHY an enumerated passthrough instead of `process.env` verbatim and instead
@@ -207,9 +293,48 @@ const ENV_PASSTHROUGH = [
   // had just handed it. It is the same credential class as ANTHROPIC_API_KEY
   // directly above, and it is the ONLY route on Linux: credential projection
   // needs darwin + /usr/bin/security, so every CI runner falls back to exactly
-  // this enumerated passthrough.
+  // this enumerated passthrough. When a projection IS active it is stripped
+  // again by PROJECTION_OWNED_KEYS below — that path holds the same
+  // credential as a file and must not also see an ambient copy.
   "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
+
+// WHY a projection strips more than HOME/TMPDIR/CLAUDE_CONFIG_DIR: a
+// credential projection's promise is that the child runs on ONE freshly
+// projected credential and nothing else, and until 2026-09-02 that promise
+// covered only the config identity. The enumerated passthrough above carries
+// the credential variables — it must, because CI has no projection — so an
+// ambient ANTHROPIC_API_KEY in the operator's shell survived the overlay
+// untouched on exactly the path whose purpose is isolating the credential.
+//
+// The leak was inert while nothing read it back. #177 ended that: the Claude
+// CLI transport now derives `billingMode`/`costSource` from this very env
+// (`claudeCliCostBasis` → `envBillsMetered`), so a developer running on the
+// projected subscription credential got the review filed as metered cash on
+// the strength of a key the projection was supposed to have replaced. Both
+// readings of the leak are defects — either the CLI honours the leaked key
+// and the isolation promise is false, or it prefers the projected OAuth and
+// the billing label is wrong — and one strip answers both.
+//
+// The rule the list encodes: a projection owns the CREDENTIAL IDENTITY, not
+// just the home. ANTHROPIC_BASE_URL is deliberately NOT here — it is network
+// routing, sitting in the passthrough beside HTTP(S)_PROXY and SSL_CERT_*,
+// and the projection supplies no endpoint of its own, so stripping it would
+// silently send the projection path somewhere the no-projection path does
+// not go, with no defect behind the change.
+//
+// ONE list, not two: the three original `delete` statements and every key
+// added since are the same array, so a future addition cannot land on one
+// side of a drift. `satisfies` ties it to the passthrough — a key stripped
+// here that is not projected there is dead code, and a typo fails tsc.
+const PROJECTION_OWNED_KEYS = [
+  "HOME",
+  "TMPDIR",
+  "CLAUDE_CONFIG_DIR",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+] as const satisfies readonly (typeof ENV_PASSTHROUGH)[number][];
 
 export function projectChildEnv(
   source: Readonly<Record<string, string | undefined>>,
@@ -270,11 +395,34 @@ async function writeAttemptLog(
       `timed_out: ${outcome.timedOut ?? false}`,
       `classification: ${classification}`,
       ...(cause !== undefined ? [`cause: ${cause}`] : []),
+      ...(outcome.toolInvocations !== undefined
+        ? [`tool_invocations: ${outcome.toolInvocations}`]
+        : []),
       "--- stderr tail (4096) ---",
       // §6.3: redaction before persistence — nothing unredacted hits disk.
-      redactDiagnostic(outcome.stderrTail),
+      redactEvidenceText(redactDiagnostic(outcome.stderrTail)),
+      // #126: the transport's own tallies, on their own line-item section so
+      // triage still reads them while no classifier can. The section is always
+      // written, empty included, so the log format stays fixed rather than
+      // varying with what a given attempt happened to observe.
+      "--- transport diagnostics ---",
+      redactEvidenceText(redactDiagnostic(outcome.diagnosticsTail ?? "")),
+      // #175 half 2: the models the PROVIDER says it ran, which is the only
+      // trustworthy answer to "what did this attempt actually use" — the
+      // route's own `modelSnapshot` records what we ASKED for. Always
+      // written, empty included, for the same reason as the section above:
+      // a log format that varies with what an attempt happened to observe is
+      // one a reader cannot tell apart from a log that lost a section.
+      "--- observed models ---",
+      ...(outcome.observedModels ?? []).map((observed) =>
+        redactDiagnostic(
+          observed.canonicalModel === undefined
+            ? observed.model
+            : `${observed.model} (canonical: ${observed.canonicalModel})`,
+        ),
+      ),
       "--- result tail (8192) ---",
-      redactDiagnostic(outcome.finalText.slice(-8192)),
+      redactEvidenceText(redactDiagnostic(outcome.finalText.slice(-8192))),
       "",
     ].join("\n"),
   );
@@ -285,6 +433,8 @@ export class StepExecutionHarness implements StepRunner {
   private readonly allowlist?: readonly ExecutableAllowlistEntry[];
   private readonly binaryPath?: string;
   private readonly admissionGate?: StepAdmissionGate;
+  private readonly registry?: TransportRegistry;
+  private readonly explicitTransport?: ProviderTransport;
   private readonly transport: ProviderTransport;
   private readonly onAuthEvent?: (event: AuthEvent) => void;
   private readonly isTestFake: boolean;
@@ -304,15 +454,21 @@ export class StepExecutionHarness implements StepRunner {
   private readonly spendLedger?: SpendLedger;
   private readonly reservedUsdPerAttempt: number;
   private readonly attemptAdmissionTimeoutMs: number;
+  private readonly credentialProjectionTimeoutMs: number;
+  private readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
 
   constructor(options: StepExecutionHarnessOptions = {}) {
     this.workspaceRoot = options.workspaceRoot;
     this.allowlist = options.executableAllowlist;
     this.binaryPath = options.binaryPath;
     this.admissionGate = options.admissionGate;
-    this.transport =
-      options.transport ??
-      new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
+    this.registry = options.registry;
+    if (options.transport !== undefined) {
+      this.explicitTransport = options.transport;
+      this.transport = options.transport;
+    } else {
+      this.transport = new ClaudeCodeCliTransport({ spawnFn: options.spawnFn });
+    }
     this.onAuthEvent = options.onAuthEvent;
     this.isTestFake = Boolean(options.spawnFn);
     this.projectedEnv = projectChildEnv(options.childEnv ?? process.env);
@@ -329,10 +485,163 @@ export class StepExecutionHarness implements StepRunner {
     this.reservedUsdPerAttempt = options.reservedUsdPerAttempt ?? 0;
     this.attemptAdmissionTimeoutMs =
       options.attemptAdmissionTimeoutMs ?? DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS;
+    this.credentialProjectionTimeoutMs =
+      options.credentialProjectionTimeoutMs ??
+      DEFAULT_CREDENTIAL_PROJECTION_TIMEOUT_MS;
+    this.onBeforeCredentialProjectionDestroy =
+      options.onBeforeCredentialProjectionDestroy;
   }
 
   async run(step: StepSpec): Promise<StepResult> {
     let canonicalCwd = step.cwd;
+
+    // Resolve transport for this step
+    const effectiveBackend =
+      step.route?.backend ?? step.backend ?? "claude-code";
+    let transport: ProviderTransport;
+    if (this.explicitTransport !== undefined) {
+      const declaredBackend = step.route?.backend ?? step.backend;
+      if (
+        declaredBackend !== undefined &&
+        this.explicitTransport.backend !== declaredBackend
+      ) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `No transport registry configured to handle backend "${declaredBackend}" for step "${step.name}"`,
+          resultText: "",
+        };
+      }
+      transport = this.explicitTransport;
+    } else if (this.registry) {
+      try {
+        transport = this.registry.get(effectiveBackend, {
+          routeFingerprint: step.routeKey,
+          route: step.route,
+        });
+      } catch (err) {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `Transport resolution failed: ${(err as Error).message}`,
+          resultText: "",
+        };
+      }
+    } else {
+      if (effectiveBackend !== "claude-code") {
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `No transport registry configured to handle backend "${effectiveBackend}" for step "${step.name}"`,
+          resultText: "",
+        };
+      }
+      transport = this.transport;
+    }
+
+    if (
+      effectiveBackend === "opencode" &&
+      this.registry instanceof DefaultTransportRegistry &&
+      this.registry.needsOpenCodeSdkProbe()
+    ) {
+      try {
+        await this.registry.probeOpenCodeSdk();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          name: step.name,
+          status: "failed",
+          usage: zeroUsage(),
+          attempts: 0,
+          stderrTail: `OpenCode SDK pre-confirm failed: ${message}`,
+          resultText: "",
+        };
+      }
+    }
+
+    // Generic execution facts resolution & validation
+    const admissionIdentity =
+      transport.admissionIdentity ??
+      (transport.backend === "claude-code"
+        ? { executable: "claude", provider: "anthropic" }
+        : this.isTestFake
+          ? {
+              executable:
+                transport.backend === "opencode" ? "opencode" : "claude",
+              provider:
+                transport.backend === "opencode" ? "opencode" : "anthropic",
+            }
+          : undefined);
+
+    const cancellationSemantics =
+      transport.cancellationSemantics ??
+      (transport.backend === "claude-code"
+        ? "process-exit"
+        : this.isTestFake
+          ? transport.backend === "opencode"
+            ? "provider-proof"
+            : "process-exit"
+          : undefined);
+
+    if (
+      admissionIdentity === undefined ||
+      cancellationSemantics === undefined
+    ) {
+      const missing = [
+        ...(admissionIdentity === undefined ? ["admissionIdentity"] : []),
+        ...(cancellationSemantics === undefined
+          ? ["cancellationSemantics"]
+          : []),
+      ].join(", ");
+      this.onAuthEvent?.({
+        kind: "executable",
+        status: "denied",
+        reason: `Missing required generic execution facts for backend "${transport.backend}" (${missing})`,
+      });
+      return {
+        name: step.name,
+        status: "failed",
+        denialCode: "executable_not_approved",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: `Missing required generic execution facts for backend "${transport.backend}" (${missing})`,
+        resultText: "",
+      };
+    }
+
+    // Provider mismatch / credential isolation check:
+    // When step.route specifies a provider, it must match the transport's configured provider,
+    // unless transport has a generic opencode provider that matches opencode routes.
+    if (
+      step.route?.provider !== undefined &&
+      admissionIdentity.provider !== undefined &&
+      step.route.provider !== admissionIdentity.provider &&
+      !(
+        admissionIdentity.provider === "opencode" &&
+        step.route.backend === "opencode"
+      )
+    ) {
+      this.onAuthEvent?.({
+        kind: "executable",
+        status: "denied",
+        reason: `Provider mismatch: step specifies provider "${step.route.provider}" but transport is configured for "${admissionIdentity.provider}"`,
+      });
+      return {
+        name: step.name,
+        status: "failed",
+        denialCode: "executable_not_approved",
+        usage: zeroUsage(),
+        attempts: 0,
+        stderrTail: `Provider mismatch: step specifies provider "${step.route.provider}" but transport is configured for "${admissionIdentity.provider}"`,
+        resultText: "",
+      };
+    }
 
     // 1. Workspace authorization
     if (this.workspaceRoot !== undefined) {
@@ -370,7 +679,7 @@ export class StepExecutionHarness implements StepRunner {
     let verifiedBinaryPath: string;
 
     if (this.allowlist !== undefined) {
-      const candidate = this.binaryPath ?? "claude";
+      const candidate = this.binaryPath ?? admissionIdentity.executable;
       const execResult = await verifyExecutableAuthority({
         candidatePath: candidate,
         allowlist: this.allowlist,
@@ -397,7 +706,7 @@ export class StepExecutionHarness implements StepRunner {
     } else if (this.isTestFake) {
       // Offline unit test runner with fake spawn
       this.onAuthEvent?.({ kind: "executable", status: "approved" });
-      verifiedBinaryPath = this.binaryPath ?? "claude";
+      verifiedBinaryPath = this.binaryPath ?? admissionIdentity.executable;
     } else {
       // Production without configured allowlist -> fail closed
       this.onAuthEvent?.({
@@ -423,12 +732,19 @@ export class StepExecutionHarness implements StepRunner {
     let projectionWarning: string | undefined;
     if (this.credentialBroker) {
       try {
-        projection = await this.credentialBroker.project({
-          sessionId: step.name,
-          credentialRef: "claude-code-credentials",
-          kind: "claude_subscription_oauth",
-          verifiedBinaryPath,
-        });
+        projection = await projectCredentialWithBudget(
+          this.credentialBroker,
+          {
+            sessionId: step.name,
+            credentialRef: step.credentialRef ?? "claude-code-credentials",
+            kind: step.credentialKind ?? "claude_subscription_oauth",
+            verifiedBinaryPath,
+          },
+          {
+            timeoutMs: this.credentialProjectionTimeoutMs,
+            signal: this.cancelSignal,
+          },
+        );
       } catch (error) {
         // Class names only the failure class; broker error text is never
         // echoed because third-party brokers may embed arbitrary content.
@@ -469,10 +785,13 @@ export class StepExecutionHarness implements StepRunner {
         verifiedBinaryPath,
         childEnv: this.buildChildEnv(projection),
         projection,
+        transport,
+        admissionIdentity,
       });
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
       // and never a replacement for the step's own outcome.
+      await this.onBeforeCredentialProjectionDestroy?.().catch(() => {});
       this.appendDestroyFailure(
         await this.destroyProjection(projection),
         result,
@@ -482,6 +801,7 @@ export class StepExecutionHarness implements StepRunner {
       }
       return result;
     } catch (error) {
+      await this.onBeforeCredentialProjectionDestroy?.().catch(() => {});
       this.appendDestroyFailure(await this.destroyProjection(projection));
       throw error;
     }
@@ -490,13 +810,18 @@ export class StepExecutionHarness implements StepRunner {
   private buildChildEnv(
     projection: CredentialProjection | undefined,
   ): Record<string, string> {
+    // No projection means CI (credential projection needs darwin plus
+    // /usr/bin/security — `claudeCredentialBroker`, runner-authority.ts), and
+    // that path is byte-identical to what it always was: the enumerated
+    // passthrough, credentials included. Stripping there is what cost
+    // pr-hero's first CI self-review.
     if (projection === undefined) return this.projectedEnv;
-    // The projection owns HOME/TMPDIR/config identity (§6.1); strip the
-    // enumerated-passthrough copies first so real values cannot survive.
+    // The projection owns HOME/TMPDIR/config identity AND the credential
+    // itself (§6.1, and PROJECTION_OWNED_KEYS above for why the credential
+    // joined the list); strip the enumerated-passthrough copies first so real
+    // values cannot survive.
     const stripped = { ...this.projectedEnv };
-    delete stripped.HOME;
-    delete stripped.TMPDIR;
-    delete stripped.CLAUDE_CONFIG_DIR;
+    for (const key of PROJECTION_OWNED_KEYS) delete stripped[key];
     return { ...stripped, ...projection.env };
   }
 
@@ -565,9 +890,11 @@ export class StepExecutionHarness implements StepRunner {
 
   // §5.2: deadlines are declared transport capabilities, not request fields;
   // an unusable capability report falls back to the CLI/POSIX row default.
-  private async resolveCancellationDeadlineMs(): Promise<number> {
+  private async resolveCancellationDeadlineMs(
+    transport: ProviderTransport = this.transport,
+  ): Promise<number> {
     try {
-      const report = await this.transport.capabilities();
+      const report = await transport.capabilities();
       const declared = report.cancellation?.deadlineMs;
       if (
         typeof declared === "number" &&
@@ -585,7 +912,9 @@ export class StepExecutionHarness implements StepRunner {
   private async executeSession(args: {
     readonly step: StepSpec;
     readonly request: TransportRequest;
+    readonly transport: ProviderTransport;
     readonly deadlineMs: number;
+    readonly harnessWatchdogMs?: number;
     readonly onData: (
       outcome: TransportOutcome,
       settlement: SettlementSession,
@@ -601,7 +930,8 @@ export class StepExecutionHarness implements StepRunner {
     // `local_fenced_remote_unconfirmed` without re-deriving it.
     readonly receipt: SettlementReceipt;
   }> {
-    const { step, request, deadlineMs, onData } = args;
+    const { step, request, transport, deadlineMs, harnessWatchdogMs, onData } =
+      args;
 
     const settlement = createSettlement(request.sessionId, request.attempt, {
       now: this.nowIso,
@@ -681,7 +1011,7 @@ export class StepExecutionHarness implements StepRunner {
       },
     };
 
-    const execPromise: Promise<void> = this.transport
+    const execPromise: Promise<void> = transport
       .execute(request, { signal: controller.signal, events: sink })
       .then((resolved) => {
         if (fenceClosed || !lease.valid) {
@@ -707,7 +1037,7 @@ export class StepExecutionHarness implements StepRunner {
       id: request.sessionId,
       attempt: request.attempt,
       controller,
-      transport: this.transport.backend,
+      transport: transport.backend,
       writeLease: lease,
       cancellationDeadlineMs: deadlineMs,
       settled,
@@ -725,11 +1055,104 @@ export class StepExecutionHarness implements StepRunner {
       sig.addEventListener("abort", onCancel, { once: true });
     });
 
+    let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+    const watchdogPromise =
+      harnessWatchdogMs !== undefined && harnessWatchdogMs > 0
+        ? new Promise<"watchdog">((resolve) => {
+            watchdogTimer = setTimeout(
+              () => resolve("watchdog"),
+              harnessWatchdogMs,
+            );
+          })
+        : undefined;
+
     try {
-      const raced = await Promise.race([
+      const racers: Promise<"outcome" | "cancel" | "watchdog">[] = [
         execGuarded.then(() => "outcome" as const),
         cancelPromise,
-      ]);
+      ];
+      if (watchdogPromise !== undefined) {
+        racers.push(watchdogPromise);
+      }
+      const raced = await Promise.race(racers);
+
+      if (raced === "watchdog") {
+        settlement.markAbortRequested();
+        if (lease.valid) {
+          lease.invalidate("harness watchdog timeout");
+          settlement.markLeaseInvalidated();
+        }
+        fenceClosed = true;
+        sink.close();
+        controller.abort();
+
+        const graceMs = deadlineMs + this.graceMarginMs;
+        await Promise.race([
+          execGuarded,
+          new Promise<void>((resolve) => setTimeout(resolve, graceMs)),
+        ]);
+
+        const transportTerminal = settlement.terminal;
+        let receipt: SettlementReceipt;
+        const cancellationSemantics =
+          transport.cancellationSemantics ??
+          (transport.backend === "claude-code"
+            ? "process-exit"
+            : this.isTestFake
+              ? transport.backend === "opencode"
+                ? "provider-proof"
+                : "process-exit"
+              : undefined);
+        const isProviderProof = cancellationSemantics === "provider-proof";
+
+        if (
+          transportTerminal !== undefined &&
+          transportTerminal.origin !== "harness" &&
+          (!isProviderProof || transportTerminal.proof !== undefined)
+        ) {
+          receipt = finalize(() =>
+            settlement.receipt("failed", {
+              confirmation:
+                cancellationSemantics === "process-exit"
+                  ? "process_group_exited"
+                  : "sdk_abort_confirmed",
+              processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
+              remoteStatus: "failed",
+            }),
+          );
+        } else {
+          settlement.acceptTerminal("harness", "failed");
+          receipt = finalize(() =>
+            synthesizeUnconfirmed(settlement, {
+              processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
+              outcome: isProviderProof
+                ? "local_fenced_remote_unconfirmed"
+                : undefined,
+              warning: `Step timed out after ${harnessWatchdogMs}ms (harness-owned watchdog)`,
+            }),
+          );
+        }
+
+        await this.persistSettlement(step, session, receipt);
+        this.onSessionSettled?.({ session, settlement, receipt });
+        return {
+          session,
+          settlement,
+          outcome: {
+            completion: "failed",
+            protocolIntegrity: "unverified",
+            finalText: "",
+            usage: normalizeUnavailableUsage({
+              wallMs: harnessWatchdogMs ?? 0,
+              billingMode: transport.billingMode,
+            }),
+            stderrTail: `Step timed out after ${harnessWatchdogMs}ms`,
+            timedOut: true,
+          },
+          cancelled: false,
+          receipt,
+        };
+      }
 
       if (raced === "outcome") {
         const resolved = outcome;
@@ -828,16 +1251,29 @@ export class StepExecutionHarness implements StepRunner {
       // confirmed within grace; otherwise §5.3 steps 5–6 apply.
       const transportTerminal = settlement.terminal;
       let receipt: SettlementReceipt;
+      const cancellationSemantics =
+        transport.cancellationSemantics ??
+        (transport.backend === "claude-code"
+          ? "process-exit"
+          : this.isTestFake
+            ? transport.backend === "opencode"
+              ? "provider-proof"
+              : "process-exit"
+            : undefined);
+      const isProviderProof = cancellationSemantics === "provider-proof";
+
       if (
         transportTerminal !== undefined &&
-        transportTerminal.origin !== "harness"
+        transportTerminal.origin !== "harness" &&
+        (!isProviderProof || transportTerminal.proof !== undefined)
       ) {
         receipt = finalize(() =>
           settlement.receipt("cancelled_confirmed", {
-            confirmation: transportTerminal.proof
-              ? "process_group_exited"
-              : "sdk_abort_confirmed",
-            processGroupAlive: "unknown",
+            confirmation:
+              cancellationSemantics === "process-exit"
+                ? "process_group_exited"
+                : "sdk_abort_confirmed",
+            processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
             remoteStatus: "cancelled",
           }),
         );
@@ -845,21 +1281,11 @@ export class StepExecutionHarness implements StepRunner {
         // §5.3 step 5: exactly one harness-origin non-success terminal, won
         // atomically by the compare-and-set slot.
         settlement.acceptTerminal("harness", "cancelled");
-        // D1-08 (design doc line 290): a non-CLI (SDK-backed) transport's
-        // abort() call carries no confirmed-stopped guarantee the way the
-        // CLI's process-group signalling does — that is exactly the
-        // "SDK abort without provider confirmation" case whose receipt is
-        // local_fenced_remote_unconfirmed, not the generic
-        // local_termination_unconfirmed. §9.2's circuit breaker (runAttempt)
-        // keys off precisely this outcome to fence the bucket.
-        const isSdkBackedTransport = this.transport.backend !== "claude-code";
         // §5.3 step 6: no transport receipt facts → synthesize + quarantine.
         receipt = finalize(() =>
           synthesizeUnconfirmed(settlement, {
-            processGroupAlive: isSdkBackedTransport
-              ? "not_applicable"
-              : "unknown",
-            outcome: isSdkBackedTransport
+            processGroupAlive: isProviderProof ? "not_applicable" : "unknown",
+            outcome: isProviderProof
               ? "local_fenced_remote_unconfirmed"
               : undefined,
           }),
@@ -870,6 +1296,9 @@ export class StepExecutionHarness implements StepRunner {
       this.onSessionSettled?.({ session, settlement, receipt });
       return { session, settlement, cancelled: true, receipt };
     } finally {
+      if (watchdogTimer !== undefined) {
+        clearTimeout(watchdogTimer);
+      }
       if (onCancel && this.cancelSignal) {
         this.cancelSignal.removeEventListener("abort", onCancel);
       }
@@ -882,9 +1311,21 @@ export class StepExecutionHarness implements StepRunner {
     readonly verifiedBinaryPath: string;
     readonly childEnv: Readonly<Record<string, string>>;
     readonly projection?: CredentialProjection;
+    readonly transport: ProviderTransport;
+    readonly admissionIdentity: {
+      readonly executable: string;
+      readonly provider: string;
+    };
   }): Promise<StepResult> {
-    const { step, canonicalCwd, verifiedBinaryPath, childEnv, projection } =
-      args;
+    const {
+      step,
+      canonicalCwd,
+      verifiedBinaryPath,
+      childEnv,
+      projection,
+      transport,
+      admissionIdentity,
+    } = args;
 
     // 3. Admission gate: called once after successful authorization
     if (this.admissionGate) {
@@ -949,7 +1390,7 @@ export class StepExecutionHarness implements StepRunner {
     // terminal attempt from opening a new reserve+admit cycle.
     let reserveToken: ReserveToken = beginStep();
 
-    const deadlineMs = await this.resolveCancellationDeadlineMs();
+    const deadlineMs = await this.resolveCancellationDeadlineMs(transport);
 
     // D3: bind the new transient budget to the EXISTING per-step knob so a
     // step's worst-case spawn count stays byte-identical to the legacy loop
@@ -982,19 +1423,30 @@ export class StepExecutionHarness implements StepRunner {
       const request: TransportRequest = {
         sessionId: `${step.name}-${Date.now()}-${attempts}`,
         attempt: attempts,
-        route: {
-          backend: this.transport.backend,
-          provider: "anthropic",
-          modelFamily: "claude",
-          modelSnapshot: step.model,
-        },
+        executionModel: step.model,
+        route:
+          step.route ??
+          (transport.defaultRoute
+            ? {
+                ...transport.defaultRoute,
+                modelSnapshot:
+                  step.model || transport.defaultRoute.modelSnapshot,
+              }
+            : {
+                backend: transport.backend,
+                provider: admissionIdentity.provider,
+                modelFamily:
+                  transport.backend === "claude-code"
+                    ? "claude"
+                    : admissionIdentity.provider,
+                modelSnapshot: step.model,
+              }),
         systemPromptPath: step.systemPromptPath,
         systemPromptSha256,
         userPrompt: pendingFormatPrompt ?? step.prompt,
         cwd: canonicalCwd,
         tools: step.tools,
         mcpConfigPath: step.mcpConfigPath,
-        timeoutMs: step.timeoutMs,
         isolation: projection
           ? {
               credentialProjectionId: projection.projectionId,
@@ -1027,7 +1479,9 @@ export class StepExecutionHarness implements StepRunner {
         kind,
         request,
         deadlineMs,
+        transport,
         reserveToken,
+        harnessWatchdogMs: step.timeoutMs,
       });
 
       if (attemptResult.reservation !== undefined) {
@@ -1177,9 +1631,20 @@ export class StepExecutionHarness implements StepRunner {
     readonly kind: "attempt" | "format-retry";
     readonly request: TransportRequest;
     readonly deadlineMs: number;
+    readonly transport: ProviderTransport;
     readonly reserveToken: ReserveToken;
+    readonly harnessWatchdogMs?: number;
   }): Promise<AttemptRunResult> {
-    const { step, attempt, kind, request, deadlineMs, reserveToken } = args;
+    const {
+      step,
+      attempt,
+      kind,
+      request,
+      deadlineMs,
+      transport,
+      reserveToken,
+      harnessWatchdogMs,
+    } = args;
 
     // D1-08 PR5b (§9.1 five-step order): acquire (1) → reserve (2) →
     // execute (3) → settle-or-unresolved (4) → release-if-unstarted (5),
@@ -1245,17 +1710,90 @@ export class StepExecutionHarness implements StepRunner {
         kind,
         request,
         deadlineMs,
+        transport,
+        harnessWatchdogMs,
       });
 
       // Step 4: settle actual known cost exactly once (or route to
       // markUnresolvedRemote when usage completeness never became
       // "complete" — coupling 1, spend-limiter.ts).
       if (reservation === undefined) return result;
-      const finalReservation = await this.finalizeReservation(
+      const finalized = await this.finalizeReservation(
         reservation,
         result,
+        transport,
       );
-      return { ...result, reservation: finalReservation };
+      // #182 follow-up fail-fast: a free-declared route that settled with
+      // reason `free_nonzero_cost` means the model flipped from free to
+      // metered mid-flight and the provider priced the work. Unresolved alone
+      // only fences the bucket while the retry loop keeps spending attempts on
+      // the flipped model, so the attempt FAILS CLOSED here with no retry —
+      // `legacy_terminal` breaks the run loop before `decideRetryDisposition`
+      // can resurrect it, and the fence from `markUnresolvedRemote` (already
+      // applied inside `finalizeReservation` — the spend may be real) blocks
+      // the next reserve. Free usage with NO cash figure carries no reason and
+      // releases without fencing (finalizeReservation's free-route fence
+      // scope) — no cash figure means no evidence of billing. Incomplete
+      // usage with a non-free mode still fences: no usage mode to exonerate
+      // it, so fail closed.
+      if (
+        finalized.decision.kind === "unresolved" &&
+        finalized.decision.reason === "free_nonzero_cost"
+      ) {
+        const known =
+          finalized.decision.knownUsd ?? finalized.reservation.knownUsd;
+        const flipNote =
+          `[pr-hero] free-route cost flip: provider reported $${known} cash ` +
+          `on a free-declared route; the model may have flipped from free to ` +
+          `metered — re-probe before retrying (no retry attempted)`;
+        if (result.kind === "cancelled") {
+          return {
+            kind: "failed",
+            outcome: {
+              completion: "failed",
+              protocolIntegrity: "unverified",
+              finalText: "",
+              usage: normalizeUnavailableUsage({ wallMs: 0 }),
+              stderrTail: flipNote,
+            },
+            resolution: { kind: "legacy_terminal" },
+            reservation: finalized.reservation,
+          };
+        }
+        // A DELIVERED attempt already persisted its parsed output
+        // (writeJsonAtomically in runAdmittedAttempt) and the loop returns ok
+        // on delivered without consulting the resolution — so rewriting it to
+        // failed would claim an artifact was never written. Preserve the
+        // delivered kind and append the flip note to stderrTail instead. The
+        // fence is already applied above, and no retry follows delivered
+        // anyway, so nothing about fail-closed is weakened: the next reserve
+        // on this bucket still refuses.
+        if (result.kind === "delivered") {
+          return {
+            kind: "delivered",
+            outcome: {
+              ...result.outcome,
+              stderrTail: [result.outcome.stderrTail, flipNote]
+                .filter(Boolean)
+                .join("\n"),
+            },
+            parsed: result.parsed,
+            reservation: finalized.reservation,
+          };
+        }
+        return {
+          kind: "failed",
+          outcome: {
+            ...result.outcome,
+            stderrTail: [result.outcome.stderrTail, flipNote]
+              .filter(Boolean)
+              .join("\n"),
+          },
+          resolution: { kind: "legacy_terminal" },
+          reservation: finalized.reservation,
+        };
+      }
+      return { ...result, reservation: finalized.reservation };
     } catch (error) {
       if (
         error instanceof ConcurrencyAdmissionAbortedError ||
@@ -1288,12 +1826,33 @@ export class StepExecutionHarness implements StepRunner {
   // invoked (executeSession calls the transport unconditionally) but no
   // usage ever arrived — that case can never settle as a number either, so
   // it takes the same unresolved path with `knownUsd: undefined`.
+  //
+  // Returns the decision alongside the terminal reservation so `runAttempt`
+  // can fail closed on `free_nonzero_cost` (#182 follow-up) — the only caller.
   private async finalizeReservation(
     reservation: SpendReservation,
     result: AttemptRunResult,
-  ): Promise<SpendReservation> {
+    transport?: ProviderTransport,
+  ): Promise<{
+    readonly reservation: SpendReservation;
+    readonly decision: SettlementDecision;
+  }> {
     const ledger = this.spendLedger;
-    if (ledger === undefined) return reservation;
+    // Unreachable via `runAttempt` (it returns before calling here when no
+    // reservation was opened, which is exactly when no ledger is configured),
+    // but kept total: report the pure decision without applying any CAS
+    // transition, so the shape holds and no fence is claimed.
+    if (ledger === undefined) {
+      const usage =
+        result.kind === "cancelled" ? undefined : result.outcome.usage;
+      return {
+        reservation,
+        decision:
+          usage === undefined
+            ? { kind: "unresolved", knownUsd: undefined }
+            : settlementFromUsage(usage),
+      };
+    }
     const idempotencyKey = `${reservation.reservationId}:finalize`;
     const usage =
       result.kind === "cancelled" ? undefined : result.outcome.usage;
@@ -1304,18 +1863,57 @@ export class StepExecutionHarness implements StepRunner {
         idempotencyKey,
       );
       return {
-        ...reservation,
-        state: "unresolved_remote",
-        knownUsd: undefined,
+        reservation: {
+          ...reservation,
+          state: "unresolved_remote",
+          knownUsd: undefined,
+        },
+        decision: { kind: "unresolved", knownUsd: undefined },
       };
     }
     const decision = settlementFromUsage(usage);
     if (decision.kind === "settle") {
       await ledger.settle(reservation.reservationId, decision, idempotencyKey);
       return {
-        ...reservation,
-        state: "settled",
-        settledUsd: decision.actualUsd,
+        reservation: {
+          ...reservation,
+          state: "settled",
+          settledUsd: decision.actualUsd,
+        },
+        decision,
+      };
+    }
+    // #182 follow-up, free-route fence scope: a free binding reserves so the
+    // free-nonzero rule can fence on a priced flip — but that made EVERY
+    // terminal free outcome fence the shared credential bucket, so one
+    // transient failure (parse failure, watchdog timeout shape) killed the
+    // whole all-free run. That contradicts the neighboring subscription
+    // reasoning in production-runtime.ts MultiProviderRunner.run: on a route
+    // that bills nothing there are no dollars to stop spending over.
+    //
+    // So an unresolved free outcome WITHOUT reason releases instead of
+    // fencing: no cash figure means no spend evidence on a free route, and a
+    // terminal released_unstarted fences nothing — the same-step retry
+    // reserves fine and sibling steps are unaffected. Coupling-1 is
+    // preserved: a non-complete usage still never settles as a number, it
+    // just releases instead of fencing. Cancelled/undefined-usage keeps the
+    // fence (no usage means no evidence either way — fail closed), the
+    // free_nonzero_cost reason keeps the fence (priced work may be real), and
+    // the metered path below is untouched. Downstream-safe:
+    // collectUnresolvedSpend (pipeline.ts) and renderResult (ui/result.ts)
+    // only read unresolved_remote reservations, so a released_unstarted free
+    // attempt is invisible to both — no floor marker, no unresolved row.
+    //
+    // #187: watchdog timeout on a free route synthesizes an unavailable usage;
+    // preserving the transport's free billing mode ensures it releases
+    // unstarted instead of fencing the bucket, allowing attempt 2 to retry.
+    const isFreeRoute =
+      usage.billingMode === "free" || transport?.billingMode === "free";
+    if (isFreeRoute && decision.reason === undefined) {
+      await ledger.releaseUnstarted(reservation.reservationId, idempotencyKey);
+      return {
+        reservation: { ...reservation, state: "released_unstarted" },
+        decision,
       };
     }
     await ledger.markUnresolvedRemote(
@@ -1324,9 +1922,12 @@ export class StepExecutionHarness implements StepRunner {
       idempotencyKey,
     );
     return {
-      ...reservation,
-      state: "unresolved_remote",
-      knownUsd: decision.knownUsd,
+      reservation: {
+        ...reservation,
+        state: "unresolved_remote",
+        knownUsd: decision.knownUsd,
+      },
+      decision,
     };
   }
 
@@ -1339,16 +1940,56 @@ export class StepExecutionHarness implements StepRunner {
     readonly kind: "attempt" | "format-retry";
     readonly request: TransportRequest;
     readonly deadlineMs: number;
+    readonly transport: ProviderTransport;
+    readonly harnessWatchdogMs?: number;
   }): Promise<AttemptRunResult> {
-    const { step, attempt, kind, request, deadlineMs } = args;
+    const {
+      step,
+      attempt,
+      kind,
+      request,
+      deadlineMs,
+      transport,
+      harnessWatchdogMs,
+    } = args;
 
+    const frozenIdentity = await freezeAttemptEvidenceIdentity(request, step);
     const execution = await this.executeSession({
       step,
       request,
+      transport,
       deadlineMs,
+      harnessWatchdogMs,
       onData: async (outcome, settlement): Promise<AttemptDelivery> => {
         try {
           const parsed = step.parse(outcome.finalText);
+          if (
+            isVacuousEmptyHunt({
+              tools: step.tools,
+              toolInvocations: outcome.toolInvocations,
+              parsed,
+            })
+          ) {
+            // The JSON parsed. format_violation would spend a paid reminder
+            // retry on the same dump. §7 has no cause for "did not look";
+            // inventing one drifts the frozen vocabulary, so this is the
+            // legacy_terminal ruling — stop, no retry. The attempt log
+            // carries `tool_invocations: 0` as the fact.
+            await this.guardedDataPlaneWrite(settlement, () =>
+              writeAttemptLog(
+                step,
+                attempt,
+                kind,
+                outcome,
+                "terminal",
+                "legacy_terminal",
+              ),
+            ).catch(() => {});
+            return {
+              delivered: false,
+              resolution: { kind: "legacy_terminal" },
+            };
+          }
           await this.guardedDataPlaneWrite(settlement, () =>
             writeAttemptLog(step, attempt, kind, outcome, "ok"),
           );
@@ -1363,7 +2004,7 @@ export class StepExecutionHarness implements StepRunner {
           // legacy step-runner one.
           const resolution = resolveFailureCause({
             outcome,
-            classifyFailure: this.transport.classifyFailure,
+            classifyFailure: transport.classifyFailure,
             parseThrew: true,
           });
           const classification = legacyClassificationFromCause(resolution);
@@ -1400,6 +2041,24 @@ export class StepExecutionHarness implements StepRunner {
       },
     });
 
+    let evidenceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        persistAttemptEvidence(step, request, {
+          ...execution,
+          frozenIdentity,
+        }).catch(() => {}),
+        new Promise<void>((resolve) => {
+          evidenceTimer = setTimeout(
+            resolve,
+            Math.min(100, Math.max(1, step.timeoutMs)),
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(evidenceTimer);
+    }
+
     // D1-08 PR5a (§9.2 "Circuit Breaker Fences An Unconfirmed-Abort
     // Bucket"): an SDK abort the harness could not confirm remotely stopped
     // fences this bucket for the rest of the run — the NEXT admission
@@ -1425,16 +2084,38 @@ export class StepExecutionHarness implements StepRunner {
       return { kind: "delivered", outcome, parsed: execution.delivery.parsed };
     }
 
+    const resolution =
+      execution.delivery?.resolution ??
+      resolveFailureCause({
+        outcome,
+        classifyFailure: transport.classifyFailure,
+        parseThrew: false,
+      });
+
+    // Attempt log persistence: the attempt log (logs/<step>.<attempt>.log) is
+    // diagnostic post-mortem persistence, parallel to the settlement receipt.
+    // When execution.delivery is undefined (e.g. watchdog timeout or an onData
+    // throw where onData did not complete), the attempt log must still be
+    // flushed so pipeline.json's attemptLogPath points to a valid file (#185).
+    // This write is deliberately not lease-guarded — the write lease was
+    // already invalidated at fence closure, and refusing diagnostic
+    // persistence would erase the post-mortem record.
+    if (execution.delivery === undefined) {
+      const classification = legacyClassificationFromCause(resolution);
+      await writeAttemptLog(
+        step,
+        attempt,
+        kind,
+        outcome,
+        classification,
+        resolution.kind === "cause" ? resolution.cause : "legacy_terminal",
+      ).catch(() => {});
+    }
+
     return {
       kind: "failed",
       outcome,
-      // Row 10: `?? format_violation` — the same defensive default the
-      // legacy loop applied (`?? "format"`) for the case `execution.delivery`
-      // itself is somehow absent despite not being cancelled.
-      resolution: execution.delivery?.resolution ?? {
-        kind: "cause",
-        cause: "format_violation",
-      },
+      resolution,
     };
   }
 }

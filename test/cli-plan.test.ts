@@ -6,10 +6,21 @@
 // flag exported symbols.
 //
 // Everything here asserts the RETURNED array. `styles` arrives as a parameter
-// (ui.ts's contract), so both the painted and the unpainted shape are
+// (ui/primitives.ts's contract), so both the painted and the unpainted shape are
 // assertable offline with no TTY anywhere.
 
 import { describe, expect, test } from "bun:test";
+import { aliasCanonical, lookupAlias } from "#model/catalog";
+import {
+  createResolvedRoutePlan,
+  type RoutingConfig,
+  resolveStepRoute,
+} from "#model/routing";
+import type { CliOptions, ConfigSources } from "#review/preflight";
+import type { ParsedAgent } from "#review/prompt-set";
+import { estimateCost, formatModelRoute } from "#review/report";
+import type { SizeGateVerdict } from "#review/size-gate";
+import type { ReviewSpec } from "#review/spec";
 import {
   type ConfigProvenance,
   type PlanContext,
@@ -18,19 +29,14 @@ import {
   prPlanDetails,
   renderPlan,
   renderPrPlan,
-} from "../src/cli";
-import type { CliOptions, ConfigSources } from "../src/preflight";
-import type { ParsedAgent } from "../src/prompt-set";
-import { estimateCost } from "../src/report";
-import type { SizeGateVerdict } from "../src/size-gate";
-import type { ReviewSpec } from "../src/spec";
+} from "#ui/plan";
 
 const ESC = String.fromCharCode(27);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 const stripAnsi = (text: string): string => text.replace(ANSI, "");
 const joined = (lines: string[]): string => stripAnsi(lines.join("\n"));
 
-// The width every case below renders at. Same value ui-result.test.ts pins,
+// The width every case below renders at. Same value ui/result.test.ts pins,
 // so the two halves of the terminal surface are asserted against one grid.
 const PINNED_WIDTH = 80;
 // Narrow enough to move the wrap points: at 40 columns the decision block's
@@ -296,7 +302,7 @@ describe("renderPlan", () => {
     const text = joined(
       renderPlan(planContext({ droppedPaths: ["bun.lock"] }), false),
     );
-    expect(text).toContain("exclusions: 1 generated file(s) dropped");
+    expect(text).toContain("exclusions: 1 excluded file(s) dropped");
     expect(text).toContain("diff.raw.patch");
   });
 
@@ -522,7 +528,7 @@ describe("prPlanDetails", () => {
 // The regression these four renderers were written to have and did not: WIDTH
 // AS A PARAMETER. Before this block they passed no width at all, so every
 // row() and box() inside them — including the ones under decisionLines,
-// markerRowLines, planDetails and prPlanDetails — fell back to ui.ts's
+// markerRowLines, planDetails and prPlanDetails — fell back to ui/primitives.ts's
 // terminalWidth() and measured whatever terminal ran `bun test`. The suite was
 // therefore green at 80 columns and red in a ~40-column pane, on assertions
 // about wrap points nobody could stub.
@@ -680,11 +686,20 @@ const provenance = (
     parity_trigger_paths: "repo",
     suspicion_priors: "repo",
     summary: { enabled: "repo", model: "default" },
+    routing: "default",
     max_verification_steps: "default",
     max_changed_lines: "default",
     max_changed_files: "default",
     scout: "default",
     post: "default",
+    ci_review_policy: "default",
+    ci_max_attempts: "default",
+    ci_max_reviews: "default",
+    ci_rereview_min_score: "default",
+    ci_blocking_weight: "default",
+    ci_advisory_weight: "default",
+    ci_trusted_actors: "repo",
+    ci_admission_observe_only: "default",
     ...sources,
   },
 });
@@ -860,7 +875,7 @@ describe("plan card config provenance (C5 O-7)", () => {
     expect(present).toContain("agents_dir ← global");
   });
 
-  // ui.ts's contract, on the rows this slice added: styles arrive as a
+  // ui/primitives.ts's contract, on the rows this slice added: styles arrive as a
   // parameter, and with them off nothing paints.
   test("no escape bytes with styles off, and the width still decides", () => {
     const ctx = planContext({
@@ -1011,5 +1026,118 @@ describe("plan card config provenance (C5 O-7)", () => {
         ),
       ),
     ).toContain("agents_dir ← env");
+  });
+});
+
+describe("plan card and details route dimensions display", () => {
+  const routingConfig: RoutingConfig = {
+    mappings: [
+      {
+        logical: aliasCanonical("sonnet"),
+        backend: "claude-code",
+        provider: lookupAlias("sonnet").provider,
+        gateway: "direct",
+        modelFamily: "sonnet",
+        modelSnapshot: "sonnet",
+      },
+      {
+        logical: aliasCanonical("haiku"),
+        backend: "claude-code",
+        provider: lookupAlias("haiku").provider,
+        gateway: "direct",
+        modelFamily: "haiku",
+        modelSnapshot: "haiku",
+      },
+      {
+        logical: aliasCanonical("opus"),
+        backend: "claude-code",
+        provider: lookupAlias("opus").provider,
+        gateway: "direct",
+        modelFamily: "opus",
+        modelSnapshot: "opus",
+      },
+      {
+        logical: "openai/o3-mini",
+        backend: "opencode",
+        provider: "openai",
+        gateway: "configured",
+        modelFamily: "o3-mini",
+        modelSnapshot: "o3-mini-2025-01-31",
+      },
+    ],
+  };
+
+  const hunter1 = resolveStepRoute({
+    stepKey: "hunter-reliability",
+    role: "hunter",
+    cliModel: "sonnet",
+    routingConfig,
+  });
+  const hunter2 = resolveStepRoute({
+    stepKey: "hunter-parity",
+    role: "hunter",
+    cliModel: "sonnet",
+    routingConfig,
+  });
+  const refuter = resolveStepRoute({
+    stepKey: "refuter",
+    role: "refuter",
+    cliModel: "openai/o3-mini",
+    routingConfig,
+  });
+  const summarizer = resolveStepRoute({
+    stepKey: "summarizer",
+    role: "summarizer",
+    cliModel: "haiku",
+    routingConfig,
+  });
+
+  const routePlan = createResolvedRoutePlan([
+    hunter1,
+    hunter2,
+    refuter,
+    summarizer,
+  ]);
+
+  const sonnetRouteLabel = `${aliasCanonical("sonnet")} [direct, claude-code]`;
+
+  test("formatModelRoute formats direct and configured routes with dimensions", () => {
+    expect(formatModelRoute(hunter1.route, "sonnet")).toBe(
+      `sonnet -> ${sonnetRouteLabel}`,
+    );
+
+    expect(formatModelRoute(refuter.route, "openai/o3-mini")).toBe(
+      "openai/o3-mini -> openai/o3-mini-2025-01-31 [configured, opencode]",
+    );
+
+    expect(formatModelRoute(hunter1.route)).toBe(sonnetRouteLabel);
+  });
+
+  test("planDetails renders route dimensions for each step", () => {
+    const lines = planDetails(planContext({ routePlan }), false);
+    const text = flat(lines);
+    expect(text).toContain("route hunter-reliability");
+    expect(text).toContain(sonnetRouteLabel);
+    expect(text).toContain("route refuter");
+    expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
+  });
+
+  test("renderPlan displays resolved route dimensions on agent rows when routePlan is supplied", () => {
+    const lines = renderPlan(planContext({ routePlan }), false);
+    const text = flat(lines);
+    expect(text).toContain("reliability");
+    expect(text).toContain(sonnetRouteLabel);
+    expect(text).toContain("openai/o3-mini-2025-01-31 [configured, opencode]");
+  });
+
+  test("prPlanDetails and renderPrPlan render route dimensions", () => {
+    const lines = prPlanDetails(prPlanContext({ routePlan }), false);
+    const text = flat(lines);
+    expect(text).toContain("route hunter-reliability");
+    expect(text).toContain(sonnetRouteLabel);
+
+    const prLines = renderPrPlan(prPlanContext({ routePlan }), false);
+    const prText = flat(prLines);
+    expect(prText).toContain(sonnetRouteLabel);
   });
 });

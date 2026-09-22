@@ -9,6 +9,7 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
+import { envBillsMetered } from "../../src/execution/usage-normalized";
 import type {
   CredentialBroker,
   CredentialProjection,
@@ -84,12 +85,20 @@ function makeHarness(transport: ProviderTransport, broker?: CredentialBroker) {
     spawnFn: (() => ({
       exited: Promise.resolve(0),
     })) as unknown as typeof Bun.spawn,
+    // Injected, never read off the real environment: these arms turn on
+    // whether an AMBIENT credential survives into the child, so a test that
+    // consulted `process.env` would pass or fail by whatever the operator
+    // happened to have exported.
     childEnv: {
       HOME: "/Users/juanma-real-home",
       USER: "juanma",
       TMPDIR: "/var/folders/real-tmp",
       CLAUDE_CONFIG_DIR: "/Users/juanma-real-home/.claude",
       PATH: "/usr/bin:/bin",
+      ANTHROPIC_API_KEY: "sk-ambient-operator-key",
+      ANTHROPIC_AUTH_TOKEN: "ambient-operator-bearer",
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-ambient",
+      ANTHROPIC_BASE_URL: "https://gateway.operator.example",
     },
     credentialBroker: broker,
   });
@@ -142,6 +151,65 @@ describe("harness with a CredentialBroker", () => {
     // Non-credential passthrough keys survive the overlay.
     expect(isolation.env.PATH).toBe("/usr/bin:/bin");
     expect(isolation.env.USER).toBe("juanma");
+  });
+
+  // 2026-09-02, #177 follow-up: the projection owns the CREDENTIAL, not only
+  // HOME/TMPDIR. An ambient ANTHROPIC_API_KEY riding the enumerated
+  // passthrough used to survive the overlay untouched on exactly the path
+  // whose purpose is handing the child one freshly projected subscription
+  // record — and #177 made that leak observable, because the billing basis is
+  // now read off this same env.
+  test("a projection strips the ambient credentials the passthrough carried", async () => {
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker();
+    const harness = makeHarness(recordingTransport(requests), broker);
+    const result = await runStep(harness);
+    expect(result.status).toBe("ok");
+
+    const env = requests[0].isolation.env;
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(JSON.stringify(env)).not.toContain("ambient");
+    // The other half of the defect, and the reason it stopped being inert:
+    // this env is what decides how the attempt's money is filed. A leaked key
+    // billed a subscription run as metered cash.
+    expect(envBillsMetered(env)).toBe(false);
+
+    // EXCLUDED on purpose, and asserted so the exclusion is a decision rather
+    // than an oversight: ANTHROPIC_BASE_URL is not a credential. It sits in
+    // the passthrough beside HTTP(S)_PROXY/SSL_CERT_* as network-routing
+    // config, and the projection supplies no endpoint — stripping it would
+    // silently send the projection path somewhere the no-projection path
+    // does not go.
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://gateway.operator.example");
+  });
+
+  // The no-projection path is CI, and it is the one that already cost a real
+  // failure: dropping CLAUDE_CODE_OAUTH_TOKEN lost pr-hero's first CI
+  // self-review (2026-08-27) to "Not logged in". Credential projection needs
+  // darwin + /usr/bin/security (runner-authority.ts `claudeCredentialBroker`),
+  // so every CI runner lands here with no projection at all, and the strip
+  // above must not reach it.
+  test("without a projection the ambient credentials still reach the child", async () => {
+    const requests: TransportRequest[] = [];
+    const harness = makeHarness(recordingTransport(requests));
+    const result = await runStep(harness);
+    expect(result.status).toBe("ok");
+
+    const env = requests[0].isolation.env;
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ambient-operator-key");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe("ambient-operator-bearer");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-ambient");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://gateway.operator.example");
+    // #177's own arm: a key with no projection is a real per-token spend and
+    // must keep filing as cash.
+    expect(envBillsMetered(env)).toBe(true);
+    // And the projection-owned trio is untouched too — there is no projection
+    // to own it.
+    expect(env.HOME).toBe("/Users/juanma-real-home");
+    expect(env.TMPDIR).toBe("/var/folders/real-tmp");
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/Users/juanma-real-home/.claude");
   });
 
   test("destroy runs after success AND after failed steps", async () => {
@@ -235,6 +303,111 @@ describe("harness with a CredentialBroker", () => {
     expect(requests.length).toBe(0);
     expect(result.stderrTail).toContain("projection_layout_invalid");
     expect(result.stderrTail).not.toContain("operator environment");
+  });
+
+  // #133: `missing_provider_record` is the metered kind's own failure class,
+  // and it must NOT join the one-class degradation above. The degrade exists
+  // because Claude's subscription store MOVED, which is an environment fact;
+  // an absent provider API token is not, and running the step anyway would
+  // hand an adversarial-diff agent the operator's ambient provider keys on a
+  // route that bills real cash.
+  test("a missing provider record fails closed instead of degrading", async () => {
+    let admitted = false;
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker(
+      new CredentialProjectionError("missing_provider_record"),
+    );
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: { HOME: "/Users/juanma-real-home" },
+      admissionGate: {
+        admit: () => {
+          admitted = true;
+        },
+      },
+      credentialBroker: broker,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(admitted).toBe(false);
+    expect(requests.length).toBe(0);
+    expect(result.stderrTail).toContain("missing_provider_record");
+    expect(result.stderrTail).not.toContain("operator environment");
+  });
+
+  test("hanging credential projection fails before spawn within the projection budget", async () => {
+    const requests: TransportRequest[] = [];
+    const hangingBroker: CredentialBroker = {
+      project: () => new Promise(() => {}),
+    };
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        PATH: "/usr/bin:/bin",
+      },
+      credentialBroker: hangingBroker,
+      credentialProjectionTimeoutMs: 25,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(requests).toHaveLength(0);
+    expect(result.stderrTail).toContain("broker_error");
+  });
+
+  test("late credential projection after timeout is destroyed instead of leaked", async () => {
+    const requests: TransportRequest[] = [];
+    let resolveLate: ((projection: CredentialProjection) => void) | undefined;
+    let destroyCalls = 0;
+    const slowBroker: CredentialBroker = {
+      project: async () =>
+        new Promise<CredentialProjection>((resolve) => {
+          resolveLate = resolve;
+        }),
+    };
+    const harness = new StepExecutionHarness({
+      transport: recordingTransport(requests),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        PATH: "/usr/bin:/bin",
+      },
+      credentialBroker: slowBroker,
+      credentialProjectionTimeoutMs: 25,
+    });
+
+    const resultPromise = runStep(harness);
+    const result = await resultPromise;
+    expect(result.status).toBe("failed");
+    expect(requests).toHaveLength(0);
+
+    const home = await mkdtemp(path.join(tmpdir(), "pr-hero-late-proj-"));
+    const lateProjection: CredentialProjection = {
+      projectionId: "late-projection",
+      kind: "claude_subscription_oauth",
+      syntheticHome: home,
+      syntheticConfigHome: path.join(home, ".claude"),
+      syntheticTmp: path.join(home, "tmp"),
+      env: { HOME: home },
+      files: [],
+      destroy: async () => {
+        destroyCalls++;
+        await rm(home, { recursive: true, force: true });
+      },
+    };
+    resolveLate?.(lateProjection);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(destroyCalls).toBe(1);
   });
 
   test("destroy failure is appended to stderrTail instead of thrown or replacing the outcome", async () => {

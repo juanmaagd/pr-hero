@@ -13,7 +13,7 @@ Canonical protocol: `docs/benchmarks/martian-bench.md`. This file is the runbook
 | `docs/benchmarks/martian-cal-goldens.json` | Vendored Martian Cal.com goldens (10 PRs, 41 issues) |
 | `docs/benchmarks/martian-cal-gotchas.md` | Intentionally thin. No gold, no vendor comments |
 
-A new arm **must** use a new suffix (`cal-<pr>-scout`, `cal-<pr>-hunters-v2`, …). `run` skips a dir that already has `findings.json` — that is how the baseline stays intact.
+A new arm **must** use a new suffix (`cal-<pr>-scout`, `cal-<pr>-hunters-v2`, …). `run` skips only schema-valid completed reviews with matching frozen identity and attributable attempt evidence. Legacy files alone do not qualify. Unqualified prior directories are preserved under `incomplete-attempts/`; use a new arm rather than rewriting a historical baseline.
 
 ## Isolation (fairness)
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  createTurnState,
   mapOpenCodeEvents,
   retryHintFromStatus,
   terminalProofFromAssistant,
@@ -27,8 +28,26 @@ const SESSION_ID = (
   }
 ).properties.sessionID;
 
+// ONE index across the whole replay, because that is how the client uses it:
+// #124 made the mapper stateful, and the state is the partID -> part kind
+// correlation that `message.part.delta` cannot carry itself. A per-event index
+// would drop every delta, which is exactly why the parameter is required
+// rather than optional.
 function mapAll(sessionId = SESSION_ID): OpenCodeClientEvent[] {
-  return PROBE_EVENTS.flatMap((raw) => mapOpenCodeEvents(raw, sessionId));
+  const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
+  return PROBE_EVENTS.flatMap((raw) =>
+    mapOpenCodeEvents(raw, sessionId, index),
+  );
+}
+
+// For the single-event assertions: an event mapped in isolation gets an index
+// that has seen nothing else.
+function mapOne(raw: unknown, sessionId = SESSION_ID): OpenCodeClientEvent[] {
+  return mapOpenCodeEvents(
+    raw,
+    sessionId,
+    createTurnState(SESSION_ID, String(ASSISTANT.parentID)),
+  );
 }
 
 describe("mapOpenCodeEvent against the recorded stream", () => {
@@ -49,7 +68,101 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
         ),
     );
     expect(userPartUpdate).toBeDefined();
-    expect(mapOpenCodeEvents(userPartUpdate as object, SESSION_ID)).toEqual([]);
+    expect(mapOne(userPartUpdate)).toEqual([]);
+  });
+
+  // #124's fix has to consume `message.part.updated` for the part TYPE, and
+  // that same event fires for the USER message — whose recorded part carries
+  // the prompt text itself. If the fix registered it, a delta naming that part
+  // would echo the prompt into finalText: TRAP 2 walking back in through the
+  // door the fix had to open. Registration is gated on the part's owning
+  // message having been announced as the ASSISTANT's.
+  test("the recorded user part is never a channel a delta can fill", () => {
+    const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
+    for (const raw of PROBE_EVENTS) mapOpenCodeEvents(raw, SESSION_ID, index);
+
+    const userPart = PROBE_EVENTS.find(
+      (e) =>
+        e.type === "message.part.updated" &&
+        (e.properties as { part?: { text?: string } })?.part?.text?.includes(
+          "Reply with exactly",
+        ),
+    ) as { properties: { part: { id: string; messageID: string } } };
+    expect(index.parts.has(userPart.properties.part.id)).toBe(false);
+    expect(
+      index.assistantMessages.has(userPart.properties.part.messageID),
+    ).toBe(false);
+
+    // The behaviour that property buys, stated directly.
+    expect(
+      mapOpenCodeEvents(
+        {
+          type: "message.part.delta",
+          properties: {
+            sessionID: SESSION_ID,
+            messageID: userPart.properties.part.messageID,
+            partID: userPart.properties.part.id,
+            field: "text",
+            delta: "the prompt, echoed back",
+          },
+        },
+        SESSION_ID,
+        index,
+      ),
+    ).toEqual([]);
+  });
+
+  test("part overflow fails closed without evicting prior identity", () => {
+    const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: { ...ASSISTANT, id: "msg_a", sessionID: SESSION_ID },
+        },
+      },
+      SESSION_ID,
+      index,
+    );
+    const part = (i: number) => ({
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: `prt_${i}`,
+          sessionID: SESSION_ID,
+          messageID: "msg_a",
+          type: "text",
+          text: "",
+        },
+      },
+    });
+    for (let i = 0; i < 4096; i++)
+      mapOpenCodeEvents(part(i), SESSION_ID, index);
+    expect(() => mapOpenCodeEvents(part(4096), SESSION_ID, index)).toThrow(
+      "maximum tracked parts",
+    );
+    expect(index.parts.has("prt_0")).toBe(true);
+    expect(index.parts.has("prt_4096")).toBe(false);
+  });
+
+  test("message overflow fails closed without evicting prior identity", () => {
+    const index = createTurnState(SESSION_ID, String(ASSISTANT.parentID));
+    const message = (i: number) => ({
+      type: "message.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        info: { ...ASSISTANT, id: `msg_${i}`, sessionID: SESSION_ID },
+      },
+    });
+    for (let i = 0; i < 512; i++)
+      mapOpenCodeEvents(message(i), SESSION_ID, index);
+    expect(() => mapOpenCodeEvents(message(512), SESSION_ID, index)).toThrow(
+      "message cap exceeded",
+    );
+    expect(index.assistantMessages.has("msg_0")).toBe(true);
+    expect(index.assistantMessages.has("msg_512")).toBe(false);
   });
 
   test("events for another session are dropped, noise and all", () => {
@@ -65,7 +178,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
       "server.connected",
     ]) {
       const noise = PROBE_EVENTS.find((e) => e.type === type);
-      expect(mapOpenCodeEvents(noise as object, SESSION_ID)).toEqual([]);
+      expect(mapOne(noise)).toEqual([]);
     }
   });
 
@@ -94,7 +207,7 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     for (const raw of PROBE_EVENTS.filter(
       (e) => e.type === "session.updated",
     )) {
-      expect(mapOpenCodeEvents(raw, SESSION_ID)).toEqual([]);
+      expect(mapOne(raw)).toEqual([]);
     }
   });
 
@@ -102,46 +215,60 @@ describe("mapOpenCodeEvent against the recorded stream", () => {
     expect(mapAll().some((e) => e.kind === "heartbeat")).toBe(true);
   });
 
-  test("session.idle is NOT a terminal — it carries no proof to be one", () => {
-    // Its entire payload is {sessionID}. Synthesising a proof from it would
-    // mean the transport issuing its own proof and letting it win the §197
-    // slot, which is exactly what that slot exists to prevent.
+  // #127: session.idle is the turn BOUNDARY and supplies no proof of its own.
+  // Its entire payload is {sessionID}, so synthesising one from it would mean
+  // the transport issuing its own proof and letting it win the §197 slot,
+  // which is exactly what that slot exists to prevent. Mapped in isolation —
+  // no completion record seen — it therefore yields nothing at all.
+  test("session.idle on its own carries no proof and yields nothing", () => {
     const idle = PROBE_EVENTS.find((e) => e.type === "session.idle");
     expect(Object.keys((idle as { properties: object }).properties)).toEqual([
       "sessionID",
     ]);
-    expect(mapOpenCodeEvents(idle as object, SESSION_ID)).toEqual([]);
+    expect(mapOne(idle)).toEqual([]);
   });
 
-  test("the assistant's completed message IS the terminal", () => {
+  // #127: the completed assistant message is the PROOF, session.idle is the
+  // BOUNDARY, and the terminal is the two together. `time.completed` says a
+  // STEP ended — OpenCode writes one assistant message per agentic step — so
+  // reading it as the turn's terminal settled the attempt on step 1.
+  test("the turn's terminal quotes the last completed assistant message", () => {
     const terminals = mapAll().filter((e) => e.kind === "terminal");
-    // The recorded run restated the completed message twice. That is fine and
-    // must stay fine: §197's compare-and-set accepts an identical repeat and
-    // only conflicts on a DIFFERENT proof, so the mapping does not dedupe.
-    expect(terminals.length).toBeGreaterThanOrEqual(1);
-    for (const terminal of terminals) {
-      if (terminal.kind !== "terminal") throw new Error("unreachable");
-      expect(terminal.proof.eventId).toBe(ASSISTANT.id as string);
-      expect(terminal.proof.providerStatus).toBe("completed");
-    }
+    // ONE, from the whole replay. The recorded run restates the completed
+    // message twice (indices 21 and 22) and reaches idle once, so a mapping
+    // that emitted per completion would emit two.
+    expect(terminals.length).toBe(1);
+    const terminal = terminals[0];
+    if (terminal?.kind !== "terminal") throw new Error("unreachable");
+    expect(terminal.proof.eventId).toBe(ASSISTANT.id as string);
+    expect(terminal.proof.providerStatus).toBe("completed");
   });
 
-  // Ordering is load-bearing, not incidental: the completed assistant message
-  // carries BOTH the real usage and the terminal proof, and the transport
-  // settles on the terminal. Emitting the terminal first would drop the only
-  // accurate usage figure the attempt ever gets.
-  test("usage is emitted before the terminal it shares an event with", () => {
-    const completed = PROBE_EVENTS.filter(
-      (e) =>
-        e.type === "message.updated" &&
-        (e.properties as { info?: { time?: { completed?: number } } })?.info
-          ?.time?.completed !== undefined,
-    );
-    expect(completed.length).toBeGreaterThan(0);
-    for (const raw of completed) {
-      const mapped = mapOpenCodeEvents(raw, SESSION_ID);
-      expect(mapped.map((e) => e.kind)).toEqual(["usage", "terminal"]);
-    }
+  // Ordering is load-bearing, not incidental: the transport SETTLES on the
+  // terminal, so a terminal that reached the slot before the turn's usage was
+  // banked would drop the only accurate figure the attempt ever gets. Since
+  // #127 the two no longer share an event at all — usage rides every step's
+  // message, the terminal rides the boundary that follows them — so the
+  // ordering holds by construction. This pins that it really does.
+  test("every usage event precedes the turn's terminal", () => {
+    const kinds = mapAll()
+      .map((e) => e.kind)
+      .filter((kind) => kind === "usage" || kind === "terminal");
+
+    expect(kinds.filter((kind) => kind === "usage").length).toBeGreaterThan(0);
+    expect(kinds.lastIndexOf("usage")).toBeLessThan(kinds.indexOf("terminal"));
+  });
+
+  // The turn's usage is the SUM of its steps', and it is summed per MESSAGE
+  // ID: the recorded run restates the same completed message twice, byte for
+  // byte, which a per-event sum would double-count into 48,024 input tokens.
+  test("a restated message does not double-count its own usage", () => {
+    const usage = mapAll().filter((e) => e.kind === "usage");
+    const last = usage[usage.length - 1];
+    if (last?.kind !== "usage") throw new Error("unreachable");
+
+    expect(last.inputTokens).toBe(24_012);
+    expect(last.outputTokens).toBe(6);
   });
 });
 
@@ -214,6 +341,203 @@ describe("terminalProofFromAssistant", () => {
   });
 });
 
+describe("mapOpenCodeEvents tool-call parts (#214)", () => {
+  const ASSISTANT_ID = "msg_hunter";
+  const USER_ID = "msg_hunter_user";
+
+  // #228's ownership model (`isMessageOwned`) needs a `currentUserId` and a
+  // parent chain back to it — a bare `createTurnState()` leaves
+  // `currentUserId` undefined, which makes `isMessageOwned` return false
+  // unconditionally and every part on this "assistant" message get dropped
+  // before it ever reaches the tool branch.
+  function announceAssistant(): ReturnType<typeof createTurnState> {
+    const state = createTurnState(SESSION_ID, USER_ID);
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: {
+            id: ASSISTANT_ID,
+            role: "assistant",
+            sessionID: SESSION_ID,
+            parentID: USER_ID,
+            time: { created: 1 },
+          },
+        },
+      },
+      SESSION_ID,
+      state,
+    );
+    return state;
+  }
+
+  // #214's count is one signal among several a tool-part update can now
+  // produce (#228's "activity" progress credit rides the same transition) —
+  // filtering to "tool" isolates the count this describe block is about from
+  // the progress signal, which has its own coverage in opencode-client.test.ts.
+  function toolEvents(
+    raw: Record<string, unknown>,
+    state: ReturnType<typeof createTurnState>,
+  ): OpenCodeClientEvent[] {
+    return mapOpenCodeEvents(raw, SESSION_ID, state).filter(
+      (event) => event.kind === "tool",
+    );
+  }
+
+  function toolPart(
+    partId: string,
+    callID: string,
+    tool = "read",
+    status = "completed",
+  ): Record<string, unknown> {
+    return {
+      type: "message.part.updated",
+      properties: {
+        sessionID: SESSION_ID,
+        part: {
+          id: partId,
+          messageID: ASSISTANT_ID,
+          sessionID: SESSION_ID,
+          type: "tool",
+          callID,
+          tool,
+          state: { status },
+        },
+      },
+    };
+  }
+
+  test("the recorded PONG probe issued no tool-call parts", () => {
+    expect(mapAll().filter((event) => event.kind === "tool")).toEqual([]);
+  });
+
+  test("a completed tool part on an assistant message emits one tool event", () => {
+    const state = announceAssistant();
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
+  test("pending and error updates are not a look", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "pending"), state),
+    ).toEqual([]);
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "running"), state),
+    ).toEqual([]);
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "error"), state),
+    ).toEqual([]);
+  });
+
+  test("pending then completed is one invocation, counted at completed", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "pending"), state),
+    ).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
+  test("restatements of the same completed callID are one invocation, not three", () => {
+    const state = announceAssistant();
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([]);
+  });
+
+  test("two callIDs are two invocations", () => {
+    const state = announceAssistant();
+    expect(toolEvents(toolPart("prt_a", "call_a"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_a" },
+    ]);
+    expect(toolEvents(toolPart("prt_b", "call_b"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_b" },
+    ]);
+  });
+
+  // pr-hero review F001 (round 2, opencode-client.ts:809): "error" and
+  // "completed" share TOOL_STATUS_RANK (both terminal, neither outranks the
+  // other), so an error->completed transition for the same callID left
+  // `transitioned` false and the completed-tally block — nested inside
+  // `if (transitioned)` — never ran at all. The call was never added to
+  // `completedToolCallIds` and no `{kind:"tool"}` event fired, contradicting
+  // the set's own contract ("every callID EVER observed completed") whenever
+  // the poll does not independently catch the same call.
+  test("error then completed for the same callID still counts as one look", () => {
+    const state = announceAssistant();
+    expect(
+      toolEvents(toolPart("prt_t1", "call_1", "read", "error"), state),
+    ).toEqual([]);
+    expect(toolEvents(toolPart("prt_t1", "call_1"), state)).toEqual([
+      { kind: "tool", tool: "read", callId: "call_1" },
+    ]);
+  });
+
+  test("step-start and step-finish are not tool invocations", () => {
+    const state = announceAssistant();
+    for (const type of ["step-start", "step-finish"]) {
+      expect(
+        mapOpenCodeEvents(
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: SESSION_ID,
+              part: {
+                id: `prt_${type}`,
+                messageID: ASSISTANT_ID,
+                sessionID: SESSION_ID,
+                type,
+              },
+            },
+          },
+          SESSION_ID,
+          state,
+        ),
+      ).toEqual([]);
+    }
+  });
+
+  test("a user-owned tool part is dropped (TRAP 2 still holds)", () => {
+    const state = createTurnState();
+    mapOpenCodeEvents(
+      {
+        type: "message.updated",
+        properties: {
+          sessionID: SESSION_ID,
+          info: { id: "msg_user", role: "user", time: { created: 1 } },
+        },
+      },
+      SESSION_ID,
+      state,
+    );
+    expect(
+      mapOpenCodeEvents(
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: SESSION_ID,
+            part: {
+              id: "prt_user_tool",
+              messageID: "msg_user",
+              type: "tool",
+              callID: "call_user",
+              tool: "read",
+            },
+          },
+        },
+        SESSION_ID,
+        state,
+      ),
+    ).toEqual([]);
+  });
+});
+
 describe("retryHintFromStatus", () => {
   // SessionStatus has a `retry {attempt, message, next}` arm and `next` is a
   // timestamp. This is the provider-issued backoff hint decideRetryDisposition
@@ -239,5 +563,81 @@ describe("retryHintFromStatus", () => {
   test("idle and busy carry no hint", () => {
     expect(retryHintFromStatus({ type: "busy" }, 0)).toBeUndefined();
     expect(retryHintFromStatus({ type: "idle" }, 0)).toBeUndefined();
+  });
+});
+
+// #157: pr-157-8df2fca3-4's complete capture — OpenCode reported this exact
+// retry status for the session's own id at ~3.8s in, kept retrying
+// internally, and no reasoning/text/usage ever arrived. The attempt sat
+// quiet for the whole usefulProgressMs budget before the silence tripwire
+// settled it $0/transient — the user saw "silence", never the account limit
+// the provider had already named. `account_rate_limit` is the only
+// `action.reason` observed across all three hunter captures of that run
+// (3487 occurrences each).
+describe("session.status account/usage limit maps to a provider_limit event (#157)", () => {
+  const LIMIT_MESSAGE =
+    "5 hour usage limit reached. It will reset in 22 minutes. To continue using this model now, enable usage from your available balance - https://opencode.ai/workspace/wrk_01M17B67W4Q9BE4T0910EQ0NRY/go";
+
+  function statusEvent(
+    status: Record<string, unknown>,
+    sessionID: string = SESSION_ID,
+  ) {
+    return {
+      type: "session.status",
+      properties: { sessionID, status },
+    };
+  }
+
+  test("an account_rate_limit retry for the own session maps to provider_limit, verbatim", () => {
+    const raw = statusEvent({
+      type: "retry",
+      attempt: 1,
+      message: LIMIT_MESSAGE,
+      action: {
+        reason: "account_rate_limit",
+        provider: "opencode-go",
+        title: "Go limit reached",
+      },
+    });
+    expect(mapOne(raw)).toEqual([
+      {
+        kind: "provider_limit",
+        reason: "account_rate_limit",
+        message: LIMIT_MESSAGE,
+      },
+    ]);
+  });
+
+  test("a retry with no action reason stays alive and is not progress", () => {
+    const raw = statusEvent({
+      type: "retry",
+      attempt: 2,
+      message: "429",
+      next: 1,
+    });
+    expect(mapOne(raw)).toEqual([]);
+  });
+
+  test("a retry whose action names an unrecognised reason stays alive too", () => {
+    const raw = statusEvent({
+      type: "retry",
+      attempt: 1,
+      message: "provider is retrying",
+      action: { reason: "some_future_reason", provider: "opencode-go" },
+    });
+    expect(mapOne(raw)).toEqual([]);
+  });
+
+  test("an account_rate_limit retry for a different session is ignored", () => {
+    const raw = statusEvent(
+      {
+        type: "retry",
+        attempt: 1,
+        message: LIMIT_MESSAGE,
+        action: { reason: "account_rate_limit", provider: "opencode-go" },
+      },
+      "some-other-session",
+    );
+    expect(mapOne(raw)).toEqual([]);
   });
 });

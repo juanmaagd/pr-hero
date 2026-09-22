@@ -15,7 +15,10 @@
 // collide on. This module asks for an ephemeral port and reads back the URL
 // the server actually prints.
 
-import type { SpawnedProcess } from "../step-runner";
+import type { CredentialKind } from "../execution/contracts";
+import type { SpawnedProcess } from "../execution/spawned-process";
+import type { CredentialBroker } from "../security/credential-broker";
+import { mcpConfigIsEmpty, type OpenCodeMcpConfig } from "./opencode-mcp";
 
 // The line the server prints on startup, verified live against
 // opencode 1.18.23: "opencode server listening on http://127.0.0.1:<port>".
@@ -56,8 +59,19 @@ export interface LaunchOpenCodeServerOptions {
   // exactly the PATH lookup §13 forbids.
   readonly verifiedBinaryPath: string;
   // The COMPLETE environment for the child. Passed through untouched — this
-  // module never merges process.env into it, which is the whole point.
+  // module never merges process.env into it, which is the whole point. The ONE
+  // documented addition is `mcp` below, and it is a value pr-hero computed
+  // rather than one inherited from anywhere.
   readonly env: Readonly<Record<string, string>>;
+  // #141: the run's MCP registry, translated from the Claude-shaped mcp.json
+  // the binding policy already gates. Delivered as `OPENCODE_CONFIG_CONTENT`
+  // at SPAWN, so the servers are connected from the server's first byte —
+  // there is then no window between "server up" and "MCP connected" for a
+  // prompt to fall into (the #128 race class). An empty registry delivers no
+  // config at all: parity with claude-code on a repo with no codegraph index,
+  // where the hunters run on read/grep/glob and pr-hero makes no claim about
+  // the child's tool channels.
+  readonly mcp?: OpenCodeMcpConfig;
   readonly spawnFn?: typeof Bun.spawn;
   // Injectable for offline tests; production signals the child by pid. Same
   // shape as ClaudeCodeCliTransport's, so the two shutdown paths read alike.
@@ -100,6 +114,7 @@ export async function launchOpenCodeServer(
     termGraceMs = DEFAULT_TERM_GRACE_MS,
     killReapMs = DEFAULT_KILL_REAP_MS,
     hostname = "127.0.0.1",
+    mcp,
   } = options;
 
   if (!verifiedBinaryPath.startsWith("/")) {
@@ -108,9 +123,39 @@ export async function launchOpenCodeServer(
     );
   }
 
+  // The projection, plus the run's own MCP registry when there is one. The
+  // config is READ from `OPENCODE_CONFIG_CONTENT` at startup, which is the
+  // mechanism the SDK's own helper uses (dist/server.js:15) and the one
+  // measured to work under `--pure` (#141 fact 1). Written here rather than by
+  // the caller so the "exactly the projected environment" rule keeps a single
+  // enforcement point.
+  //
+  // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
+  // reviewed worktree tripped OpenCode's `permission.asked` for
+  // `external_directory` twice in one run, and pr-hero never answers that
+  // prompt — the tool call sat blocked until the silence tripwire killed the
+  // attempt 150s later at $0. `permission.external_directory: "deny"` is
+  // delivered UNCONDITIONALLY (not gated on `mcp`, unlike the block below) so
+  // the provider refuses the read/write itself instead of asking and waiting
+  // forever. This tightens the §13 isolation threat model (CLAUDE.md rule
+  // 4); the client's own reject-on-ask handling (opencode-client.ts's
+  // "permission.asked" case) is defense in depth for whatever this config
+  // does not cover, never the primary control.
+  const config: {
+    mcp?: OpenCodeMcpConfig;
+    permission: { external_directory: "deny" };
+  } =
+    mcp === undefined || mcpConfigIsEmpty(mcp)
+      ? { permission: { external_directory: "deny" } }
+      : { mcp, permission: { external_directory: "deny" } };
+  const childEnv: Record<string, string> = {
+    ...env,
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+  };
+
   const proc = spawnFn(openCodeServerArgv(verifiedBinaryPath, hostname), {
     // EXACTLY the projected environment. Never `...process.env`.
-    env: env as Record<string, string>,
+    env: childEnv,
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
@@ -237,4 +282,120 @@ export async function launchOpenCodeServer(
   });
 
   return { url, pid: proc.pid, close };
+}
+
+// #149: the environment the server may inherit from pr-hero's own process.
+//
+// This list is deliberately NOT the harness's ENV_PASSTHROUGH, and the
+// difference is the whole point. That list serves a claude-code child and
+// carries ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN.
+// opencode reads ambient provider keys as credential SOURCES — measured live
+// on 1.18.23: launching with an otherwise-projected env plus a fake
+// ANTHROPIC_API_KEY connected the `anthropic` provider, and plus a fake
+// OPENAI_API_KEY connected `openai`. Composing the server's env from the
+// harness's list would therefore reintroduce, through the fix, the very leak
+// #149 is about.
+//
+// So: operational keys only. Nothing here can name a credential or a home.
+const SERVER_ENV_PASSTHROUGH: readonly string[] = [
+  // Not optional: the projection carries no PATH, and the measured-clean
+  // configuration included it. `{HOME}` alone was never measured.
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+];
+
+export function composeOpenCodeServerEnv(
+  base: Readonly<Record<string, string | undefined>>,
+  projectionEnv: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const composed: Record<string, string> = {};
+  for (const key of SERVER_ENV_PASSTHROUGH) {
+    const value = base[key];
+    if (value !== undefined) composed[key] = value;
+  }
+  // Last, and unconditionally: HOME/TMPDIR/XDG_* are the projection's to own.
+  // An inherited value surviving here is the defect, not a fallback.
+  return { ...composed, ...projectionEnv };
+}
+
+export interface LaunchProjectedOpenCodeServerOptions
+  extends Omit<LaunchOpenCodeServerOptions, "env"> {
+  // The credential authority's broker for this backend. Defaulting one here
+  // would be a second source of truth beside runner-authority.ts, so the
+  // caller supplies the same instance the binding was resolved with.
+  readonly broker: CredentialBroker;
+  // #133: REQUIRED, and paired with `broker` above for the same reason it is
+  // not defaulted here. The kind is per-ROUTE now — an opencode route on any
+  // provider but `openai` runs on a metered API token — so a default in this
+  // file would be a second source of truth beside runner-authority.ts, and
+  // the wrong half of the pair would only surface at projection time inside a
+  // live run. Required drags every caller through tsc instead.
+  readonly credentialKind: CredentialKind;
+  // pr-hero's own environment, filtered through SERVER_ENV_PASSTHROUGH.
+  readonly baseEnv?: Readonly<Record<string, string | undefined>>;
+}
+
+// The server's env is its ENTIRE environment, and the server outlives every
+// individual step, so the projection it runs under must outlive them too:
+// one projection per SERVER, destroyed by the handle's close(). Handing the
+// shared server a per-step projection would leave its HOME pointing at a
+// directory deleted when that step settled, while siblings still used it.
+export async function launchProjectedOpenCodeServer(
+  options: LaunchProjectedOpenCodeServerOptions,
+): Promise<OpenCodeServerHandle> {
+  const { broker, credentialKind, baseEnv = {}, ...launchOptions } = options;
+
+  const projection = await broker.project({
+    // Three of these four are voided by the OpenCode broker; `kind` is the one
+    // it reads. #133: it is no longer a constant. The kind is decided per
+    // route by runner-authority.ts's credentialKindForRoute, and this server
+    // is handed the one its binding resolved.
+    //
+    // SCOPE NOTE, not solved here: this server is ONE per backend and
+    // outlives every step, so a plan mixing an `openai` OAuth route with a
+    // `zai` API-token route needs two credentials behind one server. That
+    // case is refused upstream — the metered route has no pricing table yet,
+    // so the exact-binding gate blocks it per binding before anything
+    // launches (test/production-runtime.test.ts, "a plan mixing an OAuth
+    // provider and an API-token provider is refused per binding"). When #137
+    // prices those routes, this becomes reachable and needs a server per
+    // credential; until then it must fail LOUD, which it does — a broker
+    // handed the wrong kind refuses it by name.
+    sessionId: "opencode-server",
+    credentialRef: "opencode-auth",
+    kind: credentialKind,
+    verifiedBinaryPath: launchOptions.verifiedBinaryPath,
+  });
+
+  let handle: OpenCodeServerHandle;
+  try {
+    handle = await launchOpenCodeServer({
+      ...launchOptions,
+      env: composeOpenCodeServerEnv(baseEnv, projection.env),
+    });
+  } catch (error) {
+    // The client resets its launch promise on failure and will project again,
+    // so a projection abandoned here is a credential left on disk per retry.
+    await projection.destroy();
+    throw error;
+  }
+
+  return {
+    url: handle.url,
+    pid: handle.pid,
+    close: async () => {
+      try {
+        await handle.close();
+      } finally {
+        await projection.destroy();
+      }
+    },
+  };
 }

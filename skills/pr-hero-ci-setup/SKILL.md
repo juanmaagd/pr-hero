@@ -1,91 +1,88 @@
 ---
 name: pr-hero-ci-setup
-description: "Trigger: setup CI, add pr-hero to CI, GitHub Actions review, configure CI workflow. Scaffolds pr-hero workflow and configures repository secrets."
+description: "Trigger: setup CI, add pr-hero to CI, GitHub Actions review, OpenCode, OPENCODE_AUTH_JSON, PRHERO_ROUTING, DeepSeek, admission policy, configure CI workflow. Scaffolds workflow, secrets, routing, and admission config."
 license: Apache-2.0
 metadata:
   author: juanmaagd
-  version: "1.0"
+  version: "2.1"
 ---
 
 ## Activation Contract
 
-Load this skill when the user asks to:
-- Add `pr-hero` to their repository's GitHub Actions CI pipeline.
-- Scaffold or configure `.github/workflows/pr-hero.yml`.
-- Configure repository secrets (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`).
-- Set up automated, multi-agent AI PR reviews on pull requests.
+Load when the user asks to:
+- Add `pr-hero` to GitHub Actions CI, scaffold `.github/workflows/pr-hero.yml`, or configure secrets.
+- Configure **OpenCode** in CI (`OPENCODE_AUTH_JSON`, `PRHERO_ROUTING`, DeepSeek, mixed Claude+OpenCode).
+- Tune CI spend / re-review / admission policy.
 
 ## Hard Rules
 
-- **Zero secret leakage:** NEVER print, echo, commit, or log literal API keys or tokens. Reference secrets solely by environment/secret name (`${{ secrets.ANTHROPIC_API_KEY }}`).
-- **Deterministic scaffolding:** Never handcraft or fabricate `.github/workflows/pr-hero.yml` from memory. Run `pr-hero setup --ci` (or `pr-hero ci init`) to write the canonical template.
-- **`fetch-depth: 0` is mandatory:** `actions/checkout@v4` MUST specify `fetch-depth: 0`. Shallow clones fail diff range and commit ancestry computations silently.
-- **Assistant posture:** Inform the user that `pr-hero` acts as a reviewer, not a merge blocker (`exit 0` on detected findings). Findings are published as comments, reviews, and step summaries.
-- **Required permissions:** Ensure the workflow carries `contents: read`, `pull-requests: write`, and `issues: write` (required for review thread replies/resolution).
+- **Zero secret leakage:** NEVER print, `cat`, commit, or log API keys, tokens, or `OPENCODE_AUTH_JSON`. Reference `${{ secrets.* }}` names only. Inspect `auth.json` **keys and `type` only**.
+- **No per-provider GitHub secrets:** Do not create `OPENAI_API_KEY` or `DEEPSEEK_API_KEY`. One secret `OPENCODE_AUTH_JSON` (whole store or a CI-only subset) + public variable `PRHERO_ROUTING`. Cap 48 KB each.
+- **Deterministic scaffolding:** Run `pr-hero setup --ci` (or `pr-hero ci init`). Do not fabricate the workflow from memory. Fallback: copy `assets/workflow.yml`.
+- **`fetch-depth: 0` is mandatory** on `actions/checkout@v4`.
+- **Assistant posture:** pr-hero is a reviewer, not a merge gate (`exit 0` on findings).
+- **Required permissions:** `contents: read`, `pull-requests: write`, `issues: write`, `statuses: write`, **`checks: write`**, **`actions: read`** (the admission gate lists past runs; a private repo 403s without it). Template in `assets/workflow.yml` includes all six.
+- **Admission config is repo-level:** Write `.prhero/config.json` on the default branch. That file **rejects** `routing`. Person-layer only (`$HOME/.prhero/config.json` on the runner, from `vars.PRHERO_ROUTING`).
+- **`.prheroignore` is read from the base ref, not the PR branch, in CI.**
+- **OpenCode is DATA:** quoted `routing: "${{ vars.PRHERO_ROUTING }}"` + `opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}`. Unset both = Claude CI. Never a per-provider Action input. Never echo the auth blob.
+- **OpenCode procedure:** when OpenCode or mixed backends are in scope, follow `references/opencode-ci.md` before setting GitHub DATA (strip personal OAuth, `modelSnapshot`, logical vs role).
 
 ## Decision Gates
 
 | Condition | Action |
 |---|---|
-| `gh` CLI installed & authenticated (`gh auth status` succeeds) | Offer to set secret directly via `gh secret set` |
-| `gh` CLI missing or unauthenticated | Guide user to web UI: `https://github.com/<owner>/<repo>/settings/secrets/actions` |
-| Credential selection: Subscription vs API | **`CLAUDE_CODE_OAUTH_TOKEN`**: consumes directly from the user's Claude subscription (Pro/Team/Enterprise) with **zero extra API billing/costs**.<br>**`ANTHROPIC_API_KEY`**: standard pay-as-you-go key billed per token via Anthropic Console. |
-| Spend controls customization | Default budget is `$10.00` per PR (`budget-usd: 10.00`), max changed lines is 1000 |
-| Existing workflow file | `pr-hero setup --ci` skips if present; prompt user before passing `--force` |
+| `gh auth status` succeeds | Offer `gh secret set` / `gh variable set` |
+| `gh` missing/unauthenticated | Link to repo Settings → Secrets and variables → Actions (Variables tab for routing) |
+| Credential: Claude | **`CLAUDE_CODE_OAUTH_TOKEN`** — subscription (`claude setup-token` only, NOT keychain). **`ANTHROPIC_API_KEY`** — pay-as-you-go. |
+| Credential: OpenCode | Read `references/opencode-ci.md`. Secret + variable. Any one of the three secrets starts the review job. |
+| openai API key in CI | **Refuse.** openai → ChatGPT OAuth mapping; `type:"api"` is refused. Use a non-openai API token (tested: deepseek). |
+| Hunters OpenCode / refuter Claude | DATA cannot. Routing is `sonnet`/`haiku`, not role. Default hunters+refuter = `sonnet`. |
+| Mixed OpenCode providers in one run | Out of scope (#195). One OpenCode provider per run. Mixed `claude-code` + one OpenCode provider is legal. |
+| OpenCode CLI pin | Action installs **1.18.30** iff `opencode-auth != ''` OR routing contains `opencode`. Never `latest`. |
+| Fork PRs | Skip unchanged. Credentials union is Anthropic **or** Claude OAuth **or** `OPENCODE_AUTH_JSON`. Review `if` never reads `secrets`. |
+| Spend gates | Defaults: `budget-usd: 10.00` on metered routes (Anthropic key **or** OpenCode auth file), `max-changed-lines: 1000`, `max-changed-files: 50`. Claude-only OAuth stays unlimited-subscription unless OpenCode auth is also present. |
+| Existing workflow | `setup --ci` skips; ask before `--force` |
+| First-time admission | Recommend `ci_admission_observe_only: true` — `references/ci-admission.md` |
+| User wants max CI spend | Lower `ci_max_attempts` and/or raise `ci_rereview_min_score` |
+| Custom bot posts findings | Add login to `ci_trusted_actors` |
+| Budget exhausted on PR | Guide `pr-hero review --pr <n> --post --force` |
+
+## Admission Interview (ask before writing config)
+
+Ask these in plain language; map answers to `.prhero/config.json`:
+
+1. **Attempts per PR?** Default `2` (`ci_max_attempts`). Same commit never double-reviews.
+2. **When should a push trigger re-review?** Balanced → `risk_aware`; score only → `thresholded`; once then stop → `once_per_pr`; every push → `every_push`; manual only → `manual_only`.
+3. **Score floor?** Default `4` with weights 2/1.
+4. **Observe first?** If unsure, `ci_admission_observe_only: true` for one PR cycle.
+5. **Non-default bot actor?** Collect GitHub logins for `ci_trusted_actors`.
+
+Use `assets/admission-config.example.json`. Details: `references/ci-admission.md`.
 
 ## Execution Steps
 
-1. **Inspect repository context:**
-   - Confirm current directory is a git repository: `git rev-parse --is-inside-work-tree`.
-   - Resolve origin remote URL and owner/repo: `git remote get-url origin`.
-   - Check GitHub CLI authentication status: `gh auth status`.
-
-2. **Select and obtain the credential:**
-   - Explain the two authentication options and guide the user to obtain their token:
-     * **Option A: `CLAUDE_CODE_OAUTH_TOKEN` (Claude Subscription - Zero API Costs):**
-       1. Run `claude setup-token` in terminal (with Claude Code CLI installed).
-       2. Follow the browser login prompt to authorize your Claude Pro/Team/Enterprise account.
-       3. Copy the output OAuth token — it is long-lived (~1 year).
-       4. NEVER substitute the session token from `~/.claude/.credentials.json`
-          or the macOS keychain. It expires in hours and the CLI keeps it alive
-          with a refresh token CI does not have, so it breaks reviews silently
-          after about a day. Only `claude setup-token` output belongs here.
-     * **Option B: `ANTHROPIC_API_KEY` (Pay-As-You-Go API Key):**
-       1. Navigate to [Anthropic Console Settings](https://console.anthropic.com/settings/keys).
-       2. Click **Create Key**, name it `pr-hero-ci`, and copy the `sk-ant-...` key.
-
-3. **Configure the repository secret:**
-   - **Via GitHub CLI (`gh` authenticated):**
-     * Prompt the user for the value and run:
-       ```bash
-       gh secret set CLAUDE_CODE_OAUTH_TOKEN # or ANTHROPIC_API_KEY
-       ```
-     * Ensure the secret value is piped or entered securely without being echoed into transcripts or command logs.
-   - **Via GitHub Web UI:**
-     * Provide the direct link: `https://github.com/<owner>/<repo>/settings/secrets/actions`.
-     * Instruct the user to click **New repository secret**, enter the exact name (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), paste the value, and save.
-
-4. **Scaffold workflow file:**
-   - **Primary path:** Run `pr-hero setup --ci` (or `pr-hero ci init`).
-   - **Fallback (if `pr-hero` CLI is not installed):** Copy the canonical template from `assets/workflow.yml` directly into `.github/workflows/pr-hero.yml`.
-   - If the workflow already exists, ask the user before overwriting (via `--force` or replacing file).
-
-5. **Verify configuration:**
-   - If `pr-hero` is installed, run `pr-hero doctor` locally to verify `.github/workflows/pr-hero.yml` is detected.
-   - Check `git status` to verify the new workflow file is tracked.
-
-6. **Commit and deploy:**
-   - Offer to commit `.github/workflows/pr-hero.yml` (`chore: add pr-hero GitHub Actions review workflow`).
-   - Remind the user to push to their remote and open a test pull request to see the first automated review.
+1. **Inspect repo:** `git rev-parse --is-inside-work-tree`, `git remote get-url origin`, `gh auth status`.
+2. **Credential path:** Claude-only → skip OpenCode. OpenCode or mix → **read `references/opencode-ci.md`** and execute it (metadata inspect, CI-only blob, secret, routing with `modelSnapshot`).
+3. **Claude secret (if used):** `gh secret set CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (secure input, never print).
+4. **Workflow:** `pr-hero setup --ci`. Confirm `checks: write` and `actions: read`, credentials-job union includes `OPENCODE_AUTH_JSON`, quoted `routing` / `opencode-auth`. `--force` if an old template lacks them.
+5. **Admission config:** Interview above. `.prhero/config.json` on the default branch. **No `routing` key.** `pr-hero config` to verify.
+6. **Verify:** `pr-hero doctor`. `git status`. Confirm no openai `type:"api"` blob, no echoed auth, `modelSnapshot` matches `opencode models` when OpenCode is on.
+7. **Deploy:** Offer commit. Open a **same-repo** test PR (forks skip).
 
 ## Output Contract
 
-Report to the user:
-- Status of repository secret configuration (set via `gh` or manual link provided).
-- Path of scaffolded workflow (`.github/workflows/pr-hero.yml`).
-- Verification outcome from `pr-hero doctor`.
-- Next steps (pushing branch and opening a PR).
+Report:
+- Secret status (set or manual link). Names only: which of `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `OPENCODE_AUTH_JSON` exist. Never values.
+- OpenCode (if in scope): `OPENCODE_AUTH_JSON` set; blob providers **names + type only**; whether the blob was stripped to one CI provider; `PRHERO_ROUTING` JSON (no credentials); `modelSnapshot` vs `opencode models`.
+- Workflow path and whether `checks: write`, `actions: read`, credentials union, and quoted `routing` / `opencode-auth` are present.
+- Admission policy (mode, attempts, observe-only). Confirm repo `.prhero/config.json` has no `routing` key.
+- `pr-hero doctor` / `pr-hero config` outcome.
+- Next steps: push, same-repo test PR, when to turn off observe-only, override command if manual-required.
 
 ## References
-- `assets/workflow.yml` — canonical GitHub Actions review workflow template.
-- `docs/github-actions.md` — full documentation on GitHub Actions CI integration, spend gates, and permissions.
+
+- `assets/workflow.yml` — canonical workflow template.
+- `assets/admission-config.example.json` — starter `.prhero/config.json`.
+- `references/ci-admission.md` — admission keys, modes, rollout, ledger.
+- `references/opencode-ci.md` — OpenCode secret/variable procedure, routing, pin, openai vs deepseek.
+- `docs/github-actions.md` — full CI integration docs.

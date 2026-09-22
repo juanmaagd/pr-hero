@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
-import { ACTIVE_CHILD_PROCS } from "../../src/step-runner";
+import { ACTIVE_CHILD_PROCS } from "../../src/execution/spawned-process";
+import { settlementFromUsage } from "../../src/execution/spend-limiter";
+import {
+  outputTokensKnown,
+  sumNormalizedUsage,
+} from "../../src/execution/usage-normalized";
 import type { ClaudeCodeCliTransportOptions } from "../../src/transports/claude-code-cli";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
 
@@ -34,6 +39,7 @@ function makeRequest(
       modelFamily: "claude",
       modelSnapshot: "claude-test-model",
     },
+    executionModel: "claude-test-model",
     systemPromptPath: "/tmp/pr-hero-test/system.md",
     systemPromptSha256: "deadbeef",
     userPrompt: "review this",
@@ -157,6 +163,41 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     expect(signals).toHaveLength(0);
   });
 
+  test("direct routes pass executionModel (alias) to --model, not route snapshot", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({ result: "ok" }),
+      exitCode: 0,
+    });
+    let spawnArgs: string[] | undefined;
+    const spawnFn = ((args: string[]) => {
+      spawnArgs = args;
+      return fake.proc;
+    }) as unknown as typeof Bun.spawn;
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn,
+      getPgid: (pid) => pid,
+    });
+
+    await transport.execute(
+      makeRequest({
+        executionModel: "sonnet",
+        route: {
+          backend: "claude-code",
+          provider: "anthropic",
+          gateway: "direct",
+          modelFamily: "sonnet",
+          modelSnapshot: "sonnet",
+        },
+      }),
+      { signal: new AbortController().signal },
+    );
+
+    const modelIndex = spawnArgs?.indexOf("--model") ?? -1;
+    expect(modelIndex).toBeGreaterThanOrEqual(0);
+    expect(spawnArgs?.[modelIndex + 1]).toBe("sonnet");
+  });
+
   test("abort sends SIGTERM to negative pgid first; group exiting during grace receives no SIGKILL", async () => {
     const signals: RecordedSignal[] = [];
     const fake = makeFakeProc({});
@@ -205,14 +246,16 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       },
     });
 
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 10);
     const startedAt = Date.now();
-    const outcome = await transport.execute(makeRequest({ timeoutMs: 10 }), {
-      signal: new AbortController().signal,
+    const outcome = await transport.execute(makeRequest(), {
+      signal: controller.signal,
     });
     const elapsed = Date.now() - startedAt;
 
-    expect(outcome.timedOut).toBe(true);
-    expect(outcome.completion).toBe("failed");
+    expect(outcome.timedOut).toBeUndefined();
+    expect(outcome.completion).toBe("cancelled");
     expect(signals.map((s) => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
     expect(signals.every((s) => s.pid === -PID)).toBe(true);
     const graceObserved = signals[1].at - signals[0].at;
@@ -237,16 +280,18 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
       },
     });
 
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5);
     const startedAt = Date.now();
-    const outcome = await transport.execute(makeRequest({ timeoutMs: 5 }), {
-      signal: new AbortController().signal,
+    const outcome = await transport.execute(makeRequest(), {
+      signal: controller.signal,
     });
     const elapsed = Date.now() - startedAt;
 
     expect(elapsed).toBeLessThan(1000);
     expect(signals.map((s) => s.signal)).toEqual(["SIGTERM", "SIGKILL"]);
     expect(signals.every((s) => s.pid === -PID)).toBe(true);
-    expect(outcome.completion).toBe("failed");
+    expect(outcome.completion).toBe("cancelled");
     expect(outcome.protocolIntegrity).toBe("unverified");
     expect(outcome.stderrTail).toContain("not reaped");
     expect(outcome.terminalProof).toBeUndefined();
@@ -354,6 +399,138 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
     expect(outcome.usage.tokens.inputUncached).toBeUndefined();
   });
 
+  // #175 half 2, 2026-09-02. The CLI already reports WHICH models ran, in a
+  // `modelUsage` block keyed on the exact snapshot; the engine used to
+  // discard it and assert a snapshot of its own instead. Verified live
+  // against the real CLI on 2026-09-02, including the two-model shape below.
+  test("modelUsage is recorded as the models actually observed, in report order", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        modelUsage: {
+          // TWO models for ONE `--model sonnet` invocation: the CLI runs
+          // haiku for its own internal work. This is why the field is a
+          // LIST -- a scalar "the model that ran" is not a fact about this
+          // provider, and the requested model is not guaranteed to be in it.
+          "claude-haiku-4-5-20251001": {
+            inputTokens: 899,
+            outputTokens: 9,
+            costUSD: 0.000944,
+            canonicalModel: "claude-haiku-4-5",
+            provider: "firstParty",
+            costBasis: "list",
+          },
+          "claude-sonnet-5-20260115": {
+            inputTokens: 4210,
+            outputTokens: 812,
+            costUSD: 0.0142,
+            canonicalModel: "claude-sonnet-5",
+            provider: "firstParty",
+            costBasis: "list",
+          },
+        },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.observedModels).toEqual([
+      {
+        model: "claude-haiku-4-5-20251001",
+        canonicalModel: "claude-haiku-4-5",
+      },
+      { model: "claude-sonnet-5-20260115", canonicalModel: "claude-sonnet-5" },
+    ]);
+  });
+
+  test("a modelUsage entry with no canonicalModel records the snapshot alone", async () => {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        modelUsage: { "some-future-model": { inputTokens: 1 } },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.observedModels).toEqual([{ model: "some-future-model" }]);
+  });
+
+  test("a non-string canonicalModel is dropped, never coerced into a name", async () => {
+    // `String({})` is "[object Object]", which would land in a provenance
+    // record reading exactly like a model name. The snapshot key survives
+    // because it IS a string by construction; only the reported family is
+    // discarded.
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({
+        result: "reviewed",
+        modelUsage: {
+          "claude-sonnet-5-20260115": { canonicalModel: { oops: true } },
+          "claude-haiku-4-5-20251001": { canonicalModel: "" },
+        },
+      }),
+      exitCode: 0,
+    });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.observedModels).toEqual([
+      { model: "claude-sonnet-5-20260115" },
+      { model: "claude-haiku-4-5-20251001" },
+    ]);
+  });
+
+  test("no modelUsage block is absence, not an empty observation", async () => {
+    // Absence over fabrication, the same rule `normalizeUnavailableUsage`
+    // follows one field over: `[]` would read as "we looked and nothing ran",
+    // which is a claim. `undefined` says we were told nothing.
+    for (const body of [
+      JSON.stringify({ result: "reviewed" }),
+      JSON.stringify({ result: "reviewed", modelUsage: {} }),
+      "this is not json at all {{{",
+    ]) {
+      const fake = makeFakeProc({ stdoutBody: body, exitCode: 0 });
+      const transport = new ClaudeCodeCliTransport({
+        ...okPromptFns,
+        spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+        getPgid: (pid) => pid,
+        killFn: () => {},
+      });
+
+      const outcome = await transport.execute(makeRequest(), {
+        signal: new AbortController().signal,
+      });
+
+      expect(outcome.observedModels).toBeUndefined();
+    }
+  });
+
   test("cache-read and cache-write land in distinct disjoint leaves, apart from uncached input", async () => {
     const fake = makeFakeProc({
       stdoutBody: JSON.stringify({
@@ -387,7 +564,10 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
       outcome.usage.tokens.inputUncached,
     );
     expect(outcome.usage.tokens.outputVisible).toBe(45);
-    expect(outcome.usage.cashCostUsd).toBe(0.042);
+    // #173: `total_cost_usd` is LIST basis, so it is notional, never cash.
+    // The cost half of this record is owned by the #173 describe below.
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.042);
   });
 
   test("a usage block missing any token leaf is partial, never complete with fabricated zeros", async () => {
@@ -420,12 +600,526 @@ describe("ClaudeCodeCliTransport usage normalization (D1-08 PR2)", () => {
   });
 });
 
+// #173, 2026-09-02. The CLI's `total_cost_usd` is the sum of its per-model
+// `costUSD` values, and the live probe on 2026-09-02 showed every one of them
+// carries `"costBasis": "list"` — what the tokens WOULD have cost through the
+// API. This transport's route is a Claude subscription by construction
+// (`credentialKindForRoute` returns `claude_subscription_oauth` for the
+// claude-code backend unconditionally), so nothing is charged and the design's
+// §8 rule applies: "Subscription OAuth may truthfully report `cashCostUsd: 0`;
+// optional catalog cost is `notionalCostUsd` and never mixed with cash."
+//
+// Both halves are asserted on every arm, because either one alone passes
+// against a broken implementation: cash-only would pass a transport that
+// dropped the figure entirely, and notional-only would pass one that filed it
+// in BOTH fields.
+describe("ClaudeCodeCliTransport cash vs notional cost (#173)", () => {
+  async function runWith(stdoutBody: string) {
+    const fake = makeFakeProc({ stdoutBody, exitCode: 0 });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+    return transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+  }
+
+  test("a complete attempt files the list figure as notional and reports zero cash", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  test("a partial attempt files the list figure as notional and reports zero cash", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("partial");
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  // Absence over fabrication, on the notional side only: a CLI that reported
+  // no `total_cost_usd` gives us no list figure to record, and inventing 0 for
+  // it would claim the run consumed nothing. Cash is a different fact — it is
+  // 0 because the subscription charges nothing, whatever the CLI said.
+  test("an absent total_cost_usd leaves notional undefined while cash stays a truthful zero", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          cache_creation_input_tokens: 300,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // A pre-spawn denial contacted no provider, so `costSource: "provider"` was
+  // never true there. It has to agree with the parse arms for a second reason:
+  // an unclassified failure legacy-classifies as "format", which HAS a retry,
+  // so a denied attempt 1 can be summed with a spawned attempt 2 — and
+  // `sumNormalizedUsage` collapses costSource to "unknown" when the two
+  // attempts disagree.
+  test("a pre-spawn denial reports the same subscription cost basis as a spawned attempt", async () => {
+    const fake = makeFakeProc({ stdoutBody: "", exitCode: 0 });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      promptLstatFn: () => ({ mode: 0o100600, isSymbolicLink: true }),
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+
+    expect(outcome.stderrTail).toContain("prompt integrity denied");
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // The ripple this change could have caused, proven against the transport's
+  // OWN output rather than a hand-built record. #172 added a metered-zero rule
+  // to `settlementFromUsage`: a metered attempt reporting $0 having produced
+  // output tokens is unresolved, not settled. Every claude-code attempt now
+  // reports exactly $0 cash WITH output tokens, so if that rule keyed on the
+  // number instead of the billing mode, every subscription review would fence
+  // its own bucket and refuse the next step. It keys on the mode.
+  //
+  // `test/harness/spend-limiter.test.ts` already asserts the pure rule on a
+  // hand-built subscription record; this arm proves the WIRING — that what the
+  // transport actually emits lands on the settling side of it.
+  test("a subscription attempt reporting zero cash still settles, and does not trip the metered-zero rule", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outputTokensKnown(outcome.usage.tokens)).toBeGreaterThan(0);
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0,
+    });
+  });
+
+  // The negative that makes the assertion above discriminate: the same $0 with
+  // the same output tokens under a METERED mode is unresolved. Without this,
+  // a rule that simply settled every zero would pass the arm above.
+  test("the same zero under a metered billing mode is unresolved, not settled", async () => {
+    const outcome = await runWith(
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(
+      settlementFromUsage({ ...outcome.usage, billingMode: "metered" }),
+    ).toEqual({ kind: "unresolved", knownUsd: undefined });
+  });
+});
+
+// #177, 2026-09-02. #173's rule is right for the credential it assumed and
+// wrong for the one it did not check. A user running with ANTHROPIC_API_KEY
+// (or ANTHROPIC_AUTH_TOKEN) pays real per-token money, and filing that spend
+// as `notionalCostUsd` renders it "at list price, not charged" while
+// budget enforcement — cash-only by design §8 — sees a $0 ceiling. That is the
+// under-reporting direction this codebase repeatedly names as the worst to be
+// wrong in, so the CLI's figure goes back to `cashCostUsd` whenever the env
+// this transport SPAWNS THE CHILD WITH carries a metered credential.
+//
+// The signal is `request.isolation.env` and not `process.env`: that record is
+// what `projectChildEnv` (harness.ts) built for this exact child, so it is the
+// env the CLI actually bills under, and it keeps the transport free of any
+// ambient environment read. Every arm below supplies it explicitly — a test
+// whose verdict depended on the developer's own shell is the #174 defect.
+describe("ClaudeCodeCliTransport metered-credential cost filing (#177)", () => {
+  const COMPLETE_STDOUT = JSON.stringify({
+    result: "reviewed",
+    total_cost_usd: 0.0455,
+    usage: {
+      input_tokens: 2,
+      cache_read_input_tokens: 18534,
+      cache_creation_input_tokens: 10213,
+      output_tokens: 4,
+    },
+  });
+
+  function transportFor(stdoutBody: string) {
+    const fake = makeFakeProc({ stdoutBody, exitCode: 0 });
+    return new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+  }
+
+  async function runUnder(env: Record<string, string>, stdoutBody: string) {
+    return transportFor(stdoutBody).execute(
+      makeRequest({
+        isolation: {
+          credentialProjectionId: "proj-1",
+          env,
+          syntheticHome: "/tmp/pr-hero-test/home",
+          syntheticConfigHome: "/tmp/pr-hero-test/config",
+          syntheticTmp: "/tmp/pr-hero-test/tmp",
+          verifiedBinaryPath: "/usr/bin/true",
+        },
+      }),
+      { signal: new AbortController().signal },
+    );
+  }
+
+  // Both halves on every arm, for #173's own reason: cash-only would pass a
+  // transport that filed the figure in BOTH fields, and notional-only would
+  // pass one that dropped it.
+  test("an API-key run books the CLI figure as CASH, with no notional companion", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.costSource).toBe("provider");
+    expect(outcome.usage.cashCostUsd).toBe(0.0455);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  test("an ANTHROPIC_AUTH_TOKEN run books cash too — same credential class", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_AUTH_TOKEN: "bearer-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.costSource).toBe("provider");
+    expect(outcome.usage.cashCostUsd).toBe(0.0455);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // The discriminators. Without these an implementation that simply reverted
+  // #173 for every route would pass every arm above.
+  test("an OAuth-token run keeps #173's notional filing", async () => {
+    const outcome = await runUnder(
+      { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.costSource).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  // action.yml:111 binds ANTHROPIC_API_KEY unconditionally and GitHub renders
+  // an unset input as "", so every subscription-route CI run carries the empty
+  // string — the single most common env this transport will ever see, and it
+  // must stay on the subscription arm. (`""` is falsy on its own; the
+  // whitespace-only case the trim exists for is asserted on the predicate
+  // itself in test/usage/normalization.test.ts.)
+  test("an empty ANTHROPIC_API_KEY is not a metered signal", async () => {
+    const outcome = await runUnder({ ANTHROPIC_API_KEY: "" }, COMPLETE_STDOUT);
+
+    expect(outcome.usage.billingMode).toBe("subscription");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outcome.usage.notionalCostUsd).toBe(0.0455);
+  });
+
+  test("a partial attempt under an API key files cash on the partial builder too", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0.0455,
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("partial");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.costSource).toBe("provider");
+    expect(outcome.usage.cashCostUsd).toBe(0.0455);
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+  });
+
+  // Absence over fabrication, moved to the side the credential pays on. #173's
+  // subscription arm keeps a truthful `cashCostUsd: 0` when the CLI reports no
+  // total, because a subscription really does charge nothing. A METERED
+  // attempt with no reported total is a different fact — real money was spent
+  // and we do not know how much — so the cash stays undefined and
+  // `settlementFromUsage` reports it unresolved rather than settling a
+  // fabricated zero, which is the "$0 on parse failure" collapse §8 exists to
+  // kill.
+  test("a metered run whose CLI reported no total leaves cash undefined, and settles as unresolved", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 120,
+          cache_read_input_tokens: 900,
+          cache_creation_input_tokens: 300,
+          output_tokens: 45,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBeUndefined();
+    expect(outcome.usage.notionalCostUsd).toBeUndefined();
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+
+  // #173's mechanical constraint, now owed on BOTH arms: an unclassified
+  // failure legacy-classifies as "format", which retries, so a pre-spawn
+  // denial can be summed with a spawned attempt — and `sumNormalizedUsage`
+  // collapses billingMode AND costSource to "unknown" the moment the two
+  // disagree. A denial that stayed on the subscription basis would erase the
+  // metered run's cost basis on exactly the retry path this transport has.
+  test("a pre-spawn denial under an API key reports the metered basis, and survives the retry sum", async () => {
+    const fake = makeFakeProc({ stdoutBody: "", exitCode: 0 });
+    const denyingTransport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      promptLstatFn: () => ({ mode: 0o100600, isSymbolicLink: true }),
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+    const denial = await denyingTransport.execute(
+      makeRequest({
+        isolation: {
+          credentialProjectionId: "proj-1",
+          env: { ANTHROPIC_API_KEY: "sk-test" },
+          syntheticHome: "/tmp/pr-hero-test/home",
+          syntheticConfigHome: "/tmp/pr-hero-test/config",
+          syntheticTmp: "/tmp/pr-hero-test/tmp",
+          verifiedBinaryPath: "/usr/bin/true",
+        },
+      }),
+      { signal: new AbortController().signal },
+    );
+
+    expect(denial.stderrTail).toContain("prompt integrity denied");
+    expect(denial.usage.billingMode).toBe("metered");
+    expect(denial.usage.costSource).toBe("provider");
+    expect(denial.usage.cashCostUsd).toBe(0);
+
+    const spawned = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      COMPLETE_STDOUT,
+    );
+    const summed = sumNormalizedUsage(denial.usage, spawned.usage);
+    expect(summed.billingMode).toBe("metered");
+    expect(summed.costSource).toBe("provider");
+    expect(summed.cashCostUsd).toBe(0.0455);
+  });
+
+  // The safety property this whole change exists for, proven at the settlement
+  // boundary rather than at the record: budget enforcement is cash-only (§8),
+  // so a metered run's money has to arrive as `actualUsd` or the ceiling is
+  // enforcing against $0.
+  test("a metered run's real spend reaches the spend limiter as settled cash", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      COMPLETE_STDOUT,
+    );
+
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "settle",
+      actualUsd: 0.0455,
+    });
+  });
+
+  // The metered-zero rule (#172) applied to a record this transport can now
+  // actually produce, pinned so the semantics are a decision rather than a
+  // surprise. Scope stated exactly, because inferring it would overstate it:
+  // in production this rule is NOT reachable on a claude-code route today.
+  // `settlementFromUsage` runs only from `finalizeReservation`, which needs a
+  // reservation, and `reservesSpend` (production-runtime.ts) opens one only
+  // when `capabilityReport.billing.mode === "metered"` — still statically
+  // "subscription" for this backend, which is the admission path #177
+  // deliberately does not touch. So no API-key run can be fenced or refused by
+  // this change, and none appears in `result.unresolved`
+  // (`collectUnresolvedSpend` reads reservations, of which a claude-only run
+  // has none). What this arm pins is the RECORD's meaning, so that if a
+  // metered claude-code route is ever admitted (#161), it arrives already
+  // honest instead of settling a zero that is almost certainly wrong.
+  test("a metered run reporting zero cash with output tokens is unresolved, not settled", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBe(0);
+    expect(outputTokensKnown(outcome.usage.tokens)).toBeGreaterThan(0);
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+
+  // #197, the arm this change MAKES REACHABLE. Flipping this transport's
+  // `pricingReady` to true is what lets a metered claude-code route past the
+  // pricing gate at all, so the settlement question it hands downstream stops
+  // being hypothetical: the CLI's `total_cost_usd` is OPTIONAL
+  // (`RawClaudeCliResult`), so a metered attempt can complete with every token
+  // leaf present and no cost figure whatsoever.
+  //
+  // The answer is absence, never zero. `costFor` leaves `cashCostUsd`
+  // undefined on the metered arm and `settlementFromUsage`'s
+  // `cashCostUsd === undefined` guard turns that into `unresolved` with no
+  // `knownUsd` — the spend ledger fences the bucket instead of booking a
+  // fabricated $0 against the ceiling. Both halves are asserted because
+  // `kind` alone would pass an implementation that carried a bogus figure,
+  // and `knownUsd` alone would pass the guard's own deletion: without it the
+  // record falls through the metered-zero rule (cash is undefined, not 0) and
+  // the free-nonzero rule (mode is metered) to `{ kind: "settle", actualUsd:
+  // undefined }` — which also has no `knownUsd`. Mutation-checked, 2026-09-07.
+  //
+  // SCOPE, stated exactly rather than inferred: no claude-code route resolves
+  // metered TODAY. `credentialKindForRoute` (runner-authority.ts) returns
+  // `claude_subscription_oauth` for this backend unconditionally, so
+  // `effectiveBillingMode` never upgrades and `reservesSpend` opens no
+  // reservation. What this pins is the RECORD's meaning, so the arm #161
+  // opens arrives already honest.
+  test("a metered run reporting no cash figure at all is unresolved with nothing known", async () => {
+    const outcome = await runUnder(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      JSON.stringify({
+        result: "reviewed",
+        usage: {
+          input_tokens: 2,
+          cache_read_input_tokens: 18534,
+          cache_creation_input_tokens: 10213,
+          output_tokens: 4,
+        },
+      }),
+    );
+
+    expect(outcome.usage.completeness).toBe("complete");
+    expect(outcome.usage.billingMode).toBe("metered");
+    expect(outcome.usage.cashCostUsd).toBeUndefined();
+    expect(outputTokensKnown(outcome.usage.tokens)).toBeGreaterThan(0);
+    expect(settlementFromUsage(outcome.usage)).toEqual({
+      kind: "unresolved",
+      knownUsd: undefined,
+    });
+  });
+});
+
 // D1-08 PR3 task 3.11 (§9.2): capabilities() gains an OPTIONAL bucket-scope
 // input so a caller that HAS resolved a credential's scope (PR5a's harness
 // wiring, not yet built) can ask the transport to report the resulting
 // rateLimitBucketId on ProviderCapabilityReport. Calling with no argument —
 // every existing call site — must keep reporting rateLimitBucketId as
 // undefined, byte-identical to pre-PR3 behavior.
+// #197. `pricingReady` is a STATIC capability claim, read at admission
+// before any spawn: no cost figure exists at the moment it is asked, for any
+// transport. So it cannot be answering "is this attempt's cost a provider
+// invoice?" — it answers "will this transport tell you what the attempt
+// cost?", and this one will: the CLI reports `total_cost_usd`.
+//
+// Asserted HERE, on the transport's own report, because
+// `DefaultTransportRegistry.getCapabilityReport` returns exactly this object
+// to `FrozenRuntimeBinding.capabilities()` — this value IS the admission
+// input, not a report about one.
+describe("ClaudeCodeCliTransport.capabilities pricing readiness (#197)", () => {
+  test("the transport claims it will report what the attempt cost", async () => {
+    const report = await new ClaudeCodeCliTransport().capabilities();
+    expect(report.billing.pricingReady).toBe(true);
+  });
+
+  // The issue that used to sit beside `pricingReady: false` said "a versioned
+  // Anthropic pricing table is bundled, but capabilities() carries no route".
+  // Both halves died with #197: no table is bundled any more, and nothing is
+  // missing on this backend — cash comes from `total_cost_usd` on a metered
+  // credential and notional from it on a subscription. A non-blocking issue
+  // named `pricing_table_missing` beside a `true` flag is a contradiction
+  // doctor would render as a degraded row.
+  test("no pricing_table_missing issue is reported beside the claim", async () => {
+    const report = await new ClaudeCodeCliTransport().capabilities();
+    expect(report.issues.map((i) => i.code).sort()).toEqual([
+      "bounded_events_sink_missing",
+      "codegraph_policy_unenforced",
+    ]);
+    expect(report.issues.every((i) => !i.blocking)).toBe(true);
+  });
+});
+
 describe("ClaudeCodeCliTransport.capabilities bucket identity (D1-08 PR3)", () => {
   test("no bucket-scope argument leaves rateLimitBucketId undefined (regression pin)", async () => {
     const transport = new ClaudeCodeCliTransport(okPromptFns);

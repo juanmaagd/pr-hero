@@ -1,0 +1,861 @@
+// Phase 4 (Pillar 3, ROADMAP THE LAUNCH LINE): CI workflow scaffolding +
+// doctor CI diagnostics.
+//
+// Offline only: generateCiWorkflowTemplate is pure and asserted with Bun's
+// built-in YAML parser (Bun.YAML.parse — no new dependency); runCiSetup
+// touches only an mkdtemp fixture, the same pattern test/ci/reporter.test.ts
+// uses for its impure edge functions; doctor's CI check is exercised through
+// fully injected exists/env, never real process.env, network, or spawn.
+
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, statSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
+  CI_WORKFLOW_RELATIVE_PATH,
+  generateCiWorkflowTemplate,
+  materializeCiOpenCodeData,
+  OWN_CI_WORKFLOW_OPTIONS,
+  runCiSetup,
+} from "#ci/setup";
+import { DEFAULT_PIPELINE_TIMEOUT_MS } from "#review/pipeline";
+import {
+  parseArgs,
+  parseGlobalConfig,
+  parseLocalConfig,
+} from "#review/preflight";
+import { runDoctor } from "../../src/doctor";
+import { prheroLayout } from "../../src/home-preflight";
+import { resolveOpenCodeAuthPath } from "../../src/security/credential-broker";
+import { checkCiConfiguration } from "../../src/system-tools";
+
+const OPENCODE_CI_ROUTING = JSON.stringify({
+  default: {
+    backend: "opencode",
+    provider: "deepseek",
+  },
+});
+
+const OPENCODE_CI_AUTH = JSON.stringify({
+  deepseek: { type: "api", key: "oc-ci-fixture-not-a-secret" },
+});
+
+describe("generateCiWorkflowTemplate (pure)", () => {
+  test("produces syntactically valid YAML", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate());
+    expect(parsed).toBeDefined();
+    expect(typeof parsed).toBe("object");
+  });
+
+  test("triggers on pull_request opened/synchronize/reopened", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      on: { pull_request: { types: string[] } };
+    };
+    expect(parsed.on.pull_request.types).toEqual([
+      "opened",
+      "synchronize",
+      "reopened",
+    ]);
+  });
+
+  test("grants pull-requests: write and contents: read", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      permissions: Record<string, string>;
+    };
+    expect(parsed.permissions["pull-requests"]).toBe("write");
+    expect(parsed.permissions.contents).toBe("read");
+  });
+
+  // The CI admission gate lists this workflow's past runs (gh run list) to
+  // build its attempt ledger. On a public repo that endpoint is readable
+  // without the scope, so our own dogfooding never failed; on a private
+  // consumer repo the scoped token gets HTTP 403 (issue #266).
+  test("grants actions: read for the admission gate's gh run list", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      permissions: Record<string, string>;
+    };
+    expect(parsed.permissions.actions).toBe("read");
+  });
+
+  test("the skill's bundled workflow asset grants the same permissions", async () => {
+    const asset = Bun.YAML.parse(
+      await Bun.file(
+        new URL(
+          "../../skills/pr-hero-ci-setup/assets/workflow.yml",
+          import.meta.url,
+        ),
+      ).text(),
+    ) as { permissions: Record<string, string> };
+    const generated = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      permissions: Record<string, string>;
+    };
+    expect(asset.permissions).toEqual(generated.permissions);
+  });
+
+  test("checks out with fetch-depth: 0", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    const checkoutStep = parsed.jobs.review.steps.find(
+      (step) => step.uses === "actions/checkout@v4",
+    ) as { with?: { "fetch-depth"?: number } } | undefined;
+    expect(checkoutStep?.with?.["fetch-depth"]).toBe(0);
+  });
+
+  test("explains WHY fetch-depth: 0 is required, not merely that it is set", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).toMatch(/fetch-depth: 0 is load-bearing/i);
+  });
+
+  test("invokes the official composite action", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    const usesValues = parsed.jobs.review.steps.map((step) => step.uses);
+    expect(usesValues).toContain("juanmaagd/pr-hero@v1");
+  });
+
+  test("never embeds a secret value — references secrets by name only", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).toContain(`\${{ secrets.ANTHROPIC_API_KEY }}`);
+    expect(template).toContain(`\${{ secrets.GITHUB_TOKEN }}`);
+    expect(template).not.toMatch(/sk-ant-[a-z0-9-]+/i);
+  });
+
+  test("wires BOTH documented credential inputs, not just the API key", () => {
+    // The `with:` comment tells the reader to provide EITHER secret. A repo
+    // that follows it and sets only CLAUDE_CODE_OAUTH_TOKEN used to send an
+    // empty credential and never authenticate, while `pr-hero doctor` — which
+    // accepts either variable — reported a healthy CI configuration. Silent
+    // auth failure behind a green diagnostic; the template has to pass the
+    // path it documents.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    const step = parsed.jobs.review.steps.find(
+      (s) => s.uses === "juanmaagd/pr-hero@v1",
+    ) as { with?: Record<string, string> } | undefined;
+    expect(step?.with?.["anthropic-api-key"]).toBe(
+      `\${{ secrets.ANTHROPIC_API_KEY }}`,
+    );
+    expect(step?.with?.["claude-token"]).toBe(
+      `\${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`,
+    );
+  });
+
+  test("a secretless same-repo PR gets a LOUD notice, not a silent skip", () => {
+    // The defect this pins is not hypothetical: this repo shipped five PRs
+    // (D1-09, D1-03, D1-06, credential-projection, D1-07) whose review job
+    // was skipped for missing credentials. A skipped job does not fail its
+    // workflow, so `gh run list` reported "success" on every one and nobody
+    // noticed the engine had never reviewed its own code. Silence read as
+    // approval. The skip itself is correct — a permanent red X before
+    // credentials are wired teaches people to stop reading CI — so the fix is
+    // to make the skip SAY something, not to make it fail.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: {
+        credentials: { steps: Array<Record<string, string>> };
+      };
+    };
+    const notice = parsed.jobs.credentials.steps.find(
+      (step) => step.id === "notice",
+    );
+    expect(notice).toBeDefined();
+    // Gated on BOTH conditions: fork PRs never receive secrets by design, so
+    // a notice on every fork PR would be noise. The actionable case is a
+    // same-repo PR whose owner simply has not wired a secret yet.
+    expect(notice?.if).toContain("has_creds == 'false'");
+    expect(notice?.if).toContain(
+      "github.event.pull_request.head.repo.full_name == github.repository",
+    );
+    // Both surfaces: an annotation on the run AND a line in the job summary.
+    expect(notice?.run).toContain("::notice");
+    expect(notice?.run).toContain("GITHUB_STEP_SUMMARY");
+    // It must name the fix, not just the symptom.
+    expect(notice?.run).toContain("claude setup-token");
+  });
+
+  test("EVERY job is bounded, not just the one that spends money", () => {
+    // A bound on `review` alone does not deliver the hung-runner protection
+    // its own comment claims. `credentials` runs FIRST and gates `review`
+    // through `needs:`, on the same class of shared ephemeral runners — so a
+    // runner that hangs there falls back to the GitHub default of 360
+    // minutes and stalls the whole workflow for six hours, with `review`
+    // never starting. Bounding the expensive job and leaving the gate
+    // unbounded protects the budget, not the pipeline.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: Record<string, { "timeout-minutes"?: number }>;
+    };
+    const names = Object.keys(parsed.jobs);
+    expect(names.length).toBeGreaterThan(1);
+    for (const name of names) {
+      expect(typeof parsed.jobs[name]?.["timeout-minutes"]).toBe("number");
+    }
+  });
+
+  test("the notice script never lets bash run a backtick as a command", () => {
+    // Backticks inside a DOUBLE-quoted bash string are command substitution,
+    // not literal text. The notice body documents `gh run rerun` in prose, so
+    // an echo that wrapped it in double quotes would actually invoke gh on the
+    // runner and fail the step that exists to explain a failure. Every line
+    // carrying a backtick must be single-quoted.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { credentials: { steps: Array<Record<string, string>> } };
+    };
+    const script =
+      parsed.jobs.credentials.steps.find((step) => step.id === "notice")?.run ??
+      "";
+    expect(script).toContain("`");
+    for (const line of script.split("\n")) {
+      if (!line.includes("`")) continue;
+      expect(line.trim()).toMatch(/^echo '/);
+    }
+  });
+
+  test("the review job is bounded ABOVE the pipeline's own ceiling", () => {
+    // DEFAULT_PIPELINE_TIMEOUT_MS is 75 minutes (src/review/pipeline.ts). A CI
+    // timeout at or below that steals the salvage path: GitHub kills the job
+    // before the pipeline's own ceiling can fire, close its artifacts and
+    // report. The CI bound is a backstop for a HUNG runner, not a second
+    // review budget — so it sits above the internal one with room for
+    // checkout and action setup.
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { "timeout-minutes"?: number } };
+    };
+    const ceiling = parsed.jobs.review["timeout-minutes"];
+    expect(typeof ceiling).toBe("number");
+    expect(ceiling as number).toBeGreaterThan(
+      DEFAULT_PIPELINE_TIMEOUT_MS / 60_000,
+    );
+  });
+
+  test("the OAuth comment names setup-token, the only token that survives CI", () => {
+    // Two different credentials wear the name "Claude OAuth token" and only
+    // one works here. `claude setup-token` mints a long-lived (~1 year)
+    // token meant for headless use; the `/login` session token in the
+    // keychain expires in HOURS and is silently rotated by the CLI's refresh
+    // token, which CI does not have. A reader who extracts the session token
+    // gets a secret that works for a day and then breaks CI with no signal.
+    // The template is where that distinction has to be stated, because it is
+    // what the reader has open when they choose.
+    const template = generateCiWorkflowTemplate();
+    expect(template).toContain("claude setup-token");
+    expect(template).toMatch(
+      /never .*\/login|not the .*\/login|\/login.*expires/i,
+    );
+  });
+
+  test("is deterministic — calling it twice returns byte-identical output", () => {
+    expect(generateCiWorkflowTemplate()).toBe(generateCiWorkflowTemplate());
+  });
+
+  // A scaffolded repo must inherit action.yml's spend ceiling, never one this
+  // repo chose for itself. `budget-usd` is a real money cap on someone else's
+  // account; raising it from a template they did not read is not ours to do.
+  //
+  // Since issue #156 NO side sets it, this repo included: action.yml's
+  // `budget-usd` default is empty and the CLI resolves the ceiling from the
+  // route's billing mode, so writing `budget-usd: 15.00` here would IMPOSE a
+  // ceiling on a subscription route that would otherwise carry none — the
+  // opposite of what the override was for.
+  test("neither the scaffolded template nor this repo's own sets budget-usd", () => {
+    expect(generateCiWorkflowTemplate()).not.toContain("budget-usd:");
+    expect(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS)).not.toContain(
+      "budget-usd:",
+    );
+  });
+
+  // ---------------------------------------------------------------------
+  // Run-directory artifact upload.
+  //
+  // `pr-hero triage reply --from <run-dir>` is the ONLY supported way to
+  // answer a posted finding, and it hard-fails without a run directory on
+  // disk (runTriageCommand needs comparison.json; the reply path needs
+  // findings.json to map F00N onto the posted marker). In CI that directory
+  // is `~/.prhero/.../runs/pr-<n>-<sha>-1` on an EPHEMERAL runner — it dies
+  // with the job. Uploading it is what keeps the triage half of the loop
+  // reachable once reviews move to Actions.
+  // ---------------------------------------------------------------------
+  const uploadStep = () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    return parsed.jobs.review.steps.find((step) =>
+      String(step.uses ?? "").startsWith("actions/upload-artifact@"),
+    ) as
+      | { if?: string; with?: Record<string, string | number | boolean> }
+      | undefined;
+  };
+
+  test("uploads the run directory so `triage reply --from` has an input in CI", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    // The run step must carry an id, or its `run-dir` output is unreadable.
+    const runStep = parsed.jobs.review.steps.find(
+      (step) => step.name === "Run pr-hero",
+    ) as { id?: string } | undefined;
+    expect(runStep?.id).toBe("pr-hero");
+
+    const upload = uploadStep();
+    expect(upload).toBeDefined();
+    expect(String(upload?.with?.path)).toContain(
+      "steps.pr-hero.outputs.run-dir",
+    );
+  });
+
+  test("the upload runs on always(), not only on a green review", () => {
+    // The incident this pins: every hunter died with `Not logged in · Please
+    // run /login` and the per-attempt logs — the only evidence naming the
+    // cause — were on the runner. Recovering them took pushing a throwaway
+    // debug commit to `cat` them off. A failed review is exactly when the run
+    // directory matters most, so the upload must not hang off step success.
+    expect(uploadStep()?.if).toContain("always()");
+  });
+
+  test("a review that wrote no run directory never turns the job red", () => {
+    // A size-gated or budget-gated review exits 0 having written nothing.
+    // `if-no-files-found: error` would fail the job for a skip that worked
+    // exactly as designed, and the empty-output gate keeps upload-artifact
+    // from ever being handed an empty `path:` in the first place.
+    const upload = uploadStep();
+    expect(upload?.with?.["if-no-files-found"]).toBe("warn");
+    expect(upload?.if).toContain("steps.pr-hero.outputs.run-dir != ''");
+  });
+
+  test("the artifact name pins BOTH the PR number and the head sha", () => {
+    // A PR is reviewed once per push. Naming the artifact after the PR alone
+    // makes `gh run download -n <name>` ambiguous the moment a second commit
+    // lands — and the run directory itself is named `pr-<n>-<sha>-1`, so the
+    // artifact that carries it should say which head it reviewed.
+    const name = String(uploadStep()?.with?.name);
+    expect(name).toContain("github.event.pull_request.number");
+    expect(name).toContain("github.event.pull_request.head.sha");
+  });
+
+  test("a re-run overwrites its artifact instead of failing on a name clash", () => {
+    // v4 artifact names are unique per workflow RUN, and `gh run rerun`
+    // reuses the run id — which the credentials job's own notice text tells
+    // people to do. Without `overwrite`, the second attempt's upload 409s,
+    // and under `always()` that turns the job red for a re-run that
+    // otherwise succeeded.
+    expect(uploadStep()?.with?.overwrite).toBe(true);
+  });
+
+  test("retention is bounded — the artifact carries the diff and the prompts", () => {
+    // The run directory holds diff.patch, the rendered system prompts, the
+    // hunter drafts and findings.json. On a PUBLIC repository every workflow
+    // artifact is downloadable by anyone, so this is short-lived by design:
+    // long enough to triage, short enough to limit exposure.
+    const retention = uploadStep()?.with?.["retention-days"];
+    expect(retention).toBe(7);
+  });
+
+  test("uploads hidden files — the run directory lives under a hidden ancestor", () => {
+    // upload-artifact excludes hidden files by default since v4.4, and the
+    // run directory sits under `~/.prhero`. Combined with
+    // `if-no-files-found: warn`, a hidden-file exclusion here would produce
+    // an EMPTY artifact and a warning nobody reads, which is worse than no
+    // artifact at all.
+    expect(uploadStep()?.with?.["include-hidden-files"]).toBe(true);
+  });
+
+  test("explains WHY the run directory is uploaded, not merely that it is", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).toMatch(/triage reply --from/);
+    expect(template).toMatch(/ephemeral/i);
+    expect(template).toMatch(/public repositor/i);
+  });
+
+  // Threat matrix RED (5): vars must be quoted so an unset PRHERO_ROUTING
+  // becomes the empty string instead of breaking YAML. The auth secret is
+  // referenced by name, never inlined.
+  test("quoted with.routing is vars.PRHERO_ROUTING and with.opencode-auth is secrets.OPENCODE_AUTH_JSON", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).toContain(`routing: "\${{ vars.PRHERO_ROUTING }}"`);
+    const parsed = Bun.YAML.parse(template) as {
+      jobs: { review: { steps: Array<Record<string, unknown>> } };
+    };
+    const step = parsed.jobs.review.steps.find(
+      (s) => s.name === "Run pr-hero",
+    ) as { with?: Record<string, string> } | undefined;
+    expect(step?.with?.routing).toBe(`\${{ vars.PRHERO_ROUTING }}`);
+    expect(step?.with?.["opencode-auth"]).toBe(
+      `\${{ secrets.OPENCODE_AUTH_JSON }}`,
+    );
+  });
+
+  // Threat matrix RED (6): job-level `if` cannot read `secrets` (S11/S12).
+  // Presence is detected in the credentials job env and consumed via needs.
+  test("the review job if does not read secrets", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: { review: { if?: string } };
+    };
+    const reviewIf = String(parsed.jobs.review.if ?? "");
+    expect(reviewIf).not.toContain("secrets.");
+    expect(reviewIf).toContain("needs.credentials.outputs.has_creds");
+  });
+
+  // Threat matrix RED (8): the skip notice must name the OpenCode secret so
+  // an OpenCode-only operator can wire it. It must never echo a value.
+  // OpenCode also needs PRHERO_ROUTING; naming only the secret sent operators
+  // to a Claude-default fail-closed job.
+  test("the skip notice names OPENCODE_AUTH_JSON and never a secret value", () => {
+    const parsed = Bun.YAML.parse(generateCiWorkflowTemplate()) as {
+      jobs: {
+        credentials: {
+          steps: Array<{
+            id?: string;
+            env?: Record<string, string>;
+            run?: string;
+          }>;
+        };
+      };
+    };
+    const detect = parsed.jobs.credentials.steps.find(
+      (step) => step.id === "detect",
+    );
+    expect(detect?.env?.HAS_CREDS).toContain("secrets.OPENCODE_AUTH_JSON");
+    expect(detect?.env?.HAS_CREDS).toContain("secrets.ANTHROPIC_API_KEY");
+    expect(detect?.env?.HAS_CREDS).toContain("secrets.CLAUDE_CODE_OAUTH_TOKEN");
+    const notice = parsed.jobs.credentials.steps.find(
+      (step) => step.id === "notice",
+    );
+    expect(notice?.run).toContain("OPENCODE_AUTH_JSON");
+    expect(notice?.run).toContain("PRHERO_ROUTING");
+    expect(notice?.run).not.toContain("Wire ONE secret");
+    expect(notice?.run).not.toMatch(/sk-ant-|ghp_|ghs_/);
+    expect(notice?.run).not.toContain("oc-ci-fixture-not-a-secret");
+    expect(generateCiWorkflowTemplate()).not.toMatch(/"type"\s*:\s*"api"/);
+  });
+});
+
+describe("materializeCiOpenCodeData (impure edge)", () => {
+  async function withFixture<T>(
+    fn: (paths: { home: string; workspace: string }) => Promise<T>,
+  ): Promise<T> {
+    const root = await mkdtemp(path.join(tmpdir(), "pr-hero-ci-opencode-"));
+    const home = path.join(root, "home");
+    const workspace = path.join(root, "workspace");
+    await mkdir(home, { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    try {
+      return await fn({ home, workspace });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  // Threat matrix RED (1): person-layer writes use prheroLayout(home), never
+  // the workspace checkout's .prhero/config.json (repo parser rejects routing).
+  test("writes routing at prheroLayout(home).reviewConfigPath and not the workspace", async () => {
+    await withFixture(async ({ home, workspace }) => {
+      const workspaceConfig = path.join(workspace, ".prhero", "config.json");
+      await mkdir(path.dirname(workspaceConfig), { recursive: true });
+      const workspaceBefore = `${JSON.stringify({ max_changed_lines: 50 })}\n`;
+      await writeFile(workspaceConfig, workspaceBefore);
+
+      await materializeCiOpenCodeData({
+        home,
+        env: { HOME: home },
+        routing: OPENCODE_CI_ROUTING,
+        opencodeAuth: "",
+      });
+
+      const expected = prheroLayout(home).reviewConfigPath;
+      expect(expected).toBe(path.join(home, ".prhero", "config.json"));
+      expect(existsSync(expected)).toBe(true);
+      const layer = parseGlobalConfig(await readFile(expected, "utf8"));
+      expect(layer.routing?.default?.backend).toBe("opencode");
+      expect(layer.routing?.default?.provider).toBe("deepseek");
+
+      expect(await readFile(workspaceConfig, "utf8")).toBe(workspaceBefore);
+      expect(parseLocalConfig(workspaceBefore)).not.toHaveProperty("routing");
+    });
+  });
+
+  // Threat matrix RED (2): the whole auth store lands 0600 at the broker path.
+  test("writes 0600 auth.json at resolveOpenCodeAuthPath()", async () => {
+    await withFixture(async ({ home }) => {
+      const env = { HOME: home };
+      await materializeCiOpenCodeData({
+        home,
+        env,
+        routing: "",
+        opencodeAuth: OPENCODE_CI_AUTH,
+      });
+
+      const authPath = resolveOpenCodeAuthPath(env, home);
+      expect(authPath).toBe(
+        path.join(home, ".local", "share", "opencode", "auth.json"),
+      );
+      expect(existsSync(authPath)).toBe(true);
+      expect(statSync(authPath).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(await readFile(authPath, "utf8"))).toEqual(
+        JSON.parse(OPENCODE_CI_AUTH),
+      );
+    });
+  });
+
+  // Threat matrix RED (3): empty HOME fails loud; never fall back to cwd.
+  test("empty HOME is non-zero and leaves cwd untouched", async () => {
+    await withFixture(async ({ workspace }) => {
+      const workspaceConfig = path.join(workspace, ".prhero", "config.json");
+      await expect(
+        materializeCiOpenCodeData({
+          env: { HOME: "" },
+          routing: OPENCODE_CI_ROUTING,
+          opencodeAuth: OPENCODE_CI_AUTH,
+        }),
+      ).rejects.toThrow(/HOME/);
+
+      expect(existsSync(workspaceConfig)).toBe(false);
+      expect(existsSync(path.join(workspace, ".prhero"))).toBe(false);
+      expect(existsSync(path.join(workspace, ".local"))).toBe(false);
+
+      const proc = Bun.spawn(
+        ["bun", path.resolve(__dirname, "..", "..", "src", "ci", "setup.ts")],
+        {
+          cwd: workspace,
+          env: {
+            ...process.env,
+            HOME: "",
+            ROUTING_INPUT: OPENCODE_CI_ROUTING,
+            OPENCODE_AUTH_INPUT: OPENCODE_CI_AUTH,
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [stderr, exitCode] = await Promise.all([
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).not.toContain("oc-ci-fixture-not-a-secret");
+      expect(existsSync(workspaceConfig)).toBe(false);
+      expect(existsSync(path.join(workspace, ".local"))).toBe(false);
+    });
+  });
+
+  test("empty routing skips the person-layer write", async () => {
+    await withFixture(async ({ home }) => {
+      await materializeCiOpenCodeData({
+        home,
+        env: { HOME: home },
+        routing: "",
+        opencodeAuth: OPENCODE_CI_AUTH,
+      });
+      expect(existsSync(prheroLayout(home).reviewConfigPath)).toBe(false);
+      expect(existsSync(resolveOpenCodeAuthPath({ HOME: home }, home))).toBe(
+        true,
+      );
+    });
+  });
+});
+
+describe("runCiSetup (impure edge)", () => {
+  let dir: string;
+
+  afterEach(async () => {
+    if (dir) await rm(dir, { recursive: true, force: true });
+  });
+
+  test("creates .github/workflows/pr-hero.yml when absent", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ci-setup-"));
+
+    const result = await runCiSetup({ cwd: dir });
+
+    expect(result.status).toBe("created");
+    const written = await readFile(
+      path.join(dir, CI_WORKFLOW_RELATIVE_PATH),
+      "utf8",
+    );
+    expect(written).toBe(generateCiWorkflowTemplate());
+  });
+
+  test("refuses to overwrite an existing workflow without --force", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ci-setup-"));
+    const target = path.join(dir, CI_WORKFLOW_RELATIVE_PATH);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "# a user's customized workflow\n");
+
+    const result = await runCiSetup({ cwd: dir });
+
+    expect(result.status).toBe("skipped-existing");
+    const stillThere = await readFile(target, "utf8");
+    expect(stillThere).toBe("# a user's customized workflow\n");
+  });
+
+  test("overwrites the existing workflow when --force is passed", async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "pr-hero-ci-setup-"));
+    const target = path.join(dir, CI_WORKFLOW_RELATIVE_PATH);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "# a user's customized workflow\n");
+
+    const result = await runCiSetup({ cwd: dir, force: true });
+
+    expect(result.status).toBe("overwritten");
+    const written = await readFile(target, "utf8");
+    expect(written).toBe(generateCiWorkflowTemplate());
+  });
+});
+
+describe("checkCiConfiguration (pure diagnostic, system-tools.ts)", () => {
+  test("local context: configured true when the workflow file exists", () => {
+    const status = checkCiConfiguration({
+      cwd: "/repo",
+      isCi: false,
+      exists: (p) => p === path.join("/repo", CI_WORKFLOW_RELATIVE_PATH),
+    });
+    expect(status.configured).toBe(true);
+  });
+
+  test("local context: configured false with a setup hint when absent", () => {
+    const status = checkCiConfiguration({
+      cwd: "/repo",
+      isCi: false,
+      exists: () => false,
+    });
+    expect(status.configured).toBe(false);
+    expect(status.hint).toMatch(/setup --ci|ci init/);
+  });
+
+  test("GitHub Actions context: configured true when GITHUB_TOKEN and an Anthropic/Claude credential are present", () => {
+    const status = checkCiConfiguration({
+      isCi: true,
+      env: {
+        GITHUB_TOKEN: "ghs_realtoken",
+        CLAUDE_CODE_OAUTH_TOKEN: "oauth_realtoken",
+      },
+    });
+    expect(status.configured).toBe(true);
+  });
+
+  test("GitHub Actions context: accepts ANTHROPIC_API_KEY as the alternative credential", () => {
+    const status = checkCiConfiguration({
+      isCi: true,
+      env: {
+        GITHUB_TOKEN: "ghs_realtoken",
+        ANTHROPIC_API_KEY: "sk-ant-realkey",
+      },
+    });
+    expect(status.configured).toBe(true);
+  });
+
+  test("GitHub Actions context: names the missing secret without ever echoing a present value", () => {
+    const status = checkCiConfiguration({
+      isCi: true,
+      env: { GITHUB_TOKEN: "ghs_realtoken12345" },
+      exists: () => false,
+    });
+    expect(status.configured).toBe(false);
+    expect(status.message).toContain("ANTHROPIC_API_KEY");
+    expect(status.message).not.toContain("ghs_realtoken12345");
+  });
+
+  test("GitHub Actions context: reports both secrets missing distinctly", () => {
+    const status = checkCiConfiguration({
+      isCi: true,
+      env: {},
+      exists: () => false,
+    });
+    expect(status.configured).toBe(false);
+    expect(status.message).toContain("GITHUB_TOKEN");
+    expect(status.message).toContain("ANTHROPIC_API_KEY");
+  });
+
+  test("GitHub Actions context: OpenCode auth file satisfies review auth without Anthropic", () => {
+    const env = {
+      GITHUB_TOKEN: "ghs_realtoken",
+      XDG_DATA_HOME: "/xdg-data",
+    };
+    const authPath = resolveOpenCodeAuthPath(env);
+    const status = checkCiConfiguration({
+      isCi: true,
+      env,
+      exists: (p) => p === authPath,
+    });
+    expect(status.configured).toBe(true);
+  });
+});
+
+describe("doctor CI diagnostics (Pillar 3)", () => {
+  // `checkToolsOptions` was carrying only `env`, so `checkSystemTools` fell
+  // back to its real `Bun.spawn` and every one of these five tests ran
+  // `git --version`, `claude --version`, `gh --version`, `gh auth status`
+  // and `codegraph --version` for real. `gh auth status` is a live network
+  // round trip — measured at ~450ms of mostly-waiting per call — which is how
+  // five tests that assert on a pure string check became the slowest thing in
+  // the suite and timed out at bun's 5000ms default whenever `gh` was slow.
+  //
+  // The fakes are deliberately HEALTHY (every binary found, every probe exit
+  // 0). These tests assert that the CI check alone decides `severity` and, in
+  // the last one, `report.overall` — a fake-broken git would make that
+  // "blocking" for the wrong reason and the assertion would stop meaning
+  // anything. `env` stays per-test: it is the variable under study.
+  const installedTools = {
+    which: (bin: string) => `/usr/bin/${bin}`,
+    exec: async () => ({ exitCode: 0, stdout: "1.0.0", stderr: "" }),
+  };
+
+  // Both "local repo context" tests inject `env: {}` explicitly. Without it
+  // `runDoctor` falls back to the real `process.env`, and the CI check is the
+  // one check in the report whose severity is decided BY the environment — so
+  // these two would assert one thing on a developer laptop and another inside
+  // a GitHub Actions runner, where `GITHUB_ACTIONS=true` is always set and the
+  // secrets this check looks for are not.
+  //
+  // Verified, not theorised: `GITHUB_ACTIONS=true bun test test/ci/setup.test.ts`
+  // failed both of these before the injection was added. That matters now that
+  // .github/workflows/ci.yml runs this suite on every pull request — a gate
+  // that goes red for a reason unrelated to any defect is how a team learns to
+  // ignore the gate. A test that asserts on the environment has to supply it.
+  test("local repo context: healthy when a CI workflow is configured", async () => {
+    const report = await runDoctor({
+      cwd: "/repo",
+      repoRoot: "/repo",
+      home: "/home/user",
+      exists: (p) => p === path.join("/repo", CI_WORKFLOW_RELATIVE_PATH),
+      readFile: () => undefined,
+      checkToolsOptions: { ...installedTools, env: {} },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("healthy");
+  });
+
+  test("local repo context: degraded (not blocking) when no CI workflow is configured", async () => {
+    const report = await runDoctor({
+      cwd: "/repo",
+      repoRoot: "/repo",
+      home: "/home/user",
+      exists: () => false,
+      readFile: () => undefined,
+      checkToolsOptions: { ...installedTools, env: {} },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("degraded");
+    expect(ciCheck?.hint).toMatch(/setup --ci|ci init/);
+  });
+
+  test("generic non-GitHub CI (CI=true) is degraded, never blocking", async () => {
+    // `CI=true` is the near-universal convention — GitLab, CircleCI, Jenkins,
+    // Travis, Buildkite, and plenty of container builds all set it. The
+    // secrets this check looks for (GITHUB_TOKEN plus Anthropic/Claude auth)
+    // only ever exist inside a GitHub Actions job, so on any of those it found
+    // nothing, marked the check blocking, and flipped report.overall — which
+    // makes `pr-hero upgrade --reconcile` push an error and exit 1, and a bare
+    // `pr-hero doctor` exit 1, on a machine where nothing is wrong.
+    const report = await runDoctor({
+      cwd: "/repo",
+      repoRoot: "/repo",
+      home: "/home/user",
+      exists: () => false,
+      readFile: () => undefined,
+      checkToolsOptions: { ...installedTools, env: { CI: "true" } },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("degraded");
+    // And it is asked the question a non-GitHub machine can actually answer:
+    // "do you have a workflow?", not "where are your GitHub Actions secrets?"
+    expect(ciCheck?.hint).toMatch(/setup --ci|ci init/);
+  });
+
+  test("GitHub Actions context: healthy when required secrets are present", async () => {
+    const report = await runDoctor({
+      cwd: "/repo",
+      home: "/home/user",
+      exists: () => false,
+      readFile: () => undefined,
+      checkToolsOptions: {
+        ...installedTools,
+        env: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_TOKEN: "ghs_realtoken",
+          ANTHROPIC_API_KEY: "sk-ant-realkey",
+        },
+      },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("healthy");
+  });
+
+  test("GitHub Actions context: healthy when GITHUB_TOKEN and OpenCode auth file are present", async () => {
+    const env = {
+      GITHUB_ACTIONS: "true",
+      GITHUB_TOKEN: "ghs_realtoken",
+      XDG_DATA_HOME: "/xdg-data",
+    };
+    const authPath = resolveOpenCodeAuthPath(env);
+    const report = await runDoctor({
+      cwd: "/repo",
+      home: "/home/user",
+      exists: (p) => p === authPath,
+      readFile: () => undefined,
+      checkToolsOptions: {
+        ...installedTools,
+        env,
+      },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("healthy");
+  });
+
+  test("GitHub Actions context: blocking when a required secret is missing, and never echoes any value", async () => {
+    const report = await runDoctor({
+      cwd: "/repo",
+      home: "/home/user",
+      exists: () => false,
+      readFile: () => undefined,
+      checkToolsOptions: {
+        ...installedTools,
+        env: { GITHUB_ACTIONS: "true", GITHUB_TOKEN: "ghs_realtoken12345" },
+      },
+    });
+    const ciCheck = report.checks.find((c) => c.name === "ci");
+    expect(ciCheck?.severity).toBe("blocking");
+    expect(ciCheck?.message).toContain("ANTHROPIC_API_KEY");
+    expect(ciCheck?.message).not.toContain("ghs_realtoken12345");
+    expect(report.overall).toBe("blocking");
+  });
+});
+
+describe("CLI wiring: setup --ci and ci init (parseArgs)", () => {
+  test("setup --ci parses with command=setup, options.ci=true", () => {
+    const parsed = parseArgs(["setup", "--ci"]);
+    expect(parsed.command).toBe("setup");
+    expect(parsed.options.ci).toBe(true);
+  });
+
+  test("plain setup (no --ci) still parses — the interactive wizard path", () => {
+    const parsed = parseArgs(["setup"]);
+    expect(parsed.command).toBe("setup");
+    expect(parsed.options.ci).toBeUndefined();
+  });
+
+  test("ci init parses with command=ci, options.ciSubcommand=init", () => {
+    const parsed = parseArgs(["ci", "init"]);
+    expect(parsed.command).toBe("ci");
+    expect(parsed.options.ciSubcommand).toBe("init");
+  });
+
+  test("ci init --force parses with options.force=true", () => {
+    const parsed = parseArgs(["ci", "init", "--force"]);
+    expect(parsed.options.force).toBe(true);
+  });
+
+  test("bare ci with no subcommand is rejected", () => {
+    expect(() => parseArgs(["ci"])).toThrow();
+  });
+
+  test("--ci still requires --pr on the review command (unchanged Phase 3 behavior)", () => {
+    expect(() => parseArgs(["review", "--ci"])).toThrow(/--pr/);
+  });
+
+  test("--ci on a command other than review or setup is rejected", () => {
+    expect(() => parseArgs(["doctor", "--ci"])).toThrow(
+      /review or setup command/,
+    );
+  });
+});

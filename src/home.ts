@@ -1,5 +1,5 @@
 // I/O for the global ~/.prhero/ product home (W3 / #24). Every decision it
-// acts on lives in home-preflight.ts. cli.ts and watch.ts call this so the
+// acts on lives in home-preflight.ts. cli.ts and watch/watch.ts call this so the
 // registry read/write and the origin lookup are not copied across shells.
 //
 // Same git-runner rule as the other shells: args as an ARRAY, never an
@@ -8,6 +8,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { git } from "#git/git";
+import { parseLockPid } from "#watch/preflight";
+import { CliError } from "./errors";
 import {
   canonicalRemoteId,
   decidePidLock,
@@ -22,26 +25,8 @@ import {
   serializeRepoRegistry,
   touchWorktreeStamp,
 } from "./home-preflight";
-import { CliError } from "./preflight";
-import { parseLockPid } from "./watch-preflight";
 
 const PID_LOCK_ATTEMPTS = 3;
-
-async function git(
-  repo: string,
-  args: string[],
-): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["git", "-C", repo, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { ok: exitCode === 0, stdout, stderr };
-}
 
 export async function gitOriginUrl(repoRoot: string): Promise<string> {
   const result = await git(repoRoot, ["remote", "get-url", "origin"]);

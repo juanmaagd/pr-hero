@@ -11,11 +11,11 @@
 // LIVE: spends real money. Record the result (charter rule 6).
 // Run: bun run scripts/scale-probe.ts [replicates]
 import path from "node:path";
+import { runPipeline } from "#review/pipeline";
+import type { ReviewSpec } from "#review/spec";
+import { ClaudeCodeRunner } from "#review/step-runner";
 import { buildScaleFixture, type Density } from "../fixtures/scale-probe";
-import { runPipeline } from "../src/pipeline";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import type { ReviewSpec } from "../src/spec";
-import { ClaudeCodeRunner } from "../src/step-runner";
 
 const REPLICATES = Number(process.argv[2] ?? 4);
 const AGENT_SOURCE_PATH =

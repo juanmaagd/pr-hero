@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { StepSpec } from "#review/step-runner";
 import type {
   ProviderCapabilityReport,
   ProviderTransport,
@@ -19,7 +20,6 @@ import type {
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
 import type { NormalizedUsage } from "../../src/execution/usage-normalized";
-import type { StepSpec } from "../../src/step-runner";
 
 const USAGE: NormalizedUsage = {
   wallMs: 1,
@@ -264,6 +264,152 @@ describe("PR0 — live retry decision (§7)", () => {
     expect(second).toContain("classification: transient");
     expect(second).toContain("cause: network_transient");
   });
+
+  // #126: moving the transport's own tallies off the classification witness
+  // is only half the fix — they still have to be READABLE, or the change
+  // trades a wrong retry disposition for a blind incident triage. The attempt
+  // log is where they land, redacted like everything else that hits disk.
+  test("transport diagnostics are persisted beside the witness, not inside it", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport(
+      [
+        failOutcome({
+          stderrTail: "[pr-hero] opencode sdk: stream errored: boom",
+          diagnosticsTail:
+            "[pr-hero] opencode sdk: 429 poll round(s) timed out; timeouts cannot win the terminal slot",
+        }),
+        okOutcome(),
+      ],
+      () => "network_transient",
+    );
+    const step = await makeStep(dir, { maxAttempts: 2 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    await harness.run(step);
+
+    const first = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+
+    expect(first).toContain("--- transport diagnostics ---");
+    expect(first).toContain("429 poll round(s) timed out");
+    // The witness section keeps the provider's words and nothing else.
+    const witnessSection = first.slice(
+      first.indexOf("--- stderr tail (4096) ---"),
+      first.indexOf("--- transport diagnostics ---"),
+    );
+    expect(witnessSection).toContain("stream errored: boom");
+    expect(witnessSection).not.toContain("poll round(s) timed out");
+  });
+
+  // #175 half 2: the observed models are only worth parsing if a human can
+  // read them back. The attempt log is where they stop -- see the "where it
+  // stops" note on TransportOutcome.observedModels.
+  test("observed models are persisted in the attempt log", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport(
+      [
+        failOutcome({
+          observedModels: [
+            {
+              model: "claude-haiku-4-5-20251001",
+              canonicalModel: "claude-haiku-4-5",
+            },
+            { model: "claude-sonnet-5-20260115" },
+          ],
+        }),
+        okOutcome(),
+      ],
+      () => "network_transient",
+    );
+    const step = await makeStep(dir, { maxAttempts: 2 });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    await harness.run(step);
+
+    const first = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    const second = await Bun.file(
+      path.join(dir, "logs", `${step.name}.2.log`),
+    ).text();
+
+    expect(first).toContain("--- observed models ---");
+    expect(first).toContain(
+      "claude-haiku-4-5-20251001 (canonical: claude-haiku-4-5)",
+    );
+    expect(first).toContain("claude-sonnet-5-20260115");
+    // The section is written even when nothing was observed, so the log
+    // format is fixed rather than varying with what an attempt happened to
+    // see -- the same rule the transport-diagnostics section follows.
+    expect(second).toContain("--- observed models ---");
+  });
+
+  test("a watchdog-killed attempt flushes its attempt log with timed_out: true (#185)", async () => {
+    const dir = await tempDir();
+    let calls = 0;
+    const transport: ProviderTransport = {
+      backend: "claude-code",
+      capabilities: async () => CAPABILITIES,
+      execute: async (_req, { signal }) => {
+        calls++;
+        if (calls === 1) {
+          return new Promise<TransportOutcome>((resolve) => {
+            signal.addEventListener("abort", () => {
+              resolve(failOutcome({ timedOut: true }));
+            });
+          });
+        }
+        return okOutcome();
+      },
+      classifyFailure: () => undefined,
+    };
+
+    const step = await makeStep(dir, {
+      timeoutMs: 30,
+      maxAttempts: 2,
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("ok");
+    expect(calls).toBe(2);
+
+    const firstLog = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(firstLog).toContain("timed_out: true");
+    expect(firstLog).toContain("classification: transient");
+    expect(firstLog).toContain("cause: watchdog_timeout");
+    expect(firstLog).toContain("Step timed out after 30ms");
+
+    const firstReceipt = JSON.parse(
+      await Bun.file(
+        path.join(dir, `settlement.${step.name}.attempt1.json`),
+      ).text(),
+    );
+    expect(firstReceipt.lateWriteFence.closed).toBe(true);
+    expect(firstReceipt.lateWriteFence.rejectedEvents).toBe(1);
+
+    const secondLog = await Bun.file(
+      path.join(dir, "logs", `${step.name}.2.log`),
+    ).text();
+    expect(secondLog).toContain("timed_out: false");
+    expect(secondLog).toContain("classification: ok");
+  });
 });
 
 describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
@@ -275,7 +421,7 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
     );
 
     const stepRunnerImport = src.match(
-      /import\s*\{([^{}]*)\}\s*from\s*"\.\.\/step-runner"/,
+      /import\s+(?:type\s+)?\{([^{}]*)\}\s*from\s*"#review\/step-runner"/,
     );
     expect(stepRunnerImport).not.toBeNull();
     expect((stepRunnerImport as RegExpMatchArray)[1]).not.toMatch(
@@ -286,11 +432,102 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
     const hitLines = lines.filter((line) => line.includes("classifyFailure"));
     expect(hitLines.length).toBeGreaterThan(0);
     for (const line of hitLines) {
-      expect(line).toContain("this.transport.classifyFailure");
+      expect(line).toMatch(/(\bthis\.)?transport\.classifyFailure/);
       // Never a bound method (`.bind(`) or a lambda re-implementing it
       // (would look like `(outcome) => classifyFailure(...)` or similar).
       expect(line).not.toMatch(/classifyFailure\s*\.bind\(/);
       expect(line).not.toMatch(/=>\s*.*classifyFailure\(/);
     }
+  });
+});
+
+describe("vacuous empty hunt is not a delivered draft (#214)", () => {
+  test("tools + zero invocations + empty findings fails the step without a format retry", async () => {
+    const dir = await tempDir();
+    const { transport, requests } = makeScriptedTransport([
+      { ...okOutcome(), toolInvocations: 0 },
+    ]);
+    const step = await makeStep(dir, {
+      tools: ["Read", "Grep"],
+      maxAttempts: 2,
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(1);
+    expect(requests.length).toBe(1);
+    expect(await Bun.file(step.outPath).exists()).toBe(false);
+
+    const log = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(log).toContain("classification: terminal");
+    expect(log).toContain("cause: legacy_terminal");
+    expect(log).toContain("tool_invocations: 0");
+    expect(log).not.toContain("classification: format");
+  });
+
+  test("looked and found nothing still delivers", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport([
+      { ...okOutcome(), toolInvocations: 1 },
+    ]);
+    const step = await makeStep(dir, { tools: ["Read"] });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("ok");
+    expect(result.output).toEqual({ findings: [] });
+    expect(await Bun.file(step.outPath).json()).toEqual({ findings: [] });
+  });
+
+  test("scout tools:[] at zero invocations still delivers", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport([
+      { ...okOutcome(), toolInvocations: 0 },
+    ]);
+    const step = await makeStep(dir, {
+      name: "scout",
+      tools: [],
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+    expect(result.status).toBe("ok");
+  });
+
+  test("an unknown count stays ungated (Claude-shaped transport)", async () => {
+    const dir = await tempDir();
+    const { transport } = makeScriptedTransport([okOutcome()]);
+    const step = await makeStep(dir, { tools: ["Read"] });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+    expect(result.status).toBe("ok");
+
+    const log = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(log).toContain("classification: ok");
+    expect(log).not.toContain("tool_invocations:");
   });
 });

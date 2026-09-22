@@ -12,7 +12,7 @@
 // in <checkout>/.prhero/.
 
 import path from "node:path";
-import { CliUsageError } from "./preflight";
+import { CliUsageError } from "./errors";
 
 export const GC_TTL_HOURS = 72;
 
@@ -23,7 +23,7 @@ export interface PrheroLayout {
   // configPath. The watcher's opt-in registry (watch.json) and the global
   // review config (config.json) are both `string`, so re-pointing a single
   // `configPath` identifier from one file to the other would have kept
-  // compiling at all 19 `paths.configPath` sites in watch.ts while silently
+  // compiling at all 19 `paths.configPath` sites in watch/watch.ts while silently
   // reading the wrong file. The name was RETIRED rather than reused: an
   // identifier that no longer exists is the one thing tsc can flag, and no
   // test can enumerate call sites the way the type checker does.
@@ -36,7 +36,7 @@ export interface PrheroLayout {
   lockPath: string;
   launchdLogPath: string;
   // W4 (#23): ONE global sqlite db, siblings with reposDir rather than
-  // nested under it, so GC's `glob.scan({ cwd: reposDir })` (gc.ts)
+  // nested under it, so GC's `glob.scan({ cwd: reposDir })` (store/gc.ts)
   // structurally cannot enumerate or delete it.
   metricsDbPath: string;
   // Canonical product database (Fundamentals #6 / observability-canonical-store.md)

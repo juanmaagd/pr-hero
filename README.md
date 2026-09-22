@@ -62,15 +62,15 @@ See [Requirements](#requirements) above — `claude` and `git` are needed by eve
 
 ## From install to first review
 
-Seven steps, in this order. Steps 2, 5 and 6 are the ones that get skipped, and each one
-breaks the step after it.
+Seven steps, in this order. Steps 2, 5 and 6 are the ones that get skipped, and
+each one breaks the step after it.
 
 ```bash
 # 1. Install (option A shown; B and C put pr-hero on PATH themselves)
 curl -fsSL https://raw.githubusercontent.com/juanmaagd/pr-hero/main/install.sh | bash
 
-# 2. Put it on THIS shell's PATH. The installer edited your rc file, and an rc file only
-#    reaches shells started after it — the one you are in is not one of them.
+# 2. Put it on THIS shell's PATH. The installer edited your rc file, and an rc
+#    file only reaches shells started after it — the one you are in is not one.
 export PATH="$HOME/.prhero/bin:$PATH"     # fish: set -gx PATH $HOME/.prhero/bin $PATH
 
 # 3. What is installed, what is missing, what blocks a review.
@@ -79,8 +79,8 @@ pr-hero doctor
 # 4. Skills + MCP registration, and — inside a git repo — scaffold .prhero/.
 cd /path/to/your-repo && pr-hero setup
 
-# 5. Track that scaffold, or ignore it. Local review refuses to run on a dirty tree, and
-#    an untracked .prhero/ is a dirty tree.
+# 5. Track that scaffold, or ignore it. Local review refuses to run on a dirty
+#    tree, and an untracked .prhero/ is a dirty tree.
 git add .prhero && git commit -m "chore: pr-hero config"   # or: echo '.prhero/' >> .gitignore
 
 # 6. Replace the placeholder gotchas with real ones. Not paperwork — see below.
@@ -91,18 +91,17 @@ pr-hero review
 ```
 
 **On step 4.** `setup` is fully non-interactive — it asks nothing and is safe to run
-unattended. It is also optional for reviewing: `review` never checks whether it ran. What it
-buys is the skills, the MCP registration and the repo scaffold; skip it and you scaffold the
-repo yourself with `pr-hero init`. It does **not** commit or `.gitignore` what it scaffolds,
-which is why step 5 exists.
+unattended. It is also optional for reviewing: `review` never checks whether it ran,
+only `pr-hero doctor` reports it. What it buys is the skills, the MCP registration and
+the repo scaffold; skip it and you scaffold the repo yourself with `pr-hero init`. It does
+**not** commit or `.gitignore` what it scaffolds, which is why step 5 exists.
 
-**On step 6, and this is the one that costs money to skip.** `gotchas.md` is injected verbatim
-into every hunter's system prompt, and what `setup`/`init` write there is a placeholder:
-`- <subsystem>: <the thing that looks like a bug but is deliberate, and why>`. That file is
-non-empty, so it satisfies the emptiness check and the review runs anyway — billed in full, by
-hunters who were told nothing about your repo, returning a result that looks clean. Leaving the
-placeholder is not the cautious option; it is the expensive one. Write a handful of true lines
-first.
+**On step 6.** `gotchas.md` is injected verbatim into every hunter's system prompt, and
+what `setup`/`init` write there is a placeholder: `- <subsystem>: <the thing that looks
+like a bug but is deliberate, and why>`. A review that reads *that* is a review billed in
+full by hunters who know nothing about your repo, and it comes back looking clean. So
+pr-hero refuses to run while the scaffold's `human-attention-required` marker line is
+still present. Write a handful of true lines, delete the marker.
 
 Other entry points, once the above works:
 
@@ -118,25 +117,25 @@ Every paid run prints a plan and a cost band, then asks for confirmation (`--yes
 
 ### For AI agents
 
-You are most likely here because someone told you to install pr-hero and review a repo. Four
-things go wrong when an agent runs the sequence above:
+You are most likely here because someone told you to install pr-hero and review a repo.
+Four things go wrong when an agent runs the sequence above:
 
 1. **Step 2 is not optional, and not deferrable.** If each of your commands runs in its own
    shell, an `export PATH=...` in one does not reach the next. Either prepend the export to
    every pr-hero invocation, or call the binary by absolute path: `~/.prhero/bin/pr-hero`.
-2. **Step 5 is yours.** `pr-hero setup` scaffolds `.prhero/` and neither commits nor ignores
-   it, so the next `pr-hero review` fails the clean-tree gate — on files `setup` itself
-   created. Commit them or add `.prhero/` to `.gitignore` before reviewing.
-3. **Write the gotchas yourself (step 6).** You have the repository in context, which makes you
-   the best gotchas author available. Read the code and write the real ones: the deliberate
-   oddity that looks like a bug, the invariant enforced in a file the diff never shows, the
-   ownership rule a newcomer would violate. Leaving the placeholder is not the safe option — it
-   is not refused, it is *billed*, and it returns a clean-looking review of a repo nobody
-   described to the hunters.
-4. **You cannot authenticate `claude`. Stop and ask the human.** pr-hero spawns the Claude Code
-   CLI and inherits its authentication; there is no pr-hero-side key to set. If `pr-hero doctor`
-   reports `claude` missing or unauthenticated, say so and wait — every step after it fails
-   until a person fixes it.
+2. **Step 5 is yours.** `pr-hero setup` scaffolds `.prhero/` and neither commits nor
+   ignores it, so the next `pr-hero review` fails the clean-tree gate — on files `setup`
+   itself created. Commit them or add `.prhero/` to `.gitignore` before reviewing.
+3. **Write the gotchas yourself (step 6).** You have the repository in context, which makes
+   you the best gotchas author available. Read the code and write the real ones: the
+   deliberate oddity that looks like a bug, the invariant enforced in a file the diff never
+   shows, the ownership rule a newcomer would violate. Leaving the placeholder is not a
+   softer option — the review is refused until you replace it and delete the
+   `human-attention-required` marker line.
+4. **You cannot authenticate `claude`. Stop and ask the human.** pr-hero spawns the Claude
+   Code CLI and inherits its authentication; there is no pr-hero-side key to set. If
+   `pr-hero doctor` reports `claude` missing or unauthenticated, say so and wait — every
+   step after it fails until a person fixes it.
 
 ## Configuration — two layers
 
@@ -147,8 +146,11 @@ There are two config files, and the difference between them is *who they belong 
 | `~/.prhero/config.json` | **yours**, across every repo on this machine | no — it is your machine |
 | `<repo>/.prhero/config.json` | **the team's** | yes, normally — it is shared through git |
 
-`pr-hero init` creates the repo file and `gotchas.md`, and never overwrites existing ones. Commit
-`.prhero/` or add it to `.gitignore` — an untracked one trips local mode's clean-tree gate.
+`pr-hero init` creates the repo file and `gotchas.md`, and never overwrites existing ones —
+`pr-hero setup` scaffolds the same two files when it runs inside a git repo, so a repo you set up
+needs no separate `init`. (Running `init` afterwards is harmless: it keeps what exists and reprints
+the git reminder.) Commit `.prhero/` or add it to `.gitignore` — an untracked one trips local
+mode's clean-tree gate.
 
 **Run `pr-hero config` to see which layer decided what.** It lists every key with its value, the
 layer it came from, and both file paths whether or not they exist. It never edits anything.
@@ -189,12 +191,12 @@ which is a different thing from a committed file asking on your behalf. `--agent
 ### `gotchas.md`
 
 Repo-specific traps the hunters must know (fragile invariants, deliberate oddities, past incidents).
-**Required — but the only thing checked is that the file is non-empty**, which the scaffold
-`init`/`setup` write already satisfies. So a placeholder does not stop a review: it buys a
-full-price one from hunters who were told nothing about your repo, and it comes back looking
-clean. Replace the `<subsystem>` lines with facts about this repo before your first run.
-Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <file>` (and
-`--config <file>`).
+**Required, and it must be real** — not merely non-empty. The file `init`/`setup` scaffold carries a
+`human-attention-required` marker line, and `review` and `doctor` both refuse it by name: a
+placeholder passes any emptiness check while telling every hunter nothing, which buys a full-price
+review that reports clean. Replace the `<subsystem>` lines with facts about your repo, then delete
+the marker line. Reviewing a tree you cannot write to? Supply it from outside with
+`--gotchas <file>` (and `--config <file>`).
 
 ## Commands
 
@@ -216,7 +218,7 @@ Reviewing a tree you cannot write to? Supply it from outside with `--gotchas <fi
 | `pr-hero config --edit` | Open the interactive configuration editor across Person, Team, and Watcher layers with buffered draft editing, Save/Discard/Clear actions, and capped ceiling annotations. |
 | `pr-hero upgrade [--check]` | Upgrade `pr-hero` to the latest release and reconcile installed skills and MCP registrations. `--check` checks for updates without installing. |
 | `pr-hero uninstall [--purge]` | Managed uninstallation: unloads launchd background daemons, cleans up skills, unregisters MCPs, and optionally purges `~/.prhero` with `--purge`. |
-| `pr-hero init` | Scaffold `.prhero/` in the current repo — the command for every repo after the one you ran `setup` in. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. |
+| `pr-hero init` | Scaffold `.prhero/` in the current repo — the command for every repo after the one you ran `setup` in. Omits keys your global file already supplies, so a new repo does not re-state what you have already said once. Idempotent: existing files are kept untouched, and it reprints the commit-or-ignore reminder. |
 | `pr-hero watch add` | Opt the current repo (or `--repo <path>`) into the watcher; `--post` makes its reviews publish to the PR. Idempotent — re-adding updates the post flag. See [Watching PRs automatically](#watching-prs-automatically--pr-hero-watch). |
 | `pr-hero watch remove` | Take the current repo (or `--repo <path>`) back out. Idempotent — removing what is not listed just says so. |
 | `pr-hero watch status` | Read-only, $0: config summary, today's launches vs the cap, launchd state, lock, last activity. |
@@ -395,14 +397,53 @@ because an unattended watcher must not be the thing that discovers it.
 dilution was tested and falsified (`fixtures/scale-probe.ts`), and the one measured Greptile-only
 miss came from a 7-file PR. If a large diff is worth its price, `--force` reviews it.
 
-The gate counts **effective** changed lines (insertions + deletions) and files — generated content is
-excluded first, so a regenerated lockfile beside a ten-line change does not trip it. Excluded by
+The gate counts **effective** changed lines (insertions + deletions) and files — excluded content is
+subtracted first, so a regenerated lockfile beside a ten-line change does not trip it. Excluded by
 default: `bun.lock`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `go.sum`,
-`*.min.js`, `*.min.css`, `*.snap`.
+`*.min.js`, `*.min.css`, `*.snap`. A repo can add its own exclusions with `.prheroignore` — see
+below.
 
 Those exclusions come out of the **reviewed diff itself**: `diff.patch` is what the hunters are
 handed, so the number the gate measures is the number that gets paid for. If every changed file is
 excluded, there is nothing to review — pr-hero exits without spawning anything.
+
+### `.prheroignore` — repo-defined exclusions
+
+A `.prheroignore` file at the **repo root** adds your own exclusions on top of the 9 defaults above.
+The dialect is a **subset of gitignore(5)**, not a full reimplementation — most everyday patterns
+work exactly like `.gitignore`, but two things are worth knowing before you rely on it:
+
+- **Only one file, at the repo root, is read.** Nested per-directory `.prheroignore` files (the way
+  git supports a `.gitignore` in every directory) are **not** read. A file at
+  `openspec/.prheroignore` is silently ignored — put every rule in the one at the repo root instead.
+- **Matching is case-sensitive**, matching git's own behavior. This is a deliberate departure from
+  the `ignore` npm package (the common JS gitignore implementation), which is case-insensitive by
+  default — if that is where your intuition comes from, `README.md` will not match `readme.md` here.
+
+Supported: comments (`#`) and blank lines, negation (`!pattern` re-includes), anchoring
+(a leading or interior `/`), trailing-slash directory-only rules, `*`/`?`/`[a-z]`-style classes,
+`**` at any position (including matching zero directories), and literal `{`/`}` (this dialect has no
+brace-alternation syntax — braces are always literal characters, unlike some glob libraries).
+The **last matching rule wins**, builtins evaluated first, then your file's rules in order — so a
+rule can re-include one of the 9 defaults (`!bun.lock`) or exclude something the defaults do not.
+
+One documented deviation from real git: unlike `git`, which cannot re-include a file whose parent
+directory is itself excluded (gitignore(5) states this outright — it is a tree-walk optimization),
+this engine matches a finite diff file list, not a tree walk, so `docs/` then `!docs/keep.md` DOES
+re-include `docs/keep.md` here.
+
+Under CI (GitHub Actions, or any `CI`/`GITHUB_ACTIONS` environment), `.prheroignore` is read from
+the PR's **base ref**, never the PR's own branch — a PR cannot widen its own exclusions to hide
+changes from its own review. Local review, and local `--pr <n>` review without CI, read it from your
+working tree instead. A malformed file aborts the whole review before anything is spent, naming the
+file, line number, and offending text.
+
+`pr-hero watch` honors `.prheroignore` too, in its per-tick scheduling filter (both the aggregate
+check and the per-file rescue), and in a one-call pre-launch check that catches a PR whose files are
+all excluded but whose aggregate alone would not have flagged it. It reads `.prheroignore` from the
+watched repo's own working tree on the machine running the watcher — never a base ref — because the
+watcher runs from an operator's own checkout of a repo that operator explicitly opted in, with no PR
+author supplying that checkout the way CI's PR-triggered runs have one.
 
 The count is also **whitespace-blind wherever git is reachable** (local mode and PR mode count from
 `git diff -w --ignore-blank-lines --numstat`), so a formatter or linter sweep does not consume the
@@ -424,8 +465,8 @@ pr-hero watch add --max-changed-lines 800       # per-repo threshold for the wat
 ```
 
 A skipped review exits 1 with a one-line reason and no stack. In watch mode it logs
-`skipped … reason=too-large` (or `reason=nothing-to-review`, when every changed file is excluded
-generated content) and costs nothing further: it does **not** consume a poison-PR attempt,
+`skipped … reason=too-large` (or `reason=nothing-to-review`, when every changed file is excluded)
+and costs nothing further: it does **not** consume a poison-PR attempt,
 writes no review marker, and does not arm the one-review-per-PR state — a force-push that shrinks the
 PR makes it eligible again on the next tick, because the gate is recomputed every tick.
 

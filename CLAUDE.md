@@ -39,17 +39,19 @@ been burned by a manual match that inflated a score by 50%.
 
 ## Branch and PR workflow (mandatory since 2026-08-26)
 
-Every slice lands through a feature branch and a pull request — never direct
-pushes to `main`. This is deliberate dogfooding: `pr-hero.yml` runs this
+Every slice lands through a feature branch and a pull request targeting `dev` —
+never push directly to `dev`. This is deliberate dogfooding: `pr-hero.yml` runs this
 engine's own review on every PR, so each slice gets self-reviewed by pr-hero
 before it merges.
 
-1. Branch per slice off latest `main` (`feat/d1-09-capability-report`, ...).
+1. Branch per slice off latest `dev` (`feat/d1-09-capability-report`, ...).
 2. Work-unit commits on the branch (one purpose each, tests included).
-3. Open the PR, let the pr-hero review post, triage its findings with
-   `skills/pr-hero-triage/SKILL.md`, then merge.
-4. `ci.yml` runs on both PRs and main pushes; `release.yml` fires only on
-   semver tags, so merging to main never publishes a release.
+3. Open the PR targeting `dev`, let the pr-hero review post, triage its findings
+   with `skills/pr-hero-triage/SKILL.md`, then merge into `dev`.
+4. `ci.yml` runs on every PR and on pushes to `main` only. Merging into `dev`
+   does not trigger a separate push CI run, so the PR run is the required verification.
+5. `release.yml` fires only on semver tags, so merging into `dev` never publishes
+   a release.
 
 ## Commands
 
@@ -63,6 +65,8 @@ bun run fixture-eval --scout         # LIVE: same, with the scout stage on (~$0.
 bun run scripts/live-micro-eval.ts   # LIVE: one trivial real spawn (~$0.04)
 bun run scripts/live-micro-eval.ts --scout  # LIVE: the scout's real spawn shape, tools:[] (~$0.05)
 bun run scripts/opencode-probe.ts    # LIVE: records what the OpenCode SDK really emits (~$0, needs the SDK resolvable)
+bun run scripts/opencode-mcp-probe.ts        # LIVE: 4 arms — which MCP delivery mechanisms work under --pure ($0, no inference)
+bun run scripts/opencode-mcp-toolid-probe.ts # LIVE: the literal MCP tool id, and whether the tools map gates it ($0 cash, 2 turns)
 bun run scripts/m6.ts plan   # $0: prices M6's 56 runs from gh counters + the target repo's config
 bun run scripts/m6.ts score  # $0: the floor table, re-runnable from artifacts forever
 bun run scripts/m6.ts run    # LIVE and the big one: 56 serial reviews, ~$174-374, ~4h44m
@@ -95,13 +99,16 @@ over** (found while wiring C5, 2026-08-23):
 ## Architecture (one line per module)
 
 - `src/spec.ts` — `ReviewSpec`/`AgentSpec`: which agents run, their role, trigger, model. THE flow config.
+  A benchmark arm can append hunters with `PRHERO_EXTRA_HUNTERS=key:file[,...]` (read once in `localReviewSpec`,
+  inert when unset).
 - `src/pipeline.ts` — `runPipeline`: gotchas fail-loud → trigger eval → parallel hunter steps → dedupe →
   per-finding refuter steps → `deriveTier` → assembled `SkillOutput` + `pipeline.json` provenance + per-agent usage.
 - `src/step-runner.ts` — `StepRunner` interface + `ClaudeCodeRunner` (isolation flags, retry ordering,
   watchdog, atomic artifacts, per-attempt logs). Stage-2 `OpenCodeRunner` obligations documented on the
   interface.
 - `src/dedupe.ts` / `src/drafts.ts` — pure: merge/renumber; extraction + draft/refuter validation.
-- `src/findings.ts` — schema v1.0.0 (shared meaning with the lab's validator; byte-compatible artifacts).
+- `src/findings.ts` — dual reader: schema v1.0.0 (closed hunter enum, category 1-14) and v1.1.0 (open
+  specialty slug, category 1-15, what the engine writes). Shared meaning with the lab's validator.
 - `src/prompt-set.ts` — agent-file parsing + `{{PRIORS}}`/`{{GOTCHAS}}` templating.
 - `src/cli.ts` + `src/preflight.ts` + `src/report.ts` — local mode (B0): the I/O shell, its pure
   decisions (all offline-tested), and the cost band + report renderer.
@@ -152,8 +159,11 @@ over** (found while wiring C5, 2026-08-23):
 4. **Isolation flags are a threat model, not preferences.** `--strict-mcp-config` + codegraph-only,
    `--setting-sources ""`, no Write/Task/Bash for agents, driver owns all file writes. Tests assert them;
    weakening one requires explicit justification.
-5. **Schema compatibility with the lab is sacred** until a coordinated v1.1 bump (tracked in ROADMAP C2).
-   Hunter spec keys are limited to the schema's `reliability|resilience|parity|lifecycle` enum until then.
+5. **Schema compatibility with the lab is sacred.** The coordinated v1.1 bump (ROADMAP C2) LANDED, both
+   sides: `validateFindingV11` takes any specialty slug as `hunter` and category `1-15`, while the v1.0
+   validator stays closed (4 hunter names, `1-14`). So a new hunter key needs no schema change — but any
+   further widening of a shared field still does, on both sides. Category 15 = local logic error (see
+   `docs/research/local-logic-misses.md`); its lab mirror is still owed.
 6. **Every live run costs money → it lands in a ledger** (lab runs in `bench/`; local evals in the
    commit/PR description).
 7. **One variable per experiment**; replicates + N-of-M semantics; attribute misses (hunter/merge/

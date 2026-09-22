@@ -1,6 +1,6 @@
 // Offline tests for the progress panel's pure half: state transitions under
 // the pipeline event stream, and the frame text each state renders — now a
-// tree (ui-tree.ts), so the refuter's per-finding verdicts accumulate as
+// tree (ui/tree.ts), so the refuter's per-finding verdicts accumulate as
 // leaves instead of overwriting one counter. The redraw/ticker mechanics in
 // cli.ts are I/O, untested by construction.
 

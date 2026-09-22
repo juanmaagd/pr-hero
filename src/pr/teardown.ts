@@ -1,0 +1,120 @@
+// PR mode's teardown: the two `finally` blocks wrapping reviewPr()'s run.
+// Relocated out of reviewPr() (src/pr/review-pr.ts): the ledger-settle check
+// duplicated in both finally blocks factored into one shared
+// `settleLedgerIfPending` helper (still called from both), identifiers moved
+// onto explicit parameters, control flow otherwise unchanged. The WHY
+// comments below move with the code they explain.
+
+import type { CiAdmissionLedgerState } from "#pr/admission";
+import { settleCiAdmissionLedger } from "#pr/admission";
+import type { InlinePostOutcome } from "#pr/inline";
+import { commitStatusCompletion, commitStatusRequest } from "#pr/preflight";
+import { releaseCommitStatusLock, tryPublishCommitStatus } from "#pr/status";
+import type { PipelineResult } from "#review/pipeline";
+import { runGc } from "#store/gc";
+import { releasePidLock } from "../home";
+
+// The ledger has no equivalent hand-off to the SIGTERM/SIGINT handlers (which
+// settle only the commit status, via holdCommitStatusLock). Any throw or
+// early return that skipped explicit settlement lands here — checked in BOTH
+// finally blocks below, because the outer one must also catch a throw from
+// inside the inner finally itself (e.g. settleCiAdmissionLedger rejecting
+// after the status publish).
+//
+// `settle` is a test-only seam (default: the real settleCiAdmissionLedger):
+// admission.ts is out of scope for this slice and its ledger persist call
+// has no spawnFn of its own, so offline tests inject a fake here instead of
+// touching that module. Every production caller omits it.
+async function settleLedgerIfPending(
+  ciAdmissionLedger: CiAdmissionLedgerState | null,
+  settle: typeof settleCiAdmissionLedger = settleCiAdmissionLedger,
+): Promise<void> {
+  if (
+    ciAdmissionLedger !== null &&
+    (ciAdmissionLedger.record.status === "reserved" ||
+      ciAdmissionLedger.record.status === "provider-started")
+  ) {
+    await settle(
+      ciAdmissionLedger,
+      "failed",
+      "review path exited without terminal settlement",
+    );
+  }
+}
+
+// The inner `finally`: the commit status must settle BEFORE the lock is
+// released, and the release must happen no matter which path — throw, early
+// return, or normal exit — got here. Do not wrap
+// tryPublishCommitStatus/releaseCommitStatusLock in their own try/finally
+// "for safety": today a throw from tryPublishCommitStatus skips the release,
+// and preserving that (not "fixing" it) is this function's job.
+//
+// `spawnFn` threads into tryPublishCommitStatus (status.ts's own seam,
+// invisible to production): this doubles the real `gh` boundary instead of
+// replacing tryPublishCommitStatus's swallow-errors behavior with a fake,
+// so a test can prove that behavior for real — a failed gh post still lets
+// this function release the lock and settle the ledger, exactly as a
+// successful one does. `settle` stays a whole-function seam (default: the
+// real settleCiAdmissionLedger): admission.ts is out of scope for this
+// slice and its ledger persist call has no spawnFn of its own.
+export async function settleCommitStatusAndLedger(input: {
+  result: PipelineResult | undefined;
+  posted: InlinePostOutcome | null;
+  operatorRoot: string;
+  headSha: string;
+  statusTargetUrl: string | undefined;
+  ciAdmissionLedger: CiAdmissionLedgerState | null;
+  spawnFn?: typeof Bun.spawn;
+  settle?: typeof settleCiAdmissionLedger;
+}): Promise<void> {
+  const phase = commitStatusCompletion({
+    pipelineFinished: input.result !== undefined,
+    sessionFailed: input.result?.sessionFailed === true,
+  });
+  await tryPublishCommitStatus(
+    input.operatorRoot,
+    input.headSha,
+    commitStatusRequest({
+      phase,
+      posted: input.posted !== null,
+      targetUrl: input.statusTargetUrl,
+    }),
+    input.spawnFn,
+  );
+  // Settled, so nothing is held: the signal handlers must never post a
+  // second, contradicting status over the one just written. Released
+  // immediately after the settle so no path through this finally — throw,
+  // early return, or normal exit — can leave the lock standing.
+  releaseCommitStatusLock();
+  await settleLedgerIfPending(input.ciAdmissionLedger, input.settle);
+}
+
+// The outer `finally`: releases the pid lock and runs gc no matter how the
+// whole review path exited, after a last ledger-settlement chance covering a
+// throw from inside the inner finally above.
+//
+// `settle`/`gc` are test-only seams (defaults: the real
+// settleCiAdmissionLedger/runGc), same rationale as
+// settleCommitStatusAndLedger above — runGc shells out to `gh pr view` with
+// no spawnFn of its own. `releasePidLock` stays real: it is a plain
+// `fs.rm` against a caller-supplied path, so a real temp lock file is
+// already the observable, and faking it would hide the very fs effect the
+// test wants to prove.
+export async function finalizePrReviewRun(input: {
+  ciAdmissionLedger: CiAdmissionLedgerState | null;
+  lockPath: string;
+  home: string;
+  repoId: string;
+  settle?: typeof settleCiAdmissionLedger;
+  gc?: typeof runGc;
+}): Promise<void> {
+  const gc = input.gc ?? runGc;
+  await settleLedgerIfPending(input.ciAdmissionLedger, input.settle);
+  await releasePidLock(input.lockPath);
+  await gc({
+    home: input.home,
+    repoId: input.repoId,
+    dryRun: false,
+    silent: true,
+  });
+}

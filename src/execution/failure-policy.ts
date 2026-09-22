@@ -3,9 +3,11 @@
 // are separate types and this pure module is the only place that maps one
 // onto the other — LLMs judge, code governs.
 
-import type { FailureClass } from "../step-runner";
-import { classifyFailure as classifyLegacyFailure } from "../step-runner";
 import type { TransportFailureCause, TransportOutcome } from "./contracts";
+import {
+  classifyFailure as classifyLegacyFailure,
+  type FailureClass,
+} from "./failure-classification";
 
 export type { TransportFailureCause };
 
@@ -120,7 +122,7 @@ export function decideRetryDisposition(
 // WHY the raw `timedOut` fact is a parameter and not read off the class:
 // step-runner's classifyFailure collapses a watchdog kill into the generic
 // "transient" class before anything downstream sees it
-// (`src/step-runner.ts:111`), so the class ALONE can never distinguish a
+// (`src/review/step-runner.ts:111`), so the class ALONE can never distinguish a
 // timeout from a network error. §7 declares `watchdog_timeout` a first-class
 // cause; a bridge that only accepted the collapsed class would attribute
 // every timeout to the network in the per-attempt log the harness persists

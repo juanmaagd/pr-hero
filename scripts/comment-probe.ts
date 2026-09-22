@@ -10,11 +10,14 @@
 //
 // Run: bun run scripts/comment-probe.ts [replicates]
 import path from "node:path";
-import { buildProbeFixture, type ProbeVariant } from "../fixtures/comment-probe";
-import { runPipeline } from "../src/pipeline";
+import { runPipeline } from "#review/pipeline";
+import type { ReviewSpec } from "#review/spec";
+import { ClaudeCodeRunner } from "#review/step-runner";
+import {
+  buildProbeFixture,
+  type ProbeVariant,
+} from "../fixtures/comment-probe";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import type { ReviewSpec } from "../src/spec";
-import { ClaudeCodeRunner } from "../src/step-runner";
 
 const REPLICATES = Number(process.argv[2] ?? 2);
 const AGENT_SOURCE_PATH =

@@ -43,16 +43,16 @@ import {
   scoutFailed,
   tallyArm,
   tallyCleanPrs,
-} from "../src/floor-test";
-import { resolvePrTarget } from "../src/pr-preflight";
+} from "#compare/floor-test";
+import { resolvePrTarget } from "#pr/preflight";
 import {
   EMPTY_LOCAL_CONFIG,
   localReviewSpec,
   parseLocalConfig,
   resolveSummary,
-} from "../src/preflight";
-import { estimateCost } from "../src/report";
-import { evaluateSizeGateAggregate, sizeGateConfig } from "../src/size-gate";
+} from "#review/preflight";
+import { estimateCost } from "#review/report";
+import { evaluateSizeGateAggregate, sizeGateConfig } from "#review/size-gate";
 
 const CASES_PATH = path.join(
   import.meta.dir,

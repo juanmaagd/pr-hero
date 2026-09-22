@@ -32,10 +32,10 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { runPipeline } from "../src/pipeline";
+import { runPipeline } from "#review/pipeline";
+import type { ReviewSpec } from "#review/spec";
+import { ClaudeCodeRunner } from "#review/step-runner";
 import { resolveRunnerAuthority } from "../src/runner-authority";
-import type { ReviewSpec } from "../src/spec";
-import { ClaudeCodeRunner } from "../src/step-runner";
 
 const REPLICATES = Number(process.argv[2] ?? 3);
 const LAB = "/Users/juanma/Desktop/deep-review";

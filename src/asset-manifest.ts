@@ -7,6 +7,9 @@
 import lifecyclePrompt from "../prompts/default/deep-review-lifecycle.md" with {
   type: "file",
 };
+import logicPrompt from "../prompts/default/deep-review-logic.md" with {
+  type: "file",
+};
 import parityPrompt from "../prompts/default/deep-review-parity.md" with {
   type: "file",
 };
@@ -22,7 +25,16 @@ import refuterPrompt from "../prompts/default/review-refuter.md" with {
 
 import scoutPrompt from "../prompts/scout.md" with { type: "file" };
 import summarizerPrompt from "../prompts/summarizer.md" with { type: "file" };
+import ciSetupAdmissionExample from "../skills/pr-hero-ci-setup/assets/admission-config.example.json" with {
+  type: "file",
+};
 import ciSetupWorkflow from "../skills/pr-hero-ci-setup/assets/workflow.yml" with {
+  type: "file",
+};
+import ciSetupAdmissionRef from "../skills/pr-hero-ci-setup/references/ci-admission.md" with {
+  type: "file",
+};
+import ciSetupOpenCodeRef from "../skills/pr-hero-ci-setup/references/opencode-ci.md" with {
   type: "file",
 };
 import ciSetupSkill from "../skills/pr-hero-ci-setup/SKILL.md" with {
@@ -37,6 +49,7 @@ import triageSkill from "../skills/pr-hero-triage/SKILL.md" with {
 
 export const BUNDLED_AGENT_FILES: Record<string, string> = {
   "deep-review-lifecycle.md": lifecyclePrompt,
+  "deep-review-logic.md": logicPrompt,
   "deep-review-parity.md": parityPrompt,
   "deep-review-reliability.md": reliabilityPrompt,
   "deep-review-resilience.md": resiliencePrompt,
@@ -53,5 +66,9 @@ export const TRIAGE_SKILL_FILES: Record<string, string> = {
 
 export const CI_SETUP_SKILL_FILES: Record<string, string> = {
   "SKILL.md": ciSetupSkill,
+  "assets/admission-config.example.json":
+    ciSetupAdmissionExample as unknown as string,
   "assets/workflow.yml": ciSetupWorkflow,
+  "references/ci-admission.md": ciSetupAdmissionRef,
+  "references/opencode-ci.md": ciSetupOpenCodeRef,
 };

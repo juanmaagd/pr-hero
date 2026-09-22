@@ -9,12 +9,99 @@
 import type { SessionUsage } from "../usage";
 
 export type UsageCompleteness = "complete" | "partial" | "unavailable";
-export type UsageBillingMode = "subscription" | "metered" | "unknown";
+// #182 follow-up: "free" is a USAGE-layer precision, not a capability mode.
+// A free-declared route bills nothing, but a model free at probe time can flip
+// to metered before/during the attempt — and the transport observes
+// provider-reported cost per message (opencode-sdk.ts cashCostUsd,
+// costSource "provider"). Stamping "subscription" would let
+// `settlementFromUsage`'s free-nonzero rule (spend-limiter.ts) never fire and
+// settle a flipped attempt's priced cost as a truthful zero. Capability
+// `BillingMode` ("subscription"|"metered") stays binary on purpose: the exact
+// binding still reports a free route as subscription/not_applicable, and the
+// spend ledger is composed for it by credential kind (production-runtime.ts).
+export type UsageBillingMode = "subscription" | "metered" | "free" | "unknown";
 export type UsageCostSource =
   | "provider"
   | "versioned_rate_table"
   | "subscription"
   | "unknown";
+
+// 2026-09-02, #177. THE one place that says "this environment carries a
+// per-token credential". Two callers need it and they must not each carry
+// their own copy: `deriveCiBillingMode` (ci/gates.ts) turns it into a CI spend
+// ceiling, and the Claude CLI transport turns it into the `billingMode`
+// STAMPED ON EVERY USAGE RECORD it emits. This is the same anti-drift shape
+// `credentialKindBillsMetered` (runner-authority.ts) already applies to the
+// credential KIND, and for the same measured reason: #177 IS the drift. The CI
+// gate already called an API-key route metered while the transport filed that
+// user's real spend as `notionalCostUsd`, which renders as "at list price, not
+// charged" — and since budget enforcement is cash-only (§8), that user's spend
+// ceiling read $0 and stopped existing.
+//
+// A boolean, not a mode, matching its sibling: the two callers narrow it into
+// two DIFFERENT enums (`CiBillingMode`, `UsageBillingMode`), and returning a
+// mode here would invite one of them to overwrite the other's semantics
+// instead of asking the question this answers.
+//
+// WHICH variables, and why these two: `ENV_PASSTHROUGH` (harness.ts) projects
+// ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN into the child side by side as
+// one credential class — a per-token key and a per-token bearer token.
+// CLAUDE_CODE_OAUTH_TOKEN is deliberately absent: that IS the subscription.
+// 2026-09-02: "projects into the child" holds only where no credential
+// projection is active. When one IS, `buildChildEnv` strips both keys
+// (PROJECTION_OWNED_KEYS, harness.ts) because the projection owns the
+// credential, so this predicate reads subscription on that path — which is
+// the truth there, and was not before the strip.
+// When an OAuth token and a key are both present this repo does not know which
+// one the Claude CLI bills (ci/gates.ts states that gap at length), and does
+// not need to — presence of a key answers metered, because guessing
+// subscription wrongly reports real money as not charged.
+//
+// Trimming is load-bearing, and it is worth being exact about WHAT it buys,
+// because the sentence it replaces overstated it and #177 is a finding about
+// comments claiming more than their code. action.yml:111 binds
+// ANTHROPIC_API_KEY UNCONDITIONALLY and GitHub renders an unset input as the
+// empty string, so every subscription-route CI run carries
+// `ANTHROPIC_API_KEY=""` — but `""` is already falsy, so that case is safe
+// with or without the trim. What the trim actually catches is a
+// WHITESPACE-ONLY value (a secret whose content is a space, a YAML block
+// scalar that kept its newline), which is truthy and would otherwise read as
+// a live key and impose a ceiling — or, here, book a subscription run's quota
+// spend as cash. Mutation-checked: dropping the trim flips exactly the
+// whitespace arms, never the empty-string ones.
+//
+// ---------------------------------------------------------------------------
+// DO NOT wire this into route ADMISSION. It is a hazard verified before it was
+// written, and it has exactly two forbidden consumers:
+//
+//   * `CLAUDE_CAPABILITY_STATICS.billingMode` (model/provider-capabilities.ts) —
+//     static "subscription" on purpose.
+//   * `FrozenRuntimeBinding.capabilities()` (production-runtime.ts) — which
+//     derives the exact binding's mode from `credential.kind`.
+//
+// The BAN outlives its original reason, so read both. Until #197 the reason
+// was safety: making either derived turned a metered claude-code route into
+// `pricingApplicability: "required"` with no pricing source to answer, so the
+// route was refused admission outright (`pricing_table_missing`, blocking) and
+// API-key users stopped being able to run at all. #197 flipped the
+// claude-code transport's `pricingReady` to `true`, so that refusal can no
+// longer happen and the fail-closed argument is spent.
+//
+// What remains is ownership, and it is enough: which credential a route runs
+// on — and therefore how it bills — is `credentialKindForRoute`'s single
+// decision (#161's slice), with the projection and rate-limit-bucket changes
+// that implies. A second derivation here would fork it, and the two would
+// disagree about one attempt in silence. This answers only "how does this
+// attempt's money get FILED?", and it reaches nothing but the usage record and
+// the CI ceiling.
+// ---------------------------------------------------------------------------
+export function envBillsMetered(
+  env: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return Boolean(
+    env.ANTHROPIC_API_KEY?.trim() || env.ANTHROPIC_AUTH_TOKEN?.trim(),
+  );
+}
 
 // §8 lines 429-450, verbatim field names (camelCase — the legacy flat shape
 // keeps its own snake_case names; `projectLegacyUsage` below is the ONLY
@@ -65,6 +152,28 @@ function sumIfAnyDefined(
 
 function attemptTotalKnown(tokens: NormalizedTokens): number | undefined {
   return tokens.totalKnown ?? tokens.providerReportedTotal;
+}
+
+// 2026-09-02: "did this attempt produce output tokens?", answered from the
+// LEAVES and not from `outputKnown` alone. `outputKnown` is a rollup some
+// builders populate (`normalizeInclusiveUsage`, the OpenCode transport) and
+// others do not, so a reader that consulted it alone would let a transport
+// filling only `outputVisible` slip past — deciding an accounting question by
+// which fields a transport happens to set rather than by whether tokens were
+// produced. The §8 output leaves are disjoint by contract, so summing them is
+// not double counting. One consumer today: `settlementFromUsage`'s
+// metered-zero rule (spend-limiter.ts).
+export function outputTokensKnown(
+  tokens: NormalizedTokens,
+): number | undefined {
+  return (
+    tokens.outputKnown ??
+    sumIfAnyDefined(
+      tokens.outputVisible,
+      tokens.outputReasoning,
+      tokens.outputOther,
+    )
+  );
 }
 
 // §8 line 455: "If a provider total includes detailed cache/reasoning
@@ -145,6 +254,7 @@ export function normalizePartialUsage(
 // than guessing which one applied.
 export interface UnavailableUsageInput {
   readonly wallMs: number;
+  readonly billingMode?: UsageBillingMode;
 }
 
 export function normalizeUnavailableUsage(
@@ -154,7 +264,7 @@ export function normalizeUnavailableUsage(
     wallMs: input.wallMs,
     tokens: {},
     completeness: "unavailable",
-    billingMode: "unknown",
+    billingMode: input.billingMode ?? "unknown",
     costSource: "unknown",
   };
 }

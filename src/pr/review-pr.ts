@@ -1,0 +1,654 @@
+// PR mode (ROADMAP B1): one command from a PR number to a reviewed range, a
+// detached worktree, a pipeline run, and a Greptile comparison. Moved out of
+// src/cli.ts (cli-decomp Phase 2, odd/tasks/cli-decomposition.md) as a
+// byte-for-byte relocation — no behaviour change.
+//
+// Two roots run through everything below, and confusing them is the failure
+// this design exists to prevent:
+//   - the OPERATOR root: --repo's toplevel. cwd for gh and for .prhero/
+//     config+gotchas. Config is NEVER read from the worktree — the operator
+//     checkout is the trust anchor, and a reviewed PR's tree must not
+//     influence engine config. Dirtiness here is irrelevant.
+//   - the GIT-DIR OWNER: the clone registered for this origin under
+//     ~/.prhero/repos/<id>/registry.json. Fetch, worktree add/prune/remove
+//     and the object-db git (rev-parse, diff) run against it, because
+//     `git worktree add` is bound to one git dir (W3 / #24).
+//   - the REVIEW root: the worktree, detached at the PR's head, living
+//     under ~/.prhero/repos/<id>/worktrees/pr-<n>. The pipeline's cwd, the
+//     tree the codegraph checks run against, and a root the run dir must
+//     stay outside of.
+
+import path from "node:path";
+import { planCiSizeSkip } from "#ci/gates";
+import { withCiWorkflowGroup } from "#ci/reporter";
+import { pipelineConfigInput } from "#config/config";
+import {
+  exclusionLines,
+  git,
+  gitCommitExists,
+  gitIsAncestor,
+  gitNameOnly,
+  gitNameStatus,
+} from "#git/git";
+import { engineIdentity } from "#git/identity";
+import {
+  type CiAdmissionLedgerState,
+  publishCiSkip,
+  reserveCiAdmissionLedger,
+  settleCiAdmissionLedger,
+} from "#pr/admission";
+import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
+import { discoveryHunters, resolvePrDiscovery } from "#pr/discovery";
+import type { InlinePostOutcome } from "#pr/inline";
+import { resolvePrPlanAndConfirm } from "#pr/plan";
+import {
+  fetchCommitStatuses,
+  fetchPostedFindingComments,
+  fetchPrComments,
+  fetchPrReviewComments,
+  ghPrFiles,
+} from "#pr/pr";
+import { createPrRunDir, isInFlightCommitStatus } from "#pr/preflight";
+import { publishRunOutcome } from "#pr/publish-outcome";
+import { resolveEagerLocalIgnore, resolvePrFetchAndRange } from "#pr/range";
+import {
+  renderPrDryRunPlan,
+  resolvePrDryRunNumstat,
+  resolvePrPromptSetAndBudget,
+  resolvePrRunOptions,
+  resolvePrTargetRecord,
+} from "#pr/target";
+import { finalizePrReviewRun, settleCommitStatusAndLedger } from "#pr/teardown";
+import { setupPrWorktree } from "#pr/worktree-setup";
+import { type PipelineResult, runPipeline } from "#review/pipeline";
+import type { CliOptions } from "#review/preflight";
+import { estimateCost } from "#review/report";
+import {
+  pipelineScoutInput,
+  pipelineSummarizerInput,
+} from "#review/route-preflight";
+import {
+  prepareRunnerForRoute,
+  resolveParityFires,
+  validateGotchas,
+} from "#review/run";
+import { sizeGateConfigFor, sizeGateLine } from "#review/size-gate";
+import { registerActiveRun, unregisterActiveRun } from "#store/activity";
+import { dryRunHunterCount, reviewingLine } from "#ui/plan";
+import { log, styleEnabled, terminalWidth } from "#ui/primitives";
+import { applySizeGate, startProgressRenderer } from "#ui/progress";
+import { parsePrFiles } from "#watch/preflight";
+import { CliError } from "../errors";
+import { acquirePidLock } from "../home";
+import { worktreeLockPath } from "../home-preflight";
+import { readLocalIgnoreRules } from "../ignore-read";
+import type { ProductionRuntime } from "../production-runtime";
+
+export async function reviewPr(
+  options: CliOptions,
+  prArg: number | "current",
+): Promise<number> {
+  // 1-2 — the operator root, resolved config, prompt set, and PR record. See
+  // resolvePrRunOptions / resolvePrPromptSetAndBudget / resolvePrTargetRecord
+  // (src/pr/target.ts) for the full rationale, including why the gotchas
+  // validation call below stays inline here rather than moving into that
+  // module.
+  const step1 = await resolvePrRunOptions(options, prArg);
+  options = step1.options;
+  const { operatorRoot, prNumber, home, isCi, loaded, config, summary } = step1;
+  // The eager, non-CI-only `.prheroignore` read (O-8). See
+  // resolveEagerLocalIgnore (src/pr/range.ts) for the full rationale — under
+  // CI this stays `undefined` on purpose; the CI read instead needs the
+  // RESOLVED base sha, not known yet here (see resolvePrFetchAndRange below).
+  const localIgnore = await resolveEagerLocalIgnore({
+    isCi,
+    operatorRoot,
+    readLocal: readLocalIgnoreRules,
+  });
+  const step2 = await resolvePrPromptSetAndBudget({
+    options,
+    loaded,
+    isCi,
+    operatorRoot,
+  });
+  const { ciBudgetCeiling, agents, spec, agentFiles, promptSet, gotchasPath } =
+    step2;
+  const { dir: agentsDir, source: agentsDirSource } = agents;
+  await validateGotchas(gotchasPath);
+  // Local mode's dirty-tree and HEAD-match gates are both skipped here ON
+  // PURPOSE: the hunters read the worktree and never this checkout, and the
+  // worktree satisfies the HEAD gate by construction (created detached at
+  // the PR's own head).
+  const { repoHome, gitDirOwner, target, worktreePath } =
+    await resolvePrTargetRecord({
+      home,
+      operatorRoot,
+      prNumber,
+      dryRun: options.dryRun,
+    });
+
+  // The CI admission gate (ROADMAP Pillar 3): decides, before any git fetch
+  // or worktree is touched, whether a CI-triggered review of an
+  // already-reviewed head should run, skip, or fall back to a human
+  // decision. See evaluateCiAdmissionGate (src/pr/ci-admission-gate.ts) for
+  // the full rationale.
+  const ciAdmissionGate = await evaluateCiAdmissionGate({
+    operatorRoot,
+    prNumber,
+    headSha: target.headSha,
+    config,
+    isCi,
+    options,
+  });
+  if (ciAdmissionGate.exitCode !== undefined) return ciAdmissionGate.exitCode;
+  const { ciPolicy, ciPolicyHash, ledgerRecords } = ciAdmissionGate;
+  let ciAdmissionLedger: CiAdmissionLedgerState | null = null;
+
+  // 3 — the free exit, BEFORE the git fetch: a PR-mode dry run still creates
+  // NOTHING — no `git fetch`, no worktree, no run dir — but it does now make
+  // a SECOND read-only `gh` call, alongside the `ghPrView` one at step 1
+  // above. That call was always there; "fetches nothing" never meant "talks
+  // to GitHub zero times", only that nothing GIT-side happens. Overriding
+  // the original all-aggregate estimate (PR1b Addition 1 / #5557): the
+  // aggregate counters carry no per-file paths, so `.prheroignore`
+  // exclusions were structurally impossible to apply here, and that gap
+  // widens from "tens of lines" (lockfiles) to "potentially thousands" (a
+  // whole ignored directory) the moment a user defines their own rules — a
+  // dry run that says SKIP for a PR the real per-file run happily accepts
+  // reads as a broken tool, not a conservative estimate.
+  if (options.dryRun) {
+    const hunterCount = dryRunHunterCount(spec, config);
+    const estimate = estimateCost(
+      target.ghDiffStat,
+      hunterCount,
+      summary.enabled,
+      options.scout,
+    );
+    const dryRunGateConfig = sizeGateConfigFor(options, config, localIgnore);
+    // See resolvePrDryRunNumstat (src/pr/target.ts) for the full rationale —
+    // the degrade-to-aggregate-estimate rule PR1b Addition 1 / #5557 needs
+    // when `gh`'s per-file `files` list is truncated, unavailable, or the
+    // fetch itself throws (GH_PR_VIEW_TIMEOUT_MS bounds it).
+    const perFile = await resolvePrDryRunNumstat({
+      fetchFiles: async () =>
+        parsePrFiles(await ghPrFiles(operatorRoot, prNumber)),
+      totalFiles: target.ghDiffStat.files,
+    });
+    // See renderPrDryRunPlan (src/pr/target.ts) for the full rationale.
+    return renderPrDryRunPlan({
+      options,
+      operatorRoot,
+      prNumber,
+      target,
+      worktreePath,
+      repoHome,
+      agentsDir,
+      agentsDirSource,
+      agentFiles,
+      spec,
+      config,
+      summary,
+      loaded,
+      isCi,
+      hunterCount,
+      estimate,
+      dryRunGateConfig,
+      perFile,
+    });
+  }
+
+  if (isCi) {
+    try {
+      ciAdmissionLedger = await reserveCiAdmissionLedger({
+        operatorRoot,
+        prNumber,
+        headSha: target.headSha,
+        policy: ciPolicy,
+        policyHash: ciPolicyHash,
+        existing: ledgerRecords,
+        decisionReason: options.force
+          ? "manual override (--force)"
+          : "admission: run",
+      });
+    } catch (error) {
+      throw new CliError(
+        `CI admission reservation failed: ${(error as Error).message}`,
+      );
+    }
+  }
+
+  const lockPath = worktreeLockPath(home, repoHome.repoId, prNumber);
+  await acquirePidLock(lockPath);
+  try {
+    // 4 — fetch, then canonicalize, then the base-ref `.prheroignore` read.
+    // See resolvePrFetchAndRange (src/pr/range.ts) for the full rationale —
+    // fetchPrRefs's refspec pair, why baseSha must be resolveCommit's output
+    // (never target.baseRef/baseRefName directly — a merged PR's baseRef is
+    // a `<sha>^1` EXPRESSION), and design D1 (CI reads the ignore file at the
+    // resolved base sha, never author-controlled; non-CI reuses the eager
+    // `localIgnore` read above rather than re-reading).
+    const { headSha, baseSha, diffFromSha, prIgnore, headLabel } =
+      await resolvePrFetchAndRange({
+        gitDirOwner,
+        prNumber,
+        target,
+        isCi,
+        localIgnore,
+        runGit: git,
+      });
+
+    // 5 — last-reviewed head, the two deltas (D9), Phase B classification,
+    // and the size gate over the discovery range. Discovery is the
+    // restricted L..H intersection (or full B..H); the size gate counts
+    // that same discovery diff, never the whole PR, so a merge of main
+    // cannot inflate the bill. Empty discovery is a re-review state, not
+    // an error (C6) — first review (case A) still fails loud. See
+    // resolvePrDiscovery (src/pr/discovery.ts) for the full rationale; the
+    // three comment fetches stay here (its own header explains why).
+    const [issueComments, postedFindings, reviewComments] = await Promise.all([
+      fetchPrComments(operatorRoot, prNumber),
+      fetchPostedFindingComments(operatorRoot, prNumber),
+      fetchPrReviewComments(operatorRoot, prNumber),
+    ]);
+    const {
+      prepared,
+      skipDiscovery,
+      rawDiff,
+      effectiveDiff,
+      gateConfig,
+      rereview,
+      verifyQueue,
+      overlapCandidates,
+      phaseB,
+      diffStat,
+      sizeGate,
+    } = await resolvePrDiscovery({
+      diffFromSha,
+      headSha,
+      full: options.full,
+      baseRef: target.baseRef,
+      headLabel,
+      isCi,
+      sizeGateOverrides: options,
+      config,
+      prIgnore,
+      issueComments,
+      postedFindings,
+      reviewComments,
+      git: {
+        commitExists: (sha) => gitCommitExists(gitDirOwner, sha),
+        isAncestor: (ancestor, descendant) =>
+          gitIsAncestor(gitDirOwner, ancestor, descendant),
+        nameOnly: (from, to) => gitNameOnly(gitDirOwner, from, to),
+        nameStatus: (from, to) => gitNameStatus(gitDirOwner, from, to),
+        runGit: (args) => git(gitDirOwner, args),
+      },
+      log,
+    });
+
+    // 5b(CI) — the assistant-posture branch, BEFORE applySizeGate: outside
+    // CI, a hard skip in non-interactive mode THROWS a CliError (see
+    // applySizeGate below), which the top-level catch turns into exit 1 —
+    // exactly the "blocks CI" behavior spec 2.1 forbids. `--force` bypasses
+    // here too, same as the non-CI path just below, since it answers the
+    // same question ("is this diff too big to be worth its cost") either
+    // way. planCiSizeSkip (ci/gates.ts) is the ONE call: it is null unless
+    // isCi && the gate actually failed, so no separate isCi guard is needed
+    // around it beyond --force.
+    if (!options.force) {
+      const sizePlan = planCiSizeSkip({
+        isCi,
+        verdict: sizeGate,
+        prNumber,
+        maxChangedLines: gateConfig.maxChangedLines,
+        maxChangedFiles: gateConfig.maxChangedFiles,
+      });
+      if (sizePlan !== null) {
+        await settleCiAdmissionLedger(
+          ciAdmissionLedger,
+          "skipped",
+          "diff exceeds the configured size gate",
+        );
+        return await publishCiSkip({
+          operatorRoot,
+          prNumber,
+          post: options.post === true,
+          isCi,
+          stepSummaryFlag: options.stepSummary,
+          plan: sizePlan,
+          noticeMessage:
+            "pr-hero review skipped — diff exceeds the configured size gate",
+        });
+      }
+    }
+
+    // 5b — the size gate, on the REAL per-file numstat and placed here on
+    // purpose: before createPrRunDir, so a skipped PR leaves no run dir
+    // behind. That matters beyond tidiness — the watcher counts attempts from
+    // run artifacts, so a gate skip cannot consume a poison-PR attempt even
+    // when the watcher was the one that launched this review. Unattended
+    // (--yes) still skips with no prompt; an interactive TTY is asked first.
+    // A hard skip (and the interactive prompt) never reach the plan, so the
+    // verdict states itself here. --force falls through and the plan's
+    // decision block prints the same line plus the override note.
+    const sizeGateChoice = await applySizeGate(sizeGate, options, () => {
+      log(sizeGateLine(sizeGate));
+      // The shell owns BOTH impure decisions here (style flag and width), the
+      // same way printDryRun does — this is the one exclusion line that is
+      // printed outside a plan renderer, so it cannot inherit a resolved width
+      // from one.
+      for (const line of exclusionLines(
+        effectiveDiff.droppedPaths,
+        styleEnabled(),
+        terminalWidth(),
+      )) {
+        log(line);
+      }
+    });
+    if (sizeGateChoice === "abort") return 1;
+    const sizeGateConfirmed = !sizeGate.ok && !options.force;
+
+    // Cross-machine TOCTOU: the watcher already skipped fresh pendings at
+    // gather, but a CLI and a watcher can still overlap between that fetch
+    // and this process posting its own pending. --yes (the watcher child)
+    // aborts before createPrRunDir so it consumes no poison-PR attempt.
+    // Interactive continues: a stuck pending must not trap the operator
+    // behind the 90-minute TTL.
+    if (
+      isInFlightCommitStatus(
+        await fetchCommitStatuses(operatorRoot, headSha),
+        Date.now(),
+      )
+    ) {
+      if (options.yes) {
+        log("skip: a pr-hero review is already in-flight on this head");
+        return 0;
+      }
+      log(
+        "warning: a pr-hero review is already in-flight on this head; " +
+          "continuing",
+      );
+    }
+
+    // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
+    const runDir = await createPrRunDir(
+      options,
+      operatorRoot,
+      worktreePath,
+      repoHome.paths.runs,
+      prNumber,
+      headSha,
+    );
+    // diff.patch is the EFFECTIVE diff — exactly what the hunters read (see
+    // filterDiffByIgnoreRules); diff.raw.patch preserves the unfiltered
+    // bytes, and only when the filter actually dropped something.
+    const diffPath = path.join(runDir, "diff.patch");
+    await Bun.write(diffPath, effectiveDiff.patch);
+    if (effectiveDiff.droppedPaths.length > 0) {
+      await Bun.write(path.join(runDir, "diff.raw.patch"), rawDiff);
+    }
+
+    // 7 — the plan and the paid gate, exactly like local mode but with the
+    // real numstat replacing GitHub's counters.
+    const parityFires = resolveParityFires(
+      effectiveDiff.patch,
+      config.parity_trigger_paths,
+    );
+    const activeHunters = discoveryHunters({
+      skipDiscovery,
+      agents: spec.agents,
+      parityFires,
+    });
+    const hunterCount = activeHunters.length;
+    // See resolvePrPlanAndConfirm (src/pr/plan.ts) for the full rationale —
+    // the CI budget gate, route/capability resolution, the plan card, the
+    // interactive confirm, and the "committed to spending" commit-status
+    // hold that follows a successful one.
+    const planResult = await resolvePrPlanAndConfirm({
+      options,
+      operatorRoot,
+      prNumber,
+      target,
+      worktreePath,
+      runDir,
+      headSha,
+      baseSha,
+      diffFromSha,
+      diffPath,
+      diffStat,
+      droppedPaths: effectiveDiff.droppedPaths,
+      sizeGate,
+      sizeGateConfirmed,
+      agentsDir,
+      agentsDirSource,
+      agentFiles,
+      spec,
+      config,
+      summary,
+      loaded,
+      isCi,
+      ciBudgetCeiling,
+      ciAdmissionLedger,
+      skipDiscovery,
+      hunterCount,
+      parityFires,
+      verifyQueue,
+      prepared,
+    });
+    if (planResult.exitCode !== undefined) return planResult.exitCode;
+    const {
+      postEnabled,
+      routePlan,
+      productionAdmission,
+      runnerAuthority,
+      maxVerificationSteps,
+      estimate,
+      statusTargetUrl,
+    } = planResult;
+
+    let result: PipelineResult | undefined;
+    let posted: InlinePostOutcome | null = null;
+    try {
+      // 8-10 — the review root, its own codegraph index, and the MCP
+      // registry the hunters read. See setupPrWorktree
+      // (src/pr/worktree-setup.ts) for the full rationale.
+      const { mcpConfigPath, indexMs } = await setupPrWorktree({
+        gitDirOwner,
+        worktreePath,
+        headSha,
+        registryPath: repoHome.paths.registry,
+        prNumber,
+        runDir,
+      });
+
+      // 11 — run, with live progress (same shape as local mode's leg). The
+      // pipeline is untouched beyond the observational tap: it gets the worktree
+      // as its cwd and the PR's real number for the envelope.
+      // Spec 2.1: "Progress updates MUST use GitHub Actions log workflow
+      // groups (`::group::` / `::endgroup::`) to structure runner logs
+      // cleanly." One group around the whole hunt+refute run is the minimum
+      // that satisfies it. The arm and the close both live inside
+      // withCiWorkflowGroup rather than at this call site, and EVERY
+      // statement of the setup below sits inside its body: the progress
+      // renderer and registerActiveRun (whose mkdirSync/writeFileSync are
+      // unguarded) can throw on a read-only or full runner filesystem, and
+      // anything armed-but-not-yet-guarded there folds the whole rest of the
+      // job log — the `::error::` annotation naming the cause included —
+      // into a group nothing ever closes.
+      let started = 0;
+      await withCiWorkflowGroup(isCi, "pr-hero review", log, async () => {
+        log(reviewingLine(hunterCount, summary, options));
+        // runnerAuthority resolved before confirm with the exact-binding gate.
+        if (runnerAuthority.error !== undefined) {
+          throw new CliError(
+            `execution authority unavailable: ${runnerAuthority.error}`,
+          );
+        }
+        // §5.3 D1-10b: one controller shared by the pipeline and the runner,
+        // exactly as in local mode — the ceiling aborts it and the harness
+        // reads the same signal.
+        const ceilingController = new AbortController();
+        let productionRuntime: ProductionRuntime | undefined;
+        started = performance.now();
+        const progress = startProgressRenderer(
+          started,
+          `PR #${prNumber}`,
+          activeHunters.map((a) => a.key),
+          spec.agents.some((a) => a.role === "refuter"),
+          summary.enabled,
+        );
+        try {
+          const prepared = await prepareRunnerForRoute({
+            routePlan,
+            productionAdmission,
+            workspaceRoot: worktreePath,
+            runnerAuthority,
+            ceilingController,
+            onProgress: progress.onProgress,
+          });
+          productionRuntime = prepared.productionRuntime;
+          // registerActiveRun rides INSIDE this try, not before it: the
+          // renderer is already ticking by now, and a throw here used to
+          // leak its 250ms interval — which keeps the event loop alive and
+          // hangs process exit, the exact failure the finally below exists
+          // to prevent.
+          await registerActiveRun({
+            pid: process.pid,
+            repo: repoHome.paths.repoId ?? path.basename(gitDirOwner),
+            pr: prNumber,
+            runDir,
+            startedAt: new Date().toISOString(),
+          });
+          await settleCiAdmissionLedger(
+            ciAdmissionLedger,
+            "provider-started",
+            "pipeline starting",
+          );
+          result = await runPipeline(
+            {
+              pr: prNumber,
+              // Same rule as local mode: record the commit the diff was actually
+              // computed against, or nothing downstream can reproduce the range.
+              baseSha: diffFromSha,
+              headSha,
+              worktree: worktreePath,
+              diffPath,
+              excludedPaths: effectiveDiff.droppedPaths,
+              exclusions: effectiveDiff.exclusions,
+              ignoreFile: {
+                readFrom: isCi ? "base-ref" : "working-tree",
+                ...(isCi ? { ref: baseSha } : {}),
+                found: prIgnore.found,
+              },
+              gotchasPath,
+              agentsDir,
+              ...(agents.files ? { agentFiles: agents.files } : {}),
+              runDir,
+              outPath: path.join(runDir, "findings.json"),
+              mcpConfigPath,
+              hopBudget: options.hopBudget,
+              ...(options.model ? { model: options.model } : {}),
+              parityTriggerPaths: config.parity_trigger_paths,
+              suspicionPriors: config.suspicion_priors,
+              ...(skipDiscovery ? {} : pipelineSummarizerInput(summary)),
+              ...(skipDiscovery ? {} : pipelineScoutInput(options)),
+              // NOT gated on skipDiscovery: an empty-delta re-review still
+              // classifies and verifies against this config, and a run whose
+              // artifact cannot name its config inputs is the unpoolable case
+              // D7 exists to prevent — whether or not hunters fanned out.
+              ...pipelineConfigInput(loaded),
+              ...(routePlan === undefined ? {} : { routePlan }),
+              engine: await engineIdentity(),
+              promptSet,
+              spec,
+              ...(skipDiscovery ? { skipDiscovery: true } : {}),
+              ...(rereview === undefined ? {} : { rereview }),
+              ...(verifyQueue.length > 0 ? { verifyQueue } : {}),
+              ...(overlapCandidates.length > 0 ? { overlapCandidates } : {}),
+              maxVerificationSteps,
+              ...(phaseB === undefined ? {} : { phaseB }),
+            },
+            prepared.deps,
+          );
+        } finally {
+          // try/finally, never success-only: a leaked interval keeps the
+          // event loop alive and hangs process exit on the error path.
+          // `::endgroup::` is no longer emitted here — it rides
+          // withCiWorkflowGroup's own finally, which wraps this whole block.
+          progress.stop();
+          await unregisterActiveRun(process.pid);
+          if (productionRuntime !== undefined) {
+            await productionRuntime.dispose();
+          }
+        }
+      });
+      // 12-16 — everything from the artifact write through CI publishing and
+      // the ledger's terminal settlement. See publishRunOutcome
+      // (src/pr/publish-outcome.ts) for the full rationale, including the
+      // `onPosted` hazard: `posted` is declared outside this try (the
+      // finally below reads it on every exit path, including a throw from
+      // inside publishRunOutcome itself), so the callback assigns it the
+      // instant the posting stage resolves — never only at the end.
+      //
+      // `return await`, never a bare `return publishRunOutcome(...)`: this
+      // sits inside a try/finally, and a bare `return` hands back the
+      // pending promise WITHOUT suspending here, so the `finally` below runs
+      // synchronously right away — before publishRunOutcome has done
+      // anything, let alone fired `onPosted`. That would settle the commit
+      // status (and read `posted`) against pre-run state on every call, not
+      // just on a throw. The `await` is what makes this function actually
+      // wait for publishRunOutcome to settle before the finally can run.
+      return await publishRunOutcome({
+        result,
+        started,
+        indexMs,
+        runDir,
+        prNumber,
+        diffFromSha,
+        headSha,
+        options,
+        agentFiles,
+        promptSet,
+        operatorRoot,
+        baseRef: target.baseRef,
+        diffStat,
+        droppedPaths: effectiveDiff.droppedPaths,
+        diffPatch: effectiveDiff.patch,
+        home,
+        repoId: repoHome.repoId,
+        postEnabled,
+        rereview,
+        phaseB,
+        gitDirOwner,
+        worktreePath,
+        isCi,
+        estimate,
+        ciAdmissionLedger,
+        onPosted: (outcome) => {
+          posted = outcome;
+        },
+      });
+    } finally {
+      // The commit status must settle BEFORE the lock is released, and the
+      // ledger settlement must still run on throw or early return. See
+      // settleCommitStatusAndLedger (src/pr/teardown.ts) for the full
+      // rationale.
+      await settleCommitStatusAndLedger({
+        result,
+        posted,
+        operatorRoot,
+        headSha,
+        statusTargetUrl,
+        ciAdmissionLedger,
+      });
+    }
+  } finally {
+    // See finalizePrReviewRun (src/pr/teardown.ts) for the full rationale.
+    await finalizePrReviewRun({
+      ciAdmissionLedger,
+      lockPath,
+      home,
+      repoId: repoHome.repoId,
+    });
+  }
+}
