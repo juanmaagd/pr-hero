@@ -33,6 +33,7 @@ import {
 import { engineIdentity } from "#git/identity";
 import {
   type CiAdmissionLedgerState,
+  holdCiAdmissionLedger,
   publishCiSkip,
   reserveCiAdmissionLedger,
   settleCiAdmissionLedger,
@@ -210,6 +211,7 @@ export async function reviewPr(
           ? "manual override (--force)"
           : "admission: run",
       });
+      holdCiAdmissionLedger(ciAdmissionLedger);
     } catch (error) {
       throw new CliError(
         `CI admission reservation failed: ${(error as Error).message}`,
