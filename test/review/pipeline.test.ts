@@ -2252,6 +2252,88 @@ describe("assembly", () => {
     }
   });
 
+  // #199. A step that dies before its first attempt used to record status
+  // "failed" and nothing else, so a run that reviewed nothing looked like a
+  // run that found nothing. The assertion is the reason text, not the status:
+  // status alone is what the old code already wrote.
+  test("a runner that throws before an attempt records the redacted reason in pipeline.json", async () => {
+    const input = await makeInput();
+    await runPipeline(input, {
+      runner: {
+        async run(): Promise<StepResult> {
+          throw new Error("Failed to fetch models.dev sk-secretkeyvalue");
+        },
+      },
+    });
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      steps: Array<{
+        status: string;
+        failure?: string;
+        attemptLogPath?: string;
+      }>;
+    };
+    expect(plan.steps.length).toBeGreaterThan(0);
+    for (const step of plan.steps) {
+      expect(step.status).toBe("failed");
+      expect(step.failure).toContain("Failed to fetch models.dev");
+      expect(step.failure).toContain("[REDACTED]");
+      expect(step.failure).not.toContain("sk-secretkeyvalue");
+      expect(step.attemptLogPath).toBeUndefined();
+    }
+  });
+
+  test("a fulfilled step with zero attempts keeps its stderr as the reason, and a spawned failure does not", async () => {
+    const input = await makeInput();
+    await runPipeline(input, {
+      runner: new FakeStepRunner({
+        "hunter-reliability": (spec) => ({
+          name: spec.name,
+          status: "failed",
+          usage: usage({
+            wall_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_total: 0,
+            cost_usd_est: 0,
+          }),
+          attempts: 0,
+          stderrTail: "credential projection failed (source_read_failed)",
+          resultText: "",
+        }),
+        "hunter-resilience": (spec) => failed(spec),
+      }),
+    });
+    const plan = (await Bun.file(
+      path.join(input.runDir, "pipeline.json"),
+    ).json()) as {
+      steps: Array<{
+        name: string;
+        status: string;
+        attempts?: number;
+        failure?: string;
+        attemptLogPath?: string;
+      }>;
+    };
+    const reliability = plan.steps.find(
+      (step) => step.name === "hunter-reliability",
+    );
+    expect(reliability?.status).toBe("failed");
+    expect(reliability?.attempts).toBe(0);
+    expect(reliability?.failure).toBe(
+      "credential projection failed (source_read_failed)",
+    );
+    expect(reliability?.attemptLogPath).toBeUndefined();
+    const resilience = plan.steps.find(
+      (step) => step.name === "hunter-resilience",
+    );
+    expect(resilience?.status).toBe("failed");
+    expect(resilience?.attempts).toBe(2);
+    expect(resilience?.failure).toBeUndefined();
+    expect(resilience?.attemptLogPath).toBeDefined();
+  });
+
   test("S-empty — skipDiscovery spawns no hunters and records the rereview block", async () => {
     const runner = new FakeStepRunner({});
     const input = await makeInput({
