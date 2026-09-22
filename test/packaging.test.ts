@@ -548,6 +548,20 @@ describe("Packaging & distribution configuration", () => {
     );
   });
 
+  test("skills/pr-hero-ci-setup/assets/workflow-force.yml never drifts from generateCiForceWorkflowTemplate()", () => {
+    const assetPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow-force.yml",
+    );
+    expect(existsSync(assetPath)).toBe(true);
+    expect(readFileSync(assetPath, "utf-8")).toBe(
+      generateCiForceWorkflowTemplate(),
+    );
+  });
+
   test("skills/pr-hero-ci-setup/assets/workflow.yml never drifts from generateCiWorkflowTemplate()", () => {
     const assetPath = path.join(
       rootDir,
