@@ -415,13 +415,28 @@ export function formatProviderRefusalDetail(input: {
 }): string {
   const status =
     input.statusCode === undefined ? "unknown" : String(input.statusCode);
-  const retryable =
-    input.retryable === undefined ? "unknown" : String(input.retryable);
+  // The flag is the first token after the marker, before any provider-owned
+  // field. classifyFailure reads only that token. `name` and `message` are
+  // the provider's, and a message that happens to say "isRetryable: true"
+  // must not flip a terminal refusal into a retry.
+  const retryable = input.retryable === true ? "yes" : "no";
   const message = redactDiagnostic(input.message).slice(
     0,
     PROVIDER_REFUSAL_MESSAGE_MAX,
   );
-  return `${MARKER_PROVIDER_REFUSAL} (${input.name} status=${status} isRetryable: ${retryable}): ${message}`;
+  return `${MARKER_PROVIDER_REFUSAL} retryable=${retryable} (${input.name} status=${status}): ${message}`;
+}
+
+// The flag occupies a fixed slot immediately after the marker. Reading
+// anywhere else in the witness would let the provider's own message decide
+// the disposition (#213 review).
+function providerRefusalRetries(witness: string): boolean | undefined {
+  const at = witness.indexOf(MARKER_PROVIDER_REFUSAL);
+  if (at < 0) return undefined;
+  const rest = witness.slice(at + MARKER_PROVIDER_REFUSAL.length);
+  if (rest.startsWith(" retryable=yes")) return true;
+  if (rest.startsWith(" retryable=no")) return false;
+  return undefined;
 }
 
 // #157 (pr-157-8df2fca3-6): a hunter's tool call for a path OUTSIDE the
@@ -2104,7 +2119,7 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     // true is the provider asking for another attempt; that is the transient
     // budget, never the format one.
     if (witness.includes(MARKER_PROVIDER_REFUSAL)) {
-      return witness.includes("isRetryable: true")
+      return providerRefusalRetries(witness) === true
         ? "network_transient"
         : "runtime_unavailable";
     }

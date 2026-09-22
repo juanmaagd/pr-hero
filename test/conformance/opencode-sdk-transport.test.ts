@@ -1008,7 +1008,7 @@ describe("OpenCodeSdkTransport provider refusal (#213)", () => {
     expect(outcome.protocolIntegrity).toBe("unverified");
     expect(outcome.stderrTail).toContain("APIError");
     expect(outcome.stderrTail).toContain("status=403");
-    expect(outcome.stderrTail).toContain("isRetryable: false");
+    expect(outcome.stderrTail).toContain("retryable=no");
     expect(outcome.stderrTail).toContain("https://opencode.ai/workspace/");
     expect(outcome.stderrTail).toContain("[REDACTED]");
     expect(outcome.stderrTail).not.toContain("sk-secretkeyvalue");
@@ -1034,6 +1034,30 @@ describe("OpenCodeSdkTransport provider refusal (#213)", () => {
       }),
     ).toBe("terminal");
     expect(handle.abortCount()).toBe(1);
+  });
+
+  test("a message that says isRetryable: true does not override retryable=no", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_refusal",
+          name: "APIError",
+          statusCode: 403,
+          retryable: false,
+          message:
+            "the prose isRetryable: true must not steer a terminal refusal",
+        },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.stderrTail).toContain("retryable=no");
+    expect(outcome.stderrTail).toContain("isRetryable: true");
+    expect(rig.transport.classifyFailure(outcome)).toBe("runtime_unavailable");
   });
 
   test("isRetryable true is a transient retry, not a format reminder", async () => {
