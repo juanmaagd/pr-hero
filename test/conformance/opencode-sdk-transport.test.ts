@@ -974,6 +974,96 @@ describe("OpenCodeSdkTransport provider account/usage limit (#157)", () => {
   });
 });
 
+// #213: the provider refused the turn (APIError 403, isRetryable false) on
+// the event stream. The old mapper dropped that event, the turn completed
+// with empty finalText, and resolveFailureCause filed format_violation
+// because parse threw — burning the format-reminder retry on a model that
+// never ran.
+describe("OpenCodeSdkTransport provider refusal (#213)", () => {
+  const DATA_POLICY =
+    "This model collects data used to improve its quality and requires explicit opt in: https://opencode.ai/workspace/wrk_example sk-secretkeyvalue";
+
+  test("a non-retryable 403 fails unverified as runtime_unavailable, not a format retry", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_refusal",
+          name: "APIError",
+          statusCode: 403,
+          retryable: false,
+          message: DATA_POLICY,
+        },
+      ]),
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { usefulProgressMs: 150_000 },
+    });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.stderrTail).toContain("APIError");
+    expect(outcome.stderrTail).toContain("status=403");
+    expect(outcome.stderrTail).toContain("isRetryable: false");
+    expect(outcome.stderrTail).toContain("https://opencode.ai/workspace/");
+    expect(outcome.stderrTail).toContain("[REDACTED]");
+    expect(outcome.stderrTail).not.toContain("sk-secretkeyvalue");
+    expect(rig.transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+    expect(
+      resolveFailureCause({
+        outcome,
+        classifyFailure: (candidate) =>
+          rig.transport.classifyFailure(candidate),
+        parseThrew: true,
+      }),
+    ).toEqual({ kind: "cause", cause: "runtime_unavailable" });
+    expect(
+      decideRetryDisposition("runtime_unavailable", {
+        transientAttemptsUsed: 0,
+        formatRetriesUsed: 0,
+      }),
+    ).toEqual({ action: "terminal" });
+    expect(
+      legacyClassificationFromCause({
+        kind: "cause",
+        cause: "runtime_unavailable",
+      }),
+    ).toBe("terminal");
+    expect(handle.abortCount()).toBe(1);
+  });
+
+  test("isRetryable true is a transient retry, not a format reminder", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_refusal",
+          name: "APIError",
+          statusCode: 408,
+          retryable: true,
+          message: "provider asked for another attempt",
+        },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(rig.transport.classifyFailure(outcome)).toBe("network_transient");
+    expect(
+      decideRetryDisposition("network_transient", {
+        transientAttemptsUsed: 0,
+        formatRetriesUsed: 0,
+      }),
+    ).toEqual({ action: "retry_now", budget: "transient" });
+  });
+});
+
 // #157: opencode-client.ts settles a failed permission-reject the same way
 // as a failed session poll — a `{kind:"failed"}` OpenCodePollResult, so this
 // pins the classification the client-level tests in opencode-client.test.ts
