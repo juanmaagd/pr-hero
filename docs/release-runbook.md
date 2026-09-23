@@ -45,10 +45,22 @@ Two distinct tag types are used:
 1. **Immutable Release Tags (`vX.Y.Z`)**:
    - Annotated Git tags representing specific point-in-time releases (e.g. `v1.0.0`, `v1.1.0`).
    - Once pushed to GitHub, immutable release tags must **never** be moved or re-pointed.
-2. **Floating Major Tags (`v1`, `v2`, etc.)**:
-   - Floating tags pointing to the latest release within a major version line.
-   - Consumed by GitHub Actions users referencing the composite action (e.g., `uses: juanmaagd/pr-hero@v1`).
+2. **Floating Major Tags (`v0`, `v1`, `v2`, etc.)**:
+   - Floating tags pointing to the latest release within a major version line. The current floating
+     tag is `v0` while the project is pre-1.0 (0.x minor bumps may still break the CLI/config/Action
+     contract — see the pre-1.0 semantics note below).
+   - Consumed by GitHub Actions users referencing the composite action (e.g., `uses: juanmaagd/pr-hero@v0`).
    - Moved/force-updated on every release within that major version line.
+   - `v1` is a **frozen legacy tag**: it stopped moving at the last 1.x release (1.1.0) when versions
+     were renumbered to 0.x, and must never be moved again. It is kept only so pre-existing workflows
+     pinned to `@v1` keep resolving.
+
+### Pre-1.0 semantics (SemVer §4)
+
+While the major version is `0`, a MINOR bump (`0.x.0`) may contain breaking changes to CLI behavior,
+configuration schema, or the GitHub Actions contract — SemVer does not guarantee compatibility below
+`1.0.0`. Treat every `0.x` release note as "may break" until the project ships `1.0.0` again on its own
+merits.
 
 ---
 
@@ -108,6 +120,12 @@ Update the version string in both synchronization targets:
 
 ### Step 4: Commit and Tag Release
 
+The tag you push in the next step MUST carry the exact version you just set in `package.json` (Step 3):
+`.github/workflows/release.yml` now runs a `verify-version` job before anything is built that fails the
+whole run with `::error::` when `${GITHUB_REF_NAME#v}` (the tag, minus its leading `v`) differs from
+`package.json`'s `version`. Do the version bump and the changelog heading first, commit, THEN tag —
+tagging before bumping the version is exactly the mismatch this guard exists to catch.
+
 Create the release commit and annotate the Git tags:
 
 ```bash
@@ -120,8 +138,8 @@ git commit -m "chore(release): vX.Y.Z"
 # 3. Create immutable annotated tag
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 
-# 4. Update the floating major tag (e.g. v1 for 1.x.y)
-git tag -fa v1 -m "Release v1 (points to vX.Y.Z)"
+# 4. Update the floating major tag (v0 while pre-1.0; e.g. v1 once back on a 1.x.y line)
+git tag -fa v0 -m "Release v0 (points to vX.Y.Z)"
 ```
 
 ### Step 5: Push to Remote
@@ -136,7 +154,7 @@ git push origin main
 git push origin vX.Y.Z
 
 # 3. Force-push the floating major tag
-git push origin v1 --force
+git push origin v0 --force
 ```
 
 ---
@@ -147,7 +165,8 @@ Pushing a `v*` tag automatically triggers the GitHub Actions Release Workflow (`
 
 ```mermaid
 flowchart TD
-    A["Push git tag vX.Y.Z"] --> B["Job: build-binaries (Matrix)"]
+    A["Push git tag vX.Y.Z"] --> V["Job: verify-version"]
+    V --> B["Job: build-binaries (Matrix)"]
     B --> B1["darwin-arm64 (macOS Apple Silicon)"]
     B --> B2["darwin-x64 (macOS Intel)"]
     B --> B3["linux-x64 (Ubuntu x64)"]
@@ -155,13 +174,21 @@ flowchart TD
     B1 & B2 & B3 & B4 --> C["Upload Binary Artifacts"]
     C --> D["Job: publish-release (Ubuntu)"]
     D --> E["Generate SHA256SUMS"]
-    D --> F["Create GitHub Release with Binaries"]
+    D --> F["Create GitHub Release with Binaries (make_latest: true)"]
     D --> G["Build npm Bundle (bun run build)"]
     D --> H["Publish to NPM (npm publish --provenance)"]
 ```
 
 ### Pipeline Workflow Stages
 
+0. **`verify-version`**:
+   - Runs first, before anything is built. Compares `${GITHUB_REF_NAME#v}` (the pushed tag, minus its
+     leading `v`) against `package.json`'s `"version"`. A mismatch fails the job immediately with an
+     `::error::` annotation and nothing else in the pipeline runs.
+   - WHY this exists: the compiled binary embeds its version from the **tag** (`__PRHERO_VERSION__` in
+     the "Compile standalone binary" step below), while `npm publish` ships whatever `package.json` says.
+     Those are two independently-settable strings for the same release — without this gate, a tagging
+     mistake ships two different version numbers under one release, silently.
 1. **`build-binaries`**:
    - Executes across a matrix of 4 runner environments (`macos-latest`, `macos-15-intel`, `ubuntu-latest`, `ubuntu-24.04-arm`), each on its target's own architecture so the smoke below can execute what it built. `fail-fast: false`, so a failing leg does not cancel the other three — they finish and upload, and the run reports every failure rather than only the first. This does **not** keep the release publishing: `publish-release` has a bare `needs: build-binaries`, so any failed leg skips it. That is deliberate — a release missing one platform binary would give `install.sh` a 404 on that architecture, while a failed release leaves the previous version installable.
    - Runs full test suite and typechecks on each OS.
@@ -170,7 +197,12 @@ flowchart TD
    - Uploads binary artifacts (`pr-hero-darwin-arm64`, `pr-hero-darwin-x64`, `pr-hero-linux-x64`, `pr-hero-linux-arm64`).
 2. **`publish-release`**:
    - Gathers all compiled binaries and computes cryptographic `SHA256SUMS`.
-   - Creates a GitHub Release via `softprops/action-gh-release@v2` containing all binaries and checksums.
+   - Creates a GitHub Release via `softprops/action-gh-release@v2` containing all binaries and checksums,
+     with `make_latest: true`. This is explicit rather than left to GitHub's own SemVer-highest default:
+     `pr-hero upgrade` and `install.sh` both resolve GitHub's "latest release", and after the 1.x → 0.x
+     renumbering the next release (`0.2.0`) is SemVer-**lower** than the already-published `1.1.0` —
+     without `make_latest: true`, GitHub would keep calling `1.1.0` latest forever and every
+     upgrade/install would silently stay stuck on the old numbering.
    - Generates release notes automatically from commit history and pull requests.
    - Builds the npm distribution bundle and publishes to npm registry with cryptographic provenance using `NODE_AUTH_TOKEN`.
 
@@ -196,7 +228,9 @@ Perform these sanity checks immediately following a release:
      ~/.prhero/bin/pr-hero --version
      ```
 4. **GitHub Action Reference**:
-   - Confirm workflows referencing `juanmaagd/pr-hero@v1` or `juanmaagd/pr-hero@vX.Y.Z` resolve the new release.
+   - Confirm workflows referencing `juanmaagd/pr-hero@v0` or `juanmaagd/pr-hero@vX.Y.Z` resolve the new
+     release. (Workflows still pinned to the frozen `@v1` continue resolving the last 1.x release, by
+     design — they receive no further updates.)
 5. **Doctor Diagnostic**:
    - Run `pr-hero doctor` locally to verify runtime integrity and toolchain health.
 
@@ -215,7 +249,7 @@ Perform these sanity checks immediately following a release:
 2. Apply the fix and add regression tests.
 3. Update `CHANGELOG.md` with patch notes and increment the patch version (`vX.Y.Z+1`) in `package.json` and `src/index.ts`.
 4. Merge into `main` and execute the release process for `vX.Y.Z+1`.
-5. The floating `v1` tag will automatically update to point to the new patch release, instantly protecting Action users.
+5. The floating `v0` tag will automatically update to point to the new patch release, instantly protecting Action users. (The frozen `v1` tag never moves again — see §2.)
 
 ### Scenario B: Compromised or Broken NPM Package
 
@@ -231,12 +265,14 @@ If a critical flaw requires immediately warning package consumers:
 
 ### Scenario C: Mispointed Floating Tag
 
-If the floating tag `v1` was pushed to an incorrect commit SHA:
+If the floating tag `v0` was pushed to an incorrect commit SHA:
 
 ```bash
 # Re-align floating tag locally to the correct release commit
-git tag -fa v1 <target-commit-sha> -m "Re-align floating v1 tag"
+git tag -fa v0 <target-commit-sha> -m "Re-align floating v0 tag"
 
 # Force push updated floating tag
-git push origin v1 --force
+git push origin v0 --force
 ```
+
+Never apply this to `v1` — it is frozen at the last 1.x release and must never be re-pointed.
