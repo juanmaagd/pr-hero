@@ -49,6 +49,10 @@ import {
 const OPENCODE_SDK_PACKAGE_SPECIFIER = "@opencode-ai/sdk/package.json";
 const OPENCODE_SDK_V2_SPECIFIER = "@opencode-ai/sdk/v2";
 
+function openCodeSdkPackageJsonPath(nodeModulesDir: string): string {
+  return path.join(nodeModulesDir, "@opencode-ai", "sdk", "package.json");
+}
+
 export interface OpenCodeSdkPackageMetadata {
   version?: string;
   exports?: unknown;
@@ -57,6 +61,8 @@ export interface OpenCodeSdkPackageMetadata {
 export interface OpenCodeSdkLoadOptions {
   importPackage?: () => Promise<OpenCodeSdkPackageMetadata>;
   importSdk?: () => Promise<unknown>;
+  // Injected so a test can fail the bare specifier and serve the home tree.
+  importSpecifier?: (specifier: string) => Promise<unknown>;
   // Injected so `bun test` (always `dev`) can exercise the compiled branch.
   // Absent mode is the only path that calls detectAssetMode().
   mode?: AssetMode;
@@ -100,12 +106,7 @@ export function planOpenCodeSdkImport(input: {
       packageJsonPath: undefined,
     };
   }
-  const packageJsonPath = path.join(
-    input.nodeModulesDir,
-    "@opencode-ai",
-    "sdk",
-    "package.json",
-  );
+  const packageJsonPath = openCodeSdkPackageJsonPath(input.nodeModulesDir);
   return {
     packageSpecifier: pathToFileURL(packageJsonPath).href,
     v2Specifier: undefined,
@@ -175,15 +176,45 @@ async function readOpenCodeSdkPackage(
   dynamicImport: DynamicImport,
 ): Promise<LoadedOpenCodeSdkPackage> {
   const location = resolveOpenCodeSdkLocation(options);
-  const plan = planOpenCodeSdkImport(location);
+  let plan = planOpenCodeSdkImport(location);
+  const importSpecifier = options?.importSpecifier ?? dynamicImport;
   let raw: unknown;
-  try {
-    raw = options?.importPackage
-      ? await options.importPackage()
-      : await dynamicImport(plan.packageSpecifier);
-  } catch (error) {
-    if (error instanceof OpenCodeSdkUnavailableError) throw error;
-    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  // Reconcile writes the pin under the product home in every asset mode.
+  // Dev and npm still try the bare specifier first, so a checkout or a
+  // global install wins. When that import fails, the home tree is the only
+  // place the installer wrote — the same path compiled mode reads directly.
+  if (options?.importPackage) {
+    try {
+      raw = await options.importPackage();
+    } catch (error) {
+      if (error instanceof OpenCodeSdkUnavailableError) throw error;
+      throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+    }
+  } else {
+    try {
+      raw = await importSpecifier(plan.packageSpecifier);
+    } catch (error) {
+      if (error instanceof OpenCodeSdkUnavailableError) throw error;
+      if (plan.packageJsonPath !== undefined) {
+        throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+      }
+      const packageJsonPath = openCodeSdkPackageJsonPath(
+        location.nodeModulesDir,
+      );
+      try {
+        raw = await importSpecifier(pathToFileURL(packageJsonPath).href);
+      } catch (fallbackError) {
+        if (fallbackError instanceof OpenCodeSdkUnavailableError) {
+          throw fallbackError;
+        }
+        throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+      }
+      plan = {
+        packageSpecifier: pathToFileURL(packageJsonPath).href,
+        v2Specifier: undefined,
+        packageJsonPath,
+      };
+    }
   }
   const packageJson = asPackageJson(raw);
   return {
@@ -238,6 +269,7 @@ export async function readInstalledOpenCodeSdkVersion(options?: {
   mode?: AssetMode;
   nodeModulesDir?: string;
   importPackage?: OpenCodeSdkLoadOptions["importPackage"];
+  importSpecifier?: OpenCodeSdkLoadOptions["importSpecifier"];
 }): Promise<string | undefined> {
   try {
     const loaded = await readOpenCodeSdkPackage(options, createDynamicImport());

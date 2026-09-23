@@ -2093,6 +2093,52 @@ describe("OpenCode SDK import plan", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test("dev mode uses the product home when the bare specifier is missing", async () => {
+    const { loadOpenCodeSdk, readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-fallback-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageDir = path.join(nodeModulesDir, "@opencode-ai", "sdk");
+    const packageJsonPath = path.join(packageDir, "package.json");
+    const v2File = path.join(packageDir, "dist", "v2", "index.js");
+    try {
+      await mkdir(path.dirname(v2File), { recursive: true });
+      await writeFile(
+        packageJsonPath,
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2": { import: "./dist/v2/index.js" } },
+        }),
+      );
+      await writeFile(
+        v2File,
+        "export function createOpencodeClient() { return { ok: true }; }\n",
+      );
+      const importSpecifier = async (specifier: string): Promise<unknown> => {
+        if (specifier.startsWith("@opencode-ai/")) {
+          throw new Error(`Cannot find module '${specifier}'`);
+        }
+        return import(specifier);
+      };
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "dev",
+          nodeModulesDir,
+          importSpecifier,
+        }),
+      ).toBe("1.18.25");
+      const sdk = await loadOpenCodeSdk({
+        mode: "npm",
+        nodeModulesDir,
+        importSpecifier,
+      });
+      expect(typeof sdk.createOpencodeClient).toBe("function");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

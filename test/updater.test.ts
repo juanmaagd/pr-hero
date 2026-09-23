@@ -14,6 +14,7 @@ import {
   readUpgradeCache,
   reconcileUpgrade,
   selectOpenCodeSdkInstaller,
+  spawnOpenCodeSdkInstaller,
   type UpgradeCheckCache,
   writeUpgradeCache,
 } from "../src/updater";
@@ -316,6 +317,22 @@ describe("selectOpenCodeSdkInstaller", () => {
   });
 });
 
+describe("spawnOpenCodeSdkInstaller", () => {
+  test("rejects a child that never exits and omits the prefix from the error", async () => {
+    const error = await spawnOpenCodeSdkInstaller(["/bin/sleep", "30"], 40).then(
+      () => {
+        throw new Error("installer resolved");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) return;
+    expect(error.message).toContain("timed out after 40ms");
+    expect(error.message).toContain("pr-hero upgrade --reconcile");
+    expect(error.message).not.toContain("/bin/sleep");
+  });
+});
+
 describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it", () => {
   test("Claude-only routing does not spawn", async () => {
     const fixture = await withHome(CLAUDE_ROUTING);
@@ -346,7 +363,7 @@ describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it"
       const result = await quietReconcile(fixture.home, {
         readSdkVersion: async () => {
           reads += 1;
-          return reads === 1 ? undefined : "1.18.25";
+          return reads < 3 ? undefined : "1.18.25";
         },
         which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
         spawnInstaller: async (next) => {
@@ -362,7 +379,7 @@ describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it"
       expect(result.ok).toBe(true);
       expect(result.errors).toEqual([]);
       expect(doctorSawInstall).toBe(true);
-      expect(reads).toBe(2);
+      expect(reads).toBe(3);
       expect(argv).toContain(
         `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION}`,
       );
@@ -492,6 +509,61 @@ describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it"
       expect(doctorRan).toBe(true);
       expect(result.ok).toBe(false);
       expect(result.errors.join("\n")).toContain("not valid JSON");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("a live install lock refuses a second reconcile and hides the home", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const lockPath = path.join(
+      prheroLayout(fixture.home).dir,
+      "opencode-sdk.lock",
+    );
+    try {
+      await writeFile(lockPath, `${process.pid}\n`);
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(false);
+      const text = result.errors.join("\n");
+      expect(text).toContain("already running");
+      expect(text).toContain(`pid ${process.pid}`);
+      expect(text).not.toContain(fixture.home);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("a dead install lock is taken and the install still runs", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const lockPath = path.join(
+      prheroLayout(fixture.home).dir,
+      "opencode-sdk.lock",
+    );
+    const held = Bun.spawn(["/bin/sleep", "30"]);
+    held.kill();
+    await held.exited;
+    try {
+      await writeFile(lockPath, `${held.pid}\n`);
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => (spawned ? "1.18.25" : undefined),
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(true);
+      expect(result.ok).toBe(true);
+      expect(result.errors).toEqual([]);
     } finally {
       await fixture.cleanup();
     }

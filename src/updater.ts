@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -323,8 +324,68 @@ function commandOnPath(bin: string | null | undefined): string | null {
   return bin;
 }
 
-function spawnOpenCodeSdkInstaller(
+// Not watch.lock. That file is held for a whole watcher review; this one
+// only covers the install, so a second reconcile cannot npm-install the
+// same prefix while the first is still writing it.
+function openCodeSdkInstallLockPath(home: string): string {
+  return path.join(prheroLayout(home).dir, "opencode-sdk.lock");
+}
+
+function liveLockPid(lockPath: string): number | null {
+  if (!existsSync(lockPath)) return null;
+  const pid = Number(readFileSync(lockPath, "utf8").trim());
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM" ? pid : null;
+  }
+}
+
+async function withOpenCodeSdkInstallLock(
+  home: string,
+  work: () => Promise<void>,
+): Promise<void> {
+  const lockPath = openCodeSdkInstallLockPath(home);
+  mkdirSync(path.dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const handle = await open(lockPath, "wx");
+      try {
+        await handle.writeFile(`${process.pid}\n`);
+        await work();
+        return;
+      } finally {
+        await handle.close();
+        await rm(lockPath, { force: true });
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const holder = liveLockPid(lockPath);
+      if (holder !== null) {
+        throw new Error(
+          `OpenCode SDK install is already running (pid ${holder}). ` +
+            "Run pr-hero upgrade --reconcile after it finishes.",
+        );
+      }
+      await rm(lockPath, { force: true });
+    }
+  }
+  throw new Error(
+    "OpenCode SDK install is already running. " +
+      "Run pr-hero upgrade --reconcile after it finishes.",
+  );
+}
+
+// Same bound as installSystemTool's npm install. A registry fetch can be
+// slow; a child that never exits must not pin reconcile. The message omits
+// argv: `--prefix` carries the product home.
+export const OPENCODE_SDK_INSTALL_TIMEOUT_MS = 300_000;
+
+export function spawnOpenCodeSdkInstaller(
   argv: readonly string[],
+  timeoutMs = OPENCODE_SDK_INSTALL_TIMEOUT_MS,
 ): Promise<OpenCodeSdkSpawnResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -333,24 +394,38 @@ function spawnOpenCodeSdkInstaller(
       stdio: ["ignore", "ignore", "pipe"],
     });
     const chunks: Buffer[] = [];
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(
+        new Error(
+          `OpenCode SDK install timed out after ${timeoutMs}ms. Run pr-hero upgrade --reconcile.`,
+        ),
+      );
+    }, timeoutMs);
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      settle();
+    };
     child.stderr?.on("data", (chunk: Buffer | string) => {
       if (chunks.length >= 8) return;
       chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
     });
     child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
+      finish(() => reject(error));
     });
     child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
-      const stderr = Buffer.concat(chunks)
-        .toString("utf8")
-        .replaceAll("/$bunfs", "")
-        .trim()
-        .slice(0, 240);
-      resolve({ code: code ?? 1, stderr });
+      finish(() => {
+        const stderr = Buffer.concat(chunks)
+          .toString("utf8")
+          .replaceAll("/$bunfs", "")
+          .trim()
+          .slice(0, 240);
+        resolve({ code: code ?? 1, stderr });
+      });
     });
   });
 }
@@ -384,33 +459,37 @@ async function ensureOpenCodeSdkInstalled(options: {
       ));
   const installed = await readSdkVersion();
   if (installed === SUPPORTED_OPENCODE_SDK_VERSION) return;
-  const which = options.which ?? ((bin: string) => Bun.which(bin));
-  const npmPath = commandOnPath(which("npm"));
-  const bunPath = npmPath === null ? commandOnPath(which("bun")) : null;
-  const argv = selectOpenCodeSdkInstaller({
-    npmPath,
-    bunPath,
-    layoutDir: prheroLayout(options.home).dir,
+  await withOpenCodeSdkInstallLock(options.home, async () => {
+    const again = await readSdkVersion();
+    if (again === SUPPORTED_OPENCODE_SDK_VERSION) return;
+    const which = options.which ?? ((bin: string) => Bun.which(bin));
+    const npmPath = commandOnPath(which("npm"));
+    const bunPath = npmPath === null ? commandOnPath(which("bun")) : null;
+    const argv = selectOpenCodeSdkInstaller({
+      npmPath,
+      bunPath,
+      layoutDir: prheroLayout(options.home).dir,
+    });
+    const spawnInstaller = options.spawnInstaller ?? spawnOpenCodeSdkInstaller;
+    const result = await spawnInstaller(argv);
+    if (result.code !== 0) {
+      throw new Error(
+        `Failed to install @opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION} ` +
+          `(exit ${result.code}). Run pr-hero upgrade --reconcile.`,
+      );
+    }
+    const after = await readSdkVersion();
+    if (after !== SUPPORTED_OPENCODE_SDK_VERSION) {
+      const observed =
+        typeof after === "string" && after.trim() !== ""
+          ? after.trim()
+          : "missing";
+      throw new Error(
+        `OpenCode SDK version "${observed}" after install; expected ` +
+          `"${SUPPORTED_OPENCODE_SDK_VERSION}". Run pr-hero upgrade --reconcile.`,
+      );
+    }
   });
-  const spawnInstaller = options.spawnInstaller ?? spawnOpenCodeSdkInstaller;
-  const result = await spawnInstaller(argv);
-  if (result.code !== 0) {
-    throw new Error(
-      `Failed to install @opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION} ` +
-        `(exit ${result.code}). Run pr-hero upgrade --reconcile.`,
-    );
-  }
-  const after = await readSdkVersion();
-  if (after !== SUPPORTED_OPENCODE_SDK_VERSION) {
-    const observed =
-      typeof after === "string" && after.trim() !== ""
-        ? after.trim()
-        : "missing";
-    throw new Error(
-      `OpenCode SDK version "${observed}" after install; expected ` +
-        `"${SUPPORTED_OPENCODE_SDK_VERSION}". Run pr-hero upgrade --reconcile.`,
-    );
-  }
 }
 
 export async function reconcileUpgrade(
