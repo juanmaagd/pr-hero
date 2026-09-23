@@ -34,6 +34,7 @@ import { upgradeCommand } from "#commands/upgrade";
 import { usageCommand } from "#commands/usage";
 import { resolveOptionalRepoRoot } from "#config/config";
 import { corpusCommand } from "#corpus/corpus";
+import { settleHeldAdmissionLedgerOnSignal } from "#pr/admission";
 import {
   type PrDryRunSizeGateResult,
   resolvePrDryRunSizeGate,
@@ -283,6 +284,7 @@ export async function runCli(
     // in-flight lock this process took is released by its holder, or the next
     // run skips the head for the rest of the 90-minute TTL (#146).
     await settleHeldCommitStatusOnSignal();
+    await settleHeldAdmissionLedgerOnSignal();
     process.exit(143);
   });
   process.on("SIGINT", async () => {
@@ -294,6 +296,7 @@ export async function runCli(
       // Ignore
     }
     await settleHeldCommitStatusOnSignal();
+    await settleHeldAdmissionLedgerOnSignal();
     process.exit(130);
   });
   process.on("exit", () => {
