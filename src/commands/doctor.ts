@@ -11,6 +11,7 @@ import {
   renderDoctorReport,
   runDoctor,
 } from "../doctor";
+import { prheroLayout } from "../home-preflight";
 import { collectDoctorExactBindingReports } from "../production-runtime";
 import { readInstalledOpenCodeSdkVersion } from "../transport-registry";
 
@@ -65,8 +66,13 @@ export async function runDoctorCommand(input: {
         routingConfig,
       }),
   });
+  // Same home the command was given. The no-arg reader uses os.homedir().
   const readSdkVersion =
-    input.readSdkVersion ?? readInstalledOpenCodeSdkVersion;
+    input.readSdkVersion ??
+    (() =>
+      readInstalledOpenCodeSdkVersion({
+        nodeModulesDir: prheroLayout(input.home).nodeModulesDir,
+      }));
   const sdkCheck = routingNeedsOpenCodeSdk(routingConfig)
     ? openCodeRoutingSdkCheck({
         routing: routingConfig,

@@ -8,7 +8,7 @@ import {
   registerMcpServer,
   syncSkills,
 } from "./agent-env";
-import { resolveEngineAssets, selfInvocation } from "./assets";
+import { type AssetMode, resolveEngineAssets, selfInvocation } from "./assets";
 import { loadGlobalConfigLayer } from "./config/config";
 import { runDoctor } from "./doctor";
 import { prheroLayout } from "./home-preflight";
@@ -273,6 +273,9 @@ export interface ReconcileUpgradeOptions {
   ensureOpenCodeSdk?: () => Promise<void>;
   runDoctorCheck?: () => Promise<{ overall: string }>;
   readSdkVersion?: () => Promise<string | undefined>;
+  // Injected so `bun test` (always `dev`) can exercise the compiled reader.
+  // Omitted mode is the only path that calls detectAssetMode().
+  assetMode?: AssetMode;
   which?: (bin: string) => string | null;
   spawnInstaller?: (argv: readonly string[]) => Promise<OpenCodeSdkSpawnResult>;
 }
@@ -361,14 +364,24 @@ async function readReconcileRouting(
 
 async function ensureOpenCodeSdkInstalled(options: {
   home: string;
+  assetMode?: AssetMode;
   readSdkVersion?: () => Promise<string | undefined>;
   which?: (bin: string) => string | null;
   spawnInstaller?: (argv: readonly string[]) => Promise<OpenCodeSdkSpawnResult>;
 }): Promise<void> {
   const routing = await readReconcileRouting(options.home);
   if (!routingNeedsOpenCodeSdk(routing)) return;
+  // Install and the version check share this home. The no-arg reader uses
+  // os.homedir(), which is a different tree whenever reconcile was given one.
+  const nodeModulesDir = prheroLayout(options.home).nodeModulesDir;
   const readSdkVersion =
-    options.readSdkVersion ?? readInstalledOpenCodeSdkVersion;
+    options.readSdkVersion ??
+    (() =>
+      readInstalledOpenCodeSdkVersion(
+        options.assetMode === undefined
+          ? { nodeModulesDir }
+          : { mode: options.assetMode, nodeModulesDir },
+      ));
   const installed = await readSdkVersion();
   if (installed === SUPPORTED_OPENCODE_SDK_VERSION) return;
   const which = options.which ?? ((bin: string) => Bun.which(bin));
@@ -480,6 +493,7 @@ export async function reconcileUpgrade(
     } else {
       await ensureOpenCodeSdkInstalled({
         home,
+        assetMode: options.assetMode,
         readSdkVersion: options.readSdkVersion,
         which: options.which,
         spawnInstaller: options.spawnInstaller,

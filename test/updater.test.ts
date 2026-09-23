@@ -391,6 +391,39 @@ describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it"
     }
   });
 
+  test("compiled mode reads the SDK from the reconcile home and does not spawn", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const packageDir = path.join(
+      prheroLayout(fixture.home).nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+    );
+    try {
+      await mkdir(packageDir, { recursive: true });
+      await writeFile(
+        path.join(packageDir, "package.json"),
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2": { import: "./dist/v2/index.js" } },
+        }),
+      );
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        assetMode: "compiled",
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          spawned = true;
+          throw new Error("spawn should not run");
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(true);
+      expect(result.errors).toEqual([]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   test("no npm and no bun reports both and does not spawn", async () => {
     const fixture = await withHome(OPENCODE_ROUTING);
     try {
