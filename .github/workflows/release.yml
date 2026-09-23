@@ -6,8 +6,32 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
+  # The compiled binary embeds its version from the TAG (see "Compile
+  # standalone binary" below: __PRHERO_VERSION__ reads GITHUB_REF_NAME),
+  # while `npm publish` ships whatever package.json's "version" field says.
+  # Those are two independently-settable strings for the same release — a
+  # tagging mistake (forgetting to bump package.json, or tagging the wrong
+  # commit) ships two different version numbers under one release, silently.
+  # Catch it here, before anything is built or published.
+  verify-version:
+    name: Verify tag matches package.json version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compare tag to package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(jq -r .version package.json)"
+          if [[ "${TAG_VERSION}" != "${PKG_VERSION}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} (version ${TAG_VERSION}) does not match package.json's version (${PKG_VERSION}). The compiled binary would embed ${TAG_VERSION} while npm would publish ${PKG_VERSION} under the same release. Bump package.json (and src/index.ts's ENGINE_VERSION) to match before tagging, or re-tag the correct commit."
+            exit 1
+          fi
+
   build-binaries:
     name: Build binaries
+    needs: verify-version
     strategy:
       # What this buys, precisely: when one leg fails, the others still finish
       # and upload. It does NOT keep the release publishing — `publish-release`
@@ -138,6 +162,13 @@ jobs:
             release-binaries/pr-hero-*
             release-binaries/SHA256SUMS
           generate_release_notes: true
+          # `pr-hero upgrade` and install.sh both resolve GitHub's "latest
+          # release" (SemVer-highest is GitHub's own default, not ours to
+          # rely on). After the 1.x -> 0.x renumbering, 0.2.0 is SemVer-LOWER
+          # than the already-published 1.1.0 — without this, GitHub would
+          # keep calling 1.1.0 latest forever and every upgrade/install would
+          # silently stay stuck on the old numbering.
+          make_latest: true
 
       - name: Update major floating tag
         run: |
