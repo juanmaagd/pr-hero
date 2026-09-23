@@ -89,7 +89,7 @@ export interface CiWorkflowTemplateOptions {
   maxChangedLines?: string;
 }
 
-export const DEFAULT_CI_ACTION_REF = "juanmaagd/pr-hero@v1";
+export const DEFAULT_CI_ACTION_REF = "juanmaagd/pr-hero@v0";
 
 // The options THIS repo generates its OWN workflow with. One exported source
 // of truth rather than three hand-copied literals: the byte-equality drift

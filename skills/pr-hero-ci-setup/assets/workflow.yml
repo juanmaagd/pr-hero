@@ -121,7 +121,7 @@ jobs:
         # The id is load-bearing, not decorative: it is the only way to read
         # this step's `run-dir` output from the upload step below.
         id: pr-hero
-        uses: juanmaagd/pr-hero@v1
+        uses: juanmaagd/pr-hero@v0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Provide a Claude credential and/or OpenCode auth (never leave every

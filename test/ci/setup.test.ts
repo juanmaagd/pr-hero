@@ -121,7 +121,7 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       jobs: { review: { steps: Array<Record<string, unknown>> } };
     };
     const usesValues = parsed.jobs.review.steps.map((step) => step.uses);
-    expect(usesValues).toContain("juanmaagd/pr-hero@v1");
+    expect(usesValues).toContain("juanmaagd/pr-hero@v0");
   });
 
   test("never embeds a secret value — references secrets by name only", () => {
@@ -142,7 +142,7 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       jobs: { review: { steps: Array<Record<string, unknown>> } };
     };
     const step = parsed.jobs.review.steps.find(
-      (s) => s.uses === "juanmaagd/pr-hero@v1",
+      (s) => s.uses === "juanmaagd/pr-hero@v0",
     ) as { with?: Record<string, string> } | undefined;
     expect(step?.with?.["anthropic-api-key"]).toBe(
       `\${{ secrets.ANTHROPIC_API_KEY }}`,

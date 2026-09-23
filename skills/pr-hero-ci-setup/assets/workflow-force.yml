@@ -75,7 +75,7 @@ jobs:
       - name: Run pr-hero
         if: steps.gate.outputs.proceed == 'true'
         id: pr-hero
-        uses: juanmaagd/pr-hero@v1
+        uses: juanmaagd/pr-hero@v0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
