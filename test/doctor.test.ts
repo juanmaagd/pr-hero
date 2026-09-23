@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CI_WORKFLOW_RELATIVE_PATH } from "#ci/setup";
 import { aliasCanonical } from "#model/catalog";
+import { routingNeedsOpenCodeSdk } from "#model/routing";
 import {
   GOTCHAS_PLACEHOLDER_MARKER,
   GOTCHAS_TEMPLATE,
@@ -12,6 +13,7 @@ import {
 } from "../src/assets";
 import {
   type DoctorReport,
+  openCodeRoutingSdkCheck,
   PROVIDER_HINTS,
   renderDoctorReport,
   runDoctor,
@@ -621,6 +623,8 @@ describe("doctor tri-state evaluation", () => {
       const hint = report.checks.find((c) => c.name === "provider")?.hint ?? "";
       expect(hint).toContain("unverified");
       expect(hint).not.toContain("unaffected");
+      expect(hint).toContain("pr-hero upgrade --reconcile");
+      expect(hint).not.toContain("alongside the project's node_modules");
     });
 
     test("a throwing probeExactBindings that is NOT SDK-absence still fails loud as blocking", async () => {
@@ -942,5 +946,103 @@ describe("doctor tri-state evaluation", () => {
         expect(line).not.toContain("\x1b");
       }
     });
+  });
+});
+
+const openCodeDefault = {
+  backend: "opencode" as const,
+  provider: "opencode",
+};
+const claudeDefault = {
+  backend: "claude-code" as const,
+  provider: "anthropic",
+};
+
+describe("routingNeedsOpenCodeSdk", () => {
+  test("undefined, disabled routing, and Claude-only routing do not need the SDK", () => {
+    expect(routingNeedsOpenCodeSdk(undefined)).toBe(false);
+    expect(
+      routingNeedsOpenCodeSdk({
+        disabled: true,
+        default: openCodeDefault,
+      }),
+    ).toBe(false);
+    expect(routingNeedsOpenCodeSdk({ default: claudeDefault })).toBe(false);
+    expect(
+      routingNeedsOpenCodeSdk({
+        default: { ...openCodeDefault, disabled: true },
+      }),
+    ).toBe(false);
+    expect(
+      routingNeedsOpenCodeSdk({
+        default: { ...openCodeDefault, allowSpend: false },
+      }),
+    ).toBe(false);
+  });
+
+  test("an enabled OpenCode default or mapping needs the SDK", () => {
+    expect(routingNeedsOpenCodeSdk({ default: openCodeDefault })).toBe(true);
+    expect(
+      routingNeedsOpenCodeSdk({
+        default: claudeDefault,
+        mappings: [
+          { logical: "sonnet", ...openCodeDefault },
+          { logical: "opus", ...claudeDefault, allowSpend: false },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      routingNeedsOpenCodeSdk({
+        mappings: { sonnet: openCodeDefault },
+      }),
+    ).toBe(true);
+    expect(
+      routingNeedsOpenCodeSdk({
+        default: claudeDefault,
+        mappings: { sonnet: { ...openCodeDefault, disabled: true } },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("openCodeRoutingSdkCheck", () => {
+  test("no OpenCode routing or the pinned version adds no row", () => {
+    expect(
+      openCodeRoutingSdkCheck({
+        routing: { default: claudeDefault },
+        sdkVersion: undefined,
+      }),
+    ).toBeUndefined();
+    expect(
+      openCodeRoutingSdkCheck({
+        routing: { default: openCodeDefault },
+        sdkVersion: "1.18.25",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("a missing SDK blocks with the reconcile message", () => {
+    for (const sdkVersion of [undefined, "", "   "]) {
+      const item = openCodeRoutingSdkCheck({
+        routing: { default: openCodeDefault },
+        sdkVersion,
+      });
+      expect(item?.severity).toBe("blocking");
+      expect(item?.message).toContain("pr-hero upgrade --reconcile");
+      expect(item?.message).toContain("@opencode-ai/sdk@1.18.25");
+      expect(item?.message).toContain("~/.prhero/node_modules");
+      expect(item?.message).not.toContain("undefined");
+    }
+  });
+
+  test("any other installed version blocks and names both versions", () => {
+    const item = openCodeRoutingSdkCheck({
+      routing: { default: openCodeDefault },
+      sdkVersion: "1.18.26",
+    });
+    expect(item?.severity).toBe("blocking");
+    expect(item?.message).toContain("1.18.26");
+    expect(item?.message).toContain("1.18.25");
+    expect(item?.message).toContain("pr-hero upgrade --reconcile");
   });
 });

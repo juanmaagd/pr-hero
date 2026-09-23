@@ -1,16 +1,18 @@
 import os from "node:os";
 import { loadEffectiveConfig, resolveOptionalRepoRoot } from "#config/config";
-import type { RoutingConfig } from "#model/routing";
+import { type RoutingConfig, routingNeedsOpenCodeSdk } from "#model/routing";
 import type { CliOptions } from "#review/preflight";
 import { styleEnabled, terminalWidth } from "#ui/primitives";
 import {
   type DoctorCheckItem,
   type DoctorReport,
   evaluateDoctorReport,
+  openCodeRoutingSdkCheck,
   renderDoctorReport,
   runDoctor,
 } from "../doctor";
 import { collectDoctorExactBindingReports } from "../production-runtime";
+import { readInstalledOpenCodeSdkVersion } from "../transport-registry";
 
 // W3 remediation (opencode-production-runtime PR3 verify #4997): doctor
 // exists to diagnose a broken setup, so it must not die on the very
@@ -31,6 +33,9 @@ export async function runDoctorCommand(input: {
   // shells out to git/claude/gh/codegraph. Tests stub this to prove the
   // config-failure wiring without depending on host tool availability.
   runDoctorFn?: typeof runDoctor;
+  // Same seam for the SDK reader: production reads the install doctor and
+  // the loader share. Tests pass a version without resolving a package.
+  readSdkVersion?: () => Promise<string | undefined>;
 }): Promise<{ report: DoctorReport; lines: string[] }> {
   let routingConfig: RoutingConfig | undefined;
   let configCheck: DoctorCheckItem | undefined;
@@ -60,10 +65,21 @@ export async function runDoctorCommand(input: {
         routingConfig,
       }),
   });
+  const readSdkVersion =
+    input.readSdkVersion ?? readInstalledOpenCodeSdkVersion;
+  const sdkCheck = routingNeedsOpenCodeSdk(routingConfig)
+    ? openCodeRoutingSdkCheck({
+        routing: routingConfig,
+        sdkVersion: await readSdkVersion(),
+      })
+    : undefined;
+  const prefix: DoctorCheckItem[] = [];
+  if (configCheck !== undefined) prefix.push(configCheck);
+  if (sdkCheck !== undefined) prefix.push(sdkCheck);
   const report =
-    configCheck === undefined
+    prefix.length === 0
       ? doctorReport
-      : evaluateDoctorReport([configCheck, ...doctorReport.checks]);
+      : evaluateDoctorReport([...prefix, ...doctorReport.checks]);
   const lines = renderDoctorReport(report, {
     styles: input.styles,
     width: input.width,
