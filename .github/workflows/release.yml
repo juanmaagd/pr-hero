@@ -168,7 +168,13 @@ jobs:
           # than the already-published 1.1.0 — without this, GitHub would
           # keep calling 1.1.0 latest forever and every upgrade/install would
           # silently stay stuck on the old numbering.
-          make_latest: true
+          # Scoped to stable tags: the trigger also matches suffixed tags
+          # (v0.2.0-rc.1), and one of those becoming "latest" would ship an
+          # RC to every install and upgrade. Same rule the floating-tag step
+          # below applies. A backport tag for an older line would still win
+          # "latest"; there is only one release line today.
+          make_latest: ${{ !contains(github.ref_name, '-') && 'true' || 'false' }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
       - name: Update major floating tag
         run: |
