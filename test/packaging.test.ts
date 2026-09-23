@@ -6,6 +6,7 @@ import {
   generateCiWorkflowTemplate,
   OWN_CI_WORKFLOW_OPTIONS,
 } from "#ci/setup";
+import { ENGINE_VERSION } from "../src/index";
 
 describe("Packaging & distribution configuration", () => {
   const rootDir = path.resolve(__dirname, "..");
@@ -41,6 +42,15 @@ describe("Packaging & distribution configuration", () => {
     expect(pkg.files).not.toContain("openspec");
     expect(pkg.files).not.toContain("skills/martian-bench");
     expect(pkg.scripts.build).toBeDefined();
+  });
+
+  // release.yml only compares the tag against package.json, so this is what
+  // keeps the exported constant from drifting on the next bump.
+  test("ENGINE_VERSION matches package.json version", () => {
+    const pkg = JSON.parse(
+      readFileSync(path.join(rootDir, "package.json"), "utf-8"),
+    );
+    expect(ENGINE_VERSION).toBe(pkg.version);
   });
 
   test("bin/pr-hero.js exists and is an executable wrapper", () => {
