@@ -319,7 +319,10 @@ describe("selectOpenCodeSdkInstaller", () => {
 
 describe("spawnOpenCodeSdkInstaller", () => {
   test("rejects a child that never exits and omits the prefix from the error", async () => {
-    const error = await spawnOpenCodeSdkInstaller(["/bin/sleep", "30"], 40).then(
+    const error = await spawnOpenCodeSdkInstaller(
+      ["/bin/sleep", "30"],
+      40,
+    ).then(
       () => {
         throw new Error("installer resolved");
       },
