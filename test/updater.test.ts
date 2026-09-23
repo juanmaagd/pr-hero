@@ -571,4 +571,51 @@ describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it"
       await fixture.cleanup();
     }
   });
+
+  test("the lock holds the pid before the installer runs", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const lockPath = path.join(
+      prheroLayout(fixture.home).dir,
+      "opencode-sdk.lock",
+    );
+    try {
+      let pidText = "";
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => (pidText === "" ? undefined : "1.18.25"),
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          pidText = await Bun.file(lockPath).text();
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(pidText.trim()).toBe(String(process.pid));
+      expect(result.ok).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("an EEXIST from the installer is reported once", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    try {
+      let calls = 0;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          calls += 1;
+          const error = new Error("collision") as NodeJS.ErrnoException;
+          error.code = "EEXIST";
+          throw error;
+        },
+      });
+      expect(calls).toBe(1);
+      expect(result.ok).toBe(false);
+      const text = result.errors.join("\n");
+      expect(text).toContain("collision");
+      expect(text).not.toContain("already running");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });

@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -350,16 +356,9 @@ async function withOpenCodeSdkInstallLock(
   const lockPath = openCodeSdkInstallLockPath(home);
   mkdirSync(path.dirname(lockPath), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
+    let handle: Awaited<ReturnType<typeof open>>;
     try {
-      const handle = await open(lockPath, "wx");
-      try {
-        await handle.writeFile(`${process.pid}\n`);
-        await work();
-        return;
-      } finally {
-        await handle.close();
-        await rm(lockPath, { force: true });
-      }
+      handle = await open(lockPath, "wx");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const holder = liveLockPid(lockPath);
@@ -369,6 +368,17 @@ async function withOpenCodeSdkInstallLock(
             "Run pr-hero upgrade --reconcile after it finishes.",
         );
       }
+      await rm(lockPath, { force: true });
+      continue;
+    }
+    try {
+      // Synchronous: an awaited write leaves the file empty, and liveLockPid
+      // treats an empty file as a dead holder and deletes it.
+      writeSync(handle.fd, `${process.pid}\n`);
+      await work();
+      return;
+    } finally {
+      await handle.close();
       await rm(lockPath, { force: true });
     }
   }

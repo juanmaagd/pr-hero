@@ -2139,6 +2139,39 @@ describe("OpenCode SDK import plan", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test("a second read sees a package.json the installer overwrote", async () => {
+    const { readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-overwrite-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageJsonPath = path.join(
+      nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+      "package.json",
+    );
+    try {
+      await mkdir(path.dirname(packageJsonPath), { recursive: true });
+      await writeFile(packageJsonPath, JSON.stringify({ version: "1.0.0" }));
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.0.0");
+      await writeFile(packageJsonPath, JSON.stringify({ version: "1.18.25" }));
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.18.25");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

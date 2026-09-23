@@ -169,6 +169,21 @@ interface LoadedOpenCodeSdkPackage {
   plan: OpenCodeSdkImportPlan;
 }
 
+async function readPackageJsonAt(packageJsonPath: string): Promise<unknown> {
+  let text: string;
+  try {
+    text = await readFile(packageJsonPath, "utf8");
+  } catch (error) {
+    if (error instanceof OpenCodeSdkUnavailableError) throw error;
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+}
+
 // Shared by the loader and the version reader so a compiled binary and
 // doctor observe the same install.
 async function readOpenCodeSdkPackage(
@@ -181,8 +196,9 @@ async function readOpenCodeSdkPackage(
   let raw: unknown;
   // Reconcile writes the pin under the product home in every asset mode.
   // Dev and npm still try the bare specifier first, so a checkout or a
-  // global install wins. When that import fails, the home tree is the only
-  // place the installer wrote — the same path compiled mode reads directly.
+  // global install wins. A known package.json is read from disk: import()
+  // caches a file URL for the process, so the post-install read would keep
+  // the pre-install version after npm overwrites the file.
   if (options?.importPackage) {
     try {
       raw = await options.importPackage();
@@ -190,25 +206,17 @@ async function readOpenCodeSdkPackage(
       if (error instanceof OpenCodeSdkUnavailableError) throw error;
       throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
     }
+  } else if (plan.packageJsonPath !== undefined) {
+    raw = await readPackageJsonAt(plan.packageJsonPath);
   } else {
     try {
       raw = await importSpecifier(plan.packageSpecifier);
     } catch (error) {
       if (error instanceof OpenCodeSdkUnavailableError) throw error;
-      if (plan.packageJsonPath !== undefined) {
-        throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
-      }
       const packageJsonPath = openCodeSdkPackageJsonPath(
         location.nodeModulesDir,
       );
-      try {
-        raw = await importSpecifier(pathToFileURL(packageJsonPath).href);
-      } catch (fallbackError) {
-        if (fallbackError instanceof OpenCodeSdkUnavailableError) {
-          throw fallbackError;
-        }
-        throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
-      }
+      raw = await readPackageJsonAt(packageJsonPath);
       plan = {
         packageSpecifier: pathToFileURL(packageJsonPath).href,
         v2Specifier: undefined,
