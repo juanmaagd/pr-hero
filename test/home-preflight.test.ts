@@ -29,6 +29,7 @@ describe("prheroLayout", () => {
   test("repos hang off the same home as the watcher files", () => {
     expect(prheroLayout(HOME)).toEqual({
       dir: "/Users/x/.prhero",
+      nodeModulesDir: "/Users/x/.prhero/node_modules",
       reposDir: "/Users/x/.prhero/repos",
       watchConfigPath: "/Users/x/.prhero/watch.json",
       reviewConfigPath: "/Users/x/.prhero/config.json",
