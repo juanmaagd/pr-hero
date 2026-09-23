@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -8,7 +9,14 @@ import {
   syncSkills,
 } from "./agent-env";
 import { resolveEngineAssets, selfInvocation } from "./assets";
+import { loadGlobalConfigLayer } from "./config/config";
 import { runDoctor } from "./doctor";
+import { prheroLayout } from "./home-preflight";
+import { type RoutingConfig, routingNeedsOpenCodeSdk } from "./model/routing";
+import {
+  readInstalledOpenCodeSdkVersion,
+  SUPPORTED_OPENCODE_SDK_VERSION,
+} from "./transport-registry";
 
 export const PRHERO_GITHUB_REPO = "juanmaagd/pr-hero";
 
@@ -249,13 +257,147 @@ export async function planUpgrade(
   };
 }
 
+export interface OpenCodeSdkSpawnResult {
+  code: number;
+  stderr: string;
+}
+
 export interface ReconcileUpgradeOptions {
   home?: string;
   syncSkills?: () => Promise<{ synced: string[]; errors: string[] }>;
   verifyMcp?: () => Promise<{ ok: boolean }>;
   migrateStore?: () => Promise<{ ok: boolean; version?: number }>;
   reloadDaemons?: () => Promise<{ reloaded: string[] }>;
+  // Injected so the default installer, which spawns npm or bun, never runs
+  // in a test that only cares about the other reconcile steps.
+  ensureOpenCodeSdk?: () => Promise<void>;
   runDoctorCheck?: () => Promise<{ overall: string }>;
+  readSdkVersion?: () => Promise<string | undefined>;
+  which?: (bin: string) => string | null;
+  spawnInstaller?: (argv: readonly string[]) => Promise<OpenCodeSdkSpawnResult>;
+}
+
+// npm when it is on PATH; otherwise bun. Neither is an error, not a spawn.
+// Bun's `add` accepts `--ignore-scripts` (dependency scripts are never run;
+// project lifecycle scripts are skipped) and `--cwd`, so the spec lands in
+// the product home rather than the caller's cwd.
+export function selectOpenCodeSdkInstaller(input: {
+  npmPath: string | null;
+  bunPath: string | null;
+  layoutDir: string;
+}): readonly string[] {
+  const spec = `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION}`;
+  if (input.npmPath) {
+    return [
+      input.npmPath,
+      "install",
+      "--ignore-scripts",
+      "--no-fund",
+      "--no-audit",
+      "--prefix",
+      input.layoutDir,
+      spec,
+    ];
+  }
+  if (input.bunPath) {
+    return [
+      input.bunPath,
+      "add",
+      "--exact",
+      "--ignore-scripts",
+      "--cwd",
+      input.layoutDir,
+      spec,
+    ];
+  }
+  throw new Error(
+    "neither npm nor bun is on PATH. Run pr-hero upgrade --reconcile after installing npm or bun.",
+  );
+}
+
+function commandOnPath(bin: string | null | undefined): string | null {
+  if (typeof bin !== "string" || bin.trim() === "") return null;
+  return bin;
+}
+
+function spawnOpenCodeSdkInstaller(
+  argv: readonly string[],
+): Promise<OpenCodeSdkSpawnResult> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = spawn(argv[0] ?? "", argv.slice(1), {
+      shell: false,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    const chunks: Buffer[] = [];
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      if (chunks.length >= 8) return;
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      const stderr = Buffer.concat(chunks)
+        .toString("utf8")
+        .replaceAll("/$bunfs", "")
+        .trim()
+        .slice(0, 240);
+      resolve({ code: code ?? 1, stderr });
+    });
+  });
+}
+
+async function readReconcileRouting(
+  home: string,
+): Promise<RoutingConfig | undefined> {
+  const loaded = await loadGlobalConfigLayer(home);
+  return loaded.layer?.routing;
+}
+
+async function ensureOpenCodeSdkInstalled(options: {
+  home: string;
+  readSdkVersion?: () => Promise<string | undefined>;
+  which?: (bin: string) => string | null;
+  spawnInstaller?: (argv: readonly string[]) => Promise<OpenCodeSdkSpawnResult>;
+}): Promise<void> {
+  const routing = await readReconcileRouting(options.home);
+  if (!routingNeedsOpenCodeSdk(routing)) return;
+  const readSdkVersion =
+    options.readSdkVersion ?? readInstalledOpenCodeSdkVersion;
+  const installed = await readSdkVersion();
+  if (installed === SUPPORTED_OPENCODE_SDK_VERSION) return;
+  const which = options.which ?? ((bin: string) => Bun.which(bin));
+  const npmPath = commandOnPath(which("npm"));
+  const bunPath = npmPath === null ? commandOnPath(which("bun")) : null;
+  const argv = selectOpenCodeSdkInstaller({
+    npmPath,
+    bunPath,
+    layoutDir: prheroLayout(options.home).dir,
+  });
+  const spawnInstaller = options.spawnInstaller ?? spawnOpenCodeSdkInstaller;
+  const result = await spawnInstaller(argv);
+  if (result.code !== 0) {
+    throw new Error(
+      `Failed to install @opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION} ` +
+        `(exit ${result.code}). Run pr-hero upgrade --reconcile.`,
+    );
+  }
+  const after = await readSdkVersion();
+  if (after !== SUPPORTED_OPENCODE_SDK_VERSION) {
+    const observed =
+      typeof after === "string" && after.trim() !== ""
+        ? after.trim()
+        : "missing";
+    throw new Error(
+      `OpenCode SDK version "${observed}" after install; expected ` +
+        `"${SUPPORTED_OPENCODE_SDK_VERSION}". Run pr-hero upgrade --reconcile.`,
+    );
+  }
 }
 
 export async function reconcileUpgrade(
@@ -330,7 +472,24 @@ export async function reconcileUpgrade(
     }
   }
 
-  // 5. Doctor check
+  // 5. OpenCode SDK, after the daemon reload and before doctor, so the
+  // doctor step sees the install. A failure is reported and doctor still runs.
+  try {
+    if (options.ensureOpenCodeSdk) {
+      await options.ensureOpenCodeSdk();
+    } else {
+      await ensureOpenCodeSdkInstalled({
+        home,
+        readSdkVersion: options.readSdkVersion,
+        which: options.which,
+        spawnInstaller: options.spawnInstaller,
+      });
+    }
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  // 6. Doctor check
   if (options.runDoctorCheck) {
     try {
       const doc = await options.runDoctorCheck();
