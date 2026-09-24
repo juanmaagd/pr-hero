@@ -4520,3 +4520,15 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
     expect(outcome.toolInvocations).toBe(1);
   });
 });
+
+// #150: the OpenCode SDK transport must declare it does not consume the
+// harness's per-step credential projection — its server owns ONE
+// projection for the server's whole lifetime (#149), brokered before the
+// server ever launches, not a fresh one per step/attempt.
+describe("OpenCodeSdkTransport credentialProjection declaration (#150)", () => {
+  test("declares server-lifetime regardless of construction options", async () => {
+    const handle = makeClient({});
+    const transport = new OpenCodeSdkTransport({ client: handle.client });
+    expect(transport.credentialProjection).toBe("server-lifetime");
+  });
+});

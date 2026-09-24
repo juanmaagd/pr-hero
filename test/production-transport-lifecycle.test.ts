@@ -277,6 +277,12 @@ function wrapRegistryWithReleaseTracking(registry: DefaultTransportRegistry): {
 }
 
 class DestroyOrderBroker implements CredentialBroker {
+  // #150: observable proof that the harness's per-step projection call
+  // itself never happens for a transport declaring server-lifetime — not
+  // just that its destroy never fires (which merely follows from the
+  // projection never existing).
+  projectCalls = 0;
+
   constructor(
     private readonly inner: CredentialBroker,
     private readonly order: string[],
@@ -285,6 +291,7 @@ class DestroyOrderBroker implements CredentialBroker {
   async project(
     input: Parameters<CredentialBroker["project"]>[0],
   ): ReturnType<CredentialBroker["project"]> {
+    this.projectCalls++;
     const projection = await this.inner.project(input);
     const destroy = projection.destroy.bind(projection);
     return {
@@ -1566,7 +1573,18 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
       );
     });
 
-    test("opencode step teardown disposes stream then client then server before credential projection destroy", async () => {
+    // #150: this test used to be named "...before credential projection
+    // destroy" and asserted a FOURTH teardown step, "projection-destroy",
+    // after "server-close" — proving the harness materialized and destroyed
+    // a per-step credential projection for every OpenCode attempt. That
+    // projection had no consumer: `OpenCodeSdkTransport.execute` never read
+    // `request.isolation` (the server's own #149 projection is what
+    // actually protects it), so the harness now skips the per-step broker
+    // call entirely for a transport declaring `credentialProjection:
+    // "server-lifetime"`. The corrected expectation is the same three
+    // stream/client/server steps with NO fourth step, because no per-step
+    // projection was ever created to destroy.
+    test("opencode step teardown disposes stream then client then server, with no per-step credential projection to destroy", async () => {
       const teardownOrder: string[] = [];
       const mockClient: OpenCodeClientLike & { close(): Promise<void> } = {
         createSession: async () => ({ id: "sess-1" }),
@@ -1655,8 +1673,10 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
         "stream-disposed",
         "client-close",
         "server-close",
-        "projection-destroy",
       ]);
+      // #150: the broker's project() was never called for this step at all
+      // — not merely "called and its destroy landed last".
+      expect(broker.projectCalls).toBe(0);
     });
 
     test("transient retry through production runner persists one settlement receipt per attempt", async () => {

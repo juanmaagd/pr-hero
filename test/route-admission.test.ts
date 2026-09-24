@@ -782,4 +782,14 @@ describe("OpenCode transport factory derives usage billing mode from the credent
     // transport would stamp a mode its own default route contradicts.
     expect(openCodeTransportFor().usageBillingMode).toBe("subscription");
   });
+
+  // #150: the SAME real factory this describe block uses everywhere else —
+  // `DefaultTransportRegistry`'s registered "opencode" closure, which just
+  // `new`s an `OpenCodeSdkTransport` and returns it uncopied/unwrapped
+  // (transport-registry.ts `get()`). Proving the declaration survives THIS
+  // path, not only a bare `new OpenCodeSdkTransport(...)` in a unit test, is
+  // what rules out a future wrapper silently dropping the field.
+  test("the transport the production registry factory returns still declares server-lifetime", () => {
+    expect(openCodeTransportFor().credentialProjection).toBe("server-lifetime");
+  });
 });

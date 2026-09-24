@@ -215,6 +215,30 @@ export type TransportFailureCause =
   | "runtime_unavailable"
   | "remote_abort_unconfirmed";
 
+// #150 (built on #149's server-lifetime OpenCode credential fix). Declares
+// whether a `ProviderTransport` consumes `StepExecutionHarness.run`'s
+// per-STEP credential projection — the one `credentialBroker.project()`
+// materializes, writes to disk, and destroys once per attempt, and hands
+// the transport as `TransportRequest.isolation` (harness.ts ~728-808).
+//
+// "per-step" (or the field left undeclared) means "yes, this transport
+// reads `request.isolation.env`/`verifiedBinaryPath`, so keep projecting" —
+// today's only behaviour, and the FAIL-SAFE default: a transport nobody
+// updated to declare itself still gets protected credentials rather than
+// silently running on whatever `buildChildEnv` passes through.
+//
+// "server-lifetime" means the transport's OWN process already owns
+// credential protection for its whole run, independent of any one step
+// (the OpenCode SDK transport's server, launched once and brokered by
+// `OpenCodeAuthBroker`/`OpenCodeFreeBroker` per #149) — it never reads
+// `isolation` at all. Declaring it lets the harness skip the per-step
+// projection for that transport entirely: no broker call, no auth file
+// written and destroyed for nothing, and no `missing_subscription_record`
+// degrade warning for a projection that was never attempted (#150's
+// finding: that projection had no consumer and its absence was mislabeled
+// as an "operator-env-fallback", implying a degrade that never happened).
+export type CredentialProjectionConsumption = "per-step" | "server-lifetime";
+
 export interface ProviderTransport {
   readonly backend: RunnerBackend;
   readonly billingMode?: UsageBillingMode;
@@ -223,6 +247,12 @@ export interface ProviderTransport {
     readonly provider: string;
   };
   readonly cancellationSemantics?: "process-exit" | "provider-proof";
+  // #150: absent = "per-step" (fail-safe default, see
+  // `CredentialProjectionConsumption` above). A FUTURE transport that starts
+  // reading `isolation.env` must declare "per-step" explicitly or it would
+  // silently run unprotected the moment some OTHER transport's declaration
+  // taught the harness to skip.
+  readonly credentialProjection?: CredentialProjectionConsumption;
   readonly defaultRoute?: ResolvedModelRoute;
   capabilities(): Promise<ProviderCapabilityReport>;
   execute(
