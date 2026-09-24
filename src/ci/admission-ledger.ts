@@ -32,10 +32,16 @@ export interface AdmissionRecord {
   settledAt: string | null;
 }
 
+// #164, Juanma 2026-09-01: a cancelled run posted nothing, so it must not
+// spend one of the PR's review attempts. `"cancelled"` stays a real status
+// (the signal handler settles to it) and stays OUT of this set. Putting it
+// back would make the settlement a no-op on the budget half of the issue.
+// `"provider-started"` stays in: a record still armed that way is a run that
+// never settled, and counting it is what makes an abandoned reservation
+// visible until the handler writes `"cancelled"`.
 const TERMINAL_BUDGET_STATUSES: ReadonlySet<AdmissionAttemptStatus> = new Set([
   "completed",
   "failed",
-  "cancelled",
   "provider-started",
   "skipped",
 ]);

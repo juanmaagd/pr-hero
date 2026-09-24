@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0] - 2026-09-04
+### Changed
+- **Renumbered releases to 0.x**: `1.0.0` is now `0.1.0` and `1.1.0` is now `0.1.1` — the public API
+  (CLI surface, config schema, GitHub Actions contract) is not yet stable, and the `1.x` numbering
+  overstated that. The floating Action tag moves from `@v1` to `@v0`. The `v1` tag itself stays
+  **frozen** at the last 1.x release so existing `uses: juanmaagd/pr-hero@v1` workflows keep resolving
+  exactly what they always have — they simply receive no further updates. New and existing repos should
+  migrate to `@v0`.
+- **Release guard**: `.github/workflows/release.yml` now fails fast, before building anything, when the
+  pushed tag's version does not match `package.json`'s `version` — see `docs/release-runbook.md`.
+
+## [0.1.1] - 2026-09-04
 
 ### Added
 
@@ -33,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Install Script Shell PATH Guidance**: Updated `install.sh` to explicitly instruct operators on exporting `$HOME/.prhero/bin` in the current shell session, preventing `command not found` on fresh installs.
 - **Floating Tag Prerelease Exclusion**: Restricted floating major tag updates to stable semantic releases (`^v[0-9]+\.[0-9]+\.[0-9]+$`), preventing `-beta` or `-rc` builds from moving production tags.
 
-## [1.0.0] - 2026-08-25
+## [0.1.0] - 2026-08-25
 
 ### Added
 
@@ -84,11 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Activity & Run Monitor (`pr-hero activity`)**: Live dashboard showing in-flight review processes, elapsed execution time, PID management, safe process termination (`--kill <pid>`), daily watcher spend tracking, and recent run history.
 
 #### GitHub Actions CI Integration (Pillar 3)
-- **Official Composite Action (`action.yml`)**: Reusable GitHub Action referenced via `@v1` for automated pull request code reviews on `ubuntu-latest` and `macos-latest`.
+- **Official Composite Action (`action.yml`)**: Reusable GitHub Action referenced via `@v0` for automated pull request code reviews on `ubuntu-latest` and `macos-latest`.
 - **CI Step Summary & Outputs**: Markdown summary output formatted for `$GITHUB_STEP_SUMMARY` and machine-readable Action step outputs (`status`, `findings-count`, `blocking-count`, `advisory-count`, `cost-usd-est`, `run-dir`).
 - **Spend & Size Safety Gates**: Automated budget guards (`max-changed-lines`, `max-changed-files`, `budget-usd`) skipping oversized or cost-prohibitive PRs cleanly with explicit skip status annotations.
 - **CI Automated Scaffolding**: `pr-hero setup --ci` and `pr-hero ci init` commands generating byte-accurate `.github/workflows/pr-hero.yml` configurations, complemented by the `pr-hero-ci-setup` agent skill.
 
-[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/juanmaagd/pr-hero/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.0.0
+[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/juanmaagd/pr-hero/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/juanmaagd/pr-hero/releases/tag/v0.1.0

@@ -70,6 +70,52 @@ const TERMINAL_ADMISSION_STATUSES: ReadonlySet<AdmissionAttemptStatus> =
 // review shells call this from several exits (and teardown's finally), and
 // a later call must not overwrite an earlier `completed` with `failed`.
 // `spawnFn` is the gh boundary for offline tests; production omits it.
+// Same shape as the commit-status lock in status.ts, and for the same reason:
+// the SIGTERM/SIGINT handlers live in runCli and end in process.exit(), which
+// skips reviewPr's finally. A cancel-in-progress run otherwise leaves its
+// ledger row at "provider-started" forever, and that status both counts as a
+// spent attempt and blocks the next reservation (#164).
+let heldAdmission: CiAdmissionLedgerState | null = null;
+
+export function holdCiAdmissionLedger(
+  state: CiAdmissionLedgerState | null,
+): void {
+  heldAdmission = state;
+}
+
+export function releaseCiAdmissionLedger(): void {
+  heldAdmission = null;
+}
+
+// Take-and-clear BEFORE the await. Actions sends SIGINT and then SIGTERM
+// inside the grace window, so both handlers can be in flight; the second
+// must see nothing left to settle. A row that already reached a terminal
+// status (completed, failed, skipped, cancelled) is left alone —
+// settleCiAdmissionLedger's own guard. Every error is swallowed: failing to
+// settle is the old bug, and a throw here would cost the exit code.
+export async function settleHeldAdmissionLedgerOnSignal(
+  settle: typeof settleCiAdmissionLedger = settleCiAdmissionLedger,
+): Promise<void> {
+  const state = heldAdmission;
+  heldAdmission = null;
+  if (state === null) return;
+  if (
+    state.record.status !== "reserved" &&
+    state.record.status !== "provider-started"
+  ) {
+    return;
+  }
+  try {
+    await settle(
+      state,
+      "cancelled",
+      "workflow cancelled before the review produced anything",
+    );
+  } catch {
+    // Ignore
+  }
+}
+
 export async function settleCiAdmissionLedger(
   state: CiAdmissionLedgerState | null,
   status: AdmissionAttemptStatus,

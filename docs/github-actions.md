@@ -10,7 +10,7 @@ merge on its own findings.
    `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Pick one — never both blank. Leave OpenCode unset:
    that is today's Claude CI.
 2. **Add the workflow files.** Run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your repo.
-   That writes two consumer templates (`uses: juanmaagd/pr-hero@v1`): `.github/workflows/pr-hero.yml`
+   That writes two consumer templates (`uses: juanmaagd/pr-hero@v0`): `.github/workflows/pr-hero.yml`
    (automatic, on each push) and `.github/workflows/pr-hero-force.yml` (manual dispatch, always
    `--force`). Do **not** copy this repository's
    own `.github/workflows/pr-hero.yml`: that file is generated with `OWN_CI_WORKFLOW_OPTIONS` so this
@@ -71,7 +71,7 @@ jobs:
           fetch-depth: 0 # see "Why fetch-depth: 0" below
       - name: Run pr-hero
         id: pr-hero
-        uses: juanmaagd/pr-hero@v1
+        uses: juanmaagd/pr-hero@v0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -277,10 +277,14 @@ instead of failing. Fork PRs skip without that notice — they never receive sec
 every fork would be noise.
 
 ### Action version pinning
-The default workflow targets the floating major tag `uses: juanmaagd/pr-hero@v1` to automatically receive backward-compatible bug fixes and optimizations. If your organization enforces strict immutable SHA pinning, you can pin the full commit SHA directly:
+The default workflow targets the floating major tag `uses: juanmaagd/pr-hero@v0`, which moves to every new 0.x release. While the major version is 0, a minor release may include breaking changes to the Action contract (see the pre-1.0 semantics in `docs/release-runbook.md`), so `@v0` is not a compatibility guarantee: read `CHANGELOG.md` before a new 0.x minor lands, or pin an exact tag or SHA. If your organization enforces strict immutable SHA pinning, you can pin the full commit SHA directly:
 ```yaml
-- uses: juanmaagd/pr-hero@aff0324cd8c6a0c5fbf97ddbf3e6d234c9c612e4 # v1.0.0
+- uses: juanmaagd/pr-hero@aff0324cd8c6a0c5fbf97ddbf3e6d234c9c612e4 # v0.1.0
 ```
+
+`@v1` still exists and is frozen at the last 1.x release (versions were renumbered to 0.x because the
+API is not yet stable — see `CHANGELOG.md`): existing workflows pinned to `@v1` keep working exactly as
+they are today, but receive no further updates. New workflows should target `@v0`.
 
 ## Spend controls
 
