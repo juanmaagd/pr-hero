@@ -4,12 +4,16 @@
 // main() and runCli() (~325 lines). Two invariants keep it there:
 // 1. Function census: cli.ts must ONLY declare the 2 canonical functions (main, runCli).
 //    All new functions must live in their domain modules.
-// 2. Per-function size limit on extracted domain modules: no function exceeds 300 lines.
+// 2. Per-function size limit on cli.ts and the extracted domain modules: no
+//    function exceeds 300 lines.
 //
-// A line-count ceiling used to sit beside these. It ratcheted the refactor down
-// while it was in progress; once cli.ts held only main() and runCli() it guarded
-// nothing the census does not, and it failed on legitimate wiring (one import
-// plus a call in each signal handler, 19b71c4). The census is the guard.
+// A whole-file line ceiling used to sit beside these. It ratcheted the refactor
+// down while it was in progress, but pinned at the exact post-refactor count it
+// failed on legitimate wiring (one import plus a call in each signal handler,
+// 19b71c4). The census alone does not replace it: it checks names, not size, so
+// main() and runCli() could regrow inline. That is why cli.ts is also swept by
+// the per-function guard below — together they bound cli.ts to two functions
+// of at most 300 lines each.
 
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -79,6 +83,9 @@ describe("per-function size guard on extracted modules", () => {
   // in automatically below via the commands/ directory scan, and passes at
   // ~110 lines with no exemption needed.
   const EXTRACTED_MODULES = [
+    // Not extracted, but the census leaves main()/runCli() free to regrow
+    // inline; this bounds them now that the whole-file ceiling is gone.
+    "src/cli.ts",
     "src/git/git.ts",
     "src/git/identity.ts",
     "src/ui/plan.ts",
