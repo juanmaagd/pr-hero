@@ -26,6 +26,18 @@ export class OpenCodeSdkUnavailableError extends Error {
     this.name = "OpenCodeSdkUnavailableError";
   }
 }
+
+// ONE sentence for every "the SDK is not resolvable" throw: the loader and
+// the admission absence check. A version literal, not an interpolated
+// missing value — the operator-facing text must name the pin and must not
+// print the word "undefined". The transport test locks this sentence to
+// SUPPORTED_OPENCODE_SDK_VERSION so the two pins cannot drift.
+export function openCodeSdkUnavailableMessage(): string {
+  return (
+    "@opencode-ai/sdk@1.18.25 is not installed under ~/.prhero/node_modules. " +
+    "Run pr-hero upgrade --reconcile to install it."
+  );
+}
 export interface OpenCodeExecutableIdentity {
   readonly absolutePath: string;
   readonly verifiedExecutionPath: string;
@@ -277,12 +289,7 @@ export async function observeOpenCodeExecutable(
     // "Unsupported observed OpenCode pair: undefined/1.18.30" for every
     // compiled-binary install and made doctor report it as blocking.
     if (typeof sdkVersion !== "string" || sdkVersion.trim() === "")
-      throw new OpenCodeSdkUnavailableError(
-        "@opencode-ai/sdk is not resolvable from this installation " +
-          "(e.g. a compiled binary run without its node_modules), so the " +
-          "OpenCode transport cannot be admitted. Claude routes are " +
-          "unaffected.",
-      );
+      throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
     if (sdkVersion !== "1.18.25" || serverVersion !== "1.18.30")
       throw new Error(
         `Unsupported observed OpenCode pair: ${sdkVersion}/${serverVersion}`,

@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { capabilityGateDecision } from "#model/provider-capabilities";
 import type { ResolvedRoutePlan, ResolvedStepRoute } from "#model/routing";
+import { type AssetMode, detectAssetMode } from "./assets";
 // Route-keyed transport factory/cache: one ProviderTransport instance per
 // `${backend}:${routeFingerprint}`. `release()` drops a lease; teardown order
 // inside OpenCodeSdkTransport is stream → client.close → server (harness owns
@@ -13,6 +17,7 @@ import type {
   RunnerBackend,
 } from "./execution/contracts";
 import type { UsageBillingMode } from "./execution/usage-normalized";
+import { prheroLayout } from "./home-preflight";
 import { credentialKindBillsMetered } from "./runner-authority";
 import {
   type CredentialBroker,
@@ -22,6 +27,8 @@ import { redactDiagnostic } from "./security/redact";
 import { ClaudeCodeCliTransport } from "./transports/claude-code-cli";
 import {
   type OpenCodeObservedIdentity,
+  OpenCodeSdkUnavailableError,
+  openCodeSdkUnavailableMessage,
   qualifyOpenCodeServer,
 } from "./transports/opencode-admission";
 import {
@@ -39,6 +46,196 @@ import {
   type OpenCodeServerHandle,
 } from "./transports/opencode-server";
 
+const OPENCODE_SDK_PACKAGE_SPECIFIER = "@opencode-ai/sdk/package.json";
+const OPENCODE_SDK_V2_SPECIFIER = "@opencode-ai/sdk/v2";
+
+function openCodeSdkPackageJsonPath(nodeModulesDir: string): string {
+  return path.join(nodeModulesDir, "@opencode-ai", "sdk", "package.json");
+}
+
+export interface OpenCodeSdkPackageMetadata {
+  version?: string;
+  exports?: unknown;
+}
+
+export interface OpenCodeSdkLoadOptions {
+  importPackage?: () => Promise<OpenCodeSdkPackageMetadata>;
+  importSdk?: () => Promise<unknown>;
+  // Injected so a test can fail the bare specifier and serve the home tree.
+  importSpecifier?: (specifier: string) => Promise<unknown>;
+  // Injected so `bun test` (always `dev`) can exercise the compiled branch.
+  // Absent mode is the only path that calls detectAssetMode().
+  mode?: AssetMode;
+  nodeModulesDir?: string;
+}
+
+export interface OpenCodeSdkImportPlan {
+  readonly packageSpecifier: string;
+  readonly v2Specifier: string | undefined;
+  readonly packageJsonPath: string | undefined;
+}
+
+type DynamicImport = (specifier: string) => Promise<unknown>;
+
+function createDynamicImport(): DynamicImport {
+  return new Function("specifier", "return import(specifier)") as DynamicImport;
+}
+
+function resolveOpenCodeSdkLocation(options?: {
+  mode?: AssetMode;
+  nodeModulesDir?: string;
+}): { mode: AssetMode; nodeModulesDir: string } {
+  return {
+    mode: options?.mode ?? detectAssetMode(),
+    nodeModulesDir:
+      options?.nodeModulesDir ?? prheroLayout(os.homedir()).nodeModulesDir,
+  };
+}
+
+// Dev and npm keep bare specifiers. A compiled binary has no node_modules
+// inside /$bunfs, so the package.json path is the product home and the v2
+// entry is read from that file's exports — never a hardcoded dist path.
+export function planOpenCodeSdkImport(input: {
+  mode: AssetMode;
+  nodeModulesDir: string;
+}): OpenCodeSdkImportPlan {
+  if (input.mode !== "compiled") {
+    return {
+      packageSpecifier: OPENCODE_SDK_PACKAGE_SPECIFIER,
+      v2Specifier: OPENCODE_SDK_V2_SPECIFIER,
+      packageJsonPath: undefined,
+    };
+  }
+  const packageJsonPath = openCodeSdkPackageJsonPath(input.nodeModulesDir);
+  return {
+    packageSpecifier: pathToFileURL(packageJsonPath).href,
+    v2Specifier: undefined,
+    packageJsonPath,
+  };
+}
+
+function asPackageJson(module: unknown): OpenCodeSdkPackageMetadata {
+  if (typeof module !== "object" || module === null) return {};
+  const record = module as OpenCodeSdkPackageMetadata & { default?: unknown };
+  if (typeof record.version === "string" || record.exports !== undefined) {
+    return record;
+  }
+  if (typeof record.default === "object" && record.default !== null) {
+    return record.default as OpenCodeSdkPackageMetadata;
+  }
+  return record;
+}
+
+function normalizeSdkVersion(version: unknown): string | undefined {
+  if (typeof version !== "string") return undefined;
+  const trimmed = version.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+// `exports["./v2"]` is either a relative string or `{ import: relative }`.
+// Resolved against the package directory, then imported as a file URL.
+export function resolveOpenCodeSdkV2Entry(
+  packageJson: { exports?: unknown },
+  packageDir: string,
+): string {
+  const relative = readOpenCodeV2Export(packageJson.exports);
+  if (relative === undefined) {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+  return pathToFileURL(path.resolve(packageDir, relative)).href;
+}
+
+function readOpenCodeV2Export(exportsField: unknown): string | undefined {
+  if (
+    typeof exportsField !== "object" ||
+    exportsField === null ||
+    Array.isArray(exportsField)
+  ) {
+    return undefined;
+  }
+  const v2 = (exportsField as Record<string, unknown>)["./v2"];
+  if (typeof v2 === "string" && v2.trim() !== "") return v2;
+  if (typeof v2 === "object" && v2 !== null && !Array.isArray(v2)) {
+    const entry = (v2 as Record<string, unknown>).import;
+    if (typeof entry === "string" && entry.trim() !== "") return entry;
+  }
+  return undefined;
+}
+
+interface LoadedOpenCodeSdkPackage {
+  version: unknown;
+  packageJson: OpenCodeSdkPackageMetadata;
+  packageDir: string;
+  plan: OpenCodeSdkImportPlan;
+}
+
+async function readPackageJsonAt(packageJsonPath: string): Promise<unknown> {
+  let text: string;
+  try {
+    text = await readFile(packageJsonPath, "utf8");
+  } catch (error) {
+    if (error instanceof OpenCodeSdkUnavailableError) throw error;
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+}
+
+// Shared by the loader and the version reader so a compiled binary and
+// doctor observe the same install.
+async function readOpenCodeSdkPackage(
+  options: OpenCodeSdkLoadOptions | undefined,
+  dynamicImport: DynamicImport,
+): Promise<LoadedOpenCodeSdkPackage> {
+  const location = resolveOpenCodeSdkLocation(options);
+  let plan = planOpenCodeSdkImport(location);
+  const importSpecifier = options?.importSpecifier ?? dynamicImport;
+  let raw: unknown;
+  // Reconcile writes the pin under the product home in every asset mode.
+  // Dev and npm still try the bare specifier first, so a checkout or a
+  // global install wins. A known package.json is read from disk: import()
+  // caches a file URL for the process, so the post-install read would keep
+  // the pre-install version after npm overwrites the file.
+  if (options?.importPackage) {
+    try {
+      raw = await options.importPackage();
+    } catch (error) {
+      if (error instanceof OpenCodeSdkUnavailableError) throw error;
+      throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+    }
+  } else if (plan.packageJsonPath !== undefined) {
+    raw = await readPackageJsonAt(plan.packageJsonPath);
+  } else {
+    try {
+      raw = await importSpecifier(plan.packageSpecifier);
+    } catch (error) {
+      if (error instanceof OpenCodeSdkUnavailableError) throw error;
+      const packageJsonPath = openCodeSdkPackageJsonPath(
+        location.nodeModulesDir,
+      );
+      raw = await readPackageJsonAt(packageJsonPath);
+      plan = {
+        packageSpecifier: pathToFileURL(packageJsonPath).href,
+        v2Specifier: undefined,
+        packageJsonPath,
+      };
+    }
+  }
+  const packageJson = asPackageJson(raw);
+  return {
+    version: packageJson.version,
+    packageJson,
+    packageDir:
+      plan.packageJsonPath !== undefined
+        ? path.dirname(plan.packageJsonPath)
+        : "",
+    plan,
+  };
+}
+
 // ONE loader for both consumers (the transport factory and probeOpenCodeSdk),
 // so the probe proves exactly what the factory will get. `new Function` keeps
 // the import out of the static graph — the SDK is an OPTIONAL dependency and
@@ -46,52 +243,48 @@ import {
 // now validated instead of `as unknown as OpenCodeSdkLike`-cast. That cast was
 // the root cause of issue #121: it silenced the only compiler check that could
 // have noticed the local interface named a factory the SDK does not export.
-export async function loadOpenCodeSdk(options?: {
-  importPackage?: () => Promise<{ version?: string }>;
-  importSdk?: () => Promise<unknown>;
-}): Promise<OpenCodeSdkLike> {
-  const dynamicImport = new Function("specifier", "return import(specifier)");
-  let sdkPackage: { version?: string } | undefined;
-  try {
-    sdkPackage = options?.importPackage
-      ? await options.importPackage()
-      : ((await dynamicImport("@opencode-ai/sdk/package.json")) as {
-          version?: string;
-        });
-  } catch {
-    // If package metadata cannot be read directly, check below throws
+export async function loadOpenCodeSdk(
+  options?: OpenCodeSdkLoadOptions,
+): Promise<OpenCodeSdkLike> {
+  const dynamicImport = createDynamicImport();
+  const loaded = await readOpenCodeSdkPackage(options, dynamicImport);
+  const installedVersion = normalizeSdkVersion(loaded.version);
+  if (installedVersion === undefined) {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
   }
-  const installedVersion = sdkPackage?.version;
-  if (
-    typeof installedVersion !== "string" ||
-    installedVersion.trim() === "" ||
-    installedVersion !== SUPPORTED_OPENCODE_SDK_VERSION
-  ) {
+  if (installedVersion !== SUPPORTED_OPENCODE_SDK_VERSION) {
     throw new OpenCodeVersionAdmissionError(
       `Unsupported OpenCode SDK version "${installedVersion}". Expected exact version "${SUPPORTED_OPENCODE_SDK_VERSION}".`,
     );
   }
-  const sdkModule = options?.importSdk
-    ? await options.importSdk()
-    : await dynamicImport("@opencode-ai/sdk/v2");
+  if (options?.importSdk) {
+    return assertOpenCodeSdk(await options.importSdk());
+  }
+  const v2Specifier =
+    loaded.plan.v2Specifier ??
+    resolveOpenCodeSdkV2Entry(loaded.packageJson, loaded.packageDir);
+  let sdkModule: unknown;
+  try {
+    sdkModule = await dynamicImport(v2Specifier);
+  } catch (error) {
+    if (error instanceof OpenCodeSdkUnavailableError) throw error;
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
   return assertOpenCodeSdk(sdkModule);
 }
 
-export async function readInstalledOpenCodeSdkVersion(): Promise<
-  string | undefined
-> {
-  const dynamicImport = new Function("specifier", "return import(specifier)");
+export async function readInstalledOpenCodeSdkVersion(options?: {
+  mode?: AssetMode;
+  nodeModulesDir?: string;
+  importPackage?: OpenCodeSdkLoadOptions["importPackage"];
+  importSpecifier?: OpenCodeSdkLoadOptions["importSpecifier"];
+}): Promise<string | undefined> {
   try {
-    const pkg = (await dynamicImport("@opencode-ai/sdk/package.json")) as {
-      version?: string;
-    };
-    if (typeof pkg?.version === "string" && pkg.version.trim() !== "") {
-      return pkg.version.trim();
-    }
+    const loaded = await readOpenCodeSdkPackage(options, createDynamicImport());
+    return normalizeSdkVersion(loaded.version);
   } catch {
-    // SDK not installed or unreadable
+    return undefined;
   }
-  return undefined;
 }
 
 export class RouteAdmissionError extends Error {}

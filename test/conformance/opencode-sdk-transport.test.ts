@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   type BenchmarkRunRecord,
   computeQualifiedBenchmarkMetrics,
@@ -1941,16 +1945,34 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
     ).toThrow(OpenCodeVersionAdmissionError);
   });
 
-  test("loadOpenCodeSdk rejects missing package metadata or unsupported SDK versions", async () => {
-    const { loadOpenCodeSdk, OpenCodeVersionAdmissionError } = await import(
-      "../../src/transport-registry"
+  test("loadOpenCodeSdk rejects a missing SDK as unavailable and a real mismatch as a version error", async () => {
+    const {
+      loadOpenCodeSdk,
+      OpenCodeVersionAdmissionError,
+      SUPPORTED_OPENCODE_SDK_VERSION,
+    } = await import("../../src/transport-registry");
+    const { OpenCodeSdkUnavailableError, openCodeSdkUnavailableMessage } =
+      await import("../../src/transports/opencode-admission");
+    const unavailable = openCodeSdkUnavailableMessage();
+    expect(unavailable).toContain(
+      `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION}`,
     );
+    expect(unavailable).toContain("pr-hero upgrade --reconcile");
+    expect(unavailable).toContain("~/.prhero/node_modules");
+    expect(unavailable).not.toContain("/$bunfs");
+    expect(unavailable).not.toContain("undefined");
 
     await expect(
       loadOpenCodeSdk({
         importPackage: async () => ({ version: undefined }),
       }),
-    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+    ).rejects.toThrow(OpenCodeSdkUnavailableError);
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => ({ version: "   " }),
+      }),
+    ).rejects.toThrow(OpenCodeSdkUnavailableError);
 
     await expect(
       loadOpenCodeSdk({
@@ -1958,13 +1980,197 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
           throw new Error("package.json not found");
         },
       }),
-    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+    ).rejects.toThrow(OpenCodeSdkUnavailableError);
 
-    await expect(
-      loadOpenCodeSdk({
-        importPackage: async () => ({ version: "1.18.26" }),
-      }),
-    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+    const missing = await loadOpenCodeSdk({
+      importPackage: async () => {
+        throw new Error("package.json not found");
+      },
+    }).then(
+      () => {
+        throw new Error("expected the missing package to throw");
+      },
+      (error: unknown) => error,
+    );
+    expect(missing).toBeInstanceOf(OpenCodeSdkUnavailableError);
+    expect((missing as Error).message).toBe(unavailable);
+
+    const mismatched = await loadOpenCodeSdk({
+      importPackage: async () => ({ version: "1.18.26" }),
+    }).then(
+      () => {
+        throw new Error("expected the mismatched version to throw");
+      },
+      (error: unknown) => error,
+    );
+    expect(mismatched).toBeInstanceOf(OpenCodeVersionAdmissionError);
+    expect((mismatched as Error).message).toContain("1.18.26");
+    expect((mismatched as Error).message).not.toContain("undefined");
+  });
+});
+
+describe("OpenCode SDK import plan", () => {
+  test("compiled plan reads the product-home package.json and its v2 export; dev and npm stay bare", async () => {
+    const { planOpenCodeSdkImport, resolveOpenCodeSdkV2Entry } = await import(
+      "../../src/transport-registry"
+    );
+    const nodeModulesDir = "/Users/x/.prhero/node_modules";
+    const compiled = planOpenCodeSdkImport({
+      mode: "compiled",
+      nodeModulesDir,
+    });
+    const packageJsonPath = path.join(
+      nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+      "package.json",
+    );
+    expect(compiled.packageJsonPath).toBe(packageJsonPath);
+    expect(compiled.packageSpecifier).toBe(pathToFileURL(packageJsonPath).href);
+    expect(compiled.v2Specifier).toBeUndefined();
+
+    const packageDir = path.dirname(packageJsonPath);
+    const v2 = resolveOpenCodeSdkV2Entry(
+      { exports: { "./v2": { import: "./dist/v2/index.js" } } },
+      packageDir,
+    );
+    expect(fileURLToPath(v2)).toBe(
+      path.join(packageDir, "dist", "v2", "index.js"),
+    );
+    const v2String = resolveOpenCodeSdkV2Entry(
+      { exports: { "./v2": "./dist/v2/index.js" } },
+      packageDir,
+    );
+    expect(fileURLToPath(v2String)).toBe(
+      path.join(packageDir, "dist", "v2", "index.js"),
+    );
+
+    for (const mode of ["dev", "npm"] as const) {
+      const plan = planOpenCodeSdkImport({ mode, nodeModulesDir });
+      expect(plan.packageSpecifier).toBe("@opencode-ai/sdk/package.json");
+      expect(plan.v2Specifier).toBe("@opencode-ai/sdk/v2");
+      expect(plan.packageJsonPath).toBeUndefined();
+    }
+  });
+
+  test("compiled mode loads the v2 entry named by the installed package.json", async () => {
+    const { loadOpenCodeSdk, readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-plan-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageDir = path.join(nodeModulesDir, "@opencode-ai", "sdk");
+    const v2Dir = path.join(packageDir, "dist", "v2");
+    try {
+      await mkdir(v2Dir, { recursive: true });
+      await writeFile(
+        path.join(packageDir, "package.json"),
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2": { import: "./dist/v2/index.js" } },
+        }),
+      );
+      await writeFile(
+        path.join(v2Dir, "index.js"),
+        "export function createOpencodeClient() { return { ok: true }; }\n",
+      );
+
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.18.25");
+      const sdk = await loadOpenCodeSdk({ mode: "compiled", nodeModulesDir });
+      expect(typeof sdk.createOpencodeClient).toBe("function");
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir: path.join(root, "missing"),
+        }),
+      ).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dev mode uses the product home when the bare specifier is missing", async () => {
+    const { loadOpenCodeSdk, readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-fallback-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageDir = path.join(nodeModulesDir, "@opencode-ai", "sdk");
+    const packageJsonPath = path.join(packageDir, "package.json");
+    const v2File = path.join(packageDir, "dist", "v2", "index.js");
+    try {
+      await mkdir(path.dirname(v2File), { recursive: true });
+      await writeFile(
+        packageJsonPath,
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2": { import: "./dist/v2/index.js" } },
+        }),
+      );
+      await writeFile(
+        v2File,
+        "export function createOpencodeClient() { return { ok: true }; }\n",
+      );
+      const importSpecifier = async (specifier: string): Promise<unknown> => {
+        if (specifier.startsWith("@opencode-ai/")) {
+          throw new Error(`Cannot find module '${specifier}'`);
+        }
+        return import(specifier);
+      };
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "dev",
+          nodeModulesDir,
+          importSpecifier,
+        }),
+      ).toBe("1.18.25");
+      const sdk = await loadOpenCodeSdk({
+        mode: "npm",
+        nodeModulesDir,
+        importSpecifier,
+      });
+      expect(typeof sdk.createOpencodeClient).toBe("function");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a second read sees a package.json the installer overwrote", async () => {
+    const { readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-overwrite-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageJsonPath = path.join(
+      nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+      "package.json",
+    );
+    try {
+      await mkdir(path.dirname(packageJsonPath), { recursive: true });
+      await writeFile(packageJsonPath, JSON.stringify({ version: "1.0.0" }));
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.0.0");
+      await writeFile(packageJsonPath, JSON.stringify({ version: "1.18.25" }));
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.18.25");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
