@@ -516,6 +516,24 @@ export class StepExecutionHarness implements StepRunner {
     // `spendLedger`-configuring caller reserving unconditionally.
     this.reservesSpend = options.reservesSpend ?? true;
     this.degradedProjectionBucketId = options.degradedProjectionBucketId;
+    // #279 (pr-hero review follow-up): a `reservesSpend: false` binding
+    // with a `spendLedger` but NO `degradedProjectionBucketId` used to fall
+    // back, SILENTLY, to `rateLimitBucketId` when a degraded reservation
+    // opened — exactly the binding's OWN (e.g. subscription) bucket the
+    // whole design exists to avoid fencing (see the WHY on the reserve call
+    // in `runAttempt`). Dead in production today (production-runtime.ts
+    // always computes and passes `degradedMeteredBucketId`), but a landmine
+    // for any other caller. Fail LOUD at construction instead of ever
+    // reaching that fallback at runtime: this shape cannot be built.
+    if (
+      this.spendLedger !== undefined &&
+      this.reservesSpend === false &&
+      this.degradedProjectionBucketId === undefined
+    ) {
+      throw new Error(
+        "StepExecutionHarness: reservesSpend:false with a spendLedger configured requires degradedProjectionBucketId — without it, a degraded-projection reservation has no safe bucket to fence (#279)",
+      );
+    }
     this.attemptAdmissionTimeoutMs =
       options.attemptAdmissionTimeoutMs ?? DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS;
     this.credentialProjectionTimeoutMs =
@@ -840,19 +858,6 @@ export class StepExecutionHarness implements StepRunner {
     // doubles as that signal here — every OTHER projection failure returns
     // early above and never reaches this line.
     const projectionDegraded = projectionWarning !== undefined;
-    if (
-      projectionDegraded &&
-      this.spendLedger !== undefined &&
-      !this.reservesSpend &&
-      envBillsMetered(childEnv)
-    ) {
-      // The SAME predicate usage filing applies to this SAME env
-      // (`claudeCliCostBasis` -> `envBillsMetered`, claude-code-cli.ts), so
-      // this note and the usage record it is about to file can never
-      // disagree about whether this attempt paid. Stated on the result,
-      // never silent (spec: "the degraded attempt was fenced as metered").
-      projectionWarning = `${projectionWarning}; ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed`;
-    }
 
     try {
       const result = await this.admitAndExecute({
@@ -887,6 +892,30 @@ export class StepExecutionHarness implements StepRunner {
       );
       if (projectionWarning !== undefined) {
         result.stderrTail = `${result.stderrTail}\n[pr-hero] ${projectionWarning}`;
+      }
+      // #279 (pr-hero review follow-up): a metered-accounting CLAIM, so it
+      // must only be made once a reservation ACTUALLY opened — never from
+      // `projectionDegraded` alone, which is true before `admitAndExecute`
+      // ever runs an attempt. An early return above it (system-prompt-too-
+      // large, unreadable system prompt — `admitAndExecute`'s own guards)
+      // carries `attempts: 0` and no `reservations` at all; asserting "this
+      // attempt reserves..." there would describe a reservation that never
+      // happened. `result.reservations` is the exact signal: `admitAndExecute`
+      // populates it ONLY by pushing `attemptResult.reservation`, i.e. only
+      // once `spendLedger.reserve()` actually returned a reservation object
+      // — the fenced-on-arrival case (`SpendReservationFencedError`, thrown
+      // INSIDE `reserve()` before it returns one) leaves this empty too,
+      // which is correct: nothing NEW was reserved there either.
+      // `projectionDegraded` is kept as an explicit guard even though a
+      // non-empty `reservations` on a `reservesSpend: false` binding already
+      // implies it (`runAttempt`'s reserve gate) — stated here rather than
+      // relying on that invariant silently holding.
+      if (
+        projectionDegraded &&
+        result.reservations !== undefined &&
+        result.reservations.length > 0
+      ) {
+        result.stderrTail = `${result.stderrTail}\n[pr-hero] ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed`;
       }
       return result;
     } catch (error) {
@@ -1796,24 +1825,30 @@ export class StepExecutionHarness implements StepRunner {
       // presence is what forces the subscription kind in the first place).
       const degradedAmbientSpend =
         projectionDegraded && envBillsMetered(request.isolation.env);
+      // #279: a degraded-only reservation (the binding itself does not
+      // reserve) fences the credential that ACTUALLY incurred the spend —
+      // the ambient key/token, via `degradedProjectionBucketId` (the bucket
+      // a METERED binding of this SAME provider+credential would compute,
+      // production-runtime.ts) — never this binding's own subscription
+      // bucket. Fencing the subscription bucket would block the NEXT
+      // non-degraded attempt on the SAME OAuth credential over dollars that
+      // credential never spent. NO fallback to `rateLimitBucketId` on this
+      // branch: the constructor refuses to build a `reservesSpend: false` +
+      // `spendLedger` harness without `degradedProjectionBucketId` (see the
+      // throw in the constructor), so a silent wrong-bucket fence can never
+      // happen here — only `rateLimitBucketId` itself, on the OTHER branch,
+      // is a real fallback (the `reservesSpend: true` shape, which always
+      // wants its own bucket).
+      let bucketId = this.rateLimitBucketId;
+      if (!this.reservesSpend && degradedAmbientSpend) {
+        // biome-ignore lint/style/noNonNullAssertion: guaranteed by the constructor guard above — reservesSpend:false with a spendLedger cannot exist without degradedProjectionBucketId.
+        bucketId = this.degradedProjectionBucketId!;
+      }
       let reservation: SpendReservation | undefined;
       if (this.spendLedger && (this.reservesSpend || degradedAmbientSpend)) {
         reservation = await this.spendLedger.reserve(
           {
-            // #279: a degraded-only reservation (the binding itself does not
-            // reserve) fences the credential that ACTUALLY incurred the
-            // spend — the ambient key/token, via `degradedProjectionBucketId`
-            // (the bucket a METERED binding of this SAME provider+credential
-            // would compute, production-runtime.ts) — never this binding's
-            // own subscription bucket. Fencing the subscription bucket would
-            // block the NEXT non-degraded attempt on the SAME OAuth
-            // credential over dollars that credential never spent.
-            bucketId:
-              !this.reservesSpend &&
-              degradedAmbientSpend &&
-              this.degradedProjectionBucketId !== undefined
-                ? this.degradedProjectionBucketId
-                : this.rateLimitBucketId,
+            bucketId,
             reservedUsd: this.reservedUsdPerAttempt,
             sessionId: request.sessionId,
             attempt,

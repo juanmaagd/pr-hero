@@ -833,4 +833,88 @@ describe("#279: fencing a degraded projection's ambient spend", () => {
     expect(ledger.reserveCalls[0]?.bucketId).toBe("default");
     expect(result.reservations).toHaveLength(1);
   });
+
+  // pr-hero review follow-up on this same slice (parent-verified): a
+  // `reservesSpend: false` harness with a `spendLedger` but no
+  // `degradedProjectionBucketId` used to silently fence the wrong bucket
+  // (`rateLimitBucketId` — the binding's OWN, e.g. subscription, bucket) the
+  // first time a degraded reservation opened. Dead in production (it always
+  // computes and passes the mirrored bucket), but constructible by any
+  // other caller. The fix makes that shape impossible to build at all.
+  test("constructing reservesSpend:false + spendLedger WITHOUT degradedProjectionBucketId throws immediately", () => {
+    expect(
+      () =>
+        new StepExecutionHarness({
+          spendLedger: new InMemorySpendLedger(),
+          reservesSpend: false,
+          // degradedProjectionBucketId intentionally omitted.
+        }),
+    ).toThrow(/degradedProjectionBucketId/);
+  });
+
+  // The three shapes that must NOT throw: no ledger at all (ledger-free),
+  // `reservesSpend: true` (the binding reserves into its own bucket, the
+  // degraded-fence branch is never taken), and `reservesSpend: false` WITH
+  // the bucket supplied (the one construction production actually uses).
+  test("every OTHER spendLedger shape still constructs fine", () => {
+    expect(() => new StepExecutionHarness({})).not.toThrow();
+    expect(
+      () =>
+        new StepExecutionHarness({
+          spendLedger: new InMemorySpendLedger(),
+          reservesSpend: true,
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new StepExecutionHarness({
+          spendLedger: new InMemorySpendLedger(),
+          reservesSpend: false,
+          degradedProjectionBucketId: "mirrored-metered-bucket",
+        }),
+    ).not.toThrow();
+  });
+
+  // pr-hero review follow-up: the metered-accounting CLAIM ("this attempt
+  // reserves against the spend ledger...") must describe a reservation that
+  // ACTUALLY opened, never one merely intended. `admitAndExecute` can return
+  // with `attempts: 0` and no reservation at all — an unreadable system
+  // prompt is one such early return, checked BEFORE the admission gate/
+  // retry loop ever runs — and the degrade itself already happened in
+  // `run()`, before any of that. The base degrade warning is still owed
+  // (the projection DID degrade); the reserve/fence claim is not (nothing
+  // was reserved).
+  test("degraded + ambient key + a zero-attempt early return → the degrade warning is stated, the reserve/fence claim is not", async () => {
+    const ledger = new SpyLedger();
+    const { harness } = degradingHarness({
+      env: { HOME: "/tmp", ANTHROPIC_API_KEY: "sk-ambient" },
+      ledger,
+      reservesSpend: false,
+    });
+    const result = await harness.run({
+      name: "cred-probe-unreadable-prompt",
+      systemPromptPath: "/nonexistent/pr-hero-279-system-prompt.md",
+      prompt: "p",
+      tools: [],
+      model: "sonnet",
+      cwd: "/tmp/ws",
+      outPath: `/tmp/cred-probe-279-${Date.now()}.json`,
+      mcpConfigPath: "/tmp/mcp.json",
+      timeoutMs: 1000,
+      maxAttempts: 1,
+      parse: (text) => JSON.parse(text),
+    });
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(result.reservations).toBeUndefined();
+    expect(ledger.reserveCalls).toHaveLength(0);
+    // The degrade itself is real and still stated.
+    expect(result.stderrTail).toContain("missing_subscription_record");
+    // The reserve/fence claim is NOT — nothing was reserved for a step that
+    // never reached `runAttempt`.
+    expect(result.stderrTail).not.toContain("ambient credential bills metered");
+    expect(result.stderrTail).not.toContain(
+      "reserves against the spend ledger",
+    );
+  });
 });
