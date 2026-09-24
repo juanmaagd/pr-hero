@@ -95,23 +95,35 @@ export type UsageCostSource =
 // answering "does this environment carry a per-token credential?"
 // differently for the same attempt.
 //
-// The two calls read DIFFERENT env values on purpose, and that is not a
-// fork: `claudeCliCostBasis` reads the child's ACTUAL, POST-projection-strip
-// env (`request.isolation.env`) — a projection strips the key-bearing vars
-// unconditionally (`PROJECTION_OWNED_KEYS`, harness.ts), so this is a
-// truthful read of what the process the money was spent by actually saw.
-// `credentialKindForRoute` runs BEFORE any child exists, so it cannot read
-// that env — it reads the raw, pre-strip one plus whether a broker WILL
-// strip it (`hasBroker`), and `!hasBroker && envBillsMetered(rawEnv)` is
-// exactly `envBillsMetered(postStripEnv)` by construction: a broker strips
-// unconditionally, so the post-strip env never carries a key when one is
-// attached, and equals the raw env exactly when none is. Same predicate,
-// same answer, two different envs because one runs before the strip and one
-// runs after it. Everything downstream of the KIND (the projection, the
-// bucket, and `FrozenRuntimeBinding.capabilities()`'s `effectiveBillingMode`
-// via `credentialKindBillsMetered`) inherits the answer from that one call
-// and never re-reads env itself — so admission and usage filing structurally
-// cannot disagree about one attempt.
+// The two calls read DIFFERENT env values on purpose, and on a SUCCESSFUL
+// projection that is not a fork: `claudeCliCostBasis` reads the child's
+// ACTUAL, POST-projection-strip env (`request.isolation.env`) — a successful
+// projection strips the key-bearing vars (`PROJECTION_OWNED_KEYS`,
+// harness.ts), so this is a truthful read of what the process the money was
+// spent by actually saw. `credentialKindForRoute` runs BEFORE any child
+// exists, so it cannot read that env — it reads the raw, pre-strip one plus
+// whether a broker WILL ATTEMPT to strip it (`hasBroker`), and
+// `!hasBroker && envBillsMetered(rawEnv)` equals `envBillsMetered(postStripEnv)`
+// on that path: a successful strip removes the key whenever a broker is
+// attached, and the post-strip env equals the raw env exactly when none is.
+// Same predicate, same answer, two different envs because one runs before
+// the strip and one runs after it.
+//
+// KNOWN EXCEPTION — #279, not fixed here. A broker's projection can DEGRADE
+// (`missing_subscription_record`, credential-broker.ts + harness.ts
+// ~756-778) instead of stripping anything: the child then runs UNSTRIPPED,
+// so `hasBroker: true` no longer implies "the child's env has no key" —
+// admission still says subscription, the spend is not fenced, and
+// `claudeCliCostBasis` (reading the real, unstripped child env) correctly
+// files it metered. Pre-existing: this exact mismatch already existed for
+// every degraded projection before #161, which named the ownership rule but
+// did not add or remove this exception.
+//
+// Everything downstream of the KIND (the projection, the bucket, and
+// `FrozenRuntimeBinding.capabilities()`'s `effectiveBillingMode` via
+// `credentialKindBillsMetered`) inherits the answer from that one call and
+// never re-reads env itself — so admission and usage filing agree by
+// construction on a successful projection, #279 aside.
 //
 // The ban stands for everyone ELSE. `CLAUDE_CAPABILITY_STATICS.billingMode`
 // (model/provider-capabilities.ts) stays a static "subscription" on purpose —

@@ -557,12 +557,17 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         // credential broker projecting for it (no broker means nothing
         // strips the key before the child sees it — the common case being
         // Linux/CI, which has no Keychain to project from). A route that
-        // DOES have a broker attached stays subscription regardless of what
-        // its env carries, because the broker strips the key unconditionally
-        // before spawn — so a claude-code route CAN resolve metered today,
-        // not just in the gate's hypothetical, but only when nothing is
-        // about to project a credential for it. `pricingReady: true` here is
-        // what makes that route ADMITTED rather than refused for lack of
+        // DOES have a broker attached, and whose projection SUCCEEDS, stays
+        // subscription regardless of what its env carries, because a
+        // successful projection strips the key before spawn — so a
+        // claude-code route CAN resolve metered today, not just in the
+        // gate's hypothetical, but only when nothing is about to project a
+        // credential for it. A degraded projection is #279's known
+        // exception: `credentialKindForRoute` still cannot see that a
+        // broker's projection failed and fell back to the unstripped env, so
+        // that one route keeps saying subscription while the key actually
+        // reaches and pays for the child. `pricingReady: true` here is what
+        // makes a metered route ADMITTED rather than refused for lack of
         // pricing; #161 is what makes the route exist in the first place.
         // This BACKEND-WIDE report still claims `mode: "subscription"`
         // unconditionally — it is produced before any route resolves and has

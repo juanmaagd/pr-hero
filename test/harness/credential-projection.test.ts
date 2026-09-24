@@ -10,6 +10,10 @@ import type {
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
 import { envBillsMetered } from "../../src/execution/usage-normalized";
+import {
+  credentialKindBillsMetered,
+  credentialKindForRoute,
+} from "../../src/runner-authority";
 import type {
   CredentialBroker,
   CredentialProjection,
@@ -272,6 +276,50 @@ describe("harness with a CredentialBroker", () => {
     );
     expect(admitted).toBe(true);
     expect(broker.destroyCalls).toBe(0);
+  });
+
+  // #279 (documented 2026-09-24 by Juanma; NOT fixed here — owner decision:
+  // comments and tests only this pass). `missing_subscription_record` is the
+  // one failure class the harness degrades instead of killing the step (the
+  // arm just above): no projection runs, `buildChildEnv` falls back to the
+  // env UNSTRIPPED, and the ambient credentials the passthrough carried
+  // reach the child after all — even though a credential broker WAS
+  // attached to the route (`resolveBindingAuthority`, runner-authority.ts,
+  // would have called `credentialKindForRoute(..., hasBroker: true)` for it,
+  // exactly the case that says subscription per #161's corrected rule).
+  // Usage filing reads this SAME env and correctly concludes metered. The
+  // two disagree, and nothing fences the spend on this path. This test
+  // exists so that gap is OBSERVABLE rather than silently assumed fixed —
+  // fixing #279 should flip the last assertion below deliberately, not by
+  // surprise.
+  test("#279: a degraded projection leaves the ambient key reaching the child, which usage filing correctly reads as metered — while admission still says subscription", async () => {
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker(
+      new CredentialProjectionError("missing_subscription_record"),
+    );
+    const harness = makeHarness(recordingTransport(requests), broker);
+    const result = await runStep(harness);
+    expect(result.status).toBe("ok");
+    expect(result.stderrTail).toContain("missing_subscription_record");
+
+    // The ACTUAL child env: unstripped, because the projection never ran —
+    // the same ambient key `makeHarness` seeds as "the operator's real key".
+    const env = requests[0]?.isolation.env;
+    expect(env?.ANTHROPIC_API_KEY).toBe("sk-ambient-operator-key");
+    // What usage filing (`claudeCliCostBasis` -> `envBillsMetered`,
+    // claude-code-cli.ts) correctly concludes from this same env.
+    expect(envBillsMetered(env ?? {})).toBe(true);
+
+    // What ADMISSION concluded before any of this happened, for the exact
+    // same key and the exact same fact ("a broker is attached") — it cannot
+    // see that this particular attempt's projection will degrade.
+    const admissionKind = credentialKindForRoute(
+      "claude-code",
+      "anthropic",
+      { ANTHROPIC_API_KEY: "sk-ambient-operator-key" },
+      true,
+    );
+    expect(credentialKindBillsMetered(admissionKind)).toBe(false);
   });
 
   test("attack-signal projection failures still fail closed before admission", async () => {

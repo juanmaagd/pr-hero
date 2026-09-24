@@ -310,39 +310,43 @@ export async function withClaudeDiscoveryAllowlist(
 // actually run on?", not "does env carry a key?" in isolation — those two
 // questions only agree when NOTHING will project a credential.
 //
-// When a broker IS attached, the harness strips ANTHROPIC_API_KEY,
-// ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN from the child's env
-// UNCONDITIONALLY, whatever the ambient environment carries
+// When a broker IS attached and its projection SUCCEEDS, the harness strips
+// ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN from
+// the child's env, whatever the ambient environment carries
 // (`PROJECTION_OWNED_KEYS`, execution/harness.ts — "a projection owns the
 // CREDENTIAL IDENTITY, not just the home"). So a macOS developer with an
-// exported `ANTHROPIC_API_KEY`, running through the darwin Keychain default
-// (`claudeCredentialBroker`), spawns a child that never sees that key at
-// all — it runs on the projected subscription OAuth record. Calling that
-// route metered (the first cut's mistake) would silently rebill a
-// subscription developer's run as per-token, for a key the child structurally
-// cannot spend.
+// exported `ANTHROPIC_API_KEY`, running through the darwin Keychain default,
+// spawns a child that never sees that key — it runs on the projected
+// subscription OAuth record. Calling that route metered (the first cut's
+// mistake) would silently rebill a subscription developer as per-token for a
+// key the child structurally cannot spend.
 //
-// `hasBroker` carries exactly that fact — whether a broker will project
-// BEFORE this route's child spawns — as a plain boolean the CALLER already
-// resolved (`resolveBindingAuthority` below constructs the broker first,
-// unconditionally, exactly as before #161 existed, and passes whether it got
-// one). This function stays pure on purpose: no platform check, no
-// `existsSync`, nothing that would make the SAME (backend, provider, env,
-// hasBroker) answer differently on two runs.
+// KNOWN EXCEPTION — #279, deliberately NOT fixed here (owner decision:
+// comments and tests only this pass). `KeychainCredentialBroker.project` can
+// throw `missing_subscription_record` when the CLI moved its OAuth record
+// out of the Keychain item; the harness DEGRADES that one failure class
+// instead of killing the step (harness.ts ~756-778) — no projection runs,
+// `buildChildEnv` returns the env UNSTRIPPED, and an ambient key reaches the
+// child after all. On that path this function still says subscription (a
+// broker WAS attached), the spend is not fenced, and usage filing — which
+// reads the child's REAL env — correctly files it metered. Pre-existing:
+// before #161 every claude-code route said subscription regardless, so this
+// exact admission/filing mismatch already existed on every degraded
+// projection; #161 did not create it and does not resolve it.
+//
+// `hasBroker` carries "will a broker ATTEMPT to project" — a plain boolean
+// the CALLER already resolved (`resolveBindingAuthority` below constructs
+// the broker first, unconditionally, exactly as before #161 existed). This
+// function stays pure: no platform check, no fs/network probe of whether
+// that attempt will actually SUCCEED — #279 is precisely the runtime state
+// this function cannot see and does not try to.
 //
 // `env` is the raw, PRE-strip environment (`options.env ?? process.env` at
-// the call site) — deliberately not the post-strip child env, which would
-// require simulating the strip here. `!hasBroker && envBillsMetered(env)` is
-// the same answer without that simulation: with a broker attached, the strip
-// always fires, so the post-strip env never carries a key and the honest
-// answer is always subscription regardless of what `env` says; with no
-// broker attached, nothing strips, so post-strip env IS `env` and the
-// question collapses to `envBillsMetered(env)` exactly. This is the same
-// value usage filing computes from the ACTUAL post-strip env
-// (`claudeCliCostBasis` -> `envBillsMetered(request.isolation.env)`,
-// claude-code-cli.ts) — admission and filing reach the same answer by
-// construction, not by coincidence, because both are ultimately asking what
-// the same strip rule leaves behind.
+// the call site), not the post-strip child env. On a SUCCESSFUL projection,
+// `!hasBroker && envBillsMetered(env)` equals `envBillsMetered(postStripEnv)`
+// — matching usage filing's own `envBillsMetered(request.isolation.env)`
+// (claude-code-cli.ts) by construction. #279 is the one path where that
+// equality breaks.
 //
 // Both arguments default to the "nothing is known" case (`env: {}`,
 // `hasBroker: false`) so a caller that omits them — every existing call site
@@ -448,9 +452,8 @@ export async function resolveBindingAuthority(
     // never gated on a credential decision that has not been made yet. The
     // broker's PRESENCE is the INPUT to that decision now, not the other way
     // around: see the WHY block on `credentialKindForRoute` above for the
-    // full reasoning (a projection strips the env-carried key before the
-    // child ever sees it, so only an unprojected route can actually spend on
-    // one).
+    // full reasoning, including the one known exception where a broker is
+    // present but its projection degrades (#279).
     const broker =
       options.credentialBrokers?.["claude-code"] ?? claudeCredentialBroker();
     // Falls back to `process.env` exactly like the opencode PATH lookup a few

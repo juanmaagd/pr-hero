@@ -718,10 +718,15 @@ describe("production runtime PR1", () => {
 
     // #161, end to end (corrected 2026-09-24 by Juanma): an ANTHROPIC_API_KEY
     // in the route's env upgrades `credentialKindForRoute`'s answer only when
-    // NO credential broker will project for the route — a broker strips the
-    // key before the child ever spawns (PROJECTION_OWNED_KEYS, harness.ts),
-    // so a projected route stays subscription no matter what its env
-    // carries. `FrozenRuntimeBinding.capabilities()` upgrades
+    // NO credential broker will project for the route — a SUCCESSFUL
+    // projection strips the key before the child ever spawns
+    // (PROJECTION_OWNED_KEYS, harness.ts), so a projected route stays
+    // subscription no matter what its env carries. (A degraded projection is
+    // #279's known exception, not exercised by this admission-time test —
+    // `resolveBindingAuthority` never awaits the real projection, only
+    // whether a broker is attached; see
+    // test/harness/credential-projection.test.ts for the real, degraded
+    // path.) `FrozenRuntimeBinding.capabilities()` upgrades
     // `effectiveBillingMode` from that kind
     // (production-runtime.ts:~324, `credentialKindBillsMetered`). The mock
     // transport here reports the shape the REAL `ClaudeCodeCliTransport`

@@ -225,14 +225,19 @@ describe("credentialKindForRoute", () => {
       ).toBe("provider_api_token");
     });
 
-    // THE precedence rule this correction exists for: a broker's presence
-    // means the harness WILL strip the key before the child ever sees it
-    // (PROJECTION_OWNED_KEYS, execution/harness.ts), so the kind must stay
-    // subscription no matter what env carries — the child structurally
-    // cannot spend a key it never receives. The first cut of #161 got this
-    // backwards (skipped the broker whenever a key was present) and would
-    // have silently rebilled a macOS subscription developer's ambient
-    // ANTHROPIC_API_KEY as metered.
+    // THE precedence rule this correction exists for: on a SUCCESSFUL
+    // projection, a broker's presence means the harness strips the key
+    // before the child ever sees it (PROJECTION_OWNED_KEYS,
+    // execution/harness.ts), so the kind must stay subscription no matter
+    // what env carries. The first cut of #161 got this backwards (skipped
+    // the broker whenever a key was present) and would have silently
+    // rebilled a macOS subscription developer's ambient ANTHROPIC_API_KEY as
+    // metered. `credentialKindForRoute` cannot see whether a given
+    // projection attempt will actually succeed — #279 is the one known case
+    // where it degrades and the key reaches the child anyway; that gap is
+    // NOT covered by this unit-level test (see
+    // test/harness/credential-projection.test.ts for the real, degraded
+    // path).
     test("a key WITH a broker stays the subscription kind — the broker wins", () => {
       expect(
         credentialKindForRoute(
@@ -275,17 +280,26 @@ describe("credentialKindForRoute", () => {
     });
   });
 
-  // The anti-fork guarantee, proven rather than restated: admission
-  // (`credentialKindForRoute` -> `credentialKindBillsMetered`, reading the
-  // RAW pre-strip env plus `hasBroker`) and usage filing (`envBillsMetered`
-  // directly on the child's ACTUAL post-strip env, `claudeCliCostBasis` in
-  // the transport) must reach the same billing mode for the same attempt —
-  // projection present + key: both subscription; no projection + key: both
-  // metered. This builds the post-strip env INDEPENDENTLY (a literal mirror
-  // of `PROJECTION_OWNED_KEYS`, execution/harness.ts, not a call into
+  // The anti-fork guarantee, proven rather than restated — SCOPED to the two
+  // cases where it actually holds: no broker at all, and a broker whose
+  // projection SUCCEEDS. Admission (`credentialKindForRoute` ->
+  // `credentialKindBillsMetered`, reading the RAW pre-strip env plus
+  // `hasBroker`) and usage filing (`envBillsMetered` directly on the child's
+  // ACTUAL post-strip env, `claudeCliCostBasis` in the transport) reach the
+  // same billing mode for the same attempt on those two paths. This builds
+  // the successful-strip env INDEPENDENTLY (a literal mirror of
+  // `PROJECTION_OWNED_KEYS`, execution/harness.ts, not a call into
   // `credentialKindForRoute`'s own reasoning) so the test can actually catch
   // the two disagreeing, rather than restating the implementation back at it.
-  describe("admission and usage filing agree (#161 anti-fork guarantee)", () => {
+  //
+  // NOT covered here: a broker whose projection DEGRADES
+  // (`missing_subscription_record`) instead of stripping anything — that is
+  // #279, a real, currently-existing gap where admission and filing DISAGREE
+  // (admission says subscription, filing correctly says metered, and the
+  // spend is not fenced). Its own test, against the real harness rather than
+  // this simulation, lives in
+  // test/harness/credential-projection.test.ts.
+  describe("admission and usage filing agree on a successful projection or no broker (#161 anti-fork guarantee)", () => {
     const PROJECTION_OWNED_KEYS = [
       "HOME",
       "TMPDIR",
@@ -295,7 +309,12 @@ describe("credentialKindForRoute", () => {
       "CLAUDE_CODE_OAUTH_TOKEN",
     ] as const;
 
-    function postStripEnv(
+    // Named for what it models: the env a SUCCESSFUL projection leaves the
+    // child with. A degraded projection (#279) leaves the child on the raw,
+    // unstripped env instead — deliberately not a case this helper can
+    // produce, since modelling it here would just restate the exception
+    // rather than test against it.
+    function postSuccessfulProjectionEnv(
       rawEnv: Readonly<Record<string, string | undefined>>,
       hasBroker: boolean,
     ): Record<string, string | undefined> {
@@ -305,7 +324,7 @@ describe("credentialKindForRoute", () => {
       return stripped;
     }
 
-    test("projection present + key: both sides say subscription", () => {
+    test("a successful projection + key: both sides say subscription", () => {
       const rawEnv = { ANTHROPIC_API_KEY: "sk-test" };
       const hasBroker = true;
 
@@ -316,10 +335,12 @@ describe("credentialKindForRoute", () => {
         hasBroker,
       );
       expect(credentialKindBillsMetered(kind)).toBe(false);
-      expect(envBillsMetered(postStripEnv(rawEnv, hasBroker))).toBe(false);
+      expect(
+        envBillsMetered(postSuccessfulProjectionEnv(rawEnv, hasBroker)),
+      ).toBe(false);
     });
 
-    test("no projection + key: both sides say metered", () => {
+    test("no broker + key: both sides say metered", () => {
       const rawEnv = { ANTHROPIC_API_KEY: "sk-test" };
       const hasBroker = false;
 
@@ -330,10 +351,12 @@ describe("credentialKindForRoute", () => {
         hasBroker,
       );
       expect(credentialKindBillsMetered(kind)).toBe(true);
-      expect(envBillsMetered(postStripEnv(rawEnv, hasBroker))).toBe(true);
+      expect(
+        envBillsMetered(postSuccessfulProjectionEnv(rawEnv, hasBroker)),
+      ).toBe(true);
     });
 
-    test("the two sides agree across every env/broker combination", () => {
+    test("the two sides agree across every env, given a successful projection or no broker", () => {
       const envs: ReadonlyArray<Readonly<Record<string, string | undefined>>> =
         [
           {},
@@ -351,7 +374,7 @@ describe("credentialKindForRoute", () => {
             hasBroker,
           );
           expect(credentialKindBillsMetered(kind)).toBe(
-            envBillsMetered(postStripEnv(env, hasBroker)),
+            envBillsMetered(postSuccessfulProjectionEnv(env, hasBroker)),
           );
         }
       }
@@ -519,12 +542,19 @@ describe("resolveBindingAuthority claude-code credential kind (#161)", () => {
     }
   });
 
-  // #161 (corrected 2026-09-24). THE precedence test: a key alongside a
-  // broker must stay subscription — the broker is going to strip that key
-  // before the child ever spawns (PROJECTION_OWNED_KEYS, harness.ts), so
-  // billing the developer as metered would charge for spend the child
-  // structurally cannot incur. The fake broker makes this deterministic on
-  // every host, unlike the real Keychain default.
+  // #161 (corrected 2026-09-24). THE precedence test, for a SUCCESSFUL
+  // projection: a key alongside a broker must stay subscription, because a
+  // successful projection strips that key before the child ever spawns
+  // (PROJECTION_OWNED_KEYS, harness.ts), so billing the developer as metered
+  // would charge for spend the child structurally cannot incur. The fake
+  // broker below never actually projects (it always throws first), which is
+  // fine here — this test is only about the ADMISSION-time decision
+  // (`resolveBindingAuthority` never awaits a real projection), not the
+  // runtime outcome. A projection that degrades instead of succeeding is
+  // #279's known exception, tested against the real harness in
+  // test/harness/credential-projection.test.ts, not here. The fake broker
+  // also makes this deterministic on every host, unlike the real Keychain
+  // default.
   test("a key WITH a broker: subscription kind, the broker still attaches, the claude-code bucket", async () => {
     const fake: CredentialBroker = {
       project: async () => {
