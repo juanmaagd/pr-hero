@@ -155,6 +155,9 @@ mode's clean-tree gate.
 **Run `pr-hero config` to see which layer decided what.** It lists every key with its value, the
 layer it came from, and both file paths whether or not they exist. It never edits anything.
 
+Routing a model to a specific backend/provider, and how pr-hero reads credentials for each backend,
+are their own topic — see [`docs/configuration.md`](docs/configuration.md).
+
 ### The one rule
 
 > The more specific layer wins — **except** where the less specific one is protecting your money.
