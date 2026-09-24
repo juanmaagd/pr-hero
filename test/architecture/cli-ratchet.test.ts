@@ -1,11 +1,15 @@
-// CLI Decomposition S6 (odd/tasks/cli-decomposition.md): the cli.ts size ratchet.
+// CLI Decomposition S6 (odd/tasks/cli-decomposition.md): the cli.ts regression guard.
 //
-// Phase 1 reduced `src/cli.ts` from 7820 lines (122 functions) to 2853 lines (5 functions).
-// This ratchet prevents regression:
-// 1. Line count ceiling: pinned at current count (2853). It can only ratchet DOWN in Phase 2.
-// 2. Function census: cli.ts must ONLY declare the 2 canonical functions (main, runCli).
+// The decomposition took `src/cli.ts` from 7820 lines (122 functions) down to
+// main() and runCli() (~325 lines). Two invariants keep it there:
+// 1. Function census: cli.ts must ONLY declare the 2 canonical functions (main, runCli).
 //    All new functions must live in their domain modules.
-// 3. Per-function size limit on extracted domain modules: no function exceeds 300 lines.
+// 2. Per-function size limit on extracted domain modules: no function exceeds 300 lines.
+//
+// A line-count ceiling used to sit beside these. It ratcheted the refactor down
+// while it was in progress; once cli.ts held only main() and runCli() it guarded
+// nothing the census does not, and it failed on legitimate wiring (one import
+// plus a call in each signal handler, 19b71c4). The census is the guard.
 
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -16,16 +20,6 @@ const REPO_ROOT = path.join(import.meta.dir, "../..");
 const CLI_PATH = path.join(REPO_ROOT, "src/cli.ts");
 
 const CANONICAL_CLI_FUNCTIONS = ["main", "runCli"].sort();
-
-// Line count ceiling as of Phase 1 completion (S5 merged): 2853.
-// Phase 2 P2.1 (odd/tasks/cli-decomposition.md) extracted the shared pure
-// stages (assertDistinctRange, resolveGotchasPath, selectActiveHunters,
-// reviewingLine, buildTelemetry) into src/review/run.ts, ratcheting this
-// down to 2799. cli-decomp-08 moved review(), reviewPr(), and menuCommand()
-// out whole — to src/review/review.ts, src/pr/review-pr.ts, and
-// src/commands/menu.ts respectively — leaving only main() and runCli(),
-// ratcheting this down to 325. Later Phase 2 slices ratchet it further.
-const CLI_LINE_CEILING = 325;
 
 const MAX_FUNCTION_LINES = 300;
 
@@ -62,27 +56,14 @@ function topLevelFunctionsInFile(
   return functions;
 }
 
-describe("cli.ts size ratchet", () => {
-  test(`src/cli.ts does not exceed line ceiling of ${CLI_LINE_CEILING} lines`, () => {
-    const content = readFileSync(CLI_PATH, "utf8");
-    const lines = content.split("\n");
-    // Trailing newline check: lines.length can include an empty trailing line
-    const actualLines =
-      lines[lines.length - 1] === "" ? lines.length - 1 : lines.length;
-
-    expect(
-      actualLines,
-      `src/cli.ts grew beyond ceiling! Expected <= ${CLI_LINE_CEILING}, got ${actualLines}. New code belongs in domain modules.`,
-    ).toBeLessThanOrEqual(CLI_LINE_CEILING);
-  });
-
-  test("src/cli.ts declares ONLY the 5 canonical functions", () => {
+describe("cli.ts function census", () => {
+  test("src/cli.ts declares ONLY the 2 canonical functions", () => {
     const fns = topLevelFunctionsInFile(CLI_PATH);
     const fnNames = fns.map((f) => f.name).sort();
 
     expect(
       fnNames,
-      "src/cli.ts top-level functions must only be main, menuCommand, review, reviewPr, runCli",
+      "src/cli.ts top-level functions must only be main and runCli. New code belongs in domain modules.",
     ).toEqual(CANONICAL_CLI_FUNCTIONS);
   });
 });
