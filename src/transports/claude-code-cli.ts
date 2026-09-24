@@ -566,7 +566,13 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         // exception: `credentialKindForRoute` still cannot see that a
         // broker's projection failed and fell back to the unstripped env, so
         // that one route keeps saying subscription while the key actually
-        // reaches and pays for the child. `pricingReady: true` here is what
+        // reaches and pays for the child — this ADMISSION-time answer is
+        // deliberately left that way (#279, fixed 2026-09-24, option 2: the
+        // fix lives downstream, in `StepExecutionHarness.run`, harness.ts,
+        // which re-applies `envBillsMetered` to this SAME child env this
+        // module stamps `billingMode: "metered"` from, and opens a
+        // spend-ledger reservation for that one attempt so it is settled or
+        // fenced exactly like a metered route). `pricingReady: true` here is what
         // makes a metered route ADMITTED rather than refused for lack of
         // pricing; #161 is what makes the route exist in the first place.
         // This BACKEND-WIDE report still claims `mode: "subscription"`

@@ -548,6 +548,51 @@ function bindingBucketId(
   );
 }
 
+// #279: the bucket a METERED claude-code binding of this SAME
+// provider+credentialRef would compute — `bindingBucketId` above, with the
+// credential kind hardcoded to `provider_api_token` instead of read off
+// `binding.credential.kind`. Used ONLY to fence the one attempt whose
+// Keychain projection degraded onto an ambient key/token (StepExecution-
+// Harness's `degradedProjectionBucketId`), never as `rateLimitBucketId`
+// itself — that stays the binding's OWN bucket, keyed on its REAL
+// `credentialKind` (subscription), so a normal, non-degraded subscription
+// attempt keeps landing where it always did.
+//
+// WHY a different bucket than the binding's own: the ledger's guarantee is
+// "an unresolved bucket blocks the NEXT paid attempt of the SAME
+// credential" (spend-limiter.ts). The credential that pays for a degraded
+// attempt is the ambient API key/token, not the subscription OAuth record
+// this binding otherwise authenticates with — those are two different
+// credentials that happen to share one route. Fencing the subscription
+// bucket here would block the next NON-degraded subscription attempt on
+// this same route over dollars the OAuth credential never spent (and would
+// widen the harness's own reservesSpend=false invariant: "a subscription
+// binding reserves nothing" — production-runtime.test.ts). Fencing this
+// mirrored bucket instead lands on the SAME identity a real metered
+// claude-code binding of this provider+credentialRef would use (see
+// `credentialKindForRoute`, runner-authority.ts — hasBroker=false is what
+// produces `provider_api_token` for claude-code), so a later real metered
+// attempt on the same credential is correctly refused too.
+//
+// Takes the provider + credentialRef directly rather than a
+// `ResolvedBindingAuthority` (unlike `bindingBucketId` above): the ONE call
+// site (`MultiProviderRunner.run`) only has the public `RuntimeBinding`,
+// whose `credential.ref` already carries the same value `authority.
+// credentialRef` would.
+function degradedMeteredBucketId(
+  provider: string,
+  credentialRef: string,
+): string {
+  const localKey = loadOrCreateBucketKey(homedir());
+  return deriveBucketId(
+    {
+      provider,
+      credentialFingerprint: `provider_api_token:${credentialRef}`,
+    },
+    localKey,
+  );
+}
+
 async function resolveFrozenBindings(
   plan: ResolvedRoutePlan,
   options: ProductionRuntimeOptions,
@@ -1400,6 +1445,14 @@ export class MultiProviderRunner implements StepRunner {
       capabilityReport.billing.mode === "metered" ||
       binding.credential.kind === "provider_free";
 
+    // #279, 2026-09-24: the harness itself decides whether a SINGLE attempt
+    // whose Keychain projection degraded onto an ambient key/token still
+    // needs to reserve — a fact only it can see, per `run()`, not per
+    // binding (see harness.ts's `reservesSpend`/`degradedProjectionBucketId`
+    // options and their WHY). That requires the ledger to be REACHABLE from
+    // every binding, subscription included, so `spendLedger` below is now
+    // unconditional; `reservesSpend` still gates the binding's OWN
+    // unconditional-per-attempt reservation exactly as it always has.
     const isolation = minimalIsolationFromExecutable(binding.executable);
     const lease = await binding.acquire(isolation, this.registry);
     const routeKey = binding.key;
@@ -1430,7 +1483,23 @@ export class MultiProviderRunner implements StepRunner {
         // RECORDED on the reservation and read by no gate anywhere — the
         // fence keys on `fencedBuckets`, never on an amount — so a figure
         // here would be a budget nobody has decided, dressed as one that was.
-        ...(reservesSpend ? { spendLedger: this.spendLedger } : {}),
+        //
+        // #279: `spendLedger` is now handed to EVERY binding — see the WHY
+        // just above `isolation` — with `reservesSpend` carrying the
+        // per-binding decision the conditional spread used to encode. A
+        // subscription binding (`reservesSpend: false`) still reserves
+        // nothing on its own; only its harness's own degraded-projection
+        // check (envBillsMetered on the actual child env) can open a
+        // reservation now, and only into `degradedProjectionBucketId` —
+        // the bucket a metered claude-code binding of this SAME
+        // provider+credential would compute, never this binding's own
+        // subscription bucket (see `degradedMeteredBucketId`'s WHY above).
+        spendLedger: this.spendLedger,
+        reservesSpend,
+        degradedProjectionBucketId: degradedMeteredBucketId(
+          binding.route.provider,
+          binding.credential.ref,
+        ),
         ...(this.graceMarginMs !== undefined
           ? { graceMarginMs: this.graceMarginMs }
           : {}),

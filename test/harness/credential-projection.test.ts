@@ -9,6 +9,13 @@ import type {
   TransportRequest,
 } from "../../src/execution/contracts";
 import { StepExecutionHarness } from "../../src/execution/harness";
+import {
+  InMemorySpendLedger,
+  type ReserveSpendInput,
+  type SettlementDecision,
+  type SpendLedger,
+  type SpendReservation,
+} from "../../src/execution/spend-limiter";
 import { envBillsMetered } from "../../src/execution/usage-normalized";
 import {
   credentialKindBillsMetered,
@@ -113,6 +120,77 @@ function serverLifetimeTransport(
       } satisfies TransportOutcome;
     },
   };
+}
+
+// #279: a transport reporting METERED usage — `recordingTransport` above
+// always reports `billingMode: "subscription"`, which is exactly wrong for
+// exercising `settlementFromUsage`'s rules (spend-limiter.ts) against a
+// degraded attempt's own reservation.
+function meteredTransport(
+  requests: TransportRequest[],
+  usage: TransportOutcome["usage"],
+): ProviderTransport {
+  return {
+    backend: "claude-code",
+    capabilities: async () => {
+      throw new Error("not used");
+    },
+    classifyFailure: () => undefined,
+    async execute(request) {
+      requests.push(request);
+      return {
+        completion: "success",
+        protocolIntegrity: "verified",
+        finalText: "{}",
+        usage,
+        stderrTail: "",
+      } satisfies TransportOutcome;
+    },
+  };
+}
+
+// Wraps the real, already-tested InMemorySpendLedger so these tests assert
+// WIRING (was `reserve()` called, how many times, with which bucket) rather
+// than re-testing the ledger's own CAS semantics — mirrors
+// test/harness/spend-wiring.test.ts's SpyLedger exactly.
+class SpyLedger implements SpendLedger {
+  private readonly inner = new InMemorySpendLedger();
+  reserveCalls: ReserveSpendInput[] = [];
+
+  async reserve(
+    input: ReserveSpendInput,
+    token: Parameters<InMemorySpendLedger["reserve"]>[1],
+  ): Promise<SpendReservation> {
+    this.reserveCalls.push(input);
+    return this.inner.reserve(input, token);
+  }
+
+  async settle(
+    reservationId: string,
+    decision: Extract<SettlementDecision, { kind: "settle" }>,
+    idempotencyKey: string,
+  ): Promise<void> {
+    return this.inner.settle(reservationId, decision, idempotencyKey);
+  }
+
+  async releaseUnstarted(
+    reservationId: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    return this.inner.releaseUnstarted(reservationId, idempotencyKey);
+  }
+
+  async markUnresolvedRemote(
+    reservationId: string,
+    knownUsd: number | undefined,
+    idempotencyKey: string,
+  ): Promise<void> {
+    return this.inner.markUnresolvedRemote(
+      reservationId,
+      knownUsd,
+      idempotencyKey,
+    );
+  }
 }
 
 function makeHarness(transport: ProviderTransport, broker?: CredentialBroker) {
@@ -311,32 +389,65 @@ describe("harness with a CredentialBroker", () => {
     expect(broker.destroyCalls).toBe(0);
   });
 
-  // #279 (documented 2026-09-24 by Juanma; NOT fixed here — owner decision:
-  // comments and tests only this pass). `missing_subscription_record` is the
-  // one failure class the harness degrades instead of killing the step (the
-  // arm just above): no projection runs, `buildChildEnv` falls back to the
-  // env UNSTRIPPED, and the ambient credentials the passthrough carried
-  // reach the child after all — even though a credential broker WAS
-  // attached to the route (`resolveBindingAuthority`, runner-authority.ts,
-  // would have called `credentialKindForRoute(..., hasBroker: true)` for it,
-  // exactly the case that says subscription per #161's corrected rule).
-  // Usage filing reads this SAME env and correctly concludes metered. The
-  // two disagree, and nothing fences the spend on this path. This test
-  // exists so that gap is OBSERVABLE rather than silently assumed fixed —
-  // fixing #279 should flip the last assertion below deliberately, not by
-  // surprise.
-  test("#279: a degraded projection leaves the ambient key reaching the child, which usage filing correctly reads as metered — while admission still says subscription", async () => {
+  // #279 (fixed 2026-09-24 by Juanma, option 2 — see the WHY on
+  // `StepExecutionHarnessOptions.reservesSpend`/`degradedProjectionBucketId`,
+  // harness.ts). `missing_subscription_record` is the one failure class the
+  // harness degrades instead of killing the step (the arm just above): no
+  // projection runs, `buildChildEnv` falls back to the env UNSTRIPPED, and
+  // the ambient credentials the passthrough carried reach the child after
+  // all — even though a credential broker WAS attached to the route
+  // (`resolveBindingAuthority`, runner-authority.ts, would have called
+  // `credentialKindForRoute(..., hasBroker: true)` for it, exactly the case
+  // that says subscription per #161's corrected rule). Usage filing reads
+  // this SAME env and correctly concludes metered.
+  //
+  // That admission/filing DISAGREEMENT is permanent by design — admission
+  // cannot see a runtime degrade, and #279's fix does not touch bind time.
+  // What this test used to end on was the OTHER half: nothing fenced the
+  // spend on this path. It no longer does — the LAST assertions below are
+  // the deliberate flip fixing #279 promised, not a surprise: a
+  // `spendLedger` configured with `reservesSpend: false` (a subscription
+  // binding, unchanged) now opens and settles exactly ONE reservation for
+  // this attempt, on the SAME child env usage filing already reads.
+  test("#279: a degraded projection leaves the ambient key reaching the child, usage filing correctly reads it as metered, and the harness now reserves and settles that spend", async () => {
     const requests: TransportRequest[] = [];
     const broker = new FakeBroker(
       new CredentialProjectionError("missing_subscription_record"),
     );
-    const harness = makeHarness(recordingTransport(requests), broker);
+    const ledger = new SpyLedger();
+    const harness = new StepExecutionHarness({
+      transport: meteredTransport(requests, {
+        wallMs: 5,
+        tokens: { outputVisible: 40, outputKnown: 40, totalKnown: 40 },
+        completeness: "complete",
+        billingMode: "metered",
+        costSource: "provider",
+        cashCostUsd: 0.02,
+      }),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      // Same ambient key `makeHarness` seeds elsewhere in this file as "the
+      // operator's real key" — constructed directly here (rather than via
+      // `makeHarness`) because this test also needs the #279 spend options.
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        USER: "juanma",
+        PATH: "/usr/bin:/bin",
+        ANTHROPIC_API_KEY: "sk-ambient-operator-key",
+      },
+      credentialBroker: broker,
+      spendLedger: ledger,
+      reservesSpend: false,
+      degradedProjectionBucketId: "mirrored-metered-bucket",
+    });
     const result = await runStep(harness);
     expect(result.status).toBe("ok");
     expect(result.stderrTail).toContain("missing_subscription_record");
+    // Never silent: the result says the attempt was accounted as metered.
+    expect(result.stderrTail).toContain("ambient credential bills metered");
 
-    // The ACTUAL child env: unstripped, because the projection never ran —
-    // the same ambient key `makeHarness` seeds as "the operator's real key".
+    // The ACTUAL child env: unstripped, because the projection never ran.
     const env = requests[0]?.isolation.env;
     expect(env?.ANTHROPIC_API_KEY).toBe("sk-ambient-operator-key");
     // What usage filing (`claudeCliCostBasis` -> `envBillsMetered`,
@@ -345,7 +456,8 @@ describe("harness with a CredentialBroker", () => {
 
     // What ADMISSION concluded before any of this happened, for the exact
     // same key and the exact same fact ("a broker is attached") — it cannot
-    // see that this particular attempt's projection will degrade.
+    // see that this particular attempt's projection will degrade. Left
+    // UNCHANGED by #279's fix on purpose (option 2 never touches bind time).
     const admissionKind = credentialKindForRoute(
       "claude-code",
       "anthropic",
@@ -353,6 +465,16 @@ describe("harness with a CredentialBroker", () => {
       true,
     );
     expect(credentialKindBillsMetered(admissionKind)).toBe(false);
+
+    // THE FLIP: the spend admission could not see is no longer unaccounted
+    // for. One reservation, opened against the MIRRORED metered bucket
+    // (never the binding's own — `degradedProjectionBucketId`), settled on
+    // the CLI's reported cost.
+    expect(ledger.reserveCalls).toHaveLength(1);
+    expect(ledger.reserveCalls[0]?.bucketId).toBe("mirrored-metered-bucket");
+    expect(result.reservations).toHaveLength(1);
+    expect(result.reservations?.[0]?.state).toBe("settled");
+    expect(result.reservations?.[0]?.settledUsd).toBe(0.02);
   });
 
   test("attack-signal projection failures still fail closed before admission", async () => {
@@ -575,6 +697,224 @@ describe("#150: a transport declaring server-lifetime credential projection", ()
     if (projection === undefined) throw new Error("projection missing");
     expect(requests[0]?.isolation.credentialProjectionId).toBe(
       projection.projectionId,
+    );
+  });
+});
+
+// #279 (fixed 2026-09-24, option 2): the harness's own per-attempt fence for
+// a degraded projection's ambient spend, isolated from the admission
+// concerns the describe block above tests. Every harness here is built
+// directly (not via `makeHarness`) and wires `spendLedger`/`reservesSpend`
+// explicitly, so each test states its own binding shape rather than
+// inheriting one.
+describe("#279: fencing a degraded projection's ambient spend", () => {
+  const METERED_ZERO = {
+    wallMs: 5,
+    tokens: { outputVisible: 40, outputKnown: 40, totalKnown: 40 },
+    completeness: "complete" as const,
+    billingMode: "metered" as const,
+    costSource: "provider" as const,
+    cashCostUsd: 0,
+  };
+
+  function degradingHarness(options: {
+    readonly env: Record<string, string>;
+    readonly ledger: SpyLedger;
+    readonly reservesSpend: boolean;
+    readonly usage?: TransportOutcome["usage"];
+  }) {
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker(
+      new CredentialProjectionError("missing_subscription_record"),
+    );
+    return {
+      requests,
+      harness: new StepExecutionHarness({
+        transport: meteredTransport(requests, options.usage ?? METERED_ZERO),
+        spawnFn: (() => ({
+          exited: Promise.resolve(0),
+        })) as unknown as typeof Bun.spawn,
+        childEnv: options.env,
+        credentialBroker: broker,
+        spendLedger: options.ledger,
+        reservesSpend: options.reservesSpend,
+        degradedProjectionBucketId: "mirrored-metered-bucket",
+      }),
+    };
+  }
+
+  test("degraded + ambient key, metered-zero usage → unresolved → the bucket is fenced and a subsequent paid attempt on it is refused", async () => {
+    const ledger = new SpyLedger();
+    const { harness } = degradingHarness({
+      env: { HOME: "/tmp", ANTHROPIC_API_KEY: "sk-ambient" },
+      ledger,
+      reservesSpend: false,
+    });
+    const result = await runStep(harness);
+    expect(result.reservations).toHaveLength(1);
+    expect(result.reservations?.[0]?.state).toBe("unresolved_remote");
+
+    // The next paid attempt on the SAME (mirrored) bucket — a second,
+    // independently degraded run sharing the SAME ledger — is refused
+    // before its transport ever runs.
+    const second = degradingHarness({
+      env: { HOME: "/tmp", ANTHROPIC_API_KEY: "sk-ambient" },
+      ledger,
+      reservesSpend: false,
+    });
+    const secondResult = await runStep(second.harness);
+    expect(secondResult.status).toBe("failed");
+    expect(secondResult.stderrTail).toContain("fenced");
+    expect(second.requests).toHaveLength(0);
+  });
+
+  test("degraded + no ambient key → no reservation", async () => {
+    const ledger = new SpyLedger();
+    const { harness } = degradingHarness({
+      env: { HOME: "/tmp" },
+      ledger,
+      reservesSpend: false,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("ok");
+    expect(ledger.reserveCalls).toHaveLength(0);
+    expect(result.reservations).toBeUndefined();
+  });
+
+  // Successful projection (not degraded): `buildChildEnv` strips the
+  // ambient key before the child ever sees it, so even though the ledger IS
+  // configured, `envBillsMetered` on the STRIPPED env is false and
+  // `projectionDegraded` itself is false too — unchanged from before #279.
+  test("successful projection + ambient key → the key is stripped and no reservation opens", async () => {
+    const ledger = new SpyLedger();
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker();
+    const harness = new StepExecutionHarness({
+      transport: meteredTransport(requests, METERED_ZERO),
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      childEnv: { HOME: "/tmp", ANTHROPIC_API_KEY: "sk-ambient" },
+      credentialBroker: broker,
+      spendLedger: ledger,
+      reservesSpend: false,
+      degradedProjectionBucketId: "mirrored-metered-bucket",
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("ok");
+    expect(envBillsMetered(requests[0]?.isolation.env ?? {})).toBe(false);
+    expect(ledger.reserveCalls).toHaveLength(0);
+    expect(result.reservations).toBeUndefined();
+  });
+
+  // `reservesSpend: true` models a metered/free binding — unaffected by
+  // #279, and structurally never degraded in production (a metered/free
+  // claude-code binding never gets a `credentialBroker` attached at all —
+  // `credentialKindForRoute`, runner-authority.ts: a broker's presence is
+  // what forces the subscription kind in the first place). This test still
+  // wires BOTH conditions true at once — the one shape production cannot
+  // reach — specifically to prove the harness's reserve gate is an `||`,
+  // not two independent reserves: a mutant with a separate `if` per
+  // condition would call `reserve()` twice here, and this test would catch
+  // it.
+  test("a binding that already reserves (reservesSpend: true) reserves exactly once per attempt, even alongside a degraded ambient key", async () => {
+    const ledger = new SpyLedger();
+    const { harness } = degradingHarness({
+      env: { HOME: "/tmp", ANTHROPIC_API_KEY: "sk-ambient" },
+      ledger,
+      reservesSpend: true,
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("ok");
+    expect(ledger.reserveCalls).toHaveLength(1);
+    // The BINDING's own bucket (the harness's default, since this test does
+    // not configure `rateLimitBucketId`) — never the degraded-mirror bucket,
+    // because `reservesSpend: true` takes precedence in the bucket choice.
+    expect(ledger.reserveCalls[0]?.bucketId).toBe("default");
+    expect(result.reservations).toHaveLength(1);
+  });
+
+  // pr-hero review follow-up on this same slice (parent-verified): a
+  // `reservesSpend: false` harness with a `spendLedger` but no
+  // `degradedProjectionBucketId` used to silently fence the wrong bucket
+  // (`rateLimitBucketId` — the binding's OWN, e.g. subscription, bucket) the
+  // first time a degraded reservation opened. Dead in production (it always
+  // computes and passes the mirrored bucket), but constructible by any
+  // other caller. The fix makes that shape impossible to build at all.
+  test("constructing reservesSpend:false + spendLedger WITHOUT degradedProjectionBucketId throws immediately", () => {
+    expect(
+      () =>
+        new StepExecutionHarness({
+          spendLedger: new InMemorySpendLedger(),
+          reservesSpend: false,
+          // degradedProjectionBucketId intentionally omitted.
+        }),
+    ).toThrow(/degradedProjectionBucketId/);
+  });
+
+  // The three shapes that must NOT throw: no ledger at all (ledger-free),
+  // `reservesSpend: true` (the binding reserves into its own bucket, the
+  // degraded-fence branch is never taken), and `reservesSpend: false` WITH
+  // the bucket supplied (the one construction production actually uses).
+  test("every OTHER spendLedger shape still constructs fine", () => {
+    expect(() => new StepExecutionHarness({})).not.toThrow();
+    expect(
+      () =>
+        new StepExecutionHarness({
+          spendLedger: new InMemorySpendLedger(),
+          reservesSpend: true,
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new StepExecutionHarness({
+          spendLedger: new InMemorySpendLedger(),
+          reservesSpend: false,
+          degradedProjectionBucketId: "mirrored-metered-bucket",
+        }),
+    ).not.toThrow();
+  });
+
+  // pr-hero review follow-up: the metered-accounting CLAIM ("this attempt
+  // reserves against the spend ledger...") must describe a reservation that
+  // ACTUALLY opened, never one merely intended. `admitAndExecute` can return
+  // with `attempts: 0` and no reservation at all — an unreadable system
+  // prompt is one such early return, checked BEFORE the admission gate/
+  // retry loop ever runs — and the degrade itself already happened in
+  // `run()`, before any of that. The base degrade warning is still owed
+  // (the projection DID degrade); the reserve/fence claim is not (nothing
+  // was reserved).
+  test("degraded + ambient key + a zero-attempt early return → the degrade warning is stated, the reserve/fence claim is not", async () => {
+    const ledger = new SpyLedger();
+    const { harness } = degradingHarness({
+      env: { HOME: "/tmp", ANTHROPIC_API_KEY: "sk-ambient" },
+      ledger,
+      reservesSpend: false,
+    });
+    const result = await harness.run({
+      name: "cred-probe-unreadable-prompt",
+      systemPromptPath: "/nonexistent/pr-hero-279-system-prompt.md",
+      prompt: "p",
+      tools: [],
+      model: "sonnet",
+      cwd: "/tmp/ws",
+      outPath: `/tmp/cred-probe-279-${Date.now()}.json`,
+      mcpConfigPath: "/tmp/mcp.json",
+      timeoutMs: 1000,
+      maxAttempts: 1,
+      parse: (text) => JSON.parse(text),
+    });
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(0);
+    expect(result.reservations).toBeUndefined();
+    expect(ledger.reserveCalls).toHaveLength(0);
+    // The degrade itself is real and still stated.
+    expect(result.stderrTail).toContain("missing_subscription_record");
+    // The reserve/fence claim is NOT — nothing was reserved for a step that
+    // never reached `runAttempt`.
+    expect(result.stderrTail).not.toContain("ambient credential bills metered");
+    expect(result.stderrTail).not.toContain(
+      "reserves against the spend ledger",
     );
   });
 });

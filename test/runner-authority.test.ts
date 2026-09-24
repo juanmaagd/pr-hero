@@ -294,11 +294,12 @@ describe("credentialKindForRoute", () => {
   //
   // NOT covered here: a broker whose projection DEGRADES
   // (`missing_subscription_record`) instead of stripping anything — that is
-  // #279, a real, currently-existing gap where admission and filing DISAGREE
-  // (admission says subscription, filing correctly says metered, and the
-  // spend is not fenced). Its own test, against the real harness rather than
-  // this simulation, lives in
-  // test/harness/credential-projection.test.ts.
+  // #279, where admission and filing DISAGREE by design (admission says
+  // subscription, filing correctly says metered) — a disagreement #279's fix
+  // deliberately leaves in place (admission cannot see a runtime degrade);
+  // what changed is that the SPEND is now fenced too, at the harness, not
+  // here. Its own test, against the real harness rather than this
+  // simulation, lives in test/harness/credential-projection.test.ts.
   describe("admission and usage filing agree on a successful projection or no broker (#161 anti-fork guarantee)", () => {
     const PROJECTION_OWNED_KEYS = [
       "HOME",
