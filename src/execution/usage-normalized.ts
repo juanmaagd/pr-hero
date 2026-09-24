@@ -109,15 +109,22 @@ export type UsageCostSource =
 // Same predicate, same answer, two different envs because one runs before
 // the strip and one runs after it.
 //
-// KNOWN EXCEPTION — #279, not fixed here. A broker's projection can DEGRADE
-// (`missing_subscription_record`, credential-broker.ts + harness.ts
-// ~756-778) instead of stripping anything: the child then runs UNSTRIPPED,
-// so `hasBroker: true` no longer implies "the child's env has no key" —
-// admission still says subscription, the spend is not fenced, and
+// KNOWN EXCEPTION — #279 (fixed 2026-09-24, option 2). A broker's projection
+// can DEGRADE (`missing_subscription_record`, credential-broker.ts +
+// harness.ts ~756-778) instead of stripping anything: the child then runs
+// UNSTRIPPED, so `hasBroker: true` no longer implies "the child's env has no
+// key" — admission still says subscription (this function's answer is
+// deliberately left unchanged; it cannot see a runtime degrade), and
 // `claudeCliCostBasis` (reading the real, unstripped child env) correctly
-// files it metered. Pre-existing: this exact mismatch already existed for
-// every degraded projection before #161, which named the ownership rule but
-// did not add or remove this exception.
+// files it metered. That disagreement between admission and filing is
+// permanent by design — but the spend it describes is no longer
+// unaccounted for: `StepExecutionHarness.run` (harness.ts) recognizes its
+// own degraded projection and applies THIS SAME `envBillsMetered` predicate
+// to the SAME child env to open a spend-ledger reservation for that one
+// attempt, settling or fencing it exactly like a metered route. Pre-existing:
+// this exact admission/filing mismatch already existed for every degraded
+// projection before #161, which named the ownership rule but did not add or
+// remove this exception; #279's fix lives in the harness, not here.
 //
 // Everything downstream of the KIND (the projection, the bucket, and
 // `FrozenRuntimeBinding.capabilities()`'s `effectiveBillingMode` via

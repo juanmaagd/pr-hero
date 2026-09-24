@@ -321,18 +321,25 @@ export async function withClaudeDiscoveryAllowlist(
 // mistake) would silently rebill a subscription developer as per-token for a
 // key the child structurally cannot spend.
 //
-// KNOWN EXCEPTION — #279, deliberately NOT fixed here (owner decision:
-// comments and tests only this pass). `KeychainCredentialBroker.project` can
+// KNOWN EXCEPTION — #279 (fixed 2026-09-24 by Juanma, option 2: fence at the
+// harness, admission stays unchanged). `KeychainCredentialBroker.project` can
 // throw `missing_subscription_record` when the CLI moved its OAuth record
 // out of the Keychain item; the harness DEGRADES that one failure class
 // instead of killing the step (harness.ts ~756-778) — no projection runs,
 // `buildChildEnv` returns the env UNSTRIPPED, and an ambient key reaches the
-// child after all. On that path this function still says subscription (a
-// broker WAS attached), the spend is not fenced, and usage filing — which
-// reads the child's REAL env — correctly files it metered. Pre-existing:
-// before #161 every claude-code route said subscription regardless, so this
-// exact admission/filing mismatch already existed on every degraded
-// projection; #161 did not create it and does not resolve it.
+// child after all. On that path THIS FUNCTION still says subscription (a
+// broker WAS attached) — that answer is deliberately left unchanged, because
+// admission cannot know at bind time whether a projection will degrade — but
+// the spend is no longer unaccounted for: `StepExecutionHarness.run`
+// (harness.ts) now recognizes its OWN degraded projection, re-applies this
+// SAME `envBillsMetered` predicate to the SAME unstripped child env usage
+// filing reads, and reserves+fences that one attempt against the spend
+// ledger as if the route had bound metered — without changing the kind this
+// function returns, which credential runs, or who pays. Pre-existing: before
+// #161 every claude-code route said subscription regardless, so this exact
+// admission/filing mismatch already existed on every degraded projection;
+// #161 did not create it, and this function still does not resolve it — the
+// harness does, downstream of here.
 //
 // `hasBroker` carries "will a broker ATTEMPT to project" — a plain boolean
 // the CALLER already resolved (`resolveBindingAuthority` below constructs
