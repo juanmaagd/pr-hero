@@ -1741,10 +1741,18 @@ export function productionFallbackRegistry(options: {
   // #182: when the decided kind is free and no broker was supplied, default to
   // the free broker — NOT the OAuth default in openCodeLaunchServerFor. That
   // default pairs an OAuth broker with whatever kind travels, and pairing it
-  // with `provider_free` would refuse by name (loud but useless). Substituting
-  // a fresh broker here is safe UNLIKE the metered/OAuth case the comment
-  // below guards: the free broker reads nothing, so "no preference" and "use
-  // THIS one" are indistinguishable — there is no operator store to touch.
+  // with `provider_free` would refuse by name (loud but useless).
+  //
+  // #280 changed what this substitution costs. The free broker used to read
+  // nothing, so a fresh instance here was indistinguishable from the caller's.
+  // It now reads the provider's own `api` record from auth.json when one
+  // exists, so a fresh instance here and another at the binding would be two
+  // independent reads of the same mutable store — the "two brokers, diverging
+  // in silence" class #149 closed. The production path never reaches this:
+  // prepareProductionAdmissionContext resolves ONE broker and seeds it into
+  // `credentialBrokers.opencode`, which both the bindings and this registry
+  // receive. This default only serves callers that build a runtime without
+  // that context (tests, probes); pass `credentialBrokers.opencode` to share.
   const needsFreeDefault =
     kind === "provider_free" &&
     options.credentialBrokers?.opencode === undefined;
