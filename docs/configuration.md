@@ -126,21 +126,15 @@ Written to `~/.prhero/config.json` and validated against the engine's own parser
         "backend": "opencode",
         "provider": "anthropic",
         "modelSnapshot": "claude-sonnet-5"
-      },
-      "openai/gpt-5": {
-        "backend": "opencode",
-        "provider": "openai",
-        "modelFamily": "gpt-5",
-        "modelSnapshot": "gpt-5"
       }
     }
   }
 }
 ```
 
-This resolves `"sonnet"` (what the bundled prompts declare) onto OpenCode's Anthropic route, and
-routes an explicit `openai/gpt-5` identity onto OpenCode's OpenAI route. Mixing more than one
-OpenCode provider in a single run is refused — see [Credentials](#credentials) below.
+This resolves `"sonnet"` (what the bundled prompts declare) onto OpenCode's Anthropic route. Keep
+every OpenCode mapping a run uses on **one** provider: a plan naming two OpenCode providers is
+refused at admission — see [Credentials](#credentials) below.
 
 ## Credentials
 
@@ -153,7 +147,7 @@ exist today:
 | `claude_subscription_oauth` | macOS Keychain item `Claude Code-credentials` (via `/usr/bin/security`) | `claude-code` | subscription (quota, `$0.00` cash) |
 | `provider_api_token` | ambient `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` (claude-code), or the named key in OpenCode's `auth.json` (opencode) | `claude-code`, `opencode` | metered (real invoice) |
 | `opencode_chatgpt_oauth` | the `openai` entry in `~/.local/share/opencode/auth.json` (or `$XDG_DATA_HOME/opencode/auth.json`), which must be `type: "oauth"` | `opencode` | subscription |
-| `provider_free` | nothing — the provider's own catalog declares the model free at runtime (`opencode models <provider> --verbose --refresh`, every cost leaf `0`, status active) | `opencode` | free (not metered) |
+| `provider_free` | the provider's own catalog declares the model free at runtime (`opencode models <provider> --verbose --refresh`, every cost leaf `0`, status active); the provider's `type: "api"` entry in `auth.json` is projected if one exists, otherwise nothing | `opencode` | free (not metered) |
 
 ### The one trap worth naming twice
 
@@ -174,11 +168,13 @@ credential for its whole life.
 On macOS with `/usr/bin/security` present, a Keychain broker projects the subscription OAuth
 record into the child and **strips** `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` from its
 environment — so an exported key on a macOS developer's shell does not silently make a `claude-code`
-route metered; it still runs on the projected subscription record. Without that broker (Linux, CI,
-or a macOS box that never authenticated `claude`), no projection happens: if `ANTHROPIC_API_KEY` or
+route metered; it still runs on the projected subscription record. Without that broker (Linux, CI), no
+projection happens: if `ANTHROPIC_API_KEY` or
 `ANTHROPIC_AUTH_TOKEN` is set in the ambient environment, the route binds `provider_api_token` and
 bills metered. This is why CI (which has no Keychain) always binds metered when an Anthropic API key
-secret is set.
+secret is set. On macOS the broker is attached whenever `/usr/bin/security` exists: if the
+`Claude Code-credentials` item is absent entirely, projection fails closed and the step does not
+run.
 
 One known exception: if the Keychain item exists but the CLI moved its OAuth record out of the
 expected shape, projection can fail in a way the harness degrades rather than kills — the route
@@ -223,10 +219,11 @@ Environment is operational, but some optional tools or configurations are degrad
 
 ### `pr-hero review --dry-run` — two caveats
 
-- **It returns before route admission.** Local and PR dry-run both print the plan and the cost band
-  from the diff and the config alone, before any credential is projected or route bound. A plan that
-  would die immediately at admission (a missing `modelSnapshot`, a refused credential, an unmapped
-  route) can still print a clean dry-run.
+- **In PR mode it returns before route admission.** `pr-hero review --pr <n> --dry-run` prints the
+  plan and the cost band from the diff and the config alone, before any credential is projected or
+  route bound, so a plan that would die immediately at admission (a missing `modelSnapshot`, a
+  refused credential, an unmapped route) can still print a clean dry-run. Local dry-run resolves the
+  route plan and admission first (`#120`), so it catches admission refusals.
 - **The cost band ignores billing mode.** It is a diff-size-and-agent-count estimate, calibrated from
   measured runs, not derived from a live route. It prints the same non-zero range on a `$0.00`
   subscription route as on a metered one — read it as "how big is this diff", not "what will this
@@ -251,8 +248,9 @@ each ledgered live with real cost accounted:
   on the same diff and reported the same "nothing found" answer, which is weak evidence on a diff
   with no planted defect, not proof of equivalent quality.
 - `zai` is code-path-identical to the proven `deepseek` route but unrun — no credential was
-  available to prove it. `zai-coding-plan` is refused today (`#169`, flat-fee API key classified
-  metered with no pricing table).
+  available to prove it. `zai-coding-plan` (a flat-fee plan behind an API key) is priced `$0` by
+  OpenCode's catalog, so it runs as `provider_free` with its own `auth.json` key projected
+  (`#280`) — verified in code and tests, not in a live run.
 - Codegraph/MCP integration on a target that actually has an index, and a fully parity-hunter- and
   scout-exercised run, remain unverified.
 
