@@ -364,13 +364,17 @@ export type CiBillingMode = "subscription" | "metered";
 //
 // The separation stands on ownership instead: how a route bills follows from
 // which credential it runs on, which is `credentialKindForRoute`'s single
-// decision (#161's slice). This one answers a narrower question — "should CI
+// decision (#161, landed). This one answers a narrower question — "should CI
 // impose a spend ceiling?" — and reaches nothing but the ceiling.
 //
-// That refusal now guards the shared predicate itself rather than only this
-// caller: `envBillsMetered` carries the same paragraph and names BOTH
-// forbidden consumers, because #177 gave it a second caller that is one
-// careless edit away from the admission path.
+// `envBillsMetered` carries the matching ADMISSION WIRING paragraph, and it
+// is worth reading precisely because #161 changed its shape: this predicate
+// now has a SANCTIONED second caller (`credentialKindForRoute`), named
+// rather than forbidden, because admission and usage filing must answer from
+// the same function or they can disagree about one attempt. What stays
+// forbidden is a THIRD caller deriving from env directly instead of going
+// through that one decision — this CI gate is not that caller, and never
+// should be.
 //
 // Optional `openCodeAuthPresent` is the OpenCode half of the same ceiling
 // question — "could this run invoice?" — ORed beside the Anthropic env

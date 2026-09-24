@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -612,6 +613,14 @@ describe("production runtime PR1", () => {
     async function bindingReportForBilling(
       billing: ProviderCapabilityReport["billing"],
       routingConfig?: RoutingConfig,
+      // #161: optional so every pre-existing caller below (which does not
+      // care about the credential kind) stays byte-identical — no env means
+      // no key means the pre-#161 subscription kind, same as always.
+      env?: Readonly<Record<string, string | undefined>>,
+      // #161 (corrected 2026-09-24): optional so a caller can prove the
+      // "broker present" arm deterministically, on every host, instead of
+      // depending on whether THIS host's Keychain default resolves.
+      credentialBrokers?: { readonly "claude-code": CredentialBroker },
     ) {
       // No routingConfig resolves through the alias fallback in
       // model/routing.ts, which pins provider "anthropic" -- the catalogue's
@@ -641,6 +650,8 @@ describe("production runtime PR1", () => {
         executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
+        ...(env === undefined ? {} : { env }),
+        ...(credentialBrokers === undefined ? {} : { credentialBrokers }),
       });
       const binding = runtime.bindings.get(step.routeFingerprint);
       if (binding === undefined) throw new Error("missing binding");
@@ -704,6 +715,79 @@ describe("production runtime PR1", () => {
       expect(meteredPriced.billing.cashCostAccountingValid).toBe(true);
       expect(exactBindingCapabilityGate(meteredPriced).ok).toBe(true);
     });
+
+    // #161, end to end (corrected 2026-09-24 by Juanma): an ANTHROPIC_API_KEY
+    // in the route's env upgrades `credentialKindForRoute`'s answer only when
+    // NO credential broker will project for the route — a SUCCESSFUL
+    // projection strips the key before the child ever spawns
+    // (PROJECTION_OWNED_KEYS, harness.ts), so a projected route stays
+    // subscription no matter what its env carries. (A degraded projection is
+    // #279's known exception, not exercised by this admission-time test —
+    // `resolveBindingAuthority` never awaits the real projection, only
+    // whether a broker is attached; see
+    // test/harness/credential-projection.test.ts for the real, degraded
+    // path.) `FrozenRuntimeBinding.capabilities()` upgrades
+    // `effectiveBillingMode` from that kind
+    // (production-runtime.ts:~324, `credentialKindBillsMetered`). The mock
+    // transport here reports the shape the REAL `ClaudeCodeCliTransport`
+    // reports today — `mode: "subscription"` (the static, backend-wide
+    // claim), `pricingReady: true` (#197) — so both arms below prove the
+    // exact-binding mode follows the CREDENTIAL, not the transport claiming
+    // metered itself.
+    test("a key alongside a broker stays subscription — the broker wins, deterministically on every host", async () => {
+      const subscriptionShapedReport = {
+        mode: "subscription" as const,
+        pricingReady: true,
+      };
+      const withoutKey = await bindingReportForBilling(
+        subscriptionShapedReport,
+      );
+      expect(withoutKey.billing.mode).toBe("subscription");
+      expect(withoutKey.billing.pricingApplicability).toBe("not_applicable");
+
+      // The fake broker is what makes this deterministic: it proves the
+      // precedence rule without depending on whether THIS host's real
+      // Keychain default happens to resolve.
+      const withKeyAndBroker = await bindingReportForBilling(
+        subscriptionShapedReport,
+        undefined,
+        { ANTHROPIC_API_KEY: "sk-test" },
+        { "claude-code": stubClaudeCredentialBroker },
+      );
+      expect(withKeyAndBroker.billing.mode).toBe("subscription");
+      expect(withKeyAndBroker.billing.pricingApplicability).toBe(
+        "not_applicable",
+      );
+      expect(exactBindingCapabilityGate(withKeyAndBroker).ok).toBe(true);
+    });
+
+    // The full path for "a key, no broker at all" — only exercisable end to
+    // end on a host whose default Keychain broker genuinely resolves to
+    // undefined (CI's ubuntu-latest); skipped on this darwin sandbox in
+    // favour of the deterministic, platform-independent proof in
+    // test/runner-authority.test.ts.
+    test.skipIf(
+      process.platform === "darwin" && existsSync("/usr/bin/security"),
+    )(
+      "a key with no broker upgrades the exact binding to metered and admits it",
+      async () => {
+        const withKey = await bindingReportForBilling(
+          { mode: "subscription" as const, pricingReady: true },
+          undefined,
+          { ANTHROPIC_API_KEY: "sk-test" },
+        );
+        expect(withKey.billing.mode).toBe("metered");
+        expect(withKey.billing.pricingApplicability).toBe("required");
+        expect(withKey.billing.tokenPricingAvailable).toBe(true);
+        expect(withKey.billing.cashCostAccountingValid).toBe(true);
+        // Admitted, not refused for lack of pricing: this is the pairing
+        // #161 depends on but does not itself provide (#197 provided it).
+        // `ok` only reaches true with an empty `reason`
+        // (capabilityGateDecision, model/provider-capabilities.ts), so this
+        // alone rules out `pricing_table_missing` blocking the route.
+        expect(exactBindingCapabilityGate(withKey).ok).toBe(true);
+      },
+    );
 
     // #197 deleted the bundled catalogue and the `||` arm that read it, so
     // `tokenPricingAvailable` is the transport's own claim and nothing else.

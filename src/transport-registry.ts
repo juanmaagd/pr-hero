@@ -440,7 +440,11 @@ export interface TransportFactoryOptions {
   // launcher-side default below keeps the operator's override on the same
   // option path as every other binary this registry hands out.
   readonly codegraphBinaryPath?: string;
-  readonly env?: Record<string, string>;
+  // #161: matches `RunnerAuthorityOptions.env`'s widened shape (it flows in
+  // from there) and `baseEnv` below, which already accepted `string |
+  // undefined` values — `process.env` itself is typed this way, and this
+  // was the narrower link in that chain.
+  readonly env?: Readonly<Record<string, string | undefined>>;
   // #149: the credential broker the authority resolved for the opencode
   // backend. The server runs under its projection for the servers whole life.
   readonly credentialBroker?: CredentialBroker;
