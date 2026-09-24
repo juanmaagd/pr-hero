@@ -409,7 +409,11 @@ export function openCodeCredentialBrokerForKind(
   provider: string,
 ): CredentialBroker {
   if (kind === "provider_free") {
-    return new OpenCodeFreeBroker();
+    // #280: bound to the provider, same as the metered branch below — the
+    // free broker now peeks at this provider's OWN api record before
+    // falling back to the empty tree, so it needs to know which provider it
+    // is.
+    return new OpenCodeFreeBroker(provider);
   }
   if (kind === "provider_api_token") {
     return new OpenCodeApiTokenBroker(provider);

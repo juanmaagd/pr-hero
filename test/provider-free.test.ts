@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -175,7 +182,10 @@ describe("#182 provider_free kind", () => {
 
 describe("#182 OpenCodeFreeBroker", () => {
   test("projects an empty projection with no auth file", async () => {
-    const broker = new OpenCodeFreeBroker();
+    // #280: the constructor now takes a provider, matching
+    // OpenCodeApiTokenBroker — but a provider with no auth.json at all
+    // still projects the exact empty tree #182 always produced.
+    const broker = new OpenCodeFreeBroker("opencode");
     const projection = await broker.project({
       sessionId: "s",
       credentialRef: "opencode-auth:opencode",
@@ -206,7 +216,7 @@ describe("#182 OpenCodeFreeBroker", () => {
   });
 
   test("refuses any other kind by name", async () => {
-    const broker = new OpenCodeFreeBroker();
+    const broker = new OpenCodeFreeBroker("opencode");
     for (const kind of [
       "provider_api_token",
       "opencode_chatgpt_oauth",
@@ -231,6 +241,71 @@ describe("#182 OpenCodeFreeBroker", () => {
       if (error instanceof CredentialProjectionError) {
         expect(error.failureClass).not.toBe("missing_subscription_record");
       }
+    }
+  });
+});
+
+// #280: `openCodeCredentialBrokerForKind` now threads the provider into
+// OpenCodeFreeBroker's constructor (production-runtime.ts's
+// `needsFreeDefault` path, wired after the #182 probe swap). This proves the
+// factory binds the RIGHT provider — not a shared default, and not the
+// first provider constructed — by pointing two independently-built brokers
+// at the same real auth.json and checking each reads only its own key.
+describe("#280 openCodeCredentialBrokerForKind binds provider_free to the given provider", () => {
+  test("the wired broker reads that provider's own record, and a different provider stays empty", async () => {
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "pr-hero-free-bound-"));
+    const priorXdgDataHome = process.env.XDG_DATA_HOME;
+    try {
+      const authDir = path.join(tmpDir, "opencode");
+      await mkdir(authDir, { recursive: true });
+      await writeFile(
+        path.join(authDir, "auth.json"),
+        JSON.stringify({
+          "zai-coding-plan": { type: "api", key: "ZAI-KEY-test-fake" },
+          openai: { type: "oauth", access: "AT-openai-test-fake" },
+        }),
+      );
+      process.env.XDG_DATA_HOME = tmpDir;
+
+      const bound = openCodeCredentialBrokerForKind(
+        "provider_free",
+        "zai-coding-plan",
+      );
+      expect(bound).toBeInstanceOf(OpenCodeFreeBroker);
+      const projection = await bound.project({
+        sessionId: "s",
+        credentialRef: "opencode-auth:zai-coding-plan",
+        kind: "provider_free",
+        verifiedBinaryPath: "/fake/opencode",
+      });
+      try {
+        expect(projection.files).toHaveLength(1);
+      } finally {
+        await projection.destroy();
+      }
+
+      const differentProvider = openCodeCredentialBrokerForKind(
+        "provider_free",
+        "mistral",
+      );
+      const emptyProjection = await differentProvider.project({
+        sessionId: "s",
+        credentialRef: "opencode-auth:mistral",
+        kind: "provider_free",
+        verifiedBinaryPath: "/fake/opencode",
+      });
+      try {
+        expect(emptyProjection.files).toEqual([]);
+      } finally {
+        await emptyProjection.destroy();
+      }
+    } finally {
+      if (priorXdgDataHome === undefined) {
+        delete process.env.XDG_DATA_HOME;
+      } else {
+        process.env.XDG_DATA_HOME = priorXdgDataHome;
+      }
+      await rm(tmpDir, { recursive: true, force: true });
     }
   });
 });

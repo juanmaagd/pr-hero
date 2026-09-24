@@ -9,6 +9,7 @@ import {
   OPENCODE_AUTH_RELATIVE_PATH,
   OpenCodeApiTokenBroker,
   OpenCodeAuthBroker,
+  OpenCodeFreeBroker,
   openCodeProjectionLayout,
 } from "../../src/security/credential-broker";
 
@@ -722,6 +723,137 @@ describe("OpenCodeApiTokenBroker", () => {
     expect(existsSync(root)).toBe(false);
     await projection.destroy();
     expect(existsSync(root)).toBe(false);
+  });
+});
+
+// #280: the free route projects the provider's OWN `api` record when one
+// exists in auth.json, so a flat-fee API-key plan priced at $0
+// (zai-coding-plan) reaches the child with a credential instead of running
+// keyless against a provider that requires one. Every other outcome —
+// absent file, unreadable file, malformed JSON, no entry for this provider,
+// an entry that is not `type: "api"` — collapses to the SAME empty tree
+// #182 always produced, never a throw. See the class header comment for the
+// full WHY; these tests are what "collapses to the empty tree" means in
+// practice, one failure mode at a time.
+function freeBroker(provider: string, readerFn: () => Promise<string>) {
+  return new OpenCodeFreeBroker(provider, { readerFn });
+}
+
+async function projectFree(broker: OpenCodeFreeBroker) {
+  return broker.project({
+    sessionId: "session-1",
+    credentialRef: OPENCODE_AUTH_RELATIVE_PATH,
+    kind: "provider_free",
+    verifiedBinaryPath: "/opt/homebrew/bin/opencode",
+  });
+}
+
+describe("#280 OpenCodeFreeBroker projects the provider's api record", () => {
+  test("a provider WITH an api record gets it projected, and only it", async () => {
+    const broker = freeBroker(
+      "zai-coding-plan",
+      async () => FAKE_OPENCODE_STORE,
+    );
+    const projection = await projectFree(broker);
+    try {
+      expect(projection.files).toHaveLength(1);
+      const raw = await Bun.file(
+        projectedAuthPath(projection.syntheticHome),
+      ).text();
+      const written = JSON.parse(raw);
+      expect(Object.keys(written)).toEqual(["zai-coding-plan"]);
+      expect(written["zai-coding-plan"].type).toBe("api");
+      expect(written["zai-coding-plan"].key).toBe("ZAI-KEY-test-fake");
+      // Sibling providers in the same store — including the operator's
+      // OpenAI OAuth record — never leave the source store.
+      expect(raw).not.toContain("AT-openai-test-fake");
+      expect(raw).not.toContain("ZAI-KEY-2-test-fake");
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("a provider with NO record in an otherwise-populated store falls back to the empty tree", async () => {
+    const broker = freeBroker("mistral", async () => FAKE_OPENCODE_STORE);
+    const projection = await projectFree(broker);
+    try {
+      expect(projection.files).toEqual([]);
+      expect(existsSync(projectedAuthPath(projection.syntheticHome))).toBe(
+        false,
+      );
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("an OAuth record for this exact provider is not projected — empty tree, not the OAuth record", async () => {
+    const broker = freeBroker("openai", async () => FAKE_OPENCODE_STORE);
+    const projection = await projectFree(broker);
+    try {
+      expect(projection.files).toEqual([]);
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("auth.json absent (fresh machine, Zen-only user) — empty tree, never a throw", async () => {
+    const broker = freeBroker("zai-coding-plan", async () => {
+      throw new Error("/Users/someone/.local/share/opencode/auth.json ENOENT");
+    });
+    const projection = await projectFree(broker);
+    try {
+      expect(projection.files).toEqual([]);
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("malformed JSON in the store — empty tree, never a throw, never the operator env", async () => {
+    const broker = freeBroker(
+      "zai-coding-plan",
+      async () => '{"zai-coding-plan": KEY-leaked-value',
+    );
+    const projection = await projectFree(broker);
+    try {
+      expect(projection.files).toEqual([]);
+    } finally {
+      await projection.destroy();
+    }
+  });
+
+  test("still refuses any other kind by name, and never the degrading class", async () => {
+    const broker = freeBroker(
+      "zai-coding-plan",
+      async () => FAKE_OPENCODE_STORE,
+    );
+    for (const kind of [
+      "provider_api_token",
+      "opencode_chatgpt_oauth",
+      "claude_subscription_oauth",
+    ] as const) {
+      let error: unknown;
+      try {
+        await broker.project({
+          sessionId: "s",
+          credentialRef: OPENCODE_AUTH_RELATIVE_PATH,
+          kind,
+          verifiedBinaryPath: "/fake/opencode",
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(Error);
+      if (error instanceof CredentialProjectionError) {
+        expect(error.failureClass).not.toBe("missing_subscription_record");
+      }
+    }
+  });
+
+  test("a provider name outside the safe grammar is refused at construction", () => {
+    for (const bad of ["", "../escape", "Zai", "zai/x", "-lead", "a b"]) {
+      expect(() => new OpenCodeFreeBroker(bad)).toThrow(/provider/i);
+    }
+    expect(() => new OpenCodeFreeBroker("zai-coding-plan")).not.toThrow();
   });
 });
 
