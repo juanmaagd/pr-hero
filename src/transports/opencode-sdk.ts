@@ -588,6 +588,16 @@ export class OpenCodeSdkTransport implements ProviderTransport {
     readonly provider: string;
   };
   readonly cancellationSemantics = "provider-proof" as const;
+  // #150: this transport never reads `TransportRequest.isolation` — its
+  // server owns ONE credential projection for the server's whole lifetime
+  // (#149, brokered by `OpenCodeAuthBroker`/`OpenCodeFreeBroker` before the
+  // server ever launches), not a fresh one per step. Declaring
+  // "server-lifetime" tells `StepExecutionHarness.run` to skip the per-step
+  // broker call for every attempt this transport executes — no auth file
+  // materialized and destroyed for nothing, no false
+  // `missing_subscription_record` degrade for a projection that was never
+  // attempted.
+  readonly credentialProjection = "server-lifetime" as const;
   readonly defaultRoute?: ResolvedModelRoute;
   private readonly client: OpenCodeClientLike;
   private readonly stallDeadlineMs: number;

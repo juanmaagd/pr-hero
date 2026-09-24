@@ -725,12 +725,31 @@ export class StepExecutionHarness implements StepRunner {
       };
     }
 
+    // #150: a transport that declares "server-lifetime" owns its OWN
+    // credential protection outside this per-step loop (the OpenCode SDK
+    // transport's server, brokered once for the server's whole run — #149)
+    // and never reads `isolation` at all. Projecting, writing an auth file
+    // to disk, and destroying it for such a transport protects nothing —
+    // it is pure disk churn plus a misleading artifact. Reading
+    // `transport.credentialProjection` HERE (not `this.transport`) matters:
+    // this is the same transport variable `admitAndExecute` below is about
+    // to run the attempt against, resolved per-step just above (registry
+    // lookup / explicit override) — gating on any other reference could
+    // diverge from what actually executes.
+    //
+    // Undeclared/"per-step" is the fail-safe default (see
+    // `ProviderTransport.credentialProjection`, contracts.ts): every
+    // existing transport, and any new one nobody has updated yet, keeps
+    // projecting exactly as before.
+    const consumesPerStepProjection =
+      transport.credentialProjection !== "server-lifetime";
+
     // §6.1 D1-05: project credentials ONCE per run, BEFORE admission or
     // spawn — a projection failure must never reach a provider or leak into
     // an attempt count.
     let projection: CredentialProjection | undefined;
     let projectionWarning: string | undefined;
-    if (this.credentialBroker) {
+    if (this.credentialBroker && consumesPerStepProjection) {
       try {
         projection = await projectCredentialWithBudget(
           this.credentialBroker,
@@ -787,6 +806,18 @@ export class StepExecutionHarness implements StepRunner {
         projection,
         transport,
         admissionIdentity,
+        // #150: what `isolation.credentialProjectionId` says when `projection`
+        // stays undefined. "operator-env-fallback" means what it always did —
+        // no broker configured, or the missing_subscription_record degrade
+        // just above — a synthetic identity was expected and did not happen.
+        // A declared server-lifetime skip is neither: no projection was ever
+        // ATTEMPTED, so labelling it a "fallback" would claim a degrade that
+        // never occurred. "server-lifetime" says the honest thing instead —
+        // this step's credentials are protected elsewhere, by the transport's
+        // own server-scoped projection.
+        fallbackCredentialProjectionId: consumesPerStepProjection
+          ? "operator-env-fallback"
+          : "server-lifetime",
       });
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
@@ -1316,6 +1347,10 @@ export class StepExecutionHarness implements StepRunner {
       readonly executable: string;
       readonly provider: string;
     };
+    // #150: `isolation.credentialProjectionId` to stamp when `projection` is
+    // undefined — see the call site in `run()` for why this is not always
+    // "operator-env-fallback" any more.
+    readonly fallbackCredentialProjectionId: string;
   }): Promise<StepResult> {
     const {
       step,
@@ -1325,6 +1360,7 @@ export class StepExecutionHarness implements StepRunner {
       projection,
       transport,
       admissionIdentity,
+      fallbackCredentialProjectionId,
     } = args;
 
     // 3. Admission gate: called once after successful authorization
@@ -1457,11 +1493,15 @@ export class StepExecutionHarness implements StepRunner {
               verifiedBinaryPath,
             }
           : {
-              // Degraded mode must describe what ACTUALLY ran, not claim a
-              // synthetic identity the env contradicts (§6.1 invariant:
-              // env.HOME === syntheticHome). The marker id makes the
-              // fallback auditable in artifacts.
-              credentialProjectionId: "operator-env-fallback",
+              // Must describe what ACTUALLY ran, not claim a synthetic
+              // identity the env contradicts (§6.1 invariant: env.HOME ===
+              // syntheticHome). The marker id makes the absence auditable in
+              // artifacts — "operator-env-fallback" (no broker, or a
+              // missing_subscription_record degrade) or, since #150,
+              // "server-lifetime" (the transport declared it never wanted a
+              // per-step projection in the first place; see
+              // `fallbackCredentialProjectionId` above).
+              credentialProjectionId: fallbackCredentialProjectionId,
               env: childEnv,
               syntheticHome: childEnv.HOME ?? "",
               syntheticConfigHome:

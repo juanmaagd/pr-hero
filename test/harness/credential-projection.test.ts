@@ -82,6 +82,39 @@ function recordingTransport(requests: TransportRequest[]): ProviderTransport {
   };
 }
 
+// #150: a stand-in for OpenCodeSdkTransport's declaration — its server owns
+// ONE credential projection for the server's whole lifetime (#149), so it
+// never reads `request.isolation` and declares as much.
+function serverLifetimeTransport(
+  requests: TransportRequest[],
+): ProviderTransport {
+  return {
+    backend: "opencode",
+    credentialProjection: "server-lifetime",
+    capabilities: async () => {
+      throw new Error("not used");
+    },
+    classifyFailure: () => undefined,
+    async execute(request) {
+      requests.push(request);
+      return {
+        completion: "success",
+        protocolIntegrity: "verified",
+        finalText: "{}",
+        usage: {
+          wallMs: 0,
+          tokens: {},
+          completeness: "complete",
+          billingMode: "subscription",
+          costSource: "provider",
+          cashCostUsd: 0,
+        },
+        stderrTail: "",
+      } satisfies TransportOutcome;
+    },
+  };
+}
+
 function makeHarness(transport: ProviderTransport, broker?: CredentialBroker) {
   return new StepExecutionHarness({
     transport,
@@ -477,6 +510,71 @@ describe("harness with a CredentialBroker", () => {
     expect(broker.destroyCalls).toBe(1);
     expect(result.stderrTail).toContain(
       "[pr-hero] credential projection destroy failed",
+    );
+  });
+});
+
+// #150: a transport that declares it does not consume the harness's
+// per-step credential projection (the OpenCode SDK transport's
+// server-lifetime projection, #149) must never have one materialized,
+// written to disk, or destroyed on its behalf — and a broker that would
+// degrade must never even be given the chance to.
+describe("#150: a transport declaring server-lifetime credential projection", () => {
+  test("the broker's project() is never called, the step succeeds, and no projection warning is stated", async () => {
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker();
+    const harness = makeHarness(serverLifetimeTransport(requests), broker);
+    const result = await runStep(harness);
+
+    expect(result.status).toBe("ok");
+    expect(broker.projectCalls).toBe(0);
+    expect(broker.destroyCalls).toBe(0);
+    expect(result.stderrTail).not.toContain("credential projection");
+    expect(result.stderrTail).not.toContain("operator environment");
+
+    // The isolation record says the honest thing — server-lifetime, not a
+    // fallback masquerading as one (§6.1 invariant: no false synthetic
+    // identity, and no false "this was a degrade" either).
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.isolation.credentialProjectionId).toBe(
+      "server-lifetime",
+    );
+  });
+
+  test("a broker that would throw missing_subscription_record never gets the chance to — the step succeeds undegraded", async () => {
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker(
+      new CredentialProjectionError("missing_subscription_record"),
+    );
+    const harness = makeHarness(serverLifetimeTransport(requests), broker);
+    const result = await runStep(harness);
+
+    expect(result.status).toBe("ok");
+    expect(broker.projectCalls).toBe(0);
+    // The degrade branch (harness.ts) is unreachable here: project() was
+    // never called, so its failure class never surfaces.
+    expect(result.stderrTail).not.toContain("missing_subscription_record");
+    expect(result.stderrTail).not.toContain("operator environment");
+    expect(requests[0]?.isolation.credentialProjectionId).toBe(
+      "server-lifetime",
+    );
+  });
+
+  test("a transport with no declaration keeps projecting (the fail-safe default)", async () => {
+    const requests: TransportRequest[] = [];
+    const broker = new FakeBroker();
+    // recordingTransport() declares no `credentialProjection` at all —
+    // absent must mean "per-step", i.e. today's behaviour, unchanged.
+    const harness = makeHarness(recordingTransport(requests), broker);
+    const result = await runStep(harness);
+
+    expect(result.status).toBe("ok");
+    expect(broker.projectCalls).toBe(1);
+    expect(broker.destroyCalls).toBe(1);
+    const projection = broker.lastProjection;
+    if (projection === undefined) throw new Error("projection missing");
+    expect(requests[0]?.isolation.credentialProjectionId).toBe(
+      projection.projectionId,
     );
   });
 });

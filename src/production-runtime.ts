@@ -277,6 +277,20 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     this.route = Object.freeze({ ...options.route });
     this.executable = Object.freeze({ ...options.executable });
     this.credential = Object.freeze({ ...options.credential });
+    // `syntheticHome` answers ONE question: "is a credential broker
+    // configured for this binding?" — not "did this step's harness run get
+    // a fresh per-step projection from it." Those coincided for claude-code
+    // (the only consumer, until OpenCode existed). They stopped coinciding
+    // for OpenCode: since #149 this broker (`OpenCodeAuthBroker` /
+    // `OpenCodeFreeBroker`, runner-authority.ts) protects the SERVER's one
+    // lifetime projection, and since #150 `StepExecutionHarness.run`
+    // deliberately never calls it per step for this backend
+    // (`OpenCodeSdkTransport.credentialProjection === "server-lifetime"`,
+    // contracts.ts/opencode-sdk.ts) because nothing downstream would read
+    // that per-step result. `syntheticHome: true` stays an accurate claim
+    // either way — broker authority IS configured and IS what protects the
+    // inference — it just protects it at server scope, not step scope, for
+    // this backend.
     this.environment = Object.freeze({
       syntheticHome: options.credential.broker !== undefined,
       workspaceReadBroker: true,
@@ -289,6 +303,10 @@ class FrozenRuntimeBinding implements RuntimeBinding {
 
   async capabilities(): Promise<ExactBindingCapabilityReport> {
     const report = await this.getCapabilityReport(this.route.backend);
+    // "Broker configured", not "per-step projection actually taken" — see
+    // the WHY comment on `this.environment` above (#149/#150: for OpenCode
+    // this broker protects the server's lifetime projection, and the
+    // harness now skips the per-step call this flag used to imply).
     const projectionBrokered = this.credential.broker !== undefined;
     const sdkAvailable =
       this.route.backend === "claude-code" ||
@@ -404,6 +422,9 @@ class FrozenRuntimeBinding implements RuntimeBinding {
         probe: projectionBrokered ? report.auth.probe : "not_run",
       },
       environment: {
+        // Same "broker configured" meaning as `projectionBrokered` above,
+        // not "this step got its own projection" — see the #149/#150 WHY
+        // comment on `this.environment` in the constructor.
         syntheticHome: projectionBrokered,
         enumeratedPassthrough: !projectionBrokered,
       },
