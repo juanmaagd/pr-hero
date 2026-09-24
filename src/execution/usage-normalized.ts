@@ -71,29 +71,56 @@ export type UsageCostSource =
 // whitespace arms, never the empty-string ones.
 //
 // ---------------------------------------------------------------------------
-// DO NOT wire this into route ADMISSION. It is a hazard verified before it was
-// written, and it has exactly two forbidden consumers:
+// ADMISSION WIRING, #161. This predicate now has a SECOND caller:
+// `credentialKindForRoute` (runner-authority.ts) — the single place that
+// decides which credential a claude-code route runs on, and therefore its
+// projection, its broker, and its rate-limit bucket. Until #161 this block
+// banned exactly that wiring outright; read both halves below before adding
+// a THIRD caller, because the ban is lifted for exactly one function, not
+// for the question in general.
 //
-//   * `CLAUDE_CAPABILITY_STATICS.billingMode` (model/provider-capabilities.ts) —
-//     static "subscription" on purpose.
-//   * `FrozenRuntimeBinding.capabilities()` (production-runtime.ts) — which
-//     derives the exact binding's mode from `credential.kind`.
+// Until #197 the reason was safety: deriving either side from env turned a
+// metered claude-code route into `pricingApplicability: "required"` with no
+// pricing source to answer, so the route was refused admission outright
+// (`pricing_table_missing`, blocking) and API-key users stopped being able to
+// run at all. #197 flipped the claude-code transport's `pricingReady` to
+// `true`, so that refusal can no longer happen and the fail-closed argument
+// is spent.
 //
-// The BAN outlives its original reason, so read both. Until #197 the reason
-// was safety: making either derived turned a metered claude-code route into
-// `pricingApplicability: "required"` with no pricing source to answer, so the
-// route was refused admission outright (`pricing_table_missing`, blocking) and
-// API-key users stopped being able to run at all. #197 flipped the
-// claude-code transport's `pricingReady` to `true`, so that refusal can no
-// longer happen and the fail-closed argument is spent.
+// What remained was ownership, and #161 settles it by NAMING the owner
+// instead of banning the wiring outright: `credentialKindForRoute` is the
+// one admission-side reader of this predicate, and `envBillsMetered` is the
+// one shared implementation both it and the Claude CLI transport's
+// `claudeCliCostBasis` call — never two copies of the same trim rule
+// answering "does this environment carry a per-token credential?"
+// differently for the same attempt.
 //
-// What remains is ownership, and it is enough: which credential a route runs
-// on — and therefore how it bills — is `credentialKindForRoute`'s single
-// decision (#161's slice), with the projection and rate-limit-bucket changes
-// that implies. A second derivation here would fork it, and the two would
-// disagree about one attempt in silence. This answers only "how does this
-// attempt's money get FILED?", and it reaches nothing but the usage record and
-// the CI ceiling.
+// The two calls read DIFFERENT env values on purpose, and that is not a
+// fork: `claudeCliCostBasis` reads the child's ACTUAL, POST-projection-strip
+// env (`request.isolation.env`) — a projection strips the key-bearing vars
+// unconditionally (`PROJECTION_OWNED_KEYS`, harness.ts), so this is a
+// truthful read of what the process the money was spent by actually saw.
+// `credentialKindForRoute` runs BEFORE any child exists, so it cannot read
+// that env — it reads the raw, pre-strip one plus whether a broker WILL
+// strip it (`hasBroker`), and `!hasBroker && envBillsMetered(rawEnv)` is
+// exactly `envBillsMetered(postStripEnv)` by construction: a broker strips
+// unconditionally, so the post-strip env never carries a key when one is
+// attached, and equals the raw env exactly when none is. Same predicate,
+// same answer, two different envs because one runs before the strip and one
+// runs after it. Everything downstream of the KIND (the projection, the
+// bucket, and `FrozenRuntimeBinding.capabilities()`'s `effectiveBillingMode`
+// via `credentialKindBillsMetered`) inherits the answer from that one call
+// and never re-reads env itself — so admission and usage filing structurally
+// cannot disagree about one attempt.
+//
+// The ban stands for everyone ELSE. `CLAUDE_CAPABILITY_STATICS.billingMode`
+// (model/provider-capabilities.ts) stays a static "subscription" on purpose —
+// it is the BACKEND-WIDE report, produced before any route (and therefore any
+// credential) resolves, so it has no per-route env to read honestly; the
+// per-route truth lives on the exact binding instead. A THIRD caller
+// deriving straight from env, instead of going through
+// `credentialKindForRoute`, is exactly the fork this predicate exists to
+// prevent — route it through the kind instead.
 // ---------------------------------------------------------------------------
 export function envBillsMetered(
   env: Readonly<Record<string, string | undefined>>,

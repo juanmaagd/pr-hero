@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import type { RunnerBackend } from "../src/execution/contracts";
+import { envBillsMetered } from "../src/execution/usage-normalized";
 import {
+  credentialKindBillsMetered,
   credentialKindForRoute,
   resolveBindingAuthority,
   resolveRunnerAuthority,
 } from "../src/runner-authority";
 import type { CredentialBroker } from "../src/security/credential-broker";
 import {
+  KeychainCredentialBroker,
   OpenCodeApiTokenBroker,
   OpenCodeAuthBroker,
 } from "../src/security/credential-broker";
@@ -188,6 +192,171 @@ describe("credentialKindForRoute", () => {
       credentialKindForRoute("codex" as RunnerBackend, "openai"),
     ).toThrow(/codex/);
   });
+
+  // #161 (corrected 2026-09-24 by Juanma). A claude-code route reads its kind
+  // from the env it would see WITHOUT a projection (3rd arg) AND from
+  // whether a broker will actually project one BEFORE the child spawns (4th
+  // arg, `hasBroker`). Both default to the "nothing is known" case (`{}`,
+  // `false`) so every existing call site that never threaded either through
+  // keeps today's answer: subscription.
+  describe("claude-code reads the env AND broker presence (#161)", () => {
+    test("no arguments at all keeps the pre-#161 answer", () => {
+      expect(credentialKindForRoute("claude-code", "anthropic")).toBe(
+        "claude_subscription_oauth",
+      );
+    });
+
+    test("a key with no broker resolves the metered kind", () => {
+      expect(
+        credentialKindForRoute(
+          "claude-code",
+          "anthropic",
+          { ANTHROPIC_API_KEY: "sk-test" },
+          false,
+        ),
+      ).toBe("provider_api_token");
+      expect(
+        credentialKindForRoute(
+          "claude-code",
+          "anthropic",
+          { ANTHROPIC_AUTH_TOKEN: "bearer-test" },
+          false,
+        ),
+      ).toBe("provider_api_token");
+    });
+
+    // THE precedence rule this correction exists for: a broker's presence
+    // means the harness WILL strip the key before the child ever sees it
+    // (PROJECTION_OWNED_KEYS, execution/harness.ts), so the kind must stay
+    // subscription no matter what env carries — the child structurally
+    // cannot spend a key it never receives. The first cut of #161 got this
+    // backwards (skipped the broker whenever a key was present) and would
+    // have silently rebilled a macOS subscription developer's ambient
+    // ANTHROPIC_API_KEY as metered.
+    test("a key WITH a broker stays the subscription kind — the broker wins", () => {
+      expect(
+        credentialKindForRoute(
+          "claude-code",
+          "anthropic",
+          { ANTHROPIC_API_KEY: "sk-test" },
+          true,
+        ),
+      ).toBe("claude_subscription_oauth");
+      expect(
+        credentialKindForRoute(
+          "claude-code",
+          "anthropic",
+          { ANTHROPIC_AUTH_TOKEN: "bearer-test" },
+          true,
+        ),
+      ).toBe("claude_subscription_oauth");
+    });
+
+    test("no key in env keeps the subscription kind regardless of broker presence", () => {
+      for (const hasBroker of [true, false]) {
+        expect(
+          credentialKindForRoute("claude-code", "anthropic", {}, hasBroker),
+        ).toBe("claude_subscription_oauth");
+      }
+    });
+
+    // Same trim rule as `envBillsMetered`: a whitespace-only secret (a YAML
+    // block scalar that kept its newline, a space-only value) is not a real
+    // key.
+    test("a whitespace-only key behaves like no key, with no broker", () => {
+      expect(
+        credentialKindForRoute(
+          "claude-code",
+          "anthropic",
+          { ANTHROPIC_API_KEY: "   ", ANTHROPIC_AUTH_TOKEN: "\n" },
+          false,
+        ),
+      ).toBe("claude_subscription_oauth");
+    });
+  });
+
+  // The anti-fork guarantee, proven rather than restated: admission
+  // (`credentialKindForRoute` -> `credentialKindBillsMetered`, reading the
+  // RAW pre-strip env plus `hasBroker`) and usage filing (`envBillsMetered`
+  // directly on the child's ACTUAL post-strip env, `claudeCliCostBasis` in
+  // the transport) must reach the same billing mode for the same attempt —
+  // projection present + key: both subscription; no projection + key: both
+  // metered. This builds the post-strip env INDEPENDENTLY (a literal mirror
+  // of `PROJECTION_OWNED_KEYS`, execution/harness.ts, not a call into
+  // `credentialKindForRoute`'s own reasoning) so the test can actually catch
+  // the two disagreeing, rather than restating the implementation back at it.
+  describe("admission and usage filing agree (#161 anti-fork guarantee)", () => {
+    const PROJECTION_OWNED_KEYS = [
+      "HOME",
+      "TMPDIR",
+      "CLAUDE_CONFIG_DIR",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ] as const;
+
+    function postStripEnv(
+      rawEnv: Readonly<Record<string, string | undefined>>,
+      hasBroker: boolean,
+    ): Record<string, string | undefined> {
+      if (!hasBroker) return { ...rawEnv };
+      const stripped: Record<string, string | undefined> = { ...rawEnv };
+      for (const key of PROJECTION_OWNED_KEYS) delete stripped[key];
+      return stripped;
+    }
+
+    test("projection present + key: both sides say subscription", () => {
+      const rawEnv = { ANTHROPIC_API_KEY: "sk-test" };
+      const hasBroker = true;
+
+      const kind = credentialKindForRoute(
+        "claude-code",
+        "anthropic",
+        rawEnv,
+        hasBroker,
+      );
+      expect(credentialKindBillsMetered(kind)).toBe(false);
+      expect(envBillsMetered(postStripEnv(rawEnv, hasBroker))).toBe(false);
+    });
+
+    test("no projection + key: both sides say metered", () => {
+      const rawEnv = { ANTHROPIC_API_KEY: "sk-test" };
+      const hasBroker = false;
+
+      const kind = credentialKindForRoute(
+        "claude-code",
+        "anthropic",
+        rawEnv,
+        hasBroker,
+      );
+      expect(credentialKindBillsMetered(kind)).toBe(true);
+      expect(envBillsMetered(postStripEnv(rawEnv, hasBroker))).toBe(true);
+    });
+
+    test("the two sides agree across every env/broker combination", () => {
+      const envs: ReadonlyArray<Readonly<Record<string, string | undefined>>> =
+        [
+          {},
+          { ANTHROPIC_API_KEY: "sk-test" },
+          { ANTHROPIC_AUTH_TOKEN: "bearer-test" },
+          { ANTHROPIC_API_KEY: "   ", ANTHROPIC_AUTH_TOKEN: "\n" },
+          { ANTHROPIC_API_KEY: "sk-a", ANTHROPIC_AUTH_TOKEN: "bearer-b" },
+        ];
+      for (const env of envs) {
+        for (const hasBroker of [true, false]) {
+          const kind = credentialKindForRoute(
+            "claude-code",
+            "anthropic",
+            env,
+            hasBroker,
+          );
+          expect(credentialKindBillsMetered(kind)).toBe(
+            envBillsMetered(postStripEnv(env, hasBroker)),
+          );
+        }
+      }
+    });
+  });
 });
 
 describe("resolveBindingAuthority credential identity", () => {
@@ -275,5 +444,150 @@ describe("resolveBindingAuthority credential identity", () => {
       );
       expect(result.binding?.credentialBroker).toBe(fake);
     }
+  });
+});
+
+// #161: an API-key claude-code route binds as metered — a different
+// credential kind, no default Keychain broker (it projects only the
+// subscription record and throws for anything else, credential-broker.ts),
+// and its own rate-limit bucket — while a no-key route stays byte-identical
+// to the pre-#161 shape.
+describe("resolveBindingAuthority claude-code credential kind (#161)", () => {
+  const bytes = new TextEncoder().encode("#!/bin/sh\necho hi\n");
+  const canonical = "/fake/bin/claude";
+  const sha256 = (() => {
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    return hasher.digest("hex");
+  })();
+
+  const deps = {
+    existsFn: () => true,
+    realpathFn: async (p: string) => p,
+    readFileFn: async () => bytes,
+    statFn: () => ({ mode: 0o755 }),
+  };
+
+  async function bindClaude(
+    env: Readonly<Record<string, string | undefined>>,
+    credentialBrokers?: { readonly "claude-code": CredentialBroker },
+  ) {
+    const result = await resolveBindingAuthority(
+      "claude-code",
+      "anthropic",
+      {
+        binaryPath: canonical,
+        workspaceRoot: "/fake/ws",
+        executableAllowlists: {
+          "claude-code": [{ absolutePath: canonical, sha256 }],
+        },
+        env,
+        ...(credentialBrokers === undefined ? {} : { credentialBrokers }),
+      },
+      deps,
+    );
+    if (result.binding === undefined) {
+      throw new Error(result.error ?? "no binding");
+    }
+    return result.binding;
+  }
+
+  // Whether THIS host would actually offer the real default (darwin +
+  // /usr/bin/security) is orthogonal to what #161 changes, but it decides
+  // which arms below can exercise the FULL resolveBindingAuthority path
+  // deterministically: injecting a fake broker is always deterministic
+  // (proves the "a broker IS present" arm on every host); proving "NO broker
+  // at all" end to end needs a host whose default genuinely resolves to
+  // undefined, which this darwin sandbox's real Keychain does not. That arm's
+  // platform-independent proof is `credentialKindForRoute`'s own describe
+  // block above ("a key with no broker resolves the metered kind") — this
+  // block's own copy is `skipIf`'d here and runs for real on CI's
+  // ubuntu-latest.
+  function darwinKeychainAvailable(): boolean {
+    return process.platform === "darwin" && existsSync("/usr/bin/security");
+  }
+
+  test("no key: unchanged — subscription kind, the platform-gated Keychain default, and the claude-code bucket", async () => {
+    const binding = await bindClaude({});
+    expect(binding.credentialKind).toBe("claude_subscription_oauth");
+    expect(credentialKindBillsMetered(binding.credentialKind)).toBe(false);
+    expect(binding.bucketId).toBe("claude-code");
+    if (darwinKeychainAvailable()) {
+      expect(binding.credentialBroker).toBeInstanceOf(KeychainCredentialBroker);
+    } else {
+      expect(binding.credentialBroker).toBeUndefined();
+    }
+  });
+
+  // #161 (corrected 2026-09-24). THE precedence test: a key alongside a
+  // broker must stay subscription — the broker is going to strip that key
+  // before the child ever spawns (PROJECTION_OWNED_KEYS, harness.ts), so
+  // billing the developer as metered would charge for spend the child
+  // structurally cannot incur. The fake broker makes this deterministic on
+  // every host, unlike the real Keychain default.
+  test("a key WITH a broker: subscription kind, the broker still attaches, the claude-code bucket", async () => {
+    const fake: CredentialBroker = {
+      project: async () => {
+        throw new Error("never projected in this test");
+      },
+    };
+    const binding = await bindClaude(
+      { ANTHROPIC_API_KEY: "sk-test" },
+      { "claude-code": fake },
+    );
+    expect(binding.credentialKind).toBe("claude_subscription_oauth");
+    expect(credentialKindBillsMetered(binding.credentialKind)).toBe(false);
+    expect(binding.credentialBroker).toBe(fake);
+    expect(binding.bucketId).toBe("claude-code");
+  });
+
+  test("ANTHROPIC_AUTH_TOKEN with a broker: same precedence as ANTHROPIC_API_KEY", async () => {
+    const fake: CredentialBroker = {
+      project: async () => {
+        throw new Error("never projected in this test");
+      },
+    };
+    const binding = await bindClaude(
+      { ANTHROPIC_AUTH_TOKEN: "bearer-test" },
+      { "claude-code": fake },
+    );
+    expect(binding.credentialKind).toBe("claude_subscription_oauth");
+    expect(binding.credentialBroker).toBe(fake);
+    expect(binding.bucketId).toBe("claude-code");
+  });
+
+  // The full path for "a key, no broker at all" — only exercisable end to
+  // end on a host whose default Keychain broker genuinely resolves to
+  // undefined (CI's ubuntu-latest). On this darwin sandbox it is skipped in
+  // favour of the deterministic, platform-independent proof in
+  // `credentialKindForRoute`'s own describe block.
+  test.skipIf(darwinKeychainAvailable())(
+    "a key with no broker at all: metered kind, no broker, the API bucket",
+    async () => {
+      const binding = await bindClaude({ ANTHROPIC_API_KEY: "sk-test" });
+      expect(binding.credentialKind).toBe("provider_api_token");
+      expect(credentialKindBillsMetered(binding.credentialKind)).toBe(true);
+      expect(binding.credentialBroker).toBeUndefined();
+      expect(binding.bucketId).toBe("claude-code-api");
+      expect(binding.bucketId).not.toBe("claude-code");
+    },
+  );
+
+  test("whitespace-only key behaves like no key, whether or not a broker is present", async () => {
+    const withoutBroker = await bindClaude({ ANTHROPIC_API_KEY: "   " });
+    expect(withoutBroker.credentialKind).toBe("claude_subscription_oauth");
+    expect(withoutBroker.bucketId).toBe("claude-code");
+
+    const fake: CredentialBroker = {
+      project: async () => {
+        throw new Error("never projected in this test");
+      },
+    };
+    const withBroker = await bindClaude(
+      { ANTHROPIC_API_KEY: "   " },
+      { "claude-code": fake },
+    );
+    expect(withBroker.credentialKind).toBe("claude_subscription_oauth");
+    expect(withBroker.credentialBroker).toBe(fake);
   });
 });

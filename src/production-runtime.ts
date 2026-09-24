@@ -1701,7 +1701,9 @@ export function productionFallbackRegistry(options: {
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly binaryPath?: string;
   readonly openCodeBinaryPath?: string;
-  readonly env?: Record<string, string>;
+  // #161: matches `RunnerAuthorityOptions.env`'s widened shape — this
+  // function is fed `options`/`authorityOptions` (both that type) directly.
+  readonly env?: Readonly<Record<string, string | undefined>>;
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
   // #133: optional because this function is also called with a bare
   // `{ mode }` by callers that never reach an opencode route. When it IS
