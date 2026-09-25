@@ -422,3 +422,64 @@ describe("skippedDiscoveryMessage — the verification cap (#286)", () => {
     expect(line).toContain("2 stay unconfirmed");
   });
 });
+
+// #206 follow-up (pr-hero on #285): review comments and issue comments are
+// different GitHub resources, and nothing documents that their numeric ids
+// share a namespace. A posted inline finding must recover ITS OWN body even
+// when an issue comment carries the same id — otherwise the prior silently
+// inherits another comment's severity, which is worse than UNRECOVERABLE.
+describe("resolvePrDiscovery — #206 body recovery keys by comment kind", () => {
+  test("an issue comment sharing an inline finding's id never supplies its severity", async () => {
+    const inlineBody =
+      `<!-- pr-hero-finding path=src%2Fa.ts line=10 head=${L} c=abc -->\n` +
+      "\n" +
+      "🔴 blocking · BLOCKER · introduced · reliability\n" +
+      "`src/a.ts:10`\n" +
+      "\n" +
+      "the retry loop never clears the prior timer\n";
+    const collidingIssueBody =
+      "🟡 advisory · WARNING · introduced · logic\n" +
+      "`src/other.ts:1`\n" +
+      "\n" +
+      "an unrelated issue comment that happens to share the id\n";
+    const result = await resolvePrDiscovery({
+      diffFromSha: B,
+      headSha: H,
+      full: false,
+      baseRef: B,
+      headLabel: "PR #1 head",
+      isCi: false,
+      sizeGateOverrides: {},
+      config: { parity_trigger_paths: [], suspicion_priors: [] },
+      prIgnore: { rules: [], found: false },
+      issueComments: [
+        markerComment(false),
+        {
+          id: POSTED_FINDING.id,
+          user: "someone",
+          body: collidingIssueBody,
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      postedFindings: [POSTED_FINDING],
+      reviewComments: [
+        {
+          id: POSTED_FINDING.id,
+          user: "pr-hero",
+          body: inlineBody,
+          path: "src/a.ts",
+          line: 10,
+          original_line: 10,
+          in_reply_to_id: null,
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      git: baseGit(),
+      log: () => {},
+    });
+    expect(result.verifyQueue.map((v) => v.sev)).toEqual(["BLOCKER"]);
+    expect(result.verifyQueue[0]?.claim).toContain(
+      "the retry loop never clears the prior timer",
+    );
+  });
+});

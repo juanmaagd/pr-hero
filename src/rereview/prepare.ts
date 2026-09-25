@@ -6,13 +6,19 @@
 import { normalizePath } from "#compare/compare";
 import { claimFingerprint } from "#pr/preflight";
 import type { Severity } from "#review/findings";
+import { parseFindingCommentBadge } from "#review/report";
 import { parseTriageMarker } from "#triage/triage";
 import {
   classifyPrior,
+  isRecoveredSeverity,
+  isRecoveredTier,
   type PhaseBResult,
   type PriorRecord,
   type PriorTriage,
+  type RecoveredSeverity,
   type RereviewCase,
+  SEVERITY_UNRECOVERABLE,
+  TIER_UNRECOVERABLE,
 } from "./classify";
 import {
   type FindingIdentity,
@@ -115,7 +121,7 @@ export interface RereviewProvenance {
   re_tiered?: number;
   worsened?: readonly {
     priorId: string;
-    priorSev: Severity;
+    priorSev: RecoveredSeverity;
     discoverySev: Severity;
   }[];
 }
@@ -355,7 +361,7 @@ export function readRereviewProvenance(
     if (!Array.isArray(raw.worsened)) return problem("worsened");
     const rows: {
       priorId: string;
-      priorSev: Severity;
+      priorSev: RecoveredSeverity;
       discoverySev: Severity;
     }[] = [];
     for (const [i, row] of raw.worsened.entries()) {
@@ -363,7 +369,11 @@ export function readRereviewProvenance(
         !isRecord(row) ||
         typeof row.priorId !== "string" ||
         row.priorId.length === 0 ||
-        !isSeverity(row.priorSev) ||
+        // `priorSev` may carry the #206 sentinel (a worsening hit computed
+        // over an unrecoverable-severity prior, see classify.ts's
+        // `isStrictlyHigherSev`); `discoverySev` never does — it is always a
+        // fresh finding's real severity.
+        !isRecoveredSeverity(row.priorSev) ||
         !isSeverity(row.discoverySev)
       ) {
         return problem(`worsened[${i}]`);
@@ -462,8 +472,11 @@ function asLiveFinding(value: unknown): LiveFinding | null {
   if (!isRecord(value)) return null;
   const { id, sev, tier, channel, status, locs, c, claim } = value;
   if (typeof id !== "string" || id.length === 0) return null;
-  if (!isSeverity(sev)) return null;
-  if (tier !== "blocking" && tier !== "advisory") return null;
+  // A live row may legitimately carry the #206 sentinel (a prior whose
+  // severity/tier could not be recovered when it was built) — see
+  // classify.ts's `isRecoveredSeverity`/`isRecoveredTier`.
+  if (!isRecoveredSeverity(sev)) return null;
+  if (!isRecoveredTier(tier)) return null;
   if (channel !== "inline" && channel !== "outside") return null;
   if (
     status !== "carried" &&
@@ -587,23 +600,46 @@ export function priorsFromStateFindings(
   }));
 }
 
+// #206's fix: the fallback that runs whenever the previous summary's
+// `pr-hero-state` block cannot supply priors — missing, unparseable, or (the
+// ROUTINE case, not a rare one: a FIRST review never writes a state block at
+// all, see `postInlineFindings`'s `framing === undefined` branch in
+// src/pr/pr.ts) simply absent because this is the PR's second review. It
+// used to hardcode `sev: "WARNING"` / `tier: "advisory"` / `claim: ""` for
+// EVERY prior here — silently downgrading a live BLOCKER to a warning on
+// every second review of every PR, and collapsing every claim-less row onto
+// `claimFingerprint("")`'s shared constant.
+//
+// `body` is the posted comment's raw text (the marker line alone carries no
+// sev/tier/claim — `findingMarker` signs only the claim's fingerprint, never
+// the claim itself). `parseFindingCommentBadge` recovers the real values
+// from the SAME renderer that wrote them (`findingBodyLines`,
+// review/report.ts). When it cannot (a foreign/older comment shape, or a
+// truly empty body), the prior gets the explicit UNRECOVERABLE sentinels
+// instead of a guessed real value — see classify.ts's WHY on those types for
+// why every downstream consumer fails toward visibility, never a wrong
+// bucket.
 export function priorsFromPostedMarkers(
   posted: readonly {
     path: string;
     line: number;
     channel: "inline" | "outside";
+    body: string;
   }[],
 ): PriorRecord[] {
-  return posted.map((item, i) => ({
-    id: `R${String(i + 1).padStart(3, "0")}`,
-    sev: "WARNING",
-    tier: "advisory",
-    channel: item.channel,
-    locs: [`${item.path}:${item.line}`],
-    claim: "",
-    triage: null,
-    newThreadReply: false,
-  }));
+  return posted.map((item, i) => {
+    const recovered = parseFindingCommentBadge(item.body);
+    return {
+      id: `R${String(i + 1).padStart(3, "0")}`,
+      sev: recovered?.sev ?? SEVERITY_UNRECOVERABLE,
+      tier: recovered?.tier ?? TIER_UNRECOVERABLE,
+      channel: item.channel,
+      locs: [`${item.path}:${item.line}`],
+      claim: recovered?.claim ?? "",
+      triage: null,
+      newThreadReply: false,
+    };
+  });
 }
 
 // A previously posted per-finding comment, as much of it as the prior→comment

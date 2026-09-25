@@ -5,10 +5,12 @@ import {
   PR_COMMENT_MARKER_PREFIX,
   prCommentMarker,
 } from "#pr/preflight";
+import { SEVERITY_UNRECOVERABLE } from "#rereview/classify";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
 import {
   estimateCost,
   formatElapsed,
+  parseFindingCommentBadge,
   type ReportMeta,
   type RereviewLiveRow,
   renderInlineComment,
@@ -1443,6 +1445,98 @@ describe("renderPrComment", () => {
     expect(line).not.toContain("—  ");
   });
 
+  test("#206 — an unrecoverable severity renders its own glyph, never a real-severity one", () => {
+    const body = liveRowBody({
+      id: "R004",
+      sev: SEVERITY_UNRECOVERABLE,
+      status: "carried",
+      locs: ["src/watch.ts:614"],
+      claim: "",
+    });
+    const line = liveRowLine(body, "R004");
+    expect(line).toBe(
+      "- `carried` ⚠️ severity unavailable `src/watch.ts:614` — " +
+        "_claim text unavailable; see this finding's own comment on the " +
+        "PR_ (R004)",
+    );
+    // Never one of the three real-severity glyphs — reusing 🟡 by accident
+    // IS the bug (a live BLOCKER rendering as a warning).
+    expect(line).not.toContain("🔴");
+    expect(line).not.toContain("🟡");
+    expect(line).not.toContain("🔵");
+  });
+
+  test("#206 — the headline gives an unrecoverable severity its own bucket, never warning", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          live: [
+            {
+              id: "R001",
+              sev: SEVERITY_UNRECOVERABLE,
+              status: "carried",
+              locs: ["src/watch.ts:614"],
+              claim: "",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain(
+      "🔴 0 critical · 🟡 0 warning · ⚠️ 1 severity unavailable",
+    );
+  });
+
+  test("#206 — a recovered BLOCKER live row counts as critical, headline never says 0 critical", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          live: [
+            {
+              id: "R001",
+              sev: "BLOCKER",
+              status: "carried",
+              locs: ["src/watch.ts:614"],
+              claim: "a live blocker recovered from its own comment",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("🔴 1 critical · 🟡 0 warning");
+    expect(body).not.toContain("🔴 0 critical");
+  });
+
   test("D4 — force-push case banners the full-range review", () => {
     const body = renderPrComment(
       doc(),
@@ -1653,6 +1747,69 @@ describe("renderPrComment", () => {
     expect(body).toContain(
       `[\`src/never.ts:1\`](${WEB_URL}/blob/${HEAD}/src/never.ts#L1)`,
     );
+  });
+});
+
+// #206: parseFindingCommentBadge is renderInlineComment/findingBodyLines'
+// exact structural inverse — the recovery path a carried prior falls back to
+// when the re-review's state block cannot supply sev/tier/claim.
+describe("parseFindingCommentBadge — round trip with the renderer that wrote it", () => {
+  const HEAD = "b".repeat(40);
+
+  test("recovers sev/tier/claim from a rendered inline comment, byte for byte", () => {
+    const f = finding({
+      id: "F001",
+      severity: "BLOCKER",
+      tier: "blocking",
+      claim: "the retry never clears the prior timer",
+    });
+    const body = renderInlineComment(f, HEAD);
+    expect(parseFindingCommentBadge(body)).toEqual({
+      sev: "BLOCKER",
+      tier: "blocking",
+      claim: f.claim,
+    });
+  });
+
+  test("recovers a WARNING/advisory finding too, not just the BLOCKER shape", () => {
+    const f = finding({
+      id: "F002",
+      severity: "WARNING",
+      tier: "advisory",
+      refuter_verdict: "downgraded-latent",
+      claim: "a minor inconsistency",
+    });
+    const body = renderInlineComment(f, HEAD);
+    expect(parseFindingCommentBadge(body)).toEqual({
+      sev: "WARNING",
+      tier: "advisory",
+      claim: "a minor inconsistency",
+    });
+  });
+
+  test("recovers from the standalone (Outside Diff) renderer too", () => {
+    const f = finding({ id: "F003", claim: "an un-anchorable finding" });
+    const body = renderIssueFindingComment(f, HEAD);
+    expect(parseFindingCommentBadge(body)).toEqual({
+      sev: f.severity,
+      tier: f.tier,
+      claim: f.claim,
+    });
+  });
+
+  test("a body with no pr-hero-finding marker at all returns null", () => {
+    expect(
+      parseFindingCommentBadge("just a human reply, no marker here"),
+    ).toBeNull();
+    expect(parseFindingCommentBadge("")).toBeNull();
+  });
+
+  test("a marker with no readable header returns null rather than a guess", () => {
+    const body =
+      `<!-- pr-hero-finding path=a.ts line=1 head=${HEAD} c=aaaaaaaaaaaa -->\n` +
+      "\n" +
+      "not a badge line at all\n";
+    expect(parseFindingCommentBadge(body)).toBeNull();
   });
 });
 
