@@ -673,7 +673,7 @@ describe("Packaging & distribution configuration", () => {
   test("this repo's own workflow overrides only the size ceiling", () => {
     const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
     expect(own).not.toContain("budget-usd:");
-    // 5000, not action.yml's 1000: large refactoring slices (like cli-decomposition)
+    // 5000, not action.yml's 4000: large refactoring slices (like cli-decomposition)
     // exceed 2000 lines, so dogfooding requires an expanded ceiling.
     expect(own).toContain("max-changed-lines: 5000");
   });

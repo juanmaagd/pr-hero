@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Raised the size gate's default line limit**: the engine default (`DEFAULT_SIZE_GATE.maxChangedLines`)
+  and the GitHub Action's `max-changed-lines` input both move from `1500`/`1000` to `4000` — an owner
+  decision, not a new measurement, because the old defaults were skipping too many real PRs outright.
+  The files ceiling (150 engine / 50 action) is unchanged.
 - **Renumbered releases to 0.x**: `1.0.0` is now `0.1.0` and `1.1.0` is now `0.1.1` — the public API
   (CLI surface, config schema, GitHub Actions contract) is not yet stable, and the `1.x` numbering
   overstated that. The floating Action tag moves from `@v1` to `@v0`. The `v1` tag itself stays

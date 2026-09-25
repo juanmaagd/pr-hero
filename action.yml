@@ -36,7 +36,7 @@ inputs:
   max-changed-lines:
     description: 'Size gate: skip the review when the diff exceeds this many changed lines. 0 disables the limit.'
     required: false
-    default: '1000'
+    default: '4000'
   max-changed-files:
     description: 'Size gate: skip the review when the diff exceeds this many changed files. 0 disables the limit.'
     required: false

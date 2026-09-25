@@ -176,7 +176,7 @@ never be able to enlarge *your* bill: on the two keys that spend, the team can o
 | `summary.enabled` | both — team may only turn it **off** | Whether the engine-owned summarizer runs. Defaults to `true`, because it spends money and a silent opt-out would make the bill differ from the plan. |
 | `summary.model` | both | Model for that step. Defaults to whatever `prompts/summarizer.md` declares (`haiku`). |
 | `max_verification_steps` | both — team may only **lower** it | Cap on re-review verification spawns (item 7). Defaults to `8`; `0` is legal and pauses verification. |
-| `max_changed_lines` | both — team may only **lower** it | Line budget threshold before the size gate skips a review. Defaults to `1500`; `0` disables line budget check. |
+| `max_changed_lines` | both — team may only **lower** it | Line budget threshold before the size gate skips a review. Defaults to `4000`; `0` disables line budget check. |
 | `max_changed_files` | both — team may only **lower** it | File count budget threshold before the size gate skips a review. Defaults to `150`; `0` disables file budget check. |
 | `scout` | both — team may only turn it **off** | Whether the reconnaissance scout hunter runs before review. Defaults to `false`. |
 | `post` | both — team may only turn it **off** | Whether review reports publish as GitHub PR comments by default. Defaults to `false`. |
@@ -464,8 +464,8 @@ only ever over-count, never under-count.
 | Profile | Lines | Files | For |
 | --- | --- | --- | --- |
 | Conservative | `--max-changed-lines 800` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
-| **Default (shipped)** | **1500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
-| Permissive | `--max-changed-lines 3000` | `--max-changed-files 150` | You would rather pay than skip. |
+| **Default (shipped)** | **4000** | **150** | Everyday PRs pass; only very large trees are skipped. |
+| Permissive | `--max-changed-lines 0` | `--max-changed-files 150` | You would rather pay than skip — disables the line limit. |
 
 ```bash
 pr-hero review --pr 42 --dry-run          # prints the gate verdict, spends nothing

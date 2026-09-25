@@ -29,15 +29,14 @@ export interface SizeGateConfig {
   excludeRules: IgnoreRule[];
 }
 
-// The shipped defaults. 1500 lines sits above the everyday PR and well below
-// the bench tree that produced the cost blow-up above; 150 files is the "this
-// is a mechanical sweep, not a review" ceiling.
+// The shipped defaults. 4000 lines sits above the everyday PR; 150 files is
+// the "this is a mechanical sweep, not a review" ceiling.
 //
-// 1500 has a history, and the whole arc matters because the middle of it was
-// a wrong diagnosis. 1500 shipped first, extrapolated from "everything
-// measured cheap was under 830 lines". Then this repo's own PR #1 (1603
-// lines) printed `size gate: SKIP` and a $3.18-6.86 cost band in the same
-// breath — the gate refusing, on cost grounds, a diff whose cost was
+// The line default has a history, and the arc matters because the middle of
+// it was a wrong diagnosis. 1500 shipped first, extrapolated from
+// "everything measured cheap was under 830 lines". Then this repo's own PR
+// #1 (1603 lines) printed `size gate: SKIP` and a $3.18-6.86 cost band in the
+// same breath — the gate refusing, on cost grounds, a diff whose cost was
 // ordinary. The conclusion drawn at the time was "the limit is too tight",
 // and it was raised to 2500.
 //
@@ -50,12 +49,22 @@ export interface SizeGateConfig {
 //     review, because the count was taken from a plain `--numstat`.
 // With both fixed (the reviewed diff IS the filtered diff, and the gate
 // counts from `git diff -w --ignore-blank-lines`), the number the gate
-// measures is the number that gets paid for, and 1500 is a real 1500. So it
-// stands, and 2500 is retired.
+// measures is the number that gets paid for, and 1500 was a real 1500. So it
+// stood, and 2500 stayed retired — for a while.
 //
 // The band 830..4000 is still unmeasured. If a diff in it ever bills like the
 // bench tree, this number is the thing to revisit — with a measurement, not
 // another extrapolation.
+//
+// On 2026-09-25 the default moved again, 1500 -> 4000 — NOT a measurement
+// this time, an owner decision: 1500 was skipping too many real PRs outright,
+// and that cost (a review that never runs) was judged worse than the
+// cost/predictability this gate exists to manage. This is the same bench tree
+// cited above: +2775 -1237 across 45 files is ~4000 lines, so the new default
+// sits right AT that tree's size, not "well below" it as the old default did.
+// This says nothing about review quality at 4000 lines — see the file header,
+// this is a COST gate, never a quality one — only that the owner would rather
+// pay/wait for a big review than silently skip it.
 //
 // The default RULES — not a hand-written glob list — are generated-content
 // only: lockfiles, minified bundles and jest-style snapshots are enormous,
@@ -66,7 +75,7 @@ export interface SizeGateConfig {
 // dialect a user's own `.prheroignore` goes through, so the shape here is
 // `IgnoreRule[]`, not `string[]`.
 export const DEFAULT_SIZE_GATE: SizeGateConfig = {
-  maxChangedLines: 1500,
+  maxChangedLines: 4000,
   maxChangedFiles: 150,
   excludeRules: BUILTIN_IGNORE_RULES,
 };
