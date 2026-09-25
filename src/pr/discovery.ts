@@ -258,6 +258,15 @@ export async function resolvePrDiscovery(params: {
         : issueComments.find((c) => c.id === existingSummaryId);
     const summaryUpdatedAt = summaryComment?.updated_at ?? null;
     const state = parseStateBlock(summaryComment?.body ?? "");
+    // #206: `postedFindings` (PostedFindingComment[]) never carries the raw
+    // comment body — only the parsed marker fields (findingMarker signs the
+    // claim's fingerprint, never the claim text) — so recovering a fallback
+    // prior's real sev/tier/claim needs the body looked up from whichever
+    // fetch actually produced this comment. Built once, not per-item.
+    const bodyById = new Map<number, string>([
+      ...reviewComments.map((c) => [c.id, c.body] as const),
+      ...issueComments.map((c) => [c.id, c.body] as const),
+    ]);
     const rawPriors =
       state === null
         ? priorsFromPostedMarkers(
@@ -265,6 +274,7 @@ export async function resolvePrDiscovery(params: {
               path: p.livePath ?? p.marker.path,
               line: p.liveLine ?? p.marker.line,
               channel: p.channel === "issue" ? "outside" : "inline",
+              body: bodyById.get(p.id) ?? "",
             })),
           )
         : priorsFromStateFindings(state.findings);
