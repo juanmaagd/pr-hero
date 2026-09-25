@@ -7,6 +7,7 @@
 // come out byte-identical (the lab already replays old findings.json files;
 // a renderer that reached for `new Date()` would make that a lie).
 
+import { listPaths } from "#git/refs";
 import type { ResolvedModelRoute, ResolvedStepRoute } from "#model/routing";
 import { findingMarker, prCommentMarker } from "#pr/preflight";
 import type {
@@ -333,12 +334,21 @@ export interface RereviewDelta {
   }[];
   // GitHub #166: this run's discovery found nothing to look at (case B's
   // same-head re-review, or case C's restricted delta touching none of the
-  // PR's own files) — zero hunters ran. Mirrors
-  // `RereviewProvenance.discovery_skipped_empty_delta` (rereview/prepare.ts),
-  // which used to be computed and threaded onto the artifact but never READ
-  // by this renderer — the gap that let a $0/0s skip publish "pr-hero
-  // reviewed this PR and found nothing to report" over a real prior summary.
+  // PR's own files) — zero DISCOVERY hunters ran (a verifier may still have
+  // run — see `queuedForVerification` handling in `skippedDiscoveryMessage`,
+  // rereview/plan.ts). Mirrors `RereviewProvenance.discovery_skipped_empty_delta`
+  // (rereview/prepare.ts), which used to be computed and threaded onto the
+  // artifact but never READ by this renderer — the gap that let a $0/0s skip
+  // publish "pr-hero reviewed this PR and found nothing to report" over a
+  // real prior summary.
   discoverySkippedEmptyDelta?: boolean;
+  // pr-hero review #286 finding: `discoverySkippedEmptyDelta` alone cannot
+  // say WHY discovery came up empty, and "no changes since the last review"
+  // is false for the other reason — see `RereviewProvenance.discovery_skip_reason`'s
+  // own WHY (rereview/prepare.ts). Absent/`"no_delta"` renders the original
+  // wording; `"all_excluded"` MUST name what was excluded instead.
+  discoverySkipReason?: "no_delta" | "all_excluded";
+  discoveryExcludedPaths?: readonly string[];
 }
 
 export interface PrCommentDelta {
@@ -375,6 +385,10 @@ export function rereviewDeltaFromProvenance(
     // type is also satisfied by hand-built test fixtures and older
     // pipeline.json reads that never carried the field (schema tolerance).
     discovery_skipped_empty_delta?: boolean;
+    // Same optionality reasoning, for the pr-hero review #286 fields — an
+    // artifact written before that fix has neither.
+    discovery_skip_reason?: "no_delta" | "all_excluded";
+    discovery_excluded_paths?: readonly string[];
   },
   newFindings: number,
 ): RereviewDelta {
@@ -402,6 +416,13 @@ export function rereviewDeltaFromProvenance(
     ...(rereview.discovery_skipped_empty_delta === true
       ? { discoverySkippedEmptyDelta: true }
       : {}),
+    ...(rereview.discovery_skip_reason === undefined
+      ? {}
+      : { discoverySkipReason: rereview.discovery_skip_reason }),
+    ...(rereview.discovery_excluded_paths === undefined ||
+    rereview.discovery_excluded_paths.length === 0
+      ? {}
+      : { discoveryExcludedPaths: rereview.discovery_excluded_paths }),
   };
 }
 
@@ -832,29 +853,60 @@ function liveBits(rereview: RereviewDelta): string[] {
   return bits;
 }
 
-// GitHub #166: a re-review whose discovery skipped for lack of anything new
-// (case B's same head, or case C's restricted delta touching none of the
-// PR's own files) ran ZERO hunters — the two branches above both describe
-// what a review CONCLUDED, and this run concluded nothing; it never looked.
-// The prior generic branch mattered here specifically: a same-head re-run
-// of a merged PR (case B on every single run, since a merged head can never
-// advance) with nothing carried from the earlier review read as
-// "✅ pr-hero reviewed this PR and found nothing to report" — a $0, 0s run
-// overwriting a real prior summary with a false clean bill (the reported
-// defect). Whether anything IS carried changes only the second sentence;
-// the first sentence — no hunter ran — is never allowed to go unsaid.
+// pr-hero review #286 finding: `discoverySkippedEmptyDelta` alone cannot say
+// WHY discovery is empty, and "no changes" was flatly wrong for the OTHER
+// reason it can be set — a real, non-empty delta whose every file was
+// excluded by the size gate / `.prheroignore` (`filterDiffByIgnoreRules`'s
+// `droppedPaths`, threaded as `discoveryExcludedPaths`). This picks the
+// sentence the data actually supports; it never says "nothing changed" when
+// something plainly did.
+function discoverySkipSentence(rereview: RereviewDelta): string {
+  if (rereview.discoverySkipReason === "all_excluded") {
+    const paths = rereview.discoveryExcludedPaths ?? [];
+    const named = paths.length > 0 ? ` (${listPaths([...paths])})` : "";
+    return `Every changed file was excluded from review${named}, so the effective diff is empty.`;
+  }
+  return "No changes since the last review of this head.";
+}
+
+// GitHub #166, corrected by pr-hero review #286: a re-review whose discovery
+// skipped for lack of anything new (case B's same head, or case C's
+// restricted delta touching none of the PR's own files — or, per the
+// sentence above, a real delta excluded entirely) ran ZERO DISCOVERY
+// hunters — the two branches below both describe what a review CONCLUDED,
+// and this run concluded nothing from discovery; it never looked. That is
+// still all this function may claim:
+//
+// - it must never say "hunter" unqualified, since a VERIFIER can still run
+//   in the same pass (case B's `applied`/`case_b_reply` triggers, case C's
+//   `touched()` — rereview/classify.ts) and did not run zero of anything;
+// - it must never claim what "the last review reported" — this run only
+//   ever reads the CARRIED state (`rereview.live[]` and `verifiedGone`), not
+//   the last review's own content, so every sentence stays grounded in that;
+// - `verifiedGone` (review #286's third finding) MUST gate the "nothing to
+//   report" framing: `rereviewIsClean` alone ignores it, and a run whose
+//   verifier resolved every prior this pass is not "nothing happened" — it
+//   is a resolution, and erasing it would repeat the same class of false
+//   clean bill #166 reported in the first place.
 function skippedDiscoveryCleanBillLine(rereview: RereviewDelta): string {
-  if (rereviewIsClean(rereview)) {
-    return (
-      "No changes since the last review of this head — no hunter ran. " +
-      "The last review of this head reported nothing, and nothing has " +
-      "changed since."
+  const sentences: string[] = [
+    discoverySkipSentence(rereview),
+    "No discovery hunter ran this pass.",
+  ];
+  if (rereview.verifiedGone > 0) {
+    sentences.push(
+      `${rereview.verifiedGone} prior finding${rereview.verifiedGone === 1 ? "" : "s"} ` +
+        "resolved (verified) this pass.",
     );
   }
-  return (
-    "No changes since the last review of this head — no hunter ran; " +
-    `the findings below are carried from that review. Live: ${liveBits(rereview).join(" · ")}.`
-  );
+  const bits = liveBits(rereview);
+  if (bits.length > 0) {
+    sentences.push(`Still live: ${bits.join(" · ")}.`);
+  }
+  if (sentences.length === 2) {
+    sentences.push("No live findings are carried from the previous review.");
+  }
+  return sentences.join(" ");
 }
 
 function cleanBillLine(

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { discoveryHunters, resolvePrDiscovery } from "#pr/discovery";
 import type { AgentSpec } from "#review/spec";
+import { parseIgnoreFile } from "../../src/ignore-file";
 
 const HUNTER_A: AgentSpec = {
   key: "hunter-a",
@@ -156,10 +157,17 @@ function markerCommentForHead(head: string, complete: boolean) {
 // GitHub #166: a re-review whose head equals the last reviewed head (case B,
 // `L === H`) is not a rare edge — a merged PR's head can never advance, so
 // EVERY local re-run of a merged PR lands here. Discovery correctly finds
-// nothing to discover and runs zero hunters; this suite pins the two halves
-// of the fix: (1) goal 1 — that "zero hunters ran" does not mean "priors are
-// dropped", Phase B still classifies and carries them; (2) goal 3 — that the
-// skip is no longer silent on the CLI/CI log.
+// nothing to discover and runs zero discovery hunters; this suite pins the
+// two halves of the fix: (1) goal 1 — that "zero hunters ran" does not mean
+// "priors are dropped", Phase B still classifies and carries them; (2) goal
+// 3 — that the skip is no longer silent on the CLI/CI log.
+//
+// pr-hero review #286 then found the notice itself asserted facts the flag
+// does not carry: "no hunter ran... not re-verified" is false whenever a
+// verifier IS queued in the same pass (case B's `case_b_reply` trigger,
+// rereview/classify.ts ~143-151). The notice now prints only AFTER
+// `verifyQueue` is known (discovery.ts moved the log call past the Phase B
+// block), and names the real count instead of a blanket "not re-verified".
 describe("resolvePrDiscovery — case B same-head re-review (GitHub #166)", () => {
   test("skips discovery, marks the provenance, and logs a one-line operator notice", async () => {
     const logs: string[] = [];
@@ -191,7 +199,151 @@ describe("resolvePrDiscovery — case B same-head re-review (GitHub #166)", () =
     expect(result.skipDiscovery).toBe(true);
     expect(result.rawDiff).toBe("");
     expect(result.rereview?.discovery_skipped_empty_delta).toBe(true);
-    expect(logs.some((line) => line.includes("no hunter ran"))).toBe(true);
+    // #286: no reason to distrust the delta (a genuinely empty one, not an
+    // excluded one) — reason is "no_delta", never "all_excluded".
+    expect(result.rereview?.discovery_skip_reason).toBe("no_delta");
+    expect(logs.some((line) => line.includes("No discovery hunter ran"))).toBe(
+      true,
+    );
+    // #286: nothing was queued for verification this pass — the notice must
+    // say so plainly, never the blanket (and here false-adjacent) "not
+    // re-verified" the old wording used.
+    expect(
+      logs.some((line) =>
+        line.includes("No prior finding is queued for re-verification"),
+      ),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("not re-verified"))).toBe(false);
+  });
+
+  // #286 finding 2/5: case B's `case_b_reply` trigger (rereview/classify.ts
+  // ~143-151) queues a prior for THIS pass's verifier even though discovery
+  // itself is skipped — the notice must reflect the real queue, not a
+  // blanket claim made before the queue existed.
+  test("a case-B reply queues a prior for verification, and the notice says so", async () => {
+    const logs: string[] = [];
+    const result = await resolvePrDiscovery({
+      diffFromSha: B,
+      headSha: H,
+      full: false,
+      baseRef: B,
+      headLabel: "PR #1 head",
+      isCi: false,
+      sizeGateOverrides: {},
+      config: { parity_trigger_paths: [], suspicion_priors: [] },
+      prIgnore: { rules: [], found: false },
+      issueComments: [markerCommentForHead(H, true)],
+      postedFindings: [
+        {
+          ...POSTED_FINDING,
+          marker: { ...POSTED_FINDING.marker, headSha: H },
+        },
+      ],
+      // A reply on the finding's own thread AFTER the summary was posted —
+      // exactly what `enrichPriorsFromThreads` reads to set
+      // `newThreadReply: true`, the input `classifyPrior`'s case-B branch
+      // gates on.
+      reviewComments: [
+        {
+          id: 900,
+          user: "reviewer",
+          body: "still an issue?",
+          path: "src/a.ts",
+          line: 10,
+          original_line: 10,
+          in_reply_to_id: POSTED_FINDING.id,
+          created_at: "2026-01-02T00:00:00Z",
+        },
+      ],
+      git: baseGit(),
+      log: (line) => {
+        if (line !== undefined) logs.push(line);
+      },
+    });
+
+    expect(result.verifyQueue.map((v) => v.priorId)).toEqual(["R001"]);
+    expect(
+      logs.some((line) =>
+        line.includes("1 prior finding is queued for re-verification"),
+      ),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("not re-verified"))).toBe(false);
+    expect(
+      logs.some((line) => line.includes("No prior finding is queued")),
+    ).toBe(false);
+  });
+
+  // #286 finding 1: a REAL, non-empty delta that the size gate / ignore
+  // rules excluded entirely is a different truth than "nothing changed" —
+  // `filterDiffByIgnoreRules` (wired through `gateConfig.excludeRules`)
+  // drops the only changed file, and the notice/provenance must say WHAT was
+  // excluded, never "no changes".
+  test("a real delta entirely excluded by ignore rules names the reason and the paths", async () => {
+    const logs: string[] = [];
+    const excludingGit = {
+      ...baseGit(),
+      // Case B's `skipPlannedDiscovery` short-circuits before the real diff
+      // is ever read, so this exercises case C instead (L reachable, an
+      // ancestor of H, but L !== H): a genuine restricted delta whose ONLY
+      // file is `dist/bundle.js`, on both the PR range and the delta range,
+      // so `restrictedDiscoveryFiles`'s intersection is non-empty and
+      // discovery proceeds to actually read (and then exclude) a real diff.
+      nameOnly: () => Promise.resolve(["dist/bundle.js"]),
+      runGit: (args: string[]) => {
+        if (args[0] === "diff" && args.includes("--numstat")) {
+          return Promise.resolve({
+            ok: true,
+            stdout: "1\t1\tdist/bundle.js\n",
+            stderr: "",
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          stdout:
+            "diff --git a/dist/bundle.js b/dist/bundle.js\n" +
+            "index 1111111..2222222 100644\n" +
+            "--- a/dist/bundle.js\n" +
+            "+++ b/dist/bundle.js\n" +
+            "@@ -1 +1 @@\n" +
+            "-old\n" +
+            "+new\n",
+          stderr: "",
+        });
+      },
+    };
+    const result = await resolvePrDiscovery({
+      diffFromSha: B,
+      headSha: H,
+      full: false,
+      baseRef: B,
+      headLabel: "PR #1 head",
+      isCi: false,
+      sizeGateOverrides: {},
+      config: { parity_trigger_paths: [], suspicion_priors: [] },
+      prIgnore: { rules: parseIgnoreFile("dist/**\n", "user"), found: true },
+      issueComments: [markerCommentForHead(L, true)],
+      postedFindings: [],
+      reviewComments: [],
+      git: excludingGit,
+      log: (line) => {
+        if (line !== undefined) logs.push(line);
+      },
+    });
+
+    expect(result.skipDiscovery).toBe(true);
+    expect(result.rereview?.discovery_skip_reason).toBe("all_excluded");
+    expect(result.rereview?.discovery_excluded_paths).toEqual([
+      "dist/bundle.js",
+    ]);
+    expect(
+      logs.some(
+        (line) =>
+          line.includes("Every changed file") && line.includes("excluded"),
+      ),
+    ).toBe(true);
+    expect(logs.some((line) => line.includes("No changes to discover"))).toBe(
+      false,
+    );
   });
 
   test("goal 1 — a live prior is carried through Phase B, never silently dropped", async () => {
