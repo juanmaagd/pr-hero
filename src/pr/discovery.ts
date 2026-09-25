@@ -258,6 +258,25 @@ export async function resolvePrDiscovery(params: {
         : issueComments.find((c) => c.id === existingSummaryId);
     const summaryUpdatedAt = summaryComment?.updated_at ?? null;
     const state = parseStateBlock(summaryComment?.body ?? "");
+    // #206: `postedFindings` (PostedFindingComment[]) never carries the raw
+    // comment body — only the parsed marker fields (findingMarker signs the
+    // claim's fingerprint, never the claim text) — so recovering a fallback
+    // prior's real sev/tier/claim needs the body looked up from whichever
+    // fetch actually produced this comment. Built once, not per-item.
+    //
+    // Two maps, never one: review comments and issue comments are different
+    // GitHub resources from different endpoints, and nothing documents that
+    // their numeric ids share a namespace. A single map keyed by id alone
+    // would let a colliding issue comment silently hand this prior ANOTHER
+    // finding's sev/tier/claim — a plausible wrong value, which is worse than
+    // the UNRECOVERABLE sentinel this recovery exists to fall back on.
+    // `p.channel` already says which endpoint produced each posted finding.
+    const reviewBodyById = new Map<number, string>(
+      reviewComments.map((c) => [c.id, c.body] as const),
+    );
+    const issueBodyById = new Map<number, string>(
+      issueComments.map((c) => [c.id, c.body] as const),
+    );
     const rawPriors =
       state === null
         ? priorsFromPostedMarkers(
@@ -265,6 +284,10 @@ export async function resolvePrDiscovery(params: {
               path: p.livePath ?? p.marker.path,
               line: p.liveLine ?? p.marker.line,
               channel: p.channel === "issue" ? "outside" : "inline",
+              body:
+                (p.channel === "issue"
+                  ? issueBodyById.get(p.id)
+                  : reviewBodyById.get(p.id)) ?? "",
             })),
           )
         : priorsFromStateFindings(state.findings);

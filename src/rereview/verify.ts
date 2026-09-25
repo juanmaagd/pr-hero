@@ -10,7 +10,12 @@
 import path from "node:path";
 import { blockForgesNonce, wrapBlock } from "#review/boundary";
 import type { Severity } from "#review/findings";
-import type { GateStatus, VerifyTrigger } from "./classify";
+import {
+  type GateStatus,
+  type RecoveredSeverity,
+  SEVERITY_UNRECOVERABLE,
+  type VerifyTrigger,
+} from "./classify";
 import {
   type IdentityInput,
   identitiesMatch,
@@ -24,7 +29,7 @@ export const VERIFIER_AGENT = "verifier";
 
 export interface VerifyQueueEntry {
   priorId: string;
-  sev: Severity;
+  sev: RecoveredSeverity;
   trigger: VerifyTrigger;
   claim: string;
   locs: readonly string[];
@@ -84,6 +89,15 @@ const SEV_RANK: Record<Severity, number> = {
   SUGGESTION: 3,
 };
 
+// An unrecoverable severity ranks BEFORE BLOCKER, not after SUGGESTION: we
+// genuinely do not know whether the underlying finding is a live BLOCKER
+// (#206), so treating it as low priority would let a capacity cut evict the
+// one entry most worth re-checking. Ranking it most urgent means a known
+// SUGGESTION is evicted before an unknown severity ever is.
+function verifyQueueRank(sev: RecoveredSeverity): number {
+  return sev === SEVERITY_UNRECOVERABLE ? -1 : SEV_RANK[sev];
+}
+
 export function capVerificationQueue(
   queued: readonly VerifyQueueEntry[],
   max: number,
@@ -95,7 +109,7 @@ export function capVerificationQueue(
   const ranked = unique
     .map((entry, index) => ({ entry, index }))
     .sort((a, b) => {
-      const rank = SEV_RANK[a.entry.sev] - SEV_RANK[b.entry.sev];
+      const rank = verifyQueueRank(a.entry.sev) - verifyQueueRank(b.entry.sev);
       return rank !== 0 ? rank : a.index - b.index;
     })
     .map((row) => row.entry);

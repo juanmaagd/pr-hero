@@ -8,7 +8,15 @@
 // a renderer that reached for `new Date()` would make that a lie).
 
 import type { ResolvedModelRoute, ResolvedStepRoute } from "#model/routing";
-import { findingMarker, prCommentMarker } from "#pr/preflight";
+import {
+  findingMarker,
+  PR_FINDING_MARKER_PREFIX,
+  prCommentMarker,
+} from "#pr/preflight";
+import {
+  type RecoveredSeverity,
+  SEVERITY_UNRECOVERABLE,
+} from "#rereview/classify";
 import type {
   Finding,
   FindingsDocument,
@@ -308,7 +316,7 @@ export function renderReport(doc: FindingsDocument, meta: ReportMeta): string {
 // silent, on the first post.
 export interface RereviewLiveRow {
   id: string;
-  sev: Severity;
+  sev: RecoveredSeverity;
   status: string;
   locs: readonly string[];
   claim: string;
@@ -328,7 +336,7 @@ export interface RereviewDelta {
   case?: string;
   worsened?: readonly {
     priorId: string;
-    priorSev: Severity;
+    priorSev: RecoveredSeverity;
     discoverySev: Severity;
   }[];
 }
@@ -342,6 +350,24 @@ export interface PrCommentDelta {
   // MatchResult.resolved (C2, R2-S6). Absent keeps first-review rendering
   // byte-identical.
   rereview?: RereviewDelta;
+}
+
+// `row.sev` arrives typed `string` here (this reader also serves raw
+// pipeline.json data, see rereview/prepare.ts's readRereviewProvenance) —
+// never widen an unrecognized string INTO a real Severity by casting.
+// Anything that is not one of the 4 real values or the sentinel itself
+// degrades to the sentinel: the WARNING-default this replaces is #206's own
+// bug, restated for the read-back path instead of the build path.
+function asRecoveredSeverity(sev: string | undefined): RecoveredSeverity {
+  switch (sev) {
+    case "BLOCKER":
+    case "CRITICAL":
+    case "WARNING":
+    case "SUGGESTION":
+      return sev;
+    default:
+      return SEVERITY_UNRECOVERABLE;
+  }
 }
 
 export function rereviewDeltaFromProvenance(
@@ -360,7 +386,7 @@ export function rereviewDeltaFromProvenance(
     re_tiered?: number;
     worsened?: readonly {
       priorId: string;
-      priorSev: Severity;
+      priorSev: RecoveredSeverity;
       discoverySev: Severity;
     }[];
   },
@@ -379,7 +405,7 @@ export function rereviewDeltaFromProvenance(
     reTiered: rereview.re_tiered ?? 0,
     live: rereview.live.map((row) => ({
       id: row.id ?? "",
-      sev: (row.sev as Severity) ?? "WARNING",
+      sev: asRecoveredSeverity(row.sev),
       status: row.status,
       locs: row.locs ?? [],
       claim: row.claim ?? "",
@@ -607,6 +633,15 @@ export function renderPrComment(
     (sev) => sev === "BLOCKER" || sev === "CRITICAL",
   ).length;
   const warning = headlineSev.filter((sev) => sev === "WARNING").length;
+  // #206: a carried prior whose real severity could not be recovered must
+  // never fall into `warning` by default — that IS the bug (a live BLOCKER
+  // rendering as "0 critical · 1 warning"). It also must not vanish from the
+  // headline entirely: silence here would just move the undercount from
+  // "wrong bucket" to "no bucket", still hiding that something needs a
+  // human's eyes. So it gets its own headline term instead.
+  const severityUnavailable = headlineSev.filter(
+    (sev) => sev === SEVERITY_UNRECOVERABLE,
+  ).length;
   const headSha8 = code(doc.head_sha.slice(0, 8));
   const headRef =
     webUrl === undefined
@@ -703,8 +738,11 @@ export function renderPrComment(
     out.push("");
   }
   out.push(
-    `🔴 ${critical} critical · 🟡 ${warning} warning — ${headRef}, ` +
-      `diff from ${code(doc.base_sha.slice(0, 8))}`,
+    `🔴 ${critical} critical · 🟡 ${warning} warning` +
+      (severityUnavailable > 0
+        ? ` · ⚠️ ${severityUnavailable} severity unavailable`
+        : "") +
+      ` — ${headRef}, diff from ${code(doc.base_sha.slice(0, 8))}`,
   );
   out.push("");
   if (doc.summary !== undefined) {
@@ -775,8 +813,17 @@ function liveFindingLines(rereview: RereviewDelta | undefined): string[] {
     out.push("Still live:");
     for (const row of listed) {
       const loc = row.locs[0] ?? row.id;
+      // #206: never run an unrecoverable severity through severityEmoji —
+      // its 4-case switch has no branch for the sentinel, and reusing 🟡 by
+      // accident is exactly the silent downgrade this issue is about. A
+      // distinct glyph AND word, never one of 🔴/🟡/🔵, so the row cannot be
+      // mistaken for a real (if low) severity.
+      const badge =
+        row.sev === SEVERITY_UNRECOVERABLE
+          ? "⚠️ severity unavailable"
+          : severityEmoji(row.sev);
       out.push(
-        `- \`${row.status}\` ${severityEmoji(row.sev)} \`${loc}\` — ${liveClaimText(row.claim)} (${row.id})`,
+        `- \`${row.status}\` ${badge} \`${loc}\` — ${liveClaimText(row.claim)} (${row.id})`,
       );
     }
     out.push("");
@@ -989,6 +1036,64 @@ function findingBodyLines(
   out.push(...evidenceBlock(finding, headSha, webUrl));
   out.push(...promptToFixBlock(finding));
   return out;
+}
+
+const FINDING_HEADER_BADGE =
+  /^\S+\s+(blocking|advisory)\s+·\s+(BLOCKER|CRITICAL|WARNING|SUGGESTION)\s+·/;
+
+export interface RecoveredFindingBadge {
+  sev: Severity;
+  tier: Tier;
+  claim: string;
+}
+
+// #206's recovery path: when a re-review's `pr-hero-state` block cannot
+// supply a carried prior's `sev`/`tier`/`claim` (missing, unparseable, or —
+// the routine case — a FIRST review never writes one at all, see
+// `postInlineFindings`'s `framing === undefined` branch in src/pr/pr.ts),
+// the finding's OWN posted comment still carries the truth: `findingMarker`
+// signs only the claim's FINGERPRINT, never the claim text itself, but
+// `findingBodyLines` above writes the real header/location/claim right
+// after it. This is that renderer's exact structural inverse — it does NOT
+// re-derive the format independently, so the two cannot silently drift
+// apart (see the round-trip test in test/review/report.test.ts).
+//
+// Deliberately all-or-nothing: `findingBodyLines`' header/location/blank/
+// claim order is fixed by construction, so a body that does not match it
+// closely enough to recover the header cannot be trusted to have the claim
+// in the expected place either. A caller that gets `null` back must not
+// invent a value — see rereview/classify.ts's `SEVERITY_UNRECOVERABLE` /
+// `TIER_UNRECOVERABLE` sentinels, which exist for exactly this return.
+export function parseFindingCommentBadge(
+  body: string,
+): RecoveredFindingBadge | null {
+  if (!body.includes(PR_FINDING_MARKER_PREFIX)) return null;
+  const lines = body.split("\n");
+  const markerIndex = lines.findIndex((line) =>
+    line.startsWith(PR_FINDING_MARKER_PREFIX),
+  );
+  if (markerIndex === -1) return null;
+  let i = markerIndex + 1;
+  while (i < lines.length && (lines[i]?.trim() ?? "") === "") i++;
+  const headerLine = lines[i];
+  if (headerLine === undefined) return null;
+  const match = FINDING_HEADER_BADGE.exec(headerLine.trim());
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  const tier = match[1] as Tier;
+  const sev = match[2] as Severity;
+  // findingBodyLines' fixed shape from here: the location line (exactly
+  // one, whatever it contains — never parsed, its content is not needed),
+  // one blank line, then the claim. Order never varies; only the OPTIONAL
+  // blocks after the claim (tier explanation / evidence / prompt) do.
+  i++;
+  if (lines[i] === undefined) return null;
+  i++;
+  while (i < lines.length && (lines[i]?.trim() ?? "") === "") i++;
+  const claimLine = lines[i];
+  if (claimLine === undefined) return null;
+  const claim = claimLine.trim();
+  if (claim.length === 0) return null;
+  return { sev, tier, claim };
 }
 
 export function renderInlineComment(
