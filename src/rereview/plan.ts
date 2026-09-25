@@ -170,6 +170,11 @@ export function skippedDiscoveryMessage(input: {
   reason: "no_delta" | "all_excluded";
   excludedPaths: readonly string[];
   queuedForVerification: number;
+  // pr-hero on #286: the Phase B queue is capped downstream at
+  // max_verification_steps (capVerificationQueue, rereview/verify.ts); the
+  // priors past the cap are marked unconfirmed, never re-verified. The notice
+  // states the capped number, never the raw queue length.
+  maxVerificationSteps: number;
 }): string {
   const discoverySentence =
     input.reason === "all_excluded"
@@ -177,12 +182,21 @@ export function skippedDiscoveryMessage(input: {
         `(${listPaths([...input.excludedPaths])}), so the effective diff is empty.`
       : `No changes to discover at ${input.headSha} since the last completed review.`;
   const hunterSentence = "No discovery hunter ran this pass.";
+  const verified = Math.min(
+    input.queuedForVerification,
+    Math.max(0, input.maxVerificationSteps),
+  );
+  const capped = input.queuedForVerification - verified;
   const verifySentence =
-    input.queuedForVerification > 0
-      ? `${input.queuedForVerification} prior finding` +
-        `${input.queuedForVerification === 1 ? " is" : "s are"} queued for ` +
-        "re-verification this pass."
-      : "No prior finding is queued for re-verification this pass.";
+    verified > 0
+      ? `${verified} prior finding` +
+        `${verified === 1 ? " is" : "s are"} re-verified this pass` +
+        (capped > 0
+          ? `; ${capped} more ${capped === 1 ? "stays" : "stay"} unconfirmed (max_verification_steps ${input.maxVerificationSteps}).`
+          : ".")
+      : capped > 0
+        ? `No prior finding is re-verified this pass; ${capped} ${capped === 1 ? "stays" : "stay"} unconfirmed (max_verification_steps ${input.maxVerificationSteps}).`
+        : "No prior finding is queued for re-verification this pass.";
   return `${discoverySentence} ${hunterSentence} ${verifySentence}`;
 }
 

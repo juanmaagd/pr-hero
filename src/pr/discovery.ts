@@ -39,7 +39,11 @@ import {
 } from "#rereview/prepare";
 import { parseStateBlock } from "#rereview/state";
 import type { VerifyQueueEntry } from "#rereview/verify";
-import { allExcludedMessage, emptyDiffMessage } from "#review/preflight";
+import {
+  allExcludedMessage,
+  emptyDiffMessage,
+  resolveMaxVerificationSteps,
+} from "#review/preflight";
 import type { DiffStat } from "#review/report";
 import {
   computeDiffStatAndSizeGate,
@@ -329,6 +333,7 @@ export async function resolvePrDiscovery(params: {
       reason: rereview.discovery_skip_reason ?? "no_delta",
       excludedPaths: rereview.discovery_excluded_paths ?? [],
       queuedForVerification: verifyQueue.length,
+      maxVerificationSteps: resolveMaxVerificationSteps(config),
     });
     log(isCi ? formatWorkflowCommand("notice", skipped) : skipped);
   }

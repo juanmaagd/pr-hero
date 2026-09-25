@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { discoveryHunters, resolvePrDiscovery } from "#pr/discovery";
+import { skippedDiscoveryMessage } from "#rereview/plan";
 import type { AgentSpec } from "#review/spec";
 import { parseIgnoreFile } from "../../src/ignore-file";
 
@@ -264,7 +265,7 @@ describe("resolvePrDiscovery — case B same-head re-review (GitHub #166)", () =
     expect(result.verifyQueue.map((v) => v.priorId)).toEqual(["R001"]);
     expect(
       logs.some((line) =>
-        line.includes("1 prior finding is queued for re-verification"),
+        line.includes("1 prior finding is re-verified this pass."),
       ),
     ).toBe(true);
     expect(logs.some((line) => line.includes("not re-verified"))).toBe(false);
@@ -375,5 +376,49 @@ describe("resolvePrDiscovery — case B same-head re-review (GitHub #166)", () =
     expect(result.phaseB).toBeDefined();
     expect(result.phaseB?.settled.map((s) => s.status)).toEqual(["carried"]);
     expect(result.phaseB?.priors.map((p) => p.id)).toEqual(["R001"]);
+  });
+});
+
+// pr-hero on #286: the Phase B queue is capped downstream at
+// max_verification_steps, and priors past the cap are marked unconfirmed, not
+// re-verified. The notice must state the capped number, never the raw queue.
+describe("skippedDiscoveryMessage — the verification cap (#286)", () => {
+  const base = {
+    headSha: H,
+    reason: "no_delta" as const,
+    excludedPaths: [] as string[],
+  };
+
+  test("a queue within the cap says every queued prior is re-verified", () => {
+    const line = skippedDiscoveryMessage({
+      ...base,
+      queuedForVerification: 3,
+      maxVerificationSteps: 8,
+    });
+    expect(line).toContain("3 prior findings are re-verified this pass.");
+    expect(line).not.toContain("unconfirmed");
+  });
+
+  test("a queue over the cap names the verified count and the capped remainder", () => {
+    const line = skippedDiscoveryMessage({
+      ...base,
+      queuedForVerification: 12,
+      maxVerificationSteps: 8,
+    });
+    expect(line).toContain("8 prior findings are re-verified this pass");
+    expect(line).toContain(
+      "4 more stay unconfirmed (max_verification_steps 8)",
+    );
+    expect(line).not.toContain("12 prior findings");
+  });
+
+  test("a cap of 0 never claims a re-verification", () => {
+    const line = skippedDiscoveryMessage({
+      ...base,
+      queuedForVerification: 2,
+      maxVerificationSteps: 0,
+    });
+    expect(line).toContain("No prior finding is re-verified this pass");
+    expect(line).toContain("2 stay unconfirmed");
   });
 });
