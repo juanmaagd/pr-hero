@@ -1228,4 +1228,58 @@ describe("F007 — readRereviewProvenance", () => {
       problem: "rereview.verification_triggers.verify_all",
     });
   });
+
+  // pr-hero review #286: `discovery_skip_reason` / `discovery_excluded_paths`
+  // disambiguate WHY discovery came up empty — added AFTER `discovery_skipped_
+  // empty_delta` shipped, so every artifact written before this fix has
+  // neither field. Same "optional on the TYPE, defaults on READ" contract as
+  // `last_review_complete` and `worsened` above: absent must still parse, not
+  // fail LOUD.
+  test("old provenance with no discovery_skip_reason field still parses", () => {
+    const read = readRereviewProvenance({ rereview: block() });
+    expect(read.kind).toBe("ok");
+    expect(
+      read.kind === "ok" && read.rereview.discovery_skip_reason,
+    ).toBeUndefined();
+    expect(
+      read.kind === "ok" && read.rereview.discovery_excluded_paths,
+    ).toBeUndefined();
+  });
+
+  test("discovery_skip_reason and discovery_excluded_paths survive the read verbatim", () => {
+    const read = readRereviewProvenance({
+      rereview: block({
+        discovery_skip_reason: "all_excluded",
+        discovery_excluded_paths: ["dist/bundle.js"],
+      }),
+    });
+    expect(read.kind === "ok" && read.rereview.discovery_skip_reason).toBe(
+      "all_excluded",
+    );
+    expect(
+      read.kind === "ok" && read.rereview.discovery_excluded_paths,
+    ).toEqual(["dist/bundle.js"]);
+  });
+
+  test("an unknown discovery_skip_reason is invalid, naming the field", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({ discovery_skip_reason: "everything_is_fine" }),
+      }),
+    ).toEqual({
+      kind: "invalid",
+      problem: "rereview.discovery_skip_reason",
+    });
+  });
+
+  test("a non-array discovery_excluded_paths is invalid, naming the field", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({ discovery_excluded_paths: "dist/bundle.js" }),
+      }),
+    ).toEqual({
+      kind: "invalid",
+      problem: "rereview.discovery_excluded_paths",
+    });
+  });
 });

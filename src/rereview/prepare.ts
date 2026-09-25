@@ -36,18 +36,20 @@ import {
   planDiscovery,
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
+  skippedDiscoveryMessage,
   unreachableLastHeadMessage,
 } from "./plan";
 import type { LiveFinding, StateFinding } from "./state";
 import type { VerifyQueueEntry } from "./verify";
 
 // cli.ts reaches the whole re-review surface through this module and never
-// imports rereview/plan.ts directly; these two travel with `prepareDiscovery`'s
+// imports rereview/plan.ts directly; these three travel with `prepareDiscovery`'s
 // output, so they ride the same facade. The return type stays unexported here
 // — cli.ts infers it, and nothing names it across this boundary.
 export {
   decideLastHeadDelta,
   incompleteLastReviewMessage,
+  skippedDiscoveryMessage,
   unreachableLastHeadMessage,
 };
 
@@ -85,6 +87,23 @@ export interface RereviewProvenance {
   discovery_range: string;
   discovery_restricted: boolean;
   discovery_skipped_empty_delta: boolean;
+  // pr-hero review #286 finding: `discovery_skipped_empty_delta` alone
+  // conflates two different truths — (a) there was genuinely nothing new to
+  // discover (case B's same head, or case C's empty restricted intersection:
+  // `pr/discovery.ts`'s `skipPlannedDiscovery`), and (b) there WAS a real,
+  // non-empty delta, but every file in it was excluded by the size gate /
+  // `.prheroignore` rules (`filterDiffByIgnoreRules`'s `droppedPaths`). Only
+  // (a) supports "no changes since the last review" wording; (b) requires
+  // naming what was excluded, or the summary repeats the exact false claim
+  // this field exists to prevent. Optional so an artifact written before this
+  // fix still parses (`readRereviewProvenance` below); such an artifact could
+  // only ever have reached (a) or (b) through the SAME `discovery_skipped_
+  // empty_delta` flag without recording which, so a reader of an old record
+  // has no way to tell either — this field is forward-only disambiguation,
+  // not a backfillable one.
+  discovery_skip_reason?: "no_delta" | "all_excluded";
+  // Populated only when `discovery_skip_reason` is `"all_excluded"`.
+  discovery_excluded_paths?: string[];
   prior_findings: number;
   settled_deterministically: number;
   verified: number;
@@ -368,6 +387,27 @@ export function readRereviewProvenance(
     worsened = rows;
   }
 
+  // Optional, same "absent on every pre-fix artifact" reasoning as
+  // `last_review_complete` above — see `discovery_skip_reason`'s own WHY on
+  // the type. Validated when present so a corrupted value fails loud rather
+  // than silently mis-rendering an exclusion claim as a no-delta one.
+  const skipReason = raw.discovery_skip_reason;
+  if (
+    skipReason !== undefined &&
+    skipReason !== "no_delta" &&
+    skipReason !== "all_excluded"
+  ) {
+    return problem("discovery_skip_reason");
+  }
+  const excludedPaths = raw.discovery_excluded_paths;
+  if (
+    excludedPaths !== undefined &&
+    (!Array.isArray(excludedPaths) ||
+      !excludedPaths.every((p) => typeof p === "string"))
+  ) {
+    return problem("discovery_excluded_paths");
+  }
+
   return {
     kind: "ok",
     rereview: {
@@ -381,6 +421,12 @@ export function readRereviewProvenance(
       discovery_range: raw.discovery_range,
       discovery_restricted: raw.discovery_restricted,
       discovery_skipped_empty_delta: raw.discovery_skipped_empty_delta,
+      ...(skipReason === undefined
+        ? {}
+        : { discovery_skip_reason: skipReason }),
+      ...(excludedPaths === undefined
+        ? {}
+        : { discovery_excluded_paths: excludedPaths as string[] }),
       prior_findings: raw.prior_findings as number,
       settled_deterministically: raw.settled_deterministically as number,
       verified: raw.verified as number,
