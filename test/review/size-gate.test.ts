@@ -333,14 +333,16 @@ describe("sizeGateConfig", () => {
   });
 
   // Pins the shipped numbers to the README's profile table. Moving a default
-  // must be a deliberate edit here, not a drift. The number moved 1500 → 2500
-  // → 1500: this repo's own PR #1 (1603 lines) was refused while its cost
-  // band read $3.18-6.86, which was read as "too tight" and answered with
-  // 2500. The real cause was that the gate counted lines it did not filter
-  // (F001) and counted formatting noise it should ignore; with both fixed,
-  // 1500 stands. See the WHY on DEFAULT_SIZE_GATE.
+  // must be a deliberate edit here, not a drift. The line number moved
+  // 1500 → 2500 → 1500 → 4000: this repo's own PR #1 (1603 lines) was
+  // refused while its cost band read $3.18-6.86, which was read as "too
+  // tight" and answered with 2500. The real cause was that the gate counted
+  // lines it did not filter (F001) and counted formatting noise it should
+  // ignore; with both fixed, 1500 stood as a real 1500. On 2026-09-25 it
+  // moved again, to 4000 — an owner decision that 1500 was skipping too many
+  // real PRs, not a new measurement. See the WHY on DEFAULT_SIZE_GATE.
   test("the shipped defaults are the documented ones", () => {
-    expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(1500);
+    expect(DEFAULT_SIZE_GATE.maxChangedLines).toBe(4000);
     expect(DEFAULT_SIZE_GATE.maxChangedFiles).toBe(150);
   });
 });

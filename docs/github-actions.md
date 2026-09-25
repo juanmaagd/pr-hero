@@ -293,7 +293,7 @@ nothing:
 
 | Gate | Input | Default | Disable |
 |---|---|---|---|
-| Size | `max-changed-lines` / `max-changed-files` | `1000` / `50` | `0` |
+| Size | `max-changed-lines` / `max-changed-files` | `4000` / `50` | `0` |
 | Budget | `budget-usd` | route-derived (see below) | any value `<= 0` |
 
 Both gates exit 0 and leave a courteous PR comment plus step-summary note when they trip — they are cost

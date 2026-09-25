@@ -70,7 +70,7 @@ export interface CiWorkflowTemplateOptions {
   budgetUsd?: string;
   // Repo-local override for the action's own `max-changed-lines` default, and
   // omitted for the same reason as `budgetUsd`: a scaffolded repo inherits
-  // action.yml's 1000 and decides for itself. THIS repo raises it because its
+  // action.yml's 4000 and decides for itself. THIS repo raises it because its
   // own slices routinely land near the line — D1-10c was skipped at 1023,
   // twenty-three lines over, and a skipped review is indistinguishable from a
   // clean one to anyone reading the checks.
