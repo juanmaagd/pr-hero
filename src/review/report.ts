@@ -331,6 +331,14 @@ export interface RereviewDelta {
     priorSev: Severity;
     discoverySev: Severity;
   }[];
+  // GitHub #166: this run's discovery found nothing to look at (case B's
+  // same-head re-review, or case C's restricted delta touching none of the
+  // PR's own files) — zero hunters ran. Mirrors
+  // `RereviewProvenance.discovery_skipped_empty_delta` (rereview/prepare.ts),
+  // which used to be computed and threaded onto the artifact but never READ
+  // by this renderer — the gap that let a $0/0s skip publish "pr-hero
+  // reviewed this PR and found nothing to report" over a real prior summary.
+  discoverySkippedEmptyDelta?: boolean;
 }
 
 export interface PrCommentDelta {
@@ -363,6 +371,10 @@ export function rereviewDeltaFromProvenance(
       priorSev: Severity;
       discoverySev: Severity;
     }[];
+    // Optional, not `RereviewProvenance`'s required boolean: this structural
+    // type is also satisfied by hand-built test fixtures and older
+    // pipeline.json reads that never carried the field (schema tolerance).
+    discovery_skipped_empty_delta?: boolean;
   },
   newFindings: number,
 ): RereviewDelta {
@@ -387,6 +399,9 @@ export function rereviewDeltaFromProvenance(
     capped: rereview.verification_capped ?? 0,
     ...(rereview.case === undefined ? {} : { case: rereview.case }),
     ...(rereview.worsened === undefined ? {} : { worsened: rereview.worsened }),
+    ...(rereview.discovery_skipped_empty_delta === true
+      ? { discoverySkippedEmptyDelta: true }
+      : {}),
   };
 }
 
@@ -802,6 +817,46 @@ function rereviewIsClean(rereview: RereviewDelta | undefined): boolean {
   );
 }
 
+// Shared by both non-clean cleanBillLine branches below (the ordinary
+// re-review one and the skipped-discovery one, GitHub #166) so the two
+// wordings can never drift on what "live" means.
+function liveBits(rereview: RereviewDelta): string[] {
+  const bits: string[] = [];
+  if (rereview.carried > 0) bits.push(`${rereview.carried} carried`);
+  if (rereview.unconfirmed > 0)
+    bits.push(`${rereview.unconfirmed} unconfirmed`);
+  if (rereview.deferred > 0) bits.push(`${rereview.deferred} deferred`);
+  if (rereview.suppressed > 0) bits.push(`${rereview.suppressed} suppressed`);
+  if (rereview.returned > 0) bits.push(`${rereview.returned} returned`);
+  if (rereview.reTiered > 0) bits.push(`${rereview.reTiered} re-tiered`);
+  return bits;
+}
+
+// GitHub #166: a re-review whose discovery skipped for lack of anything new
+// (case B's same head, or case C's restricted delta touching none of the
+// PR's own files) ran ZERO hunters — the two branches above both describe
+// what a review CONCLUDED, and this run concluded nothing; it never looked.
+// The prior generic branch mattered here specifically: a same-head re-run
+// of a merged PR (case B on every single run, since a merged head can never
+// advance) with nothing carried from the earlier review read as
+// "✅ pr-hero reviewed this PR and found nothing to report" — a $0, 0s run
+// overwriting a real prior summary with a false clean bill (the reported
+// defect). Whether anything IS carried changes only the second sentence;
+// the first sentence — no hunter ran — is never allowed to go unsaid.
+function skippedDiscoveryCleanBillLine(rereview: RereviewDelta): string {
+  if (rereviewIsClean(rereview)) {
+    return (
+      "No changes since the last review of this head — no hunter ran. " +
+      "The last review of this head reported nothing, and nothing has " +
+      "changed since."
+    );
+  }
+  return (
+    "No changes since the last review of this head — no hunter ran; " +
+    `the findings below are carried from that review. Live: ${liveBits(rereview).join(" · ")}.`
+  );
+}
+
 function cleanBillLine(
   runStatus: FindingsDocument["run_status"],
   rereview: RereviewDelta | undefined,
@@ -812,16 +867,11 @@ function cleanBillLine(
       "bill: read it against the coverage above."
     );
   }
+  if (rereview?.discoverySkippedEmptyDelta === true) {
+    return skippedDiscoveryCleanBillLine(rereview);
+  }
   if (!rereviewIsClean(rereview) && rereview !== undefined) {
-    const bits: string[] = [];
-    if (rereview.carried > 0) bits.push(`${rereview.carried} carried`);
-    if (rereview.unconfirmed > 0)
-      bits.push(`${rereview.unconfirmed} unconfirmed`);
-    if (rereview.deferred > 0) bits.push(`${rereview.deferred} deferred`);
-    if (rereview.suppressed > 0) bits.push(`${rereview.suppressed} suppressed`);
-    if (rereview.returned > 0) bits.push(`${rereview.returned} returned`);
-    if (rereview.reTiered > 0) bits.push(`${rereview.reTiered} re-tiered`);
-    return `No new findings this delta. Live: ${bits.join(" · ")}.`;
+    return `No new findings this delta. Live: ${liveBits(rereview).join(" · ")}.`;
   }
   return "✅ pr-hero reviewed this PR and found nothing to report.";
 }

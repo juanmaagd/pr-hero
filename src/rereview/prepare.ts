@@ -30,18 +30,20 @@ import {
   planDiscovery,
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
+  skippedDiscoveryMessage,
   unreachableLastHeadMessage,
 } from "./plan";
 import type { LiveFinding, StateFinding } from "./state";
 import type { VerifyQueueEntry } from "./verify";
 
 // cli.ts reaches the whole re-review surface through this module and never
-// imports rereview/plan.ts directly; these two travel with `prepareDiscovery`'s
+// imports rereview/plan.ts directly; these three travel with `prepareDiscovery`'s
 // output, so they ride the same facade. The return type stays unexported here
 // — cli.ts infers it, and nothing names it across this boundary.
 export {
   decideLastHeadDelta,
   incompleteLastReviewMessage,
+  skippedDiscoveryMessage,
   unreachableLastHeadMessage,
 };
 

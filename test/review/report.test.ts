@@ -1114,6 +1114,118 @@ describe("renderPrComment", () => {
     expect(body).toContain("Live: 1 carried");
   });
 
+  // GitHub #166: a same-head re-review (case B) or a restricted delta that
+  // touches none of the PR's own files (case C) runs ZERO hunters. The old
+  // behavior let a zero-findings result fall through to the ordinary
+  // clean-bill branches, which both read as "we looked and found nothing" —
+  // exactly backwards when nothing looked at all. `discoverySkippedEmptyDelta`
+  // (mirroring `RereviewProvenance.discovery_skipped_empty_delta`,
+  // rereview/prepare.ts) is the signal `cleanBillLine` must check FIRST,
+  // ahead of both the generic ✅ and the ordinary "No new findings this
+  // delta" wording.
+  test("#166 — a skipped-discovery run with no live priors never claims a review happened", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 0,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          discoverySkippedEmptyDelta: true,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("found nothing to report");
+    expect(body).toContain("no hunter ran");
+  });
+
+  test("#166 — a skipped-discovery run WITH live priors carries them, never claims a fresh review", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 2,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          discoverySkippedEmptyDelta: true,
+          live: [
+            {
+              id: "R001",
+              sev: "WARNING",
+              status: "carried",
+              locs: ["src/app.ts:10"],
+              claim: "still live one",
+            },
+            {
+              id: "R002",
+              sev: "CRITICAL",
+              status: "carried",
+              locs: ["src/b.ts:1"],
+              claim: "still live two",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("found nothing to report");
+    expect(body).not.toContain("No new findings this delta");
+    expect(body).toContain("no hunter ran");
+    expect(body).toContain("carried from that review");
+    expect(body).toContain("Live: 2 carried");
+    // The carried findings are still listed in the "Still live:" section —
+    // discovery being skipped never drops what an earlier review found.
+    expect(body).toContain("(R001)");
+    expect(body).toContain("(R002)");
+  });
+
+  test("#166 — an ordinary re-review (discovery ran) keeps its unqualified wording", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 1,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("No new findings this delta. Live: 1 carried.");
+    expect(body).not.toContain("no hunter ran");
+  });
+
   test("C7-unconfirmed — a cap hit is not a clean bill", () => {
     const body = renderPrComment(
       doc(),

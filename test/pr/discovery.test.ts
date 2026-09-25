@@ -142,3 +142,86 @@ describe("resolvePrDiscovery — rereview-coverage fix (invariants 2 & 3)", () =
     expect(result.overlapCandidates.map((v) => v.priorId)).toEqual(["R001"]);
   });
 });
+
+function markerCommentForHead(head: string, complete: boolean) {
+  const coverage = complete ? "" : " coverage=partial";
+  return {
+    id: 1,
+    user: "pr-hero",
+    body: `<!-- pr-hero-report head=${head}${coverage} -->\n\nprevious review body`,
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+}
+
+// GitHub #166: a re-review whose head equals the last reviewed head (case B,
+// `L === H`) is not a rare edge — a merged PR's head can never advance, so
+// EVERY local re-run of a merged PR lands here. Discovery correctly finds
+// nothing to discover and runs zero hunters; this suite pins the two halves
+// of the fix: (1) goal 1 — that "zero hunters ran" does not mean "priors are
+// dropped", Phase B still classifies and carries them; (2) goal 3 — that the
+// skip is no longer silent on the CLI/CI log.
+describe("resolvePrDiscovery — case B same-head re-review (GitHub #166)", () => {
+  test("skips discovery, marks the provenance, and logs a one-line operator notice", async () => {
+    const logs: string[] = [];
+    const result = await resolvePrDiscovery({
+      diffFromSha: B,
+      headSha: H,
+      full: false,
+      baseRef: B,
+      headLabel: "PR #1 head",
+      isCi: false,
+      sizeGateOverrides: {},
+      config: { parity_trigger_paths: [], suspicion_priors: [] },
+      prIgnore: { rules: [], found: false },
+      issueComments: [markerCommentForHead(H, true)],
+      postedFindings: [
+        {
+          ...POSTED_FINDING,
+          marker: { ...POSTED_FINDING.marker, headSha: H },
+        },
+      ],
+      reviewComments: [],
+      git: baseGit(),
+      log: (line) => {
+        if (line !== undefined) logs.push(line);
+      },
+    });
+
+    expect(result.prepared.case).toBe("B");
+    expect(result.skipDiscovery).toBe(true);
+    expect(result.rawDiff).toBe("");
+    expect(result.rereview?.discovery_skipped_empty_delta).toBe(true);
+    expect(logs.some((line) => line.includes("no hunter ran"))).toBe(true);
+  });
+
+  test("goal 1 — a live prior is carried through Phase B, never silently dropped", async () => {
+    const result = await resolvePrDiscovery({
+      diffFromSha: B,
+      headSha: H,
+      full: false,
+      baseRef: B,
+      headLabel: "PR #1 head",
+      isCi: false,
+      sizeGateOverrides: {},
+      config: { parity_trigger_paths: [], suspicion_priors: [] },
+      prIgnore: { rules: [], found: false },
+      issueComments: [markerCommentForHead(H, true)],
+      postedFindings: [
+        {
+          ...POSTED_FINDING,
+          marker: { ...POSTED_FINDING.marker, headSha: H },
+        },
+      ],
+      reviewComments: [],
+      git: baseGit(),
+      log: () => {},
+    });
+
+    // Phase B ran (not skipped): the prior settles "carried" — still live,
+    // not touched, not queued for re-verification — rather than vanishing
+    // because discovery itself found nothing new to read.
+    expect(result.phaseB).toBeDefined();
+    expect(result.phaseB?.settled.map((s) => s.status)).toEqual(["carried"]);
+    expect(result.phaseB?.priors.map((p) => p.id)).toEqual(["R001"]);
+  });
+});

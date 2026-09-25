@@ -136,6 +136,27 @@ export function incompleteLastReviewMessage(sha: string): string {
   );
 }
 
+// GitHub #166: the THIRD way a re-review's delta can be nothing to trust "as
+// is" — not force-pushed away, not incomplete, just genuinely empty. Case B
+// (L === H) always lands here on the happy path, and it is not rare: a
+// merged PR's head can never advance, so every local re-run of a merged PR
+// is case B. Discovery correctly runs zero hunters — there is nothing new to
+// read — but the OLD behavior said nothing about that on the CLI/CI log, and
+// the PR comment (`cleanBillLine`, review/report.ts) read the resulting
+// empty findings array as "reviewed and found nothing", a $0/0s run
+// overwriting a real prior summary with a false clean bill. Fired for ANY
+// case whose discovery came up empty (case B, or case C's restricted delta
+// touching none of the PR's own files) — `resolvePrDiscovery` (pr/discovery.ts)
+// sets `discovery_skipped_empty_delta` on that same broader condition, and a
+// reader deserves the same disclosure regardless of which case produced it.
+export function skippedDiscoveryMessage(headSha: string): string {
+  return (
+    `No changes to discover at ${headSha} since the last completed review ` +
+    "— no hunter ran this pass. Any findings still live are carried from " +
+    "that review, not re-verified now."
+  );
+}
+
 export function planDiscovery(input: {
   case: RereviewCase;
   full: boolean;

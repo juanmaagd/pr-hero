@@ -33,6 +33,7 @@ import {
   priorsFromStateFindings,
   type RereviewProvenance,
   shouldAbortEmptyDiscovery,
+  skippedDiscoveryMessage,
   toRereviewProvenance,
   unreachableLastHeadMessage,
 } from "#rereview/prepare";
@@ -215,6 +216,13 @@ export async function resolvePrDiscovery(params: {
   const rereview = toRereviewProvenance(prepared, postedFindings.length);
   if (rereview !== undefined && skipDiscovery) {
     rereview.discovery_skipped_empty_delta = true;
+    // GitHub #166: this was the silent half — the field above went into
+    // pipeline.json's provenance and nothing else ever read it. A merged
+    // PR's head can never advance, so every local re-run of a merged PR
+    // hits this exact branch (case B); say so once, in CI and out, the same
+    // rule as the unreachable/incomplete notices below.
+    const skipped = skippedDiscoveryMessage(headSha);
+    log(isCi ? formatWorkflowCommand("notice", skipped) : skipped);
   }
 
   let verifyQueue: ReturnType<typeof buildPhaseBQueue>["queued"] = [];
