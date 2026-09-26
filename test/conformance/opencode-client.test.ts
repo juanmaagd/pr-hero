@@ -604,6 +604,115 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Free-tier gateway fix (2026-09-26). OpenCode's free catalogue 403s any turn
+// whose tools map denies `bash` or `read` outright — see
+// FREE_TIER_GATEWAY_TOOLS's WHY in opencode-client.ts for the full observed
+// matrix. Scoped to `credentialKind === "provider_free"` alone: every other
+// route (the tests above, all of them, none of which set `credentialKind`)
+// must keep sending `bash: false` and never gain a permission key.
+// ---------------------------------------------------------------------------
+const TOOL_LESS_INPUT = { ...INPUT, tools: [] as string[] };
+
+interface LaunchServerCall {
+  mcp: unknown;
+  freeTierGatewayAsk: readonly string[] | undefined;
+}
+
+function launchServerSpy(): {
+  launchServer: (
+    mcp?: unknown,
+    freeTierGatewayAsk?: readonly string[],
+  ) => Promise<{ url: string; pid: number; close: () => Promise<void> }>;
+  calls: () => LaunchServerCall[];
+} {
+  const calls: LaunchServerCall[] = [];
+  return {
+    launchServer: async (
+      mcp?: unknown,
+      freeTierGatewayAsk?: readonly string[],
+    ) => {
+      calls.push({ mcp, freeTierGatewayAsk });
+      return { url: "http://127.0.0.1:1", pid: 1, close: async () => {} };
+    },
+    calls: () => calls,
+  };
+}
+
+describe("createOpenCodeClient free-tier gateway fix", () => {
+  test("a non-free route is byte-identical to today: bash stays false, no server ask", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, { launchServer: spy.launchServer });
+    await client.createSession(INPUT);
+
+    expect(sentTools(fake).bash).toBe(false);
+    expect(sentTools(fake).read).toBe(true);
+    expect(spy.calls()).toEqual([{ mcp: {}, freeTierGatewayAsk: [] }]);
+  });
+
+  test("a free route with a hunter-shaped spec keeps read granted and asks only for bash", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, {
+      launchServer: spy.launchServer,
+      credentialKind: "provider_free",
+    });
+    await client.createSession(INPUT);
+
+    const tools = sentTools(fake);
+    expect(tools.bash).toBeUndefined();
+    expect("bash" in tools).toBe(false);
+    expect(tools.read).toBe(true);
+    expect(spy.calls()).toEqual([{ mcp: {}, freeTierGatewayAsk: ["bash"] }]);
+  });
+
+  test("a free route with a tool-less spec asks for both bash and read, never false", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, {
+      launchServer: spy.launchServer,
+      credentialKind: "provider_free",
+    });
+    await client.createSession(TOOL_LESS_INPUT);
+
+    const tools = sentTools(fake);
+    expect("bash" in tools).toBe(false);
+    expect("read" in tools).toBe(false);
+    expect(spy.calls()).toEqual([
+      { mcp: {}, freeTierGatewayAsk: ["bash", "read"] },
+    ]);
+  });
+
+  test("the session's recorded tool map also omits the asked ids, not just the sent one", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake, { credentialKind: "provider_free" });
+    const session = await client.createSession(TOOL_LESS_INPUT);
+
+    expect("bash" in (session.toolMap ?? {})).toBe(false);
+    expect("read" in (session.toolMap ?? {})).toBe(false);
+  });
+
+  // The residual risk #195 flags: the registry caches ONE opencode client per
+  // route, so a hunter-shaped step and a tool-less step on the SAME
+  // provider_free route share this server. Its permission config is fixed at
+  // spawn, so a session that would need a DIFFERENT ask set than the one
+  // already live must fail loud rather than silently inherit the wrong
+  // isolation posture.
+  test("a second concurrent session needing a different free-tier ask set fails loud", async () => {
+    const fake = fakeSdk({ sessionIds: ["ses_a", "ses_b"] });
+    const client = rig(fake, { credentialKind: "provider_free" });
+
+    // Session A stays open (never aborted, never ended) so the shared server
+    // is never released as idle before session B arrives.
+    await client.createSession(INPUT);
+
+    await expect(client.createSession(TOOL_LESS_INPUT)).rejects.toThrow(
+      /free-tier gateway permission set/,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fail closed. A session whose tool surface cannot be established is the
 // runtime being unavailable — there is no partial map and no hardcoded
 // fallback, because either one would re-create the exact "we believe this is

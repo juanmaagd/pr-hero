@@ -17,7 +17,10 @@ import { OpenCodeEvidenceCollector } from "./opencode-evidence";
 
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ProviderTerminalProof } from "../execution/contracts";
+import type {
+  CredentialKind,
+  ProviderTerminalProof,
+} from "../execution/contracts";
 import {
   ALL_MCP_TOOL_IDS,
   assertMcpConnected,
@@ -1951,9 +1954,19 @@ export interface CreateOpenCodeClientOptions {
   // from the environment at startup, so a server already running cannot be
   // given one without leaving a window between "server up" and "MCP
   // connected" for a prompt to fall into (the #128 race class).
+  //
+  // The free-tier gateway fix (see FREE_TIER_GATEWAY_TOOLS below) travels the
+  // same way, for the same reason: OpenCode reads its permission config from
+  // the same startup env, so it has to reach the launch, not a later call.
   readonly launchServer: (
     mcp?: OpenCodeMcpConfig,
+    freeTierGatewayAsk?: readonly string[],
   ) => Promise<OpenCodeServerHandle>;
+  // The credential kind this client's route was bound to. Optional so every
+  // existing caller (every test, and any non-opencode-free route) keeps
+  // today's behavior unchanged; only `createSession` reads it, and only to
+  // gate FREE_TIER_GATEWAY_TOOLS below.
+  readonly credentialKind?: CredentialKind;
   readonly model: {
     readonly providerID: string;
     readonly modelID: string;
@@ -1978,6 +1991,36 @@ export interface CreateOpenCodeClientOptions {
 }
 
 const DEFAULT_DENY_FLOOR = ["bash"] as const;
+
+// Free-tier gateway fix (2026-09-26). OpenCode's free catalogue (provider
+// `opencode`, e.g. `opencode/muse-spark-1.3-contributor-free`) started
+// refusing every turn with `APIError status=403: ... "OpenCode's free tier
+// can only be used from within OpenCode"` whenever the tools map it receives
+// denies `bash` or `read` outright. Measured live against opencode 1.18.30
+// (`opencode serve --pure` + the real SDK, $0):
+//   tools: {}                          -> OK
+//   tools: {"bash": false}             -> 403
+//   tools: {"read": false}             -> 403
+//   any OTHER single tool set false    -> OK
+//   permission.bash: "deny", no tools  -> 403 (OpenCode drops a denied tool
+//                                        from the reported surface — same
+//                                        effect on the model as sending it
+//                                        false)
+//   permission.bash: "ask"             -> OK
+//   permission.bash/read both "ask"    -> OK
+// This worked on 2026-09-07 with the same pr-hero code, so the change is
+// provider-side policy, not a regression here.
+//
+// These are the ONLY two ids this applies to — they are exactly the ids the
+// gateway's heuristic keys on, not "every tool" and not a general relaxation.
+// A `provider_free` route (see `credentialKind` above) omits a denied id here
+// from the tools map instead of writing it `false` (see the loop right after
+// `resolveToolMap`'s own map below), and gets OpenCode permission `"ask"` for
+// it in the server's config instead (opencode-server.ts's `launchOpenCodeServer`
+// — see the WHY there for how isolation is preserved without the tools-map
+// denial). Every other route is unaffected: this constant is read nowhere
+// unless `credentialKind === "provider_free"`.
+export const FREE_TIER_GATEWAY_TOOLS = ["bash", "read"] as const;
 
 // The engine's canonical tool names are Claude Code's namespace
 // (`BINDING_ALLOWED_TOOLS`, and the `tools:` line of every bundled prompt).
@@ -2016,6 +2059,30 @@ const CANONICAL_TO_OPENCODE_TOOL: Readonly<Record<string, string>> = {
 };
 
 const MCP_TOOL_ID_SET: ReadonlySet<string> = new Set(ALL_MCP_TOOL_IDS);
+
+// Which of `freeTierGatewayTools` (empty unless credentialKind is
+// "provider_free" — see FREE_TIER_GATEWAY_TOOLS above) this session's own
+// canonical grant list does NOT cover. Deliberately independent of the
+// provider's reported tool surface: `createSession` needs this answer BEFORE
+// the server even exists, to launch it with the right permission config
+// (§128's surface enumeration only happens after create+subscribe, which
+// needs a server), so it reads grants the same way resolveToolMap's own allow
+// loop does below — via CANONICAL_TO_OPENCODE_TOOL — rather than waiting on
+// `tool.ids()`. "bash" has no entry in that table at all (no AgentSpec has
+// ever granted it), so it is unconditionally denied whenever this is called
+// with a non-empty gate; "read" is denied exactly when this call's canonical
+// tools omit "Read" (a tool-less step: summarizer, scout).
+function deniedFreeTierGatewayTools(
+  canonicalTools: readonly string[],
+  freeTierGatewayTools: readonly string[],
+): readonly string[] {
+  const grantedIds = new Set(
+    canonicalTools
+      .map((tool) => CANONICAL_TO_OPENCODE_TOOL[tool])
+      .filter((id): id is string => id !== undefined),
+  );
+  return freeTierGatewayTools.filter((tool) => !grantedIds.has(tool));
+}
 
 // ENUMERATE, never trust a default. Every id the provider reports is written
 // into the map explicitly — the allows true, everything else false — so no key
@@ -2202,6 +2269,19 @@ export function createOpenCodeClient(
   // invisible to every other check here. Production does not hit this today
   // (one cwd per pipeline); the guard is for the day that changes.
   let launchedMcp: string | undefined;
+  // Same guard, same reason, for the free-tier gateway ask set (see
+  // FREE_TIER_GATEWAY_TOOLS). The registry caches ONE opencode client per
+  // route (transport-registry.ts), so every step routed to the same
+  // provider_free model shares this server — a hunter-shaped step (grants
+  // read) and a tool-less step (summarizer/scout) on that SAME route would
+  // otherwise silently ride whichever one's ask set the server happened to be
+  // launched with. This is fixed at spawn exactly like the MCP registry
+  // above, and the pipeline's own phase boundaries (hunters all finish before
+  // dedupe releases the idle server, refuter/scout run in a later phase)
+  // mean a real run only ever asks this server to relaunch, never to change
+  // shape mid-flight — a genuine concurrent mismatch fails loud instead of
+  // silently weakening.
+  let launchedGatewayAsk: string | undefined;
   // Calls that have committed to the shared server but have not registered a
   // session yet. `states` alone cannot answer "is anyone using this?": its
   // entry appears only after session.create AND event.subscribe both
@@ -2228,6 +2308,9 @@ export function createOpenCodeClient(
     serverPromise = undefined;
     server = undefined;
     launchedMcp = undefined;
+    // Reset with its sibling: the next launch records a fresh posture, and
+    // this releases the only thing that makes a different posture legal.
+    launchedGatewayAsk = undefined;
     if (dying !== undefined) await dying.close().catch(() => {});
   }
 
@@ -2252,6 +2335,19 @@ export function createOpenCodeClient(
       evidence.record("runtime_identity", options.observedIdentity ?? null);
       const checkCancelled = () => input.signal?.throwIfAborted();
       checkCancelled();
+      // Free-tier gateway fix: computed once, up front, from this call's OWN
+      // canonical tools — needed below at the server-launch decision (before
+      // any server exists) AND again once the tools map is resolved (so the
+      // same ids never get written `false` there either). Empty for every
+      // route but `provider_free`, so both uses are no-ops elsewhere.
+      const freeTierGatewayTools: readonly string[] =
+        options.credentialKind === "provider_free"
+          ? FREE_TIER_GATEWAY_TOOLS
+          : [];
+      const deniedGatewayTools = deniedFreeTierGatewayTools(
+        input.tools,
+        freeTierGatewayTools,
+      );
       const requestOptions = { signal: input.signal };
       let cleanupDeadline: number | undefined;
       const cleanup = async (
@@ -2304,26 +2400,37 @@ export function createOpenCodeClient(
       const mcpConfig = await resolveMcpConfig(options, input);
       checkCancelled();
       const mcpFingerprint = JSON.stringify(mcpConfig);
+      // Order-independent: two calls that deny the same set in different
+      // orders must fingerprint identically.
+      const gatewayAskFingerprint = JSON.stringify(
+        [...deniedGatewayTools].sort(),
+      );
 
       if (serverPromise === undefined) {
-        serverPromise = options.launchServer(mcpConfig);
+        serverPromise = options.launchServer(mcpConfig, deniedGatewayTools);
         // Recorded synchronously, before the first await: a sibling call that
         // arrives mid-launch must compare against this launch, not against
         // whatever it would have asked for.
         launchedMcp = mcpFingerprint;
+        launchedGatewayAsk = gatewayAskFingerprint;
         try {
           server = await serverPromise;
         } catch (error) {
           // A failed launch must not poison the client forever.
           serverPromise = undefined;
           launchedMcp = undefined;
+          launchedGatewayAsk = undefined;
           throw error;
         }
-      } else if (launchedMcp !== mcpFingerprint) {
+      } else if (
+        launchedMcp !== mcpFingerprint ||
+        launchedGatewayAsk !== gatewayAskFingerprint
+      ) {
         throw new Error(
           "the opencode server for this client was launched with a different " +
-            "MCP registry; its servers are fixed at spawn, so this session " +
-            "would silently ride the first one's project scope",
+            "MCP registry or free-tier gateway permission set; its servers " +
+            "are fixed at spawn, so this session would silently ride the " +
+            "first one's project scope or isolation posture",
         );
       }
       const handle = server ?? (await serverPromise);
@@ -2504,6 +2611,18 @@ export function createOpenCodeClient(
           denyFloor,
           mcpToolIdsFor(mcpConfig),
         );
+        // Free-tier gateway fix (FREE_TIER_GATEWAY_TOOLS above): `deniedGatewayTools`
+        // was computed up front, before this map even existed, and already
+        // decided the server's permission config (the launchServer call
+        // above). Re-applied here for the SAME two ids so the map this
+        // client actually sends never carries the `false` that trips
+        // OpenCode's gateway. Only a key the loops above left `false` is
+        // deleted — a tool this call DID grant (`read` for a hunter-shaped
+        // spec) is untouched, so it stays `true` exactly as it would on any
+        // other route.
+        for (const tool of deniedGatewayTools) {
+          if (tools[tool] === false) delete tools[tool];
+        }
 
         const userMessageId =
           options.createMessageId?.() ??

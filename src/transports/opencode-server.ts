@@ -72,6 +72,14 @@ export interface LaunchOpenCodeServerOptions {
   // where the hunters run on read/grep/glob and pr-hero makes no claim about
   // the child's tool channels.
   readonly mcp?: OpenCodeMcpConfig;
+  // Free-tier gateway fix (opencode-client.ts's FREE_TIER_GATEWAY_TOOLS):
+  // gateway-required ids the calling session does NOT grant. Empty/undefined
+  // for every route but `provider_free` — opencode-client.ts's createSession
+  // is the only caller that ever populates it, gated on credentialKind, so a
+  // metered/OAuth route reaches this launcher exactly as it always has. See
+  // the WHY at the config assembly below for what each id gets instead of a
+  // tools-map `false`.
+  readonly freeTierGatewayAsk?: readonly string[];
   readonly spawnFn?: typeof Bun.spawn;
   // Injectable for offline tests; production signals the child by pid. Same
   // shape as ClaudeCodeCliTransport's, so the two shutdown paths read alike.
@@ -115,6 +123,7 @@ export async function launchOpenCodeServer(
     killReapMs = DEFAULT_KILL_REAP_MS,
     hostname = "127.0.0.1",
     mcp,
+    freeTierGatewayAsk,
   } = options;
 
   if (!verifiedBinaryPath.startsWith("/")) {
@@ -141,13 +150,57 @@ export async function launchOpenCodeServer(
   // 4); the client's own reject-on-ask handling (opencode-client.ts's
   // "permission.asked" case) is defense in depth for whatever this config
   // does not cover, never the primary control.
+  // Free-tier gateway fix (2026-09-26), scoped to `provider_free` alone by
+  // explicit OWNER decision: OpenCode's free catalogue 403s any turn whose
+  // tools map denies `bash` or `read` outright (the full observed matrix is
+  // on FREE_TIER_GATEWAY_TOOLS in opencode-client.ts). Every other route
+  // keeps sending those two `false` in the tools map as it always has, and
+  // `freeTierGatewayAsk` stays empty for it, so `gatewayAskPermission` below
+  // is `{}` and this object is BYTE IDENTICAL to before this change.
+  //
+  // For a `provider_free` route, opencode-client.ts's createSession keeps
+  // each denied id OFF the tools map's false list instead (the gateway sees
+  // a present, non-denied tool and admits the turn) and asks THIS config to
+  // mark it "ask" here. That is a real relaxation of the tools-map control,
+  // and it is safe only because isolation for these two ids moves entirely
+  // to a DIFFERENT control: OpenCode's own permission gate, backed by
+  // pr-hero's unconditional auto-reject on every `permission.asked` event
+  // (opencode-client.ts's "permission.asked" handler, a few sessions'
+  // worth of history below the #157 WHY right above this function). An
+  // "ask" that is never answered never executes — OpenCode blocks the tool
+  // call until it gets a reply, exactly like the `external_directory` case
+  // #157 already describes — so the auto-reject exists NOT to make the call
+  // succeed but to make it fail FAST: a rejected call costs one turn, an
+  // unanswered one costs the full 150s silence-tripwire stall #157 measured.
+  // The owner accepted this trade because the gateway refuses the stronger
+  // posture (a denied tool) outright; it is not this module improvising a
+  // weaker one on its own judgment.
+  const gatewayAskPermission: Record<string, "ask"> = {};
+  for (const tool of freeTierGatewayAsk ?? []) {
+    gatewayAskPermission[tool] = "ask";
+  }
   const config: {
     mcp?: OpenCodeMcpConfig;
-    permission: { external_directory: "deny" };
+    // Widened to "ask" | "deny" rather than an intersection with
+    // Record<string, "ask">: an index signature applies to EVERY key,
+    // `external_directory` included, so a plain `Record<string, "ask">`
+    // would also demand `external_directory` be "ask" and reject "deny".
+    permission: { external_directory: "deny" } & Record<string, "ask" | "deny">;
   } =
     mcp === undefined || mcpConfigIsEmpty(mcp)
-      ? { permission: { external_directory: "deny" } }
-      : { mcp, permission: { external_directory: "deny" } };
+      ? {
+          permission: {
+            external_directory: "deny",
+            ...gatewayAskPermission,
+          },
+        }
+      : {
+          mcp,
+          permission: {
+            external_directory: "deny",
+            ...gatewayAskPermission,
+          },
+        };
   const childEnv: Record<string, string> = {
     ...env,
     OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
