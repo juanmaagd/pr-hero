@@ -33,10 +33,19 @@ This document is the operational runbook for releasing new versions of `pr-hero`
 
 ### Version Synchronization Invariant
 
-The project version is maintained in exactly two locations and must always remain identical:
+The project version is maintained in five locations and must always remain identical:
 
-1. `package.json`: `"version": "X.Y.Z"`
-2. `src/index.ts`: `export const ENGINE_VERSION = "X.Y.Z";`
+1. `package.json`: `"version": "X.Y.Z"` — the canonical source of truth.
+2. `src/index.ts`: `export const ENGINE_VERSION = "X.Y.Z";` — the published API's version constant.
+3. `src/assets.ts` (`resolveVersion()`, fallback `return "X.Y.Z";`) — used only when neither the
+   compiled `__PRHERO_VERSION__` define nor a readable `package.json` is available.
+4. `src/updater.ts` (`detectInstallMethod()`, `options.version ?? "X.Y.Z"`) — the default version
+   assumed when no version is passed in.
+5. `install.sh` (`VERSION="X.Y.Z"`) — the fallback used when the GitHub API "latest release" lookup
+   fails or returns no tag.
+
+`MCP_SERVER_VERSION` in `src/mcp/preflight.ts` is a separate, independent MCP protocol-server version —
+it is not part of this invariant and must not be bumped alongside a package release.
 
 ### Git Tagging Strategy
 
@@ -107,7 +116,7 @@ Open `CHANGELOG.md` and prepare the release section:
 
 ### Step 3: Bump Version Numbers
 
-Update the version string in both synchronization targets:
+Update the version string in all five synchronization targets:
 
 - In `package.json`:
   ```json
@@ -116,6 +125,19 @@ Update the version string in both synchronization targets:
 - In `src/index.ts`:
   ```typescript
   export const ENGINE_VERSION = "X.Y.Z";
+  ```
+- In `src/assets.ts` (`resolveVersion()`'s fallback, used when neither the compiled define nor
+  `package.json` is readable):
+  ```typescript
+  return "X.Y.Z";
+  ```
+- In `src/updater.ts` (`detectInstallMethod()`'s default when no version is passed in):
+  ```typescript
+  const version = options.version ?? "X.Y.Z";
+  ```
+- In `install.sh` (the fallback used when the GitHub API "latest release" lookup fails):
+  ```bash
+  VERSION="X.Y.Z"
   ```
 
 ### Step 4: Commit and Tag Release
@@ -130,7 +152,7 @@ Create the release commit and annotate the Git tags:
 
 ```bash
 # 1. Stage modified files
-git add package.json src/index.ts CHANGELOG.md
+git add package.json src/index.ts src/assets.ts src/updater.ts install.sh CHANGELOG.md
 
 # 2. Create conventional release commit
 git commit -m "chore(release): vX.Y.Z"

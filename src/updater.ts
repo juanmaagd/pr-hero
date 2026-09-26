@@ -47,7 +47,7 @@ export function detectInstallMethod(
 ): InstallMethod {
   const home = options.home ?? os.homedir();
   const execPath = options.execPath ?? process.execPath;
-  const version = options.version ?? "0.1.1";
+  const version = options.version ?? "0.2.0";
   const exists = options.exists ?? existsSync;
 
   const isSource =
