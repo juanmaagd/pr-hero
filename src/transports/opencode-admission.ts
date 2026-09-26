@@ -51,6 +51,8 @@ export function openCodeSdkUnavailableMessage(): string {
 // on purpose: they are the only place the real cause still lives once this
 // throws. It names no install location: the specifier already carries the
 // real one, and ~/.prhero/node_modules is only where a COMPILED binary looks.
+// The version is a literal for the same reason as the sentence above, and
+// its transport test locks it to SUPPORTED_OPENCODE_SDK_VERSION the same way.
 export function openCodeSdkLoadFailedMessage(
   specifier: string,
   error: unknown,

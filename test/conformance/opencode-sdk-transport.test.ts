@@ -2015,7 +2015,9 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
   // the real cause (a compiled binary's `Cannot find package 'which'` from
   // cross-spawn) and sent operators chasing a reinstall that could not help.
   test("loadOpenCodeSdk on an import failure of a version-matched package names the real cause, never 'not installed'", async () => {
-    const { loadOpenCodeSdk } = await import("../../src/transport-registry");
+    const { loadOpenCodeSdk, SUPPORTED_OPENCODE_SDK_VERSION } = await import(
+      "../../src/transport-registry"
+    );
     const { OpenCodeSdkUnavailableError } = await import(
       "../../src/transports/opencode-admission"
     );
@@ -2027,7 +2029,7 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
       // a genuine load failure, not a fabricated one.
       nodeModulesDir: "/nonexistent/prhero-fixture/node_modules",
       importPackage: async () => ({
-        version: "1.18.25",
+        version: SUPPORTED_OPENCODE_SDK_VERSION,
         exports: { "./v2/client": { import: "./dist/v2/client.js" } },
       }),
     }).then(
@@ -2038,7 +2040,12 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
     );
     expect(error).toBeInstanceOf(OpenCodeSdkUnavailableError);
     const message = (error as Error).message;
-    expect(message).toContain("@opencode-ai/sdk@1.18.25 is installed");
+    // Locked to the constant, like openCodeSdkUnavailableMessage's test above:
+    // the message carries a version literal, so a SUPPORTED_OPENCODE_SDK_VERSION
+    // bump must fail here rather than leave the diagnostic naming a stale pin.
+    expect(message).toContain(
+      `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION} is installed`,
+    );
     expect(message).not.toContain("is not installed");
     expect(message).toContain("failed to load");
     expect(message).toContain("v2/client.js");
