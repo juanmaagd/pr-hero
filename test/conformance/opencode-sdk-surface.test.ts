@@ -20,7 +20,13 @@
 // includes `test/**`, so `bun run typecheck` still runs this gate.
 
 import { describe, expect, test } from "bun:test";
-import type { OpencodeClient } from "@opencode-ai/sdk/v2";
+// `/v2/client`, not `/v2`: the transport's dynamic import moved to the client-only entry (the full `/v2` index
+// re-exports the SDK's server, which pulls in cross-spawn and does not
+// resolve inside a compiled binary — see the WHY comment on
+// OPENCODE_SDK_V2_SPECIFIER in transport-registry.ts). This conformance
+// check exists to prove the module the transport ACTUALLY loads at runtime
+// matches the local interface, so it has to import the same entry.
+import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import {
   assertOpenCodeSdk,
   type OpenCodeSdkClientApi,
@@ -42,7 +48,7 @@ import {
 // conformance check that passes by being weakened is worth nothing, and is
 // exactly how the `createClient` guess shipped.
 function moduleConformance(
-  module: typeof import("@opencode-ai/sdk/v2"),
+  module: typeof import("@opencode-ai/sdk/v2/client"),
 ): OpenCodeSdkLike {
   return module;
 }
@@ -99,15 +105,14 @@ describe("assertOpenCodeSdk", () => {
   });
 });
 
-describe("the installed @opencode-ai/sdk/v2", () => {
+describe("the installed @opencode-ai/sdk/v2/client", () => {
   // Belt to the type block's braces: the declaration files and the shipped
   // JavaScript are two different artifacts, and the transport calls the
   // second one.
   test("really exports createOpencodeClient and really has no createClient", async () => {
-    const module = (await import("@opencode-ai/sdk/v2")) as unknown as Record<
-      string,
-      unknown
-    >;
+    const module = (await import(
+      "@opencode-ai/sdk/v2/client"
+    )) as unknown as Record<string, unknown>;
 
     expect(typeof module.createOpencodeClient).toBe("function");
     expect(module.createClient).toBeUndefined();
@@ -125,7 +130,7 @@ describe("the installed @opencode-ai/sdk/v2", () => {
   // Constructing the client is offline — the generated hey-api client dials
   // nothing until a call is made — so the unroutable baseUrl is never reached.
   test("really exposes tool.ids(), the enumeration the allow map is built from", async () => {
-    const module = (await import("@opencode-ai/sdk/v2")) as unknown as {
+    const module = (await import("@opencode-ai/sdk/v2/client")) as unknown as {
       createOpencodeClient: (config: { baseUrl: string }) => {
         tool?: { ids?: unknown };
       };
@@ -145,7 +150,7 @@ describe("the installed @opencode-ai/sdk/v2", () => {
   // evidence base for "exactly the servers pr-hero declared are connected",
   // which is this route's replacement for claude-code's `--strict-mcp-config`.
   test("really exposes mcp.status(), the readback the isolation claim rests on", async () => {
-    const module = (await import("@opencode-ai/sdk/v2")) as unknown as {
+    const module = (await import("@opencode-ai/sdk/v2/client")) as unknown as {
       createOpencodeClient: (config: { baseUrl: string }) => {
         mcp?: { status?: unknown };
       };
@@ -165,7 +170,7 @@ describe("the installed @opencode-ai/sdk/v2", () => {
   // the poll reading "last completed assistant message" again — which is step
   // 1 until step 2 exists, the whole of #127.
   test("really exposes session.status(), the poll observer's turn boundary", async () => {
-    const module = (await import("@opencode-ai/sdk/v2")) as unknown as {
+    const module = (await import("@opencode-ai/sdk/v2/client")) as unknown as {
       createOpencodeClient: (config: { baseUrl: string }) => {
         session?: { status?: unknown; messages?: unknown };
       };
@@ -187,7 +192,7 @@ describe("the installed @opencode-ai/sdk/v2", () => {
   // reject-on-ask defense in depth with it and leave every future
   // permission kind the server-side config does not cover to hang again.
   test("really exposes permission.reply(), the only way to unblock a pending prompt", async () => {
-    const module = (await import("@opencode-ai/sdk/v2")) as unknown as {
+    const module = (await import("@opencode-ai/sdk/v2/client")) as unknown as {
       createOpencodeClient: (config: { baseUrl: string }) => {
         permission?: { reply?: unknown };
       };
