@@ -456,8 +456,16 @@ export interface TransportFactoryOptions {
   readonly spawnFn?: typeof Bun.spawn;
   readonly openCodeClient?: OpenCodeClientLike;
   readonly loadSdk?: () => Promise<OpenCodeSdkLike>;
+  // Free-tier gateway fix: widened to the same two-parameter signature as
+  // `CreateOpenCodeClientOptions.launchServer` (opencode-client.ts) so an
+  // injector here sees the second parameter exists — an injected launcher
+  // that ignores it entirely still type-checks (fewer declared parameters
+  // is a valid JS callback shape), which is exactly why createSession's own
+  // attestation check exists: the type alone cannot force a launcher to
+  // honour this argument, only createSession's runtime check can.
   readonly launchServer?: (
     mcp?: OpenCodeMcpConfig,
+    freeTierGatewayAsk?: readonly string[],
   ) => Promise<OpenCodeServerHandle>;
   readonly readSystemPrompt?: (path: string) => Promise<string>;
   readonly readMcpConfig?: (path: string) => Promise<string>;
@@ -662,6 +670,13 @@ export class DefaultTransportRegistry implements TransportRegistry {
       const codegraphBinaryPath =
         merged.codegraphBinaryPath ?? Bun.which("codegraph") ?? undefined;
       const client = createOpenCodeClient({
+        // Free-tier gateway fix: the ONLY thing createSession reads this for
+        // is gating FREE_TIER_GATEWAY_TOOLS (opencode-client.ts) — the same
+        // per-route value `usageBillingMode` above and `openCodeLaunchServerFor`
+        // below already read, so all three agree by construction.
+        ...(merged.credentialKind === undefined
+          ? {}
+          : { credentialKind: merged.credentialKind }),
         ...(observed ? { observedIdentity: observed } : {}),
         ...(observed === undefined
           ? {}
@@ -1036,8 +1051,14 @@ export function defaultOpenCodeLaunchServer(options: {
   readonly baseEnv?: Readonly<Record<string, string | undefined>>;
   readonly spawnFn?: typeof Bun.spawn;
   readonly killFn?: (pid: number, signal?: string | number) => unknown;
-}): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
-  return async (mcp?: OpenCodeMcpConfig) => {
+}): (
+  mcp?: OpenCodeMcpConfig,
+  freeTierGatewayAsk?: readonly string[],
+) => Promise<OpenCodeServerHandle> {
+  return async (
+    mcp?: OpenCodeMcpConfig,
+    freeTierGatewayAsk?: readonly string[],
+  ) => {
     return await launchProjectedOpenCodeServer({
       ...options,
       // #141: the run’s registry rides the SPAWN. OpenCode reads
@@ -1045,6 +1066,10 @@ export function defaultOpenCodeLaunchServer(options: {
       // cannot be given one without opening a window between "server up" and
       // "MCP connected".
       ...(mcp === undefined ? {} : { mcp }),
+      // Free-tier gateway fix: same reason, same spawn-time constraint — see
+      // opencode-client.ts's FREE_TIER_GATEWAY_TOOLS and opencode-server.ts's
+      // launchOpenCodeServer for the full WHY.
+      ...(freeTierGatewayAsk === undefined ? {} : { freeTierGatewayAsk }),
     });
   };
 }
@@ -1055,7 +1080,10 @@ export function defaultOpenCodeLaunchServer(options: {
 // which is how the previous inline closure went untested for its whole life.
 export function openCodeLaunchServerFor(
   merged: TransportFactoryOptions,
-): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
+): (
+  mcp?: OpenCodeMcpConfig,
+  freeTierGatewayAsk?: readonly string[],
+) => Promise<OpenCodeServerHandle> {
   return defaultOpenCodeLaunchServer({
     verifiedBinaryPath:
       merged.openCodeBinaryPath ??

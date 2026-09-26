@@ -330,9 +330,20 @@ function rig(
   return createOpenCodeClient({
     createMessageId: () => String(ASSISTANT.parentID),
     loadSdk: async () => fake.sdk,
-    launchServer: async () => ({
+    // Attests exactly what it is asked to gate — the "correct launcher"
+    // shape. A test that needs to exercise an UNattested launcher (the
+    // free-tier gateway attestation fix) overrides `launchServer` itself
+    // rather than changing this default, so every other test in this file
+    // that never touches `credentialKind: "provider_free"` keeps asking
+    // for nothing (`freeTierGatewayAsk` arrives as `[]`) and attesting
+    // nothing back, unaffected.
+    launchServer: async (
+      _mcp?: unknown,
+      freeTierGatewayAsk?: readonly string[],
+    ) => ({
       url: "http://127.0.0.1:1",
       pid: 1,
+      gatewayAsk: freeTierGatewayAsk ?? [],
       close: async () => {},
     }),
     model: { providerID: "openai", modelID: "test-model" },
@@ -600,6 +611,203 @@ describe("createOpenCodeClient tool-surface translation (#122)", () => {
     // artifacts, not assumed from source. The session carries the map the
     // transport actually sent so the attempt can stamp it into stderrTail.
     expect(session.toolMap).toEqual(EXPECTED_TOOL_MAP);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Free-tier gateway fix (2026-09-26). OpenCode's free catalogue 403s any turn
+// whose tools map denies `bash` or `read` outright — see
+// FREE_TIER_GATEWAY_TOOLS's WHY in opencode-client.ts for the full observed
+// matrix. Scoped to `credentialKind === "provider_free"` alone: every other
+// route (the tests above, all of them, none of which set `credentialKind`)
+// must keep sending `bash: false` and never gain a permission key.
+// ---------------------------------------------------------------------------
+const TOOL_LESS_INPUT = { ...INPUT, tools: [] as string[] };
+
+interface LaunchServerCall {
+  mcp: unknown;
+  freeTierGatewayAsk: readonly string[] | undefined;
+}
+
+function launchServerSpy(): {
+  launchServer: (
+    mcp?: unknown,
+    freeTierGatewayAsk?: readonly string[],
+  ) => Promise<{
+    url: string;
+    pid: number;
+    gatewayAsk: readonly string[];
+    close: () => Promise<void>;
+  }>;
+  calls: () => LaunchServerCall[];
+} {
+  const calls: LaunchServerCall[] = [];
+  return {
+    launchServer: async (
+      mcp?: unknown,
+      freeTierGatewayAsk?: readonly string[],
+    ) => {
+      calls.push({ mcp, freeTierGatewayAsk });
+      // Attests exactly what it was asked to gate — a "correct launcher"
+      // per the free-tier gateway attestation fix. The dedicated
+      // unattested-launcher test below builds its OWN fake instead of
+      // adding an escape hatch here.
+      return {
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        gatewayAsk: freeTierGatewayAsk ?? [],
+        close: async () => {},
+      };
+    },
+    calls: () => calls,
+  };
+}
+
+describe("createOpenCodeClient free-tier gateway fix", () => {
+  test("a non-free route is byte-identical to today: bash stays false, no server ask", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, { launchServer: spy.launchServer });
+    await client.createSession(INPUT);
+
+    expect(sentTools(fake).bash).toBe(false);
+    expect(sentTools(fake).read).toBe(true);
+    expect(spy.calls()).toEqual([{ mcp: {}, freeTierGatewayAsk: [] }]);
+  });
+
+  test("a free route with a hunter-shaped spec keeps read granted and asks only for bash", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, {
+      launchServer: spy.launchServer,
+      credentialKind: "provider_free",
+    });
+    await client.createSession(INPUT);
+
+    const tools = sentTools(fake);
+    expect(tools.bash).toBeUndefined();
+    expect("bash" in tools).toBe(false);
+    expect(tools.read).toBe(true);
+    expect(spy.calls()).toEqual([{ mcp: {}, freeTierGatewayAsk: ["bash"] }]);
+  });
+
+  test("a free route with a tool-less spec asks for both bash and read, never false", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, {
+      launchServer: spy.launchServer,
+      credentialKind: "provider_free",
+    });
+    await client.createSession(TOOL_LESS_INPUT);
+
+    const tools = sentTools(fake);
+    expect("bash" in tools).toBe(false);
+    expect("read" in tools).toBe(false);
+    expect(spy.calls()).toEqual([
+      { mcp: {}, freeTierGatewayAsk: ["bash", "read"] },
+    ]);
+  });
+
+  test("the session's recorded tool map also omits the asked ids, not just the sent one", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake, { credentialKind: "provider_free" });
+    const session = await client.createSession(TOOL_LESS_INPUT);
+
+    expect("bash" in (session.toolMap ?? {})).toBe(false);
+    expect("read" in (session.toolMap ?? {})).toBe(false);
+  });
+
+  // The residual risk #195 flags: the registry caches ONE opencode client per
+  // route, so a hunter-shaped step and a tool-less step on the SAME
+  // provider_free route share this server. Its permission config is fixed at
+  // spawn, so a session that would need a DIFFERENT ask set than the one
+  // already live must fail loud rather than silently inherit the wrong
+  // isolation posture.
+  test("a second concurrent session needing a different free-tier ask set fails loud", async () => {
+    const fake = fakeSdk({ sessionIds: ["ses_a", "ses_b"] });
+    const client = rig(fake, { credentialKind: "provider_free" });
+
+    // Session A stays open (never aborted, never ended) so the shared server
+    // is never released as idle before session B arrives.
+    await client.createSession(INPUT);
+
+    await expect(client.createSession(TOOL_LESS_INPUT)).rejects.toThrow(
+      /free-tier gateway permission set/,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // Launch-seam attestation. The tools-map deletion loop above is only safe
+  // because the launched server actually gates the denied ids on its own
+  // permission surface — and `launchServer` is caller-injectable, so that is
+  // an assumption about an argument, not a guaranteed fact. These tests
+  // exercise createSession's own runtime check of the launcher's
+  // attestation (`OpenCodeServerHandle.gatewayAsk`), independent of the
+  // type system.
+  // -------------------------------------------------------------------------
+  test("(a) a launcher that ignores the ask argument makes createSession refuse before any session or prompt", async () => {
+    const fake = fakeSdk();
+    let closed = 0;
+    const client = rig(fake, {
+      // Ignores freeTierGatewayAsk entirely (never declares the parameter)
+      // and returns a handle that attests nothing — the exact shape the
+      // attestation check exists to catch: a launcher that was never
+      // updated to honour its second argument.
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {
+          closed++;
+        },
+      }),
+      credentialKind: "provider_free",
+    });
+
+    await expect(client.createSession(TOOL_LESS_INPUT)).rejects.toThrow(
+      /did not attest the free-tier gateway ask posture/,
+    );
+    // Nothing beyond the launch itself was ever attempted: no tool
+    // enumeration, no session, no prompt with bash lifted off the deny map.
+    expect(fake.toolIdsCalls()).toHaveLength(0);
+    expect(fake.createdAt()).toBe(0);
+    expect(fake.promptCalls()).toHaveLength(0);
+    // And the refused server does not outlive the refusal.
+    expect(closed).toBe(1);
+  });
+
+  test("(b) a launcher that attests exactly the asked set lets the session proceed normally", async () => {
+    const fake = fakeSdk();
+    const spy = launchServerSpy();
+    const client = rig(fake, {
+      launchServer: spy.launchServer,
+      credentialKind: "provider_free",
+    });
+
+    const session = await client.createSession(TOOL_LESS_INPUT);
+
+    expect(session.id).toBe(SESSION_ID);
+    expect(fake.promptCalls()).toHaveLength(1);
+    expect(spy.calls()).toEqual([
+      { mcp: {}, freeTierGatewayAsk: ["bash", "read"] },
+    ]);
+  });
+
+  test("(c) a non-free route needs no attestation even from a handle that attests nothing", async () => {
+    const fake = fakeSdk();
+    const client = rig(fake, {
+      // Same unattested handle as (a) above, but no credentialKind at all:
+      // deniedGatewayTools is empty, so the attestation check never fires.
+      launchServer: async () => ({
+        url: "http://127.0.0.1:1",
+        pid: 1,
+        close: async () => {},
+      }),
+    });
+
+    const session = await client.createSession(INPUT);
+
+    expect(session.id).toBe(SESSION_ID);
+    expect(sentTools(fake).bash).toBe(false);
   });
 });
 
