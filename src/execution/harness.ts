@@ -84,6 +84,7 @@ import {
 } from "./step-artifacts";
 import type { NormalizedUsage } from "./usage-normalized";
 import {
+  envBillsMetered,
   normalizeUnavailableUsage,
   projectLegacyUsage,
   sumNormalizedUsage,
@@ -242,6 +243,31 @@ export interface StepExecutionHarnessOptions {
   // whoever composes the run, not to this harness). Defaults to 0 so an
   // unconfigured caller reserves nothing rather than an invented ceiling.
   readonly reservedUsdPerAttempt?: number;
+  // #279: the BINDING's own reserve decision — true for a metered or
+  // free-credential route (production-runtime.ts's `reservesSpend`),
+  // independent of whether `spendLedger` is configured at all. Defaults to
+  // `true` so every EXISTING caller that configures a `spendLedger`
+  // directly (every harness-level spend test predating this option) keeps
+  // reserving on every attempt exactly as it did when the only gate was
+  // "is a ledger configured" — this option adds a way to say "reserve a
+  // ledger-backed run's attempts SELECTIVELY", it does not change the
+  // ledger-free-by-default meaning `spendLedger` itself already carries.
+  // production-runtime.ts is the one caller that now passes `spendLedger`
+  // UNCONDITIONALLY (so a subscription binding's harness can still open the
+  // #279 degraded-fence reservation below) and sets this explicitly to
+  // `false` for a subscription binding, `true` for metered/free.
+  readonly reservesSpend?: boolean;
+  // #279: the bucket a METERED claude-code binding of this SAME
+  // provider+credential would compute (production-runtime.ts's
+  // `bindingBucketId`, mirrored with the metered kind) — used ONLY for the
+  // one attempt whose Keychain projection degraded onto an ambient
+  // key/token that bills metered (never for a `reservesSpend` reservation,
+  // which always uses `rateLimitBucketId`). Left unconfigured, that one
+  // reservation falls back to `rateLimitBucketId` — the binding's own
+  // bucket — rather than opening no reservation at all; production always
+  // configures this, so the fallback only ever applies to a caller (a test)
+  // that does not care which bucket a degraded reservation lands on.
+  readonly degradedProjectionBucketId?: string;
   // When `attemptAdmissionGate` is configured but no pipeline cancel
   // `signal` is wired, acquire() uses AbortSignal.timeout(ms) so a stuck
   // FIFO queue cannot hang the run forever.
@@ -453,6 +479,8 @@ export class StepExecutionHarness implements StepRunner {
   private readonly rateLimitBucketId: string;
   private readonly spendLedger?: SpendLedger;
   private readonly reservedUsdPerAttempt: number;
+  private readonly reservesSpend: boolean;
+  private readonly degradedProjectionBucketId?: string;
   private readonly attemptAdmissionTimeoutMs: number;
   private readonly credentialProjectionTimeoutMs: number;
   private readonly onBeforeCredentialProjectionDestroy?: () => Promise<void>;
@@ -483,6 +511,29 @@ export class StepExecutionHarness implements StepRunner {
       options.rateLimitBucketId ?? DEFAULT_RATE_LIMIT_BUCKET_ID;
     this.spendLedger = options.spendLedger;
     this.reservedUsdPerAttempt = options.reservedUsdPerAttempt ?? 0;
+    // #279: default `true` — see the WHY on `StepExecutionHarnessOptions.
+    // reservesSpend` for why an unset flag must keep every pre-existing
+    // `spendLedger`-configuring caller reserving unconditionally.
+    this.reservesSpend = options.reservesSpend ?? true;
+    this.degradedProjectionBucketId = options.degradedProjectionBucketId;
+    // #279 (pr-hero review follow-up): a `reservesSpend: false` binding
+    // with a `spendLedger` but NO `degradedProjectionBucketId` used to fall
+    // back, SILENTLY, to `rateLimitBucketId` when a degraded reservation
+    // opened — exactly the binding's OWN (e.g. subscription) bucket the
+    // whole design exists to avoid fencing (see the WHY on the reserve call
+    // in `runAttempt`). Dead in production today (production-runtime.ts
+    // always computes and passes `degradedMeteredBucketId`), but a landmine
+    // for any other caller. Fail LOUD at construction instead of ever
+    // reaching that fallback at runtime: this shape cannot be built.
+    if (
+      this.spendLedger !== undefined &&
+      this.reservesSpend === false &&
+      this.degradedProjectionBucketId === undefined
+    ) {
+      throw new Error(
+        "StepExecutionHarness: reservesSpend:false with a spendLedger configured requires degradedProjectionBucketId — without it, a degraded-projection reservation has no safe bucket to fence (#279)",
+      );
+    }
     this.attemptAdmissionTimeoutMs =
       options.attemptAdmissionTimeoutMs ?? DEFAULT_ATTEMPT_ADMISSION_TIMEOUT_MS;
     this.credentialProjectionTimeoutMs =
@@ -725,12 +776,31 @@ export class StepExecutionHarness implements StepRunner {
       };
     }
 
+    // #150: a transport that declares "server-lifetime" owns its OWN
+    // credential protection outside this per-step loop (the OpenCode SDK
+    // transport's server, brokered once for the server's whole run — #149)
+    // and never reads `isolation` at all. Projecting, writing an auth file
+    // to disk, and destroying it for such a transport protects nothing —
+    // it is pure disk churn plus a misleading artifact. Reading
+    // `transport.credentialProjection` HERE (not `this.transport`) matters:
+    // this is the same transport variable `admitAndExecute` below is about
+    // to run the attempt against, resolved per-step just above (registry
+    // lookup / explicit override) — gating on any other reference could
+    // diverge from what actually executes.
+    //
+    // Undeclared/"per-step" is the fail-safe default (see
+    // `ProviderTransport.credentialProjection`, contracts.ts): every
+    // existing transport, and any new one nobody has updated yet, keeps
+    // projecting exactly as before.
+    const consumesPerStepProjection =
+      transport.credentialProjection !== "server-lifetime";
+
     // §6.1 D1-05: project credentials ONCE per run, BEFORE admission or
     // spawn — a projection failure must never reach a provider or leak into
     // an attempt count.
     let projection: CredentialProjection | undefined;
     let projectionWarning: string | undefined;
-    if (this.credentialBroker) {
+    if (this.credentialBroker && consumesPerStepProjection) {
       try {
         projection = await projectCredentialWithBudget(
           this.credentialBroker,
@@ -778,15 +848,39 @@ export class StepExecutionHarness implements StepRunner {
       }
     }
 
+    const childEnv = this.buildChildEnv(projection);
+    // #279: the one attempt-shape fact admission cannot see. Admission
+    // (`resolveBindingAuthority`, runner-authority.ts) decides a claude-code
+    // route's credential KIND once, before any projection ever runs, and
+    // cannot know THIS attempt's projection is about to degrade.
+    // `projectionWarning` is set on exactly one failure class
+    // (`missing_subscription_record`, above) and nothing else, so it
+    // doubles as that signal here — every OTHER projection failure returns
+    // early above and never reaches this line.
+    const projectionDegraded = projectionWarning !== undefined;
+
     try {
       const result = await this.admitAndExecute({
         step,
         canonicalCwd,
         verifiedBinaryPath,
-        childEnv: this.buildChildEnv(projection),
+        childEnv,
         projection,
+        projectionDegraded,
         transport,
         admissionIdentity,
+        // #150: what `isolation.credentialProjectionId` says when `projection`
+        // stays undefined. "operator-env-fallback" means what it always did —
+        // no broker configured, or the missing_subscription_record degrade
+        // just above — a synthetic identity was expected and did not happen.
+        // A declared server-lifetime skip is neither: no projection was ever
+        // ATTEMPTED, so labelling it a "fallback" would claim a degrade that
+        // never occurred. "server-lifetime" says the honest thing instead —
+        // this step's credentials are protected elsewhere, by the transport's
+        // own server-scoped projection.
+        fallbackCredentialProjectionId: consumesPerStepProjection
+          ? "operator-env-fallback"
+          : "server-lifetime",
       });
       // §6.1: destroy() runs after settlement on EVERY return path; its
       // failure is a warning appended to stderrTail, never a thrown error
@@ -798,6 +892,30 @@ export class StepExecutionHarness implements StepRunner {
       );
       if (projectionWarning !== undefined) {
         result.stderrTail = `${result.stderrTail}\n[pr-hero] ${projectionWarning}`;
+      }
+      // #279 (pr-hero review follow-up): a metered-accounting CLAIM, so it
+      // must only be made once a reservation ACTUALLY opened — never from
+      // `projectionDegraded` alone, which is true before `admitAndExecute`
+      // ever runs an attempt. An early return above it (system-prompt-too-
+      // large, unreadable system prompt — `admitAndExecute`'s own guards)
+      // carries `attempts: 0` and no `reservations` at all; asserting "this
+      // attempt reserves..." there would describe a reservation that never
+      // happened. `result.reservations` is the exact signal: `admitAndExecute`
+      // populates it ONLY by pushing `attemptResult.reservation`, i.e. only
+      // once `spendLedger.reserve()` actually returned a reservation object
+      // — the fenced-on-arrival case (`SpendReservationFencedError`, thrown
+      // INSIDE `reserve()` before it returns one) leaves this empty too,
+      // which is correct: nothing NEW was reserved there either.
+      // `projectionDegraded` is kept as an explicit guard even though a
+      // non-empty `reservations` on a `reservesSpend: false` binding already
+      // implies it (`runAttempt`'s reserve gate) — stated here rather than
+      // relying on that invariant silently holding.
+      if (
+        projectionDegraded &&
+        result.reservations !== undefined &&
+        result.reservations.length > 0
+      ) {
+        result.stderrTail = `${result.stderrTail}\n[pr-hero] ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed`;
       }
       return result;
     } catch (error) {
@@ -1311,11 +1429,20 @@ export class StepExecutionHarness implements StepRunner {
     readonly verifiedBinaryPath: string;
     readonly childEnv: Readonly<Record<string, string>>;
     readonly projection?: CredentialProjection;
+    // #279: whether THIS run's projection degraded onto the unstripped
+    // operator env — see the WHY on `run()`'s degrade catch. Threaded down
+    // to `runAttempt` so every attempt of this step can open the same
+    // degraded-fence reservation.
+    readonly projectionDegraded: boolean;
     readonly transport: ProviderTransport;
     readonly admissionIdentity: {
       readonly executable: string;
       readonly provider: string;
     };
+    // #150: `isolation.credentialProjectionId` to stamp when `projection` is
+    // undefined — see the call site in `run()` for why this is not always
+    // "operator-env-fallback" any more.
+    readonly fallbackCredentialProjectionId: string;
   }): Promise<StepResult> {
     const {
       step,
@@ -1323,8 +1450,10 @@ export class StepExecutionHarness implements StepRunner {
       verifiedBinaryPath,
       childEnv,
       projection,
+      projectionDegraded,
       transport,
       admissionIdentity,
+      fallbackCredentialProjectionId,
     } = args;
 
     // 3. Admission gate: called once after successful authorization
@@ -1457,11 +1586,15 @@ export class StepExecutionHarness implements StepRunner {
               verifiedBinaryPath,
             }
           : {
-              // Degraded mode must describe what ACTUALLY ran, not claim a
-              // synthetic identity the env contradicts (§6.1 invariant:
-              // env.HOME === syntheticHome). The marker id makes the
-              // fallback auditable in artifacts.
-              credentialProjectionId: "operator-env-fallback",
+              // Must describe what ACTUALLY ran, not claim a synthetic
+              // identity the env contradicts (§6.1 invariant: env.HOME ===
+              // syntheticHome). The marker id makes the absence auditable in
+              // artifacts — "operator-env-fallback" (no broker, or a
+              // missing_subscription_record degrade) or, since #150,
+              // "server-lifetime" (the transport declared it never wanted a
+              // per-step projection in the first place; see
+              // `fallbackCredentialProjectionId` above).
+              credentialProjectionId: fallbackCredentialProjectionId,
               env: childEnv,
               syntheticHome: childEnv.HOME ?? "",
               syntheticConfigHome:
@@ -1481,6 +1614,7 @@ export class StepExecutionHarness implements StepRunner {
         deadlineMs,
         transport,
         reserveToken,
+        projectionDegraded,
         harnessWatchdogMs: step.timeoutMs,
       });
 
@@ -1633,6 +1767,7 @@ export class StepExecutionHarness implements StepRunner {
     readonly deadlineMs: number;
     readonly transport: ProviderTransport;
     readonly reserveToken: ReserveToken;
+    readonly projectionDegraded: boolean;
     readonly harnessWatchdogMs?: number;
   }): Promise<AttemptRunResult> {
     const {
@@ -1643,6 +1778,7 @@ export class StepExecutionHarness implements StepRunner {
       deadlineMs,
       transport,
       reserveToken,
+      projectionDegraded,
       harnessWatchdogMs,
     } = args;
 
@@ -1673,11 +1809,46 @@ export class StepExecutionHarness implements StepRunner {
       // exactly the ledger-free shape PR5a shipped. A refusing ledger
       // (fenced bucket, spec: "Unresolved bucket blocks the next paid
       // attempt") throws HERE, before the transport is ever invoked.
+      //
+      // #279: `this.reservesSpend` is the BINDING's own decision (a metered
+      // or free-credential route) and defaults `true` so every existing
+      // caller that configures a `spendLedger` directly keeps reserving
+      // exactly as it did before this option existed (see its WHY on
+      // `StepExecutionHarnessOptions`). A `false` binding (a subscription
+      // route) still opens ONE reservation when THIS attempt's own
+      // projection degraded onto an ambient key/token that bills metered —
+      // `projectionDegraded` is per-`run()`, the fact only the harness
+      // knows. The two conditions are structurally exclusive, never both at
+      // once: a degraded projection requires a `credentialBroker`, and a
+      // metered/free binding never gets one attached
+      // (`credentialKindForRoute`, runner-authority.ts — a broker's
+      // presence is what forces the subscription kind in the first place).
+      const degradedAmbientSpend =
+        projectionDegraded && envBillsMetered(request.isolation.env);
+      // #279: a degraded-only reservation (the binding itself does not
+      // reserve) fences the credential that ACTUALLY incurred the spend —
+      // the ambient key/token, via `degradedProjectionBucketId` (the bucket
+      // a METERED binding of this SAME provider+credential would compute,
+      // production-runtime.ts) — never this binding's own subscription
+      // bucket. Fencing the subscription bucket would block the NEXT
+      // non-degraded attempt on the SAME OAuth credential over dollars that
+      // credential never spent. NO fallback to `rateLimitBucketId` on this
+      // branch: the constructor refuses to build a `reservesSpend: false` +
+      // `spendLedger` harness without `degradedProjectionBucketId` (see the
+      // throw in the constructor), so a silent wrong-bucket fence can never
+      // happen here — only `rateLimitBucketId` itself, on the OTHER branch,
+      // is a real fallback (the `reservesSpend: true` shape, which always
+      // wants its own bucket).
+      let bucketId = this.rateLimitBucketId;
+      if (!this.reservesSpend && degradedAmbientSpend) {
+        // biome-ignore lint/style/noNonNullAssertion: guaranteed by the constructor guard above — reservesSpend:false with a spendLedger cannot exist without degradedProjectionBucketId.
+        bucketId = this.degradedProjectionBucketId!;
+      }
       let reservation: SpendReservation | undefined;
-      if (this.spendLedger) {
+      if (this.spendLedger && (this.reservesSpend || degradedAmbientSpend)) {
         reservation = await this.spendLedger.reserve(
           {
-            bucketId: this.rateLimitBucketId,
+            bucketId,
             reservedUsd: this.reservedUsdPerAttempt,
             sessionId: request.sessionId,
             attempt,

@@ -142,10 +142,11 @@ export interface CliOptions {
   // re-arms its PRs. The default (false) reviews each PR once — see the
   // re-arm policy note on candidateSkipReason in watch/preflight.ts.
   onPush: boolean;
-  // Bypass the size gate for THIS run (see review/size-gate.ts). Deliberately does
-  // NOT imply --yes: --force answers "is this diff too big to be worth its
-  // cost", and the cost band's own confirmation answers "do you want to
-  // spend this" — collapsing them would let one flag skip two gates.
+  // Bypass the CI skips for THIS run: the size gate, review-policy
+  // admission, and (in CI) the budget ceiling. The GitHub comment
+  // `/pr-hero review` is what sets this flag from Actions. Deliberately
+  // does NOT imply --yes: the interactive cost-band prompt is a separate
+  // question from those skips.
   force: boolean;
   // usage only (W4 / #23): show every repo_id instead of the current
   // checkout's origin-scoped view (spec "Operator-Wide View Via --all").
@@ -510,10 +511,13 @@ Options:
   --max-changed-files <n>
                       Size gate: same, on the effective changed-FILE count.
                       Default ${DEFAULT_SIZE_GATE.maxChangedFiles}; 0 disables the limit
-  --force             Review the diff even when the size gate would skip it.
-                      An interactive TTY already offers the same choice as a
-                      menu; this flag is the unattended hatch. Does NOT imply
-                      --yes — the cost band still asks. With setup --ci /
+  --force             Review even when CI would skip: the size gate, the
+                      review-policy admission rules, and the budget ceiling.
+                      On GitHub, comment /pr-hero review on the PR to pass
+                      this flag from Actions. An interactive TTY already
+                      offers the size-gate choice as a menu; this flag is
+                      the unattended hatch. Does NOT imply --yes — the
+                      cost-band prompt still asks. With setup --ci /
                       ci init: overwrite an existing
                       .github/workflows/pr-hero.yml instead of refusing
   --all               usage only: show every origin's rows instead of just

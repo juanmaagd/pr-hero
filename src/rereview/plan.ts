@@ -7,6 +7,7 @@
 // the PR is actually in; it never rewrites the case (R2-C5).
 
 import { normalizePath } from "#compare/compare";
+import { listPaths } from "#git/refs";
 import type { RereviewCase } from "./classify";
 
 export type LastHeadSource = "summary_marker" | "finding_markers" | "absent";
@@ -134,6 +135,69 @@ export function incompleteLastReviewMessage(sha: string): string {
     "failed). This run reviews the full PR range and re-verifies every " +
     "prior finding."
   );
+}
+
+// GitHub #166: the THIRD way a re-review's delta can be nothing to trust "as
+// is" — not force-pushed away, not incomplete, just genuinely empty. Case B
+// (L === H) always lands here on the happy path, and it is not rare: a
+// merged PR's head can never advance, so every local re-run of a merged PR
+// is case B. Discovery correctly runs zero DISCOVERY hunters — there is
+// nothing new to read — but the OLD behavior said nothing about that on the
+// CLI/CI log, and the PR comment (`cleanBillLine`, review/report.ts) read the
+// resulting empty findings array as "reviewed and found nothing", a $0/0s run
+// overwriting a real prior summary with a false clean bill. Fired for ANY
+// case whose discovery came up empty (case B, or case C's restricted delta
+// touching none of the PR's own files) — `resolvePrDiscovery` (pr/discovery.ts)
+// sets `discovery_skipped_empty_delta` on that same broader condition, and a
+// reader deserves the same disclosure regardless of which case produced it.
+//
+// pr-hero review #286 findings, both about this function specifically:
+//
+// 1. "No changes... since the last completed review" was flatly wrong for
+//    the OTHER way discovery comes up empty: a real, non-empty delta whose
+//    every file was excluded by the size gate / `.prheroignore`
+//    (`filterDiffByIgnoreRules`'s `droppedPaths`). That case gets its own
+//    sentence, naming what was excluded — never "no changes".
+// 2. "No hunter ran... not re-verified now" said "hunter" for a claim only
+//    true of DISCOVERY hunters, and asserted verification would NOT happen —
+//    false whenever case B's `applied`/`case_b_reply` triggers or case C's
+//    `touched()` (rereview/classify.ts) queued a prior for the SAME pass's
+//    verifier. The caller (`pr/discovery.ts`) now computes this message only
+//    after that queue is built, so `queuedForVerification` is always the
+//    real count, never a guess made before the queue existed.
+export function skippedDiscoveryMessage(input: {
+  headSha: string;
+  reason: "no_delta" | "all_excluded";
+  excludedPaths: readonly string[];
+  queuedForVerification: number;
+  // pr-hero on #286: the Phase B queue is capped downstream at
+  // max_verification_steps (capVerificationQueue, rereview/verify.ts); the
+  // priors past the cap are marked unconfirmed, never re-verified. The notice
+  // states the capped number, never the raw queue length.
+  maxVerificationSteps: number;
+}): string {
+  const discoverySentence =
+    input.reason === "all_excluded"
+      ? `Every changed file at ${input.headSha} was excluded from review ` +
+        `(${listPaths([...input.excludedPaths])}), so the effective diff is empty.`
+      : `No changes to discover at ${input.headSha} since the last completed review.`;
+  const hunterSentence = "No discovery hunter ran this pass.";
+  const verified = Math.min(
+    input.queuedForVerification,
+    Math.max(0, input.maxVerificationSteps),
+  );
+  const capped = input.queuedForVerification - verified;
+  const verifySentence =
+    verified > 0
+      ? `${verified} prior finding` +
+        `${verified === 1 ? " is" : "s are"} re-verified this pass` +
+        (capped > 0
+          ? `; ${capped} more ${capped === 1 ? "stays" : "stay"} unconfirmed (max_verification_steps ${input.maxVerificationSteps}).`
+          : ".")
+      : capped > 0
+        ? `No prior finding is re-verified this pass; ${capped} ${capped === 1 ? "stays" : "stay"} unconfirmed (max_verification_steps ${input.maxVerificationSteps}).`
+        : "No prior finding is queued for re-verification this pass.";
+  return `${discoverySentence} ${hunterSentence} ${verifySentence}`;
 }
 
 export function planDiscovery(input: {

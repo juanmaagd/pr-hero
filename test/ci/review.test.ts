@@ -13,6 +13,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ciForceReviewDispatch } from "#ci/force-comment";
 import {
   assertRunMatchesPr,
   budgetDisabledWarningMessage,
@@ -401,6 +402,7 @@ describe("planCiSizeSkip", () => {
     if (plan === null) throw new Error("unreachable");
     expect(plan.markerPrefix).toBe(SKIP_SIZE_COMMENT_MARKER);
     expect(plan.comment.startsWith(SKIP_SIZE_COMMENT_MARKER)).toBe(true);
+    expect(plan.comment).toContain(ciForceReviewDispatch(55));
     expect(plan.summaryMarkdown).toContain("PR #55");
     expect(plan.outputs).toEqual({
       status: "skipped-size",
@@ -421,6 +423,7 @@ describe("planCiBudgetSkip", () => {
         estimatedCostUsd: 8,
         budgetUsd: 10,
         prNumber: 56,
+        force: false,
       }),
     ).toBeNull();
   });
@@ -432,6 +435,7 @@ describe("planCiBudgetSkip", () => {
         estimatedCostUsd: 999,
         budgetUsd: 0,
         prNumber: 56,
+        force: false,
       }),
     ).toBeNull();
   });
@@ -442,17 +446,31 @@ describe("planCiBudgetSkip", () => {
       estimatedCostUsd: 12.5,
       budgetUsd: 10,
       prNumber: 56,
+      force: false,
     });
     expect(plan).not.toBeNull();
     if (plan === null) throw new Error("unreachable");
     expect(plan.markerPrefix).toBe(SKIP_BUDGET_COMMENT_MARKER);
     expect(plan.comment.startsWith(SKIP_BUDGET_COMMENT_MARKER)).toBe(true);
+    expect(plan.comment).toContain(ciForceReviewDispatch(56));
     expect(plan.summaryMarkdown).toContain("PR #56");
     expect(plan.outputs.status).toBe("skipped-budget");
     // The plan card and the skip comment must show the SAME number (ci-gates
     // header doctrine) — estimatedCostUsd here is estimate.high, per
     // report.ts's own documented under-estimate bias (see report.ts ~97-98).
     expect(plan.outputs.cost_usd_est).toBe(12.5);
+  });
+
+  test("force clears the ceiling — the CI comment override runs this one anyway", () => {
+    expect(
+      planCiBudgetSkip({
+        isCi: true,
+        estimatedCostUsd: 999,
+        budgetUsd: 10,
+        prNumber: 56,
+        force: true,
+      }),
+    ).toBeNull();
   });
 });
 
@@ -482,6 +500,7 @@ function budgetGateFor(input: {
     estimatedCostUsd: input.estimatedCostUsd,
     budgetUsd: ceiling.budgetUsd,
     prNumber: 156,
+    force: false,
   });
 }
 

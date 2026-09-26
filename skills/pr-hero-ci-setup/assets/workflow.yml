@@ -8,6 +8,8 @@ on:
     types: [opened, synchronize, reopened]
 
 # Avoid redundant spend on rapid pushes — cancel in-flight reviews when a newer commit arrives.
+# A forced re-run is a separate workflow (pr-hero-force.yml), dispatched with
+# `gh workflow run`, so this file stays the automatic path.
 concurrency:
   group: pr-hero-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -104,6 +106,7 @@ jobs:
     # fires when the process is genuinely stuck.
     timeout-minutes: 90
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -118,7 +121,7 @@ jobs:
         # The id is load-bearing, not decorative: it is the only way to read
         # this step's `run-dir` output from the upload step below.
         id: pr-hero
-        uses: juanmaagd/pr-hero@v1
+        uses: juanmaagd/pr-hero@v0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # Provide a Claude credential and/or OpenCode auth (never leave every

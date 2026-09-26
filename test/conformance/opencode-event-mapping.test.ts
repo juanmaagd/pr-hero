@@ -641,3 +641,77 @@ describe("session.status account/usage limit maps to a provider_limit event (#15
     expect(mapOne(raw)).toEqual([]);
   });
 });
+
+// #213: a live OpenCode-routed review finished every hunter in ~2s with an
+// empty resultText, and the attempt log said format_violation. The same
+// model via `opencode run --format json` returned type "error" / APIError /
+// 403 / isRetryable false — the model never ran. The bus event pr-hero
+// actually subscribes to is `session.error` (SDK EventSessionError); the
+// CLI printer names that same payload `error`. Both used to hit the
+// mapper's default arm and become [].
+describe("session.error provider refusal maps to provider_refusal (#213)", () => {
+  const DATA_POLICY =
+    "This model collects data used to improve its quality and requires explicit opt in: https://opencode.ai/workspace/wrk_example";
+
+  function refusalEvent(
+    type: "session.error" | "error",
+    sessionID: string = SESSION_ID,
+    extra: Record<string, unknown> = {},
+  ) {
+    return {
+      type,
+      properties: {
+        sessionID,
+        error: {
+          name: "APIError",
+          data: {
+            message: DATA_POLICY,
+            statusCode: 403,
+            isRetryable: false,
+            responseBody: "secret-response-body-must-not-leak",
+            ...extra,
+          },
+        },
+      },
+    };
+  }
+
+  test("session.error for this session carries name, status, and the opt-in sentence", () => {
+    expect(mapOne(refusalEvent("session.error"))).toEqual([
+      {
+        kind: "provider_refusal",
+        name: "APIError",
+        statusCode: 403,
+        retryable: false,
+        message: DATA_POLICY,
+      },
+    ]);
+  });
+
+  test("the CLI's type error name is the same refusal", () => {
+    expect(mapOne(refusalEvent("error"))).toEqual([
+      {
+        kind: "provider_refusal",
+        name: "APIError",
+        statusCode: 403,
+        retryable: false,
+        message: DATA_POLICY,
+      },
+    ]);
+  });
+
+  test("another session's refusal is not this turn's", () => {
+    expect(mapOne(refusalEvent("session.error", "some-other-session"))).toEqual(
+      [],
+    );
+  });
+
+  test("a session.error with no error object stays unmapped", () => {
+    expect(
+      mapOne({
+        type: "session.error",
+        properties: { sessionID: SESSION_ID },
+      }),
+    ).toEqual([]);
+  });
+});

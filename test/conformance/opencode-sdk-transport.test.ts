@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   type BenchmarkRunRecord,
   computeQualifiedBenchmarkMetrics,
@@ -974,6 +979,120 @@ describe("OpenCodeSdkTransport provider account/usage limit (#157)", () => {
   });
 });
 
+// #213: the provider refused the turn (APIError 403, isRetryable false) on
+// the event stream. The old mapper dropped that event, the turn completed
+// with empty finalText, and resolveFailureCause filed format_violation
+// because parse threw — burning the format-reminder retry on a model that
+// never ran.
+describe("OpenCodeSdkTransport provider refusal (#213)", () => {
+  const DATA_POLICY =
+    "This model collects data used to improve its quality and requires explicit opt in: https://opencode.ai/workspace/wrk_example sk-secretkeyvalue";
+
+  test("a non-retryable 403 fails unverified as runtime_unavailable, not a format retry", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_refusal",
+          name: "APIError",
+          statusCode: 403,
+          retryable: false,
+          message: DATA_POLICY,
+        },
+      ]),
+    });
+    const rig = makeRig({
+      client: handle.client,
+      transport: { usefulProgressMs: 150_000 },
+    });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.stderrTail).toContain("APIError");
+    expect(outcome.stderrTail).toContain("status=403");
+    expect(outcome.stderrTail).toContain("retryable=no");
+    expect(outcome.stderrTail).toContain("https://opencode.ai/workspace/");
+    expect(outcome.stderrTail).toContain("[REDACTED]");
+    expect(outcome.stderrTail).not.toContain("sk-secretkeyvalue");
+    expect(rig.transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+    expect(
+      resolveFailureCause({
+        outcome,
+        classifyFailure: (candidate) =>
+          rig.transport.classifyFailure(candidate),
+        parseThrew: true,
+      }),
+    ).toEqual({ kind: "cause", cause: "runtime_unavailable" });
+    expect(
+      decideRetryDisposition("runtime_unavailable", {
+        transientAttemptsUsed: 0,
+        formatRetriesUsed: 0,
+      }),
+    ).toEqual({ action: "terminal" });
+    expect(
+      legacyClassificationFromCause({
+        kind: "cause",
+        cause: "runtime_unavailable",
+      }),
+    ).toBe("terminal");
+    expect(handle.abortCount()).toBe(1);
+  });
+
+  test("a message that says isRetryable: true does not override retryable=no", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_refusal",
+          name: "APIError",
+          statusCode: 403,
+          retryable: false,
+          message:
+            "the prose isRetryable: true must not steer a terminal refusal",
+        },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(outcome.stderrTail).toContain("retryable=no");
+    expect(outcome.stderrTail).toContain("isRetryable: true");
+    expect(rig.transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+  });
+
+  test("isRetryable true is a transient retry, not a format reminder", async () => {
+    const handle = makeClient({
+      stream: streamOf([
+        {
+          kind: "provider_refusal",
+          name: "APIError",
+          statusCode: 408,
+          retryable: true,
+          message: "provider asked for another attempt",
+        },
+      ]),
+    });
+    const rig = makeRig({ client: handle.client });
+    const outcome = await rig.transport.execute(makeRequest(), {
+      signal: rig.controller.signal,
+      events: rig.sink,
+    });
+
+    expect(rig.transport.classifyFailure(outcome)).toBe("network_transient");
+    expect(
+      decideRetryDisposition("network_transient", {
+        transientAttemptsUsed: 0,
+        formatRetriesUsed: 0,
+      }),
+    ).toEqual({ action: "retry_now", budget: "transient" });
+  });
+});
+
 // #157: opencode-client.ts settles a failed permission-reject the same way
 // as a failed session poll — a `{kind:"failed"}` OpenCodePollResult, so this
 // pins the classification the client-level tests in opencode-client.test.ts
@@ -1827,16 +1946,34 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
     ).toThrow(OpenCodeVersionAdmissionError);
   });
 
-  test("loadOpenCodeSdk rejects missing package metadata or unsupported SDK versions", async () => {
-    const { loadOpenCodeSdk, OpenCodeVersionAdmissionError } = await import(
-      "../../src/transport-registry"
+  test("loadOpenCodeSdk rejects a missing SDK as unavailable and a real mismatch as a version error", async () => {
+    const {
+      loadOpenCodeSdk,
+      OpenCodeVersionAdmissionError,
+      SUPPORTED_OPENCODE_SDK_VERSION,
+    } = await import("../../src/transport-registry");
+    const { OpenCodeSdkUnavailableError, openCodeSdkUnavailableMessage } =
+      await import("../../src/transports/opencode-admission");
+    const unavailable = openCodeSdkUnavailableMessage();
+    expect(unavailable).toContain(
+      `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION}`,
     );
+    expect(unavailable).toContain("pr-hero upgrade --reconcile");
+    expect(unavailable).toContain("~/.prhero/node_modules");
+    expect(unavailable).not.toContain("/$bunfs");
+    expect(unavailable).not.toContain("undefined");
 
     await expect(
       loadOpenCodeSdk({
         importPackage: async () => ({ version: undefined }),
       }),
-    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+    ).rejects.toThrow(OpenCodeSdkUnavailableError);
+
+    await expect(
+      loadOpenCodeSdk({
+        importPackage: async () => ({ version: "   " }),
+      }),
+    ).rejects.toThrow(OpenCodeSdkUnavailableError);
 
     await expect(
       loadOpenCodeSdk({
@@ -1844,13 +1981,266 @@ describe("OpenCode bounded version admission policy (OA1b)", () => {
           throw new Error("package.json not found");
         },
       }),
-    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+    ).rejects.toThrow(OpenCodeSdkUnavailableError);
 
-    await expect(
-      loadOpenCodeSdk({
-        importPackage: async () => ({ version: "1.18.26" }),
+    const missing = await loadOpenCodeSdk({
+      importPackage: async () => {
+        throw new Error("package.json not found");
+      },
+    }).then(
+      () => {
+        throw new Error("expected the missing package to throw");
+      },
+      (error: unknown) => error,
+    );
+    expect(missing).toBeInstanceOf(OpenCodeSdkUnavailableError);
+    expect((missing as Error).message).toBe(unavailable);
+
+    const mismatched = await loadOpenCodeSdk({
+      importPackage: async () => ({ version: "1.18.26" }),
+    }).then(
+      () => {
+        throw new Error("expected the mismatched version to throw");
+      },
+      (error: unknown) => error,
+    );
+    expect(mismatched).toBeInstanceOf(OpenCodeVersionAdmissionError);
+    expect((mismatched as Error).message).toContain("1.18.26");
+    expect((mismatched as Error).message).not.toContain("undefined");
+  });
+
+  // The version check above already
+  // proved the package IS installed, so a failure importing the v2 entry
+  // itself must never collapse back into "not installed" — that swallowed
+  // the real cause (a compiled binary's `Cannot find package 'which'` from
+  // cross-spawn) and sent operators chasing a reinstall that could not help.
+  test("loadOpenCodeSdk on an import failure of a version-matched package names the real cause, never 'not installed'", async () => {
+    const { loadOpenCodeSdk, SUPPORTED_OPENCODE_SDK_VERSION } = await import(
+      "../../src/transport-registry"
+    );
+    const { OpenCodeSdkUnavailableError } = await import(
+      "../../src/transports/opencode-admission"
+    );
+    const error = await loadOpenCodeSdk({
+      mode: "compiled",
+      // Never created on disk: importPackage below supplies the package.json
+      // content directly, so the only filesystem interaction left is the
+      // REAL dynamic import of the resolved (nonexistent) v2/client entry —
+      // a genuine load failure, not a fabricated one.
+      nodeModulesDir: "/nonexistent/prhero-fixture/node_modules",
+      importPackage: async () => ({
+        version: SUPPORTED_OPENCODE_SDK_VERSION,
+        exports: { "./v2/client": { import: "./dist/v2/client.js" } },
       }),
-    ).rejects.toThrow(OpenCodeVersionAdmissionError);
+    }).then(
+      () => {
+        throw new Error("expected the import to fail");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenCodeSdkUnavailableError);
+    const message = (error as Error).message;
+    // Locked to the constant, like openCodeSdkUnavailableMessage's test above:
+    // the message carries a version literal, so a SUPPORTED_OPENCODE_SDK_VERSION
+    // bump must fail here rather than leave the diagnostic naming a stale pin.
+    expect(message).toContain(
+      `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION} is installed`,
+    );
+    expect(message).not.toContain("is not installed");
+    expect(message).toContain("failed to load");
+    expect(message).toContain("v2/client.js");
+  });
+});
+
+describe("OpenCode SDK import plan", () => {
+  test("compiled plan reads the product-home package.json and its v2 export; dev and npm stay bare", async () => {
+    const { planOpenCodeSdkImport, resolveOpenCodeSdkV2Entry } = await import(
+      "../../src/transport-registry"
+    );
+    const nodeModulesDir = "/Users/x/.prhero/node_modules";
+    const compiled = planOpenCodeSdkImport({
+      mode: "compiled",
+      nodeModulesDir,
+    });
+    const packageJsonPath = path.join(
+      nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+      "package.json",
+    );
+    expect(compiled.packageJsonPath).toBe(packageJsonPath);
+    expect(compiled.packageSpecifier).toBe(pathToFileURL(packageJsonPath).href);
+    expect(compiled.v2Specifier).toBeUndefined();
+
+    const packageDir = path.dirname(packageJsonPath);
+    // The CLIENT sub-path, not "./v2": the full index re-exports the SDK's
+    // server, which pulls in cross-spawn and does not resolve inside a
+    // compiled binary.
+    const v2 = resolveOpenCodeSdkV2Entry(
+      { exports: { "./v2/client": { import: "./dist/v2/client.js" } } },
+      packageDir,
+    );
+    expect(fileURLToPath(v2)).toBe(
+      path.join(packageDir, "dist", "v2", "client.js"),
+    );
+    const v2String = resolveOpenCodeSdkV2Entry(
+      { exports: { "./v2/client": "./dist/v2/client.js" } },
+      packageDir,
+    );
+    expect(fileURLToPath(v2String)).toBe(
+      path.join(packageDir, "dist", "v2", "client.js"),
+    );
+
+    for (const mode of ["dev", "npm"] as const) {
+      const plan = planOpenCodeSdkImport({ mode, nodeModulesDir });
+      expect(plan.packageSpecifier).toBe("@opencode-ai/sdk/package.json");
+      expect(plan.v2Specifier).toBe("@opencode-ai/sdk/v2/client");
+      expect(plan.packageJsonPath).toBeUndefined();
+    }
+  });
+
+  test("compiled mode loads the v2 entry named by the installed package.json", async () => {
+    const { loadOpenCodeSdk, readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-plan-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageDir = path.join(nodeModulesDir, "@opencode-ai", "sdk");
+    const v2Dir = path.join(packageDir, "dist", "v2");
+    try {
+      await mkdir(v2Dir, { recursive: true });
+      await writeFile(
+        path.join(packageDir, "package.json"),
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2/client": { import: "./dist/v2/client.js" } },
+        }),
+      );
+      await writeFile(
+        path.join(v2Dir, "client.js"),
+        "export function createOpencodeClient() { return { ok: true }; }\n",
+      );
+
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.18.25");
+      const sdk = await loadOpenCodeSdk({ mode: "compiled", nodeModulesDir });
+      expect(typeof sdk.createOpencodeClient).toBe("function");
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir: path.join(root, "missing"),
+        }),
+      ).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dev mode uses the product home when the bare specifier is missing", async () => {
+    const { loadOpenCodeSdk, readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-fallback-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageDir = path.join(nodeModulesDir, "@opencode-ai", "sdk");
+    const packageJsonPath = path.join(packageDir, "package.json");
+    const v2File = path.join(packageDir, "dist", "v2", "client.js");
+    try {
+      await mkdir(path.dirname(v2File), { recursive: true });
+      await writeFile(
+        packageJsonPath,
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2/client": { import: "./dist/v2/client.js" } },
+        }),
+      );
+      await writeFile(
+        v2File,
+        "export function createOpencodeClient() { return { ok: true }; }\n",
+      );
+      const importSpecifier = async (specifier: string): Promise<unknown> => {
+        if (specifier.startsWith("@opencode-ai/")) {
+          throw new Error(`Cannot find module '${specifier}'`);
+        }
+        return import(specifier);
+      };
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "dev",
+          nodeModulesDir,
+          importSpecifier,
+        }),
+      ).toBe("1.18.25");
+      const sdk = await loadOpenCodeSdk({
+        mode: "npm",
+        nodeModulesDir,
+        importSpecifier,
+      });
+      expect(typeof sdk.createOpencodeClient).toBe("function");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Drift guard: resolves the CLIENT entry
+  // against the REAL installed package's own exports map (not a hand-written
+  // fixture), so a future "simplify resolveOpenCodeSdkV2Entry back to /v2"
+  // is caught even if every fixture-based test above were reverted too. The
+  // resolved path must both name "client.js" and actually exist on disk —
+  // the installed SDK is the ground truth for whether that entry is real.
+  test("resolves the client entry against the real installed @opencode-ai/sdk package.json", async () => {
+    const { resolveOpenCodeSdkV2Entry } = await import(
+      "../../src/transport-registry"
+    );
+    const packageDir = path.dirname(
+      require.resolve("@opencode-ai/sdk/package.json"),
+    );
+    const packageJson = JSON.parse(
+      await readFile(path.join(packageDir, "package.json"), "utf8"),
+    ) as { exports?: unknown };
+
+    const resolved = resolveOpenCodeSdkV2Entry(packageJson, packageDir);
+    const resolvedPath = fileURLToPath(resolved);
+
+    expect(resolvedPath.endsWith(path.join("v2", "client.js"))).toBe(true);
+    expect(existsSync(resolvedPath)).toBe(true);
+  });
+
+  test("a second read sees a package.json the installer overwrote", async () => {
+    const { readInstalledOpenCodeSdkVersion } = await import(
+      "../../src/transport-registry"
+    );
+    const root = await mkdtemp(path.join(tmpdir(), "prhero-sdk-overwrite-"));
+    const nodeModulesDir = path.join(root, "node_modules");
+    const packageJsonPath = path.join(
+      nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+      "package.json",
+    );
+    try {
+      await mkdir(path.dirname(packageJsonPath), { recursive: true });
+      await writeFile(packageJsonPath, JSON.stringify({ version: "1.0.0" }));
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.0.0");
+      await writeFile(packageJsonPath, JSON.stringify({ version: "1.18.25" }));
+      expect(
+        await readInstalledOpenCodeSdkVersion({
+          mode: "compiled",
+          nodeModulesDir,
+        }),
+      ).toBe("1.18.25");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -4198,5 +4588,17 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
     const outcome = await pending;
 
     expect(outcome.toolInvocations).toBe(1);
+  });
+});
+
+// #150: the OpenCode SDK transport must declare it does not consume the
+// harness's per-step credential projection — its server owns ONE
+// projection for the server's whole lifetime (#149), brokered before the
+// server ever launches, not a fresh one per step/attempt.
+describe("OpenCodeSdkTransport credentialProjection declaration (#150)", () => {
+  test("declares server-lifetime regardless of construction options", async () => {
+    const handle = makeClient({});
+    const transport = new OpenCodeSdkTransport({ client: handle.client });
+    expect(transport.credentialProjection).toBe("server-lifetime");
   });
 });

@@ -18,6 +18,10 @@ export const GC_TTL_HOURS = 72;
 
 export interface PrheroLayout {
   dir: string;
+  // Compiled binaries resolve optional packages from this directory, not
+  // from the embedded filesystem. `upgrade --reconcile` installs the
+  // OpenCode SDK here when routing needs it.
+  nodeModulesDir: string;
   reposDir: string;
   // C5: two config files live in this dir and NEITHER of them is called
   // configPath. The watcher's opt-in registry (watch.json) and the global
@@ -56,6 +60,7 @@ export function prheroLayout(home: string): PrheroLayout {
   const dir = path.join(home, ".prhero");
   return {
     dir,
+    nodeModulesDir: path.join(dir, "node_modules"),
     reposDir: path.join(dir, "repos"),
     watchConfigPath: path.join(dir, "watch.json"),
     reviewConfigPath: path.join(dir, "config.json"),

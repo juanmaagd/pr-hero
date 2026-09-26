@@ -13,7 +13,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  CI_FORCE_WORKFLOW_RELATIVE_PATH,
   CI_WORKFLOW_RELATIVE_PATH,
+  generateCiForceWorkflowTemplate,
   generateCiWorkflowTemplate,
   materializeCiOpenCodeData,
   OWN_CI_WORKFLOW_OPTIONS,
@@ -57,6 +59,12 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       "synchronize",
       "reopened",
     ]);
+  });
+
+  test("the automatic workflow does not listen for comments", () => {
+    const template = generateCiWorkflowTemplate();
+    expect(template).not.toContain("issue_comment:");
+    expect(template).not.toContain("workflow_dispatch:");
   });
 
   test("grants pull-requests: write and contents: read", () => {
@@ -113,7 +121,7 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       jobs: { review: { steps: Array<Record<string, unknown>> } };
     };
     const usesValues = parsed.jobs.review.steps.map((step) => step.uses);
-    expect(usesValues).toContain("juanmaagd/pr-hero@v1");
+    expect(usesValues).toContain("juanmaagd/pr-hero@v0");
   });
 
   test("never embeds a secret value — references secrets by name only", () => {
@@ -134,7 +142,7 @@ describe("generateCiWorkflowTemplate (pure)", () => {
       jobs: { review: { steps: Array<Record<string, unknown>> } };
     };
     const step = parsed.jobs.review.steps.find(
-      (s) => s.uses === "juanmaagd/pr-hero@v1",
+      (s) => s.uses === "juanmaagd/pr-hero@v0",
     ) as { with?: Record<string, string> } | undefined;
     expect(step?.with?.["anthropic-api-key"]).toBe(
       `\${{ secrets.ANTHROPIC_API_KEY }}`,
@@ -573,6 +581,11 @@ describe("runCiSetup (impure edge)", () => {
       "utf8",
     );
     expect(written).toBe(generateCiWorkflowTemplate());
+    const forceWritten = await readFile(
+      path.join(dir, CI_FORCE_WORKFLOW_RELATIVE_PATH),
+      "utf8",
+    );
+    expect(forceWritten).toBe(generateCiForceWorkflowTemplate());
   });
 
   test("refuses to overwrite an existing workflow without --force", async () => {

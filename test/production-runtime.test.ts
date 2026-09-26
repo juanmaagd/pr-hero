@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -43,8 +44,12 @@ import {
   resolveBindingAuthority,
   resolveRunnerAuthority,
 } from "../src/runner-authority";
-import type { CredentialBroker } from "../src/security/credential-broker";
+import type {
+  CredentialBroker,
+  CredentialProjection,
+} from "../src/security/credential-broker";
 import {
+  CredentialProjectionError,
   OpenCodeApiTokenBroker,
   OpenCodeAuthBroker,
 } from "../src/security/credential-broker";
@@ -62,6 +67,30 @@ const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 const stubClaudeCredentialBroker: CredentialBroker = {
   async project() {
     throw new Error("stub broker: capability-gate tests never project");
+  },
+};
+
+// A broker whose projection always SUCCEEDS, deterministically on every
+// host — unlike omitting `credentialBrokers` entirely, which falls back to
+// the REAL `claudeCredentialBroker()` (runner-authority.ts: darwin +
+// /usr/bin/security) and reads this machine's actual Keychain. #279 made
+// that fallback load-bearing for the first time: a real degraded
+// projection now opens a real spend-ledger reservation, so a test that
+// wants "a normal, NON-degraded subscription attempt" can no longer leave
+// the broker unstubbed and hope for the best.
+const successfulClaudeCredentialBroker: CredentialBroker = {
+  async project() {
+    const projection: CredentialProjection = {
+      projectionId: "cred-successful-stub",
+      kind: "claude_subscription_oauth",
+      syntheticHome: "/tmp/pr-hero-stub-home",
+      syntheticConfigHome: "/tmp/pr-hero-stub-home/.claude",
+      syntheticTmp: "/tmp/pr-hero-stub-home/tmp",
+      env: {},
+      files: [],
+      destroy: async () => {},
+    };
+    return projection;
   },
 };
 
@@ -612,6 +641,14 @@ describe("production runtime PR1", () => {
     async function bindingReportForBilling(
       billing: ProviderCapabilityReport["billing"],
       routingConfig?: RoutingConfig,
+      // #161: optional so every pre-existing caller below (which does not
+      // care about the credential kind) stays byte-identical — no env means
+      // no key means the pre-#161 subscription kind, same as always.
+      env?: Readonly<Record<string, string | undefined>>,
+      // #161 (corrected 2026-09-24): optional so a caller can prove the
+      // "broker present" arm deterministically, on every host, instead of
+      // depending on whether THIS host's Keychain default resolves.
+      credentialBrokers?: { readonly "claude-code": CredentialBroker },
     ) {
       // No routingConfig resolves through the alias fallback in
       // model/routing.ts, which pins provider "anthropic" -- the catalogue's
@@ -641,6 +678,8 @@ describe("production runtime PR1", () => {
         executableAllowlists: claudeAllowlist(claudeFixture),
         registry,
         mode: "conformance",
+        ...(env === undefined ? {} : { env }),
+        ...(credentialBrokers === undefined ? {} : { credentialBrokers }),
       });
       const binding = runtime.bindings.get(step.routeFingerprint);
       if (binding === undefined) throw new Error("missing binding");
@@ -704,6 +743,82 @@ describe("production runtime PR1", () => {
       expect(meteredPriced.billing.cashCostAccountingValid).toBe(true);
       expect(exactBindingCapabilityGate(meteredPriced).ok).toBe(true);
     });
+
+    // #161, end to end (corrected 2026-09-24 by Juanma): an ANTHROPIC_API_KEY
+    // in the route's env upgrades `credentialKindForRoute`'s answer only when
+    // NO credential broker will project for the route — a SUCCESSFUL
+    // projection strips the key before the child ever spawns
+    // (PROJECTION_OWNED_KEYS, harness.ts), so a projected route stays
+    // subscription no matter what its env carries. (A degraded projection is
+    // #279's known exception, not exercised by this admission-time test —
+    // `resolveBindingAuthority` never awaits the real projection, only
+    // whether a broker is attached; see
+    // test/harness/credential-projection.test.ts for the real, degraded
+    // path, and "the run's spend ledger is composed" describe block below —
+    // "#279: a subscription binding still fences a degraded ambient-key
+    // attempt" — for #279's own harness-wiring-through-production-runtime
+    // coverage.) `FrozenRuntimeBinding.capabilities()` upgrades
+    // `effectiveBillingMode` from that kind
+    // (production-runtime.ts:~324, `credentialKindBillsMetered`). The mock
+    // transport here reports the shape the REAL `ClaudeCodeCliTransport`
+    // reports today — `mode: "subscription"` (the static, backend-wide
+    // claim), `pricingReady: true` (#197) — so both arms below prove the
+    // exact-binding mode follows the CREDENTIAL, not the transport claiming
+    // metered itself.
+    test("a key alongside a broker stays subscription — the broker wins, deterministically on every host", async () => {
+      const subscriptionShapedReport = {
+        mode: "subscription" as const,
+        pricingReady: true,
+      };
+      const withoutKey = await bindingReportForBilling(
+        subscriptionShapedReport,
+      );
+      expect(withoutKey.billing.mode).toBe("subscription");
+      expect(withoutKey.billing.pricingApplicability).toBe("not_applicable");
+
+      // The fake broker is what makes this deterministic: it proves the
+      // precedence rule without depending on whether THIS host's real
+      // Keychain default happens to resolve.
+      const withKeyAndBroker = await bindingReportForBilling(
+        subscriptionShapedReport,
+        undefined,
+        { ANTHROPIC_API_KEY: "sk-test" },
+        { "claude-code": stubClaudeCredentialBroker },
+      );
+      expect(withKeyAndBroker.billing.mode).toBe("subscription");
+      expect(withKeyAndBroker.billing.pricingApplicability).toBe(
+        "not_applicable",
+      );
+      expect(exactBindingCapabilityGate(withKeyAndBroker).ok).toBe(true);
+    });
+
+    // The full path for "a key, no broker at all" — only exercisable end to
+    // end on a host whose default Keychain broker genuinely resolves to
+    // undefined (CI's ubuntu-latest); skipped on this darwin sandbox in
+    // favour of the deterministic, platform-independent proof in
+    // test/runner-authority.test.ts.
+    test.skipIf(
+      process.platform === "darwin" && existsSync("/usr/bin/security"),
+    )(
+      "a key with no broker upgrades the exact binding to metered and admits it",
+      async () => {
+        const withKey = await bindingReportForBilling(
+          { mode: "subscription" as const, pricingReady: true },
+          undefined,
+          { ANTHROPIC_API_KEY: "sk-test" },
+        );
+        expect(withKey.billing.mode).toBe("metered");
+        expect(withKey.billing.pricingApplicability).toBe("required");
+        expect(withKey.billing.tokenPricingAvailable).toBe(true);
+        expect(withKey.billing.cashCostAccountingValid).toBe(true);
+        // Admitted, not refused for lack of pricing: this is the pairing
+        // #161 depends on but does not itself provide (#197 provided it).
+        // `ok` only reaches true with an empty `reason`
+        // (capabilityGateDecision, model/provider-capabilities.ts), so this
+        // alone rules out `pricing_table_missing` blocking the route.
+        expect(exactBindingCapabilityGate(withKey).ok).toBe(true);
+      },
+    );
 
     // #197 deleted the bundled catalogue and the `||` arm that read it, so
     // `tokenPricingAvailable` is the transport's own claim and nothing else.
@@ -933,6 +1048,14 @@ describe("production runtime PR1", () => {
           executableAllowlists: claudeAllowlist(claudeFixture),
           registry,
           mode: "conformance",
+          // #279: a SUCCESSFUL projection, deterministically — see the WHY
+          // on `successfulClaudeCredentialBroker`. This test is about the
+          // NON-degraded case; its degraded sibling is
+          // "#279: a subscription binding fences a degraded ambient-key
+          // attempt..." below.
+          credentialBrokers: {
+            "claude-code": successfulClaudeCredentialBroker,
+          },
         });
 
         const first = await runtime.runner.run(
@@ -1039,6 +1162,110 @@ describe("production runtime PR1", () => {
         );
         expect(survivor.status).toBe("ok");
         expect(claude.executeCount()).toBe(1);
+      });
+
+      // #279 (fixed 2026-09-24, option 2): the harness's OWN per-attempt
+      // fence for a subscription binding whose Keychain projection degrades
+      // onto an ambient key/token. `reservesSpend` stays FALSE for this
+      // binding — unchanged from "a subscription backend reserves nothing"
+      // above — what changed is that `MultiProviderRunner.run` now hands
+      // EVERY binding the ledger unconditionally (production-runtime.ts,
+      // the WHY above `isolation` in `run`), so the harness can open ONE
+      // reservation for the ONE attempt whose projection actually degraded,
+      // without touching admission's own subscription verdict.
+      test("#279: a subscription binding fences a degraded ambient-key attempt, and a later non-degraded attempt on the SAME credential is unaffected", async () => {
+        // Degrades exactly once (mirrors the real Keychain-record-moved
+        // failure this option exists for), then succeeds — so the SECOND
+        // run on this SAME binding proves the fence landed on the
+        // ambient-key's OWN mirrored bucket, not the subscription binding's
+        // bucket (`degradedMeteredBucketId`'s WHY, production-runtime.ts).
+        let projectCalls = 0;
+        const degradingBroker: CredentialBroker = {
+          async project() {
+            projectCalls++;
+            if (projectCalls === 1) {
+              throw new CredentialProjectionError(
+                "missing_subscription_record",
+              );
+            }
+            const projection: CredentialProjection = {
+              projectionId: `cred-279-${projectCalls}`,
+              kind: "claude_subscription_oauth",
+              syntheticHome: tmpDir,
+              syntheticConfigHome: path.join(tmpDir, ".claude"),
+              syntheticTmp: tmpDir,
+              env: {},
+              files: [],
+              destroy: async () => {},
+            };
+            return projection;
+          },
+        };
+        // The ambient key this test's own attempt runs on — the harness's
+        // `childEnv` defaults to `process.env`
+        // (`MultiProviderRunner.run` never threads a test-injected env
+        // through it), so this is the one seam that can put a real
+        // ANTHROPIC_API_KEY in front of it. Saved and restored so this
+        // test is deterministic standalone AND under
+        // `ANTHROPIC_API_KEY=dummy-not-real bun test`.
+        const priorKey = process.env.ANTHROPIC_API_KEY;
+        process.env.ANTHROPIC_API_KEY = "sk-ambient-279-test";
+        try {
+          const claude = countingTransport("claude-code", METERED_ZERO);
+          const step = resolveStepRoute({
+            stepKey: "hunter-reliability",
+            role: "hunter",
+            cliModel: "sonnet",
+          });
+          const registry = new DefaultTransportRegistry();
+          registry.register("claude-code", claude.transport);
+          const runtime = await createProductionRuntime({
+            workspaceRoot: tmpDir,
+            plan: createResolvedRoutePlan([step]),
+            binaryPath: claudeFixture.canonicalPath,
+            executableAllowlists: claudeAllowlist(claudeFixture),
+            registry,
+            mode: "conformance",
+            credentialBrokers: { "claude-code": degradingBroker },
+          });
+
+          const degraded = await runtime.runner.run(
+            makeStep(tmpDir, {
+              name: "hunter-reliability",
+              routeKey: step.routeFingerprint,
+              route: step.route,
+            }),
+          );
+          // The degrade itself: this ONE attempt DID reserve and, on the
+          // same metered-zero shape the OpenCode arm above fences on,
+          // settled unresolved — never silent (stderrTail says so).
+          expect(degraded.reservations?.length).toBe(1);
+          expect(degraded.reservations?.[0]?.state).toBe("unresolved_remote");
+          expect(degraded.stderrTail).toContain(
+            "ambient credential bills metered",
+          );
+          expect(claude.executeCount()).toBe(1);
+
+          // A SECOND attempt on the SAME binding — the broker now succeeds
+          // (`projectCalls === 2` above), so THIS attempt is a normal,
+          // non-degraded subscription run. If the fence above had landed on
+          // the binding's OWN bucket, this would be refused too; it must
+          // not be — that is the whole point of `degradedMeteredBucketId`
+          // mirroring a DIFFERENT credential's bucket.
+          const clean = await runtime.runner.run(
+            makeStep(tmpDir, {
+              name: "refuter",
+              routeKey: step.routeFingerprint,
+              route: step.route,
+            }),
+          );
+          expect(clean.status).toBe("ok");
+          expect(clean.reservations).toBeUndefined();
+          expect(claude.executeCount()).toBe(2);
+        } finally {
+          if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+          else process.env.ANTHROPIC_API_KEY = priorKey;
+        }
       });
     });
 

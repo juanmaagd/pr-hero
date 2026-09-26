@@ -26,6 +26,45 @@ export class OpenCodeSdkUnavailableError extends Error {
     this.name = "OpenCodeSdkUnavailableError";
   }
 }
+
+// ONE sentence for every "the SDK is not resolvable" throw: the loader and
+// the admission absence check. A version literal, not an interpolated
+// missing value — the operator-facing text must name the pin and must not
+// print the word "undefined". The transport test locks this sentence to
+// SUPPORTED_OPENCODE_SDK_VERSION so the two pins cannot drift.
+export function openCodeSdkUnavailableMessage(): string {
+  return (
+    "@opencode-ai/sdk@1.18.25 is not installed under ~/.prhero/node_modules. " +
+    "Run pr-hero upgrade --reconcile to install it."
+  );
+}
+
+// The counterpart for "installed but the import itself failed" — a
+// DIFFERENT fact from openCodeSdkUnavailableMessage above, which by this
+// point in loadOpenCodeSdk is already known to be false (the version check
+// just passed, so the package IS installed). Collapsing an import failure
+// into "not installed" is what shipped a compiled binary reporting
+// "@opencode-ai/sdk@1.18.25 is not installed" while it plainly was — the real
+// cause, a `ResolveMessage: Cannot find package 'which'` from cross-spawn
+// (nested inside the SDK's full /v2 index), was thrown away. This one
+// interpolates the failed specifier and the caught error's own name+message
+// on purpose: they are the only place the real cause still lives once this
+// throws. It names no install location: the specifier already carries the
+// real one, and ~/.prhero/node_modules is only where a COMPILED binary looks.
+// The version is a literal for the same reason as the sentence above, and
+// its transport test locks it to SUPPORTED_OPENCODE_SDK_VERSION the same way.
+export function openCodeSdkLoadFailedMessage(
+  specifier: string,
+  error: unknown,
+): string {
+  const detail =
+    error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return (
+    `@opencode-ai/sdk@1.18.25 is installed but failed to load "${specifier}": ` +
+    `${detail}. This is a load failure, not a missing install — that error ` +
+    "is the real cause."
+  );
+}
 export interface OpenCodeExecutableIdentity {
   readonly absolutePath: string;
   readonly verifiedExecutionPath: string;
@@ -277,12 +316,7 @@ export async function observeOpenCodeExecutable(
     // "Unsupported observed OpenCode pair: undefined/1.18.30" for every
     // compiled-binary install and made doctor report it as blocking.
     if (typeof sdkVersion !== "string" || sdkVersion.trim() === "")
-      throw new OpenCodeSdkUnavailableError(
-        "@opencode-ai/sdk is not resolvable from this installation " +
-          "(e.g. a compiled binary run without its node_modules), so the " +
-          "OpenCode transport cannot be admitted. Claude routes are " +
-          "unaffected.",
-      );
+      throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
     if (sdkVersion !== "1.18.25" || serverVersion !== "1.18.30")
       throw new Error(
         `Unsupported observed OpenCode pair: ${sdkVersion}/${serverVersion}`,

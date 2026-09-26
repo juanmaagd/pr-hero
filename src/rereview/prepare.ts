@@ -6,13 +6,19 @@
 import { normalizePath } from "#compare/compare";
 import { claimFingerprint } from "#pr/preflight";
 import type { Severity } from "#review/findings";
+import { parseFindingCommentBadge } from "#review/report";
 import { parseTriageMarker } from "#triage/triage";
 import {
   classifyPrior,
+  isRecoveredSeverity,
+  isRecoveredTier,
   type PhaseBResult,
   type PriorRecord,
   type PriorTriage,
+  type RecoveredSeverity,
   type RereviewCase,
+  SEVERITY_UNRECOVERABLE,
+  TIER_UNRECOVERABLE,
 } from "./classify";
 import {
   type FindingIdentity,
@@ -30,18 +36,20 @@ import {
   planDiscovery,
   resolveLastReviewedHead,
   restrictedDiscoveryFiles,
+  skippedDiscoveryMessage,
   unreachableLastHeadMessage,
 } from "./plan";
 import type { LiveFinding, StateFinding } from "./state";
 import type { VerifyQueueEntry } from "./verify";
 
 // cli.ts reaches the whole re-review surface through this module and never
-// imports rereview/plan.ts directly; these two travel with `prepareDiscovery`'s
+// imports rereview/plan.ts directly; these three travel with `prepareDiscovery`'s
 // output, so they ride the same facade. The return type stays unexported here
 // — cli.ts infers it, and nothing names it across this boundary.
 export {
   decideLastHeadDelta,
   incompleteLastReviewMessage,
+  skippedDiscoveryMessage,
   unreachableLastHeadMessage,
 };
 
@@ -79,6 +87,23 @@ export interface RereviewProvenance {
   discovery_range: string;
   discovery_restricted: boolean;
   discovery_skipped_empty_delta: boolean;
+  // pr-hero review #286 finding: `discovery_skipped_empty_delta` alone
+  // conflates two different truths — (a) there was genuinely nothing new to
+  // discover (case B's same head, or case C's empty restricted intersection:
+  // `pr/discovery.ts`'s `skipPlannedDiscovery`), and (b) there WAS a real,
+  // non-empty delta, but every file in it was excluded by the size gate /
+  // `.prheroignore` rules (`filterDiffByIgnoreRules`'s `droppedPaths`). Only
+  // (a) supports "no changes since the last review" wording; (b) requires
+  // naming what was excluded, or the summary repeats the exact false claim
+  // this field exists to prevent. Optional so an artifact written before this
+  // fix still parses (`readRereviewProvenance` below); such an artifact could
+  // only ever have reached (a) or (b) through the SAME `discovery_skipped_
+  // empty_delta` flag without recording which, so a reader of an old record
+  // has no way to tell either — this field is forward-only disambiguation,
+  // not a backfillable one.
+  discovery_skip_reason?: "no_delta" | "all_excluded";
+  // Populated only when `discovery_skip_reason` is `"all_excluded"`.
+  discovery_excluded_paths?: string[];
   prior_findings: number;
   settled_deterministically: number;
   verified: number;
@@ -96,7 +121,7 @@ export interface RereviewProvenance {
   re_tiered?: number;
   worsened?: readonly {
     priorId: string;
-    priorSev: Severity;
+    priorSev: RecoveredSeverity;
     discoverySev: Severity;
   }[];
 }
@@ -336,7 +361,7 @@ export function readRereviewProvenance(
     if (!Array.isArray(raw.worsened)) return problem("worsened");
     const rows: {
       priorId: string;
-      priorSev: Severity;
+      priorSev: RecoveredSeverity;
       discoverySev: Severity;
     }[] = [];
     for (const [i, row] of raw.worsened.entries()) {
@@ -344,7 +369,11 @@ export function readRereviewProvenance(
         !isRecord(row) ||
         typeof row.priorId !== "string" ||
         row.priorId.length === 0 ||
-        !isSeverity(row.priorSev) ||
+        // `priorSev` may carry the #206 sentinel (a worsening hit computed
+        // over an unrecoverable-severity prior, see classify.ts's
+        // `isStrictlyHigherSev`); `discoverySev` never does — it is always a
+        // fresh finding's real severity.
+        !isRecoveredSeverity(row.priorSev) ||
         !isSeverity(row.discoverySev)
       ) {
         return problem(`worsened[${i}]`);
@@ -356,6 +385,27 @@ export function readRereviewProvenance(
       });
     }
     worsened = rows;
+  }
+
+  // Optional, same "absent on every pre-fix artifact" reasoning as
+  // `last_review_complete` above — see `discovery_skip_reason`'s own WHY on
+  // the type. Validated when present so a corrupted value fails loud rather
+  // than silently mis-rendering an exclusion claim as a no-delta one.
+  const skipReason = raw.discovery_skip_reason;
+  if (
+    skipReason !== undefined &&
+    skipReason !== "no_delta" &&
+    skipReason !== "all_excluded"
+  ) {
+    return problem("discovery_skip_reason");
+  }
+  const excludedPaths = raw.discovery_excluded_paths;
+  if (
+    excludedPaths !== undefined &&
+    (!Array.isArray(excludedPaths) ||
+      !excludedPaths.every((p) => typeof p === "string"))
+  ) {
+    return problem("discovery_excluded_paths");
   }
 
   return {
@@ -371,6 +421,12 @@ export function readRereviewProvenance(
       discovery_range: raw.discovery_range,
       discovery_restricted: raw.discovery_restricted,
       discovery_skipped_empty_delta: raw.discovery_skipped_empty_delta,
+      ...(skipReason === undefined
+        ? {}
+        : { discovery_skip_reason: skipReason }),
+      ...(excludedPaths === undefined
+        ? {}
+        : { discovery_excluded_paths: excludedPaths as string[] }),
       prior_findings: raw.prior_findings as number,
       settled_deterministically: raw.settled_deterministically as number,
       verified: raw.verified as number,
@@ -416,8 +472,11 @@ function asLiveFinding(value: unknown): LiveFinding | null {
   if (!isRecord(value)) return null;
   const { id, sev, tier, channel, status, locs, c, claim } = value;
   if (typeof id !== "string" || id.length === 0) return null;
-  if (!isSeverity(sev)) return null;
-  if (tier !== "blocking" && tier !== "advisory") return null;
+  // A live row may legitimately carry the #206 sentinel (a prior whose
+  // severity/tier could not be recovered when it was built) — see
+  // classify.ts's `isRecoveredSeverity`/`isRecoveredTier`.
+  if (!isRecoveredSeverity(sev)) return null;
+  if (!isRecoveredTier(tier)) return null;
   if (channel !== "inline" && channel !== "outside") return null;
   if (
     status !== "carried" &&
@@ -541,23 +600,46 @@ export function priorsFromStateFindings(
   }));
 }
 
+// #206's fix: the fallback that runs whenever the previous summary's
+// `pr-hero-state` block cannot supply priors — missing, unparseable, or (the
+// ROUTINE case, not a rare one: a FIRST review never writes a state block at
+// all, see `postInlineFindings`'s `framing === undefined` branch in
+// src/pr/pr.ts) simply absent because this is the PR's second review. It
+// used to hardcode `sev: "WARNING"` / `tier: "advisory"` / `claim: ""` for
+// EVERY prior here — silently downgrading a live BLOCKER to a warning on
+// every second review of every PR, and collapsing every claim-less row onto
+// `claimFingerprint("")`'s shared constant.
+//
+// `body` is the posted comment's raw text (the marker line alone carries no
+// sev/tier/claim — `findingMarker` signs only the claim's fingerprint, never
+// the claim itself). `parseFindingCommentBadge` recovers the real values
+// from the SAME renderer that wrote them (`findingBodyLines`,
+// review/report.ts). When it cannot (a foreign/older comment shape, or a
+// truly empty body), the prior gets the explicit UNRECOVERABLE sentinels
+// instead of a guessed real value — see classify.ts's WHY on those types for
+// why every downstream consumer fails toward visibility, never a wrong
+// bucket.
 export function priorsFromPostedMarkers(
   posted: readonly {
     path: string;
     line: number;
     channel: "inline" | "outside";
+    body: string;
   }[],
 ): PriorRecord[] {
-  return posted.map((item, i) => ({
-    id: `R${String(i + 1).padStart(3, "0")}`,
-    sev: "WARNING",
-    tier: "advisory",
-    channel: item.channel,
-    locs: [`${item.path}:${item.line}`],
-    claim: "",
-    triage: null,
-    newThreadReply: false,
-  }));
+  return posted.map((item, i) => {
+    const recovered = parseFindingCommentBadge(item.body);
+    return {
+      id: `R${String(i + 1).padStart(3, "0")}`,
+      sev: recovered?.sev ?? SEVERITY_UNRECOVERABLE,
+      tier: recovered?.tier ?? TIER_UNRECOVERABLE,
+      channel: item.channel,
+      locs: [`${item.path}:${item.line}`],
+      claim: recovered?.claim ?? "",
+      triage: null,
+      newThreadReply: false,
+    };
+  });
 }
 
 // A previously posted per-finding comment, as much of it as the prior→comment

@@ -73,7 +73,7 @@ describe("parseAdmissionRecord / serializeAdmissionRecord", () => {
 });
 
 describe("countTerminalAttempts", () => {
-  test("counts completed, failed, cancelled, provider-started, and skipped", () => {
+  test("counts completed, failed, provider-started, and skipped — not a cancellation", () => {
     const records = [
       baseRecord({ status: "reserved", attemptNumber: 1 }),
       baseRecord({ status: "provider-started", attemptNumber: 2 }),
@@ -83,7 +83,9 @@ describe("countTerminalAttempts", () => {
       baseRecord({ status: "cancelled", attemptNumber: 6 }),
       baseRecord({ status: "unknown", attemptNumber: 7 }),
     ];
-    expect(countTerminalAttempts(records)).toBe(5);
+    // #164: cancelled produced nothing, so it is not a spent attempt.
+    // provider-started still counts until the signal handler settles it.
+    expect(countTerminalAttempts(records)).toBe(4);
   });
 });
 
@@ -146,6 +148,25 @@ describe("reserveAdmissionAttempt", () => {
     expect(record.reservationId).toBe(
       admissionRecordFingerprint(PR, HEAD, POLICY_HASH),
     );
+  });
+
+  test("a cancelled row does not block the next reservation", () => {
+    const cancelled = baseRecord({
+      status: "cancelled",
+      attemptNumber: 1,
+      createdAt: "2026-08-28T12:00:00.000Z",
+    });
+    const { record, created } = reserveAdmissionAttempt({
+      existing: [cancelled],
+      prNumber: PR,
+      headSha: HEAD,
+      policyHash: POLICY_HASH,
+      reservationTtlSeconds: 3600,
+      now: new Date("2026-08-28T12:30:00.000Z"),
+    });
+    expect(created).toBe(true);
+    expect(record.attemptNumber).toBe(2);
+    expect(record.status).toBe("reserved");
   });
 
   test("is idempotent for an active reservation within TTL", () => {

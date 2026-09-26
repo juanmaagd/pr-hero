@@ -10,6 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { PR_FINDING_MARKER_PREFIX, parseFindingMarker } from "#pr/preflight";
+import type { RecoveredTier } from "#rereview/classify";
 import type { ParsedStateBlock } from "#rereview/state";
 import type { Tier } from "#review/findings";
 import type { LocalConfig } from "#review/preflight";
@@ -227,14 +228,22 @@ export function nextStateReviewCount(input: {
 }
 
 export function priorTierScore(
-  findings: readonly { tier: Tier }[],
+  findings: readonly { tier: RecoveredTier }[],
   weights: Pick<CiReviewPolicy, "blockingWeight" | "advisoryWeight">,
 ): PriorTierScore {
   let blocking = 0;
   let advisory = 0;
+  // A state-block row can now carry #206's `TIER_UNRECOVERABLE` sentinel.
+  // Counting it as advisory (the old `else` branch's behavior) would
+  // silently under-weight the score exactly like the bug this reuses the
+  // sentinel to fix — so it sets `failOpen` instead, reusing the SAME
+  // "run rather than trust an incomplete count" signal this type already
+  // carries for the untrusted-actor case below.
+  let unrecoverable = 0;
   for (const finding of findings) {
     if (finding.tier === "blocking") blocking++;
-    else advisory++;
+    else if (finding.tier === "advisory") advisory++;
+    else unrecoverable++;
   }
   return {
     blocking,
@@ -242,6 +251,7 @@ export function priorTierScore(
     score:
       blocking * weights.blockingWeight + advisory * weights.advisoryWeight,
     source: "state",
+    ...(unrecoverable > 0 ? { failOpen: true } : {}),
   };
 }
 
@@ -744,18 +754,10 @@ export function ciReviewManualRequiredDetail(
   verdict: Extract<CiReviewAdmissionVerdict, { action: "manual-required" }>,
 ): string {
   const { reason, reviewCount, maxAttempts } = verdict;
-  const override =
-    "Run `pr-hero review --pr <n> --post --force` locally to override.";
   switch (reason) {
     case "max-attempts-exhausted":
-      return (
-        `automatic review budget exhausted (${reviewCount}/${maxAttempts} attempts on this PR). ` +
-        override
-      );
+      return `automatic review budget exhausted (${reviewCount}/${maxAttempts} attempts on this PR).`;
     case "manual-only-policy":
-      return (
-        "ci_review_policy is manual_only and this PR already has a review. " +
-        override
-      );
+      return "ci_review_policy is manual_only and this PR already has a review.";
   }
 }

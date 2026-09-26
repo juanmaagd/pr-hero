@@ -33,12 +33,17 @@ import {
   priorsFromStateFindings,
   type RereviewProvenance,
   shouldAbortEmptyDiscovery,
+  skippedDiscoveryMessage,
   toRereviewProvenance,
   unreachableLastHeadMessage,
 } from "#rereview/prepare";
 import { parseStateBlock } from "#rereview/state";
 import type { VerifyQueueEntry } from "#rereview/verify";
-import { allExcludedMessage, emptyDiffMessage } from "#review/preflight";
+import {
+  allExcludedMessage,
+  emptyDiffMessage,
+  resolveMaxVerificationSteps,
+} from "#review/preflight";
 import type { DiffStat } from "#review/report";
 import {
   computeDiffStatAndSizeGate,
@@ -215,6 +220,22 @@ export async function resolvePrDiscovery(params: {
   const rereview = toRereviewProvenance(prepared, postedFindings.length);
   if (rereview !== undefined && skipDiscovery) {
     rereview.discovery_skipped_empty_delta = true;
+    // pr-hero review #286 finding: this flag alone cannot tell a reader WHY
+    // discovery is empty, and the two reasons need different wording — see
+    // `RereviewProvenance.discovery_skip_reason`'s own WHY. `skipPlannedDiscovery`
+    // is the (a) branch (case B / case C's empty restricted intersection,
+    // decided before any diff was even read); anything reaching here with
+    // `skipPlannedDiscovery` false got a REAL diff that `filterDiffByIgnoreRules`
+    // then emptied out — but ONLY when it actually dropped something. A
+    // `git diff` that came back empty on its own (no exclusions recorded)
+    // is still "nothing to discover", not "everything was excluded".
+    rereview.discovery_skip_reason =
+      !skipPlannedDiscovery && effectiveDiff.droppedPaths.length > 0
+        ? "all_excluded"
+        : "no_delta";
+    if (rereview.discovery_skip_reason === "all_excluded") {
+      rereview.discovery_excluded_paths = effectiveDiff.droppedPaths;
+    }
   }
 
   let verifyQueue: ReturnType<typeof buildPhaseBQueue>["queued"] = [];
@@ -258,6 +279,25 @@ export async function resolvePrDiscovery(params: {
         : issueComments.find((c) => c.id === existingSummaryId);
     const summaryUpdatedAt = summaryComment?.updated_at ?? null;
     const state = parseStateBlock(summaryComment?.body ?? "");
+    // #206: `postedFindings` (PostedFindingComment[]) never carries the raw
+    // comment body — only the parsed marker fields (findingMarker signs the
+    // claim's fingerprint, never the claim text) — so recovering a fallback
+    // prior's real sev/tier/claim needs the body looked up from whichever
+    // fetch actually produced this comment. Built once, not per-item.
+    //
+    // Two maps, never one: review comments and issue comments are different
+    // GitHub resources from different endpoints, and nothing documents that
+    // their numeric ids share a namespace. A single map keyed by id alone
+    // would let a colliding issue comment silently hand this prior ANOTHER
+    // finding's sev/tier/claim — a plausible wrong value, which is worse than
+    // the UNRECOVERABLE sentinel this recovery exists to fall back on.
+    // `p.channel` already says which endpoint produced each posted finding.
+    const reviewBodyById = new Map<number, string>(
+      reviewComments.map((c) => [c.id, c.body] as const),
+    );
+    const issueBodyById = new Map<number, string>(
+      issueComments.map((c) => [c.id, c.body] as const),
+    );
     const rawPriors =
       state === null
         ? priorsFromPostedMarkers(
@@ -265,6 +305,10 @@ export async function resolvePrDiscovery(params: {
               path: p.livePath ?? p.marker.path,
               line: p.liveLine ?? p.marker.line,
               channel: p.channel === "issue" ? "outside" : "inline",
+              body:
+                (p.channel === "issue"
+                  ? issueBodyById.get(p.id)
+                  : reviewBodyById.get(p.id)) ?? "",
             })),
           )
         : priorsFromStateFindings(state.findings);
@@ -297,6 +341,24 @@ export async function resolvePrDiscovery(params: {
         (s) => s.status !== "queued",
       ).length;
     }
+  }
+
+  // pr-hero review #286 finding: the discovery-skip notice used to print
+  // BEFORE this block ran, when `verifyQueue` did not exist yet — an empty
+  // notice claiming "not re-verified now" while case B's `applied`/
+  // `case_b_reply` triggers or case C's `touched()` (rereview/classify.ts)
+  // may have just queued priors for the SAME pass's verifier. Printed here,
+  // after the queue is a real, final number, the same "said once, in CI and
+  // out" rule as the unreachable/incomplete notices above.
+  if (rereview !== undefined && skipDiscovery) {
+    const skipped = skippedDiscoveryMessage({
+      headSha,
+      reason: rereview.discovery_skip_reason ?? "no_delta",
+      excludedPaths: rereview.discovery_excluded_paths ?? [],
+      queuedForVerification: verifyQueue.length,
+      maxVerificationSteps: resolveMaxVerificationSteps(config),
+    });
+    log(isCi ? formatWorkflowCommand("notice", skipped) : skipped);
   }
 
   let diffStat: DiffStat;

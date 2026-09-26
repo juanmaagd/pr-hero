@@ -526,6 +526,62 @@ function buildOpenCodeProjection(
 // traversal, a prototype key, or anything requiring escaping.
 const OPENCODE_PROVIDER_NAME = /^[a-z0-9][a-z0-9_-]*$/;
 
+type OpenCodeApiRecordLookup =
+  | { readonly ok: true; readonly record: OpenCodeProviderRecord }
+  | {
+      readonly ok: false;
+      readonly failureClass: CredentialProjectionFailureClass;
+    };
+
+// #280: the read+parse+validate sequence for ONE provider's `type: "api"`
+// entry, shared by OpenCodeApiTokenBroker (below, fails loud on every
+// outcome) and OpenCodeFreeBroker (fails loud on NONE of them — every
+// `ok: false` collapses to the empty tree). Splitting this out is the same
+// move buildOpenCodeProjection's header already made for the create+lstat+
+// hash sequence: a third hand-maintained copy is exactly the drift that
+// comment warns about, and here it would additionally let the two callers'
+// validation silently diverge (e.g. one broker accepting a record shape the
+// other refuses).
+async function lookupOpenCodeApiRecord(
+  readerFn: () => Promise<string>,
+  provider: string,
+): Promise<OpenCodeApiRecordLookup> {
+  let raw: string;
+  try {
+    raw = await readerFn();
+  } catch {
+    return { ok: false, failureClass: "source_read_failed" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, failureClass: "malformed_payload" };
+  }
+
+  if (typeof parsed !== "object" || parsed === null) {
+    return { ok: false, failureClass: "malformed_payload" };
+  }
+
+  // Object.hasOwn, never a bare index — see OpenCodeApiTokenBroker's own note
+  // (pr-hero F001 lineage, PR #162): a bare index reaches Object.prototype.
+  if (!Object.hasOwn(parsed, provider)) {
+    return { ok: false, failureClass: "missing_provider_record" };
+  }
+  const record = (parsed as Record<string, unknown>)[provider];
+  if (typeof record !== "object" || record === null) {
+    return { ok: false, failureClass: "missing_provider_record" };
+  }
+  // The mirror of the OAuth broker's `type !== "oauth"` lock: this lookup
+  // promises an API token specifically, never an OAuth record.
+  if ((record as Record<string, unknown>).type !== "api") {
+    return { ok: false, failureClass: "missing_provider_record" };
+  }
+
+  return { ok: true, record: record as OpenCodeProviderRecord };
+}
+
 export class OpenCodeApiTokenBroker implements CredentialBroker {
   private readonly provider: string;
   private readonly readerFn: () => Promise<string>;
@@ -563,82 +619,89 @@ export class OpenCodeApiTokenBroker implements CredentialBroker {
       );
     }
 
-    let raw: string;
-    try {
-      raw = await this.readerFn();
-    } catch {
-      throw new CredentialProjectionError("source_read_failed");
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      throw new CredentialProjectionError("malformed_payload");
-    }
-
-    if (typeof parsed !== "object" || parsed === null) {
-      throw new CredentialProjectionError("malformed_payload");
-    }
-
-    // Object.hasOwn, never a bare index. The bug this guards was real and
-    // found by pr-hero on its own PR #162, in `lookupModelPricing` (the
-    // pricing catalogue, deleted by #197): a bare index reaches
-    // Object.prototype, so looking up "constructor" returned the Object
-    // constructor and the lookup answered true for something the store never
-    // held.
-    //
-    // HONESTY about what this line currently buys: with
+    // HONESTY about the hasOwn guard inside the shared lookup: with
     // OPENCODE_PROVIDER_NAME as it stands, the only Object.prototype key that
     // can even be a provider name is `constructor`, and its value is a
-    // FUNCTION — so the `typeof record !== "object"` check below already
-    // refuses it, and removing this line breaks no test today (verified by
+    // FUNCTION — so the `typeof record !== "object"` check already refuses
+    // it, and removing the hasOwn guard breaks no test today (verified by
     // mutation, 2026-09-01). It is the second lock, and it is the one that
     // stays correct if the grammar is ever widened or the source stops being
     // JSON.parse output. Keep both; do not read the passing suite as proof
-    // that this line is exercised.
-    if (!Object.hasOwn(parsed, this.provider)) {
-      throw new CredentialProjectionError("missing_provider_record");
-    }
-    const record = (parsed as Record<string, unknown>)[this.provider];
-    if (typeof record !== "object" || record === null) {
-      throw new CredentialProjectionError("missing_provider_record");
-    }
-    // The mirror of the OAuth broker's lock — see the header comment.
-    if ((record as Record<string, unknown>).type !== "api") {
-      throw new CredentialProjectionError("missing_provider_record");
+    // that line is exercised.
+    const lookup = await lookupOpenCodeApiRecord(this.readerFn, this.provider);
+    if (!lookup.ok) {
+      throw new CredentialProjectionError(lookup.failureClass);
     }
 
-    return buildOpenCodeProjection(
-      input.kind,
-      this.provider,
-      record as OpenCodeProviderRecord,
-    );
+    return buildOpenCodeProjection(input.kind, this.provider, lookup.record);
   }
 }
 
 // ---------------------------------------------------------------------------
-// #182: the provider-free route — an OpenCode model the provider itself
-// declares free at runtime (all cost leaves === 0, status active). Ported
-// from buildOpenCodeProjection's layout+lstat defense, MINUS the credential:
+// #182 → #280: the provider-free route — an OpenCode model the provider
+// itself declares free at runtime (all cost leaves === 0, status active).
 //
-//  1. It reads NOTHING. No readerFn, no auth.json lookup, no source to fail
-//     — so `source_read_failed` is structurally unreachable and there is no
-//     ambient credential to leak. The constructor takes no options on purpose.
-//  2. It writes NO auth file. The projection is an empty 0700 tree (HOME /
-//     TMPDIR / XDG_* pinned to it) with `files: []`. First tried with no file
-//     at all and verified live: `opencode run --model
-//     opencode/muse-spark-1.3-contributor-free` under the projected env
-//     authenticates with nothing and bills $0 (see live ledger in the slice).
-//     If a future binary requires auth.json to exist, the fix is to write
-//     `{}` — not to project any real record.
+// #182's ORIGINAL invariant was "reads nothing, projects nothing" — sound
+// for a per-token free model, wrong for a flat-fee API-key plan priced at
+// $0 (zai-coding-plan): that provider still REQUIRES its key, so the empty
+// tree left it running keyless against a provider that rejects the request.
+// #280's relaxed invariant, and the reasoning behind each clause:
+//
+//  1. It projects THIS PROVIDER's own `type: "api"` record from auth.json,
+//     and ONLY that — never another provider's, never an OAuth record for
+//     the same provider name. The read+parse+validate is the exact same
+//     `lookupOpenCodeApiRecord` OpenCodeApiTokenBroker uses; the two brokers
+//     must never silently diverge on what counts as a usable record.
+//  2. EVERY other outcome of that lookup — the file is absent, unreadable,
+//     malformed JSON, has no entry for this provider, or the entry is not
+//     `type: "api"` — collapses to the SAME empty 0700 tree #182 always
+//     produced (`files: []`, no auth file written at all). Deliberately NOT
+//     a fail-closed throw for the read/parse failures: a fresh machine or a
+//     Zen-only user has no auth.json for zai-coding-plan at all, and that is
+//     the common case this route exists to keep working, not an error to
+//     surface. #182's `source_read_failed` header note ("structurally
+//     unreachable") no longer holds — this route reads now — but its
+//     conclusion does: nothing about a missing or corrupt STORE should stop
+//     a free run, only a symlinked LAYOUT should (clause 3).
 //  3. It MUST NEVER throw `missing_subscription_record`. harness.ts degrades
 //     exactly that class to the operator environment, and degrading a free
 //     route onto ambient credentials would be the failure this issue forbids
-//     (a free run silently spending a real token). Only fail-closed classes:
-//     `projection_layout_invalid` on a symlinked layout. Nothing else throws.
+//     (a free run silently spending a real token, or now, running under the
+//     WRONG provider's ambient key). Only fail-closed class: still
+//     `projection_layout_invalid` on a symlinked layout. Nothing else
+//     throws — the record lookup above never gets the chance to.
+//
+// Accepted cost (owner decision, #280, 2026-09-24): a model that flips from
+// free to paid mid-run can spend on one attempt before the free-nonzero
+// settlement rule fences the bucket — unchanged from #182, since billing
+// stays keyed on `provider_free`/"free" regardless of what this broker
+// projects. And an OpenCode Zen user with a stored `opencode` api key now
+// runs Zen's free models with that key rather than keyless — accepted
+// because it is strictly an upgrade (a working credential where none
+// existed), never a downgrade.
 // ---------------------------------------------------------------------------
 export class OpenCodeFreeBroker implements CredentialBroker {
+  private readonly provider: string;
+  private readonly readerFn: () => Promise<string>;
+
+  constructor(provider: string, options: OpenCodeAuthBrokerOptions = {}) {
+    // Same grammar lock as OpenCodeApiTokenBroker, same reason: fail loud at
+    // construction, not mid-run, and the provider is interpolated into a
+    // JSON key by the shared lookup below.
+    if (!OPENCODE_PROVIDER_NAME.test(provider)) {
+      throw new Error(
+        `Invalid OpenCode provider name: ${JSON.stringify(provider)} (expected ${OPENCODE_PROVIDER_NAME})`,
+      );
+    }
+    this.provider = provider;
+    if (options.readerFn !== undefined) {
+      this.readerFn = options.readerFn;
+    } else {
+      const authPath = options.authFilePath ?? resolveOpenCodeAuthPath();
+      this.readerFn = () => Bun.file(authPath).text();
+    }
+  }
+
   async project(input: {
     readonly sessionId: string;
     readonly credentialRef: string;
@@ -652,6 +715,15 @@ export class OpenCodeFreeBroker implements CredentialBroker {
       throw new Error(
         `Unsupported credential kind: ${input.kind} (OpenCodeFreeBroker projects only provider_free)`,
       );
+    }
+
+    // Clause 1+2: a usable record projects; every other lookup outcome
+    // (including a thrown read/parse error) falls through to the empty tree
+    // below rather than propagating — `lookup.failureClass` is deliberately
+    // never inspected here.
+    const lookup = await lookupOpenCodeApiRecord(this.readerFn, this.provider);
+    if (lookup.ok) {
+      return buildOpenCodeProjection(input.kind, this.provider, lookup.record);
     }
 
     const parentDir = path.join(tmpdir(), "prhero-cred-projections");

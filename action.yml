@@ -36,7 +36,7 @@ inputs:
   max-changed-lines:
     description: 'Size gate: skip the review when the diff exceeds this many changed lines. 0 disables the limit.'
     required: false
-    default: '1000'
+    default: '4000'
   max-changed-files:
     description: 'Size gate: skip the review when the diff exceeds this many changed files. 0 disables the limit.'
     required: false
@@ -53,6 +53,10 @@ inputs:
     description: 'Write a Markdown summary to the job step summary'
     required: false
     default: 'true'
+  force:
+    description: 'Bypass CI skip gates for this run: the size gate, review-policy admission, and the budget ceiling. The workflow sets this when a pull request comment is exactly `/pr-hero review`.'
+    required: false
+    default: 'false'
 
 outputs:
   status:
@@ -148,6 +152,7 @@ runs:
         BUDGET_USD_INPUT: ${{ inputs.budget-usd }}
         POST_INPUT: ${{ inputs.post }}
         STEP_SUMMARY_INPUT: ${{ inputs.step-summary }}
+        FORCE_INPUT: ${{ inputs.force }}
       run: |
         # NEVER redirect stderr away in this step: pr-hero's log() writes to
         # process.stderr unconditionally, and GitHub Actions scans BOTH
@@ -181,5 +186,6 @@ runs:
         if [ -n "$MAX_CHANGED_LINES_INPUT" ]; then set -- "$@" --max-changed-lines "$MAX_CHANGED_LINES_INPUT"; fi
         if [ -n "$MAX_CHANGED_FILES_INPUT" ]; then set -- "$@" --max-changed-files "$MAX_CHANGED_FILES_INPUT"; fi
         if [ -n "$BUDGET_USD_INPUT" ]; then set -- "$@" --budget-usd "$BUDGET_USD_INPUT"; fi
+        if [ "$FORCE_INPUT" = "true" ]; then set -- "$@" --force; fi
 
         bun "${{ github.action_path }}/bin/pr-hero.js" "$@"
