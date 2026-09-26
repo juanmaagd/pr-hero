@@ -2084,6 +2084,47 @@ function deniedFreeTierGatewayTools(
   return freeTierGatewayTools.filter((tool) => !grantedIds.has(tool));
 }
 
+// Fail-closed launch-seam guard. The tools-map deletion loop further down
+// (search FREE_TIER_GATEWAY_TOOLS) is safe ONLY on the assumption that the
+// server behind `handle` was launched with `deniedGatewayTools` set to
+// OpenCode permission "ask" — that is the ONLY thing standing between a
+// deleted `bash: false` and bash running under OpenCode's default
+// permission. `launchServer` is caller-injectable
+// (`CreateOpenCodeClientOptions.launchServer` / `TransportFactoryOptions.
+// launchServer`), so that assumption is a claim about an ARGUMENT, not a
+// fact about this module — a launcher that silently ignores its second
+// parameter (or was never updated to honour it) would make it false with no
+// visible symptom until a live gateway 403, or worse, a bash call that
+// should have been denied actually running.
+//
+// Verified, not trusted: `handle.gatewayAsk` is the launcher's OWN
+// attestation of what it wrote, and this compares it against exactly what
+// this call asked to have gated — sorted, so key order never causes a
+// false mismatch. Gated on a non-empty ask: a route that asks for nothing
+// (every non-`provider_free` route) needs no attestation, and passes
+// regardless of what a handle does or does not attest.
+function gatewayAskAttestationError(
+  deniedGatewayTools: readonly string[],
+  attestedGatewayAsk: readonly string[] | undefined,
+): string | undefined {
+  if (deniedGatewayTools.length === 0) return undefined;
+  const expected = [...deniedGatewayTools].sort();
+  const attested = [...(attestedGatewayAsk ?? [])].sort();
+  const matches =
+    expected.length === attested.length &&
+    expected.every((tool, index) => tool === attested[index]);
+  if (matches) return undefined;
+  return (
+    "the opencode server did not attest the free-tier gateway ask posture " +
+    `this session requires (expected [${expected.join(", ")}], attested ` +
+    `[${attested.join(", ")}]); refusing to lift bash/read off the ` +
+    "tools-map deny list before a session is created. The deletion is only " +
+    "safe because the server gates those tools itself on its own " +
+    "permission surface — an unattested server would leave bash at " +
+    "OpenCode's default permission instead."
+  );
+}
+
 // ENUMERATE, never trust a default. Every id the provider reports is written
 // into the map explicitly — the allows true, everything else false — so no key
 // is ever absent. An absent key asks for the provider's default, and
@@ -2435,6 +2476,20 @@ export function createOpenCodeClient(
       }
       const handle = server ?? (await serverPromise);
       checkCancelled();
+      // Free-tier gateway fix: verify the launch seam's assumption BEFORE
+      // the tools-map deletion loop, tool enumeration, session.create, or
+      // any prompt — see gatewayAskAttestationError's WHY above.
+      const gatewayAttestationError = gatewayAskAttestationError(
+        deniedGatewayTools,
+        handle.gatewayAsk,
+      );
+      if (gatewayAttestationError !== undefined) {
+        // No session of this call exists yet, so an otherwise idle server is
+        // released here rather than left running until the run tears down;
+        // one shared with live sessions stays up for them.
+        await releaseIdleServer();
+        throw new Error(gatewayAttestationError);
+      }
       const api = sdk.createOpencodeClient({
         baseUrl: handle.url,
         fetch: evidence.wrapFetch((request) => {

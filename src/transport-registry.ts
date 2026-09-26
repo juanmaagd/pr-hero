@@ -456,8 +456,16 @@ export interface TransportFactoryOptions {
   readonly spawnFn?: typeof Bun.spawn;
   readonly openCodeClient?: OpenCodeClientLike;
   readonly loadSdk?: () => Promise<OpenCodeSdkLike>;
+  // Free-tier gateway fix: widened to the same two-parameter signature as
+  // `CreateOpenCodeClientOptions.launchServer` (opencode-client.ts) so an
+  // injector here sees the second parameter exists — an injected launcher
+  // that ignores it entirely still type-checks (fewer declared parameters
+  // is a valid JS callback shape), which is exactly why createSession's own
+  // attestation check exists: the type alone cannot force a launcher to
+  // honour this argument, only createSession's runtime check can.
   readonly launchServer?: (
     mcp?: OpenCodeMcpConfig,
+    freeTierGatewayAsk?: readonly string[],
   ) => Promise<OpenCodeServerHandle>;
   readonly readSystemPrompt?: (path: string) => Promise<string>;
   readonly readMcpConfig?: (path: string) => Promise<string>;

@@ -49,6 +49,22 @@ async function drainToNowhere(stream: unknown): Promise<void> {
 export interface OpenCodeServerHandle {
   readonly url: string;
   readonly pid: number;
+  // Free-tier gateway fix: the gateway-ask ids this handle's OWN launcher
+  // actually wrote into the server's `permission` config (sorted) — see
+  // `freeTierGatewayAsk` below and `launchOpenCodeServer`'s config assembly
+  // for where it is decided. opencode-client.ts's createSession reads this
+  // BACK before it ever deletes a `false` entry off the tools map for a
+  // denied id, so the deletion is only ever as safe as this field is honest.
+  //
+  // Optional, not required, by explicit scope decision: dozens of test
+  // fakes across the suite construct a bare `{url, pid, close}` literal for
+  // routes that never touch the free-tier gate, and turning every one of
+  // them into a required-field update would be unrelated churn far outside
+  // this fix. Absence is read as "this launcher attests nothing" by the
+  // check in createSession, which fails CLOSED on it — an unattested
+  // launcher can never satisfy a non-empty ask requirement, so an absent
+  // field is exactly as safe as one that is present and empty.
+  readonly gatewayAsk?: readonly string[];
   close(): Promise<void>;
 }
 
@@ -179,6 +195,12 @@ export async function launchOpenCodeServer(
   for (const tool of freeTierGatewayAsk ?? []) {
     gatewayAskPermission[tool] = "ask";
   }
+  // The handle's attestation (OpenCodeServerHandle.gatewayAsk): read back
+  // from what this function is ABOUT to write into `permission`, not echoed
+  // from the `freeTierGatewayAsk` argument — a duplicate in that argument
+  // must not inflate the attested set, and the attestation must describe
+  // this config, not this call's input.
+  const attestedGatewayAsk = Object.keys(gatewayAskPermission).sort();
   const config: {
     mcp?: OpenCodeMcpConfig;
     // Widened to "ask" | "deny" rather than an intersection with
@@ -334,7 +356,7 @@ export async function launchOpenCodeServer(
     })();
   });
 
-  return { url, pid: proc.pid, close };
+  return { url, pid: proc.pid, gatewayAsk: attestedGatewayAsk, close };
 }
 
 // #149: the environment the server may inherit from pr-hero's own process.
@@ -443,6 +465,14 @@ export async function launchProjectedOpenCodeServer(
   return {
     url: handle.url,
     pid: handle.pid,
+    // Carried through, not dropped: this function builds a FRESH handle
+    // object rather than returning `handle` itself (its `close` has to wrap
+    // `projection.destroy()`), and forgetting a field here silently loses
+    // it for every production caller — `defaultOpenCodeLaunchServer` and
+    // `openCodeLaunchServerFor` both go through this path, so a dropped
+    // `gatewayAsk` here would empty the attestation `createSession` reads
+    // in the ONE codepath production actually runs.
+    gatewayAsk: handle.gatewayAsk,
     close: async () => {
       try {
         await handle.close();

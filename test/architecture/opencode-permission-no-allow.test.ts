@@ -16,10 +16,18 @@
 // way this directory's other architecture tests already enforce
 // call-shape invariants tools/tsc cannot (review-shell-invariants.test.ts).
 //
-// Call-SHAPE tokens, not whitespace-sensitive multi-line literals: a reformat
-// (biome, or a wrapped argument list) must never flip this guard, so the
-// pattern matches across the field name and its literal value regardless of
-// intervening whitespace or line breaks.
+// The pattern's `\s*` already spans newlines (JS `\s` includes `\n`), so it
+// is applied to each file's FULL content rather than line-by-line — a
+// reformat (biome, or a wrapped argument list) that splits `reply:` from
+// its value across lines still trips it. Comments are blanked out first
+// (see `blankComments`) so a literal mentioned inside one is not flagged.
+//
+// What this guard does NOT catch: an allow value that reaches `reply`/
+// `response` through a variable or computed expression (`reply: answer`,
+// `respond({ response: getVerdict() })`) rather than a literal `"once"` /
+// `"always"` token. It is a lexical net over literals, not a proof that no
+// call site can ever allow — a pass means "no literal allow found", not
+// "provably safe".
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
@@ -41,35 +49,105 @@ function getAllTsFiles(dir: string): string[] {
   return files;
 }
 
-// Matches `reply: "once"` / `response: 'always'` etc. — the two SDK field
-// names that carry this vocabulary — across any whitespace/newline, so a
-// reformatted call site still trips it.
-const ALLOW_LIKE_REPLY = /\b(reply|response)\s*:\s*["'](once|always)["']/;
+// Matches `reply: "once"` / `response: 'always'` etc. across any
+// whitespace, INCLUDING a line break between the field name, the colon, and
+// the literal — `\s` already includes `\n`. Global so a single scan can
+// report every offender in a file, not just the first.
+const ALLOW_LIKE_REPLY = /\b(reply|response)\s*:\s*["'](once|always)["']/g;
+
+// Blanks `//` line comments and `/* */` block comments to spaces, keeping
+// every newline in place so (a) a literal mentioned inside a comment never
+// matches and (b) a line number recovered from a later match index in the
+// blanked text is identical to the line number in the original file.
+function blankComments(text: string): string {
+  const blank = (match: string) => match.replace(/[^\n]/g, " ");
+  const withoutBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, blank);
+  return withoutBlockComments.replace(/\/\/.*$/gm, blank);
+}
+
+function lineNumberAt(text: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i++) {
+    if (text[i] === "\n") line += 1;
+  }
+  return line;
+}
+
+function findAllowLikeReplies(
+  content: string,
+): Array<{ line: number; text: string }> {
+  const scanned = blankComments(content);
+  const offenders: Array<{ line: number; text: string }> = [];
+  for (const match of scanned.matchAll(ALLOW_LIKE_REPLY)) {
+    offenders.push({
+      line: lineNumberAt(scanned, match.index ?? 0),
+      // Collapsed to one line for a readable failure message — the
+      // OFFENSE (which line it starts on) is what `line` is for.
+      text: match[0].replace(/\s+/g, " ").trim(),
+    });
+  }
+  return offenders;
+}
 
 describe("no src/ code ever answers an OpenCode permission request with allow (#157, provider_free)", () => {
   test("no reply/response literal in src/ is 'once' or 'always'", () => {
     const offenders: Array<{ file: string; line: number; text: string }> = [];
     for (const file of getAllTsFiles(SRC_DIR)) {
-      const lines = fs.readFileSync(file, "utf8").split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] ?? "";
-        if (line.trim().startsWith("//")) continue;
-        if (ALLOW_LIKE_REPLY.test(line)) {
-          offenders.push({ file, line: i + 1, text: line.trim() });
-        }
+      const content = fs.readFileSync(file, "utf8");
+      for (const offender of findAllowLikeReplies(content)) {
+        offenders.push({ file, ...offender });
       }
     }
     expect(offenders).toEqual([]);
   });
 
-  // A pure absence check proves nothing about whether the pattern CAN match
-  // at all — this pins the regex itself against both SDK literals, so a
-  // typo in ALLOW_LIKE_REPLY above cannot silently turn the test above into
-  // a vacuous pass.
-  test("the guard's own pattern actually matches both allow-like literals", () => {
-    expect(ALLOW_LIKE_REPLY.test('reply: "once"')).toBe(true);
-    expect(ALLOW_LIKE_REPLY.test("reply: 'always'")).toBe(true);
-    expect(ALLOW_LIKE_REPLY.test('response: "always"')).toBe(true);
-    expect(ALLOW_LIKE_REPLY.test('reply: "reject"')).toBe(false);
+  // A pure absence check proves nothing about whether the scan CAN match at
+  // all — these pin the scan itself against both allow-like literals (on
+  // one line and split across two), so a typo in the pattern above cannot
+  // silently turn the test above into a vacuous pass.
+  test("matches both allow-like literals on a single line", () => {
+    expect(findAllowLikeReplies('reply: "once"')).toHaveLength(1);
+    expect(findAllowLikeReplies("reply: 'always'")).toHaveLength(1);
+    expect(findAllowLikeReplies('response: "always"')).toHaveLength(1);
+  });
+
+  test("matches an allow-like literal split across a line break", () => {
+    expect(findAllowLikeReplies('reply:\n    "once"')).toHaveLength(1);
+    expect(findAllowLikeReplies("response:\n'always'")).toHaveLength(1);
+  });
+
+  test("does not match a reject literal", () => {
+    expect(findAllowLikeReplies('reply: "reject"')).toHaveLength(0);
+  });
+
+  test("does not match an allow literal hidden in a // comment", () => {
+    expect(findAllowLikeReplies('// reply: "once"')).toHaveLength(0);
+    expect(findAllowLikeReplies('doStuff(); // reply: "always"')).toHaveLength(
+      0,
+    );
+  });
+
+  test("does not match an allow literal hidden in a /* */ comment, including across lines", () => {
+    expect(findAllowLikeReplies('/* reply: "once" */')).toHaveLength(0);
+    expect(findAllowLikeReplies('/*\n  reply:\n    "once"\n*/')).toHaveLength(
+      0,
+    );
+  });
+
+  // Discrimination. This is the exact defect this file used to carry: the
+  // OLD approach split file content on "\n" and tested the (non-global)
+  // pattern against each line in isolation, so a literal split across two
+  // lines never appeared whole on any single line and was never caught. A
+  // future regression back to per-line scanning is caught here immediately,
+  // without needing to plant anything in src/.
+  test("a per-line scan misses the multi-line split that the full-text scan catches", () => {
+    const splitAcrossLines = 'reply:\n    "once"';
+    const perLinePattern = /\b(reply|response)\s*:\s*["'](once|always)["']/;
+    const perLineHit = splitAcrossLines
+      .split("\n")
+      .some((line) => perLinePattern.test(line));
+
+    expect(perLineHit).toBe(false);
+    expect(findAllowLikeReplies(splitAcrossLines)).toHaveLength(1);
   });
 });
