@@ -27,7 +27,12 @@
 //   2. Every `<...>.permission.reply(...)` / `.respond(...)` call passes an
 //      object literal whose `reply` / `response` is the literal "reject" — so
 //      an allow value arriving through a variable or a computed expression
-//      (`reply: answer`) is flagged too, not just a literal one.
+//      (`reply: answer`) is flagged too, not just a literal one. The object
+//      must also be FULLY verifiable: an allowlist of shapes, not a list of
+//      known tricks. Only plain `key: value` / shorthand entries with plain
+//      names, exactly one reply/response entry, and no spread, computed key,
+//      getter, setter or method — any of which can replace the answer at
+//      runtime (`{ reply: "reject", ...override }` sends override's value).
 // What it still cannot see: a permission reply made through an alias of the
 // client that does not spell `permission.reply`/`permission.respond` at the
 // call site. Rule 3 below at least proves the scan sees the one call that
@@ -81,6 +86,46 @@ function literalText(node: ts.Expression): string | undefined {
   return undefined;
 }
 
+// Rule 2's shape allowlist: the literal "reject" when the object is fully
+// verifiable, otherwise why it is not. A plain `key: value` or shorthand
+// entry with an identifier/string name is the only verifiable member; every
+// other member kind can change what the runtime object's answer is.
+function verifiedReplyAnswer(
+  arg: ts.Expression | undefined,
+): { answer: "reject" } | { problem: string } {
+  if (arg === undefined || !ts.isObjectLiteralExpression(arg)) {
+    return { problem: "its argument is not an object literal" };
+  }
+  const answers: ts.ObjectLiteralElementLike[] = [];
+  for (const member of arg.properties) {
+    const plain =
+      ts.isPropertyAssignment(member) ||
+      ts.isShorthandPropertyAssignment(member);
+    const name = plain ? propertyName(member.name) : undefined;
+    if (!plain || name === undefined) {
+      return {
+        problem:
+          "its object has a spread, computed key, accessor or method, " +
+          "which can replace the answer at runtime",
+      };
+    }
+    if (REPLY_KEYS.has(name)) answers.push(member);
+  }
+  if (answers.length !== 1) {
+    return {
+      problem: `its object has ${answers.length} reply/response entries, not exactly one`,
+    };
+  }
+  const [answer] = answers;
+  const value =
+    answer !== undefined && ts.isPropertyAssignment(answer)
+      ? literalText(answer.initializer)
+      : undefined;
+  return value === "reject"
+    ? { answer: "reject" }
+    : { problem: 'its answer is not the literal "reject"' };
+}
+
 // `<anything>.permission.reply(...)` / `.respond(...)`.
 function isPermissionReplyCall(node: ts.CallExpression): boolean {
   const callee = node.expression;
@@ -120,25 +165,13 @@ function scanSource(fileName: string, content: string): ScanResult {
     }
     // Rule 2.
     if (ts.isCallExpression(node) && isPermissionReplyCall(node)) {
-      const [first] = node.arguments;
-      const replyProp =
-        first && ts.isObjectLiteralExpression(first)
-          ? first.properties.find(
-              (p): p is ts.PropertyAssignment =>
-                ts.isPropertyAssignment(p) &&
-                REPLY_KEYS.has(propertyName(p.name) ?? ""),
-            )
-          : undefined;
-      const value = replyProp ? literalText(replyProp.initializer) : undefined;
-      if (value === "reject") {
+      const verdict = verifiedReplyAnswer(node.arguments[0]);
+      if ("answer" in verdict) {
         verifiedRejectCalls += 1;
       } else {
         offenses.push({
           line: lineOf(node),
-          reason:
-            "a permission reply/respond call whose answer is not the " +
-            'literal "reject" (a variable, a computed value, or no object ' +
-            "literal cannot be verified)",
+          reason: `a permission reply/respond call cannot be verified: ${verdict.problem}`,
         });
       }
     }
@@ -208,5 +241,24 @@ describe("no src/ code ever answers an OpenCode permission request with allow (#
     ).toBe(1);
     expect(offensesIn("api.permission.respond(payload);")).toBe(1);
     expect(offensesIn('api.permission.reply({ reply: "once" });')).toBe(2);
+  });
+
+  // Each of these carries a literal "reject" that a first-match check would
+  // accept, while the object the runtime actually sends can answer allow.
+  test("a reject that a later member can override is not verified", () => {
+    const unverifiable = [
+      'api.permission.reply({ requestID, reply: "reject", ...override });',
+      'api.permission.reply({ reply: "reject", reply: answer });',
+      'api.permission.reply({ reply: "reject", [key]: answer });',
+      'api.permission.reply({ reply: "reject", get response() { return answer; } });',
+      'api.permission.reply({ reply: "reject", response: answer });',
+      "api.permission.reply({ reply });",
+    ];
+    for (const source of unverifiable) {
+      expect(scanSource("fixture.ts", source)).toMatchObject({
+        verifiedRejectCalls: 0,
+      });
+      expect(offensesIn(source)).toBeGreaterThanOrEqual(1);
+    }
   });
 });
