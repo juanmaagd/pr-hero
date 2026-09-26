@@ -8,32 +8,40 @@
 //
 // The SDK types the reply value as "once" | "always" | "reject"
 // (@opencode-ai/sdk/dist/v2/gen/sdk.gen.d.ts, `Permission.reply` and the
-// deprecated session-scoped `Permission2.respond`'s "once" | "always" |
-// "reject"), so a type-level restriction of the reply helper can only narrow
-// ONE call site — it cannot see a second helper introduced later, or a call
-// against the deprecated `respond` shape. A source scan is the enforceable
-// form here: it covers every call site in `src/` by construction, the same
-// way this directory's other architecture tests already enforce
-// call-shape invariants tools/tsc cannot (review-shell-invariants.test.ts).
+// deprecated session-scoped `Permission2.respond`), so a type-level
+// restriction of one reply helper cannot see a second call site introduced
+// later. A source scan covers every call site in `src/` by construction.
 //
-// The pattern's `\s*` already spans newlines (JS `\s` includes `\n`), so it
-// is applied to each file's FULL content rather than line-by-line — a
-// reformat (biome, or a wrapped argument list) that splits `reply:` from
-// its value across lines still trips it. Comments are blanked out first
-// (see `blankComments`) so a literal mentioned inside one is not flagged.
+// WHY the TypeScript AST and not a regex. Two regex versions of this guard
+// shipped and both had blind spots a review found: the first tested each
+// line alone, so `reply:` and `"once"` on separate lines passed; the second
+// blanked comments with regexes that did not know about strings, so a `//`
+// inside a URL string blanked the rest of its line, and the `/*` inside the
+// string "src/**" opened a pseudo-comment that hid fifteen lines of real code
+// in src/ci/review-risk.ts. The parser knows what is a comment, a string and
+// a property; formatting, comments and string contents cannot fool it.
 //
-// What this guard does NOT catch: an allow value that reaches `reply`/
-// `response` through a variable or computed expression (`reply: answer`,
-// `respond({ response: getVerdict() })`) rather than a literal `"once"` /
-// `"always"` token. It is a lexical net over literals, not a proof that no
-// call site can ever allow — a pass means "no literal allow found", not
-// "provably safe".
+// Two rules, one per failure shape:
+//   1. No `reply` / `response` property anywhere in src/ is the literal
+//      "once" or "always".
+//   2. Every `<...>.permission.reply(...)` / `.respond(...)` call passes an
+//      object literal whose `reply` / `response` is the literal "reject" — so
+//      an allow value arriving through a variable or a computed expression
+//      (`reply: answer`) is flagged too, not just a literal one.
+// What it still cannot see: a permission reply made through an alias of the
+// client that does not spell `permission.reply`/`permission.respond` at the
+// call site. Rule 3 below at least proves the scan sees the one call that
+// exists today.
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 
 const SRC_DIR = path.join(import.meta.dir, "../../src");
+const ALLOW_VALUES = new Set(["once", "always"]);
+const REPLY_KEYS = new Set(["reply", "response"]);
+const REPLY_METHODS = new Set(["reply", "respond"]);
 
 function getAllTsFiles(dir: string): string[] {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -49,105 +57,156 @@ function getAllTsFiles(dir: string): string[] {
   return files;
 }
 
-// Matches `reply: "once"` / `response: 'always'` etc. across any
-// whitespace, INCLUDING a line break between the field name, the colon, and
-// the literal — `\s` already includes `\n`. Global so a single scan can
-// report every offender in a file, not just the first.
-const ALLOW_LIKE_REPLY = /\b(reply|response)\s*:\s*["'](once|always)["']/g;
-
-// Blanks `//` line comments and `/* */` block comments to spaces, keeping
-// every newline in place so (a) a literal mentioned inside a comment never
-// matches and (b) a line number recovered from a later match index in the
-// blanked text is identical to the line number in the original file.
-function blankComments(text: string): string {
-  const blank = (match: string) => match.replace(/[^\n]/g, " ");
-  const withoutBlockComments = text.replace(/\/\*[\s\S]*?\*\//g, blank);
-  return withoutBlockComments.replace(/\/\/.*$/gm, blank);
+interface Offense {
+  line: number;
+  reason: string;
 }
 
-function lineNumberAt(text: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index; i++) {
-    if (text[i] === "\n") line += 1;
-  }
-  return line;
+interface ScanResult {
+  offenses: Offense[];
+  // Permission reply calls whose value was verified to be "reject" — the
+  // non-vacuity count: a scan that finds no such call proves nothing.
+  verifiedRejectCalls: number;
 }
 
-function findAllowLikeReplies(
-  content: string,
-): Array<{ line: number; text: string }> {
-  const scanned = blankComments(content);
-  const offenders: Array<{ line: number; text: string }> = [];
-  for (const match of scanned.matchAll(ALLOW_LIKE_REPLY)) {
-    offenders.push({
-      line: lineNumberAt(scanned, match.index ?? 0),
-      // Collapsed to one line for a readable failure message — the
-      // OFFENSE (which line it starts on) is what `line` is for.
-      text: match[0].replace(/\s+/g, " ").trim(),
-    });
+function propertyName(name: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  return undefined;
+}
+
+function literalText(node: ts.Expression): string | undefined {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
   }
-  return offenders;
+  return undefined;
+}
+
+// `<anything>.permission.reply(...)` / `.respond(...)`.
+function isPermissionReplyCall(node: ts.CallExpression): boolean {
+  const callee = node.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  if (!REPLY_METHODS.has(callee.name.text)) return false;
+  const owner = callee.expression;
+  return (
+    (ts.isPropertyAccessExpression(owner) &&
+      owner.name.text === "permission") ||
+    (ts.isIdentifier(owner) && owner.text === "permission")
+  );
+}
+
+function scanSource(fileName: string, content: string): ScanResult {
+  const sf = ts.createSourceFile(
+    fileName,
+    content,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const offenses: Offense[] = [];
+  let verifiedRejectCalls = 0;
+  const lineOf = (node: ts.Node) =>
+    sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+
+  const visit = (node: ts.Node): void => {
+    // Rule 1.
+    if (ts.isPropertyAssignment(node)) {
+      const key = propertyName(node.name);
+      const value = literalText(node.initializer);
+      if (key && REPLY_KEYS.has(key) && value && ALLOW_VALUES.has(value)) {
+        offenses.push({
+          line: lineOf(node),
+          reason: `${key}: "${value}" is an allow-like permission answer`,
+        });
+      }
+    }
+    // Rule 2.
+    if (ts.isCallExpression(node) && isPermissionReplyCall(node)) {
+      const [first] = node.arguments;
+      const replyProp =
+        first && ts.isObjectLiteralExpression(first)
+          ? first.properties.find(
+              (p): p is ts.PropertyAssignment =>
+                ts.isPropertyAssignment(p) &&
+                REPLY_KEYS.has(propertyName(p.name) ?? ""),
+            )
+          : undefined;
+      const value = replyProp ? literalText(replyProp.initializer) : undefined;
+      if (value === "reject") {
+        verifiedRejectCalls += 1;
+      } else {
+        offenses.push({
+          line: lineOf(node),
+          reason:
+            "a permission reply/respond call whose answer is not the " +
+            'literal "reject" (a variable, a computed value, or no object ' +
+            "literal cannot be verified)",
+        });
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return { offenses, verifiedRejectCalls };
 }
 
 describe("no src/ code ever answers an OpenCode permission request with allow (#157, provider_free)", () => {
-  test("no reply/response literal in src/ is 'once' or 'always'", () => {
-    const offenders: Array<{ file: string; line: number; text: string }> = [];
+  test("src/ holds no allow-like answer, and every permission reply call is a literal reject", () => {
+    const offenses: Array<Offense & { file: string }> = [];
+    let verifiedRejectCalls = 0;
     for (const file of getAllTsFiles(SRC_DIR)) {
-      const content = fs.readFileSync(file, "utf8");
-      for (const offender of findAllowLikeReplies(content)) {
-        offenders.push({ file, ...offender });
-      }
+      const result = scanSource(file, fs.readFileSync(file, "utf8"));
+      verifiedRejectCalls += result.verifiedRejectCalls;
+      for (const offense of result.offenses)
+        offenses.push({ file, ...offense });
     }
-    expect(offenders).toEqual([]);
+    expect(offenses).toEqual([]);
+    // Rule 3, non-vacuity: the auto-reject handler's own call must be seen.
+    // If a refactor renames it out of the `permission.reply` shape, this
+    // fails instead of the scan silently checking nothing.
+    expect(verifiedRejectCalls).toBeGreaterThanOrEqual(1);
   });
 
-  // A pure absence check proves nothing about whether the scan CAN match at
-  // all — these pin the scan itself against both allow-like literals (on
-  // one line and split across two), so a typo in the pattern above cannot
-  // silently turn the test above into a vacuous pass.
-  test("matches both allow-like literals on a single line", () => {
-    expect(findAllowLikeReplies('reply: "once"')).toHaveLength(1);
-    expect(findAllowLikeReplies("reply: 'always'")).toHaveLength(1);
-    expect(findAllowLikeReplies('response: "always"')).toHaveLength(1);
+  const offensesIn = (source: string) =>
+    scanSource("fixture.ts", source).offenses.length;
+
+  test("flags allow-like literals, on one line or split across lines", () => {
+    expect(offensesIn('const a = { reply: "once" };')).toBe(1);
+    expect(offensesIn("const a = { response: 'always' };")).toBe(1);
+    expect(offensesIn('const a = {\n  reply:\n    "once",\n};')).toBe(1);
+    expect(offensesIn("const a = { reply: `always` };")).toBe(1);
   });
 
-  test("matches an allow-like literal split across a line break", () => {
-    expect(findAllowLikeReplies('reply:\n    "once"')).toHaveLength(1);
-    expect(findAllowLikeReplies("response:\n'always'")).toHaveLength(1);
+  test("ignores allow-like text in comments and inside other strings", () => {
+    expect(offensesIn('// reply: "once"\nconst a = 1;')).toBe(0);
+    expect(offensesIn('/* reply: "once" */ const a = 1;')).toBe(0);
+    expect(offensesIn("const a = 'reply: \"once\"';")).toBe(0);
   });
 
-  test("does not match a reject literal", () => {
-    expect(findAllowLikeReplies('reply: "reject"')).toHaveLength(0);
+  // The two blind spots the regex version had, each planted in front of a
+  // real offense: the parser must still see the offense behind them.
+  test("a // inside a URL string does not hide an allow on the same line", () => {
+    expect(offensesIn('respond({ url: "http://x", reply: "once" });')).toBe(1);
   });
 
-  test("does not match an allow literal hidden in a // comment", () => {
-    expect(findAllowLikeReplies('// reply: "once"')).toHaveLength(0);
-    expect(findAllowLikeReplies('doStuff(); // reply: "always"')).toHaveLength(
-      0,
-    );
+  test("a /* inside a string does not open a comment that hides later code", () => {
+    const source = [
+      'const globs = ["src/**", "docs/**"];',
+      'const a = { reply: "always" };',
+      'const more = ["**/auth/**"];',
+    ].join("\n");
+    expect(offensesIn(source)).toBe(1);
   });
 
-  test("does not match an allow literal hidden in a /* */ comment, including across lines", () => {
-    expect(findAllowLikeReplies('/* reply: "once" */')).toHaveLength(0);
-    expect(findAllowLikeReplies('/*\n  reply:\n    "once"\n*/')).toHaveLength(
-      0,
-    );
-  });
-
-  // Discrimination. This is the exact defect this file used to carry: the
-  // OLD approach split file content on "\n" and tested the (non-global)
-  // pattern against each line in isolation, so a literal split across two
-  // lines never appeared whole on any single line and was never caught. A
-  // future regression back to per-line scanning is caught here immediately,
-  // without needing to plant anything in src/.
-  test("a per-line scan misses the multi-line split that the full-text scan catches", () => {
-    const splitAcrossLines = 'reply:\n    "once"';
-    const perLinePattern = /\b(reply|response)\s*:\s*["'](once|always)["']/;
-    const perLineHit = splitAcrossLines
-      .split("\n")
-      .some((line) => perLinePattern.test(line));
-
-    expect(perLineHit).toBe(false);
-    expect(findAllowLikeReplies(splitAcrossLines)).toHaveLength(1);
+  test("a permission reply call must answer with a literal reject", () => {
+    expect(
+      scanSource(
+        "fixture.ts",
+        'api.permission.reply({ requestID, reply: "reject" });',
+      ),
+    ).toEqual({ offenses: [], verifiedRejectCalls: 1 });
+    expect(
+      offensesIn("api.permission.reply({ requestID, reply: answer });"),
+    ).toBe(1);
+    expect(offensesIn("api.permission.respond(payload);")).toBe(1);
+    expect(offensesIn('api.permission.reply({ reply: "once" });')).toBe(2);
   });
 });
