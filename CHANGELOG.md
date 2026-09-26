@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-26
+
+### Added
+- **OpenCode as an alternative execution runtime**: hunters, the refuter, and the scout can now run
+  through the OpenCode SDK instead of only the Claude Code CLI — a route-keyed, provider-neutral
+  runtime composition with exact-binding readiness checks feeding `doctor`/`init` and the review plan
+  card, and a `provider_api_token` credential broker generic over every OpenCode provider (adding a new
+  one is an `auth.json` entry, a route, and a pricing file — no code). Opt-in; Claude-only behavior is
+  unchanged (#106, #107, #108, #112, #114, #115, #168).
+- **OpenCode in GitHub Actions**: operators can select OpenCode in CI via a `PRHERO_ROUTING` variable
+  and an `OPENCODE_AUTH_JSON` secret, with API-token CI correctly detected as metered rather than an
+  unlimited subscription, documented end-to-end in `docs/github-actions.md` (#209, #210, #211).
+- **Manual re-run from GitHub Actions**: a new `pr-hero-force.yml` `workflow_dispatch` workflow lets an
+  operator dispatch `gh workflow run pr-hero-force.yml -f pr=<n>` to run a skipped review on Actions with
+  `--force`, bypassing the size gate, CI admission, and the budget ceiling for that one run (#269).
+- **Skip re-review when nothing justifies another run**: CI now skips re-reviewing a PR when the prior
+  findings don't warrant another pass, instead of always re-running discovery (#109).
+- **`.prheroignore`**: a repo-root file declaring which paths pr-hero excludes from a review. Excluded
+  paths fall out of the reviewed diff and hunters/scout input, and stop counting toward the cost band,
+  the size-gate threshold, and the watcher's pre-launch check, both locally and in CI (#202, #204, #205).
+- **New `logic` hunter (category 15)**: a CWE-derived, language-agnostic local-logic-error sweep,
+  promoted from a benchmark-only modifier into the bundled default prompt set (#261, #265).
+- **Findings schema v1.1**: hunters may now report an open specialty slug instead of only the four
+  built-in hunter names, and severity category `1-15` instead of `1-14`; a v1.0 reader/validator is kept
+  for backward compatibility (#110).
+- **Operator configuration guide**: `docs/configuration.md` documents the two-layer person/team
+  configuration, routing, and credentials end-to-end, linked from the README (#283).
+
 ### Changed
+- **Provider-reported cost replaces bundled pricing tables**: a metered route is now admitted on the
+  provider transport's own reported cost instead of a rate table pr-hero has to keep updated. Per-provider
+  pricing catalogues (including a real z.ai rate table) shipped first to unblock non-Anthropic providers,
+  then were removed once transport-reported cost proved sufficient for all routes (#162, #167, #170,
+  #172, #198).
+- **No more hardcoded Claude model alias**: the CLI resolves `sonnet`/other Anthropic aliases itself and
+  pr-hero records what actually ran, instead of pinning and asserting a version internally — an alias
+  repoint from Anthropic no longer needs a pr-hero release (#176).
 - **Raised the size gate's default line limit**: the engine default (`DEFAULT_SIZE_GATE.maxChangedLines`)
   and the GitHub Action's `max-changed-lines` input both move from `1500`/`1000` to `4000` — an owner
   decision, not a new measurement, because the old defaults were skipping too many real PRs outright.
@@ -21,7 +57,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Release guard**: `.github/workflows/release.yml` now fails fast, before building anything, when the
   pushed tag's version does not match `package.json`'s `version` — see `docs/release-runbook.md`.
 
+### Fixed
+- **OpenCode SDK transport stabilization**: a long tail of correctness fixes surfaced while
+  operationalizing the OpenCode runtime — tool-surface enumeration instead of trusting the provider's
+  default, text-part harvesting instead of reasoning text, turn boundaries ending at the actual end of
+  turn, MCP registry wiring so hunters reach codegraph, credential-projection ordering, a typed session
+  wire format with canonical snapshots and fail-closed identity reconciliation, terminal-state
+  arbitration and usage-identity dedup, stream-delta dedup by event id, provider SSE refusals filed as
+  `runtime_unavailable` instead of a burned format retry, a hunter that never made a tool call now fails
+  instead of posting a clean bill, an absent SDK degrading `doctor` instead of crashing it, and resolving
+  the SDK correctly from standalone compiled binaries (#117, #123, #125, #129, #130, #140, #143, #144,
+  #145, #151, #208, #215, #216, #217, #218, #219, #220, #221, #222, #223, #225, #226, #227, #228, #263,
+  #270, #273, #281).
+- **Billing and credential correctness**: a `claude-code` route on an API key is now billed as metered
+  instead of silently admitted as subscription (#278); the harness no longer performs a per-step
+  credential projection the OpenCode transport never reads, which could throw and print a false
+  "operator environment" warning (#282); an attempt whose credential projection degrades onto a raw key
+  now has its spend fenced instead of going unreserved (#284).
+- **`.prheroignore` scoping**: pr-hero's own default exclusions are now scoped to prose files only, so
+  executable code inside `docs/research/**` is no longer accidentally excluded from review (#262).
+- **In-flight lock released on cancellation**: a cancelled review run no longer leaves the PR's in-flight
+  lock held, which had blocked the very next push's review from starting (#163).
+- **Re-review checks proof against the reviewed tree**: `proof_refs` are now verified against the tree
+  that was actually reviewed (#165).
+- **Deduplication no longer discards on similarity alone**: a later claim looking similar to an earlier
+  one is no longer treated as permission to drop the earlier finding (#155).
+- **CI budget ceiling defaults to unlimited on a subscription route**: a subscription route no longer
+  gets silently capped by a budget ceiling meant for metered spend (#160).
+- **Subscription cost marked as notional**: a subscription run's reported cost is now clearly labeled as
+  a notional list-price figure, not actual cash spend (#177).
+- **Install → ready path**: fixed four defects (three found by inspection, one more while fixing them)
+  blocking the documented install-then-review path, so a fresh `install.sh` run actually reaches a
+  working `pr-hero` (#179).
+- **Empty separator row removed**: the report no longer prints an empty separator row for a claim-less
+  live finding (#181).
+- **Partial review forces full coverage next time**: a review where some hunters or the refuter failed
+  (but not all) no longer causes the next review on the same head to skip discovery entirely (#224).
+- **Pipeline records why a step failed before its first attempt**: a step that died before spawning now
+  carries a redacted failure reason in `pipeline.json` instead of silently discarding it (#271).
+- **Re-review recovers carried finding state**: severity, tier, and claim text now carry forward
+  correctly on a second review instead of resetting to generic placeholder values (#285).
+- **Re-review reports skipped discovery honestly**: a re-review that skips discovery now says explicitly
+  that no hunter ran, instead of falsely reporting a clean bill (#286).
+
 ## [0.1.1] - 2026-09-04
+
+_Originally published as tag `v1.1.0`; renumbered to `0.1.1` afterward (see "Renumbered releases to 0.x"
+above). `0.1.0` below was originally published as `v1.0.0`._
 
 ### Added
 
@@ -103,6 +185,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Spend & Size Safety Gates**: Automated budget guards (`max-changed-lines`, `max-changed-files`, `budget-usd`) skipping oversized or cost-prohibitive PRs cleanly with explicit skip status annotations.
 - **CI Automated Scaffolding**: `pr-hero setup --ci` and `pr-hero ci init` commands generating byte-accurate `.github/workflows/pr-hero.yml` configurations, complemented by the `pr-hero-ci-setup` agent skill.
 
-[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/juanmaagd/pr-hero/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/juanmaagd/pr-hero/releases/tag/v0.1.0
+[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/juanmaagd/pr-hero/compare/v1.1.0...v0.2.0
+[0.1.1]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.1.0
+[0.1.0]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.0.0
