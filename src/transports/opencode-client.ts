@@ -1894,7 +1894,7 @@ export function assertOpenCodeSdk(module: unknown): OpenCodeSdkLike {
     typeof candidate.createOpencodeClient !== "function"
   ) {
     throw new Error(
-      "@opencode-ai/sdk/v2 resolved but does not export createOpencodeClient(), " +
+      "@opencode-ai/sdk/v2/client resolved but does not export createOpencodeClient(), " +
         "which pr-hero needs to open a session. The installed package is not " +
         `the SDK this transport was built against (got ${describeModule(module)}).`,
     );

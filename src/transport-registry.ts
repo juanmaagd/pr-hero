@@ -28,6 +28,7 @@ import { ClaudeCodeCliTransport } from "./transports/claude-code-cli";
 import {
   type OpenCodeObservedIdentity,
   OpenCodeSdkUnavailableError,
+  openCodeSdkLoadFailedMessage,
   openCodeSdkUnavailableMessage,
   qualifyOpenCodeServer,
 } from "./transports/opencode-admission";
@@ -47,7 +48,21 @@ import {
 } from "./transports/opencode-server";
 
 const OPENCODE_SDK_PACKAGE_SPECIFIER = "@opencode-ai/sdk/package.json";
-const OPENCODE_SDK_V2_SPECIFIER = "@opencode-ai/sdk/v2";
+// The CLIENT entry, not the full `/v2` index. `/v2` re-exports
+// `dist/v2/server.js`, which imports `cross-spawn`, whose nested
+// `require("which")` Bun's `--compile` runtime does not resolve for a package
+// living outside the binary (under ~/.prhero/node_modules). Why the compiled
+// runtime fails there is not established; that it fails is. pr-hero never
+// launches the SDK's own server (see
+// src/transports/opencode-server.ts's WHY-NOT header) — it only ever needs
+// `createOpencodeClient` (assertOpenCodeSdk) — so `/v2/client` is both
+// sufficient and the only one of the two that loads inside a compiled binary.
+// Confirmed by a discriminating repro compiled with `bun build --compile`:
+// `dist/v2/index.js` throws `Cannot find package 'which'`, `dist/v2/client.js`
+// exports `createOpencodeClient` cleanly, and its relative import graph
+// (gen/client/client.gen.js, gen/sdk.gen.js, ../error-interceptor.js) carries
+// no bare imports.
+const OPENCODE_SDK_V2_SPECIFIER = "@opencode-ai/sdk/v2/client";
 
 function openCodeSdkPackageJsonPath(nodeModulesDir: string): string {
   return path.join(nodeModulesDir, "@opencode-ai", "sdk", "package.json");
@@ -132,8 +147,11 @@ function normalizeSdkVersion(version: unknown): string | undefined {
   return trimmed === "" ? undefined : trimmed;
 }
 
-// `exports["./v2"]` is either a relative string or `{ import: relative }`.
-// Resolved against the package directory, then imported as a file URL.
+// `exports["./v2/client"]` is either a relative string or `{ import:
+// relative }`. Resolved against the package directory, then imported as a
+// file URL. Reading the CLIENT sub-path, not `"./v2"` — see the WHY comment
+// on OPENCODE_SDK_V2_SPECIFIER above; the full index pulls in cross-spawn,
+// which does not resolve inside a compiled binary.
 export function resolveOpenCodeSdkV2Entry(
   packageJson: { exports?: unknown },
   packageDir: string,
@@ -153,10 +171,14 @@ function readOpenCodeV2Export(exportsField: unknown): string | undefined {
   ) {
     return undefined;
   }
-  const v2 = (exportsField as Record<string, unknown>)["./v2"];
-  if (typeof v2 === "string" && v2.trim() !== "") return v2;
-  if (typeof v2 === "object" && v2 !== null && !Array.isArray(v2)) {
-    const entry = (v2 as Record<string, unknown>).import;
+  const v2Client = (exportsField as Record<string, unknown>)["./v2/client"];
+  if (typeof v2Client === "string" && v2Client.trim() !== "") return v2Client;
+  if (
+    typeof v2Client === "object" &&
+    v2Client !== null &&
+    !Array.isArray(v2Client)
+  ) {
+    const entry = (v2Client as Record<string, unknown>).import;
     if (typeof entry === "string" && entry.trim() !== "") return entry;
   }
   return undefined;
@@ -268,7 +290,14 @@ export async function loadOpenCodeSdk(
     sdkModule = await dynamicImport(v2Specifier);
   } catch (error) {
     if (error instanceof OpenCodeSdkUnavailableError) throw error;
-    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+    // The version check above already passed: the package IS installed, so
+    // this catch is a genuine IMPORT failure (e.g. a compiled binary unable
+    // to resolve cross-spawn's nested `require("which")`), never "not
+    // installed". openCodeSdkLoadFailedMessage keeps the real cause instead
+    // of collapsing it into the absence message below.
+    throw new OpenCodeSdkUnavailableError(
+      openCodeSdkLoadFailedMessage(v2Specifier, error),
+    );
   }
   return assertOpenCodeSdk(sdkModule);
 }
