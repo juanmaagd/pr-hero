@@ -58,6 +58,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pushed tag's version does not match `package.json`'s `version` — see `docs/release-runbook.md`.
 
 ### Fixed
+- **OpenCode works from the standalone binary**: the compiled binary installed by `install.sh` could
+  not use the OpenCode backend at all — admission reported the SDK as "not installed" even when it
+  was. pr-hero now loads the SDK's client entry, which has no external dependencies, instead of the
+  full index; a load failure now names its real cause; and the compiled-binary smoke that gates CI and
+  every release asset exercises this load path (#289).
 - **OpenCode SDK transport stabilization**: a long tail of correctness fixes surfaced while
   operationalizing the OpenCode runtime — tool-surface enumeration instead of trusting the provider's
   default, text-part harvesting instead of reasoning text, turn boundaries ending at the actual end of
