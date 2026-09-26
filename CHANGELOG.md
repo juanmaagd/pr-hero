@@ -63,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was. pr-hero now loads the SDK's client entry, which has no external dependencies, instead of the
   full index; a load failure now names its real cause; and the compiled-binary smoke that gates CI and
   every release asset exercises this load path (#289).
+- **OpenCode free models work again**: OpenCode's free-tier gateway began refusing any turn whose tool
+  list lacks `bash` or `read` (`403 … free tier can only be used from within OpenCode`), and pr-hero
+  always denies `bash`. On free routes only, those tools now stay visible with OpenCode permission
+  `ask`, and pr-hero rejects every permission request automatically, so a step still never executes a
+  command; every other route keeps denying them outright. The server attests the posture it launched
+  with, and pr-hero refuses to lift the deny when that attestation is missing (#290).
 - **OpenCode SDK transport stabilization**: a long tail of correctness fixes surfaced while
   operationalizing the OpenCode runtime — tool-surface enumeration instead of trusting the provider's
   default, text-part harvesting instead of reasoning text, turn boundaries ending at the actual end of
