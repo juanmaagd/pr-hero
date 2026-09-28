@@ -1,14 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { prheroLayout } from "../src/home-preflight";
+import { SUPPORTED_OPENCODE_SDK_VERSION } from "../src/transport-registry";
 import {
   detectInstallMethod,
   detectShadowInstalls,
   isCheckCacheFresh,
   PRHERO_GITHUB_REPO,
   planUpgrade,
+  type ReconcileUpgradeOptions,
   readUpgradeCache,
   reconcileUpgrade,
+  selectOpenCodeSdkInstaller,
+  spawnOpenCodeSdkInstaller,
   type UpgradeCheckCache,
   writeUpgradeCache,
 } from "../src/updater";
@@ -166,6 +172,8 @@ describe("updater (lifecycle foundations)", () => {
       let mcpVerified = false;
       let storeMigrated = false;
       let daemonsReloaded = false;
+      let sdkEnsured = false;
+      const order: string[] = [];
 
       const result = await reconcileUpgrade({
         home,
@@ -183,9 +191,17 @@ describe("updater (lifecycle foundations)", () => {
         },
         reloadDaemons: async () => {
           daemonsReloaded = true;
+          order.push("reload");
           return { reloaded: ["watch"] };
         },
-        runDoctorCheck: async () => ({ overall: "healthy" }),
+        ensureOpenCodeSdk: async () => {
+          sdkEnsured = true;
+          order.push("sdk");
+        },
+        runDoctorCheck: async () => {
+          order.push("doctor");
+          return { overall: "healthy" };
+        },
       });
 
       expect(result.ok).toBe(true);
@@ -193,6 +209,413 @@ describe("updater (lifecycle foundations)", () => {
       expect(mcpVerified).toBe(true);
       expect(storeMigrated).toBe(true);
       expect(daemonsReloaded).toBe(true);
+      expect(sdkEnsured).toBe(true);
+      expect(order).toEqual(["reload", "sdk", "doctor"]);
     });
+  });
+});
+
+const OPENCODE_ROUTING = {
+  default: { backend: "opencode", provider: "opencode" },
+};
+const CLAUDE_ROUTING = {
+  default: { backend: "claude-code", provider: "anthropic" },
+};
+
+async function withHome(
+  routing: unknown | undefined,
+  raw?: string,
+): Promise<{ home: string; cleanup: () => Promise<void> }> {
+  const home = await mkdtemp(path.join(tmpdir(), "prhero-reconcile-"));
+  const layout = prheroLayout(home);
+  await mkdir(layout.dir, { recursive: true });
+  if (raw !== undefined) {
+    await writeFile(layout.reviewConfigPath, raw);
+  } else if (routing !== undefined) {
+    await writeFile(layout.reviewConfigPath, JSON.stringify({ routing }));
+  }
+  return {
+    home,
+    cleanup: () => rm(home, { recursive: true, force: true }),
+  };
+}
+
+function quietReconcile(
+  home: string,
+  overrides: ReconcileUpgradeOptions = {},
+): Promise<{ ok: boolean; errors: string[] }> {
+  return reconcileUpgrade({
+    home,
+    syncSkills: async () => ({ synced: [], errors: [] }),
+    verifyMcp: async () => ({ ok: true }),
+    migrateStore: async () => ({ ok: true }),
+    reloadDaemons: async () => ({ reloaded: [] }),
+    runDoctorCheck: async () => ({ overall: "healthy" }),
+    which: () => null,
+    spawnInstaller: async () => {
+      throw new Error("spawn should not run");
+    },
+    ...overrides,
+  });
+}
+
+describe("selectOpenCodeSdkInstaller", () => {
+  const spec = `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION}`;
+
+  test("prefers npm and pins the spec under the product home", () => {
+    expect(
+      selectOpenCodeSdkInstaller({
+        npmPath: "/usr/bin/npm",
+        bunPath: "/usr/bin/bun",
+        layoutDir: "/Users/x/.prhero",
+      }),
+    ).toEqual([
+      "/usr/bin/npm",
+      "install",
+      "--ignore-scripts",
+      "--no-fund",
+      "--no-audit",
+      "--prefix",
+      "/Users/x/.prhero",
+      spec,
+    ]);
+  });
+
+  test("falls back to bun add with scripts ignored and an exact pin", () => {
+    expect(
+      selectOpenCodeSdkInstaller({
+        npmPath: null,
+        bunPath: "/usr/bin/bun",
+        layoutDir: "/Users/x/.prhero",
+      }),
+    ).toEqual([
+      "/usr/bin/bun",
+      "add",
+      "--exact",
+      "--ignore-scripts",
+      "--cwd",
+      "/Users/x/.prhero",
+      spec,
+    ]);
+  });
+
+  test("neither package manager is an error that names reconcile", () => {
+    expect(() =>
+      selectOpenCodeSdkInstaller({
+        npmPath: null,
+        bunPath: null,
+        layoutDir: "/Users/x/.prhero",
+      }),
+    ).toThrow(/neither npm nor bun is on PATH/);
+    expect(() =>
+      selectOpenCodeSdkInstaller({
+        npmPath: null,
+        bunPath: null,
+        layoutDir: "/Users/x/.prhero",
+      }),
+    ).toThrow(/pr-hero upgrade --reconcile/);
+  });
+});
+
+describe("spawnOpenCodeSdkInstaller", () => {
+  test("rejects a child that never exits and omits the prefix from the error", async () => {
+    const error = await spawnOpenCodeSdkInstaller(
+      ["/bin/sleep", "30"],
+      40,
+    ).then(
+      () => {
+        throw new Error("installer resolved");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) return;
+    expect(error.message).toContain("timed out after 40ms");
+    expect(error.message).toContain("pr-hero upgrade --reconcile");
+    expect(error.message).not.toContain("/bin/sleep");
+  });
+});
+
+describe("reconcileUpgrade installs the OpenCode SDK only when routing needs it", () => {
+  test("Claude-only routing does not spawn", async () => {
+    const fixture = await withHome(CLAUDE_ROUTING);
+    try {
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("OpenCode routing with a missing SDK installs via npm before doctor", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const layout = prheroLayout(fixture.home);
+    try {
+      let installed = false;
+      let doctorSawInstall = false;
+      let reads = 0;
+      let argv: readonly string[] = [];
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => {
+          reads += 1;
+          return reads < 3 ? undefined : "1.18.25";
+        },
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async (next) => {
+          installed = true;
+          argv = next;
+          return { code: 0, stderr: "" };
+        },
+        runDoctorCheck: async () => {
+          doctorSawInstall = installed;
+          return { overall: "healthy" };
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.errors).toEqual([]);
+      expect(doctorSawInstall).toBe(true);
+      expect(reads).toBe(3);
+      expect(argv).toContain(
+        `@opencode-ai/sdk@${SUPPORTED_OPENCODE_SDK_VERSION}`,
+      );
+      expect(argv).toContain("--ignore-scripts");
+      expect(argv[argv.indexOf("--prefix") + 1]).toBe(layout.dir);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("OpenCode routing that already has the pinned SDK does not spawn", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    try {
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => "1.18.25",
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("compiled mode reads the SDK from the reconcile home and does not spawn", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const packageDir = path.join(
+      prheroLayout(fixture.home).nodeModulesDir,
+      "@opencode-ai",
+      "sdk",
+    );
+    try {
+      await mkdir(packageDir, { recursive: true });
+      await writeFile(
+        path.join(packageDir, "package.json"),
+        JSON.stringify({
+          version: "1.18.25",
+          exports: { "./v2": { import: "./dist/v2/index.js" } },
+        }),
+      );
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        assetMode: "compiled",
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          spawned = true;
+          throw new Error("spawn should not run");
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(true);
+      expect(result.errors).toEqual([]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("no npm and no bun reports both and does not spawn", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    try {
+      let spawned = false;
+      let doctorRan = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        which: () => null,
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+        runDoctorCheck: async () => {
+          doctorRan = true;
+          return { overall: "healthy" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(doctorRan).toBe(true);
+      expect(result.ok).toBe(false);
+      const text = result.errors.join("\n");
+      expect(text).toContain("neither npm nor bun is on PATH");
+      expect(text).toContain("pr-hero upgrade --reconcile");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("routing.disabled with an OpenCode default does not spawn", async () => {
+    const fixture = await withHome({
+      disabled: true,
+      default: OPENCODE_ROUTING.default,
+    });
+    try {
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("a malformed config is an error and does not spawn", async () => {
+    const fixture = await withHome(undefined, "{");
+    try {
+      let spawned = false;
+      let doctorRan = false;
+      const result = await quietReconcile(fixture.home, {
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+        runDoctorCheck: async () => {
+          doctorRan = true;
+          return { overall: "healthy" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(doctorRan).toBe(true);
+      expect(result.ok).toBe(false);
+      expect(result.errors.join("\n")).toContain("not valid JSON");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("a live install lock refuses a second reconcile and hides the home", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const lockPath = path.join(
+      prheroLayout(fixture.home).dir,
+      "opencode-sdk.lock",
+    );
+    try {
+      await writeFile(lockPath, `${process.pid}\n`);
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(false);
+      expect(result.ok).toBe(false);
+      const text = result.errors.join("\n");
+      expect(text).toContain("already running");
+      expect(text).toContain(`pid ${process.pid}`);
+      expect(text).not.toContain(fixture.home);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("a dead install lock is taken and the install still runs", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const lockPath = path.join(
+      prheroLayout(fixture.home).dir,
+      "opencode-sdk.lock",
+    );
+    const held = Bun.spawn(["/bin/sleep", "30"]);
+    held.kill();
+    await held.exited;
+    try {
+      await writeFile(lockPath, `${held.pid}\n`);
+      let spawned = false;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => (spawned ? "1.18.25" : undefined),
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          spawned = true;
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(spawned).toBe(true);
+      expect(result.ok).toBe(true);
+      expect(result.errors).toEqual([]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("the lock holds the pid before the installer runs", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    const lockPath = path.join(
+      prheroLayout(fixture.home).dir,
+      "opencode-sdk.lock",
+    );
+    try {
+      let pidText = "";
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => (pidText === "" ? undefined : "1.18.25"),
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          pidText = await Bun.file(lockPath).text();
+          return { code: 0, stderr: "" };
+        },
+      });
+      expect(pidText.trim()).toBe(String(process.pid));
+      expect(result.ok).toBe(true);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  test("an EEXIST from the installer is reported once", async () => {
+    const fixture = await withHome(OPENCODE_ROUTING);
+    try {
+      let calls = 0;
+      const result = await quietReconcile(fixture.home, {
+        readSdkVersion: async () => undefined,
+        which: (bin) => (bin === "npm" ? "/usr/bin/npm" : null),
+        spawnInstaller: async () => {
+          calls += 1;
+          const error = new Error("collision") as NodeJS.ErrnoException;
+          error.code = "EEXIST";
+          throw error;
+        },
+      });
+      expect(calls).toBe(1);
+      expect(result.ok).toBe(false);
+      const text = result.errors.join("\n");
+      expect(text).toContain("collision");
+      expect(text).not.toContain("already running");
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });

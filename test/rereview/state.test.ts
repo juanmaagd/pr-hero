@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  claimFingerprint,
   PR_COMMENT_MARKER_PREFIX,
   PR_FINDING_MARKER_PREFIX,
   parseFindingMarker,
   prCommentMarker,
 } from "#pr/preflight";
+import { SEVERITY_UNRECOVERABLE, TIER_UNRECOVERABLE } from "#rereview/classify";
 import {
   assembleLive,
   assignFreshIds,
@@ -107,6 +109,49 @@ describe("render / parse round-trip", () => {
   test("reviews counter round-trips", () => {
     const body = renderStateBlock(HEAD, [finding("R001")], 2);
     expect(parseStateBlock(body)?.reviews).toBe(2);
+  });
+
+  // #206 constraint: the JSON shape a state block already posted before this
+  // fix — real Severity/Tier values only, never the new sentinels — must
+  // still parse unchanged. Hand-built, not run through `renderStateBlock`,
+  // so this is genuinely the OLD wire format and not just today's renderer
+  // exercising its own parser.
+  test("#206 — an old-format block (real sev/tier only, no sentinel) still parses", () => {
+    const body =
+      `${stateish()}\n` +
+      '<!-- {"findings":[{"id":"R001","sev":"BLOCKER","tier":"blocking",' +
+      '"channel":"inline","locs":["a.ts:1"],"c":"aaaaaaaaaaaa","claim":"old"}]} -->';
+    expect(parseStateBlock(body)?.findings).toEqual([
+      {
+        id: "R001",
+        sev: "BLOCKER",
+        tier: "blocking",
+        channel: "inline",
+        locs: ["a.ts:1"],
+        c: "aaaaaaaaaaaa",
+        claim: "old",
+      },
+    ]);
+  });
+
+  // Additive-only widening, the other direction: a block a POST-fix run
+  // wrote, carrying the sentinel, must also parse — `isRecoveredSeverity`/
+  // `isRecoveredTier` accept it on top of the 4/2 real values.
+  test("#206 — a block carrying the UNRECOVERABLE sentinel parses too", () => {
+    const body =
+      `${stateish()}\n` +
+      `<!-- {"findings":[{"id":"R001","sev":"${SEVERITY_UNRECOVERABLE}",` +
+      `"tier":"${TIER_UNRECOVERABLE}","channel":"inline","locs":["a.ts:1"],` +
+      '"c":"bbbbbbbbbbbb","claim":""}]} -->';
+    expect(parseStateBlock(body)?.findings[0]).toEqual({
+      id: "R001",
+      sev: SEVERITY_UNRECOVERABLE,
+      tier: TIER_UNRECOVERABLE,
+      channel: "inline",
+      locs: ["a.ts:1"],
+      c: "bbbbbbbbbbbb",
+      claim: "",
+    });
   });
 });
 
@@ -233,5 +278,46 @@ describe("assembleLive", () => {
     expect(assembled.live.map((row) => `${row.id}:${row.status}`)).toEqual([
       "R002:unconfirmed",
     ]);
+  });
+
+  // #206's second-order bug: `claimFingerprint("")` is a REAL constant
+  // (e3b0c44298fc), not an absence marker. Two distinct claim-less priors
+  // (e.g. two posted-marker recoveries whose comment bodies both failed to
+  // parse) must never collapse onto that one shared `c`.
+  test("#206 — two claim-less carried rows never collide on `c`", () => {
+    const priors = [
+      {
+        id: "R001",
+        sev: SEVERITY_UNRECOVERABLE,
+        tier: TIER_UNRECOVERABLE,
+        channel: "inline" as const,
+        locs: ["src/a.ts:1"],
+        claim: "",
+        triage: null,
+        newThreadReply: false,
+      },
+      {
+        id: "R002",
+        sev: SEVERITY_UNRECOVERABLE,
+        tier: TIER_UNRECOVERABLE,
+        channel: "inline" as const,
+        locs: ["src/b.ts:2"],
+        claim: "",
+        triage: null,
+        newThreadReply: false,
+      },
+    ];
+    const assembled = assembleLive({
+      settled: [
+        { id: "R001", status: "carried", locs: ["src/a.ts:1"], renamed: false },
+        { id: "R002", status: "carried", locs: ["src/b.ts:2"], renamed: false },
+      ],
+      priors,
+      verifyVerdicts: new Map(),
+    });
+    const [row1, row2] = assembled.live;
+    expect(row1?.c).not.toBe(claimFingerprint(""));
+    expect(row2?.c).not.toBe(claimFingerprint(""));
+    expect(row1?.c).not.toBe(row2?.c);
   });
 });

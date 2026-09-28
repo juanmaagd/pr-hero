@@ -280,6 +280,112 @@ describe("launchOpenCodeServer", () => {
     await server.close();
   });
 
+  // Free-tier gateway fix (2026-09-26): opencode-client.ts's createSession
+  // passes `freeTierGatewayAsk` only for a `provider_free` route, and only
+  // with the ids that route's OWN spec does not grant — this module never
+  // decides which ids, only how to render whatever list it is given. See
+  // FREE_TIER_GATEWAY_TOOLS in opencode-client.ts for the observed 403 matrix
+  // that makes this necessary, and the WHY at this function's config
+  // assembly for why "ask" (not "allow", not simply omitting the key)
+  // preserves isolation.
+  test("marks a free-tier gateway tool 'ask' instead of denying it, alongside external_directory", async () => {
+    const fake = fakeServer();
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: { HOME: "/tmp/projection" },
+      freeTierGatewayAsk: ["bash"],
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+    expect(fake.env()).toEqual({
+      HOME: "/tmp/projection",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { external_directory: "deny", bash: "ask" },
+      }),
+    });
+    fake.finish(0);
+    await server.close();
+  });
+
+  test("marks every free-tier gateway tool named 'ask', not only the first", async () => {
+    const fake = fakeServer();
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: { HOME: "/tmp/projection" },
+      freeTierGatewayAsk: ["bash", "read"],
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+    const config = JSON.parse(fake.env()?.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      permission?: Record<string, string>;
+    };
+    expect(config.permission).toEqual({
+      external_directory: "deny",
+      bash: "ask",
+      read: "ask",
+    });
+    fake.finish(0);
+    await server.close();
+  });
+
+  // Pin: an empty list is indistinguishable from omitting the option
+  // entirely — every non-`provider_free` route reaches this launcher with
+  // `freeTierGatewayAsk` either absent or `[]`, and both must produce the
+  // exact byte-identical config this file's OTHER tests already pin.
+  test("an empty freeTierGatewayAsk adds no permission key beyond external_directory", async () => {
+    const fake = fakeServer();
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: { HOME: "/tmp/projection" },
+      freeTierGatewayAsk: [],
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+    expect(fake.env()).toEqual({
+      HOME: "/tmp/projection",
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: { external_directory: "deny" },
+      }),
+    });
+    fake.finish(0);
+    await server.close();
+  });
+
+  test("a free-tier gateway ask coexists with a delivered MCP registry", async () => {
+    const fake = fakeServer();
+    const mcp = {
+      codegraph: {
+        type: "local" as const,
+        command: ["/opt/homebrew/bin/codegraph", "serve", "--mcp", "-p", "/w"],
+        enabled: true as const,
+      },
+    };
+    const pending = launchOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      env: { HOME: "/tmp/projection" },
+      mcp,
+      freeTierGatewayAsk: ["bash"],
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    const server = await pending;
+    expect(fake.env()?.OPENCODE_CONFIG_CONTENT).toBe(
+      JSON.stringify({
+        mcp,
+        permission: { external_directory: "deny", bash: "ask" },
+      }),
+    );
+    fake.finish(0);
+    await server.close();
+  });
+
   test("refuses a binary path that was never resolved to an absolute one", async () => {
     const fake = fakeServer();
     await expect(
@@ -484,6 +590,38 @@ describe("projected server launch (#149)", () => {
       ...PROJECTION_ENV,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         permission: { external_directory: "deny" },
+      }),
+    });
+  });
+
+  // `launchProjectedOpenCodeServer` destructures `broker`/`credentialKind`/
+  // `baseEnv` out of its options and forwards the rest — `freeTierGatewayAsk`
+  // has to survive that spread untouched to reach launchOpenCodeServer's
+  // config assembly.
+  test("freeTierGatewayAsk survives the projected launch's option spread", async () => {
+    const fake = fakeServer();
+    const proj = fakeBroker();
+    const pending = launchProjectedOpenCodeServer({
+      verifiedBinaryPath: BIN,
+      broker: proj.broker,
+      credentialKind: "provider_free",
+      freeTierGatewayAsk: ["bash", "read"],
+      baseEnv: { PATH: "/usr/bin" },
+      spawnFn: fake.spawnFn,
+      killFn: fake.killFn,
+    });
+    fake.emit(LISTENING);
+    await pending;
+
+    expect(fake.env()).toEqual({
+      PATH: "/usr/bin",
+      ...PROJECTION_ENV,
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        permission: {
+          external_directory: "deny",
+          bash: "ask",
+          read: "ask",
+        },
       }),
     });
   });

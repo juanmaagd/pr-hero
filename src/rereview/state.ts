@@ -13,12 +13,15 @@
 
 import { isFullCommitId } from "#git/refs";
 import { claimFingerprint } from "#pr/preflight";
-import type { Severity, Tier } from "#review/findings";
-import type {
-  FindingChannel,
-  GateStatus,
-  PhaseBResult,
-  PriorRecord,
+import {
+  type FindingChannel,
+  type GateStatus,
+  isRecoveredSeverity,
+  isRecoveredTier,
+  type PhaseBResult,
+  type PriorRecord,
+  type RecoveredSeverity,
+  type RecoveredTier,
 } from "./classify";
 
 export const PR_STATE_MARKER_PREFIX = "<!-- pr-hero-state ";
@@ -28,8 +31,8 @@ export type LiveStatus = "carried" | "unconfirmed" | "suppressed" | "deferred";
 
 export interface StateFinding {
   id: string;
-  sev: Severity;
-  tier: Tier;
+  sev: RecoveredSeverity;
+  tier: RecoveredTier;
   channel: FindingChannel;
   locs: string[];
   c: string;
@@ -100,10 +103,23 @@ export function renderStateBlock(
   return `${stateMarker(headSha)}\n<!-- ${encodeStateJson(payload)} -->`;
 }
 
+// `claimFingerprint("")` is a REAL constant hash (`e3b0c44298fc`), not an
+// absence marker — every claim-less row would otherwise share ONE identity
+// on `c` (#206's second-order bug: `resolvePriorTie`/`resolveRowTie` in
+// rereview/prepare.ts already refuse to trust that constant for a tie-break,
+// but the state block itself still wrote it, and nothing guarantees every
+// FUTURE consumer of `c` will re-derive that same caution). `id` is unique
+// within one state block by construction (`nextStableId` never reuses one),
+// so a claim-less row fingerprints its own id instead of nothing.
+function liveFingerprint(id: string, claim: string): string {
+  if (claim.trim().length > 0) return claimFingerprint(claim);
+  return claimFingerprint(`pr-hero:unrecoverable-claim:${id}`);
+}
+
 export function stateFinding(input: {
   id: string;
-  sev: Severity;
-  tier: Tier;
+  sev: RecoveredSeverity;
+  tier: RecoveredTier;
   channel: FindingChannel;
   locs: readonly string[];
   claim: string;
@@ -114,7 +130,7 @@ export function stateFinding(input: {
     tier: input.tier,
     channel: input.channel,
     locs: [...input.locs],
-    c: claimFingerprint(input.claim),
+    c: liveFingerprint(input.id, input.claim),
     claim: input.claim,
   };
 }
@@ -254,7 +270,7 @@ function asStateFinding(row: unknown): StateFinding | null {
   if (typeof row !== "object" || row === null) return null;
   const r = row as Record<string, unknown>;
   if (typeof r.id !== "string" || !R_ID.test(r.id)) return null;
-  if (!isSeverity(r.sev) || !isTier(r.tier)) return null;
+  if (!isRecoveredSeverity(r.sev) || !isRecoveredTier(r.tier)) return null;
   if (r.channel !== "inline" && r.channel !== "outside") return null;
   if (
     !Array.isArray(r.locs) ||
@@ -273,19 +289,6 @@ function asStateFinding(row: unknown): StateFinding | null {
     c: r.c,
     claim: r.claim,
   };
-}
-
-function isSeverity(value: unknown): value is Severity {
-  return (
-    value === "BLOCKER" ||
-    value === "CRITICAL" ||
-    value === "WARNING" ||
-    value === "SUGGESTION"
-  );
-}
-
-function isTier(value: unknown): value is Tier {
-  return value === "blocking" || value === "advisory";
 }
 
 function formatR(n: number): string {
@@ -343,7 +346,7 @@ export function assembleLive(input: {
       tier: prior.tier,
       channel: prior.channel,
       locs: row.locs,
-      c: claimFingerprint(prior.claim),
+      c: liveFingerprint(prior.id, prior.claim),
       claim: prior.claim,
       status,
     });

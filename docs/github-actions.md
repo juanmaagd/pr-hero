@@ -9,8 +9,10 @@ merge on its own findings.
 1. **Add one auth secret** (Settings → Secrets and variables → Actions → New repository secret):
    `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Pick one — never both blank. Leave OpenCode unset:
    that is today's Claude CI.
-2. **Add the workflow file.** Run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your repo.
-   That writes the consumer template (`uses: juanmaagd/pr-hero@v1`). Do **not** copy this repository's
+2. **Add the workflow files.** Run `pr-hero setup --ci` (or `pr-hero ci init`) in a clone of your repo.
+   That writes two consumer templates (`uses: juanmaagd/pr-hero@v0`): `.github/workflows/pr-hero.yml`
+   (automatic, on each push) and `.github/workflows/pr-hero-force.yml` (manual dispatch, always
+   `--force`). Do **not** copy this repository's
    own `.github/workflows/pr-hero.yml`: that file is generated with `OWN_CI_WORKFLOW_OPTIONS` so this
    repo can dogfood the checkout (`uses: ./` and `max-changed-lines: 5000`). `test/packaging.test.ts`
    asserts each file against its own generator options; it does **not** assert the two files are
@@ -69,7 +71,7 @@ jobs:
           fetch-depth: 0 # see "Why fetch-depth: 0" below
       - name: Run pr-hero
         id: pr-hero
-        uses: juanmaagd/pr-hero@v1
+        uses: juanmaagd/pr-hero@v0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -275,10 +277,14 @@ instead of failing. Fork PRs skip without that notice — they never receive sec
 every fork would be noise.
 
 ### Action version pinning
-The default workflow targets the floating major tag `uses: juanmaagd/pr-hero@v1` to automatically receive backward-compatible bug fixes and optimizations. If your organization enforces strict immutable SHA pinning, you can pin the full commit SHA directly:
+The default workflow targets the floating major tag `uses: juanmaagd/pr-hero@v0`, which moves to every new 0.x release. While the major version is 0, a minor release may include breaking changes to the Action contract (see the pre-1.0 semantics in `docs/release-runbook.md`), so `@v0` is not a compatibility guarantee: read `CHANGELOG.md` before a new 0.x minor lands, or pin an exact tag or SHA. If your organization enforces strict immutable SHA pinning, you can pin the full commit SHA directly:
 ```yaml
-- uses: juanmaagd/pr-hero@aff0324cd8c6a0c5fbf97ddbf3e6d234c9c612e4 # v1.0.0
+- uses: juanmaagd/pr-hero@aff0324cd8c6a0c5fbf97ddbf3e6d234c9c612e4 # v0.1.0
 ```
+
+`@v1` still exists and is frozen at the last 1.x release (versions were renumbered to 0.x because the
+API is not yet stable — see `CHANGELOG.md`): existing workflows pinned to `@v1` keep working exactly as
+they are today, but receive no further updates. New workflows should target `@v0`.
 
 ## Spend controls
 
@@ -287,11 +293,14 @@ nothing:
 
 | Gate | Input | Default | Disable |
 |---|---|---|---|
-| Size | `max-changed-lines` / `max-changed-files` | `1000` / `50` | `0` |
+| Size | `max-changed-lines` / `max-changed-files` | `4000` / `50` | `0` |
 | Budget | `budget-usd` | route-derived (see below) | any value `<= 0` |
 
 Both gates exit 0 and leave a courteous PR comment plus step-summary note when they trip — they are cost
-gates, not quality gates, and never fail the job.
+gates, not quality gates, and never fail the job. The comment names the one-shot override:
+`gh workflow run pr-hero-force.yml -f pr=<n>`. That dispatches [the force workflow](#manual-override)
+on GitHub Actions. It does not change the ceilings for later pushes, and it does not review on the
+machine that sends the command.
 
 **Leaving `budget-usd` unset resolves the ceiling from how the run is billed.** A Claude
 subscription route (`CLAUDE_CODE_OAUTH_TOKEN`) draws on quota rather than a per-token invoice, so its
@@ -362,14 +371,23 @@ Example:
 
 ### Manual override
 
-When automatic admission skips a push or the attempt budget is exhausted, run locally:
+When CI skips a pull request — size gate, admission policy, or budget ceiling — dispatch the
+force workflow. The review runs on the GitHub Actions runner. The command does not review on
+the machine where you type it:
 
 ```bash
-pr-hero review --pr <n> --post --force
+gh workflow run pr-hero-force.yml -f pr=<number>
 ```
 
-`--force` bypasses admission (and the size gate) for that run only. It does not reset the durable
-ledger — it is an explicit operator override, not a silent retry loop.
+Write access on the repository is required (`workflow_dispatch`). A fork pull request is refused.
+`gh run rerun` on the automatic workflow re-evaluates the gates and does not force.
+
+A local agent (Claude Code) uses that same `gh workflow run`. It must not run
+`pr-hero review --pr <n> --force` when the goal is a CI review.
+
+The dispatched run passes `--force`. That bypasses the size gate, admission, and the budget
+ceiling for that run only. It does not reset the durable ledger. An empty effective diff
+(everything excluded) still does not review.
 
 ### Check Runs ledger
 
@@ -505,7 +523,8 @@ Three properties of the upload step are load-bearing:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `pr-number` | resolved from the triggering event | Override when triggering from a non-`pull_request` event. |
+| `pr-number` | resolved from the triggering event | Override when triggering from a non-`pull_request` event. `pr-hero-force.yml` sets this from the dispatch input. |
+| `force` | `false` | Bypass the size gate, CI admission, and the budget ceiling for this run. `pr-hero-force.yml` sets it to `true`. |
 | `model` | engine default | Override every agent's model. |
 | `scout` | `false` | Experimental diff-only pre-hunt stage; off by default. |
 | `post` | `true` | Set `false` to run the review and write outputs/summary without posting to the PR. |
@@ -517,6 +536,10 @@ Three properties of the upload step are load-bearing:
 
 - **`pr-hero doctor`** locally reports whether `.github/workflows/pr-hero.yml` exists; inside Actions it
   reports whether the required secrets (or OpenCode auth file) are present (never their values).
+- **The review was skipped** (size, budget, or admission) — dispatch
+  `gh workflow run pr-hero-force.yml -f pr=<n>`. `gh run rerun` on `pr-hero.yml` re-evaluates the
+  gates and skips again. The force workflow has to be on the default branch before `workflow_dispatch`
+  can see it.
 - **No comment appears on the PR** — check `permissions: pull-requests: write` is present, and that at
   least one of the three credential secrets is set (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or
   `OPENCODE_AUTH_JSON`). Fork PRs never receive those secrets. OpenCode also needs `PRHERO_ROUTING`.

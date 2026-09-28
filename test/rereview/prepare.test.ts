@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { claimFingerprint } from "#pr/preflight";
-import type { PriorRecord } from "#rereview/classify";
+import {
+  type PriorRecord,
+  SEVERITY_UNRECOVERABLE,
+  TIER_UNRECOVERABLE,
+} from "#rereview/classify";
 import { planDiscovery } from "#rereview/plan";
 import {
   bindPriorsToPosted,
@@ -17,6 +21,8 @@ import {
   toRereviewProvenance,
 } from "#rereview/prepare";
 import type { LiveFinding } from "#rereview/state";
+import type { Finding } from "#review/findings";
+import { renderInlineComment } from "#review/report";
 import { triageMarker } from "#triage/triage";
 
 const B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -630,8 +636,8 @@ describe("F001/F003 — prior->comment binding by path:line", () => {
     // marker's `c` ever equals — so this whole path used to drop every triage
     // reply an author wrote. path:line is the identity both sides DO have.
     const priors = priorsFromPostedMarkers([
-      { path: "src/a.ts", line: 10, channel: "inline" },
-      { path: "src/b.ts", line: 20, channel: "inline" },
+      { path: "src/a.ts", line: 10, channel: "inline", body: "" },
+      { path: "src/b.ts", line: 20, channel: "inline", body: "" },
     ]);
     expect(priors.map((p) => p.claim)).toEqual(["", ""]);
     expect(claimFingerprint("")).toBe("e3b0c44298fc");
@@ -733,6 +739,135 @@ describe("F001/F003 — prior->comment binding by path:line", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// #206 — a carried finding keeps its real sev/tier/claim
+//
+// `priorsFromPostedMarkers` runs whenever the previous summary's state block
+// is unusable — including the ROUTINE case, not a rare one: a first review
+// writes NO `pr-hero-state` block at all (`postInlineFindings`'s
+// `framing === undefined` branch, src/pr/pr.ts, confirmed by
+// `PR_CI_ADMISSION_PREFIX`'s own WHY in src/ci/review-admission.ts: "First
+// reviews carry no item-7 pr-hero-state block"), so EVERY PR's second review
+// takes this path. It used to hardcode sev/tier/claim; now it recovers them
+// from the posted comment's own body via `parseFindingCommentBadge`.
+// ---------------------------------------------------------------------------
+
+describe("#206 — priorsFromPostedMarkers recovers from the posted comment body", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  function finding(overrides: Partial<Finding> & { id: string }): Finding {
+    return {
+      category: 3,
+      path: "src/watch.ts",
+      line: 614,
+      severity: "BLOCKER",
+      evidence_class: "deterministic",
+      refuter_verdict: "corroborated",
+      causal_disposition: "introduced",
+      claim: "the retry never clears the prior timer, so two timers race",
+      proof_refs: [],
+      hunter: "reliability",
+      tier: "blocking",
+      hops_used: 1,
+      hop_trail: [],
+      dedupe_key: `${overrides.path ?? "src/watch.ts"}::3`,
+      ...overrides,
+    };
+  }
+
+  test("a posted BLOCKER comment recovers as BLOCKER/blocking with its claim", () => {
+    const body = renderInlineComment(finding({ id: "F001" }), HEAD);
+    const [prior] = priorsFromPostedMarkers([
+      { path: "src/watch.ts", line: 614, channel: "inline", body },
+    ]);
+    expect(prior?.sev).toBe("BLOCKER");
+    expect(prior?.tier).toBe("blocking");
+    expect(prior?.claim).toBe(
+      "the retry never clears the prior timer, so two timers race",
+    );
+  });
+
+  test("a posted WARNING/advisory comment recovers accordingly (not just the BLOCKER path)", () => {
+    const body = renderInlineComment(
+      finding({
+        id: "F002",
+        severity: "WARNING",
+        tier: "advisory",
+        claim: "a minor style inconsistency",
+      }),
+      HEAD,
+    );
+    const [prior] = priorsFromPostedMarkers([
+      { path: "src/watch.ts", line: 614, channel: "inline", body },
+    ]);
+    expect(prior?.sev).toBe("WARNING");
+    expect(prior?.tier).toBe("advisory");
+    expect(prior?.claim).toBe("a minor style inconsistency");
+  });
+
+  test("an unparseable body never defaults to WARNING/advisory — it is UNRECOVERABLE", () => {
+    const [empty, foreign] = priorsFromPostedMarkers([
+      { path: "src/a.ts", line: 1, channel: "inline", body: "" },
+      {
+        path: "src/b.ts",
+        line: 2,
+        channel: "inline",
+        body: "a human's plain reply, not a pr-hero comment at all",
+      },
+    ]);
+    for (const prior of [empty, foreign]) {
+      expect(prior?.sev).toBe(SEVERITY_UNRECOVERABLE);
+      expect(prior?.tier).toBe(TIER_UNRECOVERABLE);
+      expect(prior?.sev).not.toBe("WARNING");
+      expect(prior?.tier).not.toBe("advisory");
+      expect(prior?.claim).toBe("");
+    }
+  });
+
+  // The #205/#278 row shape, reproduced from a REALISTIC fixture (the badge
+  // line format straight from the issue's own PR #278 evidence: "🔴 blocking
+  // · BLOCKER · introduced · reliability") rather than always going through
+  // today's renderer — a hand-built body is what actually sits on GitHub, and
+  // the parser has to survive reading the wire format, not just its own
+  // writer's output.
+  test("regression — the #205/#278 row shape is no longer produced", () => {
+    const realisticBody =
+      `<!-- pr-hero-finding path=src%2Fwatch.ts line=614 head=${HEAD} ` +
+      "c=deadbeefcafe -->\n" +
+      "\n" +
+      "🔴 blocking · BLOCKER · introduced · reliability\n" +
+      "`src/watch.ts:614`\n" +
+      "\n" +
+      "the watcher retries without ever clearing the prior timer, so two " +
+      "timers race\n" +
+      "\n" +
+      "<details><summary>Evidence (1)</summary>\n" +
+      "\n" +
+      "- `src/watch.ts:600`\n" +
+      "\n" +
+      "</details>\n";
+    const [prior] = priorsFromPostedMarkers([
+      {
+        path: "src/watch.ts",
+        line: 614,
+        channel: "inline",
+        body: realisticBody,
+      },
+    ]);
+    // The buggy shape PR #205/#278 actually posted:
+    // {"sev":"WARNING","tier":"advisory","c":"e3b0c44298fc","claim":""}
+    expect(prior?.sev).not.toBe("WARNING");
+    expect(prior?.tier).not.toBe("advisory");
+    expect(prior?.claim).not.toBe("");
+    expect(prior?.sev).toBe("BLOCKER");
+    expect(prior?.tier).toBe("blocking");
+    expect(prior?.claim).toBe(
+      "the watcher retries without ever clearing the prior timer, so two " +
+        "timers race",
+    );
+  });
+});
+
 describe("F002 — collapseTargets gives each verified-gone id its own thread", () => {
   const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -753,9 +888,9 @@ describe("F002 — collapseTargets gives each verified-gone id its own thread", 
     // in the batch — a "✅ RESOLVED · verified gone" reply and a programmatic
     // thread-resolve landing on a finding nobody checked.
     const priors = priorsFromPostedMarkers([
-      { path: "src/a.ts", line: 10, channel: "inline" },
-      { path: "src/b.ts", line: 20, channel: "inline" },
-      { path: "src/c.ts", line: 30, channel: "inline" },
+      { path: "src/a.ts", line: 10, channel: "inline", body: "" },
+      { path: "src/b.ts", line: 20, channel: "inline", body: "" },
+      { path: "src/c.ts", line: 30, channel: "inline", body: "" },
     ]);
     expect(
       collapseTargets({
@@ -1091,6 +1226,60 @@ describe("F007 — readRereviewProvenance", () => {
     ).toEqual({
       kind: "invalid",
       problem: "rereview.verification_triggers.verify_all",
+    });
+  });
+
+  // pr-hero review #286: `discovery_skip_reason` / `discovery_excluded_paths`
+  // disambiguate WHY discovery came up empty — added AFTER `discovery_skipped_
+  // empty_delta` shipped, so every artifact written before this fix has
+  // neither field. Same "optional on the TYPE, defaults on READ" contract as
+  // `last_review_complete` and `worsened` above: absent must still parse, not
+  // fail LOUD.
+  test("old provenance with no discovery_skip_reason field still parses", () => {
+    const read = readRereviewProvenance({ rereview: block() });
+    expect(read.kind).toBe("ok");
+    expect(
+      read.kind === "ok" && read.rereview.discovery_skip_reason,
+    ).toBeUndefined();
+    expect(
+      read.kind === "ok" && read.rereview.discovery_excluded_paths,
+    ).toBeUndefined();
+  });
+
+  test("discovery_skip_reason and discovery_excluded_paths survive the read verbatim", () => {
+    const read = readRereviewProvenance({
+      rereview: block({
+        discovery_skip_reason: "all_excluded",
+        discovery_excluded_paths: ["dist/bundle.js"],
+      }),
+    });
+    expect(read.kind === "ok" && read.rereview.discovery_skip_reason).toBe(
+      "all_excluded",
+    );
+    expect(
+      read.kind === "ok" && read.rereview.discovery_excluded_paths,
+    ).toEqual(["dist/bundle.js"]);
+  });
+
+  test("an unknown discovery_skip_reason is invalid, naming the field", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({ discovery_skip_reason: "everything_is_fine" }),
+      }),
+    ).toEqual({
+      kind: "invalid",
+      problem: "rereview.discovery_skip_reason",
+    });
+  });
+
+  test("a non-array discovery_excluded_paths is invalid, naming the field", () => {
+    expect(
+      readRereviewProvenance({
+        rereview: block({ discovery_excluded_paths: "dist/bundle.js" }),
+      }),
+    ).toEqual({
+      kind: "invalid",
+      problem: "rereview.discovery_excluded_paths",
     });
   });
 });

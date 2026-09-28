@@ -155,6 +155,9 @@ mode's clean-tree gate.
 **Run `pr-hero config` to see which layer decided what.** It lists every key with its value, the
 layer it came from, and both file paths whether or not they exist. It never edits anything.
 
+Routing a model to a specific backend/provider, and how pr-hero reads credentials for each backend,
+are their own topic — see [`docs/configuration.md`](docs/configuration.md).
+
 ### The one rule
 
 > The more specific layer wins — **except** where the less specific one is protecting your money.
@@ -173,7 +176,7 @@ never be able to enlarge *your* bill: on the two keys that spend, the team can o
 | `summary.enabled` | both — team may only turn it **off** | Whether the engine-owned summarizer runs. Defaults to `true`, because it spends money and a silent opt-out would make the bill differ from the plan. |
 | `summary.model` | both | Model for that step. Defaults to whatever `prompts/summarizer.md` declares (`haiku`). |
 | `max_verification_steps` | both — team may only **lower** it | Cap on re-review verification spawns (item 7). Defaults to `8`; `0` is legal and pauses verification. |
-| `max_changed_lines` | both — team may only **lower** it | Line budget threshold before the size gate skips a review. Defaults to `1500`; `0` disables line budget check. |
+| `max_changed_lines` | both — team may only **lower** it | Line budget threshold before the size gate skips a review. Defaults to `4000`; `0` disables line budget check. |
 | `max_changed_files` | both — team may only **lower** it | File count budget threshold before the size gate skips a review. Defaults to `150`; `0` disables file budget check. |
 | `scout` | both — team may only turn it **off** | Whether the reconnaissance scout hunter runs before review. Defaults to `false`. |
 | `post` | both — team may only turn it **off** | Whether review reports publish as GitHub PR comments by default. Defaults to `false`. |
@@ -234,7 +237,9 @@ the marker line. Reviewing a tree you cannot write to? Supply it from outside wi
 Flags worth knowing: `--dry-run` (plan + cost band, creates nothing), `--yes`, `--model <m>`,
 `--scout` / `--no-scout` (toggle pre-hunt reconnaissance scout),
 `--post` / `--no-post` (toggle PR comment publishing),
-`--force` (bypass size gate thresholds for this run),
+`--force` (local only: review this diff even when the size gate would skip it;
+in GitHub Actions the same override is `gh workflow run pr-hero-force.yml -f pr=<n>`,
+which runs on the Actions runner),
 `--full` (run un-capped refuter verification steps),
 `--no-summary` (skip the summarizer; see `summary` in config above),
 `--out <dir>` (run dir for `review`), `--runs <dir>` (ledger's runs root),
@@ -395,7 +400,12 @@ because an unattended watcher must not be the thing that discovers it.
 
 **It is not a claim about quality.** We have no evidence that a bigger diff reviews worse: attention
 dilution was tested and falsified (`fixtures/scale-probe.ts`), and the one measured Greptile-only
-miss came from a 7-file PR. If a large diff is worth its price, `--force` reviews it.
+miss came from a 7-file PR. If a large diff is worth its price, review it anyway.
+Locally that is `--force`. In GitHub Actions it is a separate workflow,
+`pr-hero-force.yml`, dispatched with `gh workflow run pr-hero-force.yml -f pr=<n>`.
+That command does not review on your machine; the Actions runner does. It also
+clears the CI admission rules and the budget ceiling for that one run. `gh run rerun`
+on the automatic workflow does not: it measures the gates again and skips again.
 
 The gate counts **effective** changed lines (insertions + deletions) and files — excluded content is
 subtracted first, so a regenerated lockfile beside a ten-line change does not trip it. Excluded by
@@ -454,12 +464,13 @@ only ever over-count, never under-count.
 | Profile | Lines | Files | For |
 | --- | --- | --- | --- |
 | Conservative | `--max-changed-lines 800` | `--max-changed-files 150` | Tight budget; only small PRs auto-review. |
-| **Default (shipped)** | **1500** | **150** | Everyday PRs pass; bench-sized trees are skipped. |
-| Permissive | `--max-changed-lines 3000` | `--max-changed-files 150` | You would rather pay than skip. |
+| **Default (shipped)** | **4000** | **150** | Everyday PRs pass; only very large trees are skipped. |
+| Permissive | `--max-changed-lines 0` | `--max-changed-files 150` | You would rather pay than skip — disables the line limit. |
 
 ```bash
 pr-hero review --pr 42 --dry-run          # prints the gate verdict, spends nothing
-pr-hero review --pr 42 --force            # review it anyway (does NOT skip the cost prompt)
+pr-hero review --pr 42 --force            # local: review it anyway (does NOT skip the cost prompt)
+gh workflow run pr-hero-force.yml -f pr=42 # CI: same override, on the Actions runner
 pr-hero review --pr 42 --max-changed-lines 0   # 0 disables that limit entirely
 pr-hero watch add --max-changed-lines 800       # per-repo threshold for the watcher
 ```

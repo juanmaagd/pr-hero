@@ -767,6 +767,10 @@ What is still manual, in the order it should be closed:
    GitHub's counters (`additions`/`deletions`/`changedFiles`, `gh pr view --json files`), which carry no
    whitespace information at all. Those paths label themselves estimates and can only over-count.
 
+   **2026-09-25 — the line default moved again, 1500 -> 4000, and the action's own default 1000 ->
+   4000.** Owner decision, not a measurement: 1500 was skipping too many real PRs outright. The
+   830..4000 band above is still unmeasured — this just picks the top of it.
+
    The gate runs BEFORE the cost-band `confirm()`, never behind it — the watcher passes `--yes`, so a
    gate inside the prompt would never fire in the one place unattended spend actually happens. In
    watch mode the skip is `too-large`: it consumes no poison-PR attempt, writes no marker, and does

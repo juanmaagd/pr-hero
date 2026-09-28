@@ -10,6 +10,10 @@ import {
   resolveClaudeCanonicalBinary,
 } from "#model/provider-capabilities";
 import type { ExactBindingCapabilityReport } from "../../src/execution/contracts";
+import {
+  credentialKindBillsMetered,
+  credentialKindForRoute,
+} from "../../src/runner-authority";
 import { ClaudeCodeCliTransport } from "../../src/transports/claude-code-cli";
 
 const GREEN_BINARY = {
@@ -396,12 +400,20 @@ describe("transport/producer parity (§11)", () => {
     // pricing gate now ANSWERS for a claude-code route, so a derived metered
     // mode would no longer be refused for lack of pricing.
     //
-    // What remains is scope, not safety. Deriving the mode from the host
-    // environment is #161's slice (a real metered mode carried by the
-    // credential, alongside the projection and bucket changes it implies), and
-    // `credentialKindForRoute` returning `claude_subscription_oauth`
-    // unconditionally is the single place that decision belongs. Changing the
-    // constant here would fork it.
+    // What remained was scope, not safety, and #161 has now landed: deriving
+    // a real metered mode from the host environment is
+    // `credentialKindForRoute`'s job (runner-authority.ts), not this
+    // constant's. This backend-wide static still claims "subscription"
+    // unconditionally on purpose — it is produced BEFORE any route (and
+    // therefore any credential) resolves, so it has no per-route env to read
+    // honestly. Deriving it HERE, from this function's own `env` option,
+    // would be a SECOND, independent derivation racing
+    // `credentialKindForRoute`'s — exactly the fork `envBillsMetered`'s
+    // ADMISSION WIRING comment (usage-normalized.ts) now names as the thing
+    // still forbidden. The real per-route answer lives on the EXACT binding
+    // (`FrozenRuntimeBinding.capabilities()`, production-runtime.ts), which
+    // upgrades `effectiveBillingMode` from `credential.kind` — asserted
+    // directly below, at the layer that actually owns the decision.
     //
     // Issue #156's CI budget ceiling deliberately does NOT read this field --
     // see deriveCiBillingMode in src/ci/gates.ts, which answers the narrower
@@ -416,6 +428,35 @@ describe("transport/producer parity (§11)", () => {
     // Environment-independent, like every other CLAUDE_CAPABILITY_STATICS
     // field: the CLI reports `total_cost_usd` whoever is paying.
     expect(withApiKey.billing.pricingReady).toBe(true);
+
+    // The new truth, pinned where the old defect used to be pinned: the
+    // SAME env that leaves this backend-wide static at "subscription" is
+    // exactly what `credentialKindForRoute` reads (alongside whether a
+    // broker will project — the 4th argument, corrected 2026-09-24 by
+    // Juanma) to derive a real metered credential kind — the thing
+    // `FrozenRuntimeBinding.capabilities()` actually upgrades
+    // `effectiveBillingMode` from. A test asserting only the static side,
+    // forever, would leave the old defect's shape unfalsifiable even after
+    // the fix landed.
+    //
+    // `hasBroker: false` here is deliberate, not an oversight: a broker
+    // strips the key before the child ever spawns, so the key resolves
+    // metered ONLY in its absence (see runner-authority.test.ts for the full
+    // precedence truth table, including the "key WITH a broker stays
+    // subscription" arm this pin deliberately does not repeat).
+    const kindWithApiKeyNoBroker = credentialKindForRoute(
+      "claude-code",
+      "anthropic",
+      { ANTHROPIC_API_KEY: "sk-test" },
+      false,
+    );
+    expect(kindWithApiKeyNoBroker).toBe("provider_api_token");
+    expect(credentialKindBillsMetered(kindWithApiKeyNoBroker)).toBe(true);
+    expect(
+      credentialKindBillsMetered(
+        credentialKindForRoute("claude-code", "anthropic", {}),
+      ),
+    ).toBe(false);
   });
 
   test("the transport contradicts the producer in no environment", async () => {

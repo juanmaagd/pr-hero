@@ -89,7 +89,7 @@ function settlePush(
 }
 
 describe("admission state machine — push A cancel → B fail → C cancel → D", () => {
-  test("automatic budget is never exceeded and push D requires manual override", () => {
+  test("cancelled launches do not exhaust the budget, so push D may still run", () => {
     let records: AdmissionRecord[] = [];
     const launches: AdmissionRecord[] = [];
 
@@ -106,20 +106,15 @@ describe("admission state machine — push A cancel → B fail → C cancel → 
     }
 
     expect(launches).toHaveLength(3);
-    expect(
-      launches.filter((r) =>
-        ["failed", "cancelled", "completed", "provider-started"].includes(
-          r.status,
-        ),
-      ).length,
-    ).toBe(3);
 
     const reviewCount = resolveCiAdmissionAttemptCount({
       stateCount: 0,
       workflowHeads: new Set<string>(),
       ledgerRecords: records,
     });
-    expect(reviewCount).toBe(3);
+    // Two of the three launches were cancelled. #164: those do not spend the
+    // budget. Only the failed run counts, and maxAttempts is 2, so D may run.
+    expect(reviewCount).toBe(1);
 
     const verdict = evaluateCiReviewAdmission(
       admissionInput({
@@ -136,10 +131,7 @@ describe("admission state machine — push A cancel → B fail → C cancel → 
         deltaRisk: classifyChangedPaths(["src/pipeline.ts"]),
       }),
     );
-    expect(verdict.action).toBe("manual-required");
-    if (verdict.action === "manual-required") {
-      expect(verdict.reason).toBe("max-attempts-exhausted");
-    }
+    expect(verdict.action).toBe("run");
 
     const { record: wouldReserve, created } = reserveAdmissionAttempt({
       existing: records,
@@ -192,7 +184,10 @@ describe("evaluateCiReviewAdmission + ledger attempt count", () => {
       workflowHeads: new Set([HEAD_A]),
       ledgerRecords: records,
     });
-    expect(reviewCount).toBe(2);
+    // The cancelled row does not raise the count. stateCount and the one
+    // workflow head still do, so the max stays 1 — under maxAttempts 2.
+    // Whatever the next gate decides, it is not "budget exhausted".
+    expect(reviewCount).toBe(1);
 
     const verdict = evaluateCiReviewAdmission(
       admissionInput({
@@ -208,7 +203,10 @@ describe("evaluateCiReviewAdmission + ledger attempt count", () => {
         policy: POLICY,
       }),
     );
-    expect(verdict.action).toBe("manual-required");
+    expect(
+      verdict.action === "manual-required" &&
+        verdict.reason === "max-attempts-exhausted",
+    ).toBe(false);
   });
 });
 

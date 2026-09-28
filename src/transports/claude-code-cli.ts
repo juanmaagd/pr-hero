@@ -86,7 +86,7 @@ function hashPromptFile(promptPath: string): string {
 // #197 removed the REASON that guard used to give — a metered claude-code
 // route is no longer refused for lack of pricing, because `pricingReady` is
 // now `true` for this transport — but not the guard: which credential a route
-// runs on is `credentialKindForRoute`'s single decision (#161's slice), and
+// runs on is `credentialKindForRoute`'s single decision (#161), and
 // deriving it from the env HERE would fork it. This only decides how an
 // attempt that already ran gets FILED.
 //
@@ -550,12 +550,37 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         // (production-runtime.ts) is now this flag and nothing else, so a
         // metered claude-code route that the old gate refused for a missing
         // or expired table is admitted and runs on the cost the CLI reports.
-        // Stated with the precision the code supports: no claude-code route
-        // resolves metered TODAY — `credentialKindForRoute`
-        // (runner-authority.ts) returns `claude_subscription_oauth` for this
-        // backend unconditionally — so what changes today is the GATE's
-        // answer, and the widening becomes observable when #161 derives a
-        // real metered mode for the backend.
+        // #161 landed on top of this: `credentialKindForRoute`
+        // (runner-authority.ts) now derives `provider_api_token` — a metered
+        // kind — for a claude-code route whose environment carries
+        // ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN AND that has no
+        // credential broker projecting for it (no broker means nothing
+        // strips the key before the child sees it — the common case being
+        // Linux/CI, which has no Keychain to project from). A route that
+        // DOES have a broker attached, and whose projection SUCCEEDS, stays
+        // subscription regardless of what its env carries, because a
+        // successful projection strips the key before spawn — so a
+        // claude-code route CAN resolve metered today, not just in the
+        // gate's hypothetical, but only when nothing is about to project a
+        // credential for it. A degraded projection is #279's known
+        // exception: `credentialKindForRoute` still cannot see that a
+        // broker's projection failed and fell back to the unstripped env, so
+        // that one route keeps saying subscription while the key actually
+        // reaches and pays for the child — this ADMISSION-time answer is
+        // deliberately left that way (#279, fixed 2026-09-24, option 2: the
+        // fix lives downstream, in `StepExecutionHarness.run`, harness.ts,
+        // which re-applies `envBillsMetered` to this SAME child env this
+        // module stamps `billingMode: "metered"` from, and opens a
+        // spend-ledger reservation for that one attempt so it is settled or
+        // fenced exactly like a metered route). `pricingReady: true` here is what
+        // makes a metered route ADMITTED rather than refused for lack of
+        // pricing; #161 is what makes the route exist in the first place.
+        // This BACKEND-WIDE report still claims `mode: "subscription"`
+        // unconditionally — it is produced before any route resolves and has
+        // no per-route credential to read — and it is the EXACT binding
+        // (`FrozenRuntimeBinding.capabilities()`, production-runtime.ts) that
+        // upgrades to the real per-route mode via
+        // `credentialKindBillsMetered(credential.kind)`.
         //
         // The one gap this opens is settled, not hand-waved: `total_cost_usd`
         // is OPTIONAL on `RawClaudeCliResult`, so a metered attempt can

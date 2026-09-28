@@ -12,7 +12,10 @@ import {
 } from "#ci/admission-ledger";
 import {
   type CiAdmissionLedgerState,
+  holdCiAdmissionLedger,
+  releaseCiAdmissionLedger,
   settleCiAdmissionLedger,
+  settleHeldAdmissionLedgerOnSignal,
 } from "#pr/admission";
 
 const HEAD = "b".repeat(40);
@@ -122,5 +125,51 @@ describe("settleCiAdmissionLedger — a pending record is settled and published"
     await settleCiAdmissionLedger(null, "failed", SETTLE_REASON, { spawnFn });
 
     expect(calls).toEqual([]);
+  });
+});
+
+describe("settleHeldAdmissionLedgerOnSignal", () => {
+  test("a provider-started row becomes cancelled and is published", async () => {
+    const state = ledgerState("provider-started");
+    holdCiAdmissionLedger(state);
+    const { spawnFn, calls } = ghSpawn({ exitCode: 0, stdout: '{"id":42}' });
+
+    await settleHeldAdmissionLedgerOnSignal((held, status, reason, options) =>
+      settleCiAdmissionLedger(held, status, reason, {
+        ...options,
+        spawnFn,
+      }),
+    );
+
+    expect(state.record.status).toBe("cancelled");
+    expect(state.record.decisionReason).toBe(
+      "workflow cancelled before the review produced anything",
+    );
+    expect(calls.length).toBe(1);
+  });
+
+  test("a second signal finds nothing left to settle", async () => {
+    const state = ledgerState("provider-started");
+    holdCiAdmissionLedger(state);
+    const settle = async () => {
+      state.record = { ...state.record, status: "cancelled" };
+    };
+    await Promise.all([
+      settleHeldAdmissionLedgerOnSignal(settle),
+      settleHeldAdmissionLedgerOnSignal(settle),
+    ]);
+    expect(state.record.status).toBe("cancelled");
+  });
+
+  test("a completed row is not rewritten", async () => {
+    const state = ledgerState("completed");
+    holdCiAdmissionLedger(state);
+    let calls = 0;
+    await settleHeldAdmissionLedgerOnSignal(async () => {
+      calls += 1;
+    });
+    expect(calls).toBe(0);
+    expect(state.record.status).toBe("completed");
+    releaseCiAdmissionLedger();
   });
 });

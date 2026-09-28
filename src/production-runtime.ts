@@ -277,6 +277,20 @@ class FrozenRuntimeBinding implements RuntimeBinding {
     this.route = Object.freeze({ ...options.route });
     this.executable = Object.freeze({ ...options.executable });
     this.credential = Object.freeze({ ...options.credential });
+    // `syntheticHome` answers ONE question: "is a credential broker
+    // configured for this binding?" — not "did this step's harness run get
+    // a fresh per-step projection from it." Those coincided for claude-code
+    // (the only consumer, until OpenCode existed). They stopped coinciding
+    // for OpenCode: since #149 this broker (`OpenCodeAuthBroker` /
+    // `OpenCodeFreeBroker`, runner-authority.ts) protects the SERVER's one
+    // lifetime projection, and since #150 `StepExecutionHarness.run`
+    // deliberately never calls it per step for this backend
+    // (`OpenCodeSdkTransport.credentialProjection === "server-lifetime"`,
+    // contracts.ts/opencode-sdk.ts) because nothing downstream would read
+    // that per-step result. `syntheticHome: true` stays an accurate claim
+    // either way — broker authority IS configured and IS what protects the
+    // inference — it just protects it at server scope, not step scope, for
+    // this backend.
     this.environment = Object.freeze({
       syntheticHome: options.credential.broker !== undefined,
       workspaceReadBroker: true,
@@ -289,6 +303,10 @@ class FrozenRuntimeBinding implements RuntimeBinding {
 
   async capabilities(): Promise<ExactBindingCapabilityReport> {
     const report = await this.getCapabilityReport(this.route.backend);
+    // "Broker configured", not "per-step projection actually taken" — see
+    // the WHY comment on `this.environment` above (#149/#150: for OpenCode
+    // this broker protects the server's lifetime projection, and the
+    // harness now skips the per-step call this flag used to imply).
     const projectionBrokered = this.credential.broker !== undefined;
     const sdkAvailable =
       this.route.backend === "claude-code" ||
@@ -404,6 +422,9 @@ class FrozenRuntimeBinding implements RuntimeBinding {
         probe: projectionBrokered ? report.auth.probe : "not_run",
       },
       environment: {
+        // Same "broker configured" meaning as `projectionBrokered` above,
+        // not "this step got its own projection" — see the #149/#150 WHY
+        // comment on `this.environment` in the constructor.
         syntheticHome: projectionBrokered,
         enumeratedPassthrough: !projectionBrokered,
       },
@@ -522,6 +543,51 @@ function bindingBucketId(
     {
       provider: route.provider,
       credentialFingerprint: `${authority.credentialKind}:${authority.credentialRef}`,
+    },
+    localKey,
+  );
+}
+
+// #279: the bucket a METERED claude-code binding of this SAME
+// provider+credentialRef would compute — `bindingBucketId` above, with the
+// credential kind hardcoded to `provider_api_token` instead of read off
+// `binding.credential.kind`. Used ONLY to fence the one attempt whose
+// Keychain projection degraded onto an ambient key/token (StepExecution-
+// Harness's `degradedProjectionBucketId`), never as `rateLimitBucketId`
+// itself — that stays the binding's OWN bucket, keyed on its REAL
+// `credentialKind` (subscription), so a normal, non-degraded subscription
+// attempt keeps landing where it always did.
+//
+// WHY a different bucket than the binding's own: the ledger's guarantee is
+// "an unresolved bucket blocks the NEXT paid attempt of the SAME
+// credential" (spend-limiter.ts). The credential that pays for a degraded
+// attempt is the ambient API key/token, not the subscription OAuth record
+// this binding otherwise authenticates with — those are two different
+// credentials that happen to share one route. Fencing the subscription
+// bucket here would block the next NON-degraded subscription attempt on
+// this same route over dollars the OAuth credential never spent (and would
+// widen the harness's own reservesSpend=false invariant: "a subscription
+// binding reserves nothing" — production-runtime.test.ts). Fencing this
+// mirrored bucket instead lands on the SAME identity a real metered
+// claude-code binding of this provider+credentialRef would use (see
+// `credentialKindForRoute`, runner-authority.ts — hasBroker=false is what
+// produces `provider_api_token` for claude-code), so a later real metered
+// attempt on the same credential is correctly refused too.
+//
+// Takes the provider + credentialRef directly rather than a
+// `ResolvedBindingAuthority` (unlike `bindingBucketId` above): the ONE call
+// site (`MultiProviderRunner.run`) only has the public `RuntimeBinding`,
+// whose `credential.ref` already carries the same value `authority.
+// credentialRef` would.
+function degradedMeteredBucketId(
+  provider: string,
+  credentialRef: string,
+): string {
+  const localKey = loadOrCreateBucketKey(homedir());
+  return deriveBucketId(
+    {
+      provider,
+      credentialFingerprint: `provider_api_token:${credentialRef}`,
     },
     localKey,
   );
@@ -1379,6 +1445,14 @@ export class MultiProviderRunner implements StepRunner {
       capabilityReport.billing.mode === "metered" ||
       binding.credential.kind === "provider_free";
 
+    // #279, 2026-09-24: the harness itself decides whether a SINGLE attempt
+    // whose Keychain projection degraded onto an ambient key/token still
+    // needs to reserve — a fact only it can see, per `run()`, not per
+    // binding (see harness.ts's `reservesSpend`/`degradedProjectionBucketId`
+    // options and their WHY). That requires the ledger to be REACHABLE from
+    // every binding, subscription included, so `spendLedger` below is now
+    // unconditional; `reservesSpend` still gates the binding's OWN
+    // unconditional-per-attempt reservation exactly as it always has.
     const isolation = minimalIsolationFromExecutable(binding.executable);
     const lease = await binding.acquire(isolation, this.registry);
     const routeKey = binding.key;
@@ -1409,7 +1483,23 @@ export class MultiProviderRunner implements StepRunner {
         // RECORDED on the reservation and read by no gate anywhere — the
         // fence keys on `fencedBuckets`, never on an amount — so a figure
         // here would be a budget nobody has decided, dressed as one that was.
-        ...(reservesSpend ? { spendLedger: this.spendLedger } : {}),
+        //
+        // #279: `spendLedger` is now handed to EVERY binding — see the WHY
+        // just above `isolation` — with `reservesSpend` carrying the
+        // per-binding decision the conditional spread used to encode. A
+        // subscription binding (`reservesSpend: false`) still reserves
+        // nothing on its own; only its harness's own degraded-projection
+        // check (envBillsMetered on the actual child env) can open a
+        // reservation now, and only into `degradedProjectionBucketId` —
+        // the bucket a metered claude-code binding of this SAME
+        // provider+credential would compute, never this binding's own
+        // subscription bucket (see `degradedMeteredBucketId`'s WHY above).
+        spendLedger: this.spendLedger,
+        reservesSpend,
+        degradedProjectionBucketId: degradedMeteredBucketId(
+          binding.route.provider,
+          binding.credential.ref,
+        ),
         ...(this.graceMarginMs !== undefined
           ? { graceMarginMs: this.graceMarginMs }
           : {}),
@@ -1701,7 +1791,9 @@ export function productionFallbackRegistry(options: {
   readonly evidence?: Map<RunnerBackend, D1_11ReadinessEvidence>;
   readonly binaryPath?: string;
   readonly openCodeBinaryPath?: string;
-  readonly env?: Record<string, string>;
+  // #161: matches `RunnerAuthorityOptions.env`'s widened shape — this
+  // function is fed `options`/`authorityOptions` (both that type) directly.
+  readonly env?: Readonly<Record<string, string | undefined>>;
   readonly credentialBrokers?: RunnerAuthorityOptions["credentialBrokers"];
   // #133: optional because this function is also called with a bare
   // `{ mode }` by callers that never reach an opencode route. When it IS
@@ -1739,10 +1831,18 @@ export function productionFallbackRegistry(options: {
   // #182: when the decided kind is free and no broker was supplied, default to
   // the free broker — NOT the OAuth default in openCodeLaunchServerFor. That
   // default pairs an OAuth broker with whatever kind travels, and pairing it
-  // with `provider_free` would refuse by name (loud but useless). Substituting
-  // a fresh broker here is safe UNLIKE the metered/OAuth case the comment
-  // below guards: the free broker reads nothing, so "no preference" and "use
-  // THIS one" are indistinguishable — there is no operator store to touch.
+  // with `provider_free` would refuse by name (loud but useless).
+  //
+  // #280 changed what this substitution costs. The free broker used to read
+  // nothing, so a fresh instance here was indistinguishable from the caller's.
+  // It now reads the provider's own `api` record from auth.json when one
+  // exists, so a fresh instance here and another at the binding would be two
+  // independent reads of the same mutable store — the "two brokers, diverging
+  // in silence" class #149 closed. The production path never reaches this:
+  // prepareProductionAdmissionContext resolves ONE broker and seeds it into
+  // `credentialBrokers.opencode`, which both the bindings and this registry
+  // receive. This default only serves callers that build a runtime without
+  // that context (tests, probes); pass `credentialBrokers.opencode` to share.
   const needsFreeDefault =
     kind === "provider_free" &&
     options.credentialBrokers?.opencode === undefined;

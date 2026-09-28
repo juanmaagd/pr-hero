@@ -1563,6 +1563,7 @@ describe("prheroHomePaths", () => {
     const paths = prheroHomePaths("/Users/x");
     expect(paths).toEqual({
       dir: "/Users/x/.prhero",
+      nodeModulesDir: "/Users/x/.prhero/node_modules",
       reposDir: "/Users/x/.prhero/repos",
       watchConfigPath: "/Users/x/.prhero/watch.json",
       reviewConfigPath: "/Users/x/.prhero/config.json",

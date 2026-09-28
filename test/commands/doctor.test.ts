@@ -171,3 +171,86 @@ describe("runDoctorCommand — config-load resilience (W3)", () => {
     }
   });
 });
+
+describe("runDoctorCommand — OpenCode routing needs a resolvable SDK", () => {
+  const degradedProbe = async () => ({
+    overall: "degraded" as const,
+    exitCode: 0 as const,
+    checks: [
+      {
+        name: "provider",
+        severity: "degraded" as const,
+        message: "capability report production degraded: sdk missing",
+        hint: "Claude-backed steps are unverified here",
+      },
+    ],
+  });
+
+  test("OpenCode routing with no installed SDK blocks even when the probe row is degraded", async () => {
+    const home = await tmpHome(
+      JSON.stringify({
+        routing: {
+          default: { backend: "opencode", provider: "opencode" },
+        },
+      }),
+    );
+    const repo = await tmpRoot();
+    try {
+      const { report } = await runDoctorCommand({
+        repoRoot: repo.root,
+        workspaceRoot: repo.root,
+        home: home.home,
+        styles: false,
+        width: 80,
+        runDoctorFn: degradedProbe,
+        readSdkVersion: async () => undefined,
+      });
+
+      expect(report.overall).toBe("blocking");
+      expect(report.exitCode).toBe(1);
+      const sdk = report.checks.find((c) => c.name === "opencode-sdk");
+      expect(sdk?.severity).toBe("blocking");
+      expect(sdk?.message).toContain("pr-hero upgrade --reconcile");
+      expect(sdk?.message).toContain("@opencode-ai/sdk@1.18.25");
+      const probe = report.checks.find((c) => c.name === "provider");
+      expect(probe?.severity).toBe("degraded");
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+
+  test("Claude-only routing does not add an OpenCode SDK row", async () => {
+    const home = await tmpHome(
+      JSON.stringify({
+        routing: {
+          default: { backend: "claude-code", provider: "anthropic" },
+        },
+      }),
+    );
+    const repo = await tmpRoot();
+    try {
+      let reads = 0;
+      const { report } = await runDoctorCommand({
+        repoRoot: repo.root,
+        workspaceRoot: repo.root,
+        home: home.home,
+        styles: false,
+        width: 80,
+        runDoctorFn: degradedProbe,
+        readSdkVersion: async () => {
+          reads += 1;
+          return undefined;
+        },
+      });
+
+      expect(reads).toBe(0);
+      expect(report.checks.some((c) => c.name === "opencode-sdk")).toBe(false);
+      expect(report.overall).toBe("degraded");
+      expect(report.exitCode).toBe(0);
+    } finally {
+      await home.cleanup();
+      await repo.cleanup();
+    }
+  });
+});

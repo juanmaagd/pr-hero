@@ -24,6 +24,8 @@
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -183,6 +185,178 @@ function check(name: string, ok: boolean, detail: string): boolean {
   return ok;
 }
 
+// ---------------------------------------------------------------------------
+// The compiled-mode OpenCode SDK load path
+// ---------------------------------------------------------------------------
+//
+// Everything above proves the binary resolves ITS OWN bundled assets. This
+// proves a DIFFERENT thing a compiled binary does: resolve an OPTIONAL
+// runtime dependency (`@opencode-ai/sdk`) that lives OUTSIDE the binary,
+// under ~/.prhero/node_modules. The full `@opencode-ai/sdk/v2` index
+// re-exports the SDK's own server, which imports `cross-spawn`, whose nested
+// `require("which")` Bun's --compile runtime does not resolve for a package
+// living outside the binary — a real defect this file did not
+// catch before it shipped (route admission reported "not installed" for an
+// SDK that plainly was).
+//
+// Still free, on purpose: `review --dry-run` reaches the SDK load during
+// route admission — see the "OpenCode SDK pre-confirm" in
+// prepareProductionAdmissionContext (src/production-runtime.ts) — BEFORE the
+// dry-run's own early exit, so this needs no auth, no OpenCode credentials
+// and no network, same contract as the sweep above. It does need a stub
+// `opencode` executable (mirroring the `claude` stub): route admission
+// observes the binary's `--version` before it ever imports the SDK, and
+// never executes it past that, so the stub never has to behave like a real
+// server.
+//
+// Provider "openai" (OPENCODE_OAUTH_PROVIDER, src/security/credential-broker.ts)
+// is deliberate, not incidental: it resolves an OAuth credential kind, which
+// keeps prepareProductionAdmissionContext OFF the free-model-probe branch
+// entirely. Any other provider resolves a metered kind, which would ALSO
+// spawn the opencode binary asking whether the model is free — a second stub
+// behaviour this check does not need to grow.
+const OPENCODE_SDK_PACKAGE_DIR = path.join(
+  REPO_ROOT,
+  "node_modules",
+  "@opencode-ai",
+  "sdk",
+);
+
+function checkOpenCodeSdkLoad(
+  binary: string,
+  repo: string,
+  claudeStubDir: string,
+): boolean {
+  // @opencode-ai/sdk is an OPTIONAL dependency (package.json
+  // optionalDependencies), and `bun install --frozen-lockfile` — the only
+  // install command either ci.yml or release.yml runs, with no
+  // `--no-optional` anywhere — installs optional dependencies by default. So
+  // both workflows that run this file always have it, and a silent skip here
+  // would be exactly the "gate that always finds a way to pass" pattern that
+  // let v1.0.0 ship a broken `review` past a fully green run: fail loudly
+  // instead.
+  if (!existsSync(OPENCODE_SDK_PACKAGE_DIR)) {
+    return check(
+      "opencode SDK load: repo's own node_modules has @opencode-ai/sdk",
+      false,
+      `not found at ${OPENCODE_SDK_PACKAGE_DIR} — is it still an ` +
+        "optionalDependency, and did `bun install` run without --no-optional?",
+    );
+  }
+
+  const home = mkdtempSync(path.join(os.tmpdir(), "prhero-smoke-sdkhome-"));
+  const outDir = mkdtempSync(path.join(os.tmpdir(), "prhero-smoke-sdkout-"));
+  const opencodeStubDir = mkdtempSync(
+    path.join(os.tmpdir(), "prhero-smoke-opencode-stub-"),
+  );
+  let passed = true;
+  try {
+    // ONLY the SDK package, never its dependency tree: cross-spawn and which
+    // live as SIBLINGS under the repo's root node_modules, not nested inside
+    // node_modules/@opencode-ai/sdk itself (a flat node_modules layout has no
+    // node_modules/@opencode-ai/sdk/node_modules at all), so copying this one
+    // directory excludes them structurally. That absence is exactly what
+    // makes the full /v2 index unloadable here on unfixed dev, and it is what
+    // this check discriminates on: without it, the full index would resolve
+    // fine and the check would prove nothing.
+    const sdkDestDir = path.join(
+      home,
+      ".prhero",
+      "node_modules",
+      "@opencode-ai",
+      "sdk",
+    );
+    mkdirSync(path.dirname(sdkDestDir), { recursive: true });
+    cpSync(OPENCODE_SDK_PACKAGE_DIR, sdkDestDir, { recursive: true });
+
+    // Person-layer config: `routing` is a "person" direction field
+    // (CONFIG_DIRECTION, src/review/preflight.ts) — the repo-level
+    // .prhero/config.json rejects it outright, so this has to live under the
+    // fake HOME, exactly where a real operator's global routing config would.
+    mkdirSync(path.join(home, ".prhero"), { recursive: true });
+    writeFileSync(
+      path.join(home, ".prhero", "config.json"),
+      JSON.stringify({
+        routing: {
+          default: {
+            backend: "opencode",
+            provider: "openai",
+            gateway: "configured",
+            modelSnapshot: "gpt-4o",
+          },
+        },
+      }),
+    );
+
+    // Route admission observes this binary's `--version` before it ever
+    // imports the SDK (the OpenCode server/SDK identity pairing) — see the
+    // header comment above for why it is never executed past that.
+    const opencodeStub = path.join(opencodeStubDir, "opencode");
+    writeFileSync(opencodeStub, '#!/bin/sh\necho "1.18.30"\nexit 0\n');
+    chmodSync(opencodeStub, 0o755);
+
+    const env = {
+      ...process.env,
+      HOME: home,
+      PATH:
+        `${claudeStubDir}${path.delimiter}${opencodeStubDir}` +
+        `${path.delimiter}${process.env.PATH ?? ""}`,
+    };
+
+    const result = run(
+      [
+        binary,
+        "review",
+        "--base",
+        "HEAD~1",
+        "--dry-run",
+        "--yes",
+        "--out",
+        outDir,
+      ],
+      repo,
+      env,
+    );
+    passed =
+      check(
+        "opencode SDK load: review --dry-run through opencode routing exits 0",
+        result.code === 0,
+        `exit ${result.code}\n${result.output}`,
+      ) && passed;
+    // The exact collapse this whole file exists to catch: an import failure
+    // of an INSTALLED, version-matched package reported as "not installed",
+    // and the real cause (a resolution error) thrown away entirely.
+    passed =
+      check(
+        "opencode SDK load: does not report the SDK as not installed",
+        !result.output.includes("not installed"),
+        result.output,
+      ) && passed;
+    passed =
+      check(
+        "opencode SDK load: no unresolved import failure surfaced",
+        !result.output.includes("Cannot find package"),
+        result.output,
+      ) && passed;
+    // The positive proof, not just the absence of the two strings above:
+    // this line only prints after route admission (and inside it, the SDK
+    // pre-confirm) succeeded — reaching the dry run's own early exit.
+    passed =
+      check(
+        "opencode SDK load: admission succeeded and reached the dry-run exit",
+        result.output.includes(
+          "dry run: nothing was spawned and nothing was spent.",
+        ),
+        result.output,
+      ) && passed;
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outDir, { recursive: true, force: true });
+    rmSync(opencodeStubDir, { recursive: true, force: true });
+  }
+  return passed;
+}
+
 async function main(): Promise<number> {
   // Release CI already built the real artifact for its target; re-compiling it
   // here would smoke a DIFFERENT binary from the one it uploads.
@@ -284,6 +458,8 @@ async function main(): Promise<number> {
           `--- compiled ---\n${built.output}\n--- source ---\n${fromSource.output}`,
       ) && passed;
   }
+
+  passed = checkOpenCodeSdkLoad(binary, repo, stubDir) && passed;
 
   rmSync(repo, { recursive: true, force: true });
   rmSync(outDir, { recursive: true, force: true });

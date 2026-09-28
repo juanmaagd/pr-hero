@@ -31,6 +31,9 @@ import ciSetupAdmissionExample from "../skills/pr-hero-ci-setup/assets/admission
 import ciSetupWorkflow from "../skills/pr-hero-ci-setup/assets/workflow.yml" with {
   type: "file",
 };
+import ciSetupForceWorkflow from "../skills/pr-hero-ci-setup/assets/workflow-force.yml" with {
+  type: "file",
+};
 import ciSetupAdmissionRef from "../skills/pr-hero-ci-setup/references/ci-admission.md" with {
   type: "file",
 };
@@ -69,6 +72,7 @@ export const CI_SETUP_SKILL_FILES: Record<string, string> = {
   "assets/admission-config.example.json":
     ciSetupAdmissionExample as unknown as string,
   "assets/workflow.yml": ciSetupWorkflow,
+  "assets/workflow-force.yml": ciSetupForceWorkflow,
   "references/ci-admission.md": ciSetupAdmissionRef,
   "references/opencode-ci.md": ciSetupOpenCodeRef,
 };

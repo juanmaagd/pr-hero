@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { generateCiWorkflowTemplate, OWN_CI_WORKFLOW_OPTIONS } from "#ci/setup";
+import {
+  generateCiForceWorkflowTemplate,
+  generateCiWorkflowTemplate,
+  OWN_CI_WORKFLOW_OPTIONS,
+} from "#ci/setup";
+import { ENGINE_VERSION } from "../src/index";
 
 describe("Packaging & distribution configuration", () => {
   const rootDir = path.resolve(__dirname, "..");
@@ -37,6 +42,15 @@ describe("Packaging & distribution configuration", () => {
     expect(pkg.files).not.toContain("openspec");
     expect(pkg.files).not.toContain("skills/martian-bench");
     expect(pkg.scripts.build).toBeDefined();
+  });
+
+  // release.yml only compares the tag against package.json, so this is what
+  // keeps the exported constant from drifting on the next bump.
+  test("ENGINE_VERSION matches package.json version", () => {
+    const pkg = JSON.parse(
+      readFileSync(path.join(rootDir, "package.json"), "utf-8"),
+    );
+    expect(ENGINE_VERSION).toBe(pkg.version);
   });
 
   test("bin/pr-hero.js exists and is an executable wrapper", () => {
@@ -530,6 +544,34 @@ describe("Packaging & distribution configuration", () => {
     expect(committed).toBe(generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS));
   });
 
+  test("committed .github/workflows/pr-hero-force.yml never drifts from generateCiForceWorkflowTemplate()", () => {
+    const workflowPath = path.join(
+      rootDir,
+      ".github",
+      "workflows",
+      "pr-hero-force.yml",
+    );
+    expect(existsSync(workflowPath)).toBe(true);
+    const committed = readFileSync(workflowPath, "utf-8");
+    expect(committed).toBe(
+      generateCiForceWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS),
+    );
+  });
+
+  test("skills/pr-hero-ci-setup/assets/workflow-force.yml never drifts from generateCiForceWorkflowTemplate()", () => {
+    const assetPath = path.join(
+      rootDir,
+      "skills",
+      "pr-hero-ci-setup",
+      "assets",
+      "workflow-force.yml",
+    );
+    expect(existsSync(assetPath)).toBe(true);
+    expect(readFileSync(assetPath, "utf-8")).toBe(
+      generateCiForceWorkflowTemplate(),
+    );
+  });
+
   test("skills/pr-hero-ci-setup/assets/workflow.yml never drifts from generateCiWorkflowTemplate()", () => {
     const assetPath = path.join(
       rootDir,
@@ -599,14 +641,14 @@ describe("Packaging & distribution configuration", () => {
   // action being changed in the PR that changes it.
   test("the default action ref targets the published tag for consumer repos", () => {
     expect(generateCiWorkflowTemplate()).toContain(
-      "uses: juanmaagd/pr-hero@v1",
+      "uses: juanmaagd/pr-hero@v0",
     );
   });
 
   test("this repo's own workflow runs the local action, not an unpublished tag", () => {
     const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
     expect(own).toContain("uses: ./");
-    expect(own).not.toContain("juanmaagd/pr-hero@v1");
+    expect(own).not.toContain("juanmaagd/pr-hero@v0");
   });
 
   // The byte-equality drift tests above already fail if these lines change, but
@@ -631,7 +673,7 @@ describe("Packaging & distribution configuration", () => {
   test("this repo's own workflow overrides only the size ceiling", () => {
     const own = generateCiWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
     expect(own).not.toContain("budget-usd:");
-    // 5000, not action.yml's 1000: large refactoring slices (like cli-decomposition)
+    // 5000, not action.yml's 4000: large refactoring slices (like cli-decomposition)
     // exceed 2000 lines, so dogfooding requires an expanded ceiling.
     expect(own).toContain("max-changed-lines: 5000");
   });

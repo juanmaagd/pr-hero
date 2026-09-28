@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { capabilityGateDecision } from "#model/provider-capabilities";
 import type { ResolvedRoutePlan, ResolvedStepRoute } from "#model/routing";
+import { type AssetMode, detectAssetMode } from "./assets";
 // Route-keyed transport factory/cache: one ProviderTransport instance per
 // `${backend}:${routeFingerprint}`. `release()` drops a lease; teardown order
 // inside OpenCodeSdkTransport is stream → client.close → server (harness owns
@@ -13,6 +17,7 @@ import type {
   RunnerBackend,
 } from "./execution/contracts";
 import type { UsageBillingMode } from "./execution/usage-normalized";
+import { prheroLayout } from "./home-preflight";
 import { credentialKindBillsMetered } from "./runner-authority";
 import {
   type CredentialBroker,
@@ -22,6 +27,9 @@ import { redactDiagnostic } from "./security/redact";
 import { ClaudeCodeCliTransport } from "./transports/claude-code-cli";
 import {
   type OpenCodeObservedIdentity,
+  OpenCodeSdkUnavailableError,
+  openCodeSdkLoadFailedMessage,
+  openCodeSdkUnavailableMessage,
   qualifyOpenCodeServer,
 } from "./transports/opencode-admission";
 import {
@@ -39,6 +47,217 @@ import {
   type OpenCodeServerHandle,
 } from "./transports/opencode-server";
 
+const OPENCODE_SDK_PACKAGE_SPECIFIER = "@opencode-ai/sdk/package.json";
+// The CLIENT entry, not the full `/v2` index. `/v2` re-exports
+// `dist/v2/server.js`, which imports `cross-spawn`, whose nested
+// `require("which")` Bun's `--compile` runtime does not resolve for a package
+// living outside the binary (under ~/.prhero/node_modules). Why the compiled
+// runtime fails there is not established; that it fails is. pr-hero never
+// launches the SDK's own server (see
+// src/transports/opencode-server.ts's WHY-NOT header) — it only ever needs
+// `createOpencodeClient` (assertOpenCodeSdk) — so `/v2/client` is both
+// sufficient and the only one of the two that loads inside a compiled binary.
+// Confirmed by a discriminating repro compiled with `bun build --compile`:
+// `dist/v2/index.js` throws `Cannot find package 'which'`, `dist/v2/client.js`
+// exports `createOpencodeClient` cleanly, and its relative import graph
+// (gen/client/client.gen.js, gen/sdk.gen.js, ../error-interceptor.js) carries
+// no bare imports.
+const OPENCODE_SDK_V2_SPECIFIER = "@opencode-ai/sdk/v2/client";
+
+function openCodeSdkPackageJsonPath(nodeModulesDir: string): string {
+  return path.join(nodeModulesDir, "@opencode-ai", "sdk", "package.json");
+}
+
+export interface OpenCodeSdkPackageMetadata {
+  version?: string;
+  exports?: unknown;
+}
+
+export interface OpenCodeSdkLoadOptions {
+  importPackage?: () => Promise<OpenCodeSdkPackageMetadata>;
+  importSdk?: () => Promise<unknown>;
+  // Injected so a test can fail the bare specifier and serve the home tree.
+  importSpecifier?: (specifier: string) => Promise<unknown>;
+  // Injected so `bun test` (always `dev`) can exercise the compiled branch.
+  // Absent mode is the only path that calls detectAssetMode().
+  mode?: AssetMode;
+  nodeModulesDir?: string;
+}
+
+export interface OpenCodeSdkImportPlan {
+  readonly packageSpecifier: string;
+  readonly v2Specifier: string | undefined;
+  readonly packageJsonPath: string | undefined;
+}
+
+type DynamicImport = (specifier: string) => Promise<unknown>;
+
+function createDynamicImport(): DynamicImport {
+  return new Function("specifier", "return import(specifier)") as DynamicImport;
+}
+
+function resolveOpenCodeSdkLocation(options?: {
+  mode?: AssetMode;
+  nodeModulesDir?: string;
+}): { mode: AssetMode; nodeModulesDir: string } {
+  return {
+    mode: options?.mode ?? detectAssetMode(),
+    nodeModulesDir:
+      options?.nodeModulesDir ?? prheroLayout(os.homedir()).nodeModulesDir,
+  };
+}
+
+// Dev and npm keep bare specifiers. A compiled binary has no node_modules
+// inside /$bunfs, so the package.json path is the product home and the v2
+// entry is read from that file's exports — never a hardcoded dist path.
+export function planOpenCodeSdkImport(input: {
+  mode: AssetMode;
+  nodeModulesDir: string;
+}): OpenCodeSdkImportPlan {
+  if (input.mode !== "compiled") {
+    return {
+      packageSpecifier: OPENCODE_SDK_PACKAGE_SPECIFIER,
+      v2Specifier: OPENCODE_SDK_V2_SPECIFIER,
+      packageJsonPath: undefined,
+    };
+  }
+  const packageJsonPath = openCodeSdkPackageJsonPath(input.nodeModulesDir);
+  return {
+    packageSpecifier: pathToFileURL(packageJsonPath).href,
+    v2Specifier: undefined,
+    packageJsonPath,
+  };
+}
+
+function asPackageJson(module: unknown): OpenCodeSdkPackageMetadata {
+  if (typeof module !== "object" || module === null) return {};
+  const record = module as OpenCodeSdkPackageMetadata & { default?: unknown };
+  if (typeof record.version === "string" || record.exports !== undefined) {
+    return record;
+  }
+  if (typeof record.default === "object" && record.default !== null) {
+    return record.default as OpenCodeSdkPackageMetadata;
+  }
+  return record;
+}
+
+function normalizeSdkVersion(version: unknown): string | undefined {
+  if (typeof version !== "string") return undefined;
+  const trimmed = version.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+// `exports["./v2/client"]` is either a relative string or `{ import:
+// relative }`. Resolved against the package directory, then imported as a
+// file URL. Reading the CLIENT sub-path, not `"./v2"` — see the WHY comment
+// on OPENCODE_SDK_V2_SPECIFIER above; the full index pulls in cross-spawn,
+// which does not resolve inside a compiled binary.
+export function resolveOpenCodeSdkV2Entry(
+  packageJson: { exports?: unknown },
+  packageDir: string,
+): string {
+  const relative = readOpenCodeV2Export(packageJson.exports);
+  if (relative === undefined) {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+  return pathToFileURL(path.resolve(packageDir, relative)).href;
+}
+
+function readOpenCodeV2Export(exportsField: unknown): string | undefined {
+  if (
+    typeof exportsField !== "object" ||
+    exportsField === null ||
+    Array.isArray(exportsField)
+  ) {
+    return undefined;
+  }
+  const v2Client = (exportsField as Record<string, unknown>)["./v2/client"];
+  if (typeof v2Client === "string" && v2Client.trim() !== "") return v2Client;
+  if (
+    typeof v2Client === "object" &&
+    v2Client !== null &&
+    !Array.isArray(v2Client)
+  ) {
+    const entry = (v2Client as Record<string, unknown>).import;
+    if (typeof entry === "string" && entry.trim() !== "") return entry;
+  }
+  return undefined;
+}
+
+interface LoadedOpenCodeSdkPackage {
+  version: unknown;
+  packageJson: OpenCodeSdkPackageMetadata;
+  packageDir: string;
+  plan: OpenCodeSdkImportPlan;
+}
+
+async function readPackageJsonAt(packageJsonPath: string): Promise<unknown> {
+  let text: string;
+  try {
+    text = await readFile(packageJsonPath, "utf8");
+  } catch (error) {
+    if (error instanceof OpenCodeSdkUnavailableError) throw error;
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+  }
+}
+
+// Shared by the loader and the version reader so a compiled binary and
+// doctor observe the same install.
+async function readOpenCodeSdkPackage(
+  options: OpenCodeSdkLoadOptions | undefined,
+  dynamicImport: DynamicImport,
+): Promise<LoadedOpenCodeSdkPackage> {
+  const location = resolveOpenCodeSdkLocation(options);
+  let plan = planOpenCodeSdkImport(location);
+  const importSpecifier = options?.importSpecifier ?? dynamicImport;
+  let raw: unknown;
+  // Reconcile writes the pin under the product home in every asset mode.
+  // Dev and npm still try the bare specifier first, so a checkout or a
+  // global install wins. A known package.json is read from disk: import()
+  // caches a file URL for the process, so the post-install read would keep
+  // the pre-install version after npm overwrites the file.
+  if (options?.importPackage) {
+    try {
+      raw = await options.importPackage();
+    } catch (error) {
+      if (error instanceof OpenCodeSdkUnavailableError) throw error;
+      throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
+    }
+  } else if (plan.packageJsonPath !== undefined) {
+    raw = await readPackageJsonAt(plan.packageJsonPath);
+  } else {
+    try {
+      raw = await importSpecifier(plan.packageSpecifier);
+    } catch (error) {
+      if (error instanceof OpenCodeSdkUnavailableError) throw error;
+      const packageJsonPath = openCodeSdkPackageJsonPath(
+        location.nodeModulesDir,
+      );
+      raw = await readPackageJsonAt(packageJsonPath);
+      plan = {
+        packageSpecifier: pathToFileURL(packageJsonPath).href,
+        v2Specifier: undefined,
+        packageJsonPath,
+      };
+    }
+  }
+  const packageJson = asPackageJson(raw);
+  return {
+    version: packageJson.version,
+    packageJson,
+    packageDir:
+      plan.packageJsonPath !== undefined
+        ? path.dirname(plan.packageJsonPath)
+        : "",
+    plan,
+  };
+}
+
 // ONE loader for both consumers (the transport factory and probeOpenCodeSdk),
 // so the probe proves exactly what the factory will get. `new Function` keeps
 // the import out of the static graph — the SDK is an OPTIONAL dependency and
@@ -46,52 +265,55 @@ import {
 // now validated instead of `as unknown as OpenCodeSdkLike`-cast. That cast was
 // the root cause of issue #121: it silenced the only compiler check that could
 // have noticed the local interface named a factory the SDK does not export.
-export async function loadOpenCodeSdk(options?: {
-  importPackage?: () => Promise<{ version?: string }>;
-  importSdk?: () => Promise<unknown>;
-}): Promise<OpenCodeSdkLike> {
-  const dynamicImport = new Function("specifier", "return import(specifier)");
-  let sdkPackage: { version?: string } | undefined;
-  try {
-    sdkPackage = options?.importPackage
-      ? await options.importPackage()
-      : ((await dynamicImport("@opencode-ai/sdk/package.json")) as {
-          version?: string;
-        });
-  } catch {
-    // If package metadata cannot be read directly, check below throws
+export async function loadOpenCodeSdk(
+  options?: OpenCodeSdkLoadOptions,
+): Promise<OpenCodeSdkLike> {
+  const dynamicImport = createDynamicImport();
+  const loaded = await readOpenCodeSdkPackage(options, dynamicImport);
+  const installedVersion = normalizeSdkVersion(loaded.version);
+  if (installedVersion === undefined) {
+    throw new OpenCodeSdkUnavailableError(openCodeSdkUnavailableMessage());
   }
-  const installedVersion = sdkPackage?.version;
-  if (
-    typeof installedVersion !== "string" ||
-    installedVersion.trim() === "" ||
-    installedVersion !== SUPPORTED_OPENCODE_SDK_VERSION
-  ) {
+  if (installedVersion !== SUPPORTED_OPENCODE_SDK_VERSION) {
     throw new OpenCodeVersionAdmissionError(
       `Unsupported OpenCode SDK version "${installedVersion}". Expected exact version "${SUPPORTED_OPENCODE_SDK_VERSION}".`,
     );
   }
-  const sdkModule = options?.importSdk
-    ? await options.importSdk()
-    : await dynamicImport("@opencode-ai/sdk/v2");
+  if (options?.importSdk) {
+    return assertOpenCodeSdk(await options.importSdk());
+  }
+  const v2Specifier =
+    loaded.plan.v2Specifier ??
+    resolveOpenCodeSdkV2Entry(loaded.packageJson, loaded.packageDir);
+  let sdkModule: unknown;
+  try {
+    sdkModule = await dynamicImport(v2Specifier);
+  } catch (error) {
+    if (error instanceof OpenCodeSdkUnavailableError) throw error;
+    // The version check above already passed: the package IS installed, so
+    // this catch is a genuine IMPORT failure (e.g. a compiled binary unable
+    // to resolve cross-spawn's nested `require("which")`), never "not
+    // installed". openCodeSdkLoadFailedMessage keeps the real cause instead
+    // of collapsing it into the absence message below.
+    throw new OpenCodeSdkUnavailableError(
+      openCodeSdkLoadFailedMessage(v2Specifier, error),
+    );
+  }
   return assertOpenCodeSdk(sdkModule);
 }
 
-export async function readInstalledOpenCodeSdkVersion(): Promise<
-  string | undefined
-> {
-  const dynamicImport = new Function("specifier", "return import(specifier)");
+export async function readInstalledOpenCodeSdkVersion(options?: {
+  mode?: AssetMode;
+  nodeModulesDir?: string;
+  importPackage?: OpenCodeSdkLoadOptions["importPackage"];
+  importSpecifier?: OpenCodeSdkLoadOptions["importSpecifier"];
+}): Promise<string | undefined> {
   try {
-    const pkg = (await dynamicImport("@opencode-ai/sdk/package.json")) as {
-      version?: string;
-    };
-    if (typeof pkg?.version === "string" && pkg.version.trim() !== "") {
-      return pkg.version.trim();
-    }
+    const loaded = await readOpenCodeSdkPackage(options, createDynamicImport());
+    return normalizeSdkVersion(loaded.version);
   } catch {
-    // SDK not installed or unreadable
+    return undefined;
   }
-  return undefined;
 }
 
 export class RouteAdmissionError extends Error {}
@@ -234,8 +456,16 @@ export interface TransportFactoryOptions {
   readonly spawnFn?: typeof Bun.spawn;
   readonly openCodeClient?: OpenCodeClientLike;
   readonly loadSdk?: () => Promise<OpenCodeSdkLike>;
+  // Free-tier gateway fix: widened to the same two-parameter signature as
+  // `CreateOpenCodeClientOptions.launchServer` (opencode-client.ts) so an
+  // injector here sees the second parameter exists — an injected launcher
+  // that ignores it entirely still type-checks (fewer declared parameters
+  // is a valid JS callback shape), which is exactly why createSession's own
+  // attestation check exists: the type alone cannot force a launcher to
+  // honour this argument, only createSession's runtime check can.
   readonly launchServer?: (
     mcp?: OpenCodeMcpConfig,
+    freeTierGatewayAsk?: readonly string[],
   ) => Promise<OpenCodeServerHandle>;
   readonly readSystemPrompt?: (path: string) => Promise<string>;
   readonly readMcpConfig?: (path: string) => Promise<string>;
@@ -247,7 +477,11 @@ export interface TransportFactoryOptions {
   // launcher-side default below keeps the operator's override on the same
   // option path as every other binary this registry hands out.
   readonly codegraphBinaryPath?: string;
-  readonly env?: Record<string, string>;
+  // #161: matches `RunnerAuthorityOptions.env`'s widened shape (it flows in
+  // from there) and `baseEnv` below, which already accepted `string |
+  // undefined` values — `process.env` itself is typed this way, and this
+  // was the narrower link in that chain.
+  readonly env?: Readonly<Record<string, string | undefined>>;
   // #149: the credential broker the authority resolved for the opencode
   // backend. The server runs under its projection for the servers whole life.
   readonly credentialBroker?: CredentialBroker;
@@ -436,6 +670,13 @@ export class DefaultTransportRegistry implements TransportRegistry {
       const codegraphBinaryPath =
         merged.codegraphBinaryPath ?? Bun.which("codegraph") ?? undefined;
       const client = createOpenCodeClient({
+        // Free-tier gateway fix: the ONLY thing createSession reads this for
+        // is gating FREE_TIER_GATEWAY_TOOLS (opencode-client.ts) — the same
+        // per-route value `usageBillingMode` above and `openCodeLaunchServerFor`
+        // below already read, so all three agree by construction.
+        ...(merged.credentialKind === undefined
+          ? {}
+          : { credentialKind: merged.credentialKind }),
         ...(observed ? { observedIdentity: observed } : {}),
         ...(observed === undefined
           ? {}
@@ -810,8 +1051,14 @@ export function defaultOpenCodeLaunchServer(options: {
   readonly baseEnv?: Readonly<Record<string, string | undefined>>;
   readonly spawnFn?: typeof Bun.spawn;
   readonly killFn?: (pid: number, signal?: string | number) => unknown;
-}): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
-  return async (mcp?: OpenCodeMcpConfig) => {
+}): (
+  mcp?: OpenCodeMcpConfig,
+  freeTierGatewayAsk?: readonly string[],
+) => Promise<OpenCodeServerHandle> {
+  return async (
+    mcp?: OpenCodeMcpConfig,
+    freeTierGatewayAsk?: readonly string[],
+  ) => {
     return await launchProjectedOpenCodeServer({
       ...options,
       // #141: the run’s registry rides the SPAWN. OpenCode reads
@@ -819,6 +1066,10 @@ export function defaultOpenCodeLaunchServer(options: {
       // cannot be given one without opening a window between "server up" and
       // "MCP connected".
       ...(mcp === undefined ? {} : { mcp }),
+      // Free-tier gateway fix: same reason, same spawn-time constraint — see
+      // opencode-client.ts's FREE_TIER_GATEWAY_TOOLS and opencode-server.ts's
+      // launchOpenCodeServer for the full WHY.
+      ...(freeTierGatewayAsk === undefined ? {} : { freeTierGatewayAsk }),
     });
   };
 }
@@ -829,7 +1080,10 @@ export function defaultOpenCodeLaunchServer(options: {
 // which is how the previous inline closure went untested for its whole life.
 export function openCodeLaunchServerFor(
   merged: TransportFactoryOptions,
-): (mcp?: OpenCodeMcpConfig) => Promise<OpenCodeServerHandle> {
+): (
+  mcp?: OpenCodeMcpConfig,
+  freeTierGatewayAsk?: readonly string[],
+) => Promise<OpenCodeServerHandle> {
   return defaultOpenCodeLaunchServer({
     verifiedBinaryPath:
       merged.openCodeBinaryPath ??

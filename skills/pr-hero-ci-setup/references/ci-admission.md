@@ -41,7 +41,7 @@ Read this when configuring `.prhero/config.json` during CI setup. Full operator 
 |---|---|
 | Review runs | Normal pipeline |
 | **Skipped** | Push did not justify spend (same head, low score, docs-only delta, etc.) — **not** “clean” |
-| **Manual required** | Budget exhausted or `manual_only` — needs `pr-hero review --pr N --post --force` |
+| **Manual required** | Budget exhausted or `manual_only` — `gh workflow run pr-hero-force.yml -f pr=<n>` |
 
 Skipped and manual-required posts include admission metadata in the step summary.
 
@@ -75,8 +75,14 @@ Skipped and manual-required posts include admission metadata in the step summary
 
 ## Manual override
 
+Dispatch the force workflow. GitHub Actions runs the review with `--force`. The command itself does not review anything on the machine that sends it:
+
 ```bash
-pr-hero review --pr <n> --post --force
+gh workflow run pr-hero-force.yml -f pr=<n>
 ```
 
-Bypasses admission for one run. Does not reset the ledger.
+It bypasses the size gate, the admission rules (same commit, `once_per_pr`, score, low-risk delta, exhausted attempts, `manual_only`), and the budget ceiling. It does not reset the ledger.
+
+Who can dispatch: anyone with write access to the repository. A fork PR is refused. `gh run rerun` on the automatic workflow re-evaluates the gates and does not force.
+
+A local agent uses this command. It does not run `pr-hero review --pr <n> --force` when the review should happen in CI.

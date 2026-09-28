@@ -19,6 +19,46 @@ import {
   mapIdentityPaths,
 } from "./identity";
 
+// #206: a re-review whose posted priors have no readable `pr-hero-state`
+// block (routine, not rare — a FIRST review never writes one at all, see
+// `postInlineFindings`'s `framing === undefined` branch in src/pr/pr.ts,
+// so EVERY PR's second review takes this path) used to invent
+// `sev: "WARNING"` / `tier: "advisory"` for every carried prior — the exact
+// silent downgrade the headline's severity-not-tier design (report.ts)
+// exists to prevent. These sentinels let a prior say "I could not recover
+// this field" without pretending it is a real Severity/Tier: a consumer
+// that still switches on the 4/2 real values keeps its old exhaustive
+// behavior, and every place this sentinel newly reaches (verify-queue
+// priority, worsening, CI admission scoring, the headline count) fails
+// toward VISIBILITY instead of toward the wrong bucket. Deliberately local
+// sentinels, not a widened `Severity`/`Tier` — those two stay exactly what
+// the lab's `Finding` schema expects (project rule 5, schema compatibility
+// is sacred); this is pr-hero's own internal PR-comment bookkeeping, never
+// read by the lab's scorer.
+export const SEVERITY_UNRECOVERABLE = "UNRECOVERABLE" as const;
+export type RecoveredSeverity = Severity | typeof SEVERITY_UNRECOVERABLE;
+
+export const TIER_UNRECOVERABLE = "unrecoverable" as const;
+export type RecoveredTier = Tier | typeof TIER_UNRECOVERABLE;
+
+export function isRecoveredSeverity(
+  value: unknown,
+): value is RecoveredSeverity {
+  return (
+    value === "BLOCKER" ||
+    value === "CRITICAL" ||
+    value === "WARNING" ||
+    value === "SUGGESTION" ||
+    value === SEVERITY_UNRECOVERABLE
+  );
+}
+
+export function isRecoveredTier(value: unknown): value is RecoveredTier {
+  return (
+    value === "blocking" || value === "advisory" || value === TIER_UNRECOVERABLE
+  );
+}
+
 export type RereviewCase = "A" | "B" | "C" | "D" | "E";
 
 export type GateStatus =
@@ -50,8 +90,8 @@ export interface PriorTriage {
 
 export interface PriorRecord {
   id: string;
-  sev: Severity;
-  tier: Tier;
+  sev: RecoveredSeverity;
+  tier: RecoveredTier;
   channel: FindingChannel;
   locs: readonly string[];
   claim: string;
@@ -196,14 +236,21 @@ const SEV_RANK: Record<Severity, number> = {
 
 export function isStrictlyHigherSev(
   discovery: Severity,
-  prior: Severity,
+  prior: RecoveredSeverity,
 ): boolean {
+  // An unrecoverable prior severity must not silently rank as "already
+  // severe enough to stay suppressed" — #206's whole point is that an
+  // unknown severity fails toward being LOOKED AT again, never toward
+  // staying quiet. Any real rediscovery counts as strictly higher than
+  // "unknown", the same "direction of error stays under-match" bias
+  // `bindPriorsToPosted` (rereview/prepare.ts) already documents.
+  if (prior === SEVERITY_UNRECOVERABLE) return true;
   return SEV_RANK[discovery] < SEV_RANK[prior];
 }
 
 export interface WorseningHit {
   priorId: string;
-  priorSev: Severity;
+  priorSev: RecoveredSeverity;
   discoverySev: Severity;
 }
 

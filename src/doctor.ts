@@ -5,6 +5,7 @@ import {
   exactBindingCapabilityIssues,
   type ProviderCapabilityReport,
 } from "#model/provider-capabilities";
+import { type RoutingConfig, routingNeedsOpenCodeSdk } from "#model/routing";
 import {
   agentFilePath,
   GOTCHAS_PLACEHOLDER_MARKER,
@@ -29,7 +30,11 @@ import {
   checkCiConfiguration,
   checkSystemTools,
 } from "./system-tools";
-import { OpenCodeSdkUnavailableError } from "./transports/opencode-admission";
+import { SUPPORTED_OPENCODE_SDK_VERSION } from "./transport-registry";
+import {
+  OpenCodeSdkUnavailableError,
+  openCodeSdkUnavailableMessage,
+} from "./transports/opencode-admission";
 
 export type DoctorSeverity = "healthy" | "degraded" | "blocking";
 
@@ -103,7 +108,7 @@ export const PROVIDER_HINTS: Record<string, string> = {
 // produces ZERO capability reports, Claude-backed steps included. Degraded
 // here means "unverified", not "verified fine".
 const OPENCODE_SDK_UNAVAILABLE_HINT =
-  "Install @opencode-ai/sdk where this binary can resolve it (e.g. alongside the project's node_modules), or route the affected steps through Claude instead. The probe stops at the first OpenCode step, so this run verified no capabilities for ANY route in the plan — Claude-backed steps are unverified here, not confirmed healthy.";
+  "Run pr-hero upgrade --reconcile to install @opencode-ai/sdk where this binary can resolve it, or route the affected steps through Claude instead. The probe stops at the first OpenCode step, so this run verified no capabilities for ANY route in the plan — Claude-backed steps are unverified here, not confirmed healthy.";
 
 function pushCapabilityProbeFailure(
   checks: DoctorCheckItem[],
@@ -137,6 +142,31 @@ function pushProviderIssues(
       ...(issue.blocking ? {} : { hint: PROVIDER_HINTS[issue.code] }),
     });
   }
+}
+
+export function openCodeRoutingSdkCheck(input: {
+  routing: RoutingConfig | undefined;
+  sdkVersion: string | undefined;
+}): DoctorCheckItem | undefined {
+  if (!routingNeedsOpenCodeSdk(input.routing)) return undefined;
+  const version =
+    typeof input.sdkVersion === "string" ? input.sdkVersion.trim() : "";
+  if (version === SUPPORTED_OPENCODE_SDK_VERSION) return undefined;
+  if (version === "") {
+    return {
+      name: "opencode-sdk",
+      severity: "blocking",
+      message: openCodeSdkUnavailableMessage(),
+    };
+  }
+  return {
+    name: "opencode-sdk",
+    severity: "blocking",
+    message:
+      `Unsupported OpenCode SDK version "${version}". ` +
+      `Expected exact version "${SUPPORTED_OPENCODE_SDK_VERSION}". ` +
+      "Run pr-hero upgrade --reconcile.",
+  };
 }
 
 export function evaluateDoctorReport(checks: DoctorCheckItem[]): DoctorReport {

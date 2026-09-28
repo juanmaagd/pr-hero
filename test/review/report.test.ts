@@ -5,10 +5,12 @@ import {
   PR_COMMENT_MARKER_PREFIX,
   prCommentMarker,
 } from "#pr/preflight";
+import { SEVERITY_UNRECOVERABLE } from "#rereview/classify";
 import type { Finding, FindingsDocument, Telemetry } from "#review/findings";
 import {
   estimateCost,
   formatElapsed,
+  parseFindingCommentBadge,
   type ReportMeta,
   type RereviewLiveRow,
   renderInlineComment,
@@ -1114,6 +1116,171 @@ describe("renderPrComment", () => {
     expect(body).toContain("Live: 1 carried");
   });
 
+  // GitHub #166: a same-head re-review (case B) or a restricted delta that
+  // touches none of the PR's own files (case C) runs ZERO discovery hunters.
+  // The old behavior let a zero-findings result fall through to the ordinary
+  // clean-bill branches, which both read as "we looked and found nothing" —
+  // exactly backwards when nothing looked at all. `discoverySkippedEmptyDelta`
+  // (mirroring `RereviewProvenance.discovery_skipped_empty_delta`,
+  // rereview/prepare.ts) is the signal `cleanBillLine` must check FIRST,
+  // ahead of both the generic ✅ and the ordinary "No new findings this
+  // delta" wording.
+  //
+  // pr-hero review #286 then found the fix's OWN wording asserted facts the
+  // flag does not carry (5 findings, all pinned below): "no changes" is false
+  // when the delta was real but entirely excluded by ignore rules; "no
+  // hunter ran... not re-verified" is false whenever a verifier IS queued in
+  // the same pass; and the "clean" check ignored `verifiedGone`, so a run
+  // that resolved every prior claimed the last review "reported nothing".
+  const NO_DELTA = {
+    verifiedGone: 0,
+    unconfirmed: 0,
+    carried: 0,
+    deferred: 0,
+    new: 0,
+    suppressed: 0,
+    returned: 0,
+    reTiered: 0,
+    discoverySkippedEmptyDelta: true,
+  };
+
+  test("#166a — no-delta clean: no live priors, no resolution, reason absent (no_delta)", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: { ...NO_DELTA },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("found nothing to report");
+    expect(body).toContain("No changes since the last review of this head.");
+    expect(body).toContain("No discovery hunter ran this pass.");
+    expect(body).toContain(
+      "No live findings are carried from the previous review.",
+    );
+    // Never a bare "no hunter ran" — it must always say DISCOVERY hunter,
+    // since a verifier is a different kind of run this same wording must
+    // not rule out.
+    expect(body).not.toContain(" no hunter ran");
+  });
+
+  // #286 finding 1 (report.ts:846 exclusion wording / discovery.ts:216
+  // exclusion): `discoverySkipReason: "all_excluded"` is a REAL, non-empty
+  // delta that ignore rules stripped to nothing — "no changes" is false
+  // here, and the PR comment must name what was excluded (previously only
+  // the local report.md did, report.ts's `excludedPaths` rendering).
+  test("#286b — all-excluded: names the dropped paths, never claims nothing changed", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          ...NO_DELTA,
+          discoverySkipReason: "all_excluded",
+          discoveryExcludedPaths: ["dist/bundle.js", "vendor/lib.min.js"],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain("No changes since the last review");
+    expect(body).not.toContain("nothing changed");
+    expect(body).toContain(
+      "Every changed file was excluded from review " +
+        "(dist/bundle.js, vendor/lib.min.js), so the effective diff is empty.",
+    );
+    expect(body).toContain("No discovery hunter ran this pass.");
+  });
+
+  // #286 finding 3 (report.ts:817 rereviewIsClean ignoring verifiedGone):
+  // a case-B run whose queued verifier resolved a prior this pass is not
+  // "the last review reported nothing" — it is a resolution, and the old
+  // wording erased it.
+  test("#286 — case B where verification resolved every prior: wording reflects resolved, not clean", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: { ...NO_DELTA, verifiedGone: 2 },
+      },
+      [],
+      undefined,
+    );
+    expect(body).not.toContain(
+      "No live findings are carried from the previous review",
+    );
+    expect(body).not.toContain("reported nothing");
+    expect(body).toContain("2 prior findings resolved (verified) this pass.");
+  });
+
+  test("#286 — case B with BOTH a resolution and still-live carried findings, both named", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          ...NO_DELTA,
+          verifiedGone: 1,
+          carried: 1,
+          live: [
+            {
+              id: "R001",
+              sev: "WARNING",
+              status: "carried",
+              locs: ["src/app.ts:10"],
+              claim: "still live one",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("1 prior finding resolved (verified) this pass.");
+    expect(body).toContain("Still live: 1 carried.");
+    expect(body).toContain("(R001)");
+  });
+
+  test("#166 — an ordinary re-review (discovery ran) keeps its unqualified wording", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 1,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("No new findings this delta. Live: 1 carried.");
+    expect(body).not.toContain("No discovery hunter ran");
+  });
+
   test("C7-unconfirmed — a cap hit is not a clean bill", () => {
     const body = renderPrComment(
       doc(),
@@ -1276,6 +1443,98 @@ describe("renderPrComment", () => {
         "see this finding's own comment on the PR_ (R003)",
     );
     expect(line).not.toContain("—  ");
+  });
+
+  test("#206 — an unrecoverable severity renders its own glyph, never a real-severity one", () => {
+    const body = liveRowBody({
+      id: "R004",
+      sev: SEVERITY_UNRECOVERABLE,
+      status: "carried",
+      locs: ["src/watch.ts:614"],
+      claim: "",
+    });
+    const line = liveRowLine(body, "R004");
+    expect(line).toBe(
+      "- `carried` ⚠️ severity unavailable `src/watch.ts:614` — " +
+        "_claim text unavailable; see this finding's own comment on the " +
+        "PR_ (R004)",
+    );
+    // Never one of the three real-severity glyphs — reusing 🟡 by accident
+    // IS the bug (a live BLOCKER rendering as a warning).
+    expect(line).not.toContain("🔴");
+    expect(line).not.toContain("🟡");
+    expect(line).not.toContain("🔵");
+  });
+
+  test("#206 — the headline gives an unrecoverable severity its own bucket, never warning", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          live: [
+            {
+              id: "R001",
+              sev: SEVERITY_UNRECOVERABLE,
+              status: "carried",
+              locs: ["src/watch.ts:614"],
+              claim: "",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain(
+      "🔴 0 critical · 🟡 0 warning · ⚠️ 1 severity unavailable",
+    );
+  });
+
+  test("#206 — a recovered BLOCKER live row counts as critical, headline never says 0 critical", () => {
+    const body = renderPrComment(
+      doc(),
+      undefined,
+      {
+        resolved: 0,
+        new: 0,
+        persist: 0,
+        rereview: {
+          verifiedGone: 0,
+          unconfirmed: 0,
+          carried: 1,
+          deferred: 0,
+          new: 0,
+          suppressed: 0,
+          returned: 0,
+          reTiered: 0,
+          live: [
+            {
+              id: "R001",
+              sev: "BLOCKER",
+              status: "carried",
+              locs: ["src/watch.ts:614"],
+              claim: "a live blocker recovered from its own comment",
+            },
+          ],
+        },
+      },
+      [],
+      undefined,
+    );
+    expect(body).toContain("🔴 1 critical · 🟡 0 warning");
+    expect(body).not.toContain("🔴 0 critical");
   });
 
   test("D4 — force-push case banners the full-range review", () => {
@@ -1488,6 +1747,69 @@ describe("renderPrComment", () => {
     expect(body).toContain(
       `[\`src/never.ts:1\`](${WEB_URL}/blob/${HEAD}/src/never.ts#L1)`,
     );
+  });
+});
+
+// #206: parseFindingCommentBadge is renderInlineComment/findingBodyLines'
+// exact structural inverse — the recovery path a carried prior falls back to
+// when the re-review's state block cannot supply sev/tier/claim.
+describe("parseFindingCommentBadge — round trip with the renderer that wrote it", () => {
+  const HEAD = "b".repeat(40);
+
+  test("recovers sev/tier/claim from a rendered inline comment, byte for byte", () => {
+    const f = finding({
+      id: "F001",
+      severity: "BLOCKER",
+      tier: "blocking",
+      claim: "the retry never clears the prior timer",
+    });
+    const body = renderInlineComment(f, HEAD);
+    expect(parseFindingCommentBadge(body)).toEqual({
+      sev: "BLOCKER",
+      tier: "blocking",
+      claim: f.claim,
+    });
+  });
+
+  test("recovers a WARNING/advisory finding too, not just the BLOCKER shape", () => {
+    const f = finding({
+      id: "F002",
+      severity: "WARNING",
+      tier: "advisory",
+      refuter_verdict: "downgraded-latent",
+      claim: "a minor inconsistency",
+    });
+    const body = renderInlineComment(f, HEAD);
+    expect(parseFindingCommentBadge(body)).toEqual({
+      sev: "WARNING",
+      tier: "advisory",
+      claim: "a minor inconsistency",
+    });
+  });
+
+  test("recovers from the standalone (Outside Diff) renderer too", () => {
+    const f = finding({ id: "F003", claim: "an un-anchorable finding" });
+    const body = renderIssueFindingComment(f, HEAD);
+    expect(parseFindingCommentBadge(body)).toEqual({
+      sev: f.severity,
+      tier: f.tier,
+      claim: f.claim,
+    });
+  });
+
+  test("a body with no pr-hero-finding marker at all returns null", () => {
+    expect(
+      parseFindingCommentBadge("just a human reply, no marker here"),
+    ).toBeNull();
+    expect(parseFindingCommentBadge("")).toBeNull();
+  });
+
+  test("a marker with no readable header returns null rather than a guess", () => {
+    const body =
+      `<!-- pr-hero-finding path=a.ts line=1 head=${HEAD} c=aaaaaaaaaaaa -->\n` +
+      "\n" +
+      "not a badge line at all\n";
+    expect(parseFindingCommentBadge(body)).toBeNull();
   });
 });
 
