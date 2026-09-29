@@ -103,19 +103,17 @@ Keep `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) for the Claude mapping. 
 
 ### Mixed: OpenCode hunters + Claude refuter (legal DATA mix)
 
-Map **only** `sonnet`. Hunters go to OpenCode; the unmapped `opus` refuter falls through to the Claude CLI (current behavior), so keep a Claude secret next to `OPENCODE_AUTH_JSON`.
+Map **only** `sonnet`. Hunters go to OpenCode; the unmapped `opus` refuter and the `haiku` summarizer (on unless `summary.enabled` is false) fall through to the Claude CLI (current behavior), so keep a Claude secret next to `OPENCODE_AUTH_JSON`.
 
 ```bash
 gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
 ```
 
-Do not use this shape in an OpenCode-only run (no Claude secret): the refuter is still routed to the Claude CLI and has no credentials to run it. Either use the `default` route above, or map `opus` as well, with its own `modelSnapshot` (`opencode models` ids, same single OpenCode provider):
+Do **not** use this shape in an OpenCode-only run (no Claude secret): the refuter and the summarizer are still routed to the Claude CLI and have no credentials to run them. For OpenCode-only, use the `default` route above, or map all three aliases (`sonnet`, `opus`, `haiku`), each with its own `modelSnapshot` (`opencode models` ids, same single OpenCode provider):
 
 ```bash
-gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-pro"}]}'
+gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-pro"},{"logical":"haiku","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
 ```
-
-`haiku` (summarizer) is unmapped in both shapes; when the summarizer runs it takes the same fall-through to the Claude CLI.
 
 ## Workflow
 
