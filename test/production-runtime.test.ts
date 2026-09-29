@@ -61,36 +61,13 @@ import {
   OpenCodeProductionGatedError,
 } from "../src/transport-registry";
 import { ClaudeCodeCliTransport } from "../src/transports/claude-code-cli";
+import { successfulClaudeCredentialBroker } from "./support/claude-credential-broker";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 
 const stubClaudeCredentialBroker: CredentialBroker = {
   async project() {
     throw new Error("stub broker: capability-gate tests never project");
-  },
-};
-
-// A broker whose projection always SUCCEEDS, deterministically on every
-// host — unlike omitting `credentialBrokers` entirely, which falls back to
-// the REAL `claudeCredentialBroker()` (runner-authority.ts: darwin +
-// /usr/bin/security) and reads this machine's actual Keychain. #279 made
-// that fallback load-bearing for the first time: a real degraded
-// projection now opens a real spend-ledger reservation, so a test that
-// wants "a normal, NON-degraded subscription attempt" can no longer leave
-// the broker unstubbed and hope for the best.
-const successfulClaudeCredentialBroker: CredentialBroker = {
-  async project() {
-    const projection: CredentialProjection = {
-      projectionId: "cred-successful-stub",
-      kind: "claude_subscription_oauth",
-      syntheticHome: "/tmp/pr-hero-stub-home",
-      syntheticConfigHome: "/tmp/pr-hero-stub-home/.claude",
-      syntheticTmp: "/tmp/pr-hero-stub-home/tmp",
-      env: {},
-      files: [],
-      destroy: async () => {},
-    };
-    return projection;
   },
 };
 
@@ -1128,6 +1105,8 @@ describe("production runtime PR1", () => {
           registry,
           mode: "conformance",
           credentialBrokers: {
+            // The claude step must not fall through to the host's Keychain.
+            "claude-code": successfulClaudeCredentialBroker,
             opencode: new OpenCodeAuthBroker({
               readerFn: async () =>
                 JSON.stringify({
@@ -2050,6 +2029,8 @@ describe("production runtime PR1", () => {
         mode: "conformance",
         evidence: new Map([["opencode", evidence]]),
         credentialBrokers: {
+          // The claude step must not fall through to the host's Keychain.
+          "claude-code": successfulClaudeCredentialBroker,
           opencode: new OpenCodeAuthBroker({
             readerFn: async () =>
               JSON.stringify({
