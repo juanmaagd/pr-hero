@@ -68,11 +68,13 @@
 //                                   the gate does not look for callers at all.
 //
 // LIVE: spends real money (charter rule 6 — the result lands in a ledger). One
-// sonnet refuter step per attempt over a nine-file repo, so cents each; the
-// hunter leg is faked and free. The first two arms measured ~$0.10 per step
-// (3 replicates x 2 arms = $0.5776); the new arms traverse more files, so a
-// default 3 x 4 run should land near $1.5 — still far below the ~$10 replay
-// that cannot answer this question at all.
+// refuter step per attempt over a nine-file repo; the hunter leg is faked and
+// free. The figures below were measured while the refuter ran on sonnet, so
+// they UNDERSTATE an opus run and no opus figure has been recorded yet: the
+// first two arms measured ~$0.10 per step (3 replicates x 2 arms = $0.5776);
+// the new arms traverse more files, so a default 3 x 4 run was forecast near
+// $1.5 on sonnet — still far below the ~$10 replay that cannot answer this
+// question at all.
 //
 // Run: bun run scripts/refuter-probe.ts [replicates]
 import path from "node:path";
@@ -103,11 +105,15 @@ const REFUTER_SOURCE_PATH = path.resolve(
   import.meta.dir,
   "../prompts/default/review-refuter.md",
 );
-// The production model. A haiku refuter would answer a different question —
+// The production refuter model: it must equal the `model:` in
+// prompts/default/review-refuter.md (test/review/preflight-bundled-prompts.test.ts
+// asserts that value). A haiku refuter would answer a different question —
 // this probe is about the v2 PROMPT's deference, not about what a cheap model
-// can verify. Set on the AgentSpec so the probe is pinned even if the agent
-// file's frontmatter is later retuned.
-const REFUTER_MODEL = "sonnet";
+// can verify. Set on the AgentSpec on purpose, so the probe is pinned even if
+// the agent file's frontmatter is later retuned; that also means retuning the
+// frontmatter does NOT move this constant, and a probe run on a model
+// production no longer uses proves nothing about production.
+const REFUTER_MODEL = "opus";
 
 // One hunter (never spawned — see the runner below) and one refuter, which is
 // the minimum the pipeline accepts. The hunter is non-parity, so the

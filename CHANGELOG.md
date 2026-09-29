@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The refuter now defaults to `opus`**: the bundled refuter prompt declares the `opus` alias instead
+  of `sonnet`, so the adversarial step that judges every severe finding runs on the latest Opus the
+  Claude CLI resolves, with no pr-hero release needed per model version. Hunters stay on `sonnet` and
+  the summarizer on `haiku`. OpenCode operators whose routing maps only `sonnet` and has no `default`
+  route: the refuter is now unmapped and falls through to the Claude CLI, which needs Claude
+  credentials; map `opus` or add a `default` route to keep it on OpenCode (see `docs/github-actions.md`,
+  "OpenCode in CI").
+
 ## [0.2.0] - 2026-09-26
 
 ### Added
