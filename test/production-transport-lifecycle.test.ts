@@ -61,6 +61,7 @@ import {
   type OpenCodePollResult,
   OpenCodeSdkTransport,
 } from "../src/transports/opencode-sdk";
+import { successfulClaudeCredentialBroker } from "./support/claude-credential-broker";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 
@@ -1356,6 +1357,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
         },
         registry,
         mode: "conformance",
+        // The claude step must not fall through to the host's Keychain.
+        credentialBrokers: { "claude-code": successfulClaudeCredentialBroker },
         signal: options.signal,
       });
       return { step, runtime, releases };
@@ -1743,6 +1746,8 @@ describe("Task 2.1 RED: production transport lifecycle", () => {
         },
         registry: baseRegistry,
         mode: "conformance",
+        // The claude step must not fall through to the host's Keychain.
+        credentialBrokers: { "claude-code": successfulClaudeCredentialBroker },
       });
 
       const outPath = path.join(tmpDir, "hunter-reliability.json");
