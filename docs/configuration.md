@@ -132,9 +132,12 @@ Written to `~/.prhero/config.json` and validated against the engine's own parser
 }
 ```
 
-This resolves `"sonnet"` (what the bundled prompts declare) onto OpenCode's Anthropic route. Keep
-every OpenCode mapping a run uses on **one** provider: a plan naming two OpenCode providers is
-refused at admission — see [Credentials](#credentials) below.
+This resolves `"sonnet"` (what the bundled hunter prompts declare) onto OpenCode's Anthropic route.
+The bundled refuter declares `opus` and the summarizer `haiku`; with no mapping for them and no
+`default` route they fall through to the Claude CLI and need Claude credentials — see
+[OpenCode in CI](github-actions.md#opencode-in-ci) for the routing shapes. Keep every OpenCode
+mapping a run uses on **one** provider: a plan naming two OpenCode providers is refused at
+admission — see [Credentials](#credentials) below.
 
 ## Credentials
 
