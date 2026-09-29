@@ -65,12 +65,19 @@ Default prompt set:
 
 | Step | Logical model |
 |---|---|
-| Hunters + refuter | `sonnet` |
+| Hunters | `sonnet` |
+| Refuter | `opus` |
 | Summarizer | `haiku` |
 
-A `sonnet` mapping moves hunters **and** the refuter. DATA cannot send hunters to OpenCode and the refuter to Claude. That split needs a spec/frontmatter change (out of scope here).
+A mapping moves only the steps whose logical model it names: a `sonnet` mapping moves the hunters and leaves the refuter alone. An alias with **no** mapping and **no** `default` route currently falls through to the Claude CLI (`claude-code` / `direct`), so that step needs Claude credentials in the run. A `default` route covers every alias, the refuter included.
 
-OpenCode does not resolve pr-hero aliases. Any `opencode` route for `sonnet`/`haiku` **must** set `modelSnapshot` to the provider model id. Confirm with `opencode models` (optionally `opencode models <provider>`). Do not guess `deepseek-chat` if the CLI lists `deepseek-v4-flash` / `deepseek-v4-pro`.
+| Routing shape | Hunters (`sonnet`) | Refuter (`opus`) |
+|---|---|---|
+| `default` route only | default route | default route (same model as the hunters) |
+| Only a `sonnet` mapping to OpenCode | OpenCode | Claude CLI (needs a Claude secret) |
+| `sonnet` and `opus` mappings to OpenCode | OpenCode | OpenCode |
+
+OpenCode does not resolve pr-hero aliases. Any `opencode` route for `sonnet`/`opus`/`haiku` **must** set `modelSnapshot` to the provider model id. Confirm with `opencode models` (optionally `opencode models <provider>`). Do not guess `deepseek-chat` if the CLI lists `deepseek-v4-flash` / `deepseek-v4-pro`.
 
 `gateway`: `"configured"` for OpenCode; `"direct"` for Claude CLI.
 
@@ -82,17 +89,31 @@ Do not wrap the variable in `{"routing": ...}`. Do not put keys in the variable 
 gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}}'
 ```
 
-Replace `deepseek-v4-flash` with an id `opencode models` actually lists.
+Replace `deepseek-v4-flash` with an id `opencode models` actually lists. The `default` route covers hunters (`sonnet`) and the refuter (`opus`) alike, so the refuter runs on this same model.
 
 ### Mixed: OpenCode default + Claude summarizer (legal DATA mix)
 
-Hunters + refuter (`sonnet`) → one OpenCode API provider. Summarizer (`haiku`) → Claude.
+Hunters (`sonnet`) and refuter (`opus`) → the OpenCode default route, one API provider. Summarizer (`haiku`) → Claude.
 
 ```bash
 gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},"mappings":[{"logical":"haiku","backend":"claude-code","provider":"anthropic","gateway":"direct"}]}'
 ```
 
 Keep `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) for the Claude mapping. Presence of `OPENCODE_AUTH_JSON` still applies the metered ceiling.
+
+### Mixed: OpenCode hunters + Claude refuter (legal DATA mix)
+
+Map **only** `sonnet`. Hunters go to OpenCode; the unmapped `opus` refuter and the `haiku` summarizer (on unless `summary.enabled` is false) fall through to the Claude CLI (current behavior), so keep a Claude secret next to `OPENCODE_AUTH_JSON`.
+
+```bash
+gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
+```
+
+Do **not** use this shape in an OpenCode-only run (no Claude secret): the refuter and the summarizer are still routed to the Claude CLI and have no credentials to run them. For OpenCode-only, use the `default` route above, or map all three aliases (`sonnet`, `opus`, `haiku`), each with its own `modelSnapshot` (`opencode models` ids, same single OpenCode provider):
+
+```bash
+gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-pro"},{"logical":"haiku","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
+```
 
 ## Workflow
 

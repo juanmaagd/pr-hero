@@ -161,6 +161,43 @@ describe("bundled prompts carry no tool-injected content", () => {
   });
 });
 
+describe("bundled prompts declare the intended model split", () => {
+  // The refuter is the adversarial step: it judges what the hunters claim, so
+  // it runs on a stronger model than they do. Hunters stay on sonnet for cost.
+  // Each prompt's frontmatter `model:` is the ONLY place this is decided (the
+  // bundled AgentSpec carries no model), so a one-line frontmatter edit moves
+  // it and nothing else would notice. scripts/refuter-probe.ts pins its own
+  // REFUTER_MODEL on purpose, so that constant must equal the refuter value
+  // asserted here, or the probe measures a model production does not run.
+  const defaultDir = path.resolve(import.meta.dir, "../../prompts/default");
+  const modelOf = (file: string): string | undefined =>
+    parseAgentSource(readFileSync(path.join(defaultDir, file), "utf-8")).model;
+
+  test("the refuter prompt declares opus", () => {
+    expect(modelOf("review-refuter.md")).toBe("opus");
+  });
+
+  test("every bundled hunter prompt declares sonnet", () => {
+    const hunterFiles = readdirSync(defaultDir)
+      .filter((f) => f.startsWith("deep-review-") && f.endsWith(".md"))
+      .sort();
+
+    // Pinned against the spec so the loop below cannot pass vacuously: a glob
+    // that matched nothing, or a hunter renamed out of the prefix, would
+    // otherwise leave it asserting over an empty or shrunken list.
+    expect(hunterFiles).toEqual(
+      localReviewSpec({})
+        .agents.filter((a) => a.role === "hunter")
+        .map((a) => a.file)
+        .sort(),
+    );
+
+    for (const file of hunterFiles) {
+      expect(modelOf(file), `${file} model`).toBe("sonnet");
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Compiled mode: the prompt set is a MAP, never a directory.
 //
