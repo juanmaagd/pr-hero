@@ -2228,7 +2228,7 @@ describe("Task 5.1 RED U5 BE3a/b: generic facts, isolation safeguards, and concu
       },
       // #214: this step's `tools:` list is non-empty (`makeStep`'s default),
       // so an empty `findings` draft with zero observed tool invocations
-      // reads as a hunt that never looked (`isVacuousEmptyHunt`) and the
+      // reads as a hunt that never looked (`isVacuousHunt`) and the
       // harness now refuses it — a `{kind:"tool"}` event is enough to prove
       // this mocked session looked, without this cwd-plumbing test needing
       // to care about findings content.

@@ -11,7 +11,7 @@ import {
 //   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
 //   protocol events, return TransportOutcome, classify provider/transport causes.
 //   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
-import { isVacuousEmptyHunt } from "#review/drafts";
+import { isVacuousHunt } from "#review/drafts";
 import type {
   RetryInfo,
   StepResult,
@@ -2135,14 +2135,15 @@ export class StepExecutionHarness implements StepRunner {
         try {
           const parsed = step.parse(outcome.finalText);
           if (
-            isVacuousEmptyHunt({
+            isVacuousHunt({
               tools: step.tools,
               toolInvocations: outcome.toolInvocations,
               parsed,
             })
           ) {
-            // The JSON parsed. format_violation would spend a paid reminder
-            // retry on the same dump. §7 has no cause for "did not look";
+            // The JSON parsed, with any number of findings. format_violation
+            // would spend a paid reminder retry on the same dump. §7 has no
+            // cause for "did not look";
             // inventing one drifts the frozen vocabulary, so this is the
             // legacy_terminal ruling — stop, no retry. The attempt log
             // carries `tool_invocations: 0` as the fact.
