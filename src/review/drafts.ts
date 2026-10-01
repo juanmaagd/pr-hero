@@ -28,7 +28,9 @@ export interface HunterDraft {
 //
 // Unknown counts stay ungated: a transport that cannot observe tools must
 // not invent a failure, and must not invent a pass by stamping a 0 it did
-// not see. OpenCode stamps the count (including 0). Claude Code omits it.
+// not see. OpenCode stamps the count (including 0). Claude Code derives it from
+// the CLI result's `num_turns` (#299) and omits it when that is not a valid
+// integer.
 // Scout is out of this rule because the engine forces `tools: []`.
 export function isVacuousEmptyHunt(input: {
   readonly tools: readonly string[];

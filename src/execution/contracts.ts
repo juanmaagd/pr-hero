@@ -177,8 +177,9 @@ export interface TransportOutcome {
   // tools, because 0 is the claim "we looked and the model issued none" and
   // absence is the honest shape for "we were told nothing" (the same rule
   // `observedModels` follows one field down). OpenCode stamps the count
-  // after a session actually ran, including 0. Claude Code omits it until
-  // the CLI result exposes the fact.
+  // after a session actually ran, including 0. Claude Code derives it from
+  // the CLI result's `num_turns` (#299), as a lower bound that is exact on
+  // zero versus nonzero, and omits it when `num_turns` is not an integer >= 1.
   readonly toolInvocations?: number;
   // #175 half 2: the models the provider says it ran. `undefined` — never
   // `[]` — when the provider reported nothing, because an empty list is the
