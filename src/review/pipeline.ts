@@ -607,7 +607,7 @@ async function writeSystemPrompt(
 // Prose Step 4/8 phrasing turned into the engine-owned output contract. This
 // text is driver source: it is covered by the engine version, NOT by the
 // prompt-set fingerprint.
-const HUNTER_OUTPUT_CONTRACT = [
+const HUNTER_SHAPE_CONTRACT = [
   "Your final message must be exactly one JSON object — no prose, no code",
   'fences — of the shape {"findings":[...]}. Each finding carries: id,',
   "category (1-15), path, line, symbol (optional), severity",
@@ -615,10 +615,47 @@ const HUNTER_OUTPUT_CONTRACT = [
   "(deterministic|inferential|insufficient), causal_disposition",
   "(introduced|behavior-activated|worsened|pre-existing|base-only|unknown),",
   "claim, proof_refs (array of strings), hunter, hops_used, hop_trail,",
+];
+
+// #299 (2026-10-01): the CLI alias `sonnet` moved to claude-sonnet-5-5, which
+// answered from the inline patch in ONE turn, 41k input tokens, and returned
+// {"findings":[]} on code it never opened. Same prompt, flags, binary and
+// worktree on claude-sonnet-5 took 17 turns and found the defect. The cause was
+// this contract: reading was optional, and an empty array was declared valid
+// unconditionally, so skipping the read was the cheapest compliant answer. With
+// the clause below the same model moved from 1 turn to 3 (n=1; depth is
+// measured separately, not assumed). The engine now REQUIRES the read here,
+// observes it (the transport stamps toolInvocations) and enforces it
+// (isVacuousHunt).
+//
+// Conditioned on the step having tools: a hunter configured with `tools: []`
+// (a custom prompt set, PRHERO_EXTRA_HUNTERS) cannot read anything, and telling
+// it to would demand the impossible and make every answer inadmissible.
+const HUNTER_READ_REQUIREMENT = [
+  "dedupe_key (path:symbol:category).",
+  "",
+  "The patch shows only changed lines, and changed lines alone can neither",
+  "clear code nor convict it. Before you answer, verify against the",
+  "repository with your tools: Read the enclosing function of every hunk you",
+  "assess, and open the code each claim depends on. A finding whose proof you",
+  "did not read with a tool is not admissible. If nothing survives that",
+  'scrutiny, return {"findings":[]} — after that reading, an empty array is a',
+  "valid, expected result, not a failure.",
+];
+
+// The pre-#299 wording, byte for byte, for a hunter that has no tools.
+const HUNTER_EMPTY_ALLOWANCE = [
   "dedupe_key (path:symbol:category). If nothing survives scrutiny, return",
   '{"findings":[]} — an empty array is a valid, expected result, not a',
   "failure.",
-].join("\n");
+];
+
+function hunterOutputContract(toolsEnabled: boolean): string {
+  return [
+    ...HUNTER_SHAPE_CONTRACT,
+    ...(toolsEnabled ? HUNTER_READ_REQUIREMENT : HUNTER_EMPTY_ALLOWANCE),
+  ].join("\n");
+}
 
 const REFUTER_OUTPUT_CONTRACT = [
   "Your final message must be exactly one JSON object — no prose, no code",
@@ -651,6 +688,7 @@ function hunterPrompt(
   patch: string,
   hopBudget: number,
   nonce: string,
+  toolsEnabled: boolean,
   leadsBlock = "",
 ): string {
   const wrappedLeads = wrapBlock("scout_leads", nonce, leadsBlock);
@@ -667,7 +705,7 @@ function hunterPrompt(
     // Leads sit LAST before the contract so the diff is still what the hunter
     // reads first (§3.8's block order).
     ...(wrappedLeads.length === 0 ? [] : [wrappedLeads, ""]),
-    HUNTER_OUTPUT_CONTRACT,
+    hunterOutputContract(toolsEnabled),
   ].join("\n");
 }
 
@@ -1344,7 +1382,13 @@ async function execute(
     const spec: StepSpec = {
       name,
       systemPromptPath,
-      prompt: hunterPrompt(patch, input.hopBudget, boundaryNonce, leadsBlock),
+      prompt: hunterPrompt(
+        patch,
+        input.hopBudget,
+        boundaryNonce,
+        agent.tools.length > 0,
+        leadsBlock,
+      ),
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model: resolveModel(input, hunter.model, agent.model, hunter.file),
