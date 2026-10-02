@@ -72,7 +72,13 @@ function ghSpawn(response: { exitCode: number; stdout: string }): {
 }
 
 describe("settleCiAdmissionLedger — a terminal record is never re-settled", () => {
-  test.each(["completed", "failed", "cancelled", "skipped"] as const)(
+  test.each([
+    "completed",
+    "failed",
+    "cancelled",
+    "skipped",
+    "yielded",
+  ] as const)(
     "a %s record keeps its status and reason and nothing is sent to GitHub",
     async (terminal) => {
       const state = ledgerState(terminal);

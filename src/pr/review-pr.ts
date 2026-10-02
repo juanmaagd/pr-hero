@@ -38,18 +38,20 @@ import {
   reserveCiAdmissionLedger,
   settleCiAdmissionLedger,
 } from "#pr/admission";
-import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
+import {
+  evaluateCiAdmissionGate,
+  yieldToInFlightReview,
+} from "#pr/ci-admission-gate";
 import { discoveryHunters, resolvePrDiscovery } from "#pr/discovery";
 import type { InlinePostOutcome } from "#pr/inline";
 import { resolvePrPlanAndConfirm } from "#pr/plan";
 import {
-  fetchCommitStatuses,
   fetchPostedFindingComments,
   fetchPrComments,
   fetchPrReviewComments,
   ghPrFiles,
 } from "#pr/pr";
-import { createPrRunDir, isInFlightCommitStatus } from "#pr/preflight";
+import { createPrRunDir } from "#pr/preflight";
 import { publishRunOutcome } from "#pr/publish-outcome";
 import { resolveEagerLocalIgnore, resolvePrFetchAndRange } from "#pr/range";
 import {
@@ -350,33 +352,17 @@ export async function reviewPr(
     if (sizeGateChoice === "abort") return 1;
     const sizeGateConfirmed = !sizeGate.ok && !options.force;
 
-    // Cross-machine TOCTOU: the watcher already skipped fresh pendings at
-    // gather, but a CLI and a watcher can still overlap between that fetch
-    // and this process posting its own pending. --yes (the watcher child)
-    // aborts before createPrRunDir so it consumes no poison-PR attempt.
-    // Interactive continues: a stuck pending must not trap the operator
-    // behind the 90-minute TTL.
-    if (
-      isInFlightCommitStatus(
-        await fetchCommitStatuses(operatorRoot, headSha),
-        Date.now(),
-      )
-    ) {
-      // `--yes` without `--force` is the watcher child: a second launch
-      // would double-spend. `--force` is the CI comment override, and the
-      // workflow's concurrency group cancels the run already holding this
-      // pending status. Treating that leftover pending as a skip would
-      // cancel the review the comment just asked for and then refuse to
-      // start the replacement.
-      if (options.yes && !options.force) {
-        log("skip: a pr-hero review is already in-flight on this head");
-        return 0;
-      }
-      log(
-        "warning: a pr-hero review is already in-flight on this head; " +
-          "continuing",
-      );
-    }
+    // Cross-machine TOCTOU: another pr-hero review already in flight on this
+    // head. A stand-down settles the CI ledger as `yielded`, never leaving it
+    // for teardown to mark `failed`. See yieldToInFlightReview
+    // (src/pr/ci-admission-gate.ts) for the full rationale.
+    const inFlightExit = await yieldToInFlightReview({
+      operatorRoot,
+      headSha,
+      options,
+      ciAdmissionLedger,
+    });
+    if (inFlightExit !== undefined) return inFlightExit;
 
     // 6 — run dir + diff artifact (PR naming; outside BOTH roots).
     const runDir = await createPrRunDir(

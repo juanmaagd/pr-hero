@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A CI run that yields to an in-flight review is no longer recorded as a failed admission**
+  (2026-10-02): when another pr-hero review (for example a local hook-triggered one) already held a
+  `pending` commit status on the PR head, the CI run stood down with exit 0 but left its
+  `pr-hero/ci-admission` reservation unsettled, and teardown's safety net settled it `failed`. The PR
+  showed a red check, and the row counted as a spent attempt for any later run on that head. The run
+  now settles its reservation as a new terminal status, `yielded`, which completes the check run as
+  `skipped`, never counts toward the budget, and does not block the next reservation.
+
 ## [0.2.1] - 2026-10-02
 
 ### Added

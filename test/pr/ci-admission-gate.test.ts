@@ -30,9 +30,13 @@ import {
   serializeAdmissionRecord,
 } from "#ci/admission-ledger";
 import { renderCiAdmissionBlock } from "#ci/review-admission";
-import { evaluateCiAdmissionGate } from "#pr/ci-admission-gate";
+import type { CiAdmissionLedgerState } from "#pr/admission";
+import {
+  evaluateCiAdmissionGate,
+  yieldToInFlightReview,
+} from "#pr/ci-admission-gate";
 import { CommentsTruncatedError } from "#pr/pr";
-import { PR_COMMENT_MARKER_PREFIX } from "#pr/preflight";
+import { COMMIT_STATUS_CONTEXT, PR_COMMENT_MARKER_PREFIX } from "#pr/preflight";
 import {
   type CliOptions,
   EMPTY_LOCAL_CONFIG,
@@ -143,9 +147,15 @@ type ScriptEntry = {
   response: { stdout?: string; stderr?: string; exitCode?: number };
 };
 
-function makeFakeGh(script: ScriptEntry[]): typeof Bun.spawn {
+// `calls`, when given, receives every argv: the yield tests below read the
+// check-run upsert itself, since that request IS the ledger write.
+function makeFakeGh(
+  script: ScriptEntry[],
+  calls?: string[][],
+): typeof Bun.spawn {
   const encoder = new TextEncoder();
   return ((argv: string[]) => {
+    calls?.push(argv);
     const joined = argv.join(" ");
     const entry = script.find((s) =>
       s.match.every((token) => joined.includes(token)),
@@ -475,4 +485,181 @@ describe("evaluateCiAdmissionGate — admission decisions", () => {
     expect(result.exitCode).toBeUndefined();
     expect(recordCalls).toEqual([]);
   });
+});
+
+// yieldToInFlightReview: the second stand-down point, after reviewPr already
+// reserved a CI ledger row. Both gh calls it makes (the commit-status read
+// and the check-run upsert inside the real settleCiAdmissionLedger) go
+// through one fake, so the observables are the exit code, the ledger record,
+// the check-run request GitHub would receive, and the stderr line.
+describe("yieldToInFlightReview", () => {
+  // musive #1935's shape: another review set its pending status 47s before
+  // this run looked. Well inside the 90-minute in-flight TTL.
+  const PENDING_AT = "2026-10-02T14:11:13Z";
+  const NOW_MS = Date.parse("2026-10-02T14:12:00Z");
+  const YIELD_REASON =
+    "another pr-hero review is already in flight on this head";
+  const SKIP_LINE = "skip: a pr-hero review is already in-flight on this head";
+  const WARNING_LINE =
+    "warning: a pr-hero review is already in-flight on this head; continuing";
+  const LEDGER_CHECK_RUN_ID = 11;
+
+  function commitStatus(state: "pending" | "success"): ScriptEntry {
+    return {
+      match: [`commits/${HEAD_B}/status`],
+      response: {
+        stdout: `${JSON.stringify({
+          state,
+          context: COMMIT_STATUS_CONTEXT,
+          created_at: PENDING_AT,
+        })}\n`,
+      },
+    };
+  }
+
+  const CHECK_RUN_PATCH: ScriptEntry = {
+    match: [`check-runs/${LEDGER_CHECK_RUN_ID}`],
+    response: { stdout: JSON.stringify({ id: LEDGER_CHECK_RUN_ID }) },
+  };
+
+  function reservedLedger(): CiAdmissionLedgerState {
+    return {
+      record: admissionCheckRunRecord({
+        status: "reserved",
+        decisionReason: "admission: run",
+        settledAt: null,
+      }),
+      checkRunId: LEDGER_CHECK_RUN_ID,
+      headSha: HEAD_B,
+      operatorRoot: "/repo",
+    };
+  }
+
+  function checkRunCalls(calls: string[][]): string[][] {
+    return calls.filter((argv) => argv.join(" ").includes("check-runs"));
+  }
+
+  async function capturingStderr<T>(
+    fn: () => Promise<T>,
+  ): Promise<{ result: T; logged: string }> {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      chunks.push(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      );
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      return { result: await fn(), logged: chunks.join("") };
+    } finally {
+      process.stderr.write = origWrite;
+    }
+  }
+
+  test("in CI, standing down for an in-flight review settles the reservation as yielded, not failed", async () => {
+    const calls: string[][] = [];
+    const spawnFn = makeFakeGh(
+      [commitStatus("pending"), CHECK_RUN_PATCH],
+      calls,
+    );
+    const ledger = reservedLedger();
+
+    const { result, logged } = await capturingStderr(() =>
+      yieldToInFlightReview({
+        operatorRoot: "/repo",
+        headSha: HEAD_B,
+        options: { yes: true, force: false },
+        ciAdmissionLedger: ledger,
+        spawnFn,
+        nowMs: NOW_MS,
+      }),
+    );
+
+    expect(result).toBe(0);
+    expect(logged).toBe(`${SKIP_LINE}\n`);
+    expect(ledger.record.status).toBe("yielded");
+    expect(ledger.record.decisionReason).toBe(YIELD_REASON);
+    const upserts = checkRunCalls(calls);
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]).toContain("status=completed");
+    expect(upserts[0]).toContain("conclusion=skipped");
+    expect(upserts[0]).toContain("output[summary]=yielded (attempt 1)");
+  });
+
+  test("outside CI there is no ledger: the watcher child still stands down and writes no check run", async () => {
+    const calls: string[][] = [];
+    const spawnFn = makeFakeGh([commitStatus("pending")], calls);
+
+    const { result, logged } = await capturingStderr(() =>
+      yieldToInFlightReview({
+        operatorRoot: "/repo",
+        headSha: HEAD_B,
+        options: { yes: true, force: false },
+        ciAdmissionLedger: null,
+        spawnFn,
+        nowMs: NOW_MS,
+      }),
+    );
+
+    expect(result).toBe(0);
+    expect(logged).toBe(`${SKIP_LINE}\n`);
+    expect(checkRunCalls(calls)).toEqual([]);
+  });
+
+  test("a head whose latest pr-hero status is not pending proceeds silently and settles nothing", async () => {
+    const calls: string[][] = [];
+    const spawnFn = makeFakeGh(
+      [commitStatus("success"), CHECK_RUN_PATCH],
+      calls,
+    );
+    const ledger = reservedLedger();
+
+    const { result, logged } = await capturingStderr(() =>
+      yieldToInFlightReview({
+        operatorRoot: "/repo",
+        headSha: HEAD_B,
+        options: { yes: true, force: false },
+        ciAdmissionLedger: ledger,
+        spawnFn,
+        nowMs: NOW_MS,
+      }),
+    );
+
+    expect(result).toBeUndefined();
+    expect(logged).toBe("");
+    expect(ledger.record.status).toBe("reserved");
+    expect(checkRunCalls(calls)).toEqual([]);
+  });
+
+  test.each([
+    ["--force (the CI comment override)", { yes: true, force: true }],
+    ["an interactive run (no --yes)", { yes: false, force: false }],
+  ] as const)(
+    "%s warns and continues over an in-flight review, leaving the reservation to the run",
+    async (_name, options) => {
+      const calls: string[][] = [];
+      const spawnFn = makeFakeGh(
+        [commitStatus("pending"), CHECK_RUN_PATCH],
+        calls,
+      );
+      const ledger = reservedLedger();
+
+      const { result, logged } = await capturingStderr(() =>
+        yieldToInFlightReview({
+          operatorRoot: "/repo",
+          headSha: HEAD_B,
+          options,
+          ciAdmissionLedger: ledger,
+          spawnFn,
+          nowMs: NOW_MS,
+        }),
+      );
+
+      expect(result).toBeUndefined();
+      expect(logged).toBe(`${WARNING_LINE}\n`);
+      expect(ledger.record.status).toBe("reserved");
+      expect(checkRunCalls(calls)).toEqual([]);
+    },
+  );
 });

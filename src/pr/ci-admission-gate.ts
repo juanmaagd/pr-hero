@@ -9,6 +9,10 @@
 // A no-op on --dry-run (a dry run creates nothing, including ledger writes)
 // and on --force (an explicit override answers the same question this gate
 // asks). Both guards are read straight off the caller's own CliOptions.
+//
+// yieldToInFlightReview (below) is the later, second stand-down point: a
+// review already in flight on the same head. It lives here rather than
+// inline in reviewPr() so its ledger settlement is reachable from a test.
 
 import type { AdmissionRecord } from "#ci/admission-ledger";
 import {
@@ -38,16 +42,22 @@ import {
   classifyChangedPaths,
   type DeltaRiskAssessment,
 } from "#ci/review-risk";
-import { publishCiSkip, recordCiAdmissionGateSkip } from "#pr/admission";
+import {
+  type CiAdmissionLedgerState,
+  publishCiSkip,
+  recordCiAdmissionGateSkip,
+  settleCiAdmissionLedger,
+} from "#pr/admission";
 import {
   CommentsTruncatedError,
+  fetchCommitStatuses,
   fetchPrComments,
   fetchPrReviewComments,
   ghCompareChangedFilesWithStatus,
   ghPrHeroWorkflowRunHeads,
   listAdmissionCheckRuns,
 } from "#pr/pr";
-import { findMarkedCommentId } from "#pr/preflight";
+import { findMarkedCommentId, isInFlightCommitStatus } from "#pr/preflight";
 import { parseStateBlock } from "#rereview/state";
 import type { CliOptions, LocalConfig } from "#review/preflight";
 import { log } from "#ui/primitives";
@@ -296,4 +306,64 @@ export async function evaluateCiAdmissionGate(input: {
     }
   }
   return { ciPolicy, ciPolicyHash, ledgerRecords, exitCode: undefined };
+}
+
+// Cross-machine TOCTOU: the watcher already skipped fresh pendings at
+// gather, but a CLI and a watcher can still overlap between that fetch
+// and this process posting its own pending. --yes (the watcher child)
+// aborts before createPrRunDir so it consumes no poison-PR attempt.
+// Interactive continues: a stuck pending must not trap the operator
+// behind the 90-minute TTL.
+//
+// Relocated out of reviewPr() (src/pr/review-pr.ts) with its log lines
+// byte-identical. One addition: a CI run reaches this check AFTER reviewPr
+// reserved its admission ledger row, so a stand-down must settle that row
+// as `"yielded"` before returning. Left `"reserved"`, it reached teardown's
+// safety net, which settles it `"failed"` (musive #1935, run 37018094654: a
+// red pr-hero/ci-admission check and a spent attempt for a run that reviewed
+// nothing, while the local review it yielded to posted fine). Outside CI the
+// ledger is null and the settle is a no-op, so the watcher child behaves as
+// before. The check stays where it is, after the reservation, on purpose:
+// moving it earlier would change the CI path's ordering for every other exit.
+//
+// Returns the exit code when the run must stop here, `undefined` to proceed.
+// `spawnFn` and `nowMs` are test-only seams (defaults: the real Bun.spawn and
+// Date.now()). The one spawnFn reaches both gh calls made here: the
+// commit-status read and the check-run upsert inside settleCiAdmissionLedger.
+export async function yieldToInFlightReview(input: {
+  operatorRoot: string;
+  headSha: string;
+  options: Pick<CliOptions, "yes" | "force">;
+  ciAdmissionLedger: CiAdmissionLedgerState | null;
+  spawnFn?: typeof Bun.spawn;
+  nowMs?: number;
+}): Promise<number | undefined> {
+  const { operatorRoot, headSha, options, ciAdmissionLedger, spawnFn } = input;
+  const statuses = await fetchCommitStatuses(operatorRoot, headSha, {
+    spawnFn,
+  });
+  if (!isInFlightCommitStatus(statuses, input.nowMs ?? Date.now())) {
+    return undefined;
+  }
+  // `--yes` without `--force` is the watcher child: a second launch
+  // would double-spend. `--force` is the CI comment override, and the
+  // workflow's concurrency group cancels the run already holding this
+  // pending status. Treating that leftover pending as a skip would
+  // cancel the review the comment just asked for and then refuse to
+  // start the replacement.
+  if (options.yes && !options.force) {
+    log("skip: a pr-hero review is already in-flight on this head");
+    await settleCiAdmissionLedger(
+      ciAdmissionLedger,
+      "yielded",
+      "another pr-hero review is already in flight on this head",
+      { spawnFn },
+    );
+    return 0;
+  }
+  log(
+    "warning: a pr-hero review is already in-flight on this head; " +
+      "continuing",
+  );
+  return undefined;
 }

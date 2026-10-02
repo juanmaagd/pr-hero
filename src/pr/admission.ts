@@ -63,8 +63,11 @@ export async function tryPersistCiAdmissionLedger(
   }
 }
 
+// `"yielded"` is terminal too: without it here, teardown's safety net (or
+// any later exit) could overwrite a yield with `"failed"`, which is the red
+// check this status exists to prevent.
 const TERMINAL_ADMISSION_STATUSES: ReadonlySet<AdmissionAttemptStatus> =
-  new Set(["completed", "failed", "cancelled", "skipped"]);
+  new Set(["completed", "failed", "cancelled", "skipped", "yielded"]);
 
 // A record that already reached a terminal status is never re-settled: the
 // review shells call this from several exits (and teardown's finally), and
@@ -90,7 +93,7 @@ export function releaseCiAdmissionLedger(): void {
 // Take-and-clear BEFORE the await. Actions sends SIGINT and then SIGTERM
 // inside the grace window, so both handlers can be in flight; the second
 // must see nothing left to settle. A row that already reached a terminal
-// status (completed, failed, skipped, cancelled) is left alone —
+// status (completed, failed, skipped, cancelled, yielded) is left alone —
 // settleCiAdmissionLedger's own guard. Every error is swallowed: failing to
 // settle is the old bug, and a throw here would cost the exit code.
 export async function settleHeldAdmissionLedgerOnSignal(

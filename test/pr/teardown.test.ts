@@ -285,6 +285,7 @@ const LEDGER_GUARD_CASES: readonly [
   ["skipped", "skipped", ORIGINAL_REASON],
   ["failed", "failed", ORIGINAL_REASON],
   ["cancelled", "cancelled", ORIGINAL_REASON],
+  ["yielded", "yielded", ORIGINAL_REASON],
   ["unknown", "unknown", ORIGINAL_REASON],
 ];
 
@@ -391,9 +392,11 @@ describe("finalizePrReviewRun — cleanup ordering", () => {
     ]);
   });
 
+  // `yielded` rides along because an in-flight stand-down returns from inside
+  // the OUTER try only, so finalizePrReviewRun is the one teardown it meets.
   test.each(
     LEDGER_GUARD_CASES.filter(([status]) =>
-      ["reserved", "completed"].includes(status),
+      ["reserved", "completed", "yielded"].includes(status),
     ),
   )(
     "ledger settlement guard: status=%s ends as %s",
