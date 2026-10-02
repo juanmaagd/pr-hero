@@ -23,7 +23,11 @@ Load when the user asks to:
 - **`fetch-depth: 0` is mandatory** on `actions/checkout@v4`.
 - **Assistant posture:** pr-hero is a reviewer, not a merge gate (`exit 0` on findings).
 - **Required permissions:** `contents: read`, `pull-requests: write`, `issues: write`, `statuses: write`, **`checks: write`**, **`actions: read`** (the admission gate lists past runs; a private repo 403s without it). Template in `assets/workflow.yml` includes all six.
-- **Retrigger is `gh workflow run pr-hero-force.yml -f pr=<n>`.** That dispatches GitHub Actions. The review runs on the runner. Do not run `pr-hero review --force` locally when the review should happen in CI. `gh run rerun` on `pr-hero.yml` re-evaluates the gates and does not force. `workflow_dispatch` is invisible until `pr-hero-force.yml` exists on the repository **default branch** (for this repo, `main`, not `dev`).
+- **Retrigger is `gh workflow run pr-hero-force.yml -f pr=<n>`.** That dispatches GitHub Actions. The review runs on the runner. Do not run `pr-hero review --force` locally when the review should happen in CI. `gh run rerun` on `pr-hero.yml` re-evaluates the gates and does not force. `workflow_dispatch` is invisible until `pr-hero-force.yml` exists on the repository **default branch** (for this repo, `main`, not `dev`). In this repo the force workflow checks out the PR head commit before `uses: ./`, so it runs the PR's own engine, not the default branch's.
+- **`--force` never widens discovery; `full` does.** When a prior review of the same head was hollow or wrong and re-runs report "No changes to discover", dispatch `gh workflow run pr-hero-force.yml -f pr=<n> -f full=true`. It passes `--full`, which re-discovers the whole PR range.
+- **When the force workflow changes take effect:** `workflow_dispatch` reads the workflow file from the default branch, so in this repo the engine pin and `full` work only once the YAML is on `main`; a user repo needs an action release that declares `full`, through the `@v0` it pins.
+- **`full` on older heads (this repo):** the forced review loads the PR head's own `action.yml`, so on a head from before `full` existed `full=true` does nothing; merge or rebase the PR onto a base that has it first.
+- **Trust (this repo):** a forced review runs the PR head's code, including its `bun install`, with the workflow's secrets. Dispatch it only for heads you trust; on a bot-authored same-repo branch (for example Dependabot's) it skips the secret withholding GitHub applies to that bot's `pull_request` runs.
 - **Admission config is repo-level:** Write `.prhero/config.json` on the default branch. That file **rejects** `routing`. Person-layer only (`$HOME/.prhero/config.json` on the runner, from `vars.PRHERO_ROUTING`).
 - **`.prheroignore` is read from the base ref, not the PR branch, in CI.**
 - **OpenCode is DATA:** quoted `routing: "${{ vars.PRHERO_ROUTING }}"` + `opencode-auth: ${{ secrets.OPENCODE_AUTH_JSON }}`. Unset both = Claude CI. Never a per-provider Action input. Never echo the auth blob.
@@ -48,6 +52,7 @@ Load when the user asks to:
 | User wants max CI spend | Lower `ci_max_attempts` and/or raise `ci_rereview_min_score` |
 | Custom bot posts findings | Add login to `ci_trusted_actors` |
 | CI skipped (size, admission, or budget) | Dispatch `pr-hero-force.yml` with `gh workflow run pr-hero-force.yml -f pr=<n>`. The review runs on GitHub Actions. Do not run `pr-hero review --force` locally for this. |
+| Prior review of the same head was hollow or wrong; re-runs say "No changes to discover" | Dispatch `gh workflow run pr-hero-force.yml -f pr=<n> -f full=true`. A plain force re-run keeps the narrowed discovery. |
 
 ## Admission Interview (ask before writing config)
 
@@ -84,7 +89,7 @@ Report:
 ## References
 
 - `assets/workflow.yml` — automatic review workflow (`pull_request`).
-- `assets/workflow-force.yml` — dispatch-only force workflow (`workflow_dispatch`, `force: true`).
+- `assets/workflow-force.yml` — dispatch-only force workflow (`workflow_dispatch`, `force: true`, optional `full` input).
 - `assets/admission-config.example.json` — starter `.prhero/config.json`.
 - `references/ci-admission.md` — admission keys, modes, rollout, ledger.
 - `references/opencode-ci.md` — OpenCode secret/variable procedure, routing, pin, openai vs deepseek.

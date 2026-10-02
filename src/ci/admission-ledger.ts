@@ -6,6 +6,12 @@ import { createHash } from "node:crypto";
 export const ADMISSION_LEDGER_SCHEMA_VERSION = 1;
 export const ADMISSION_CHECK_RUN_NAME = "pr-hero/ci-admission";
 
+// `"yielded"`: this run stood down because another pr-hero review already
+// held a pending commit status on the same head (musive #1935: a local hook
+// review was running when CI started). It is terminal, never re-settled, and
+// spends no attempt. Older engines read it through parseAdmissionRecord's
+// open string status as neither budget-counting nor active, which is the
+// same answer, so no schema bump is needed.
 export type AdmissionAttemptStatus =
   | "reserved"
   | "provider-started"
@@ -13,6 +19,7 @@ export type AdmissionAttemptStatus =
   | "skipped"
   | "failed"
   | "cancelled"
+  | "yielded"
   | "unknown";
 
 export interface AdmissionRecord {
@@ -39,6 +46,11 @@ export interface AdmissionRecord {
 // `"provider-started"` stays in: a record still armed that way is a run that
 // never settled, and counting it is what makes an abandoned reservation
 // visible until the handler writes `"cancelled"`.
+// `"yielded"` stays out for the same reason as `"cancelled"`: the run spent
+// nothing and reviewed nothing. The review that DID run on this head is
+// counted where it records itself (its own ledger row in CI, or the summary
+// comment's state block for a local review). Counting the yield as well
+// would charge the PR twice for one review and exhaust the budget early.
 const TERMINAL_BUDGET_STATUSES: ReadonlySet<AdmissionAttemptStatus> = new Set([
   "completed",
   "failed",

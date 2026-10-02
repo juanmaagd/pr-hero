@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`full` action input and `full` force-dispatch input**: the action passes `--full` when `full` is
+  `'true'`, and `pr-hero-force.yml` (the scaffolded template and this repository's own) gains a
+  boolean `full` dispatch input, off by default, wired to it. It is the only CI recovery when a prior
+  review of the same head was hollow or wrong: that review's complete summary marker makes every later
+  run on the head skip discovery ("No changes to discover"), and `--force` never widens discovery. Run
+  `gh workflow run pr-hero-force.yml -f pr=<n> -f full=true`. See `docs/github-actions.md`, "Manual
+  override".
+
+### Fixed
+- **A CI run that yields to an in-flight review is no longer recorded as a failed admission**
+  (2026-10-02): when another pr-hero review (for example a local hook-triggered one) already held a
+  `pending` commit status on the PR head, the CI run stood down with exit 0 but left its
+  `pr-hero/ci-admission` reservation unsettled, and teardown's safety net settled it `failed`. The PR
+  showed a red check, and the row counted as a spent attempt for any later run on that head. The run
+  now settles its reservation as a new terminal status, `yielded`, which completes the check run as
+  `skipped`, never counts toward the budget, and does not block the next reservation.
+- **This repository's force workflow reviews with the pull request's own engine** (found on #305,
+  2026-10-02): `gh workflow run pr-hero-force.yml` starts on the default branch, and the workflow
+  checked out that branch before `uses: ./`, so a forced review ran the default branch's engine
+  instead of the one under review. On #305 `main` lagged `dev`: four hunters returned no drafts in 59
+  seconds and the run posted a complete summary marker for the PR head, so every later run on that
+  head skipped discovery. The gate now reads the fork verdict and the head commit in one
+  `gh pr view` call before checkout, fails unless the head is a full 40-character commit sha, and
+  checkout pins that commit.
+  Consumer workflows run the published `juanmaagd/pr-hero@v0` and are unchanged.
+
 ## [0.2.1] - 2026-10-02
 
 ### Added
