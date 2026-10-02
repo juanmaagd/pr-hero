@@ -7,18 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`effort:` agent frontmatter key**: a prompt may declare how hard its model works, one of `low`,
+  `medium`, `high`, `xhigh`, `max` (the Claude CLI's `--effort` levels). An unknown value fails at
+  preflight and names the file. When the key is omitted the engine supplies a per-role default (hunter
+  `xhigh`, refuter `high`, summarizer, scout and rereview verifier `high`), so a custom prompt set still
+  runs at an explicit level. See `docs/configuration.md`, "Effort".
+- **Effort in the run artifacts**: each attempt's request plan records the `effort` that was requested
+  and `effortApplied`, and each step in `pipeline.json` records `effort` and, when it has a route,
+  `effort_applied`. The effort is not part of the route fingerprint.
+
 ### Changed
-- **The bundled hunters now default to `opus`**: all five bundled hunter prompts (lifecycle, logic,
-  parity, reliability, resilience) declare the `opus` alias instead of `sonnet`, so the Claude CLI
-  resolves the latest Opus for them, the same stance as the refuter. The CLI alias `sonnet` now
-  resolves to claude-sonnet-5-5, which hunted far too shallowly on the same harness (#299, 2026-10-02):
-  4 hunters x 2 replicates on a real diff took 1-5 turns each and 0 of 8 runs returned any finding,
-  against 3-10 turns and findings in 6 of 8 runs on `opus`. The refuter and the hunters now share a tier;
-  the summarizer stays on `haiku`. `pr-hero doctor` now probes the hunter route on `opus`. Expect a
-  higher per-review cost than the sonnet-era band. OpenCode operators whose routing maps only `sonnet`
-  and has no `default` route: the hunters and refuter are now unmapped and fall through to the Claude
-  CLI, which needs Claude credentials; map `opus` (and `haiku` for the summarizer) or add a `default`
-  route to keep them on OpenCode (see `docs/github-actions.md`, "OpenCode in CI").
+- **pr-hero now owns the effort and always passes `--effort`** (#299, 2026-10-02). It used to pass none,
+  so every step ran at the Claude CLI's implicit default: `high`, except on Sonnet 5.5 and Opus 5.5,
+  where it is `medium`. When the `sonnet` alias moved to claude-sonnet-5-5 the bundled hunters silently
+  dropped from `high` to `medium` and stopped exploring: on a real 280-line PR, 0 of 8 hunter runs found
+  anything at `medium`, 6 of 8 at `high`, 8 of 8 (and all 4 known bugs) at `xhigh` (about 4.5 minutes
+  per review), and 7 of 8 at `max` (about 19 minutes). The bundled hunters keep `sonnet` and now declare
+  `effort: xhigh`; the bundled refuter keeps `opus` and now declares `effort: high`. The refuter is
+  `high`, not `medium`, because on real findings `medium` refuted a pre-labeled known blocker in 3 of 4
+  verdicts (a deleted finding) where `high` kept it as latent in 3 of 4, even though `refuter-probe`
+  had passed 16 of 16 at `medium`. This supersedes an earlier unreleased change that moved the hunters to
+  `opus`; that change is reverted and the hunters stay on `sonnet`. Expect a higher per-review cost
+  and wall time than the 0.2.0 band: `xhigh` hunters cost roughly three times `high` per hunter, and the
+  cost band does not yet price effort. The child environment is an allowlist that never carries
+  `CLAUDE_CODE_EFFORT_LEVEL`, so an operator's shell cannot override the engine's level. OpenCode has no
+  equivalent control and does not map one: the requested level is recorded with `effortApplied: false`.
 
 ## [0.2.0] - 2026-09-26
 
