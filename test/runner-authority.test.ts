@@ -1,7 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { readdir, rm } from "node:fs/promises";
+import path from "node:path";
 import type { RunnerBackend } from "../src/execution/contracts";
 import { envBillsMetered } from "../src/execution/usage-normalized";
+import { defaultExecSnapshotBase } from "../src/model/exec-snapshots";
 import {
   credentialKindBillsMetered,
   credentialKindForRoute,
@@ -620,5 +624,72 @@ describe("resolveBindingAuthority claude-code credential kind (#161)", () => {
     );
     expect(withBroker.credentialKind).toBe("claude_subscription_oauth");
     expect(withBroker.credentialBroker).toBe(fake);
+  });
+});
+
+// #303: binding resolution used to call verifyExecutableAuthority, which
+// copies the binary into a snapshot dir, and then discarded the result —
+// one leaked copy per route per run, each >100 MB for a real claude binary.
+describe("resolveBindingAuthority writes no execution snapshot", () => {
+  // The verify-only path takes no snapshot base, so the observable is the
+  // real default base, filtered to this fixture's unique digest prefix.
+  async function defaultBaseEntriesFor(sha256: string): Promise<string[]> {
+    const names = await readdir(defaultExecSnapshotBase()).catch(() => []);
+    return names.filter((name) => name.startsWith(sha256.slice(0, 16)));
+  }
+
+  const seenDigests: string[] = [];
+  afterEach(async () => {
+    for (const sha256 of seenDigests.splice(0)) {
+      for (const name of await defaultBaseEntriesFor(sha256)) {
+        await rm(path.join(defaultExecSnapshotBase(), name), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
+  });
+
+  test.each([
+    ["claude-code", "anthropic", "/fake/bin/claude"],
+    ["opencode", "opencode", "/fake/bin/opencode"],
+  ] as const)("%s", async (backend, provider, canonical) => {
+    // Mach-O-prefixed, so the full authority would have snapshotted it.
+    const bytes = new Uint8Array([
+      0xcf,
+      0xfa,
+      0xed,
+      0xfe,
+      ...new TextEncoder().encode(randomUUID()),
+    ]);
+    const hasher = new Bun.CryptoHasher("sha256");
+    hasher.update(bytes);
+    const sha256 = hasher.digest("hex");
+    seenDigests.push(sha256);
+
+    const result = await resolveBindingAuthority(
+      backend,
+      provider,
+      {
+        binaryPath: canonical,
+        openCodeBinaryPath: canonical,
+        workspaceRoot: "/fake/ws",
+        env: {},
+        executableAllowlists: {
+          [backend]: [{ absolutePath: canonical, sha256 }],
+        },
+      },
+      {
+        existsFn: () => true,
+        realpathFn: async (p: string) => p,
+        readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o755 }),
+      },
+    );
+
+    expect(result.binding?.executableAllowlist).toEqual([
+      { absolutePath: canonical, sha256 },
+    ]);
+    expect(await defaultBaseEntriesFor(sha256)).toEqual([]);
   });
 });
