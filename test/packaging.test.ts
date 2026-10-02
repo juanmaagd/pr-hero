@@ -445,6 +445,33 @@ describe("Packaging & distribution configuration", () => {
       expect(ours).toContain("claude-token");
     });
 
+    // The force workflow hands the action keys the automatic one never does
+    // (`pr-number`, `force`, `full`), so the guard above cannot see them.
+    test.each([
+      ["scaffolded", () => generateCiForceWorkflowTemplate()],
+      [
+        "this repo's own",
+        () => generateCiForceWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS),
+      ],
+    ])(
+      "every `with:` key the %s force workflow hands the action is a declared input",
+      (_label, template) => {
+        const declared = Object.keys(parsedAction().inputs);
+        const workflow = Bun.YAML.parse(template()) as {
+          jobs: {
+            review: {
+              steps: Array<{ id?: string; with?: Record<string, unknown> }>;
+            };
+          };
+        };
+        const ours = workflow.jobs.review.steps
+          .filter((step) => step.id === "pr-hero")
+          .flatMap((step) => Object.keys(step.with ?? {}));
+        expect(ours).toContain("full");
+        expect(ours.filter((key) => !declared.includes(key))).toEqual([]);
+      },
+    );
+
     test("run step invokes bin/pr-hero.js — the entrypoint verified to actually run", () => {
       const action = parsedAction();
       const runStep = action.runs.steps.find(
@@ -461,6 +488,72 @@ describe("Packaging & distribution configuration", () => {
       expect(runStep?.run).toContain("--ci");
       expect(runStep?.run).toContain("--yes");
     });
+
+    // Runs the run step's own argument-building script under the composite
+    // `shell: bash` flags, with `bun` replaced by a function that prints the
+    // CLI arguments it receives. Inputs reach the script through the step's
+    // real `env:` bindings, falling back to each input's declared default, so
+    // a missing binding or a wrong default fails here like a wrong branch.
+    function cliArgsFor(inputs: Record<string, string>): string[] {
+      const action = parsedAction();
+      const runStep = action.runs.steps.find(
+        (step) => step.id === "run-pr-hero",
+      ) as { env?: Record<string, string>; run?: string } | undefined;
+      const env = Object.fromEntries(
+        Object.entries(runStep?.env ?? {}).map(([name, value]) => {
+          const input = /^\$\{\{\s*inputs\.([\w-]+)\s*\}\}$/.exec(value)?.[1];
+          if (input === undefined) return [name, value];
+          return [name, inputs[input] ?? action.inputs[input]?.default ?? ""];
+        }),
+      );
+      const script = (runStep?.run ?? "").replaceAll(
+        `\${{ github.action_path }}`,
+        "/action",
+      );
+      const fakeBun = `bun() { shift; printf '%s\\n' "$@"; }`;
+      const result = Bun.spawnSync(
+        [
+          "bash",
+          "--noprofile",
+          "--norc",
+          "-eo",
+          "pipefail",
+          "-c",
+          `${fakeBun}\n${script}`,
+        ],
+        { env: { ...env, PATH: process.env.PATH ?? "" } },
+      );
+      return result.stdout
+        .toString()
+        .split("\n")
+        .filter((line) => line !== "");
+    }
+
+    // `full` is the only CI recovery when a prior review of the same head was
+    // hollow: its complete summary marker makes every later run on that head
+    // skip discovery, and `--force` never widens discovery.
+    test.each([
+      ["full: 'true'", { "pr-number": "305", full: "true" }, ["--full"]],
+      ["full: 'false'", { "pr-number": "305", full: "false" }, []],
+      ["full unset", { "pr-number": "305" }, []],
+    ])(
+      "%s passes --full only when the input is exactly 'true'",
+      (_label, inputs, fullFlags) => {
+        const args = cliArgsFor(inputs);
+        // Proves the script ran to the CLI call, so an empty result below is
+        // the branch's verdict and not a script that died early.
+        expect(args.slice(0, 5)).toEqual([
+          "review",
+          "--pr",
+          "305",
+          "--ci",
+          "--yes",
+        ]);
+        expect(args.filter((arg): boolean => arg === "--full")).toEqual(
+          fullFlags,
+        );
+      },
+    );
 
     test("never interpolates a free-text input directly into the shell script body", () => {
       // Every input / github-context value the run step needs must be

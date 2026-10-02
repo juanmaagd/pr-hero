@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`full` action input and `full` force-dispatch input**: the action passes `--full` when `full` is
+  `'true'`, and `pr-hero-force.yml` (the scaffolded template and this repository's own) gains a
+  boolean `full` dispatch input, off by default, wired to it. It is the only CI recovery when a prior
+  review of the same head was hollow or wrong: that review's complete summary marker makes every later
+  run on the head skip discovery ("No changes to discover"), and `--force` never widens discovery. Run
+  `gh workflow run pr-hero-force.yml -f pr=<n> -f full=true`. See `docs/github-actions.md`, "Manual
+  override".
+
 ### Fixed
 - **This repository's force workflow reviews with the pull request's own engine** (found on #305,
   2026-10-02): `gh workflow run pr-hero-force.yml` starts on the default branch, and the workflow

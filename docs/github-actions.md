@@ -406,6 +406,18 @@ The dispatched run passes `--force`. That bypasses the size gate, admission, and
 ceiling for that run only. It does not reset the durable ledger. An empty effective diff
 (everything excluded) still does not review.
 
+`--force` never widens discovery. A re-review only hunts the commits since the last completed review,
+and that review is identified by the summary marker it posted for its head commit. So when a prior
+review of the **same head** was hollow or wrong (for example, its hunters returned nothing), every
+later run on that head reports "No changes to discover" and runs no hunter. Recover with the `full`
+dispatch input, which passes `--full` and re-discovers the whole pull request range:
+
+```bash
+gh workflow run pr-hero-force.yml -f pr=<number> -f full=true
+```
+
+Prior findings are still verified and triaged as usual; only discovery widens.
+
 In this repository, `pr-hero-force.yml` runs the pull request's own engine: it is generated with
 `OWN_CI_WORKFLOW_OPTIONS`, so its gate resolves the PR head commit first and checkout pins that commit
 before `uses: ./`. A dispatch starts on the default branch, so without the pin a forced review would
@@ -548,6 +560,7 @@ Three properties of the upload step are load-bearing:
 |---|---|---|
 | `pr-number` | resolved from the triggering event | Override when triggering from a non-`pull_request` event. `pr-hero-force.yml` sets this from the dispatch input. |
 | `force` | `false` | Bypass the size gate, CI admission, and the budget ceiling for this run. `pr-hero-force.yml` sets it to `true`. |
+| `full` | `false` | On a re-review, widen discovery to the full pull request range (`--full`). `pr-hero-force.yml` passes its `full` dispatch input. Use it when a prior review of the same head was hollow or wrong. |
 | `model` | engine default | Override every agent's model. |
 | `scout` | `false` | Experimental diff-only pre-hunt stage; off by default. |
 | `post` | `true` | Set `false` to run the review and write outputs/summary without posting to the PR. |
@@ -563,6 +576,11 @@ Three properties of the upload step are load-bearing:
   `gh workflow run pr-hero-force.yml -f pr=<n>`. `gh run rerun` on `pr-hero.yml` re-evaluates the
   gates and skips again. The force workflow has to be on the default branch before `workflow_dispatch`
   can see it.
+- **Every re-run says "No changes to discover" after a hollow review** — a prior review of the same
+  head completed without really reviewing (for example, every hunter returned nothing within
+  seconds), and its summary marker now scopes discovery to nothing. On a head that was genuinely
+  reviewed this message is expected and needs no action. Otherwise, dispatch `gh workflow run pr-hero-force.yml -f pr=<n> -f full=true` to re-discover the whole pull
+  request; see [Manual override](#manual-override).
 - **No comment appears on the PR** — check `permissions: pull-requests: write` is present, and that at
   least one of the three credential secrets is set (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or
   `OPENCODE_AUTH_JSON`). Fork PRs never receive those secrets. OpenCode also needs `PRHERO_ROUTING`.

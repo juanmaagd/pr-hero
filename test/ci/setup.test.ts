@@ -638,6 +638,32 @@ describe("generateCiForceWorkflowTemplate (pure)", () => {
     expect(ownForce()).toMatch(/default branch's engine/);
     expect(ownForce()).toMatch(/refs\/pull\/<n>\/merge/);
   });
+
+  // A hollow review on the same head leaves a complete summary marker, and
+  // every later run on that head then skips discovery; `--force` never widens
+  // it. The `full` dispatch input is the only way back, in every repo.
+  test.each([
+    ["scaffolded", scaffoldedForce],
+    ["this repo's own", ownForce],
+  ])(
+    "the %s force workflow offers a boolean `full` dispatch input, off by default, and hands it to the action",
+    (_label, template) => {
+      const parsed = Bun.YAML.parse(template()) as {
+        on: {
+          workflow_dispatch: {
+            inputs: Record<string, Record<string, unknown>>;
+          };
+        };
+      };
+      expect(parsed.on.workflow_dispatch.inputs.full).toMatchObject({
+        required: false,
+        type: "boolean",
+        default: false,
+      });
+      const run = reviewSteps(template()).find((step) => step.id === "pr-hero");
+      expect(run?.with?.full).toBe(`\${{ inputs.full }}`);
+    },
+  );
 });
 
 describe("materializeCiOpenCodeData (impure edge)", () => {
