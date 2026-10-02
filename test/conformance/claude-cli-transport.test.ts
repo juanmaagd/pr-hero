@@ -40,6 +40,7 @@ function makeRequest(
       modelSnapshot: "claude-test-model",
     },
     executionModel: "claude-test-model",
+    effort: "high",
     systemPromptPath: "/tmp/pr-hero-test/system.md",
     systemPromptSha256: "deadbeef",
     userPrompt: "review this",
@@ -197,6 +198,68 @@ describe("ClaudeCodeCliTransport §5.2 cancellation and terminal proof", () => {
     expect(modelIndex).toBeGreaterThanOrEqual(0);
     expect(spawnArgs?.[modelIndex + 1]).toBe("sonnet");
   });
+
+  // The engine owns the effort and ALWAYS passes it (#299). The CLI's implicit
+  // default is `high` except on the 5.5 family, where it is `medium`, so an
+  // omitted flag silently changed what a step ran at when the `sonnet` alias
+  // moved. Every level is asserted, because the flag's value is the whole
+  // contract and a hard-coded one would pass a single-level test.
+  for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
+    test(`passes --effort ${effort} straight from the request`, async () => {
+      const fake = makeFakeProc({
+        stdoutBody: JSON.stringify({ result: "ok" }),
+        exitCode: 0,
+      });
+      let spawnArgs: string[] | undefined;
+      const transport = new ClaudeCodeCliTransport({
+        ...okPromptFns,
+        spawnFn: ((args: string[]) => {
+          spawnArgs = args;
+          return fake.proc;
+        }) as unknown as typeof Bun.spawn,
+        getPgid: (pid) => pid,
+      });
+
+      await transport.execute(makeRequest({ effort }), {
+        signal: new AbortController().signal,
+      });
+
+      const at = spawnArgs?.indexOf("--effort") ?? -1;
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(spawnArgs?.[at + 1]).toBe(effort);
+      // Exactly once: a second occurrence would let the CLI pick whichever
+      // wins its own precedence, which is the ambiguity this flag removes.
+      expect(spawnArgs?.filter((a) => a === "--effort")).toHaveLength(1);
+    });
+  }
+
+  // A missing effort is a programming error, never a fallback: a transport that
+  // quietly omitted the flag would reinstate the CLI's implicit default, which
+  // is the defect. It must also fail BEFORE a paid spawn.
+  for (const [label, effort] of [
+    ["a missing", undefined],
+    ["an unrecognized", "turbo"],
+  ] as const) {
+    test(`${label} effort throws before any spawn`, async () => {
+      let spawned = 0;
+      const transport = new ClaudeCodeCliTransport({
+        ...okPromptFns,
+        spawnFn: (() => {
+          spawned += 1;
+          return makeFakeProc({ exitCode: 0 }).proc;
+        }) as unknown as typeof Bun.spawn,
+        getPgid: (pid) => pid,
+      });
+
+      await expect(
+        transport.execute(
+          makeRequest({ effort } as unknown as Partial<TransportRequest>),
+          { signal: new AbortController().signal },
+        ),
+      ).rejects.toThrow(/effort/);
+      expect(spawned).toBe(0);
+    });
+  }
 
   test("abort sends SIGTERM to negative pgid first; group exiting during grace receives no SIGKILL", async () => {
     const signals: RecordedSignal[] = [];
@@ -1271,5 +1334,53 @@ describe("ClaudeCodeCliTransport.classifyFailure", () => {
 
   test("the witness spans stderr AND the final message", () => {
     expect(classify("overloaded_error", "final")).toBe("rate_limit");
+  });
+});
+
+// #299 (2026-10-01): the CLI result's `num_turns` is the only tool signal the
+// Claude Code route exposes, and the vacuous-hunt gate (#214) was blind on this
+// route without it. Observed live: 1 turn with no tools, 2 turns for one Read,
+// 17 turns for a deep hunt.
+describe("ClaudeCodeCliTransport toolInvocations from num_turns (#299)", () => {
+  async function toolInvocationsFor(stdoutBody: string): Promise<unknown> {
+    const fake = makeFakeProc({ stdoutBody, exitCode: 0 });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+    return outcome.toolInvocations;
+  }
+
+  const withTurns = (numTurns: unknown): string =>
+    JSON.stringify({ result: "reviewed", num_turns: numTurns });
+
+  test("a single turn is an observed zero: the model never called a tool", async () => {
+    expect(await toolInvocationsFor(withTurns(1))).toBe(0);
+  });
+
+  test("every turn after the first followed tool results", async () => {
+    expect(await toolInvocationsFor(withTurns(2))).toBe(1);
+    expect(await toolInvocationsFor(withTurns(17))).toBe(16);
+  });
+
+  test("a missing num_turns is unknown, never a fabricated zero", async () => {
+    expect(
+      await toolInvocationsFor(JSON.stringify({ result: "reviewed" })),
+    ).toBeUndefined();
+  });
+
+  test("a malformed num_turns is unknown, never coerced", async () => {
+    for (const bad of [0, -3, 1.5, "3", null, Number.NaN, {}, [2]]) {
+      expect(await toolInvocationsFor(withTurns(bad))).toBeUndefined();
+    }
+  });
+
+  test("non-JSON stdout is unknown", async () => {
+    expect(await toolInvocationsFor("not json at all")).toBeUndefined();
   });
 });

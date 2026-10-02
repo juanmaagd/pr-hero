@@ -18,6 +18,7 @@ import { readdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { lookupGolden, type MartianGoldenPr } from "#compare/martian-adapter";
+import { defaultEffortForRole } from "#model/catalog";
 import type { Finding } from "#review/findings";
 import { ClaudeCodeRunner } from "#review/step-runner";
 import { readEvidenceFile } from "../src/execution/attempt-evidence";
@@ -575,6 +576,9 @@ if (import.meta.main) {
       tools: [],
       mcpConfigPath,
       model: JUDGE_MODEL,
+      // `high`: what every model ran at before the 5.5 family, so the judge keeps
+      // the behavior the recorded Surface A scores were measured under.
+      effort: defaultEffortForRole("other"),
       cwd: tmp,
       outPath: path.join(tmp, "out.json"),
       timeoutMs: 5 * 60 * 1000,

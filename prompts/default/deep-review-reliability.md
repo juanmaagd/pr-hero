@@ -2,6 +2,7 @@
 name: pr-hero-reliability
 description: pr-hero value-contract pass — enumerates the contract of every value crossing the diff (units, domain, transformations, consumer assumptions) and reports only contradictions between those contracts. Occupies the reliability slot; runs on every replayed PR.
 model: sonnet
+effort: xhigh
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore
 ---
 

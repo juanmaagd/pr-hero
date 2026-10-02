@@ -2,6 +2,7 @@
 name: pr-hero-refuter
 description: Detached read-only refuter that judges exactly one severe finding by expanding its own evidence beyond the cited proof refs.
 model: opus
+effort: high
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore
 ---
 

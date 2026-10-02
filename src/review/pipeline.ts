@@ -8,6 +8,11 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  defaultEffortForRole,
+  type Effort,
+  type StepRole,
+} from "#model/catalog";
+import {
   agentStepKey,
   buildResolvedRoutePlan,
   type ResolvedModelRoute,
@@ -607,7 +612,7 @@ async function writeSystemPrompt(
 // Prose Step 4/8 phrasing turned into the engine-owned output contract. This
 // text is driver source: it is covered by the engine version, NOT by the
 // prompt-set fingerprint.
-const HUNTER_OUTPUT_CONTRACT = [
+const HUNTER_SHAPE_CONTRACT = [
   "Your final message must be exactly one JSON object — no prose, no code",
   'fences — of the shape {"findings":[...]}. Each finding carries: id,',
   "category (1-15), path, line, symbol (optional), severity",
@@ -615,10 +620,47 @@ const HUNTER_OUTPUT_CONTRACT = [
   "(deterministic|inferential|insufficient), causal_disposition",
   "(introduced|behavior-activated|worsened|pre-existing|base-only|unknown),",
   "claim, proof_refs (array of strings), hunter, hops_used, hop_trail,",
+];
+
+// #299 (2026-10-01): the CLI alias `sonnet` moved to claude-sonnet-5-5, which
+// answered from the inline patch in ONE turn, 41k input tokens, and returned
+// {"findings":[]} on code it never opened. Same prompt, flags, binary and
+// worktree on claude-sonnet-5 took 17 turns and found the defect. The cause was
+// this contract: reading was optional, and an empty array was declared valid
+// unconditionally, so skipping the read was the cheapest compliant answer. With
+// the clause below the same model moved from 1 turn to 3 (n=1; depth is
+// measured separately, not assumed). The engine now REQUIRES the read here,
+// observes it (the transport stamps toolInvocations) and enforces it
+// (isVacuousHunt).
+//
+// Conditioned on the step having tools: a hunter configured with `tools: []`
+// (a custom prompt set, PRHERO_EXTRA_HUNTERS) cannot read anything, and telling
+// it to would demand the impossible and make every answer inadmissible.
+const HUNTER_READ_REQUIREMENT = [
+  "dedupe_key (path:symbol:category).",
+  "",
+  "The patch shows only changed lines, and changed lines alone can neither",
+  "clear code nor convict it. Before you answer, verify against the",
+  "repository with your tools: Read the enclosing function of every hunk you",
+  "assess, and open the code each claim depends on. A finding whose proof you",
+  "did not read with a tool is not admissible. If nothing survives that",
+  'scrutiny, return {"findings":[]} — after that reading, an empty array is a',
+  "valid, expected result, not a failure.",
+];
+
+// The pre-#299 wording, byte for byte, for a hunter that has no tools.
+const HUNTER_EMPTY_ALLOWANCE = [
   "dedupe_key (path:symbol:category). If nothing survives scrutiny, return",
   '{"findings":[]} — an empty array is a valid, expected result, not a',
   "failure.",
-].join("\n");
+];
+
+function hunterOutputContract(toolsEnabled: boolean): string {
+  return [
+    ...HUNTER_SHAPE_CONTRACT,
+    ...(toolsEnabled ? HUNTER_READ_REQUIREMENT : HUNTER_EMPTY_ALLOWANCE),
+  ].join("\n");
+}
 
 const REFUTER_OUTPUT_CONTRACT = [
   "Your final message must be exactly one JSON object — no prose, no code",
@@ -651,6 +693,7 @@ function hunterPrompt(
   patch: string,
   hopBudget: number,
   nonce: string,
+  toolsEnabled: boolean,
   leadsBlock = "",
 ): string {
   const wrappedLeads = wrapBlock("scout_leads", nonce, leadsBlock);
@@ -667,7 +710,7 @@ function hunterPrompt(
     // Leads sit LAST before the contract so the diff is still what the hunter
     // reads first (§3.8's block order).
     ...(wrappedLeads.length === 0 ? [] : [wrappedLeads, ""]),
-    HUNTER_OUTPUT_CONTRACT,
+    hunterOutputContract(toolsEnabled),
   ].join("\n");
 }
 
@@ -752,6 +795,15 @@ export const PIPELINE_SCHEMA_VERSION = "1.0.0";
 interface StepMeta {
   name: string;
   model: string;
+  // The effort the engine asked this step to run at (#299), always resolved.
+  // REQUESTED, not necessarily applied: see `effort_applied`.
+  effort: Effort;
+  // Whether the step's backend could apply `effort`. Only the Claude Code CLI
+  // has `--effort`; OpenCode records the request and reports `false` here so
+  // this artifact never reads as a fact about a run it did not govern. Absent
+  // when the step carries no route (the legacy Claude-only shape), where the
+  // backend is not recorded and guessing it would be fabrication.
+  effort_applied?: boolean;
   tools: string[];
   systemPromptPath: string;
   outPath: string;
@@ -1344,10 +1396,17 @@ async function execute(
     const spec: StepSpec = {
       name,
       systemPromptPath,
-      prompt: hunterPrompt(patch, input.hopBudget, boundaryNonce, leadsBlock),
+      prompt: hunterPrompt(
+        patch,
+        input.hopBudget,
+        boundaryNonce,
+        agent.tools.length > 0,
+        leadsBlock,
+      ),
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model: resolveModel(input, hunter.model, agent.model, hunter.file),
+      effort: resolveEffort(agent.effort, "hunter"),
       cwd: input.worktree,
       outPath: path.join(stepsDir, `${name}.draft.json`),
       timeoutMs: stepTimeoutMs,
@@ -1398,6 +1457,7 @@ async function execute(
     summarizerMeta = {
       name,
       model: input.summarizer.model ?? input.model ?? "unresolved",
+      effort: defaultEffortForRole("summarizer"),
       tools: [],
       systemPromptPath,
       outPath,
@@ -1412,6 +1472,7 @@ async function execute(
         agent.model,
         input.summarizer.promptPath,
       );
+      summarizerMeta.effort = resolveEffort(agent.effort, "summarizer");
       summarizerMeta.tools = agent.tools;
       summarizerSpec = {
         name,
@@ -1420,6 +1481,7 @@ async function execute(
         tools: agent.tools,
         mcpConfigPath: input.mcpConfigPath,
         model: summarizerMeta.model,
+        effort: summarizerMeta.effort,
         cwd: input.worktree,
         outPath,
         ...(routeForStepKey(routePlan, name) === undefined
@@ -1839,6 +1901,7 @@ async function runRefuter(
     agent.model,
     options.agent.file,
   );
+  const effort = resolveEffort(agent.effort, "refuter");
   // A finding's content is composed LONG after the run's nonce was committed
   // — the hunters wrote its `claim` and `proof_refs` from the patch — so it is
   // the one block `selectBoundaryNonce` could not be drawn against. Guarded
@@ -1881,6 +1944,7 @@ async function runRefuter(
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model,
+      effort,
       cwd: input.worktree,
       outPath: path.join(
         options.stepsDir,
@@ -2059,6 +2123,10 @@ async function runVerify(
     agent.model,
     options.agent.file,
   );
+  // The verifier re-reads the REFUTER's prompt file, so a frontmatter `effort:`
+  // there applies to it as well; `verifier` is only the fallback for a prompt
+  // that omits the key.
+  const effort = resolveEffort(agent.effort, "verifier");
   const forged: VerifySubject[] = [];
   const specs: Array<{
     subject: VerifySubject;
@@ -2080,6 +2148,7 @@ async function runVerify(
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model,
+      effort,
       cwd: input.worktree,
       outPath: path.join(dir, "result.json"),
       timeoutMs: options.stepTimeoutMs,
@@ -2249,6 +2318,7 @@ async function runScout(
   const meta: StepMeta = {
     name,
     model: input.scout.model ?? input.model ?? "unresolved",
+    effort: defaultEffortForRole("scout"),
     // FORCED to empty here, never read from the prompt file's frontmatter.
     // §3.5 mechanism 1 — "the scout cannot open a file, grep, or walk a call
     // graph" — is the guarantee this whole design rests on, and a guarantee a
@@ -2321,6 +2391,7 @@ async function runScout(
       input.scout.promptPath,
     );
     record.model = meta.model;
+    meta.effort = resolveEffort(agent.effort, "scout");
     // FULL sha256, not the 12 chars the probe prints: the probe's artifact
     // stores the full digest too, so a pipeline.json and a scout-probe.json
     // naming the same prompt say the same string.
@@ -2334,6 +2405,7 @@ async function runScout(
       tools: meta.tools,
       mcpConfigPath: input.mcpConfigPath,
       model: meta.model,
+      effort: meta.effort,
       cwd: input.worktree,
       outPath,
       timeoutMs: SCOUT_TIMEOUT_MS,
@@ -2360,6 +2432,7 @@ async function runScout(
 
   if (spec.route !== undefined) {
     meta.route = spec.route;
+    meta.effort_applied = spec.route.backend === "claude-code";
     const routedModel = effectiveExecutionModel(spec);
     meta.model = routedModel;
     record.model = routedModel;
@@ -2708,6 +2781,16 @@ function resolveModel(
   return model;
 }
 
+// Precedence: the prompt's frontmatter `effort:`, else the engine's per-role
+// default. There is no third seat on purpose: nothing may fall through to the
+// CLI's implicit default, which is what #299 removed.
+function resolveEffort(
+  frontmatterEffort: Effort | undefined,
+  role: StepRole,
+): Effort {
+  return frontmatterEffort ?? defaultEffortForRole(role);
+}
+
 function perAgentEntry(result: StepResult): PerAgentUsage {
   return {
     tokens_total: result.usage.tokens_total,
@@ -2756,6 +2839,10 @@ function stepMeta(spec: StepSpec): StepMeta {
   return {
     name: spec.name,
     model: effectiveExecutionModel(spec),
+    effort: spec.effort,
+    ...(spec.route === undefined
+      ? {}
+      : { effort_applied: spec.route.backend === "claude-code" }),
     tools: spec.tools,
     systemPromptPath: spec.systemPromptPath,
     outPath: spec.outPath,

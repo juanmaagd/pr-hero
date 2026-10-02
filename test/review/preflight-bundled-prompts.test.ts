@@ -162,22 +162,39 @@ describe("bundled prompts carry no tool-injected content", () => {
 });
 
 describe("bundled prompts declare the intended model split", () => {
-  // The refuter is the adversarial step: it judges what the hunters claim, so
-  // it runs on a stronger model than they do. Hunters stay on sonnet for cost.
-  // Each prompt's frontmatter `model:` is the ONLY place this is decided (the
-  // bundled AgentSpec carries no model), so a one-line frontmatter edit moves
-  // it and nothing else would notice. scripts/refuter-probe.ts pins its own
-  // REFUTER_MODEL on purpose, so that constant must equal the refuter value
-  // asserted here, or the probe measures a model production does not run.
+  // Hunters are Sonnet at `xhigh`; the refuter is Opus at `high`. Each prompt's
+  // frontmatter `model:` and `effort:` are the ONLY place this is decided (the
+  // bundled AgentSpec carries neither), so a one-line frontmatter edit moves it
+  // and nothing else would notice.
+  //
+  // The effort values are the #299 (2026-10-02) evidence, not taste. pr-hero
+  // never passed `--effort`, so every step ran at the CLI's implicit default:
+  // `high`, except on the 5.5 family, where it is `medium`. When the `sonnet`
+  // alias moved to claude-sonnet-5-5 the hunters silently dropped a level and
+  // stopped exploring. Measured on musive pr-1858 (Sonnet 5.5, 4 hunters x 2):
+  //   medium: 0/8 runs with findings (0.5 min); high: 6/8 (1.5 min);
+  //   xhigh: 8/8 and all 4 known bugs (4.5 min); max: 7/8 (19 min).
+  // So the hunters pin `xhigh`. The refuter pins `high`, NOT `medium`:
+  // refuter-probe passed 16/16 at medium, but on the real pr-1858 xhigh findings
+  // medium returned `refuted` on the pre-labeled known `updateProject` BLOCKER
+  // in 3 of 4 verdicts (which deletes it) while high kept it as
+  // `downgraded-latent` in 3 of 4. The probe plants claims with a known verdict;
+  // it cannot see a real finding being talked out of existence.
+  //
+  // scripts/refuter-probe.ts pins its own REFUTER_MODEL on purpose, so that
+  // constant must equal the refuter value asserted here, or the probe measures
+  // a model production does not run.
   const defaultDir = path.resolve(import.meta.dir, "../../prompts/default");
-  const modelOf = (file: string): string | undefined =>
-    parseAgentSource(readFileSync(path.join(defaultDir, file), "utf-8")).model;
+  const parsedOf = (file: string) =>
+    parseAgentSource(readFileSync(path.join(defaultDir, file), "utf-8"));
 
-  test("the refuter prompt declares opus", () => {
-    expect(modelOf("review-refuter.md")).toBe("opus");
+  test("the refuter prompt declares opus at high effort", () => {
+    const refuter = parsedOf("review-refuter.md");
+    expect(refuter.model).toBe("opus");
+    expect(refuter.effort).toBe("high");
   });
 
-  test("every bundled hunter prompt declares sonnet", () => {
+  test("every bundled hunter prompt declares sonnet at xhigh effort", () => {
     const hunterFiles = readdirSync(defaultDir)
       .filter((f) => f.startsWith("deep-review-") && f.endsWith(".md"))
       .sort();
@@ -193,7 +210,9 @@ describe("bundled prompts declare the intended model split", () => {
     );
 
     for (const file of hunterFiles) {
-      expect(modelOf(file), `${file} model`).toBe("sonnet");
+      const hunter = parsedOf(file);
+      expect(hunter.model, `${file} model`).toBe("sonnet");
+      expect(hunter.effort, `${file} effort`).toBe("xhigh");
     }
   });
 });

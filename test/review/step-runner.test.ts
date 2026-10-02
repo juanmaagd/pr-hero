@@ -116,6 +116,7 @@ async function makeSpec(overrides: Partial<StepSpec> = {}): Promise<StepSpec> {
     tools: ["Read", "Grep", "Glob", "mcp__codegraph__codegraph_explore"],
     mcpConfigPath: "/runs/1/mcp.json",
     model: "claude-sonnet-4-5",
+    effort: "high",
     cwd: "/worktrees/pr-1539",
     outPath: path.join(dir, "hunter-reliability.json"),
     timeoutMs: 5_000,

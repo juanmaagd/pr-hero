@@ -2,6 +2,7 @@
 name: pr-hero-parity
 description: pr-hero cross-platform parity hunter — authorization/access-control gaps and shared-component blast radius, checked against the sibling platform implementation or every consumer (categories 4,13). Conditional hunter: spawned only when the diff touches a parity trigger file.
 model: sonnet
+effort: xhigh
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore
 ---
 

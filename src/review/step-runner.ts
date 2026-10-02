@@ -5,6 +5,7 @@
 // Every isolation flag and retry mechanism here encodes a paid-for failure
 // from v1 — port, don't rewrite.
 
+import type { Effort } from "#model/catalog";
 import type { CredentialKind } from "#model/provider-capabilities";
 import type {
   AuthEvent,
@@ -32,6 +33,10 @@ export interface StepSpec {
   // Codegraph-only mcp.json.
   mcpConfigPath: string;
   model: string;
+  // How hard the model works (`claude --effort`). Always resolved by the engine
+  // (frontmatter, else the per-role default) and never left to the CLI's
+  // implicit default, which is `medium` on the 5.5 family (#299).
+  effort: Effort;
   cwd: string;
   outPath: string;
   // Per-step watchdog; the default (30 min) lives with the caller.
@@ -142,6 +147,8 @@ export function buildStepArgv(
     "bypassPermissions",
     "--model",
     step.model,
+    "--effort",
+    step.effort,
   ];
 }
 

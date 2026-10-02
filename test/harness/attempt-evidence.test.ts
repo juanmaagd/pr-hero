@@ -4,6 +4,7 @@ import path from "node:path";
 import type { StepSpec } from "#review/step-runner";
 import {
   evidenceSha256,
+  freezeAttemptEvidenceIdentity,
   readEvidenceFile,
 } from "../../src/execution/attempt-evidence";
 import type {
@@ -99,6 +100,7 @@ async function setup(
     tools: [],
     mcpConfigPath: mcp,
     model: "sonnet",
+    effort: "high",
     cwd: dir,
     outPath: path.join(dir, "out.json"),
     timeoutMs: 50,
@@ -541,4 +543,97 @@ test("persistAttemptEvidence records captureDropped with a reason when a capture
   expect(e.captureDropped).toBeDefined();
   expect(typeof e.captureDropped.reason).toBe("string");
   expect(e.captureDropped.reason.length).toBeGreaterThan(0);
+});
+// #299: the request plan is the record of what the model was ALLOWED to do.
+// It carried only a hash of the tool list, so after a run that skipped the
+// code nobody could say, from the artifacts, whether tools had been on offer.
+test("the request plan records the effective tool names beside their hash", async () => {
+  const x = await setup();
+  x.step.tools = ["Read", "Grep", "mcp__codegraph__codegraph_explore"];
+  await x.harness.run(x.step);
+  const e = await waitForEvidence(x.step);
+  const planFile = attemptEvidencePath(x.step.outPath, x.step.name, 1).replace(
+    /\.json$/,
+    ".request.json",
+  );
+  const plan = JSON.parse(await readFile(planFile, "utf8"));
+  expect(plan.toolNames).toEqual([
+    "Read",
+    "Grep",
+    "mcp__codegraph__codegraph_explore",
+  ]);
+  // Additive: the hash is still there and still agrees with the attempt record.
+  expect(plan.toolsConfigSha256).toBe(e.identity.toolsConfigSha256);
+  expect(e.requestPlan.sha256).toBe(evidenceSha256(await readFile(planFile)));
+});
+
+test("a tool-less step records an empty name list, not an absent one", async () => {
+  const x = await setup();
+  await x.harness.run(x.step);
+  await waitForEvidence(x.step);
+  const planFile = attemptEvidencePath(x.step.outPath, x.step.name, 1).replace(
+    /\.json$/,
+    ".request.json",
+  );
+  expect(JSON.parse(await readFile(planFile, "utf8")).toolNames).toEqual([]);
+});
+
+// #299: the effort is the other half of what a step was allowed to do. A hunter
+// that returned a clean bill is read against the effort it ran at, and the CLI's
+// implicit default (medium on the 5.5 family) is exactly what the artifacts could
+// not show before.
+test("the request plan records the requested effort and that it was applied", async () => {
+  const x = await setup();
+  (x.step as { effort?: string }).effort = "xhigh";
+  await x.harness.run(x.step);
+  await waitForEvidence(x.step);
+  const planFile = attemptEvidencePath(x.step.outPath, x.step.name, 1).replace(
+    /\.json$/,
+    ".request.json",
+  );
+  const plan = JSON.parse(await readFile(planFile, "utf8"));
+  expect(plan.effort).toBe("xhigh");
+  // The fixture's transport is `claude-code` (route.backend), where the flag exists.
+  expect(plan.effortApplied).toBe(true);
+});
+
+// OpenCode has no `--effort`. The requested level is still recorded (it is the
+// engine's intent, and the diff against what ran is the finding), but a reader
+// must never be able to take "effort: xhigh" on that backend as a fact about the run.
+test("the request plan says plainly when the backend could not apply the effort", async () => {
+  const x = await setup();
+  const request: TransportRequest = {
+    sessionId: "effort-opencode-1",
+    attempt: 1,
+    route: {
+      backend: "opencode",
+      provider: "deepseek",
+      modelFamily: "deepseek",
+      modelSnapshot: "deepseek-v4",
+    },
+    executionModel: "deepseek-v4",
+    systemPromptPath: x.step.systemPromptPath,
+    systemPromptSha256: "deadbeef",
+    userPrompt: "review",
+    cwd: x.dir,
+    tools: [],
+    effort: "xhigh",
+    isolation: {
+      credentialProjectionId: "operator-env-fallback",
+      env: {},
+      syntheticHome: x.dir,
+      syntheticConfigHome: x.dir,
+      syntheticTmp: x.dir,
+      verifiedBinaryPath: x.binary,
+    },
+  };
+  const frozen = await freezeAttemptEvidenceIdentity(request, x.step);
+  expect(frozen.requestPlan).toBeDefined();
+  const planFile = attemptEvidencePath(x.step.outPath, x.step.name, 1).replace(
+    /\.json$/,
+    ".request.json",
+  );
+  const plan = JSON.parse(await readFile(planFile, "utf8"));
+  expect(plan.effort).toBe("xhigh");
+  expect(plan.effortApplied).toBe(false);
 });

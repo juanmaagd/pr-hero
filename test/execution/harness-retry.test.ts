@@ -114,6 +114,7 @@ async function makeStep(
     tools: [],
     mcpConfigPath: path.join(dir, "mcp.json"),
     model: "claude-sonnet-4-5",
+    effort: "high",
     cwd: dir,
     outPath: path.join(dir, "out.json"),
     timeoutMs: 5_000,
@@ -441,7 +442,7 @@ describe("PR0 — tripwire: classifyFailure ownership (D1-08 spec)", () => {
   });
 });
 
-describe("vacuous empty hunt is not a delivered draft (#214)", () => {
+describe("vacuous hunt is not a delivered draft (#214, #299)", () => {
   test("tools + zero invocations + empty findings fails the step without a format retry", async () => {
     const dir = await tempDir();
     const { transport, requests } = makeScriptedTransport([
@@ -471,6 +472,94 @@ describe("vacuous empty hunt is not a delivered draft (#214)", () => {
     expect(log).toContain("cause: legacy_terminal");
     expect(log).toContain("tool_invocations: 0");
     expect(log).not.toContain("classification: format");
+  });
+
+  test("tools + zero invocations + a finding fails the step too (#299)", async () => {
+    // df63033a-2: a logic hunter returned one finding "inferred from the
+    // diff" with zero tool calls and the old, empty-only gate delivered it.
+    const dir = await tempDir();
+    const { transport, requests } = makeScriptedTransport([
+      {
+        ...okOutcome(),
+        finalText: JSON.stringify({ findings: [{ id: "F001" }] }),
+        toolInvocations: 0,
+      },
+    ]);
+    const step = await makeStep(dir, {
+      tools: ["Read", "Grep"],
+      maxAttempts: 2,
+    });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("failed");
+    expect(result.attempts).toBe(1);
+    expect(requests.length).toBe(1);
+    expect(await Bun.file(step.outPath).exists()).toBe(false);
+
+    const log = await Bun.file(
+      path.join(dir, "logs", `${step.name}.1.log`),
+    ).text();
+    expect(log).toContain("cause: legacy_terminal");
+    expect(log).toContain("tool_invocations: 0");
+  });
+
+  test("a finding backed by a tool call still delivers (#299)", async () => {
+    const dir = await tempDir();
+    const finding = { findings: [{ id: "F001" }] };
+    const { transport } = makeScriptedTransport([
+      {
+        ...okOutcome(),
+        finalText: JSON.stringify(finding),
+        toolInvocations: 3,
+      },
+    ]);
+    const step = await makeStep(dir, { tools: ["Read"] });
+    const harness = new StepExecutionHarness({
+      transport,
+      spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+      sleep: async () => {},
+    });
+
+    const result = await harness.run(step);
+
+    expect(result.status).toBe("ok");
+    expect(result.output).toEqual(finding);
+  });
+
+  test("a non-hunter shape with tools and zero invocations still delivers (#299)", async () => {
+    // Refuter `results` and summarizer prose carry no findings array: the
+    // widened gate must not reach them.
+    for (const body of [
+      { results: [{ finding_id: "F001", outcome: "refuted", proof_refs: [] }] },
+      { prose: "p", score: 3, score_reason: "r" },
+    ]) {
+      const dir = await tempDir();
+      const { transport } = makeScriptedTransport([
+        {
+          ...okOutcome(),
+          finalText: JSON.stringify(body),
+          toolInvocations: 0,
+        },
+      ]);
+      const step = await makeStep(dir, {
+        name: "refuter-F001",
+        tools: ["Read"],
+      });
+      const harness = new StepExecutionHarness({
+        transport,
+        spawnFn: (() => ({}) as unknown) as typeof Bun.spawn,
+        sleep: async () => {},
+      });
+
+      const result = await harness.run(step);
+      expect(result.status).toBe("ok");
+    }
   });
 
   test("looked and found nothing still delivers", async () => {

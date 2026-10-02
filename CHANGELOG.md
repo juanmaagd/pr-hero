@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-02
+
+### Added
+- **`effort:` agent frontmatter key**: a prompt may declare how hard its model works, one of `low`,
+  `medium`, `high`, `xhigh`, `max` (the Claude CLI's `--effort` levels). An unknown value fails at
+  preflight and names the file. When the key is omitted the engine supplies a per-role default (hunter
+  `xhigh`, refuter `high`, summarizer, scout and rereview verifier `high`), so a custom prompt set still
+  runs at an explicit level. See `docs/configuration.md`, "Effort".
+- **Effort in the run artifacts**: each attempt's request plan records the `effort` that was requested
+  and `effortApplied`, and each step in `pipeline.json` records `effort` and, when it has a route,
+  `effort_applied`. The effort is not part of the route fingerprint.
+
+### Changed
+- **pr-hero now owns the effort and always passes `--effort`** (#299, 2026-10-02). It used to pass none,
+  so every step ran at the Claude CLI's implicit default: `high`, except on Sonnet 5.5 and Opus 5.5,
+  where it is `medium`. When the `sonnet` alias moved to claude-sonnet-5-5 the bundled hunters silently
+  dropped from `high` to `medium` and stopped exploring: on a real 280-line PR, 0 of 8 hunter runs found
+  anything at `medium`, 6 of 8 at `high`, 8 of 8 (and all 4 known bugs) at `xhigh` (about 4.5 minutes
+  per review), and 7 of 8 at `max` (about 19 minutes). The bundled hunters keep `sonnet` and now declare
+  `effort: xhigh`; the bundled refuter keeps `opus` and now declares `effort: high`. The refuter is
+  `high`, not `medium`, because on real findings `medium` refuted a pre-labeled known blocker in 3 of 4
+  verdicts (a deleted finding) where `high` kept it as latent in 3 of 4, even though `refuter-probe`
+  had passed 16 of 16 at `medium`. This supersedes an earlier unreleased change that moved the hunters to
+  `opus`; that change is reverted and the hunters stay on `sonnet`. Expect a higher per-review cost
+  and wall time than the 0.2.0 band: `xhigh` hunters cost roughly three times `high` per hunter, and the
+  cost band does not yet price effort. The child environment is an allowlist that never carries
+  `CLAUDE_CODE_EFFORT_LEVEL`, so an operator's shell cannot override the engine's level. OpenCode has no
+  equivalent control and does not map one: the requested level is recorded with `effortApplied: false`.
+
+### Fixed
+- **Verified execution snapshots no longer fill the disk** (#303, 2026-10-02): every step copied the
+  verified provider binary (about 217 MB for `claude`) into `$TMPDIR/prhero-exec-snapshots` and never
+  removed it, so one benchmark machine accumulated 153 GB and reached 98% disk. Each step now removes
+  its snapshot after its last attempt, resolving a binding no longer writes one, a process removes the
+  snapshots it still holds when it exits, and the next run (or `pr-hero gc`) sweeps snapshots left by
+  processes that died without cleaning up: a dead owner pid, or older than 6 hours. Snapshots stay
+  private per call; they are not shared across steps.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added
@@ -203,7 +241,8 @@ above). `0.1.0` below was originally published as `v1.0.0`._
 - **Spend & Size Safety Gates**: Automated budget guards (`max-changed-lines`, `max-changed-files`, `budget-usd`) skipping oversized or cost-prohibitive PRs cleanly with explicit skip status annotations.
 - **CI Automated Scaffolding**: `pr-hero setup --ci` and `pr-hero ci init` commands generating byte-accurate `.github/workflows/pr-hero.yml` configurations, complemented by the `pr-hero-ci-setup` agent skill.
 
-[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/juanmaagd/pr-hero/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/juanmaagd/pr-hero/compare/v1.1.0...v0.2.0
 [0.1.1]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.1.0
 [0.1.0]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.0.0

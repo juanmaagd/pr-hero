@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -64,6 +72,27 @@ import { ClaudeCodeCliTransport } from "../src/transports/claude-code-cli";
 import { successfulClaudeCredentialBroker } from "./support/claude-credential-broker";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
+
+// #303: the harnesses this file builds verify real Mach-O fixtures, which
+// snapshots them under os.tmpdir() and, once per process, sweeps that base.
+// A per-file TMPDIR keeps both away from the operator's real
+// $TMPDIR/prhero-exec-snapshots (Bun's os.tmpdir() re-reads TMPDIR per call).
+let originalTmpdir: string | undefined;
+let isolatedTmpdir: string;
+
+beforeAll(async () => {
+  originalTmpdir = process.env.TMPDIR;
+  isolatedTmpdir = await mkdtemp(
+    path.join(tmpdir(), "pr-hero-prod-rt-tmpdir-"),
+  );
+  process.env.TMPDIR = isolatedTmpdir;
+});
+
+afterAll(async () => {
+  if (originalTmpdir === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpdir;
+  await rm(isolatedTmpdir, { recursive: true, force: true });
+});
 
 const stubClaudeCredentialBroker: CredentialBroker = {
   async project() {
@@ -204,7 +233,7 @@ function createMockTransport(
 function makeStep(
   tmpDir: string,
   overrides: Partial<import("#review/step-runner").StepSpec> = {},
-) {
+): import("#review/step-runner").StepSpec {
   return {
     name: "hunter-reliability",
     systemPromptPath: path.join(tmpDir, "system.md"),
@@ -212,6 +241,7 @@ function makeStep(
     tools: ["Read"],
     mcpConfigPath: path.join(tmpDir, "mcp.json"),
     model: "sonnet",
+    effort: "high",
     cwd: tmpDir,
     outPath: path.join(tmpDir, "out.json"),
     timeoutMs: 5000,
@@ -458,6 +488,8 @@ describe("production runtime PR1", () => {
         "bypassPermissions",
         "--model",
         "sonnet",
+        "--effort",
+        "high",
       ]);
     });
 
@@ -2356,6 +2388,7 @@ describe("production runtime PR1", () => {
         tools: ["Read"],
         mcpConfigPath: path.join(tmpDir, "mcp.json"),
         model: "sonnet",
+        effort: "high",
         cwd: tmpDir,
         outPath: path.join(tmpDir, "out.json"),
         timeoutMs: 60_000,

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type DraftFinding,
   extractJsonObject,
-  isVacuousEmptyHunt,
+  isVacuousHunt,
   validateHunterDraft,
   validateRefuterResult,
   validateSummary,
@@ -356,13 +356,13 @@ describe("proof_refs resolvability", () => {
   });
 });
 
-describe("isVacuousEmptyHunt (#214)", () => {
+describe("isVacuousHunt (#214, #299)", () => {
   const empty = { findings: [] };
   const found = { findings: [draft()] };
 
   test("tools given, zero invocations, empty findings — vacuous", () => {
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: ["Read", "Grep"],
         toolInvocations: 0,
         parsed: empty,
@@ -372,7 +372,7 @@ describe("isVacuousEmptyHunt (#214)", () => {
 
   test("looked and found nothing is not vacuous", () => {
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: ["Read"],
         toolInvocations: 1,
         parsed: empty,
@@ -382,7 +382,7 @@ describe("isVacuousEmptyHunt (#214)", () => {
 
   test("unknown count stays ungated", () => {
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: ["Read"],
         toolInvocations: undefined,
         parsed: empty,
@@ -392,7 +392,7 @@ describe("isVacuousEmptyHunt (#214)", () => {
 
   test("scout tools:[] is out of the rule even at zero invocations", () => {
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: [],
         toolInvocations: 0,
         parsed: empty,
@@ -400,26 +400,77 @@ describe("isVacuousEmptyHunt (#214)", () => {
     ).toBe(false);
   });
 
-  test("a finding without tools is a different problem, not this gate", () => {
+  // #299: the gate used to look only at EMPTY findings, so a logic hunter that
+  // returned one finding "inferred from the diff" with zero tool calls
+  // (run df63033a-2) passed. Under the engine's read requirement a finding
+  // whose proof was never read is inadmissible, at any findings count.
+  test("tools given, zero invocations, findings present — vacuous too", () => {
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: ["Read"],
+        toolInvocations: 0,
+        parsed: found,
+      }),
+    ).toBe(true);
+    expect(
+      isVacuousHunt({
+        tools: ["Read"],
+        toolInvocations: 0,
+        parsed: { findings: [draft(), draft({ id: "F002" })] },
+      }),
+    ).toBe(true);
+  });
+
+  test("findings backed by at least one tool call are not vacuous", () => {
+    expect(
+      isVacuousHunt({
+        tools: ["Read"],
+        toolInvocations: 1,
+        parsed: found,
+      }),
+    ).toBe(false);
+  });
+
+  test("unknown count stays ungated whatever the findings count", () => {
+    expect(
+      isVacuousHunt({
+        tools: ["Read"],
+        toolInvocations: undefined,
+        parsed: found,
+      }),
+    ).toBe(false);
+  });
+
+  test("a tool-less step is out of the rule at any findings count", () => {
+    expect(
+      isVacuousHunt({
+        tools: [],
         toolInvocations: 0,
         parsed: found,
       }),
     ).toBe(false);
   });
 
+  test("a findings field that is not an array is not this gate's concern", () => {
+    expect(
+      isVacuousHunt({
+        tools: ["Read"],
+        toolInvocations: 0,
+        parsed: { findings: "none" },
+      }),
+    ).toBe(false);
+  });
+
   test("refuter and scout shapes have no findings array, so they do not trip", () => {
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: ["Read"],
         toolInvocations: 0,
         parsed: { results: [] },
       }),
     ).toBe(false);
     expect(
-      isVacuousEmptyHunt({
+      isVacuousHunt({
         tools: ["Read"],
         toolInvocations: 0,
         parsed: { leads: [] },

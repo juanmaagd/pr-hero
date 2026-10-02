@@ -139,6 +139,45 @@ The bundled refuter declares `opus` and the summarizer `haiku`; with no mapping 
 mapping a run uses on **one** provider: a plan naming two OpenCode providers is refused at
 admission — see [Credentials](#credentials) below.
 
+## Effort
+
+How hard a model works is set per step with the Claude CLI's `--effort` control, and **pr-hero owns it**:
+every Claude Code step is spawned with an explicit `--effort <level>`, never the CLI's implicit default.
+That default is `high`, except on Sonnet 5.5 and Opus 5.5, where it is `medium`, so leaving it implicit
+meant a model alias moving to a new release could silently change how deeply a step explores.
+
+An agent prompt may declare its own level in its frontmatter, beside `model:`:
+
+```yaml
+---
+name: my-hunter
+model: sonnet
+effort: xhigh
+tools: Read, Grep, Glob
+---
+```
+
+The levels are `low`, `medium`, `high`, `xhigh` and `max`. Anything else fails at preflight and names the
+file. When a prompt omits `effort:`, the engine supplies a default for the step's role, so a custom or lab
+prompt set still runs at an explicit level:
+
+| Role | Default | Why |
+| --- | --- | --- |
+| Hunter | `xhigh` | Measured on a real 280-line PR (Sonnet 5.5, 4 hunters x 2 replicates): `medium` found something in 0 of 8 runs, `high` in 6 of 8, `xhigh` in 8 of 8 and all 4 known bugs, `max` in 7 of 8 at about four times the wall time. |
+| Refuter | `high` | `medium` refuted a pre-labeled known blocker in 3 of 4 verdicts on real findings, which deletes it; `high` kept it as latent in 3 of 4. |
+| Summarizer, scout, rereview verifier | `high` | Unmeasured, so they keep what every model ran at before the 5.5 family. |
+
+The bundled prompts declare `effort: xhigh` on the hunters and `effort: high` on the refuter. The rereview
+verifier reuses the refuter's prompt, so it follows the refuter's frontmatter. A prompt's `effort:` wins over
+the role default; there is no CLI flag or environment variable that overrides it, and the child process never
+inherits `CLAUDE_CODE_EFFORT_LEVEL` from your shell. `xhigh` hunters cost roughly three times what `high`
+did per hunter, and the cost band does not price effort yet, so expect the real bill to exceed the quote.
+
+Effort is a Claude Code CLI control. The OpenCode backend has no equivalent here and does not map one: the
+requested level is still recorded in the run artifacts (`effort` in each attempt's request plan and in
+`pipeline.json`), next to `effortApplied: false` / `effort_applied: false`, so a run on OpenCode never reads
+as having run at that level.
+
 ## Credentials
 
 **pr-hero never stores a credential.** It reads them from wherever they already live and projects

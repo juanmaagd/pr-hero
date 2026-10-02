@@ -105,7 +105,7 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
             data = [
               // #214: this fixture's `tools: ["Read"]` step with an empty
               // `findings` draft and zero observed tool invocations used to
-              // read as a hunt that never looked (`isVacuousEmptyHunt`),
+              // read as a hunt that never looked (`isVacuousHunt`),
               // which the harness now refuses to deliver as `ok`. A completed
               // "read" tool part fixes that — but it stays on this SAME flat
               // message, parented directly to the prompt, rather than dev's
@@ -222,6 +222,7 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
           mcpConfigPath: join(root, "mcp.json"),
           tools: ["Read"],
           model: "model",
+          effort: "high",
           route: {
             backend: "opencode",
             provider: "openai",

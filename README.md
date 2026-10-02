@@ -228,7 +228,7 @@ the marker line. Reviewing a tree you cannot write to? Supply it from outside wi
 | `pr-hero watch --once` | Run ONE watcher tick: scan the watched repos, pick the next unreviewed open PR, review it. `--dry-run` shows the whole decision for $0. |
 | `pr-hero watch install` | Install the macOS launchd agent that runs a tick every `--interval` minutes (default 15). **This is the opt-in to automatic spend.** |
 | `pr-hero watch uninstall` | Unload and remove that agent. |
-| `pr-hero gc` | Collect worktrees under `~/.prhero` that are merged/closed or idle >72h. `--dry-run` prints the table and removes nothing. `--repo <clone>` scopes to one origin; default is the whole home. |
+| `pr-hero gc` | Collect worktrees under `~/.prhero` that are merged/closed or idle >72h. `--dry-run` prints the table and removes nothing. `--repo <clone>` scopes to one origin; default is the whole home. Also removes leftover verified execution snapshots under `$TMPDIR/prhero-exec-snapshots` (dead owner process or older than 6h). |
 | `pr-hero gc install` | Install the macOS launchd agent that runs `pr-hero gc` every `--interval` minutes (default 360 = 6h). No reviews, no `watch.json`, no daily cap — the $0 sweeper so trees do not wait for a review or the watcher. |
 | `pr-hero gc uninstall` | Unload and remove that GC agent. |
 | `pr-hero gc status` | Read-only, $0: whether the GC agent is installed, its interval, plist, and tick log. |

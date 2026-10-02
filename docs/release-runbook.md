@@ -53,7 +53,9 @@ Two distinct tag types are used:
 
 1. **Immutable Release Tags (`vX.Y.Z`)**:
    - Annotated Git tags representing specific point-in-time releases (e.g. `v1.0.0`, `v1.1.0`).
-   - Once pushed to GitHub, immutable release tags must **never** be moved or re-pointed.
+   - Once pushed to GitHub, immutable release tags must **never** be moved or re-pointed. The one
+     narrow, checked exception is a release run that failed before any GitHub Release existed for the
+     tag — see §6, Scenario D. Everything else is a patch release (Scenario A).
 2. **Floating Major Tags (`v0`, `v1`, `v2`, etc.)**:
    - Floating tags pointing to the latest release within a major version line. The current floating
      tag is `v0` while the project is pre-1.0 (0.x minor bumps may still break the CLI/config/Action
@@ -101,6 +103,23 @@ bun run refuter-probe
 ```
 
 All commands must exit cleanly with code `0`.
+
+**macOS is only tested by `release.yml`.** `ci.yml` runs on `ubuntu-latest` alone, so no pull request ever
+runs the suite, the compile or the compiled-binary smoke on darwin; the first time they run is the
+release itself (the `0.2.0` release run failed on both macOS legs for exactly this reason). On a Mac,
+rehearse that leg before tagging. The empty `HOME` matters: a developer machine with a Claude login hides
+tests that silently depend on the macOS keychain.
+
+```bash
+# Suite as a bare macOS runner sees it (no keychain item, empty HOME)
+env CI=true GITHUB_ACTIONS=true HOME="$(mktemp -d)" bun test
+
+# Compile and smoke the binary exactly as release.yml does (use your own target)
+bun build --compile --target=bun-darwin-arm64 --minify --no-compile-autoload-dotenv \
+  --no-compile-autoload-bunfig --define __PRHERO_VERSION__='"X.Y.Z"' src/cli.ts \
+  --outfile /tmp/pr-hero-darwin-arm64
+bun run scripts/compiled-smoke.ts /tmp/pr-hero-darwin-arm64
+```
 
 ### Step 2: Update Changelog
 
@@ -164,9 +183,44 @@ git tag -a vX.Y.Z -m "Release vX.Y.Z"
 git tag -fa v0 -m "Release v0 (points to vX.Y.Z)"
 ```
 
+### Step 4b: Publish to npm (manual, before pushing the tag)
+
+`release.yml` publishes to npm only when the `NPM_TOKEN` secret exists, and today it does not. The CI token
+failed with `E404` on `PUT /pr-hero`: the `v1.1.0` run created its GitHub Release and the floating tag and
+then died at that step, so `1.1.0` never reached npm, and the secret was removed on 2026-09-29. Until npm
+trusted publishing is set up, npm is published by hand from the release commit.
+
+Do it **before** pushing the tag. If the publish fails, nothing else has moved; CI used to publish last,
+after the GitHub Release, so a failure left a half-release.
+
+```bash
+git switch main && git pull --ff-only origin main   # the release commit, clean tree
+bun install --frozen-lockfile && bun run build      # the tarball ships dist/
+npm login             # interactive (browser or passkey); `npm whoami` fails with E401 without a session
+npm whoami            # must print the package owner (see `npm owner ls pr-hero`)
+npm publish --access public
+```
+
+- No `--provenance`: it only works from a supported CI provider (OIDC), so a manual publish carries none.
+- **Prereleases** (`vX.Y.Z-rc.N`): add `--tag next`. Without it npm points `latest` at the prerelease.
+- `npm publish` moves `latest` to the version it publishes, whatever the SemVer order. That is intended for
+  the `1.x → 0.x` renumbering (`latest` went from `1.0.0` to `0.2.0`), and it is why an existing `^1` range
+  never sees the `0.x` line.
+- `E404` on `PUT` for a package that exists means no valid credentials, not a missing package. A
+  `PUT ... 202` (see `~/.npm/_logs/*-debug-0.log`) means the registry accepted the upload and is processing
+  it asynchronously: for `0.2.0` the version and `latest` took about 9 minutes to appear. Poll, and do not
+  publish again:
+  ```bash
+  until [ "$(curl -s -o /dev/null -w '%{http_code}' https://registry.npmjs.org/pr-hero/X.Y.Z)" = 200 ]; do sleep 30; done
+  npm view pr-hero dist-tags --prefer-online   # expect latest: X.Y.Z
+  ```
+- The workflow's npm step stays in place and is skipped without the secret. If `NPM_TOKEN` is ever restored,
+  stop publishing by hand: the step would fail on a version that already exists.
+
 ### Step 5: Push to Remote
 
-Push the release commit, immutable tag, and updated floating tag to GitHub:
+Push only after Step 4b succeeded. Pushing the tag starts the release pipeline (§4). Push the release
+commit, immutable tag, and updated floating tag to GitHub:
 
 ```bash
 # 1. Push main branch
@@ -198,7 +252,7 @@ flowchart TD
     D --> E["Generate SHA256SUMS"]
     D --> F["Create GitHub Release with Binaries (make_latest: true)"]
     D --> G["Build npm Bundle (bun run build)"]
-    D --> H["Publish to NPM (npm publish --provenance)"]
+    D --> H["Publish to NPM (only if NPM_TOKEN is set; skipped today, see Step 4b)"]
 ```
 
 ### Pipeline Workflow Stages
@@ -213,7 +267,9 @@ flowchart TD
      mistake ships two different version numbers under one release, silently.
 1. **`build-binaries`**:
    - Executes across a matrix of 4 runner environments (`macos-latest`, `macos-15-intel`, `ubuntu-latest`, `ubuntu-24.04-arm`), each on its target's own architecture so the smoke below can execute what it built. `fail-fast: false`, so a failing leg does not cancel the other three — they finish and upload, and the run reports every failure rather than only the first. This does **not** keep the release publishing: `publish-release` has a bare `needs: build-binaries`, so any failed leg skips it. That is deliberate — a release missing one platform binary would give `install.sh` a 404 on that architecture, while a failed release leaves the previous version installable.
-   - Runs full test suite and typechecks on each OS.
+   - Runs full test suite and typechecks on each OS. This is the only place the suite runs on macOS
+     (`ci.yml` is ubuntu-only), so a darwin-only failure surfaces here first; rehearse it in Step 1. A
+     failed leg leaves a pushed tag with no release: see §6, Scenario D.
    - Compiles standalone executables using `bun build --compile --minify` with embedded version definitions.
    - **Runs the compiled binary** (`scripts/compiled-smoke.ts`) before uploading it. v1.0.0 shipped a binary whose `review` failed for every user because this step did not exist.
    - Uploads binary artifacts (`pr-hero-darwin-arm64`, `pr-hero-darwin-x64`, `pr-hero-linux-x64`, `pr-hero-linux-arm64`).
@@ -226,7 +282,9 @@ flowchart TD
      without `make_latest: true`, GitHub would keep calling `1.1.0` latest forever and every
      upgrade/install would silently stay stuck on the old numbering.
    - Generates release notes automatically from commit history and pull requests.
-   - Builds the npm distribution bundle and publishes to npm registry with cryptographic provenance using `NODE_AUTH_TOKEN`.
+   - Builds the npm distribution bundle and, **only when the `NPM_TOKEN` secret exists**, publishes it with
+     `npm publish --provenance`. The secret is currently unset, so this step is skipped and npm is
+     published by hand (Step 4b).
 
 ---
 
@@ -236,12 +294,18 @@ Perform these sanity checks immediately following a release:
 
 1. **GitHub Release Verification**:
    - Visit `https://github.com/juanmaagd/pr-hero/releases/tag/vX.Y.Z`.
-   - Confirm all 4 platform binaries and `SHA256SUMS` are attached as release assets.
-2. **NPM Registry Verification**:
+   - Confirm all 4 platform binaries and `SHA256SUMS` are attached as release assets, and that the release
+     is the one GitHub marks `Latest` (after the renumbering it must not be `1.1.0`):
+     ```bash
+     gh release view vX.Y.Z --json assets,isPrerelease --jq '.isPrerelease, (.assets[].name)'
+     gh release list --limit 3
+     ```
+   - Confirm the floating tag moved: `git ls-remote origin 'refs/tags/v0^{}'` must equal the release commit.
+2. **NPM Registry Verification** (the version can lag the upload by ~10 minutes, see Step 4b):
    ```bash
    # Check published package version
-   npm view pr-hero version
-   npm view pr-hero dist-tags
+   npm view pr-hero version --prefer-online
+   npm view pr-hero dist-tags --prefer-online
    ```
 3. **Installer Script Test**:
    - Test standalone installer download in a temporary environment:
@@ -298,3 +362,31 @@ git push origin v0 --force
 ```
 
 Never apply this to `v1` — it is frozen at the last 1.x release and must never be re-pointed.
+
+### Scenario D: Release Run Failed Before the GitHub Release Existed
+
+Typically a `build-binaries` leg failed, so `publish-release` was skipped: the tag is pushed, but there is
+no GitHub Release, no binaries and no floating tag. Re-running the failed jobs does not help when the
+failure is deterministic, because the run builds the tag's own commit.
+
+The default is still a patch release (Scenario A). Moving the tag is allowed only when **all** of these hold:
+
+1. `gh release view vX.Y.Z` reports `release not found`: nothing consumable hangs off the tag.
+2. The fix changes nothing that ships. This must print nothing, and `package.json` must still say `X.Y.Z`
+   (if npm was already published, its tarball stays valid because none of its files changed):
+   ```bash
+   git diff --name-only <old-tag-commit>..origin/main | grep -v '^test/'
+   ```
+3. The fix reached `main` through the normal pull request flow first.
+
+Then re-point the tag with a lease on its current remote value, so the push fails if anyone touched it in
+between. A forced tag update starts a fresh `release.yml` run:
+
+```bash
+git fetch origin main
+git tag -fa vX.Y.Z -m "Release vX.Y.Z" origin/main
+git push origin vX.Y.Z --force-with-lease=refs/tags/vX.Y.Z:$(git ls-remote origin refs/tags/vX.Y.Z | cut -f1)
+```
+
+Record the deviation in the promotion pull request. Precedent: `v0.2.0` moved from `d36e51a` to `05feaac`
+on 2026-09-29 after five keychain-dependent tests failed on both macOS legs (fixed test-only).

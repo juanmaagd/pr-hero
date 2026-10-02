@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
+import { isEffort } from "#model/catalog";
 import { CLAUDE_CAPABILITY_STATICS } from "#model/provider-capabilities";
 import { spawnModelForClaudeCli } from "#model/routing";
 import type { BucketScope } from "../execution/bucket-id";
@@ -153,6 +154,9 @@ function noSpawnUsage(
 
 interface RawClaudeCliResult {
   readonly total_cost_usd?: number;
+  // #299. Read through `toolInvocationsFromCliResult`, never directly: the
+  // type is `unknown` because the only trustworthy shape is an integer >= 1.
+  readonly num_turns?: unknown;
   readonly usage?: {
     readonly input_tokens?: number;
     readonly output_tokens?: number;
@@ -230,6 +234,35 @@ function observedModelsFromCliResult(
     });
   }
   return observed.length === 0 ? undefined : observed;
+}
+
+// #299 (2026-10-01): how many tool calls the model made, as far as the CLI's
+// result lets us say. `num_turns` counts ASSISTANT turns, and every turn after
+// the first begins from tool results, so `num_turns - 1` is a LOWER BOUND on
+// tool calls: parallel calls inside one turn count once. That is exact on the
+// one distinction the vacuous-hunt gate needs, zero versus nonzero, and
+// deliberately not offered as a call count. Observed 2026-10-01: 1 turn with no
+// tools, 2 turns for one Read, 17 turns for a deep hunt.
+//
+// `undefined` — never a fabricated 0 — unless `num_turns` is an integer >= 1.
+// A 0 here asserts "we looked and the model issued none", which would fail a
+// hunt on the strength of a field we never saw (missing, a string, a float, or
+// a turn count of 0, which no completed attempt can have). Each attempt is its
+// own `claude -p` process, with no `--resume`, so `num_turns` is per attempt
+// and a retry cannot inherit the previous attempt's count.
+function toolInvocationsFromCliResult(rawStdout: string): number | undefined {
+  let parsed: RawClaudeCliResult;
+  try {
+    parsed = JSON.parse(rawStdout);
+  } catch {
+    return undefined;
+  }
+  // `JSON.parse("null")` is valid JSON and not an object.
+  if (parsed === null || typeof parsed !== "object") return undefined;
+  const turns = parsed.num_turns;
+  return typeof turns === "number" && Number.isInteger(turns) && turns >= 1
+    ? turns - 1
+    : undefined;
 }
 
 // #173 (§8, docs/multi-runtime-model-diversity-design.md:462): "Subscription
@@ -675,6 +708,18 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       readonly events?: import("../execution/contracts").AsyncEventSink;
     },
   ): Promise<TransportOutcome> {
+    // The engine owns the effort and ALWAYS passes it (#299). The CLI's own
+    // default is `high` except on Sonnet 5.5 / Opus 5.5 (`medium`), so a
+    // request that reaches here without a level would quietly put the step back
+    // on the implicit default this flag exists to replace. That is a
+    // programming error, not a case to fall back from, and it throws before the
+    // paid spawn. The child env is an allowlist without
+    // CLAUDE_CODE_EFFORT_LEVEL, so nothing the operator exports can override it.
+    if (typeof request.effort !== "string" || !isEffort(request.effort)) {
+      throw new Error(
+        `claude-code transport requires an explicit effort, got ${JSON.stringify(request.effort)}`,
+      );
+    }
     const args = [
       request.isolation.verifiedBinaryPath,
       "-p",
@@ -698,6 +743,8 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       "bypassPermissions",
       "--model",
       spawnModelForClaudeCli(request.route, request.executionModel),
+      "--effort",
+      request.effort,
     );
 
     const start = performance.now();
@@ -855,6 +902,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         request.isolation.env,
       );
       const observedModels = observedModelsFromCliResult(stdout);
+      const toolInvocations = toolInvocationsFromCliResult(stdout);
 
       let stderrTail = stderr.slice(-4096);
       if (unreaped) {
@@ -902,6 +950,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         usage,
         stderrTail,
         ...(observedModels === undefined ? {} : { observedModels }),
+        ...(toolInvocations === undefined ? {} : { toolInvocations }),
         ...(exitCode !== undefined ? { exitCode } : {}),
       };
     } finally {

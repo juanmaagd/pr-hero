@@ -154,6 +154,7 @@ describe("Executable authority & deceptive fixtures denials", () => {
         tools: ["Read"],
         mcpConfigPath: path.join(tempDir, "mcp.json"),
         model: "claude-sonnet-4-5",
+        effort: "high",
         cwd: tempDir,
         outPath: path.join(tempDir, `out-${name}.json`),
         timeoutMs: 5000,
@@ -266,6 +267,7 @@ describe("Executable authority & deceptive fixtures denials", () => {
       tools: ["Read"],
       mcpConfigPath: path.join(tempDir, "mcp.json"),
       model: "claude-sonnet-4-5",
+      effort: "high",
       cwd: tempDir,
       outPath: path.join(tempDir, "out.json"),
       timeoutMs: 5000,
@@ -442,6 +444,9 @@ describe("Executable authority & deceptive fixtures denials", () => {
     const verifyResult = await verifyExecutableAuthority({
       candidatePath: canonicalPath,
       allowlist,
+      // Inside tempDir, so the snapshot is cleaned with it instead of leaking
+      // into the real $TMPDIR (#303).
+      snapshotDir: path.join(tempDir, "snaps-toctou"),
     });
 
     expect(verifyResult.approved).toBe(true);

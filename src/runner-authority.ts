@@ -7,7 +7,7 @@ import type {
 } from "#model/provider-capabilities";
 import {
   resolveClaudeCanonicalBinary,
-  verifyExecutableAuthority,
+  verifyExecutableBinding,
 } from "#model/provider-capabilities";
 import type { ResolvedRoutePlan } from "#model/routing";
 import type { CredentialKind, RunnerBackend } from "./execution/contracts";
@@ -156,7 +156,11 @@ async function verifyConfiguredExecutable(
     };
   }
 
-  const verification = await verifyExecutableAuthority(
+  // #303: verify-only. Binding resolution needs the allowlist and hash
+  // verdict, never a runnable copy; the full authority snapshotted the binary
+  // here and dropped the result, leaking one copy per route per run. The
+  // harness still verifies (and snapshots) again right before each spawn.
+  const verification = await verifyExecutableBinding(
     {
       candidatePath,
       allowlist: configuredAllowlist,

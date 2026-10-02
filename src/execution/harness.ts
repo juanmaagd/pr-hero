@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { releaseExecutionSnapshot } from "#model/exec-snapshots";
 import {
   type ExecutableAllowlistEntry,
   verifyExecutableAuthority,
@@ -11,7 +12,7 @@ import {
 //   TRANSPORT — provider/process mechanics only: honor AbortSignal, emit bounded
 //   protocol events, return TransportOutcome, classify provider/transport causes.
 //   TransportRequest deliberately omits timeoutMs, parser, retry, and artifacts.
-import { isVacuousEmptyHunt } from "#review/drafts";
+import { isVacuousHunt } from "#review/drafts";
 import type {
   RetryInfo,
   StepResult,
@@ -189,6 +190,9 @@ export interface StepExecutionHarnessOptions {
   readonly workspaceRoot?: string;
   readonly executableAllowlist?: readonly ExecutableAllowlistEntry[];
   readonly binaryPath?: string;
+  // Where verified execution snapshots are written. Tests point it at a temp
+  // dir so they never touch the real $TMPDIR; production leaves it unset.
+  readonly executableSnapshotDir?: string;
   readonly admissionGate?: StepAdmissionGate;
   readonly registry?: TransportRegistry;
   readonly transport?: ProviderTransport;
@@ -458,6 +462,7 @@ export class StepExecutionHarness implements StepRunner {
   private readonly workspaceRoot?: string;
   private readonly allowlist?: readonly ExecutableAllowlistEntry[];
   private readonly binaryPath?: string;
+  private readonly executableSnapshotDir?: string;
   private readonly admissionGate?: StepAdmissionGate;
   private readonly registry?: TransportRegistry;
   private readonly explicitTransport?: ProviderTransport;
@@ -489,6 +494,7 @@ export class StepExecutionHarness implements StepRunner {
     this.workspaceRoot = options.workspaceRoot;
     this.allowlist = options.executableAllowlist;
     this.binaryPath = options.binaryPath;
+    this.executableSnapshotDir = options.executableSnapshotDir;
     this.admissionGate = options.admissionGate;
     this.registry = options.registry;
     if (options.transport !== undefined) {
@@ -734,6 +740,7 @@ export class StepExecutionHarness implements StepRunner {
       const execResult = await verifyExecutableAuthority({
         candidatePath: candidate,
         allowlist: this.allowlist,
+        snapshotDir: this.executableSnapshotDir,
       });
 
       if (!execResult.approved) {
@@ -752,11 +759,9 @@ export class StepExecutionHarness implements StepRunner {
           resultText: "",
         };
       }
-      this.onAuthEvent?.({ kind: "executable", status: "approved" });
       verifiedBinaryPath = execResult.executable.verifiedExecutionPath;
     } else if (this.isTestFake) {
       // Offline unit test runner with fake spawn
-      this.onAuthEvent?.({ kind: "executable", status: "approved" });
       verifiedBinaryPath = this.binaryPath ?? admissionIdentity.executable;
     } else {
       // Production without configured allowlist -> fail closed
@@ -775,6 +780,48 @@ export class StepExecutionHarness implements StepRunner {
         resultText: "",
       };
     }
+
+    // #303: the verified execution snapshot lives exactly as long as the
+    // attempts that spawn from it. The try opens on the line after the path
+    // is assigned — even the approval event sits inside it — so every return
+    // and throw below, including the credential-projection early return,
+    // releases it exactly once, after the LAST attempt (all attempts reuse
+    // one snapshot). After a watchdog or cancel the child may still be alive;
+    // unlinking a running executable is fine on POSIX, and on Windows the
+    // failed removal stays registered for the process-exit release. The
+    // release is gated on the snapshot registry, so the test-fake and `#!`
+    // launcher paths (never snapshotted) are untouched.
+    try {
+      this.onAuthEvent?.({ kind: "executable", status: "approved" });
+      return await this.runAuthorizedStep({
+        step,
+        transport,
+        admissionIdentity,
+        canonicalCwd,
+        verifiedBinaryPath,
+      });
+    } finally {
+      releaseExecutionSnapshot(verifiedBinaryPath);
+    }
+  }
+
+  private async runAuthorizedStep(args: {
+    readonly step: StepSpec;
+    readonly transport: ProviderTransport;
+    readonly admissionIdentity: {
+      readonly executable: string;
+      readonly provider: string;
+    };
+    readonly canonicalCwd: string;
+    readonly verifiedBinaryPath: string;
+  }): Promise<StepResult> {
+    const {
+      step,
+      transport,
+      admissionIdentity,
+      canonicalCwd,
+      verifiedBinaryPath,
+    } = args;
 
     // #150: a transport that declares "server-lifetime" owns its OWN
     // credential protection outside this per-step loop (the OpenCode SDK
@@ -1553,6 +1600,7 @@ export class StepExecutionHarness implements StepRunner {
         sessionId: `${step.name}-${Date.now()}-${attempts}`,
         attempt: attempts,
         executionModel: step.model,
+        effort: step.effort,
         route:
           step.route ??
           (transport.defaultRoute
@@ -2135,14 +2183,15 @@ export class StepExecutionHarness implements StepRunner {
         try {
           const parsed = step.parse(outcome.finalText);
           if (
-            isVacuousEmptyHunt({
+            isVacuousHunt({
               tools: step.tools,
               toolInvocations: outcome.toolInvocations,
               parsed,
             })
           ) {
-            // The JSON parsed. format_violation would spend a paid reminder
-            // retry on the same dump. §7 has no cause for "did not look";
+            // The JSON parsed, with any number of findings. format_violation
+            // would spend a paid reminder retry on the same dump. §7 has no
+            // cause for "did not look";
             // inventing one drifts the frozen vocabulary, so this is the
             // legacy_terminal ruling — stop, no retry. The attempt log
             // carries `tool_invocations: 0` as the fact.

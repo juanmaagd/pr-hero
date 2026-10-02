@@ -95,6 +95,7 @@ function makeRequest(
       modelSnapshot: "gpt-test-snapshot",
     },
     executionModel: "gpt-test-snapshot",
+    effort: "high",
     systemPromptPath: "/tmp/pr-hero-test/system.md",
     systemPromptSha256: "deadbeef",
     userPrompt: "review this",
@@ -4448,7 +4449,7 @@ describe("OpenCodeSdkTransport toolInvocations (#214)", () => {
   // POLL readback is what discovered the completed tool part and the
   // terminal — must still be able to prove it looked. Without this, a
   // poll-won turn with a genuinely completed tool call reads as vacuous and
-  // the harness gate (#214, `isVacuousEmptyHunt`) refuses it.
+  // the harness gate (#214, `isVacuousHunt`) refuses it.
   test("a poll-won terminal carries its own tool tally when the stream never saw one", async () => {
     const proof = completedProof("evt-poll-tool");
     const handle = makeClient({
