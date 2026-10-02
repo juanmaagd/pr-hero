@@ -59,23 +59,24 @@ gh secret set OPENCODE_AUTH_JSON < /path/to/ci-only-auth.json
 
 ## Routing is logical model, not role
 
-`PRHERO_ROUTING` maps **logical model identity** (`sonnet`, `haiku`), not hunter vs refuter.
+`PRHERO_ROUTING` maps **logical model identity** (`opus`, `haiku`), not hunter vs refuter.
 
 Default prompt set:
 
 | Step | Logical model |
 |---|---|
-| Hunters | `sonnet` |
+| Hunters | `opus` |
 | Refuter | `opus` |
 | Summarizer | `haiku` |
 
-A mapping moves only the steps whose logical model it names: a `sonnet` mapping moves the hunters and leaves the refuter alone. An alias with **no** mapping and **no** `default` route currently falls through to the Claude CLI (`claude-code` / `direct`), so that step needs Claude credentials in the run. A `default` route covers every alias, the refuter included.
+Hunters and the refuter share the `opus` alias (hunters moved off `sonnet` after #299 measured it hunting too shallowly), so one `opus` mapping moves both. A mapping moves only the steps whose logical model it names. An alias with **no** mapping and **no** `default` route currently falls through to the Claude CLI (`claude-code` / `direct`), so that step needs Claude credentials in the run. A `default` route covers every alias.
 
-| Routing shape | Hunters (`sonnet`) | Refuter (`opus`) |
+| Routing shape | Hunters + refuter (`opus`) | Summarizer (`haiku`) |
 |---|---|---|
-| `default` route only | default route | default route (same model as the hunters) |
-| Only a `sonnet` mapping to OpenCode | OpenCode | Claude CLI (needs a Claude secret) |
-| `sonnet` and `opus` mappings to OpenCode | OpenCode | OpenCode |
+| `default` route only | default route | default route |
+| Only an `opus` mapping to OpenCode | OpenCode | Claude CLI (needs a Claude secret) |
+| `opus` and `haiku` mappings to OpenCode | OpenCode | OpenCode |
+| Only a `sonnet` mapping to OpenCode | Claude CLI (needs a Claude secret) | Claude CLI (needs a Claude secret) |
 
 OpenCode does not resolve pr-hero aliases. Any `opencode` route for `sonnet`/`opus`/`haiku` **must** set `modelSnapshot` to the provider model id. Confirm with `opencode models` (optionally `opencode models <provider>`). Do not guess `deepseek-chat` if the CLI lists `deepseek-v4-flash` / `deepseek-v4-pro`.
 
@@ -89,11 +90,11 @@ Do not wrap the variable in `{"routing": ...}`. Do not put keys in the variable 
 gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}}'
 ```
 
-Replace `deepseek-v4-flash` with an id `opencode models` actually lists. The `default` route covers hunters (`sonnet`) and the refuter (`opus`) alike, so the refuter runs on this same model.
+Replace `deepseek-v4-flash` with an id `opencode models` actually lists. The `default` route covers the hunters and the refuter (`opus`) and the summarizer (`haiku`) alike, so all of them run on this same model.
 
 ### Mixed: OpenCode default + Claude summarizer (legal DATA mix)
 
-Hunters (`sonnet`) and refuter (`opus`) → the OpenCode default route, one API provider. Summarizer (`haiku`) → Claude.
+Hunters and refuter (`opus`) → the OpenCode default route, one API provider. Summarizer (`haiku`) → Claude (the `haiku` mapping overrides the default route).
 
 ```bash
 gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},"mappings":[{"logical":"haiku","backend":"claude-code","provider":"anthropic","gateway":"direct"}]}'
@@ -101,18 +102,18 @@ gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provide
 
 Keep `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) for the Claude mapping. Presence of `OPENCODE_AUTH_JSON` still applies the metered ceiling.
 
-### Mixed: OpenCode hunters + Claude refuter (legal DATA mix)
+### Mixed: OpenCode hunters + refuter, Claude summarizer (map only `opus`)
 
-Map **only** `sonnet`. Hunters go to OpenCode; the unmapped `opus` refuter and the `haiku` summarizer (on unless `summary.enabled` is false) fall through to the Claude CLI (current behavior), so keep a Claude secret next to `OPENCODE_AUTH_JSON`.
+Map **only** `opus`. Hunters and the refuter go to OpenCode; the unmapped `haiku` summarizer (on unless `summary.enabled` is false) falls through to the Claude CLI (current behavior), so keep a Claude secret next to `OPENCODE_AUTH_JSON`. DATA cannot send hunters to OpenCode and the refuter to Claude: they share the `opus` alias.
 
 ```bash
-gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
+gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-pro"}]}'
 ```
 
-Do **not** use this shape in an OpenCode-only run (no Claude secret): the refuter and the summarizer are still routed to the Claude CLI and have no credentials to run them. For OpenCode-only, use the `default` route above, or map all three aliases (`sonnet`, `opus`, `haiku`), each with its own `modelSnapshot` (`opencode models` ids, same single OpenCode provider):
+Do **not** use this shape in an OpenCode-only run (no Claude secret): the summarizer is still routed to the Claude CLI and has no credentials to run it. A `sonnet`-only mapping is worse: the hunters and refuter declare `opus`, so it moves nothing. For OpenCode-only, use the `default` route above, or map `opus` and `haiku` (the aliases the bundled prompts use), each with its own `modelSnapshot` (`opencode models` ids, same single OpenCode provider):
 
 ```bash
-gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-pro"},{"logical":"haiku","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
+gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-pro"},{"logical":"haiku","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
 ```
 
 ## Workflow

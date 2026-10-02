@@ -1273,3 +1273,51 @@ describe("ClaudeCodeCliTransport.classifyFailure", () => {
     expect(classify("overloaded_error", "final")).toBe("rate_limit");
   });
 });
+
+// #299 (2026-10-01): the CLI result's `num_turns` is the only tool signal the
+// Claude Code route exposes, and the vacuous-hunt gate (#214) was blind on this
+// route without it. Observed live: 1 turn with no tools, 2 turns for one Read,
+// 17 turns for a deep hunt.
+describe("ClaudeCodeCliTransport toolInvocations from num_turns (#299)", () => {
+  async function toolInvocationsFor(stdoutBody: string): Promise<unknown> {
+    const fake = makeFakeProc({ stdoutBody, exitCode: 0 });
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: (() => fake.proc) as unknown as typeof Bun.spawn,
+      getPgid: (pid) => pid,
+      killFn: () => {},
+    });
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+    return outcome.toolInvocations;
+  }
+
+  const withTurns = (numTurns: unknown): string =>
+    JSON.stringify({ result: "reviewed", num_turns: numTurns });
+
+  test("a single turn is an observed zero: the model never called a tool", async () => {
+    expect(await toolInvocationsFor(withTurns(1))).toBe(0);
+  });
+
+  test("every turn after the first followed tool results", async () => {
+    expect(await toolInvocationsFor(withTurns(2))).toBe(1);
+    expect(await toolInvocationsFor(withTurns(17))).toBe(16);
+  });
+
+  test("a missing num_turns is unknown, never a fabricated zero", async () => {
+    expect(
+      await toolInvocationsFor(JSON.stringify({ result: "reviewed" })),
+    ).toBeUndefined();
+  });
+
+  test("a malformed num_turns is unknown, never coerced", async () => {
+    for (const bad of [0, -3, 1.5, "3", null, Number.NaN, {}, [2]]) {
+      expect(await toolInvocationsFor(withTurns(bad))).toBeUndefined();
+    }
+  });
+
+  test("non-JSON stdout is unknown", async () => {
+    expect(await toolInvocationsFor("not json at all")).toBeUndefined();
+  });
+});

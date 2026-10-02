@@ -21,16 +21,32 @@ export interface HunterDraft {
   findings: DraftFinding[];
 }
 
-// #214: an empty `findings` array is a LEGAL draft (the hunter looked and
-// found nothing). It is not a legal SUCCESS when the step was given tools
-// and the transport observed zero tool calls — that is a review that did
-// not look, wearing the shape of a clean bill.
+// #214, widened by #299: a hunt that was given tools and whose transport
+// observed zero tool calls is not a legal SUCCESS, whatever it returned. It is
+// a review that did not look.
+//
+// #214 gated only the EMPTY array: a clean bill with no reading behind it.
+// #299 (2026-10-01) closes the other half. The hunter contract
+// (HUNTER_READ_REQUIREMENT, pipeline.ts) now requires reading the code, and
+// says a finding whose proof was not read with a tool is not admissible; this
+// gate is where the engine ENFORCES that contract. Observed 2026-10-01 in run
+// `df63033a-2`: a logic hunter returned 1 finding with 0 tool calls,
+// self-described as "inferred from the diff", and passed the empty-only gate.
+//
+// The cost is stated, not hidden: a rare real finding that was reachable from
+// the diff alone is lost for that run. It is never lost silently. The step
+// fails, the run goes partial, and no clean bill is posted.
 //
 // Unknown counts stay ungated: a transport that cannot observe tools must
 // not invent a failure, and must not invent a pass by stamping a 0 it did
-// not see. OpenCode stamps the count (including 0). Claude Code omits it.
-// Scout is out of this rule because the engine forces `tools: []`.
-export function isVacuousEmptyHunt(input: {
+// not see. OpenCode stamps the count (including 0). Claude Code derives it from
+// the CLI result's `num_turns` (#299) and omits it when that is not a valid
+// integer. Scout is out of this rule because the engine forces `tools: []`.
+//
+// Only a parsed `{ findings: [...] }` can trip it. The refuter and verifier
+// emit `results`, the summarizer `prose`/`score`, and the scout a bare lead
+// list; none of them has a `findings` array, so none of them is reached.
+export function isVacuousHunt(input: {
   readonly tools: readonly string[];
   readonly toolInvocations: number | undefined;
   readonly parsed: unknown;
@@ -41,8 +57,7 @@ export function isVacuousEmptyHunt(input: {
   if (typeof input.parsed !== "object" || input.parsed === null) {
     return false;
   }
-  const findings = (input.parsed as { findings?: unknown }).findings;
-  return Array.isArray(findings) && findings.length === 0;
+  return Array.isArray((input.parsed as { findings?: unknown }).findings);
 }
 
 // `downgraded-latent` (ROADMAP A2): the claim holds as a real defect, but

@@ -4148,3 +4148,69 @@ describe("#152 makeProofRefResolver", () => {
     await rm(worktree, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// #299 — the read requirement is part of the hunter's output contract, and it
+// is conditioned on the hunter actually having tools. The sentence under test
+// is the one that told claude-sonnet-5-5 an empty array was fine without
+// having opened any code.
+// ---------------------------------------------------------------------------
+
+describe("hunter read requirement (#299)", () => {
+  // The contract is wrapped at ~72 columns; collapse whitespace so a test
+  // asserts on the wording and not on where a line happens to break.
+  const flat = (s: string): string => s.replace(/\s+/g, " ");
+
+  async function toolLessAgentsDir(): Promise<string> {
+    const dir = await makeAgentsDir();
+    await Bun.write(
+      path.join(dir, "deep-review-reliability.md"),
+      [
+        "---",
+        "name: deep-review-reliability",
+        "description: a hunter configured with no tools",
+        "model: sonnet",
+        "---",
+        "",
+        "Hunt bugs in the diff.",
+        "",
+      ].join("\n"),
+    );
+    return dir;
+  }
+
+  test("a tools-enabled hunter must read the enclosing code before any verdict", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    await runPipeline(await makeInput(), { runner });
+
+    const prompt = flat(hunterPromptOf(runner));
+    expect(prompt).toContain(
+      "Read the enclosing function of every hunk you assess",
+    );
+    expect(prompt).toContain(
+      "A finding whose proof you did not read with a tool is not admissible.",
+    );
+    // The empty-array allowance survives, but only after that reading.
+    expect(prompt).toContain(
+      'return {"findings":[]} — after that reading, an empty array is a valid, expected result, not a failure.',
+    );
+    expect(prompt).not.toContain(
+      'scrutiny, return {"findings":[]} — an empty array is a valid',
+    );
+  });
+
+  test("a hunter configured with no tools is not told to use tools it lacks", async () => {
+    const runner = new FakeStepRunner(HUNTERS_OK);
+    const input = await makeInput({}, { agentsDir: await toolLessAgentsDir() });
+    await runPipeline(input, { runner });
+
+    const spec = runner.specs.find((s) => s.name === "hunter-reliability");
+    expect(spec?.tools).toEqual([]);
+    const prompt = flat(hunterPromptOf(runner));
+    expect(prompt).not.toContain("with your tools");
+    expect(prompt).not.toContain("Read the enclosing function");
+    expect(prompt).toContain(
+      'return {"findings":[]} — an empty array is a valid, expected result, not a failure.',
+    );
+  });
+});

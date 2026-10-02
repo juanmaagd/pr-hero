@@ -1,7 +1,7 @@
 ---
 name: pr-hero-resilience
 description: pr-hero resilience hunter — non-unique lookup/dedup keys, retry/idempotency and distributed-lock issues, CI/CD guard gaps, test isolation and shared global state (categories 5,6,7,11). Fixed hunter: runs on every replayed PR regardless of diff content.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore
 ---
 

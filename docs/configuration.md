@@ -75,13 +75,13 @@ interface RoutingConfig {
 
 A mapping's `logical` (or its object key, in the record form) matches a lookup against **four**
 forms of the requested model identity: its canonical name, the raw string the caller passed, its
-alias, and the alias's reverse form. In practice this means `"sonnet"` — the bare name the bundled
-hunter prompts declare — is a valid key, and so is `"anthropic/sonnet"`.
+alias, and the alias's reverse form. In practice this means `"opus"` — the bare name the bundled
+hunter and refuter prompts declare — is a valid key, and so is `"anthropic/opus"`.
 
 **Two mappings that both match the same request is an error, not first-wins:**
 
 ```
-Ambiguous model routing: found 2 duplicate mappings for "anthropic/sonnet"
+Ambiguous model routing: found 2 duplicate mappings for "anthropic/opus"
 ```
 
 ### `disabled` and `allowSpend`
@@ -105,7 +105,7 @@ non-Anthropic) model must be spelled out in full, and a wrong id fails at the pr
 pr-hero. Routing an alias to a non-direct backend without `modelSnapshot` fails loud instead:
 
 ```
-Model alias "sonnet" is routed to backend "opencode" over the "configured" gateway by the routing
+Model alias "opus" is routed to backend "opencode" over the "configured" gateway by the routing
 mapping, which supplies no "modelSnapshot". Only the Claude CLI reached over the "direct" gateway
 resolves a bare alias; every other gateway forwards the model identity verbatim to an endpoint that
 never registered pr-hero's aliases, so this route has no provider model id to send. Add an explicit
@@ -122,19 +122,20 @@ Written to `~/.prhero/config.json` and validated against the engine's own parser
 {
   "routing": {
     "mappings": {
-      "sonnet": {
+      "opus": {
         "backend": "opencode",
         "provider": "anthropic",
-        "modelSnapshot": "claude-sonnet-5"
+        "modelSnapshot": "claude-opus-5-5"
       }
     }
   }
 }
 ```
 
-This resolves `"sonnet"` (what the bundled hunter prompts declare) onto OpenCode's Anthropic route.
-The bundled refuter declares `opus` and the summarizer `haiku`; with no mapping for them and no
-`default` route they fall through to the Claude CLI and need Claude credentials — see
+This resolves `"opus"` (what the bundled hunter and refuter prompts declare) onto OpenCode's
+Anthropic route, which moves every hunter and the refuter. The summarizer declares `haiku`; with no
+mapping for it and no `default` route it falls through to the Claude CLI and needs Claude
+credentials (as does any `sonnet` use, such as the scout's default) — see
 [OpenCode in CI](github-actions.md#opencode-in-ci) for the routing shapes. Keep every OpenCode
 mapping a run uses on **one** provider: a plan naming two OpenCode providers is refused at
 admission — see [Credentials](#credentials) below.

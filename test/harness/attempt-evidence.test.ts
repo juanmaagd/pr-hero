@@ -542,3 +542,36 @@ test("persistAttemptEvidence records captureDropped with a reason when a capture
   expect(typeof e.captureDropped.reason).toBe("string");
   expect(e.captureDropped.reason.length).toBeGreaterThan(0);
 });
+// #299: the request plan is the record of what the model was ALLOWED to do.
+// It carried only a hash of the tool list, so after a run that skipped the
+// code nobody could say, from the artifacts, whether tools had been on offer.
+test("the request plan records the effective tool names beside their hash", async () => {
+  const x = await setup();
+  x.step.tools = ["Read", "Grep", "mcp__codegraph__codegraph_explore"];
+  await x.harness.run(x.step);
+  const e = await waitForEvidence(x.step);
+  const planFile = attemptEvidencePath(x.step.outPath, x.step.name, 1).replace(
+    /\.json$/,
+    ".request.json",
+  );
+  const plan = JSON.parse(await readFile(planFile, "utf8"));
+  expect(plan.toolNames).toEqual([
+    "Read",
+    "Grep",
+    "mcp__codegraph__codegraph_explore",
+  ]);
+  // Additive: the hash is still there and still agrees with the attempt record.
+  expect(plan.toolsConfigSha256).toBe(e.identity.toolsConfigSha256);
+  expect(e.requestPlan.sha256).toBe(evidenceSha256(await readFile(planFile)));
+});
+
+test("a tool-less step records an empty name list, not an absent one", async () => {
+  const x = await setup();
+  await x.harness.run(x.step);
+  await waitForEvidence(x.step);
+  const planFile = attemptEvidencePath(x.step.outPath, x.step.name, 1).replace(
+    /\.json$/,
+    ".request.json",
+  );
+  expect(JSON.parse(await readFile(planFile, "utf8")).toolNames).toEqual([]);
+});

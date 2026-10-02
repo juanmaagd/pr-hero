@@ -358,6 +358,12 @@ export async function freezeAttemptEvidenceIdentity(
             path.dirname(file),
             step.systemPromptPath,
           ),
+          // #299: the NAMES behind `toolsConfigSha256`. The hash can only
+          // confirm a list someone already has; when a hunter returned a clean
+          // bill without opening the code, the first question is whether it
+          // was ever offered tools, and a digest cannot answer it. Additive:
+          // the hash stays, and the plan's readers compare fields by name.
+          toolNames: [...request.tools],
           ...frozen,
         };
         await mkdir(path.dirname(file), { recursive: true });
