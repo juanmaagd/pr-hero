@@ -8,7 +8,14 @@
 // fully injected exists/env, never real process.env, network, or spawn.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -437,6 +444,234 @@ describe("generateCiWorkflowTemplate (pure)", () => {
     expect(notice?.run).not.toContain("oc-ci-fixture-not-a-secret");
     expect(generateCiWorkflowTemplate()).not.toMatch(/"type"\s*:\s*"api"/);
   });
+});
+
+// ---------------------------------------------------------------------
+// The force workflow (pr-hero-force.yml).
+//
+// A dispatch runs on the DEFAULT branch, and `uses: ./` runs whatever engine
+// actions/checkout put on disk. On #305 that was main's engine, which lagged
+// dev: four hunters returned nothing in 59 s and the complete summary marker
+// they posted blocked every later review of that head. This repo's own force
+// workflow therefore resolves the PR head first and checks out that commit.
+// A consumer repo runs the published tag, so its checkout picks no engine.
+// ---------------------------------------------------------------------
+describe("generateCiForceWorkflowTemplate (pure)", () => {
+  type WorkflowStep = {
+    id?: string;
+    name?: string;
+    if?: string;
+    uses?: string;
+    run?: string;
+    with?: Record<string, unknown>;
+  };
+
+  const scaffoldedForce = () => generateCiForceWorkflowTemplate();
+  const ownForce = () =>
+    generateCiForceWorkflowTemplate(OWN_CI_WORKFLOW_OPTIONS);
+
+  function reviewSteps(template: string): WorkflowStep[] {
+    const parsed = Bun.YAML.parse(template) as {
+      jobs: { review: { steps: WorkflowStep[] } };
+    };
+    return parsed.jobs.review.steps;
+  }
+
+  function stepOrder(template: string): Array<string | undefined> {
+    return reviewSteps(template).map((step) => step.id ?? step.name);
+  }
+
+  function checkoutStep(template: string): WorkflowStep | undefined {
+    return reviewSteps(template).find((step) =>
+      String(step.uses ?? "").startsWith("actions/checkout@"),
+    );
+  }
+
+  const REPOSITORY = "acme/widgets";
+  const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
+
+  type PrHead = {
+    headRepository: { nameWithOwner: string } | null;
+    headRefOid: string | null;
+  };
+
+  // Runs the gate step's own script under `bash -e`, the shell a `run:` step
+  // gets by default, with `gh` replaced by a function that logs its arguments
+  // and answers through real jq: gh's --jq flag speaks the same filter
+  // language, so the parsing under test is the script's own.
+  function runGate(template: string, pr: PrHead) {
+    const gate = reviewSteps(template).find((step) => step.id === "gate");
+    const dir = mkdtempSync(path.join(tmpdir(), "prhero-force-gate-"));
+    const outputFile = path.join(dir, "github-output");
+    const callLog = path.join(dir, "gh-calls");
+    writeFileSync(outputFile, "");
+    writeFileSync(callLog, "");
+    const fakeGh = [
+      "gh() {",
+      '  printf "%s\\n" "$*" >> "$GH_CALL_LOG"',
+      '  filter="."',
+      "  while [ $# -gt 0 ]; do",
+      '    if [ "$1" = "--jq" ]; then filter="$2"; fi',
+      "    shift",
+      "  done",
+      '  printf "%s" "$FAKE_PR_JSON" | jq -r "$filter"',
+      "}",
+    ].join("\n");
+    const result = Bun.spawnSync(
+      ["bash", "-e", "-c", `${fakeGh}\n${gate?.run ?? "exit 99"}`],
+      {
+        env: {
+          PATH: process.env.PATH ?? "",
+          PR: "305",
+          GITHUB_REPOSITORY: REPOSITORY,
+          GITHUB_OUTPUT: outputFile,
+          GH_CALL_LOG: callLog,
+          FAKE_PR_JSON: JSON.stringify(pr),
+        },
+      },
+    );
+    const outputs = Object.fromEntries(
+      readFileSync(outputFile, "utf-8")
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => line.split("=", 2)),
+    );
+    const calls = readFileSync(callLog, "utf-8")
+      .split("\n")
+      .filter((line) => line !== "");
+    rmSync(dir, { recursive: true, force: true });
+    return { exitCode: result.exitCode, outputs, calls };
+  }
+
+  const sameRepoPr: PrHead = {
+    headRepository: { nameWithOwner: REPOSITORY },
+    headRefOid: HEAD_SHA,
+  };
+  const forkPr: PrHead = {
+    headRepository: { nameWithOwner: "stranger/widgets" },
+    headRefOid: HEAD_SHA,
+  };
+  // GitHub reports a null head repository once a fork is deleted.
+  const deletedForkPr: PrHead = { headRepository: null, headRefOid: HEAD_SHA };
+
+  test("this repo's own force workflow resolves the PR head before it checks anything out", () => {
+    expect(stepOrder(ownForce())).toEqual([
+      "gate",
+      "Checkout",
+      "pr-hero",
+      "Upload pr-hero run directory",
+    ]);
+  });
+
+  test("this repo's own force workflow checks out the gate's head sha, only when the gate proceeds", () => {
+    const checkout = checkoutStep(ownForce());
+    expect(checkout?.with?.ref).toBe(`\${{ steps.gate.outputs.sha }}`);
+    expect(checkout?.if).toBe("steps.gate.outputs.proceed == 'true'");
+    expect(checkout?.with?.["fetch-depth"]).toBe(0);
+  });
+
+  test("this repo's own gate reads the fork verdict and the head sha in ONE gh call", () => {
+    // Two reads could straddle a push: the fork verdict would describe one
+    // head and the checked-out sha another.
+    const gate = runGate(ownForce(), sameRepoPr);
+    expect(gate.exitCode).toBe(0);
+    expect(gate.outputs).toEqual({ proceed: "true", sha: HEAD_SHA });
+    expect(gate.calls).toHaveLength(1);
+    expect(gate.calls[0]).toContain("--json headRepository,headRefOid");
+  });
+
+  // `ref: ""` makes actions/checkout fall back to the default branch, the
+  // very engine this pin exists to avoid, and any other non-sha value would
+  // be resolved as a ref name. Only a full 40-hex commit sha may proceed.
+  test.each([
+    ["a missing head commit", null],
+    ["a branch name", "main"],
+    [
+      "a non-hex 40-character value",
+      "g123456789abcdef0123456789abcdef01234567",
+    ],
+    ["a 39-character sha prefix", HEAD_SHA.slice(0, 39)],
+    ["a 41-character value", `${HEAD_SHA}0`],
+  ])(
+    "this repo's own gate fails on %s instead of handing it to checkout",
+    (_label, headRefOid) => {
+      const gate = runGate(ownForce(), {
+        headRepository: { nameWithOwner: REPOSITORY },
+        headRefOid,
+      });
+      expect(gate.exitCode).toBe(1);
+      expect(gate.outputs).toEqual({});
+    },
+  );
+
+  test.each([
+    ["scaffolded", scaffoldedForce],
+    ["this repo's own", ownForce],
+  ])(
+    "the %s gate proceeds on a same-repo PR and publishes its head sha",
+    (_label, template) => {
+      const gate = runGate(template(), sameRepoPr);
+      expect(gate.exitCode).toBe(0);
+      expect(gate.outputs).toEqual({ proceed: "true", sha: HEAD_SHA });
+    },
+  );
+
+  test.each([
+    ["scaffolded", "a fork", scaffoldedForce, forkPr],
+    ["scaffolded", "a deleted fork", scaffoldedForce, deletedForkPr],
+    ["this repo's own", "a fork", ownForce, forkPr],
+    ["this repo's own", "a deleted fork", ownForce, deletedForkPr],
+  ])(
+    "the %s gate refuses %s without failing the job",
+    (_label, _kind, template, pr) => {
+      const gate = runGate(template(), pr);
+      expect(gate.exitCode).toBe(0);
+      expect(gate.outputs).toEqual({ proceed: "false" });
+    },
+  );
+
+  test("the scaffolded force workflow keeps checkout first and pins no ref", () => {
+    // A consumer repo runs juanmaagd/pr-hero@v0, so its checkout never
+    // selects the engine and needs no pin.
+    expect(stepOrder(scaffoldedForce())).toEqual([
+      "Checkout",
+      "gate",
+      "pr-hero",
+      "Upload pr-hero run directory",
+    ]);
+    expect(checkoutStep(scaffoldedForce())?.with?.ref).toBeUndefined();
+  });
+
+  test("the head pin is its own option, never inferred from a local action ref", () => {
+    const localRefOnly = generateCiForceWorkflowTemplate({ actionRef: "./" });
+    expect(checkoutStep(localRefOnly)?.with?.ref).toBeUndefined();
+  });
+
+  // A hollow review on the same head leaves a complete summary marker, and
+  // every later run on that head then skips discovery; `--force` never widens
+  // it. The `full` dispatch input is the only way back, in every repo.
+  test.each([
+    ["scaffolded", scaffoldedForce],
+    ["this repo's own", ownForce],
+  ])(
+    "the %s force workflow offers a boolean `full` dispatch input, off by default, and hands it to the action",
+    (_label, template) => {
+      const parsed = Bun.YAML.parse(template()) as {
+        on: {
+          workflow_dispatch: {
+            inputs: Record<string, Record<string, unknown>>;
+          };
+        };
+      };
+      expect(parsed.on.workflow_dispatch.inputs.full).toMatchObject({
+        required: false,
+        type: "boolean",
+        default: false,
+      });
+      const run = reviewSteps(template()).find((step) => step.id === "pr-hero");
+      expect(run?.with?.full).toBe(`\${{ inputs.full }}`);
+    },
+  );
 });
 
 describe("materializeCiOpenCodeData (impure edge)", () => {

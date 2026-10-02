@@ -87,6 +87,19 @@ export interface CiWorkflowTemplateOptions {
   // gated `estimate.high`, a token-derived figure, against $0.00 of real
   // cash.
   maxChangedLines?: string;
+  // THIS repo only: the force workflow resolves the pull request's head
+  // commit BEFORE checkout and checks out exactly that commit, so `uses: ./`
+  // runs the engine under review. A `workflow_dispatch` run starts on the
+  // default branch, and without the pin it ran THAT branch's engine: on #305
+  // main lagged dev, a stale engine posted a hollow review on the PR head,
+  // and its complete summary marker made every later run on that head skip
+  // discovery. The head sha, not `refs/pull/<n>/merge`: the merge ref is
+  // missing on a conflicted PR and moves with the base.
+  //
+  // Its own flag, never inferred from `actionRef === "./"`: a consumer
+  // template runs a published tag, where the checkout selects no engine, and
+  // the scaffolded output must not change shape because of a ref string.
+  forceEngineFromPr?: boolean;
 }
 
 export const DEFAULT_CI_ACTION_REF = "juanmaagd/pr-hero@v0";
@@ -109,6 +122,7 @@ export const DEFAULT_CI_ACTION_REF = "juanmaagd/pr-hero@v0";
 export const OWN_CI_WORKFLOW_OPTIONS: CiWorkflowTemplateOptions = {
   actionRef: "./",
   maxChangedLines: "5000",
+  forceEngineFromPr: true,
 };
 
 export function generateCiWorkflowTemplate(
@@ -347,6 +361,7 @@ export function generateCiForceWorkflowTemplate(
   options: CiWorkflowTemplateOptions = {},
 ): string {
   const actionRef = options.actionRef ?? DEFAULT_CI_ACTION_REF;
+  const pinEngine = options.forceEngineFromPr === true;
   const budgetLine =
     options.budgetUsd === undefined
       ? ""
@@ -355,9 +370,79 @@ export function generateCiForceWorkflowTemplate(
     options.maxChangedLines === undefined
       ? ""
       : `\n          max-changed-lines: ${options.maxChangedLines}`;
+  // Pinned, the sha is what checkout lands on, so the fork verdict and the
+  // sha come from ONE read: two reads could straddle a push and describe two
+  // different heads. An assignment, not a here-string into `read`, so a
+  // failing `gh` fails the step under `bash -e` instead of reading as a fork.
+  const headLookup = pinEngine
+    ? `          # One read: the fork verdict and the commit checked out next must
+          # describe the same head, even if the branch moves in between.
+          pr_head=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRepository,headRefOid --jq '.headRepository.nameWithOwner + " " + .headRefOid')
+          head_repo=\${pr_head% *}
+          sha=\${pr_head##* }
+`
+    : `          head_repo=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRepository --jq '.headRepository.nameWithOwner')
+`;
+  const shaLookup = pinEngine
+    ? `          # Only a full commit sha may reach checkout: an empty ref makes
+          # actions/checkout fall back to the default branch, which is the
+          # engine this pin exists to avoid, and any other value would be
+          # resolved as a ref name.
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=pr-hero::could not resolve the pull request head commit"
+            exit 1
+          fi
+`
+    : `          sha=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid')
+`;
+  const gateStep = `      - name: Refuse a fork pull request
+        id: gate
+        env:
+          PR: \${{ inputs.pr }}
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "$PR" in
+            ''|*[!0-9]*)
+              echo "::error title=pr-hero::pr must be a positive integer"
+              exit 1
+              ;;
+          esac
+${headLookup}          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::notice title=pr-hero::fork pull requests are not reviewed"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+${shaLookup}          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+`;
+  const checkoutStep = pinEngine
+    ? `      # The gate runs first and checkout pins the pull request's head commit,
+      # because \`uses: ./\` runs whatever engine is checked out. A dispatch
+      # starts on the default branch, so without the pin a forced review runs
+      # the default branch's engine, not the engine under review. The head
+      # sha, not refs/pull/<n>/merge: the merge ref is missing on a conflicted
+      # pull request and moves with the base.
+      - name: Checkout
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: \${{ steps.gate.outputs.sha }}
+          fetch-depth: 0
+`
+    : `      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+`;
+  const leadingSteps = pinEngine
+    ? `${gateStep}\n${checkoutStep}`
+    : `${checkoutStep}\n${gateStep}`;
   return `# Generated by \`pr-hero setup --ci\` (or \`pr-hero ci init\`).
 # Dispatch-only. Runs the review on GitHub Actions with the skip gates bypassed.
 #   gh workflow run ${CI_FORCE_WORKFLOW_FILE} -f pr=<number>
+# When a prior review of the same head was hollow or wrong and re-runs report
+# "No changes to discover", add -f full=true to widen discovery again:
+#   gh workflow run ${CI_FORCE_WORKFLOW_FILE} -f pr=<number> -f full=true
 name: pr-hero Force Review
 
 on:
@@ -367,6 +452,14 @@ on:
         description: Pull request number
         required: true
         type: string
+      # The only CI recovery from a wrong review on the same head: its
+      # complete summary marker makes later runs skip discovery, and force
+      # alone never widens it.
+      full:
+        description: Re-discover the whole pull request even if this head was already reviewed
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: pr-hero-force-\${{ github.repository }}-\${{ inputs.pr }}
@@ -402,33 +495,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Refuse a fork pull request
-        id: gate
-        env:
-          PR: \${{ inputs.pr }}
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-        run: |
-          case "$PR" in
-            ''|*[!0-9]*)
-              echo "::error title=pr-hero::pr must be a positive integer"
-              exit 1
-              ;;
-          esac
-          head_repo=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRepository --jq '.headRepository.nameWithOwner')
-          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
-            echo "::notice title=pr-hero::fork pull requests are not reviewed"
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          sha=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq '.headRefOid')
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
+${leadingSteps}
       - name: Run pr-hero
         if: steps.gate.outputs.proceed == 'true'
         id: pr-hero
@@ -440,7 +507,8 @@ jobs:
           routing: "\${{ vars.PRHERO_ROUTING }}"
           opencode-auth: \${{ secrets.OPENCODE_AUTH_JSON }}
           pr-number: \${{ inputs.pr }}
-          force: true${sizeGateLine}${budgetLine}
+          force: true
+          full: \${{ inputs.full }}${sizeGateLine}${budgetLine}
 
       - name: Upload pr-hero run directory
         if: always() && steps.pr-hero.outputs.run-dir != ''
