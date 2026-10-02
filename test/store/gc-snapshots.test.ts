@@ -78,24 +78,43 @@ describe("pr-hero gc", () => {
   // Through the real CLI in a child process: gcCommand reads os.homedir(),
   // which Bun fixes at startup, so only a child with its own HOME stays off
   // the operator's ~/.prhero (and off gh: an empty home has no worktrees).
-  test("a dry run prints the exec snapshot line and removes nothing", async () => {
+  async function runGcCli(args: readonly string[]) {
     const home = path.join(tempDir, "home");
     await mkdir(home, { recursive: true });
     const cli = path.resolve(import.meta.dir, "../../src/cli.ts");
-
-    const child = Bun.spawnSync([process.execPath, cli, "gc", "--dry-run"], {
+    return Bun.spawnSync([process.execPath, cli, "gc", ...args], {
       env: {
         PATH: process.env.PATH ?? "",
         HOME: home,
         TMPDIR: path.join(tempDir, "tmp"),
       },
     });
+  }
+
+  test("a dry run prints the exec snapshot line and removes nothing", async () => {
+    const child = await runGcCli(["--dry-run"]);
 
     expect(child.exitCode).toBe(0);
     expect(child.stderr.toString().split("\n")).toContain(
       "dry run: exec snapshots would remove 1 (2.0 KB), keep 1",
     );
     expect(existsSync(staleDir)).toBe(true);
+  });
+
+  // The launchd backstop must not depend on the worktree half succeeding. A
+  // scoped --repo with no origin throws from the worktree gc before it lists
+  // a single tree; the snapshot sweep still runs, and the error still wins.
+  test("the snapshot sweep still runs when the worktree gc throws", async () => {
+    const missingRepo = path.join(tempDir, "no-such-repo");
+
+    const child = await runGcCli(["--dry-run", "--repo", missingRepo]);
+    const stderr = child.stderr.toString();
+
+    expect(child.exitCode).toBe(1);
+    expect(stderr).toContain(`no git remote named origin in ${missingRepo}`);
+    expect(stderr.split("\n")).toContain(
+      "dry run: exec snapshots would remove 1 (2.0 KB), keep 1",
+    );
   });
 });
 
@@ -118,6 +137,16 @@ describe("renderSnapshotGcLine", () => {
       true,
       "dry run: exec snapshots would remove 4 (1.5 GB), keep 2",
     ],
+    // Unit boundaries: the unit is chosen from the value as displayed, so a
+    // count that rounds up to 1024 of one unit prints as 1.0 of the next.
+    [1024, false, "gc: exec snapshots removed 4 (1.0 KB), keep 2"],
+    [1024 ** 2 - 1, false, "gc: exec snapshots removed 4 (1.0 MB), keep 2"],
+    [1024 ** 2, false, "gc: exec snapshots removed 4 (1.0 MB), keep 2"],
+    [1024 ** 3 - 1, false, "gc: exec snapshots removed 4 (1.0 GB), keep 2"],
+    [1024 ** 3, false, "gc: exec snapshots removed 4 (1.0 GB), keep 2"],
+    [1024 ** 4, false, "gc: exec snapshots removed 4 (1.0 TB), keep 2"],
+    // TB is the largest unit: nothing rolls past it.
+    [1024 ** 5, false, "gc: exec snapshots removed 4 (1024.0 TB), keep 2"],
   ] as const)("%d bytes, dry run %p", (removedBytes, dryRun, expected) => {
     expect(renderSnapshotGcLine(report({ removedBytes }), dryRun)).toBe(
       expected,

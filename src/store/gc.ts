@@ -218,7 +218,9 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   let value = bytes / 1024;
   let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
+  // Compare the value as it will be DISPLAYED: 1048575 bytes is 1023.999 KB,
+  // which toFixed(1) rounds to "1024.0 KB" — it must print as "1.0 MB".
+  while (Number(value.toFixed(1)) >= 1024 && unit < units.length - 1) {
     value /= 1024;
     unit++;
   }
@@ -242,16 +244,22 @@ export function renderSnapshotGcLine(
 // a crash, default-signal death. Same rules as the opportunistic sweep (dead
 // owner pid or older than 6 h; never another user's entry), but unthrottled
 // and reported. Best-effort: a snapshot that cannot be removed is counted
-// in the line, never a reason to fail the worktree gc around it.
+// in the line, never a reason to fail the worktree gc around it. Never
+// throws: gcCommand runs it from a `finally`, where a throw would replace
+// the worktree gc's own error.
 export async function gcExecutionSnapshots(input: {
   readonly dryRun: boolean;
   readonly snapshotBase?: string;
 }): Promise<string> {
-  const report = await sweepStaleExecutionSnapshots({
-    snapshotBase: input.snapshotBase,
-    dryRun: input.dryRun,
-  });
-  return renderSnapshotGcLine(report, input.dryRun);
+  try {
+    const report = await sweepStaleExecutionSnapshots({
+      snapshotBase: input.snapshotBase,
+      dryRun: input.dryRun,
+    });
+    return renderSnapshotGcLine(report, input.dryRun);
+  } catch (error) {
+    return `gc: exec snapshot sweep failed: ${(error as Error).message}`;
+  }
 }
 
 export async function gcCommand(options: CliOptions): Promise<number> {
@@ -262,29 +270,36 @@ export async function gcCommand(options: CliOptions): Promise<number> {
   if (options.gc === "status") return gcStatus();
 
   const home = os.homedir();
-  // parseArgs defaults --repo to ".". For gc that means "the whole home",
-  // not "the current checkout" — scoping takes an explicit path.
-  let repoId: string | undefined;
-  if (options.repo !== ".") {
-    const resolved = await resolveRepoHome({
+  let result: Awaited<ReturnType<typeof runGc>>;
+  try {
+    // parseArgs defaults --repo to ".". For gc that means "the whole home",
+    // not "the current checkout" — scoping takes an explicit path.
+    let repoId: string | undefined;
+    if (options.repo !== ".") {
+      const resolved = await resolveRepoHome({
+        home,
+        operatorRoot: path.resolve(options.repo),
+        persist: false,
+      });
+      repoId = resolved.repoId;
+    }
+    result = await runGc({
       home,
-      operatorRoot: path.resolve(options.repo),
-      persist: false,
+      repoId,
+      dryRun: options.dryRun,
     });
-    repoId = resolved.repoId;
+    const verb = options.dryRun ? "dry run: would collect" : "gc: collected";
+    log(
+      `${verb} ${result.collected}, keep ${result.kept}` +
+        (result.failed > 0 ? `, ${result.failed} failed` : ""),
+    );
+  } finally {
+    // #303: the snapshot sweep is the launchd backstop for SIGKILL/crash
+    // leftovers, so it runs even when the worktree half throws (a scoped
+    // --repo without origin, an fs or lock error) — and before the worktree
+    // failure throw below. It never throws, so it cannot mask that error.
+    log(await gcExecutionSnapshots({ dryRun: options.dryRun }));
   }
-  const result = await runGc({
-    home,
-    repoId,
-    dryRun: options.dryRun,
-  });
-  const verb = options.dryRun ? "dry run: would collect" : "gc: collected";
-  log(
-    `${verb} ${result.collected}, keep ${result.kept}` +
-      (result.failed > 0 ? `, ${result.failed} failed` : ""),
-  );
-  // Before the worktree failure throw, so a failed tree never skips it.
-  log(await gcExecutionSnapshots({ dryRun: options.dryRun }));
   if (!options.dryRun && result.failed > 0) {
     throw new CliError(
       `gc failed to remove ${result.failed} worktree(s); see stderr`,
