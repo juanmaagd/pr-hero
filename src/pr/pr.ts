@@ -1950,6 +1950,11 @@ function admissionCheckRunConclusion(
       return "cancelled";
     case "skipped":
       return "skipped";
+    // Explicit, never left to `default`: standing down for a review already
+    // in flight is not a failure, and GitHub renders `skipped` as grey rather
+    // than red on the PR (musive #1935 showed a red check for exactly this).
+    case "yielded":
+      return "skipped";
     default:
       return "neutral";
   }
