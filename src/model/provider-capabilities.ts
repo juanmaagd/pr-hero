@@ -7,14 +7,20 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  rmSync,
   statSync,
   writeSync,
 } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 import type { ExactBindingCapabilityReport } from "../execution/contracts";
+import {
+  defaultExecSnapshotBase,
+  executionSnapshotDirName,
+  registerExecutionSnapshot,
+  releaseExecutionSnapshot,
+  sweepExecutionSnapshotsOpportunistically,
+} from "./exec-snapshots";
 
 export type RunnerBackend =
   | "claude-code"
@@ -80,10 +86,19 @@ export interface VerifyExecutableAuthorityDeps {
   readonly statFn?: (p: string) => { mode: number };
 }
 
-export async function verifyExecutableAuthority(
-  options: VerifyExecutableOptions,
-  deps: VerifyExecutableAuthorityDeps = {},
-): Promise<ExecutableVerificationResult> {
+interface AllowlistedBytes {
+  readonly approved: true;
+  readonly canonicalPath: string;
+  readonly digest: string;
+  readonly content: Buffer;
+}
+
+// Steps 1-6: the allowlist and hash verdict, shared by the snapshotting
+// authority below and the verify-only binding check. Writes nothing.
+async function verifyAllowlistedBytes(
+  options: Omit<VerifyExecutableOptions, "snapshotDir">,
+  deps: VerifyExecutableAuthorityDeps,
+): Promise<AllowlistedBytes | ExecutableVerificationDenied> {
   const { candidatePath, allowlist = [] } = options;
   const toRealpath = deps.realpathFn ?? realpath;
   const readBytes =
@@ -173,6 +188,48 @@ export async function verifyExecutableAuthority(
     };
   }
 
+  return { approved: true, canonicalPath, digest, content };
+}
+
+export interface ExecutableBindingApproved {
+  readonly approved: true;
+  readonly absolutePath: string;
+  readonly sha256: string;
+  readonly code?: undefined;
+  readonly reason?: undefined;
+}
+
+export type ExecutableBindingVerificationResult =
+  | ExecutableBindingApproved
+  | ExecutableVerificationDenied;
+
+// #303: binding resolution (runner-authority.ts) needs the allowlist and hash
+// verdict, never a runnable copy — it used to call verifyExecutableAuthority
+// and discard the snapshot that call had just written, one per route. The
+// approved shape deliberately carries no `verifiedExecutionPath`: nothing can
+// spawn from a verify-only result, so execution still has to go through
+// verifyExecutableAuthority and its TOCTOU snapshot.
+export async function verifyExecutableBinding(
+  options: Omit<VerifyExecutableOptions, "snapshotDir">,
+  deps: VerifyExecutableAuthorityDeps = {},
+): Promise<ExecutableBindingVerificationResult> {
+  const verified = await verifyAllowlistedBytes(options, deps);
+  if (!verified.approved) return verified;
+  return {
+    approved: true,
+    absolutePath: verified.canonicalPath,
+    sha256: verified.digest,
+  };
+}
+
+export async function verifyExecutableAuthority(
+  options: VerifyExecutableOptions,
+  deps: VerifyExecutableAuthorityDeps = {},
+): Promise<ExecutableVerificationResult> {
+  const verified = await verifyAllowlistedBytes(options, deps);
+  if (!verified.approved) return verified;
+  const { canonicalPath, digest, content } = verified;
+
   // WHY scripts are not snapshotted: a shebang launcher's interpreter resolves
   // relative imports against the script's own location, so a snapshot copy
   // breaks sibling imports. The launcher executes from its canonical path; the
@@ -191,11 +248,22 @@ export async function verifyExecutableAuthority(
   }
 
   // 7. TOCTOU Defense: Create private verified execution snapshot bound to verified bytes
-  const snapBase =
-    options.snapshotDir ?? path.join(tmpdir(), "prhero-exec-snapshots");
-  const snapDir = path.join(snapBase, `${digest.slice(0, 16)}-${randomUUID()}`);
+  const snapBase = options.snapshotDir ?? defaultExecSnapshotBase();
+  // #303: collect what crashed processes left behind before adding to it.
+  // Rate-limited and best-effort inside; awaited so a test's cleanup never
+  // races a sweep still running in the background.
+  await sweepExecutionSnapshotsOpportunistically(snapBase);
+  // The pid lets a later sweep tell a dead owner's directory from a live one;
+  // the per-call uuid stays — it is what defeats a pre-planted path.
+  const snapDir = path.join(
+    snapBase,
+    executionSnapshotDirName(digest, process.pid, randomUUID()),
+  );
   try {
     mkdirSync(snapDir, { recursive: true, mode: 0o700 });
+    // Registered before the bytes land, so an exit mid-write still removes
+    // the partial copy. Every removal below goes through the registry too.
+    registerExecutionSnapshot(snapDir);
     chmodSync(snapDir, 0o700);
     const snapBinaryName = path.basename(canonicalPath);
     const snapBinaryPath = path.join(snapDir, snapBinaryName);
@@ -220,7 +288,7 @@ export async function verifyExecutableAuthority(
     const verifyHasher = new Bun.CryptoHasher("sha256");
     verifyHasher.update(snapshotBytes);
     if (verifyHasher.digest("hex") !== digest.toLowerCase()) {
-      rmSync(snapDir, { recursive: true, force: true });
+      releaseExecutionSnapshot(snapDir);
       return {
         approved: false,
         code: "executable_not_approved",
@@ -238,7 +306,9 @@ export async function verifyExecutableAuthority(
       },
     };
   } catch (error) {
-    rmSync(snapDir, { recursive: true, force: true });
+    // Unregistered only when mkdirSync itself failed, and then there is no
+    // directory to remove.
+    releaseExecutionSnapshot(snapDir);
     return {
       approved: false,
       code: "executable_not_approved",
