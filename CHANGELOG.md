@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The bundled hunters now default to `opus`**: all five bundled hunter prompts (lifecycle, logic,
+  parity, reliability, resilience) declare the `opus` alias instead of `sonnet`, so the Claude CLI
+  resolves the latest Opus for them, the same stance as the refuter. The CLI alias `sonnet` now
+  resolves to claude-sonnet-5-5, which hunted far too shallowly on the same harness (#299, 2026-10-02):
+  4 hunters x 2 replicates on a real diff took 1-5 turns each and 0 of 8 runs returned any finding,
+  against 3-10 turns and findings in 6 of 8 runs on `opus`. The refuter and the hunters now share a tier;
+  the summarizer stays on `haiku`. `pr-hero doctor` now probes the hunter route on `opus`. Expect a
+  higher per-review cost than the sonnet-era band. OpenCode operators whose routing maps only `sonnet`
+  and has no `default` route: the hunters and refuter are now unmapped and fall through to the Claude
+  CLI, which needs Claude credentials; map `opus` (and `haiku` for the summarizer) or add a `default`
+  route to keep them on OpenCode (see `docs/github-actions.md`, "OpenCode in CI").
+
 ## [0.2.0] - 2026-09-26
 
 ### Added

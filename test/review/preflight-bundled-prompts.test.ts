@@ -162,8 +162,14 @@ describe("bundled prompts carry no tool-injected content", () => {
 });
 
 describe("bundled prompts declare the intended model split", () => {
-  // The refuter is the adversarial step: it judges what the hunters claim, so
-  // it runs on a stronger model than they do. Hunters stay on sonnet for cost.
+  // The refuter and the hunters now share a tier: every one of them declares
+  // opus. The refuter used to run on a stronger model than the hunters it
+  // challenges, and that split is gone. #299 (2026-10-02) measured the CLI
+  // alias `sonnet` (claude-sonnet-5-5) hunting far too shallowly on the same
+  // harness: 4 hunters x 2 replicates on a real diff took 1-5 turns each and
+  // 0 of 8 runs returned any finding, while the `opus` alias (claude-opus-5-5)
+  // took 3-10 turns and 6 of 8 runs returned findings. Hunters that do not
+  // look are worse than hunters that cost more, so they moved to opus.
   // Each prompt's frontmatter `model:` is the ONLY place this is decided (the
   // bundled AgentSpec carries no model), so a one-line frontmatter edit moves
   // it and nothing else would notice. scripts/refuter-probe.ts pins its own
@@ -177,7 +183,7 @@ describe("bundled prompts declare the intended model split", () => {
     expect(modelOf("review-refuter.md")).toBe("opus");
   });
 
-  test("every bundled hunter prompt declares sonnet", () => {
+  test("every bundled hunter prompt declares opus", () => {
     const hunterFiles = readdirSync(defaultDir)
       .filter((f) => f.startsWith("deep-review-") && f.endsWith(".md"))
       .sort();
@@ -193,7 +199,7 @@ describe("bundled prompts declare the intended model split", () => {
     );
 
     for (const file of hunterFiles) {
-      expect(modelOf(file), `${file} model`).toBe("sonnet");
+      expect(modelOf(file), `${file} model`).toBe("opus");
     }
   });
 });

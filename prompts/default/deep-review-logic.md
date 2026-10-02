@@ -1,7 +1,7 @@
 ---
 name: pr-hero-logic
 description: pr-hero logic hunter — exhaustive, language-independent sweep of every added hunk for local logic errors (comparison and equality, calculation and numeric conversion, control flow, sequencing, error handling, input and state validation, initialization, resource lifecycle), from the CWE catalog. Category 15. Fixed hunter: runs on every PR regardless of diff content.
-model: sonnet
+model: opus
 tools: Read, Grep, Glob
 ---
 

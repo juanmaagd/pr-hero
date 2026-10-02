@@ -1967,9 +1967,12 @@ describe("production runtime PR1", () => {
         env: { PATH: tmpDir },
       });
 
-      expect(reports.length).toBe(2);
-      expect([...reports].map((report) => report.backend).sort()).toEqual([
-        "claude-code",
+      // The doctor plan is one hunter plus the refuter, and both declare opus
+      // (#299, 2026-10-02), so mapping opus moves both onto the same OpenCode
+      // route and the two steps share one binding. This used to be two bindings
+      // (a sonnet hunter on the Claude CLI beside an opus refuter on OpenCode).
+      expect(reports.length).toBe(1);
+      expect([...reports].map((report) => report.backend)).toEqual([
         "opencode",
       ]);
     });

@@ -172,11 +172,11 @@ secret), not a new Action input.
    `disabled`), same shape as person-layer `config.routing`. Do not wrap it in `{"routing": ...}`
    and do not put credentials inside it (the variable is public). OpenCode does not resolve pr-hero
    aliases (`sonnet` / `opus` / `haiku`): set `modelSnapshot` to an id `opencode models` lists. Routing
-   maps **logical model**, not hunter vs refuter. By default the hunters declare `sonnet`, the refuter
-   declares `opus`, and the summarizer runs on `haiku`, so a mapping moves only the steps whose alias it
-   names. An alias with no mapping and no `default` route currently falls through to the Claude CLI,
-   which needs Claude credentials in that run; a `default` route covers every alias, the refuter
-   included, so the refuter then runs on the default model.
+   maps **logical model**, not hunter vs refuter. By default the hunters and the refuter both declare
+   `opus` and the summarizer runs on `haiku`, so a mapping moves only the steps whose alias it names:
+   an `opus` mapping moves nearly the whole review. An alias with no mapping and no `default` route
+   currently falls through to the Claude CLI, which needs Claude credentials in that run; a `default`
+   route covers every alias, so the hunters and the refuter then run on the default model.
 
    ```bash
    gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}}'
@@ -188,18 +188,20 @@ secret), not a new Action input.
    gh variable set PRHERO_ROUTING --body '{"default":{"backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"},"mappings":[{"logical":"haiku","backend":"claude-code","provider":"anthropic","gateway":"direct"}]}'
    ```
 
-   Hunters on OpenCode, refuter on Claude: map only `sonnet`. The unmapped `opus` refuter, and the
-   `haiku` summarizer (on unless `summary.enabled` is false), fall through to the Claude CLI, so keep
+   Hunters and refuter on OpenCode, summarizer on Claude: map only `opus`. The unmapped `haiku`
+   summarizer (on unless `summary.enabled` is false) falls through to the Claude CLI, so keep
    `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`) alongside `OPENCODE_AUTH_JSON`:
 
    ```bash
-   gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"sonnet","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
+   gh variable set PRHERO_ROUTING --body '{"mappings":[{"logical":"opus","backend":"opencode","provider":"deepseek","gateway":"configured","modelSnapshot":"deepseek-v4-flash"}]}'
    ```
 
-   Do not use that shape for an OpenCode-only run (no Claude credentials): the refuter and the
-   summarizer would still be routed to the Claude CLI with no credentials to run them. Use a `default`
-   route as above, or map all three aliases (`sonnet`, `opus`, `haiku`), each with its own
-   `modelSnapshot`.
+   A mapping that names only `sonnet` (the old hunter alias) now moves nothing: the hunters and the
+   refuter declare `opus`, so they stay unmapped and fall through to the Claude CLI with no credentials
+   in an OpenCode-only run. Do not use that shape. Hunters and refuter can no longer be split across
+   backends by mapping alone, because they share the `opus` alias. For an OpenCode-only run, use a
+   `default` route as above, or map `opus` and `haiku` (the aliases the bundled prompts use), each with
+   its own `modelSnapshot`.
 
 2. **Repository secret** `OPENCODE_AUTH_JSON` — one JSON object in OpenCode's `auth.json` shape. Never
    echo it. Cap 48 KB. If the personal store also has ChatGPT OAuth or extra providers, upload a
