@@ -204,7 +204,7 @@ function createMockTransport(
 function makeStep(
   tmpDir: string,
   overrides: Partial<import("#review/step-runner").StepSpec> = {},
-) {
+): import("#review/step-runner").StepSpec {
   return {
     name: "hunter-reliability",
     systemPromptPath: path.join(tmpDir, "system.md"),
@@ -212,6 +212,7 @@ function makeStep(
     tools: ["Read"],
     mcpConfigPath: path.join(tmpDir, "mcp.json"),
     model: "sonnet",
+    effort: "high",
     cwd: tmpDir,
     outPath: path.join(tmpDir, "out.json"),
     timeoutMs: 5000,
@@ -458,6 +459,8 @@ describe("production runtime PR1", () => {
         "bypassPermissions",
         "--model",
         "sonnet",
+        "--effort",
+        "high",
       ]);
     });
 
@@ -2359,6 +2362,7 @@ describe("production runtime PR1", () => {
         tools: ["Read"],
         mcpConfigPath: path.join(tmpDir, "mcp.json"),
         model: "sonnet",
+        effort: "high",
         cwd: tmpDir,
         outPath: path.join(tmpDir, "out.json"),
         timeoutMs: 60_000,

@@ -55,6 +55,21 @@ describe("projectChildEnv", () => {
     expect(projected.ANTHROPIC_API_KEY).toBe("sk-test");
   });
 
+  // #299 (2026-10-02): pr-hero owns the effort and passes `--effort` on every
+  // spawn. The CLI also reads CLAUDE_CODE_EFFORT_LEVEL, and if that variable
+  // ever reached the child, an operator's shell could race the flag the engine
+  // measured its defaults against. The projection is an allowlist, so today it
+  // cannot; this pins that, so adding the variable to ENV_PASSTHROUGH (the
+  // usual reflex when a CLI knob "needs" to be forwarded) fails here.
+  test("never projects CLAUDE_CODE_EFFORT_LEVEL, so the engine's --effort cannot be overridden", () => {
+    const projected = projectChildEnv({
+      HOME: "/h",
+      CLAUDE_CODE_EFFORT_LEVEL: "low",
+    });
+    expect(projected).toEqual({ HOME: "/h" });
+    expect("CLAUDE_CODE_EFFORT_LEVEL" in projected).toBe(false);
+  });
+
   test("the harness hands the projected env to the transport request", async () => {
     let seenEnv: Readonly<Record<string, string>> | undefined;
     const transport: ProviderTransport = {
@@ -88,7 +103,11 @@ describe("projectChildEnv", () => {
       spawnFn: (() => ({
         exited: Promise.resolve(0),
       })) as unknown as typeof Bun.spawn,
-      childEnv: { HOME: "/Users/juanma", GIT_DIR: "/evil" },
+      childEnv: {
+        HOME: "/Users/juanma",
+        GIT_DIR: "/evil",
+        CLAUDE_CODE_EFFORT_LEVEL: "low",
+      },
     });
     // The harness hashes the system prompt before admitting the step, so it
     // must exist on disk even in this offline projection probe.
@@ -101,6 +120,7 @@ describe("projectChildEnv", () => {
       prompt: "p",
       tools: [],
       model: "sonnet",
+      effort: "high",
       cwd: "/tmp/ws",
       outPath: `/tmp/env-probe-${Date.now()}.json`,
       mcpConfigPath: "/tmp/mcp.json",
@@ -111,5 +131,6 @@ describe("projectChildEnv", () => {
     expect(seenEnv).toBeDefined();
     expect(seenEnv?.HOME).toBe("/Users/juanma");
     expect(seenEnv?.GIT_DIR).toBeUndefined();
+    expect(seenEnv?.CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
   });
 });

@@ -47,6 +47,7 @@ const request: TransportRequest = {
     modelSnapshot: "model",
   },
   executionModel: "model",
+  effort: "high",
   systemPromptPath: "/unused",
   systemPromptSha256: "x",
   userPrompt: "review",

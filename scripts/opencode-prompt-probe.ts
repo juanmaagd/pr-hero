@@ -17,6 +17,7 @@ import {
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { defaultEffortForRole } from "#model/catalog";
 import type { RoutingConfig } from "#model/routing";
 import { buildResolvedRoutePlan } from "#model/routing";
 import type { ResolvedModelRoute } from "../src/execution/contracts";
@@ -298,6 +299,7 @@ if (import.meta.main) {
       tools: hunterTools ? HUNTER_TOOLS : [],
       mcpConfigPath,
       model: "sonnet",
+      effort: defaultEffortForRole("hunter"),
       cwd: stepCwd ?? workspaceRoot,
       outPath: path.join(dir, "out.json"),
       timeoutMs: timeoutSec * 1000,

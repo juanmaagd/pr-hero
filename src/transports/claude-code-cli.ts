@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
+import { isEffort } from "#model/catalog";
 import { CLAUDE_CAPABILITY_STATICS } from "#model/provider-capabilities";
 import { spawnModelForClaudeCli } from "#model/routing";
 import type { BucketScope } from "../execution/bucket-id";
@@ -707,6 +708,18 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       readonly events?: import("../execution/contracts").AsyncEventSink;
     },
   ): Promise<TransportOutcome> {
+    // The engine owns the effort and ALWAYS passes it (#299). The CLI's own
+    // default is `high` except on Sonnet 5.5 / Opus 5.5 (`medium`), so a
+    // request that reaches here without a level would quietly put the step back
+    // on the implicit default this flag exists to replace. That is a
+    // programming error, not a case to fall back from, and it throws before the
+    // paid spawn. The child env is an allowlist without
+    // CLAUDE_CODE_EFFORT_LEVEL, so nothing the operator exports can override it.
+    if (typeof request.effort !== "string" || !isEffort(request.effort)) {
+      throw new Error(
+        `claude-code transport requires an explicit effort, got ${JSON.stringify(request.effort)}`,
+      );
+    }
     const args = [
       request.isolation.verifiedBinaryPath,
       "-p",
@@ -730,6 +743,8 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
       "bypassPermissions",
       "--model",
       spawnModelForClaudeCli(request.route, request.executionModel),
+      "--effort",
+      request.effort,
     );
 
     const start = performance.now();

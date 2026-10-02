@@ -8,6 +8,11 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  defaultEffortForRole,
+  type Effort,
+  type StepRole,
+} from "#model/catalog";
+import {
   agentStepKey,
   buildResolvedRoutePlan,
   type ResolvedModelRoute,
@@ -790,6 +795,15 @@ export const PIPELINE_SCHEMA_VERSION = "1.0.0";
 interface StepMeta {
   name: string;
   model: string;
+  // The effort the engine asked this step to run at (#299), always resolved.
+  // REQUESTED, not necessarily applied: see `effort_applied`.
+  effort: Effort;
+  // Whether the step's backend could apply `effort`. Only the Claude Code CLI
+  // has `--effort`; OpenCode records the request and reports `false` here so
+  // this artifact never reads as a fact about a run it did not govern. Absent
+  // when the step carries no route (the legacy Claude-only shape), where the
+  // backend is not recorded and guessing it would be fabrication.
+  effort_applied?: boolean;
   tools: string[];
   systemPromptPath: string;
   outPath: string;
@@ -1392,6 +1406,7 @@ async function execute(
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model: resolveModel(input, hunter.model, agent.model, hunter.file),
+      effort: resolveEffort(agent.effort, "hunter"),
       cwd: input.worktree,
       outPath: path.join(stepsDir, `${name}.draft.json`),
       timeoutMs: stepTimeoutMs,
@@ -1442,6 +1457,7 @@ async function execute(
     summarizerMeta = {
       name,
       model: input.summarizer.model ?? input.model ?? "unresolved",
+      effort: defaultEffortForRole("summarizer"),
       tools: [],
       systemPromptPath,
       outPath,
@@ -1456,6 +1472,7 @@ async function execute(
         agent.model,
         input.summarizer.promptPath,
       );
+      summarizerMeta.effort = resolveEffort(agent.effort, "summarizer");
       summarizerMeta.tools = agent.tools;
       summarizerSpec = {
         name,
@@ -1464,6 +1481,7 @@ async function execute(
         tools: agent.tools,
         mcpConfigPath: input.mcpConfigPath,
         model: summarizerMeta.model,
+        effort: summarizerMeta.effort,
         cwd: input.worktree,
         outPath,
         ...(routeForStepKey(routePlan, name) === undefined
@@ -1883,6 +1901,7 @@ async function runRefuter(
     agent.model,
     options.agent.file,
   );
+  const effort = resolveEffort(agent.effort, "refuter");
   // A finding's content is composed LONG after the run's nonce was committed
   // — the hunters wrote its `claim` and `proof_refs` from the patch — so it is
   // the one block `selectBoundaryNonce` could not be drawn against. Guarded
@@ -1925,6 +1944,7 @@ async function runRefuter(
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model,
+      effort,
       cwd: input.worktree,
       outPath: path.join(
         options.stepsDir,
@@ -2103,6 +2123,10 @@ async function runVerify(
     agent.model,
     options.agent.file,
   );
+  // The verifier re-reads the REFUTER's prompt file, so a frontmatter `effort:`
+  // there applies to it as well; `verifier` is only the fallback for a prompt
+  // that omits the key.
+  const effort = resolveEffort(agent.effort, "verifier");
   const forged: VerifySubject[] = [];
   const specs: Array<{
     subject: VerifySubject;
@@ -2124,6 +2148,7 @@ async function runVerify(
       tools: agent.tools,
       mcpConfigPath: input.mcpConfigPath,
       model,
+      effort,
       cwd: input.worktree,
       outPath: path.join(dir, "result.json"),
       timeoutMs: options.stepTimeoutMs,
@@ -2293,6 +2318,7 @@ async function runScout(
   const meta: StepMeta = {
     name,
     model: input.scout.model ?? input.model ?? "unresolved",
+    effort: defaultEffortForRole("scout"),
     // FORCED to empty here, never read from the prompt file's frontmatter.
     // §3.5 mechanism 1 — "the scout cannot open a file, grep, or walk a call
     // graph" — is the guarantee this whole design rests on, and a guarantee a
@@ -2365,6 +2391,7 @@ async function runScout(
       input.scout.promptPath,
     );
     record.model = meta.model;
+    meta.effort = resolveEffort(agent.effort, "scout");
     // FULL sha256, not the 12 chars the probe prints: the probe's artifact
     // stores the full digest too, so a pipeline.json and a scout-probe.json
     // naming the same prompt say the same string.
@@ -2378,6 +2405,7 @@ async function runScout(
       tools: meta.tools,
       mcpConfigPath: input.mcpConfigPath,
       model: meta.model,
+      effort: meta.effort,
       cwd: input.worktree,
       outPath,
       timeoutMs: SCOUT_TIMEOUT_MS,
@@ -2404,6 +2432,7 @@ async function runScout(
 
   if (spec.route !== undefined) {
     meta.route = spec.route;
+    meta.effort_applied = spec.route.backend === "claude-code";
     const routedModel = effectiveExecutionModel(spec);
     meta.model = routedModel;
     record.model = routedModel;
@@ -2752,6 +2781,16 @@ function resolveModel(
   return model;
 }
 
+// Precedence: the prompt's frontmatter `effort:`, else the engine's per-role
+// default. There is no third seat on purpose: nothing may fall through to the
+// CLI's implicit default, which is what #299 removed.
+function resolveEffort(
+  frontmatterEffort: Effort | undefined,
+  role: StepRole,
+): Effort {
+  return frontmatterEffort ?? defaultEffortForRole(role);
+}
+
 function perAgentEntry(result: StepResult): PerAgentUsage {
   return {
     tokens_total: result.usage.tokens_total,
@@ -2800,6 +2839,10 @@ function stepMeta(spec: StepSpec): StepMeta {
   return {
     name: spec.name,
     model: effectiveExecutionModel(spec),
+    effort: spec.effort,
+    ...(spec.route === undefined
+      ? {}
+      : { effort_applied: spec.route.backend === "claude-code" }),
     tools: spec.tools,
     systemPromptPath: spec.systemPromptPath,
     outPath: spec.outPath,

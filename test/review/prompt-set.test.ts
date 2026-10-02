@@ -13,7 +13,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { promptSetFingerprint, promptSetIdentity } from "#review/prompt-set";
+import {
+  parseAgentFile,
+  parseAgentSource,
+  promptSetFingerprint,
+  promptSetIdentity,
+} from "#review/prompt-set";
 
 async function setDir(
   files: Record<string, string>,
@@ -125,5 +130,38 @@ describe("promptSetIdentity", () => {
     ]);
 
     expect(identity.name).toBe(path.basename(dir));
+  });
+});
+
+describe("agent frontmatter effort", () => {
+  const agent = (frontmatter: string): string =>
+    `---\nname: a\n${frontmatter}\n---\nbody\n`;
+
+  test("parses an optional `effort:` key beside `model:`", () => {
+    const parsed = parseAgentSource(agent("model: sonnet\neffort: xhigh"));
+    expect(parsed.model).toBe("sonnet");
+    expect(parsed.effort).toBe("xhigh");
+  });
+
+  test("an omitted key stays absent, so the engine's per-role default applies", () => {
+    const parsed = parseAgentSource(agent("model: sonnet"));
+    expect("effort" in parsed).toBe(false);
+  });
+
+  test("an unknown level fails loud and names the closed vocabulary", () => {
+    expect(() => parseAgentSource(agent("effort: turbo"))).toThrow(
+      /effort "turbo".*low, medium, high, xhigh, max/,
+    );
+  });
+
+  test("a present-but-empty key is a malformed frontmatter, not an omission", () => {
+    expect(() => parseAgentSource(agent("effort:"))).toThrow(/effort/);
+  });
+
+  test("parseAgentFile names the offending file", async () => {
+    const dir = await setDir({ "bad-hunter.md": agent("effort: turbo") });
+    const file = path.join(dir, "bad-hunter.md");
+    await expect(parseAgentFile(file)).rejects.toThrow(file);
+    await expect(parseAgentFile(file)).rejects.toThrow(/effort "turbo"/);
   });
 });
