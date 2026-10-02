@@ -1986,4 +1986,27 @@ describe("upsertAdmissionCheckRun", () => {
     expect(argv.join(" ")).toContain("check-runs/77");
     expect(argv.join(" ")).toContain("conclusion=success");
   });
+
+  // musive #1935: a run that stood down for a review already in flight was
+  // settled `failed` and showed a red check. A yield is not a failure.
+  test("a yielded record completes the check run as skipped, never failure", async () => {
+    const record = admissionRecordFixture({
+      status: "yielded",
+      decisionReason: "another pr-hero review is already in flight",
+    });
+    const { spawnFn, calls } = makeFakeGh([
+      {
+        match: ["check-runs/77"],
+        response: { stdout: JSON.stringify({ id: 77 }) },
+      },
+    ]);
+    await upsertAdmissionCheckRun(
+      OPERATOR_ROOT,
+      { headSha: HEAD, record, checkRunId: 77 },
+      { spawnFn },
+    );
+    const argv = calls[0]?.argv ?? [];
+    expect(argv).toContain("status=completed");
+    expect(argv).toContain("conclusion=skipped");
+  });
 });

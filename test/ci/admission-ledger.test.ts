@@ -73,7 +73,7 @@ describe("parseAdmissionRecord / serializeAdmissionRecord", () => {
 });
 
 describe("countTerminalAttempts", () => {
-  test("counts completed, failed, provider-started, and skipped — not a cancellation", () => {
+  test("counts completed, failed, provider-started, and skipped — not a cancellation or a yield", () => {
     const records = [
       baseRecord({ status: "reserved", attemptNumber: 1 }),
       baseRecord({ status: "provider-started", attemptNumber: 2 }),
@@ -82,9 +82,12 @@ describe("countTerminalAttempts", () => {
       baseRecord({ status: "failed", attemptNumber: 5 }),
       baseRecord({ status: "cancelled", attemptNumber: 6 }),
       baseRecord({ status: "unknown", attemptNumber: 7 }),
+      baseRecord({ status: "yielded", attemptNumber: 8 }),
     ];
     // #164: cancelled produced nothing, so it is not a spent attempt.
     // provider-started still counts until the signal handler settles it.
+    // yielded stood down for a review already in flight on this head: it
+    // reviewed nothing, so it is not a spent attempt either (musive #1935).
     expect(countTerminalAttempts(records)).toBe(4);
   });
 });
@@ -158,6 +161,25 @@ describe("reserveAdmissionAttempt", () => {
     });
     const { record, created } = reserveAdmissionAttempt({
       existing: [cancelled],
+      prNumber: PR,
+      headSha: HEAD,
+      policyHash: POLICY_HASH,
+      reservationTtlSeconds: 3600,
+      now: new Date("2026-08-28T12:30:00.000Z"),
+    });
+    expect(created).toBe(true);
+    expect(record.attemptNumber).toBe(2);
+    expect(record.status).toBe("reserved");
+  });
+
+  test("a yielded row does not block the next reservation", () => {
+    const yielded = baseRecord({
+      status: "yielded",
+      attemptNumber: 1,
+      createdAt: "2026-08-28T12:00:00.000Z",
+    });
+    const { record, created } = reserveAdmissionAttempt({
+      existing: [yielded],
       prNumber: PR,
       headSha: HEAD,
       policyHash: POLICY_HASH,
