@@ -13,7 +13,10 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { STALE_SNAPSHOT_MAX_AGE_MS } from "#model/exec-snapshots";
+import {
+  EXEC_SNAPSHOT_DIRNAME,
+  STALE_SNAPSHOT_MAX_AGE_MS,
+} from "#model/exec-snapshots";
 import { gcExecutionSnapshots, renderSnapshotGcLine } from "#store/gc";
 
 const STALE_BYTES = 2048;
@@ -27,7 +30,9 @@ beforeEach(async () => {
   tempDir = await realpath(
     await mkdtemp(path.join(tmpdir(), "pr-hero-gc-snapshots-")),
   );
-  base = path.join(tempDir, "snaps");
+  // Laid out as <TMPDIR>/prhero-exec-snapshots so the CLI test below can
+  // reach it through TMPDIR alone.
+  base = path.join(tempDir, "tmp", EXEC_SNAPSHOT_DIRNAME);
   // A legacy-format dir (no pid) past the age cap: removable on age alone.
   staleDir = path.join(base, `0123456789abcdef-${randomUUID()}`);
   await mkdir(staleDir, { recursive: true });
@@ -66,6 +71,31 @@ describe("gcExecutionSnapshots", () => {
     expect(line).toBe("gc: exec snapshots removed 1 (2.0 KB), keep 1");
     expect(existsSync(staleDir)).toBe(false);
     expect(existsSync(liveDir)).toBe(true);
+  });
+});
+
+describe("pr-hero gc", () => {
+  // Through the real CLI in a child process: gcCommand reads os.homedir(),
+  // which Bun fixes at startup, so only a child with its own HOME stays off
+  // the operator's ~/.prhero (and off gh: an empty home has no worktrees).
+  test("a dry run prints the exec snapshot line and removes nothing", async () => {
+    const home = path.join(tempDir, "home");
+    await mkdir(home, { recursive: true });
+    const cli = path.resolve(import.meta.dir, "../../src/cli.ts");
+
+    const child = Bun.spawnSync([process.execPath, cli, "gc", "--dry-run"], {
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: home,
+        TMPDIR: path.join(tempDir, "tmp"),
+      },
+    });
+
+    expect(child.exitCode).toBe(0);
+    expect(child.stderr.toString().split("\n")).toContain(
+      "dry run: exec snapshots would remove 1 (2.0 KB), keep 1",
+    );
+    expect(existsSync(staleDir)).toBe(true);
   });
 });
 

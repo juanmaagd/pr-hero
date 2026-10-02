@@ -186,6 +186,14 @@ export function classifySnapshotEntry(
   ) {
     return { action: "remove", reason: "owner-dead" };
   }
+  // Accepted trade-offs, both failing closed (the step that loses its binary
+  // fails with ENOENT on its next spawn; nothing runs unverified bytes):
+  // - The age cap applies to a LIVE pid too, deliberately, to bound pid
+  //   recycling. A host asleep for more than 6 h mid-step can lose the
+  //   snapshot; that step's watchdog would time it out on wake anyway.
+  // - ESRCH is trusted as death. Same-uid containers sharing one /tmp across
+  //   separate pid namespaces would see each other's live pids as dead; that
+  //   deployment is out of scope.
   if (policy.nowMs - entry.mtimeMs > policy.maxAgeMs) {
     return { action: "remove", reason: "stale" };
   }

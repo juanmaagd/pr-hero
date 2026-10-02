@@ -178,6 +178,18 @@ describe("classifySnapshotEntry", () => {
       { action: "keep", reason: "foreign-name" },
     ],
     [
+      "a snapshot name with a leading prefix is foreign",
+      entry({ name: `x${snapshotName(DEAD_PID)}`, mtimeMs: stale }),
+      policy,
+      { action: "keep", reason: "foreign-name" },
+    ],
+    [
+      "a snapshot name with a trailing suffix is foreign",
+      entry({ name: `${snapshotName(DEAD_PID)}.bak`, mtimeMs: stale }),
+      policy,
+      { action: "keep", reason: "foreign-name" },
+    ],
+    [
       "a symlink carrying a snapshot name is kept",
       entry({ name: snapshotName(DEAD_PID), kind: "symlink", mtimeMs: stale }),
       policy,
@@ -351,6 +363,29 @@ describe("sweepStaleExecutionSnapshots", () => {
     releaseExecutionSnapshot(snapshotPath);
   });
 
+  // pid 1 is root's: for any other user `kill(1, 0)` throws EPERM, which
+  // the default probe must read as alive. Root gets no EPERM to exercise.
+  test.skipIf(process.getuid?.() === 0)(
+    "the default pid probe keeps an EPERM owner and removes an ESRCH one",
+    async () => {
+      const base = path.join(tempDir, "snaps");
+      const rootOwned = await makeEntry(base, snapshotName(1));
+      const exitedPid = Bun.spawnSync(["true"]).pid;
+      const deadOwner = await makeEntry(base, snapshotName(exitedPid));
+
+      const report = await sweepStaleExecutionSnapshots({ snapshotBase: base });
+
+      expect(report).toEqual({
+        removed: 1,
+        removedBytes: 0,
+        kept: 1,
+        failed: 0,
+      });
+      expect(existsSync(rootOwned)).toBe(true);
+      expect(existsSync(deadOwner)).toBe(false);
+    },
+  );
+
   test("a missing base is an empty sweep, not an error", async () => {
     expect(
       await sweepStaleExecutionSnapshots({
@@ -395,6 +430,57 @@ describe("opportunistic sweep", () => {
 
     expect(afterHalfHour).toBe(true);
     expect(existsSync(staleLegacy)).toBe(false);
+  });
+
+  // Parallel hunters verify at the same moment. The entry below is fresh at
+  // t0 and stale at t0 + 30 min, so it survives only if the second, concurrent
+  // call skipped its sweep — i.e. the first call claimed the base before its
+  // first await, and exactly one sweep ran.
+  test("concurrent triggers on one base run exactly one sweep", async () => {
+    const base = path.join(tempDir, "snaps");
+    const t0 = Date.now();
+    const halfHour = HOUR_MS / 2;
+    const entry = await makeEntry(base, snapshotName(undefined), {
+      mtimeMs: t0 - STALE_SNAPSHOT_MAX_AGE_MS + halfHour / 2,
+    });
+
+    await Promise.all([
+      sweepExecutionSnapshotsOpportunistically(base, t0),
+      sweepExecutionSnapshotsOpportunistically(base, t0 + halfHour),
+    ]);
+
+    expect(existsSync(entry)).toBe(true);
+  });
+});
+
+describe("snapshot creation failure", () => {
+  // The dir is registered before the bytes land, so a write that fails
+  // mid-creation still has its partial dir removed. A basename past NAME_MAX
+  // (255 bytes on macOS and Linux) makes the exclusive open fail with
+  // ENAMETOOLONG after the snapshot dir already exists.
+  test("removes the partial dir when the snapshot write fails", async () => {
+    const base = path.join(tempDir, "snaps");
+    const canonical = `/fake/bin/${"a".repeat(300)}`;
+    const bytes = Buffer.concat([MACHO_PREFIX, Buffer.from(randomUUID())]);
+
+    const result = await verifyExecutableAuthority(
+      {
+        candidatePath: canonical,
+        allowlist: [{ absolutePath: canonical, sha256: sha256Of(bytes) }],
+        snapshotDir: base,
+      },
+      {
+        realpathFn: async (p) => p,
+        readFileFn: async () => bytes,
+        statFn: () => ({ mode: 0o755 }),
+      },
+    );
+
+    expect(result.approved).toBe(false);
+    expect(result.reason).toContain(
+      "Failed to create verified execution snapshot",
+    );
+    expect(await readdir(base)).toEqual([]);
   });
 });
 
