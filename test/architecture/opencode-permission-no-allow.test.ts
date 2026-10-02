@@ -182,6 +182,10 @@ function scanSource(fileName: string, content: string): ScanResult {
 }
 
 describe("no src/ code ever answers an OpenCode permission request with allow (#157, provider_free)", () => {
+  // Parses every file under src/ into a TypeScript AST, so its cost grows
+  // with src/ and not with this test. On the macos-15-intel release runner,
+  // under full-suite load, it took 6.4 s and hit bun's 5 s default
+  // (v0.2.1 release run 37019218788), which blocked the release.
   test("src/ holds no allow-like answer, and every permission reply call is a literal reject", () => {
     const offenses: Array<Offense & { file: string }> = [];
     let verifiedRejectCalls = 0;
@@ -196,7 +200,7 @@ describe("no src/ code ever answers an OpenCode permission request with allow (#
     // If a refactor renames it out of the `permission.reply` shape, this
     // fails instead of the scan silently checking nothing.
     expect(verifiedRejectCalls).toBeGreaterThanOrEqual(1);
-  });
+  }, 30_000);
 
   const offensesIn = (source: string) =>
     scanSource("fixture.ts", source).offenses.length;
