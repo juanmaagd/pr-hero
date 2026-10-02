@@ -424,6 +424,18 @@ before `uses: ./`. A dispatch starts on the default branch, so without the pin a
 run the default branch's engine instead of the one under review. Consumer workflows run the published
 `juanmaagd/pr-hero@v0`, where the checkout does not select the engine.
 
+- **When it takes effect.** `workflow_dispatch` reads the workflow file from the default branch, so in
+  this repository the engine pin and the `full` dispatch input work only once that YAML is on `main`;
+  in a consumer repository, `full` needs an action release that declares it, reached through the
+  `@v0` tag the workflow pins.
+- **`full` on older heads.** In this repository the forced review loads the PR head's own `action.yml`,
+  so on a head from before the `full` input existed `full=true` does nothing: merge or rebase the PR
+  onto a base that has it first.
+- **Trust.** In this repository a forced review runs the PR head's code, including its `bun install`,
+  with the workflow's secrets, so dispatch it only for heads you trust: on a bot-authored same-repo
+  branch (for example Dependabot's) it skips the secret withholding GitHub applies to that bot's
+  `pull_request` runs.
+
 ### Check Runs ledger
 
 Admission attempts are persisted as Check Runs named `pr-hero/ci-admission` on the reviewed commit.

@@ -384,9 +384,11 @@ export function generateCiForceWorkflowTemplate(
     : `          head_repo=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRepository --jq '.headRepository.nameWithOwner')
 `;
   const shaLookup = pinEngine
-    ? `          # An empty ref makes actions/checkout fall back to the default
-          # branch, which is the engine this pin exists to avoid.
-          if [ -z "$sha" ]; then
+    ? `          # Only a full commit sha may reach checkout: an empty ref makes
+          # actions/checkout fall back to the default branch, which is the
+          # engine this pin exists to avoid, and any other value would be
+          # resolved as a ref name.
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error title=pr-hero::could not resolve the pull request head commit"
             exit 1
           fi

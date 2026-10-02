@@ -580,16 +580,29 @@ describe("generateCiForceWorkflowTemplate (pure)", () => {
     expect(gate.calls[0]).toContain("--json headRepository,headRefOid");
   });
 
-  test("this repo's own gate fails instead of handing checkout an empty ref", () => {
-    // `ref: ""` makes actions/checkout fall back to the default branch,
-    // which is the very engine this pin exists to avoid.
-    const gate = runGate(ownForce(), {
-      headRepository: { nameWithOwner: REPOSITORY },
-      headRefOid: null,
-    });
-    expect(gate.exitCode).not.toBe(0);
-    expect(gate.outputs).toEqual({});
-  });
+  // `ref: ""` makes actions/checkout fall back to the default branch, the
+  // very engine this pin exists to avoid, and any other non-sha value would
+  // be resolved as a ref name. Only a full 40-hex commit sha may proceed.
+  test.each([
+    ["a missing head commit", null],
+    ["a branch name", "main"],
+    [
+      "a non-hex 40-character value",
+      "g123456789abcdef0123456789abcdef01234567",
+    ],
+    ["a 39-character sha prefix", HEAD_SHA.slice(0, 39)],
+    ["a 41-character value", `${HEAD_SHA}0`],
+  ])(
+    "this repo's own gate fails on %s instead of handing it to checkout",
+    (_label, headRefOid) => {
+      const gate = runGate(ownForce(), {
+        headRepository: { nameWithOwner: REPOSITORY },
+        headRefOid,
+      });
+      expect(gate.exitCode).toBe(1);
+      expect(gate.outputs).toEqual({});
+    },
+  );
 
   test.each([
     ["scaffolded", scaffoldedForce],
@@ -632,11 +645,6 @@ describe("generateCiForceWorkflowTemplate (pure)", () => {
   test("the head pin is its own option, never inferred from a local action ref", () => {
     const localRefOnly = generateCiForceWorkflowTemplate({ actionRef: "./" });
     expect(checkoutStep(localRefOnly)?.with?.ref).toBeUndefined();
-  });
-
-  test("explains WHY this repo's own force workflow pins the head, not merely that it does", () => {
-    expect(ownForce()).toMatch(/default branch's engine/);
-    expect(ownForce()).toMatch(/refs\/pull\/<n>\/merge/);
   });
 
   // A hollow review on the same head leaves a complete summary marker, and

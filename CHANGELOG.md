@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the one under review. On #305 `main` lagged `dev`: four hunters returned no drafts in 59
   seconds and the run posted a complete summary marker for the PR head, so every later run on that
   head skipped discovery. The gate now reads the fork verdict and the head commit in one
-  `gh pr view` call before checkout, fails on an empty head commit, and checkout pins that commit.
+  `gh pr view` call before checkout, fails unless the head is a full 40-character commit sha, and
+  checkout pins that commit.
   Consumer workflows run the published `juanmaagd/pr-hero@v0` and are unchanged.
 
 ## [0.2.1] - 2026-10-02
