@@ -75,7 +75,13 @@ const MIGRATED_DOMAINS: MigratedDomain[] = [
   },
   {
     domain: "model",
-    files: ["catalog", "free-discovery", "provider-capabilities", "routing"],
+    files: [
+      "catalog",
+      "exec-snapshots",
+      "free-discovery",
+      "provider-capabilities",
+      "routing",
+    ],
   },
   {
     domain: "triage",

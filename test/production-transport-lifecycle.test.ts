@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
@@ -64,6 +72,27 @@ import {
 import { successfulClaudeCredentialBroker } from "./support/claude-credential-broker";
 
 const MACHO_PREFIX = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
+
+// #303: the harnesses this file builds verify real Mach-O fixtures, which
+// snapshots them under os.tmpdir() and, once per process, sweeps that base.
+// A per-file TMPDIR keeps both away from the operator's real
+// $TMPDIR/prhero-exec-snapshots (Bun's os.tmpdir() re-reads TMPDIR per call).
+let originalTmpdir: string | undefined;
+let isolatedTmpdir: string;
+
+beforeAll(async () => {
+  originalTmpdir = process.env.TMPDIR;
+  isolatedTmpdir = await mkdtemp(
+    path.join(tmpdir(), "pr-hero-prod-tl-tmpdir-"),
+  );
+  process.env.TMPDIR = isolatedTmpdir;
+});
+
+afterAll(async () => {
+  if (originalTmpdir === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpdir;
+  await rm(isolatedTmpdir, { recursive: true, force: true });
+});
 
 const ISOLATION_STUB: IsolationProjection = {
   credentialProjectionId: "test-projection",

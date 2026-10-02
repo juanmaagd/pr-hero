@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CLAUDE_CODE_EFFORT_LEVEL`, so an operator's shell cannot override the engine's level. OpenCode has no
   equivalent control and does not map one: the requested level is recorded with `effortApplied: false`.
 
+### Fixed
+- **Verified execution snapshots no longer fill the disk** (#303, 2026-10-02): every step copied the
+  verified provider binary (about 217 MB for `claude`) into `$TMPDIR/prhero-exec-snapshots` and never
+  removed it, so one benchmark machine accumulated 153 GB and reached 98% disk. Each step now removes
+  its snapshot after its last attempt, resolving a binding no longer writes one, a process removes the
+  snapshots it still holds when it exits, and the next run (or `pr-hero gc`) sweeps snapshots left by
+  processes that died without cleaning up: a dead owner pid, or older than 6 hours. Snapshots stay
+  private per call; they are not shared across steps.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added

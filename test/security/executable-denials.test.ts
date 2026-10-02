@@ -444,6 +444,9 @@ describe("Executable authority & deceptive fixtures denials", () => {
     const verifyResult = await verifyExecutableAuthority({
       candidatePath: canonicalPath,
       allowlist,
+      // Inside tempDir, so the snapshot is cleaned with it instead of leaking
+      // into the real $TMPDIR (#303).
+      snapshotDir: path.join(tempDir, "snaps-toctou"),
     });
 
     expect(verifyResult.approved).toBe(true);
