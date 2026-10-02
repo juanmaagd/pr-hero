@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **This repository's force workflow reviews with the pull request's own engine** (found on #305,
+  2026-10-02): `gh workflow run pr-hero-force.yml` starts on the default branch, and the workflow
+  checked out that branch before `uses: ./`, so a forced review ran the default branch's engine
+  instead of the one under review. On #305 `main` lagged `dev`: four hunters returned no drafts in 59
+  seconds and the run posted a complete summary marker for the PR head, so every later run on that
+  head skipped discovery. The gate now reads the fork verdict and the head commit in one
+  `gh pr view` call before checkout, fails on an empty head commit, and checkout pins that commit.
+  Consumer workflows run the published `juanmaagd/pr-hero@v0` and are unchanged.
+
 ## [0.2.1] - 2026-10-02
 
 ### Added

@@ -406,6 +406,12 @@ The dispatched run passes `--force`. That bypasses the size gate, admission, and
 ceiling for that run only. It does not reset the durable ledger. An empty effective diff
 (everything excluded) still does not review.
 
+In this repository, `pr-hero-force.yml` runs the pull request's own engine: it is generated with
+`OWN_CI_WORKFLOW_OPTIONS`, so its gate resolves the PR head commit first and checkout pins that commit
+before `uses: ./`. A dispatch starts on the default branch, so without the pin a forced review would
+run the default branch's engine instead of the one under review. Consumer workflows run the published
+`juanmaagd/pr-hero@v0`, where the checkout does not select the engine.
+
 ### Check Runs ledger
 
 Admission attempts are persisted as Check Runs named `pr-hero/ci-admission` on the reviewed commit.
